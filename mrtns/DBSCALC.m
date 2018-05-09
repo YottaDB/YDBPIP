@@ -7,9 +7,9 @@ DBSCALC	;DBSCALC; Calculator Program
 	;=======================================================================
 	;----Revision History --------------------------------------------------
 	;
-	; 05/12/00 - DOUGANM- 39582 
-	;            To improve the performance of error handling, cleaned up 
-	;            call to $$NEW^%ZT, and removed use of indirection. 
+        ; 05/12/00 - DOUGANM- 39582
+        ;            To improve the performance of error handling, cleaned up
+        ;            call to $$NEW^%ZT, and removed use of indirection.
 	;	     Replaced $ZP reference with $O(^gbl(...),-1) syntax.
 	;
 	; 12/09/94 - Janet An
@@ -21,7 +21,7 @@ DBSCALC	;DBSCALC; Calculator Program
 	;            Replaced "Q ;" with "Q  ;".
 	;     
 	;-----------------------------------------------------------------------
-	;   I18N=QUIT : Excluded From I18N Standards 
+        ;   I18N=QUIT : Excluded From I18N Standards
 KEYPAD	;
 	; This interface will display the keypad on the screen.
 	; Note that only the area used by the calculator is cleared.

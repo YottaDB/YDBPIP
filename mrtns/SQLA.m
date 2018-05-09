@@ -36,10 +36,32 @@ SQLA	;private;SQL Query Generator Compiler
 	;
 	; EXAMPLE:
 	;
-	; I18N=QUIT: Exculded from I18N standards. 
-	; 
+        ; I18N=QUIT: Exculded from I18N standards.
+        ;
 	Q
 	;---------- Revision History ------------------------------------------
+	; 02/26/09 - Pete Chenard
+	;	     Modified FILE and OUTJOIN sections to correct the handling
+	;	     of left outer join conditions.  See comments in those
+	;	     individual sections for details.
+	;
+	; 01/20/09 - Pete Chenard
+	;	     Modified to call IN if ANY clause is present.  ANY behaves
+	;	     very similar to IN.
+	;
+	; 08/30/2008 - RussellDS - CR30801
+	; 	* Modified section QUERY to add a check to see if relational
+	;	  operator is a LIKE clause before calling BYTECHAR^SQLUTL.
+	;
+	; 10/26/07 - Pete Chenard CR30087
+	;	* Replaced references to $$BYTECHAR^SQLUTL with 
+	;	  $$BYTECODE^SQLUTL to eliminate runtime determination
+	;	  of whether to use $C or $ZCH based on character set 
+	;	  configuration.
+	;
+	; 09/27/07 - Lik Kwan - CR 29465
+	;	     Modified SQL to conform to the new error handling
+	;
 	; 09/07/07 - Pete Chenard - CR27652
 	;	     Modified setting of exprght to use $C(254) instead
 	;	     of "" in the case where the column is an access key
@@ -117,7 +139,7 @@ SQLA	;private;SQL Query Generator Compiler
 QUERY(rng,whr,mcode,vsub,jfiles,fsn,dqm,ojqry)	; Place query expressions into executable
 	;----------------------------------------------------------------------
 	;
-	S ER=0
+ 	S ER=0
 	;
 	N datatyp,ddref,delete,exprqry,exprlft,exprght,nbrexpr,ok,outjoin,oplogic,oprelat,orkill,nest,serial,I,X
 	;
@@ -141,7 +163,7 @@ QUERY(rng,whr,mcode,vsub,jfiles,fsn,dqm,ojqry)	; Place query expressions into ex
 	..		S ok=$$CONTAIN(jfiles,$P(ddref,".",1))
 	..		S isKey=$$CONTAIN($G(access),ddref)
 	..		I 'ok S ok=isKey
-	..		I isKey,exprght=$C(34,34) S exprght="$C(254)"
+	..		I oprelat'="[",isKey,exprght=$C(34,34) S exprght=$$BYTECODE^SQLUTL(254)
 	.	;
 	.	I 'ok D  Q
 	..		;
@@ -180,7 +202,7 @@ BUILD	; Construct the query
 	.	;
 	.	I exprght="""""" Q
 	.	I $E(exprlft)'="+" S exprlft=$S($$ISNUM(exprlft):+exprlft,1:"+"_exprlft)
-	.	I oprelat["=",$E(exprght)'="+" S exprght=$S($$ISNUM(exprght):+exprght,1:"+"_exprght)
+	.	I oprelat["=",(oprelat'="=ANY"),$E(exprght)'="+" S exprght=$S($$ISNUM(exprght):+exprght,1:"+"_exprght)
 	;
 	F I=0:1 Q:exprlft'[$C(1)  D DINAM(.exprlft) Q:ER
 	F I=0:1 Q:exprght'[$C(1)  D DINAM(.exprght) Q:ER
@@ -198,7 +220,7 @@ BUILD	; Construct the query
 	.	S exprght=exprght_"&("_exprlft_"'="""")"
 	; 
 	I oprelat["E" D CORREL Q:ER
-	I oprelat["I" D IN Q:ER
+	I oprelat["I"!(oprelat["ANY") D IN Q:ER
 	;
 	I nest\2 D				; Put parenthesis back
 	.	;
@@ -222,7 +244,11 @@ BUILD	; Construct the query
 	;--------------------------------------------------------------------
 FILE	; Set executable code into the mcode(seq)
 	;--------------------------------------------------------------------
-	;
+	; 02/26/2009 Pete Chenard
+	; modified to expect the ojqry variable to be an array keyed by table
+	; name.  This is used in the OUTJOIN section to control whether to 
+	; set result set values to null or not.  See comment in OUTJOIN section for
+	; more details.
 	I serial N vxp S vxp=serial
 	;
 	I $E(exprqry,$L(exprqry))="&" S exprqry=$E(exprqry,1,$L(exprqry)-1)
@@ -231,12 +257,12 @@ FILE	; Set executable code into the mcode(seq)
 	;
 	I outjoin D
 	.	; 
-	.	I ojqry="" D				; Init OJ query flag 
+	.	I $G(ojqry(file))="" D				; Init OJ query flag 
 	..		;
-	..		S ojqry="vsql("_$$NXTSYM^SQLM_")"
-	..		S exprqry="S "_ojqry_"=0 "_exprqry
+	..		S ojqry(file)="vsql("_$$NXTSYM^SQLM_")"
+	..		S exprqry="S "_ojqry(file)_"=0 "_exprqry
 	.	;
-	.	S exprqry=exprqry_" S "_ojqry_"=1"
+	.	S exprqry=exprqry_" S "_ojqry(file)_"=1"
 	.	;
 	.	F i=1:1:$L(frm) S alias=$P(frm,",",i) I $D(join(alias,1)) D  Q
 	..	S exprqry=exprqry_" I "_join(alias,1)_"'="""" S vsql="_vxp
@@ -247,22 +273,39 @@ FILE	; Set executable code into the mcode(seq)
 	Q
 	;
 	;--------------------------------------------------------------------
-OUTJOIN(exe,fsn,join,vsub,ojqry)	; Outer join drop through
+OUTJOIN(exe,fsn,join,vsub,ojqry)
 	;--------------------------------------------------------------------
 	;
-	N alias,expr,expr1,expr2,i
+	; 2/26/2009 Pete Chenard
+	; This subroutine has been modified to allow multiple outer join flags.  Prior to this,
+	; the flag ojqry, if set to 1, would cause all values to the right of the expression
+	; to be set to null.  for example the following join:
+	;   (ACN LEFT JOIN DEP ON ACN.CID=DEP.CID) (LEFT JOIN LN ON ACN.CID=LN.CID) 
+	; would set the LN values to null even if only the DEP row didn't exist.  On a 
+	; left outer join, the result set should contain LN rows even if the DEP row was
+	; nonexistent.
 	;
-	S (expr1,expr2)=""
-	F i=1:1:$L(frm,",") S alias=$P(frm,",",i) I $D(join(alias))#2 D MAPVSQL^SQLM(.expr1,.expr2,alias,.jkeys,.vsub,.fsn,.fma)
+	; The code below now expects the outer join flag ojqry to be keyed by
+	; alias, with each entry containing its own vsql(n) variable to control whether
+	; to null out the data or not.
 	;
-	I expr2="" Q
-	;
-	S expr="I "_ojqry_" S "_expr2
-	I expr1'="" S expr="S "_expr1_" "_expr
-	;
-	S exe=exe+1,exe(exe)=expr
+	; See corresponding changes in the FILE section of this routine and the OPEN section
+	; of SQLM.
+	;	
+	N alias,expr,expr1,expr2,i,oj
+	S alias=""
+	F  S alias=$O(ojqry(alias)) Q:alias=""  D
+	.	S oj=ojqry(alias)
+	.	S (expr1,expr2)=""
+	.	I $D(join(alias))#2 D MAPVSQL^SQLM(.expr1,.expr2,alias,.jkeys,.vsub,.fsn,.fma)
+	.	;
+	.	I expr2="" Q
+	.	;
+	.	S expr="I "_ojqry(alias)_" S "_expr2
+	.	I expr1'="" S expr="S "_expr1_" "_expr
+	.	;
+	.	S exe=exe+1,exe(exe)=expr
 	Q
-	;
 	;--------------------------------------------------------------------
 IN	; (List) processing, Data is in a list or array
 	;--------------------------------------------------------------------
@@ -304,7 +347,10 @@ IN	; (List) processing, Data is in a list or array
 	.	;
 	.	S orexpr=orexpr_$S(notoper="":"!",1:"&")_"("_z_")"
 	;
-	S exprlft=$g(orexpr),exprght="",oprelat=""
+	I $G(orexpr)[$C(0) D
+	.	F i=1:1:$L(orexpr,$C(0)) S orexpr=$P(orexpr,$C(0),1)_"_$C(9)_"_$P(orexpr,$C(0),2,999)
+	.	S orexpr=$E(orexpr,1,$L(orexpr)-7)	; strip extra "_$C(9)_"
+	S exprlft=$G(orexpr),exprght="",oprelat=""
 	Q
 	;
 	;----------------------------------------------------------------------
@@ -317,7 +363,7 @@ DINAM(expr)	; Replace logical database references with physical
 	;
 	I $D(vsub(dinam)) S ref=vsub(dinam)
 	E  S ref=$$PARSE^SQLDD(.dinam,"",.cmp,.fsn,,.vdd,,.vsub) Q:ER
-	;
+  	;
 	S expr=$P(expr,$C(1),1)_ref_$P(expr,$C(1),3,999)
 	Q
 	;
@@ -341,19 +387,24 @@ FUNC(expr)	; Execute a function or assign a local variable
 	.	I $D(@expr)#2=0 S ER=1,RM=$$^MSG(8592,expr) Q
 	.	S expr=@expr
 	;
-	I $$NEW^%ZT N $ZT
-	S @$$SET^%ZT("ET^SQLA")
+	;;I $$NEW^%ZT N $ZT
+	;;S @$$SET^%ZT("ET^SQLA")
+	N $ET,$ES,$ZYER S $ZYER="ZE^UCGMR",$ZE="",$EC="",$ET="Q:$Q&$ES """" Q:$ES  D ET^SQLA"
 	X "S expr="_expr
 	Q
 ET	; Error executing function
-	S ER=1,RM=$P($ZS,",",4)
+	N ERR S ERR=$ZE
+	;;S ER=1,RM=$P($ZS,",",4)
+	S ER=1,RM=$P(ERR,",",4)
+	S $EC="",$ZE=""
+
 	Q
 	;
 CONTAIN(X,Y)	Q ","_X_","[(","_Y_",")
 	;
 	;
 	;----------------------------------------------------------------------
-ASCPRE(v,typ,dinam,vdd)	; Return Minimum value string and datatype 
+ASCPRE(v,typ,dinam,vdd) ; Return Minimum value string and datatype
 	;----------------------------------------------------------------------
 	;
 	N dec,maxCharV
@@ -371,7 +422,7 @@ ASCPRE(v,typ,dinam,vdd)	; Return Minimum value string and datatype
 	I "N$DC"[typ Q "("_v_"-"_dec_")"
 	; *** 06/21/96
 	Q "($E("_v_",1,$L("_v_")-1)_$C($A("_v_",$L("_v_"))-1)_$C("_maxCharV_"))"
-	;
+   	;
 	;----------------------------------------------------------------------
 SETRNG(exprlft,exprght,oprelat,datatyp)	; Set Range variables
 	;----------------------------------------------------------------------
@@ -404,7 +455,7 @@ NESTED(whr,nbrexpr,oplogic)	; Return nest code
 	N i
 	F i=$L(z,"("):-1:($L(z,"(")-c) S z=$P(z,"(",1,i) I $E(z,$L(z))="!" Q
 	Q c*2+($E(z,$L(z))="!")
-	; 
+        ;
 	;--------------------------------------------------------------------
 SERIAL	; This is a serial column relative to the bottom key
 	;--------------------------------------------------------------------
@@ -457,16 +508,16 @@ CORREL	; Build correlated query code
 	S exprlft=v1,exprght=1,datatyp="N"
 	K vsql("E",exprght)
 	Q
-	;-------------------------------------------------------------------- 
-ADDVAL(str,val)	; Add Value to String 
-	;-------------------------------------------------------------------- 
-	; 
-	I $G(str)="" Q $G(val) 
-	Q str_","_$G(val) 
+        ;--------------------------------------------------------------------
+ADDVAL(str,val) ; Add Value to String
+        ;--------------------------------------------------------------------
+        ;
+        I $G(str)="" Q $G(val)
+        Q str_","_$G(val)
 	;
-	;-------------------------------------------------------------------- 
-SUBVAL(str,val)	; Subtract Value from String 
-	;-------------------------------------------------------------------- 
+        ;--------------------------------------------------------------------
+SUBVAL(str,val) ; Subtract Value from String
+        ;--------------------------------------------------------------------
 	;
 	N s,v
 	S s=","_str_",",v=","_val_","

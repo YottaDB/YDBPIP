@@ -4,7 +4,16 @@ DBSDSMC	;DBSDSMC;DBS - U - V4.4 - Mass screen compiler
 	;     DESC: Screen Compiler
 	;
 	;---------- Revision History -------------------------------------------
-	; 01/31/07 - Pete Chenard - CR23705
+	; 12/18/2008 - RussellDS - CRs 36952/35741
+	;	* Modified SID1 section to test for LINKAGE based on -1
+	;	  not equal to null.  Avoids issues with new RecordDBTBL2
+	;	  save code creating null node values.
+	;
+	; 12/09/2008 - RussellDS - CR37111/35741
+	;	* Modified SID1 section to add %UCLS to list of preserved
+	;	  variables to avoid problems if using access rights.
+	;
+	; 01/31/07 - Pete Chenard - CR23705/25146
 	;	     Modified LOAD to make sure delimiter is correct on the screen.
 	;
 	; 10/23/06 - RussellDS - CR22719
@@ -28,9 +37,9 @@ DBSDSMC	;DBSDSMC;DBS - U - V4.4 - Mass screen compiler
 	; 01/13/03 - CHENARDP - 45497
 	;	     Modified to call the new PSL Screen compiler.
 	;
-	; 05/12/00 - DOUGANM- 39582 
-	;            To improve the performance of error handling, cleaned up 
-	;            call to $$NEW^%ZT, and removed use of indirection. 
+        ; 05/12/00 - DOUGANM- 39582
+        ;            To improve the performance of error handling, cleaned up
+        ;            call to $$NEW^%ZT, and removed use of indirection.
 	;
 	;-----------------------------------------------------------------------
 START	;
@@ -60,9 +69,9 @@ SID	S ZSID=$O(^TEMP($J,ZSID)) I ZSID="" Q
 SID1	W !,%LIBS,"   ",ZSID,"   "
 	S PGM=$P(^DBTBL(%LIBS,2,ZSID,0),"|",2)
 	;
-	N (io,%DB,%UID,%LIBS,ZSID,%TO,TEMP,PGM,NOLINK,%MSKC)
+	N (io,%DB,%UID,%UCLS,%LIBS,ZSID,%TO,TEMP,PGM,NOLINK,%MSKC)
 	K TEMP(ZSID) S SID=ZSID
-	S LINKAGE=$D(^DBTBL(%LIBS,2,SID,-1)),ER=0
+	S LINKAGE=$G(^DBTBL(%LIBS,2,SID,-1))'="",ER=0
 	S CSCMP=$P(^DBTBL(%LIBS,2,SID,0),"|",22)	; *** BC - 06/24/94
 	I LINKAGE,'CSCMP D LINKAGE G SID
 	D CMODES
@@ -105,7 +114,7 @@ ZT	;
 NEWVN	; Reassign screen numbers based NEWVN
 	;
 	S N="" W !!,"Deleting V programs",!
-	S ^DBTBL(%LIBS,0,"S")=1
+ 	S ^DBTBL(%LIBS,0,"S")=1
 	;
 LP	S N=$O(^DBTBL(%LIBS,2,N)) Q:N=""
 	I $D(^DBTBL(%LIBS,2,N,-3)) G LP ; Skip implicits

@@ -1,0 +1,601 @@
+	#PACKAGE framework
+	 //Private;To load the data from a table to a RMS file for transfer to a client
+
+	/*
+	
+	   ORIG: CHAPYALAJ - 07/28/94
+	   DESC: Move the data from the table to the RMS file.
+	
+	  ----Revision History---------------------------------------------------
+	  
+	  12/02/2008 - RussellDS - CRs 35714/36974
+	  	* Modified BUILD section to correct syntax error with .getCol()
+	  	* Added #PACKAGE to force use of FW30 compiler and corrected
+	  	  resulting warnings.
+	  
+	  10/01/2008 - RussellDS - CRs 35714/35918
+		Modified error handling to use new logging syntax.
+		
+		Removed old revision history.
+	*/
+
+	quit 
+	
+	
+public BLDRMS(String TBLNAME,		// File list 				/TBL=DBTBL1
+	      Number OPT,		// Option
+	      String Q,			// Query Defination			/NOREQ
+	      String QITEM,		// Table Name if delete mode		/NOREQ
+	      String WIDEFILE,		// Wide table when splitting tables	/NOREQ
+	      Number SPLIT,		// Split table number			/NOREQ
+	      String FK)		// DBTBL1F.FKEYS			/NOREQ
+	
+	/*
+	Build output file for full transfer of a table type
+	
+	This label is called from routines used within the host sync utility.  It is used to produce a 
+	file of deletes and inserts of schema and data based on the queries passed in the paramater list.
+	The schema sent can include foreign keys,tables and index definitions.  The only data that can be
+	sent comes from tables where the LOG indicator is set to yes.
+	
+	I18N=QUIT: Excluded from I18N standards.
+
+	Records created in the RMS file are
+		TREC	- table header record
+		FREC	- Column list
+		SREC	- Column format list
+		DREC	- Data record
+	
+	*/
+	
+	type public String FILENAME, IOLIST(), RECTYPE, SORTFID(,)
+	
+	type Number CNT, I, TRECWRT
+	type String ACCVAL,ACKEYS,COLUMN,FILETYP,fsn,LIB,LOGCHG,KEYS,NETLOC,REC2,RECORD,QUOTE,TREC
+
+	set QUOTE = 34.char()
+
+	set QITEM = QITEM.get() 
+	set WIDEFILE = WIDEFILE.get() 
+	set SPLIT = SPLIT.get()
+	set LIB = "SYSDEV"
+	
+ 	type RecordDBTBL1 dbtbl1 = Db.getRecord("DBTBL1", "%LIBS='SYSDEV',FID=:TBLNAME")
+ 	
+ 	set KEYS = dbtbl1.ACCKEYS
+	set ACKEYS = ""
+	for I = 1:1:KEYS.length(",") if (KEYS.piece(",", I).extract() '= """"), (+KEYS.piece(",", I) '= KEYS.piece(",", I)) set ACKEYS=ACKEYS_ ","_ KEYS.piece(",", I)
+	if 'ACKEYS.isNull() set ACKEYS = ACKEYS.extract(2, 100)
+	set NETLOC = dbtbl1.netloc
+	set LOGCHG = dbtbl1.log
+		
+	// define file type to determine if it should be loaded on gui/mumps clients
+ 	
+	if FILENAME.get().isNull() set FILETYP = ""
+	else  do {
+		
+		type RecordDBTBL1 dbtbl1 = Db.getRecord("DBTBL1", "%LIBS='SYSDEV',FID=:FILENAME")
+		set FILETYP = dbtbl1.filetyp
+	}
+	set ACCVAL = ""
+
+	//Opt=3 is delete option
+ 	if (OPT = 3), 'QITEM.isNull() do {
+ 	
+ 		if TBLNAME.isLike("%DBTBL%") do {
+ 	
+			for I = 1:1:ACKEYS.length(",") do {
+			
+				set COLUMN = ACKEYS.piece(",", I)
+				if (COLUMN = "%LIBS") set ACCVAL = QUOTE_"SYSDEV"_QUOTE quit 
+				if (I = 2) set ACCVAL = ACCVAL_","_QUOTE_QITEM_QUOTE quit 
+				if (TBLNAME = "DBTBL1F"), 'WIDEFILE.isNull() set ACCVAL = ACCVAL_","_QUOTE_WIDEFILE_QUOTE quit 
+				if (I > 2) set ACCVAL = ACCVAL_","_"*"
+			}
+ 		}
+ 		else  do {
+
+			set ACCVAL = ""
+			if 'ACKEYS.isNull() for I = 1:1:ACKEYS.length(",") do {
+			
+				if (I = 1) set ACCVAL = QUOTE_QITEM_QUOTE
+				else  if (I > 1) set ACCVAL = ACCVAL_","_"*"
+			}
+		}
+	}
+
+	if ACCVAL.extract()="," set ACCVAL = ACCVAL.extract(2, ACCVAL.length())
+
+	set TREC = "T"
+
+	set TREC = TREC_","_%CurrentDate_","_%CurrentTime_","_QUOTE_TBLNAME_QUOTE_","_$select(ACKEYS.isNull():0, 1:ACKEYS.length(","))
+	if ACCVAL.isNull() set ACCVAL = "*"
+	set REC2 = $select(TBLNAME.isLike("%DBTBL%"):"D", 'ACCVAL.piece(",", 1).isLike("%*%"):"D", 1:"T")
+
+	if (OPT = 3), FK.get(), SORTFID.data(), 'SPLIT.get().isNull() do SPLITDEL^HSYNCSPT quit 
+
+	if (OPT = 3) do { quit
+		
+		if 'ACCVAL.piece(",", 1).isLike("%*%"), ACCVAL.isLike("%*%") do {
+		
+			// adjust the key CNT so GUI will not deal with any * values.
+			set TREC.piece(",", 5) = ACCVAL.extract(1, ACCVAL.find("*")).length(",") - 1
+		}
+		// SORTFID  is an array containing a split of the widefiles sent to the client
+		
+		if 'SORTFID.data(), IOLIST.data() do {
+		
+			type String SREC, WRTREC
+		
+			set RECTYPE = $$SETREC(SORTFID(,), FILETYP)
+			if (RECTYPE = "C"), 'IOLIST("N").exists() quit 
+			set WRTREC = TREC_",N,"_RECTYPE_9.char()_"F"
+			
+			// Columns named with % can not be inserted into Oracle, they are converted to _
+			set SREC = "S"
+			if 'ACKEYS.isNull() do {
+			
+				set WRTREC = WRTREC_","_ACKEYS.translate("%", "_")
+				if 'ACKEYS.isNull() for I = 1:1:ACKEYS.length(",") set SREC = SREC_","_$$TYP^DBSDD(TBLNAME_"."_ACKEYS.piece(",", I))
+			}
+			if ('REC2.extract(1) = "T") set WRTREC = WRTREC_9.char()_SREC_9.char()
+			// occurs on truncate record
+			else  set WRTREC = WRTREC_9.char()       
+			set WRTREC = WRTREC_"D,"_REC2_","_ACCVAL
+			do IOWRITE^HSYNCWRT(WRTREC)
+		}
+		else  do SPLITDEL^HSYNCSPT
+	}
+	set TRECWRT = 0
+	do BUILD(TBLNAME,Q.get())
+
+	quit
+	
+
+public CHKVER(String VER)	// Check Version, determine if PFW has multiple builds
+
+	/*
+	Description:	
+	  Check if a new file was created in a version more record then
+	  the version currently being written. New files will not be transferred
+	  to older versions.
+	*/
+	
+	type public String FILENAME, NEWFILE(,)
+	
+	if 'NEWFILE(FILENAME,VER).order().isNull() quit 1
+	
+	quit 0
+	
+	
+BUILD(String FID,	// Table Name being processed
+      String Q)		// Query string built in other routines		/NOREQ
+
+	/* 
+	Build the data item list of the file and fetch the data from the table
+	
+	Build a resultset through call to dbsfetch, based on type of table branch off to 
+	process the transfer of the data.
+	*/
+	
+	type public Boolean ER
+	type public Number SPLIT
+	type public String ACKEYS, CLIENT(), COLLIST(,,), FILETYP, NOD, RM, SORTFID(,)
+	type public String TREC, TBLNAME, WIDEFILE
+	
+	type Boolean FOUND, SPLITFLG
+	type Number KEYCNT, vzdec, vzdes, vzdft, vzmax, vzmin
+	type String COLUMN, DI, DILIST, DITYPE(), DREC, DV, DVLIST, EXE, NODE, FREC, QDV, TESTVAL
+	type String VER, VZNOD, VZREQ, VZTYPE, VZCMP, VZLEN, WRTARRAY()
+
+	catch ERROR@"LOGERR^UTLERR" {	 
+
+		set ER = 1
+		set RM = ERROR.type_ ","_ ERROR.thrownAt_ ","_ ERROR.component_ ","_ ERROR.description_ ","_ ERROR.ident 
+	}
+
+	set FREC = "F"
+	set QDV = ""
+	set DILIST = ACKEYS
+	set KEYCNT = DILIST.length(",")
+
+	// Allocate position for keys within DITYPE string
+	set DITYPE = ""
+	set DITYPE.piece(",", KEYCNT) = "" 
+	set SPLITFLG = 0
+
+	type ResultSet collist = Db.select("NOD,TYP,DI,CMP", "DBTBL1D", "%LIBS='SYSDEV' AND FID=:FID AND NOD IS NOT NULL AND CMP IS NULL")
+	quit:collist.isEmpty()
+	while collist.next() do { quit:(ER.get() = "W")
+
+		// can not send memo or binary data item
+		if ((collist.getCol("TYP") = "B") ! (collist.getCol("TYP") = "M")) set ER = "W" quit
+		// computed are not sent
+		quit:'collist.getCol("CMP").isNull()
+		set COLUMN = collist.getCol("DI")
+		// literal numerics or strings will not be sent to a client
+		if ((COLUMN?1.N) ! (COLUMN.extract().isLike("%""%"))) quit 
+
+		if collist.getCol("NOD").isLike("%*%") do { quit
+			
+			// once non key keys are removed, we need to adjust the position in the type variable
+			// to account for them not being sent
+
+			set NODE = 0
+			
+			type Number I
+			for I = 1:1:ACKEYS.length(",") if ACKEYS.piece(",",I) = COLUMN set NODE = I quit
+		
+			set DITYPE.piece(",", NODE) = collist.getCol("TYP")
+			
+			if (DITYPE.data() > 1) do {
+				
+				set VER = "" 
+				for  set VER = DITYPE(VER).order() quit:VER.isNull()  set DITYPE(VER).piece(",",NODE) = collist.getCol("TYP")
+			}
+		}
+
+		set DILIST = DILIST_","_COLUMN
+		
+		if DILIST.extract() = "," set DILIST = DILIST.extract(2, 999999)
+
+		set DITYPE = DITYPE_","_collist.getCol("TYP")
+		if (DITYPE.data() > 1) do {
+			
+			set VER = "" 
+			for  set VER = DITYPE(VER).order() quit:VER.isNull()  set DITYPE(VER) = DITYPE(VER)_","_collist.getCol("TYP")
+		}
+			
+		if (FID = "DBTBL1D") do {
+		 
+			if COLUMN = "REQ" set VZREQ = DILIST.length(",")  
+			if COLUMN = "NOD" set VZNOD = DILIST.length(",") 
+			if COLUMN = "TYP" set VZTYPE = DILIST.length(",")
+			if COLUMN = "LEN" set VZLEN = DILIST.length(",")
+			if COLUMN = "CMP" set VZCMP = DILIST.length(",")
+			if COLUMN = "DEC" set vzdec = DILIST.length(",")
+			if COLUMN = "DES" set vzdes = DILIST.length(",")
+			if COLUMN = "DFT" set vzdft = DILIST.length(",")
+			if COLUMN = "MAX" set vzmax = DILIST.length(",")
+			if COLUMN = "MIN" set vzmin = DILIST.length(",")
+		}
+
+		quit:'COLLIST(COLUMN,"TYP").data()
+
+		set VER = ""
+		for  set VER = CLIENT(VER).order() quit:VER.isNull()  do {
+			
+			set TESTVAL = COLLIST(COLUMN,"TYP",VER).order()
+			if TESTVAL.isNull() quit 
+			if 'DITYPE(VER).exists() set DITYPE(VER) = DITYPE
+			set DITYPE(VER) = DITYPE(VER).piece(",", 1, DITYPE(VER).length(",") - 1)_","_COLLIST(COLUMN,"TYP",TESTVAL).piece("|",1)
+		}
+	}
+
+	/*
+	Only a transfer of file with data with get here, file will truncate
+	all data at the client. No need to tell the user. If they select
+	file only they will see a message come from ddpxfr1.
+	*/  
+	
+	if (ER.get() = "W") set ER = "" quit
+
+	if 'ACKEYS.isNull() set FREC = FREC_","_DILIST
+	if TBLNAME.isLike("%DBTBL%"), SPLIT.get() '= WIDEFILE.get(), 'WIDEFILE.isLike("%DBTBL%") do SPLITTBL^HSYNCSPT quit
+
+	#ACCEPT DATE=07/28/06;PGM=KELLYP;CR=unknown
+	type ResultSet rs = Db.select(DILIST, FID, Q.get())
+	quit:rs.isEmpty()
+	
+	set TREC.piece(",", 6) = $select(SORTFID.data():"W", 1:"N")
+	set TREC.piece(",", 7) = $$SETREC(SORTFID(,), FILETYP)
+
+	if 'SORTFID.data() do {
+	
+		set WRTARRAY(1) = TREC
+		set WRTARRAY(2) = FREC.translate("%", "_")
+		set WRTARRAY(3) = "S,"_DITYPE
+		if DITYPE.data() > 1 do {
+			
+			set VER = ""
+			for  set VER = DITYPE(VER).order() quit:VER.isNull()  set WRTARRAY(3, VER) = "S,"_DITYPE(VER)
+		}
+		set FOUND = 1
+		do FETCH(rs)
+	}
+
+	if 'TBLNAME.isLike("%DBTBL%"), SPLIT.get() '= WIDEFILE.get() do {
+		
+		set SPLIT = ""
+		set WIDEFILE = TBLNAME
+		for  set SPLIT = SORTFID(SPLIT).order() quit:SPLIT.isNull()  do SPLITTBL^HSYNCSPT
+	}
+
+	quit 
+
+ 
+public FETCH(ResultSet rs)	//  retrieve data records and write them to the file
+
+	/*
+	Description:
+	Retrieve the data and update file with that information.
+	Called from BUILD^DBSTLOAD and SPLITTBL^HSYNCSPT
+
+	Global Scope variables:
+		.exe		Executable array used to retrieve rows of data
+
+	*/
+	
+	type public Boolean FOUND
+	type public Number TRECWRT, VZNOD, VZREQ
+	type public String CLIENT(), COLLIST(,,), DILIST, DITYPE, FID, FREC, QUOTE, SORTFID(,), SPLIT, SREC()
+	type public String TBLNAME, TREC, RECTYPE, VER, WRTARRAY(,), WRTREC
+	
+	type Number I, FFIDWIDE, NOCOLUMN, OK, RECORD
+	type String DATATYPE, DREC, DVLIST, QDV, PKEYS
+	
+	set RECORD = 0
+	set FFIDWIDE = 0
+
+	// 	exe array created in the calling function
+	while rs.next() do {
+		
+		set DVLIST = rs.getRow().toString()
+		set DVLIST = DVLIST.translate(9.char(),"|")
+
+		//Change key to required field
+		if FID = "DBTBL1D", DVLIST.piece("|",VZNOD)?1N1"*" set DVLIST.piece("|",VZREQ) = 1
+	
+		set DREC = "D"_","_"I"
+		set QDV = ""
+
+		set NOCOLUMN = 1 
+		set DATATYPE = DITYPE
+		for I = 1:1:DILIST.length(",") do DIVAL(.QDV, I) quit:(NOCOLUMN = 0)
+		if NOCOLUMN = 0 quit 
+
+		if (COLLIST.data() > 1) set VER = "" for  set VER = CLIENT(VER).order() quit:VER.isNull()  do {
+			
+			type String QDV
+			set QDV = ""
+			set DATATYPE = DITYPE
+			if DITYPE(VER).exists() set DATATYPE = DITYPE(VER)
+			for I = 1:1:DILIST.length(",") do DIVAL(.QDV, I, VER) quit:(NOCOLUMN = 0)
+			set DREC(VER) = "D"_","_"I"_QDV
+		}
+
+		if WRTARRAY.data() do {
+			
+			set WRTREC = WRTARRAY(1)_9.char()_WRTARRAY(2)
+			do IOWRITE^HSYNCWRT(WRTREC,,1)
+			if WRTARRAY(3).exists() do IOWRITE^HSYNCWRT(WRTARRAY(3)) kill WRTARRAY quit
+			 
+			do IOWRITE^HSYNCWRT(WRTARRAY(3), CLIENT)
+			set VER = ""
+			for  set VER = WRTARRAY(3, VER).order() quit:VER.isNull()  do IOWRITE^HSYNCWRT(WRTARRAY(3, VER), VER)
+			kill WRTARRAY
+		}
+		if (FOUND = 0) do {
+			
+			if 'TBLNAME.isLike("%DBTBL%") set TREC.piece(",", 4) = QUOTE_"W_"_SORTFID(SPLIT)_"_"_SPLIT_QUOTE
+			set TREC.piece(",", 6, 7) = "S,G"
+			set RECTYPE = "G"
+			set WRTREC = TREC_9.char()_FREC.translate("%","_")
+			do IOWRITE^HSYNCWRT(WRTREC,,1)
+			if DITYPE.exists() do IOWRITE^HSYNCWRT("S,"_DITYPE)
+			if (DITYPE.data() > 1) do {
+				
+				do IOWRITE^HSYNCWRT("S,"_DITYPE, CLIENT)
+				set VER = ""
+				for  set VER = DITYPE(VER).order() quit:VER.isNull()  do IOWRITE^HSYNCWRT("S,"_DITYPE(VER), VER)
+			}
+			set FOUND = 1
+			set RECORD = 1
+		}
+		set QDV = QDV.extract(2,QDV.length())
+		set DREC = DREC_","_QDV
+		if FFIDWIDE do {
+			
+			set TRECWRT = 1
+			set WRTREC = TREC_9.char()_FREC
+			do IOWRITE^HSYNCWRT(WRTREC,,1)
+			if SREC.exists() do IOWRITE^HSYNCWRT(SREC) quit
+			 
+			if (SREC.data() > 1) do {
+				
+				do IOWRITE^HSYNCWRT(SREC, CLIENT)
+				set VER = ""
+				for  set VER = SREC(VER).order() quit:VER.isNull()  do IOWRITE^HSYNCWRT(SREC(VER), VER)
+			}
+		}
+		if DREC.exists() do IOWRITE^HSYNCWRT(DREC)
+		set VER = ""
+		for  set VER = DREC(VER).order() quit:VER.isNull()  do IOWRITE^HSYNCWRT(DREC(VER), VER)
+		kill DREC
+		if FFIDWIDE do {
+			
+			type Number J
+			type String FILENAME, I, PKEYS, RECTYPE, SORTFID(,), WIDEFILE(,)
+			
+			set TREC.piece(",", 6, 7) = "S,G"
+			set FILENAME = DVLIST.piece("|", FFIDWIDE)
+			do MAP^DBSDDMAP(FILENAME, WIDEFILE(,))
+			do RESORT^DDPXFR1(.WIDEFILE, .SORTFID, FILENAME)
+			quit:'SORTFID.data()
+			 
+			set I = DILIST.piece("PKEYS", 1).length(",")
+			set PKEYS = DVLIST.piece("|", I)
+			set I = ""
+			for  set I = SORTFID(I).order() quit:SORTFID(I, PKEYS.piece(",",1)).exists() 
+			set DREC.piece(",", FFIDWIDE + 2) = QUOTE_"W_"_FILENAME_"_"_I_QUOTE
+			set OK = 1
+			for J = 1:1:PKEYS.length(",") quit:PKEYS.piece(",", J).isNull()  if 'SORTFID(I, PKEYS.piece(",",J)).exists() set OK = 0 quit 
+			quit:'OK
+			set TRECWRT = 1
+
+			set RECTYPE = "G"
+			set WRTREC = TREC_9.char()_FREC
+			do IOWRITE^HSYNCWRT(WRTREC,,1)
+			if SREC.exists() do IOWRITE^HSYNCWRT(SREC) quit 
+			if (SREC.data() > 1) do {
+				
+				do IOWRITE^HSYNCWRT(SREC,CLIENT)
+				set VER = ""
+				for  set VER = SREC(VER).order() quit:VER.isNull()  do IOWRITE^HSYNCWRT(SREC(VER), VER)
+			}
+		}
+	}
+	quit 
+	
+
+DIVAL(ret String QDV,	// Formatted data 		/MECH=REF:RW
+      String PTR,	// Property of table
+      String VER)	// Host Profile Version
+      
+	/* 
+	Column data formatter
+	The function is used to format a single piece of data
+	*/
+	
+	type public Boolean SPLITFLG
+	type public String ACKEYS, COLLIST(,,), DATATYPE, DILIST, DVLIST, LOC, NOCOLUMN, QITEM, SORTFID(,), SPLIT, TBLNAME
+	type public String VZCMP, vzdec, vzdes, vzdft, VZLEN, vzmin, vzmax, VZREQ, VZTYPE
+
+	type String DV, DVDATA, RETURNDV, TESTVAR
+
+	if SPLITFLG, '$$SPLITDI^HSYNCSPT(DVLIST.piece("|", LOC + 1), TBLNAME, DILIST, ACKEYS, SPLIT, PTR) set NOCOLUMN = 0 quit
+
+	//DVDATA will be modified to contain the older released version of the format of a column
+		 
+	set DVDATA = DVLIST
+	set VER = VER.get()
+
+	if TBLNAME = "DBTBL1D", COLLIST(DVLIST.piece("|", 3)).data(),'VER.isNull() do {
+		if PTR = VZREQ,'COLLIST(DVLIST.piece("|", 3), "REQ", VER).order().isNull() do CHGDVDTA("REQ", VER)
+		if PTR = VZTYPE,'COLLIST(DVLIST.piece("|", 3), "TYP", VER).order().isNull() do CHGDVDTA("TYP", VER)
+		if PTR = VZLEN,'COLLIST(DVLIST.piece("|", 3), "LEN", VER).order().isNull() do CHGDVDTA("LEN", VER)
+		if PTR = VZCMP,'COLLIST(DVLIST.piece("|", 3), "CMP", VER).order().isNull() do CHGDVDTA("CMP", VER)
+		if PTR = vzdec,'COLLIST(DVLIST.piece("|", 3), "DEC", VER).order().isNull() do CHGDVDTA("DEC", VER)
+		if PTR = vzdes,'COLLIST(DVLIST.piece("|", 3), "DES", VER).order().isNull() do CHGDVDTA("DES", VER)
+		if PTR = vzdft,'COLLIST(DVLIST.piece("|", 3), "DFT", VER).order().isNull() do CHGDVDTA("DFT", VER)
+		if PTR = vzmin,'COLLIST(DVLIST.piece("|", 3), "MIN", VER).order().isNull() do CHGDVDTA("MIN", VER)
+		if PTR = vzmax,'COLLIST(DVLIST.piece("|", 3), "MAX", VER).order().isNull() do CHGDVDTA("MAX", VER)
+		}
+	set TESTVAR = DATATYPE.piece(",", PTR)
+	if "N$"[TESTVAR set QDV = QDV_","_(DVDATA.piece("|", PTR)) quit 
+	if "L"[TESTVAR set QDV = QDV_","_(+DVDATA.piece("|", PTR)) quit 
+	if "D"[TESTVAR set QDV = QDV_","_$$INT^%ZM(DVDATA.piece("|", PTR),"D") quit 
+	if "C"[TESTVAR set QDV = QDV_","_$$INT^%ZM(DVDATA.piece("|", PTR), "C") quit 
+
+	set DV = DVDATA.piece("|",PTR)
+	if SPLITFLG, (PTR = LOC), TBLNAME.isLike("%DBTBL%"), SORTFID.data() set DV = "W_"_SORTFID(SPLIT)_"_"_SPLIT
+	
+	if (DILIST.piece(",", PTR) = "TBLREF"), '(SPLITFLG ! ('QITEM.isNull())),'SORTFID.data() do {
+	
+		set RETURNDV = ""
+		do TESTFFID
+		set NOCOLUMN = $$LOGGING(DV)
+		set DV = RETURNDV
+	}
+			
+	set QDV = QDV_","_DV.addQuotes()
+	quit
+
+	
+CHGDVDTA(String ATTRIB,		// Attribute of the column that was changed
+	 String VER)		// Version of changed column
+
+	/* 
+	Account for schema change between version release:
+	The function is used to reset an attribute of a column when PFW clients
+  	are not on the same build
+ 
+	Returns:
+ 
+	. DVDATA	Updated DATA string
+ 
+	Example:
+ 
+	W $$CHGVDTA
+ 
+	*/
+	
+	type public String COLLIST(,,), DVDATA, DVLIST, FID, I, VZNOD, VZREQ
+	
+	if (I = VZREQ), (FID = "DBTBL1D"), DVLIST.piece("|", VZNOD)?1N1"*" set DVDATA.piece("|", VZREQ) = 1
+	else  do {
+	 
+		set VER = COLLIST(DVLIST.piece("|", 3), ATTRIB, VER).order()
+		set DVDATA.piece("|", I) = COLLIST(DVLIST.piece("|", 3), ATTRIB, VER).piece("|", 1)
+	}
+	
+	quit 
+
+
+SETREC(String SORTFID(,),	// Array of split table mapping
+       String FILETYP)		// Table type
+
+	/* 
+	Determine the type of record being transferred:
+	The function is used to create an indicator for the T record
+	of the type of record being sent
+	*/
+	
+	type public String CHARBASE, FILENAME
+
+	if SORTFID.data() quit "C"
+	if CHARBASE.get() quit "C"
+	if (FILETYP = 7) quit "G"
+	if FILENAME.get().isNull() quit "B"
+	if Db.isDefined("STBLNOGUI", "FILENAME") quit "C"
+	quit "B"
+
+
+public LOGGING(String FID)	// Table Name
+
+	/*
+	Description:
+	Determine if this table should be sent to the client. It should not be
+	if the table has logging off or the file is not assigned to the client.	
+	*/
+
+	type RecordDBTBL1 dbtbl1 = Db.getRecord("DBTBL1", "%LIBS='SYSDEV',FID=:FID")
+	
+	if ((+dbtbl1.netloc = 0) ! (+dbtbl1.log = 0)) quit 0
+	
+	quit 1
+	
+
+private TESTFFID
+
+	type public String DV, FFIDWIDE, FREC, I, RETURNDV, SREC, TBLNAME, TREC, VER, WRTARRAY()
+	
+	type String FILENAME, PKEYS, N, OK, SAVEI, SORTFID(,,), WIDEFILE(,)
+
+	quit:(TBLNAME '= "DBTBL1F")
+	
+	set SAVEI = I
+	
+	set (RETURNDV, FILENAME) = DV
+	do MAP^DBSDDMAP(FILENAME, WIDEFILE(,))
+	if 'WIDEFILE.data() do { quit 
+	
+		if WRTARRAY.data() set WRTARRAY(1).piece(",", 6, 7) = "N,B" quit 
+		set WRTARRAY(1) = TREC 
+		set WRTARRAY(1).piece(",", 6, 7) = "N,B"
+		set WRTARRAY(2) = FREC 
+		if SREC.exists() set WRTARRAY(3) = SREC
+		set VER = ""
+		for  set VER = SREC(VER).order() quit:VER.isNull()  set WRTARRAY(3, VER) = SREC(VER)
+		}
+
+	do RESORT^DDPXFR1(WIDEFILE(,), SORTFID(,,), FILENAME)
+	if WRTARRAY.data() set WRTARRAY(1).piece(",", 6) = "W"
+	else  set TREC.piece(",", 6) = "W"
+	set N = SORTFID("").order()
+	set RETURNDV = "W_"_DV_"_"_N
+	set FFIDWIDE = SAVEI
+
+	quit
+ #OPTION ResultClass ON
+public String vSIG()	quit "61333^34998^Dan Russell^18294"	// Signature - LTD^TIME^USER^SIZE

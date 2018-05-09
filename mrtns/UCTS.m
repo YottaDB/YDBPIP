@@ -1,4 +1,4 @@
-UCTS	;Library of Transaction Set Class Methods
+UCTS	;wittef;2007-12-13 19:22:00;Library of Transaction Set Class Methods
 	;;Copyright(c)2003 Sanchez Computer Associates, Inc.  All Rights Reserved - 05/16/03 12:31:59 - SPIER
 	; ORIG: MATTSON - 04/07/98
 	; DESC: Library of Class TranSet methods
@@ -57,6 +57,20 @@ UCTS	;Library of Transaction Set Class Methods
 	; RecordTTX object to the transaction driver.
 	;
 	;----- Revision History ------------------------------------------------
+	; 10/20/2008 - RussellDS - CR35741/35918
+	;	Modified postTSet to eliminate use of third parameter.
+	;
+	; 09/09/2008 - RussellDS - CR30801
+	;	* Modified copyTran, getTran, and post to consider the negative
+	;	  nodes -1 through -6, as well as -161 and -162
+	;	* Removed obsolete postOld section and related sections that
+	;	  it used
+	;
+	; 07/18/07 - Frans S.C. Witte - CR: 27800
+	;	* Modified call to $$newObj^UCCLASS().
+	;	* Replaced $D(labels()) with $$hasSubr^UCGM()
+	;	* Added TTXOBJS,TRNDRVI,TRNPSSTK to the NEW in post()
+	;
 	; 01/24/07 - Frans S.C. Witte - CRs: 24902 / 24903 / 24974
 	;	Replaced invalid 8-bit characters (all Windows "smart" chars) by
 	;	their ASCII equivalent.
@@ -129,7 +143,7 @@ UCTS	;Library of Transaction Set Class Methods
 	;-----------------------------------------------------------------------
 	;
 	;----------------------------------------------------------------------
-copyTran	;Public;method copyTran;Copy transaction obj to transaction set 
+copyTran ;public;method copyTran;Copy transaction obj to transaction set
 	;----------------------------------------------------------------------
 	;
 	; EXAMPLE:  set seq=ts.copyTran(tranObj,.TTXBLD,1.01)
@@ -148,7 +162,7 @@ copyTran	;Public;method copyTran;Copy transaction obj to transaction set
 	;
 	d append(tab_"s "_oLvn_"(tranObj)=$G("_oLvn_"(tranObj))",label)
 	d append(tab_"d TTX^TTXBLD(tranObj,.colRefs)",label)
-	d append(tab_"n seq",label)
+	d append(tab_"n i,seq",label)
 	;
 	I actual(4)'="" D
 	.	I actual(4)["SYSTEM" S string="($O("_oLvn_"(TSet,tranSeq*1000\1/1000+.001),-1)*1000\1/1000)+.001"
@@ -157,6 +171,9 @@ copyTran	;Public;method copyTran;Copy transaction obj to transaction set
 	d append(tab_"i $G(tranSeq) s seq=tranSeq",label)
 	d append(tab_"e  s seq=$O("_oLvn_"(TSet,""""),-1)\1+1 i seq<1 s seq=1",label)
 	d append(tab_"s "_oLvn_"(TSet,seq)="_oLvn_"(tranObj)",label)
+	d append(tab_"s "_oLvn_"(TSet,seq,-2)=0",label)
+	d append(tab_"f i=-1,-3:-1:-6 i $d("_oLvn_"(tranObj,i)) s "_oLvn_"(TSet,seq,i)="_oLvn_"(tranObj,i)",label)
+	d append(tab_"f i=-161,-162 i $d("_oLvn_"(tranObj,i,""0*"")) s "_oLvn_"(TSet,seq,i,""0*"")="_oLvn_"(tranObj,i,""0*"")",label)
 	d append(tab_"q seq",label)
 	;
 	s return="$$"_label_"("_objectName_","_actual(1)_","_actual(2)_","_actual(3)_")"
@@ -164,7 +181,7 @@ copyTran	;Public;method copyTran;Copy transaction obj to transaction set
 	q
 	;
 	;----------------------------------------------------------------------
-getTran	;Public;method getTran;Get transaction object from transaction set 
+getTran ;public;method getTran;Get transaction object from transaction set
 	;----------------------------------------------------------------------
 	; Generated subroutine returns a new RecordTTX instance with:
 	; - RecordMode = 0
@@ -180,22 +197,20 @@ getTran	;Public;method getTran;Get transaction object from transaction set
 	set cmt="TranSet.getTran"
 	;
 	set label=$$findSubr^UCGM("TStGet",cmt)
-	set return="$$"_label_"("_objectName_","_actual(1)_")"
-	if $D(labels(label)) quit
+	set return="$$"_label_"("_$$newObjSt^UCCLASS(var)_","_objectName_","_actual(1)_")"
+	if $$hasSubr^UCGM(label) quit
 	;
-	do addSubr^UCGM(label,"(vTSt,vTseq)",cmt)
+	do addSubr^UCGM(label,"(vS,vTSt,vTseq)",cmt)
 	;
 	do append(tab_"n vRet",label)
 	;
-	do append(tab_"s vRet="_$$newObj^UCCLASS("RecordTTX"),label)
-	do append(tab_"s "_oLvn_"(vRet)=$G("_oLvn_"(vTSt,vTseq))",label)
-	do append(tab_"s "_oLvn_"(vRet,-2)=0",label)
-	do append(tab_"s ("_oLvn_"(vRet,-3),"_oLvn_"(vRet,-4),"_oLvn_"(vRet,-5),"_oLvn_"(vRet,-6))=""""",label)
+	do append(tab_"s vRet="_$$newObj^UCCLASS("RecordTTX","vS"),label)
+	do append(tab_"merge "_oLvn_"(vRet)="_oLvn_"(vTSt,vTseq)",label)
 	do append(tab_"q vRet",label)
 	quit
 	;
 	;----------------------------------------------------------------------
-postTSet	;method postTSet;Post transaction set 
+postTSet ;method postTSet;Post transaction set
 	;----------------------------------------------------------------------
 	;
 	; EXAMPLE:  do ts.postTSet(TJD,BRCD,.par)
@@ -205,32 +220,22 @@ postTSet	;method postTSet;Post transaction set
 	;	Framework Upgrade Rules. If the version number to be returned by
 	;	$$VERSION^TRNDRV is ever incremented, pre-upgrade / post-upgrade
 	;	version mismatches will occur, and need to be handled.
+	; - This method used to take three parameters.  actual(3) was parameters
+	;	to be used for TTXP2 calls.  It no longer has relevance for TRNDRV.
+	;	Because this method is deprecated, instead of requiring modification
+	;	of callers to remove the third parameter, it is just ignored here.
+	;	Eventually, all callers should be changed to call TRNDRV directly.
 	;----------------------------------------------------------------------
 	i $G(actual(1))="" d ERROR^UCGM("Parameter 1 required - postTSet")
 	i $G(actual(2))="" d ERROR^UCGM("Parameter 2 required - postTSet")
-	i $G(actual(3))="" d ERROR^UCGM("Parameter 3 required - postTSet")
+	;i $G(actual(3))="" d ERROR^UCGM("Parameter 3 required - postTSet")
 	;
-	; Determine whether to use old or new transaction posting.
-	n tpversn
-	s tpversn=""
-	d
-	.	s $ZT="Q"			; Error trap in case doesn't exist
-	.	s tpversn=$$VERSION^TRNDRV
-	;
-	; If no version from TRNDRV, use TTXP2 if it's there
-	i tpversn="" do
-	.	i $$VALID^%ZRTNS("TTXP2") s tpversn=1
-	.	e  d
-	..		d WARN^UCGM("Unable to determine transaction posting method - using TRNDRV")
-	..		s tpversn=2
-	;
-	i tpversn=2 s return="post^UCTS("_actual(1)_","_actual(2)_","_objectName_","_actual(3)_")"
-	e  i tpversn=1 s return="postOld^UCTS("_actual(1)_","_actual(2)_","_objectName_","_actual(3)_","_$G(actual(4))_")"
+	s return="post^UCTS("_actual(1)_","_actual(2)_","_objectName_")"
 	s formal="Transaction"
 	q
 	;
 	;----------------------------------------------------------------------
-post(TPD,BRCD,ttx,par)	;Public;Post transactions 
+post(TPD,BRCD,ttx,par) ;public;Post transactions
 	;----------------------------------------------------------------------
 	;
 	; ARGUMENTS:
@@ -274,14 +279,20 @@ post(TPD,BRCD,ttx,par)	;Public;Post transactions
 	tstart (vobj):transactionid="CS"
 	set seq=0
 	for  set seq=$o(vobj(ttx,seq)) quit:+seq=0  do  quit:$G(ER)
-	.	new RJ,acnDup,acnOrig
+	.	new RJ,acnDup,acnOrig,TTXOBJS,TRNDRVI,TRNPSSTK
 	.	set ttxDup=$o(vobj(""),-1)+1
-	.	set vobj(ttxDup,-1)="RecordTTX"
+	.	merge vobj(ttxDup)=vobj(ttx,seq)
 	.	set vobj(ttxDup,-3)=TPD
 	.	set vobj(ttxDup,-4)=BRCD
 	.	set vobj(ttxDup,-5)=""
 	.	set vobj(ttxDup,-6)=""
-	.	set vobj(ttxDup)=vobj(ttx,seq)
+	.	; Modify -161/-162 to reflect key changes
+	.	if $d(vobj(ttxDup,-161)) do
+	..		new ign
+	..		set ign=$$rdbColUpd^UCDBRT(0,ttxDup,"S_TJD","0*","|",TPD)
+	..		set ign=$$rdbColUpd^UCDBRT(0,ttxDup,"BRCD","0*","|",BRCD)
+	..		set ign=$$rdbColUpd^UCDBRT(0,ttxDup,"S_UID","0*","|","")
+	..		set ign=$$rdbColUpd^UCDBRT(0,ttxDup,"TSEQ","0*","|","")
 	.	;
 	.	; FSCW CR15411: TRNSINGL^TRNDRV requires a RecordACN instance,
 	.	; and "" is not a valid value in this case.
@@ -318,7 +329,7 @@ post(TPD,BRCD,ttx,par)	;Public;Post transactions
 	quit
 	;
 	;----------------------------------------------------------------------
-getAcnObj(ttxobj,vOrig,vDup)	;local void; Return pointer to object already established for the account 
+getAcnObj(ttxobj,vOrig,vDup) ;local void; Return pointer to object already established for the account
 	;----------------------------------------------------------------------
 	; Arguments:
 	; . ttxobj = ttx pointer				/TYP=N/MECH=VAL/REQ
@@ -345,8 +356,8 @@ getAcnObj(ttxobj,vOrig,vDup)	;local void; Return pointer to object already estab
 	set CID=$$TRANCID^TRNUTL(.ttxobj)
 	set (obj,vOrig)=""
 	for  set obj=$o(vobj(obj)) quit:obj=""  do  quit:vOrig
-	.	if vobj(obj,-1)="RecordDEP",$g(vobj(obj,-3))=CID set vOrig=obj
-	.	else  if vobj(obj,-1)="RecordLN",$g(vobj(obj,-3))=CID set vOrig=obj
+	.	if $P(vobj(obj,-1),$C(9))="RecordDEP",$g(vobj(obj,-3))=CID set vOrig=obj
+	.	else  if $P(vobj(obj,-1),$C(9))="RecordLN",$g(vobj(obj,-3))=CID set vOrig=obj
 	if vOrig do
 	.	set vDup=$o(vobj(""),-1)+1
 	.	;
@@ -355,159 +366,9 @@ getAcnObj(ttxobj,vOrig,vDup)	;local void; Return pointer to object already estab
 	.	merge vobj(vDup)=vobj(vOrig)
 	else  kill vOrig
 	quit
-	;;;----------------------------------------------------------------------
-	;;copyobj(from,to)	; copy dep or ln object to vobj for processing
-	;;;----------------------------------------------------------------------
-	;;; The object copied into by this label is either the new object
-	;;; which will be used for processing or when processing is successful
-	;;; the old object will be updated with the changes that occurred
-	;;; during processing.
-	;;; This code is used because the TRNDRV will reload the object if
-	;;; it has to rollback a transaction
-	;;;
-	;;; Arguments:
-	;;;	from	account object pointer		TYP=N/MECH=VAL/REQ
-	;;;	to 	copy to account object pointer	TYP=N/MECH=VAL/REQ
-	;;;
-	;;new loop,di
-	;;; Copy top level if it's defined (will only be defined on Oracle)
-	;;if $d(vobj(from))#2 set vobj(to)=vobj(from)
-	;;;
-	;;set (loop,di)=""
-	;;for  set loop=$o(vobj(from,loop)) q:loop=""  if $data(vobj(from,loop))#2 set vobj(to,loop)=vobj(from,loop)
-	;;if $d(vobj(from,-100)) for  set loop=$o(vobj(from,-100,loop)) quit:loop=""   d
-	;;.	if $d(vobj(from,-100,loop))#2 set vobj(to,-100,loop)=vobj(from,-100,loop)
-	;;.	for  set di=$o(vobj(from,-100,loop,di)) quit:di=""  set vobj(to,-100,loop,di)=vobj(from,-100,loop,di)
-	;;quit
 	;
 	;----------------------------------------------------------------------
-postOld(TPD,BRCD,ttx,par,tr)	;Public;Post transactions 
-	;----------------------------------------------------------------------
-	;
-	; ARGUMENTS:
-	;     .TPD	Teller posting date		TYP=D/MECH=VAL/REQ
-	;
-	;     .BRCD	Branch code			TYP=N/MECH=VAL/REQ
-	;
-	;     .ttx	A pointer to the object which	TYP=N/MECH=REF/REQ
-	;		contains an array of pointers
-	;		to transaction objects.
-	;
-	;     .par	Processing qualifiers		TYP=T/MECH=REFARR/REQ
-	;		(For details, refer to
-	;		the documentation in
-	;		TTXP2.)
-	;
-	;     .tr	Transaction array		TYP=T/MECH=REFARR/NOREQ
-	;               The transaction array returned
-	;               from TTXP2, including secondary
-	;               transactions.
-	;
-	; NOTE:  There is no TP here, as there is in the newer post section
-	;	 because the older version of transaction posting has a single
-	;	 TP wrapper that is outside of this code.  In the older version,
-	;	 all updates are done locally in the symbol table and then,
-	;	 only at the end, applied to the database, under TP.  The new
-	;	 approach for transaction posting uses nested transactions, so
-	;	 we update as we go, and, if we encounter an error, do a rollback
-	;	 of just the last portion.  Hence, there's TP in the new method,
-	;	 but not the old one.
-	;----------------------------------------------------------------------
-	;
-	n obj,seq
-	n A,%A,TR
-	;
-	; Copy transaction objects that are pointed to by the transaction
-	; container object 'ttx' to the internal structure required by
-	; TTXP2 (i.e., TR).
-	;
-	s seq=0
-	f  s seq=$o(vobj(ttx,seq)) q:+seq=0  s TR(seq)=vobj(ttx,seq)
-	;
-	; Copy deposit and loan objects to internal structures required
-	; by TTXP2 (i.e., A(CID,node) and %A(CID,node)).
-	;
-	s obj=""
-	f  s obj=$o(vobj(obj)) q:obj=""  d
-	.	i vobj(obj,-1)="RecordDEP" d acnLoad(obj)
-	.	e  i vobj(obj,-1)="RecordLN" d acnLoad(obj)
-	.	e  i vobj(obj,-1)="RecordDEPSEG" do segLoad(obj)
-	;
-	; Call transaction posting module
-	d EXT^TTXP2(TPD,BRCD,.TR,.par)
-	;
-	; Update the transaction and transaction container objects to
-	; reflect the updates made in TTXP2.
-	;
-	n return
-	s return=1
-	i $G(ER) s return=0
-	k tr
-	s seq=0
-	f  s seq=$o(TR(seq)) q:seq=""!(seq="status")  d
-	.	k RJ(seq,"HIST")				; MJZ - 42342
-	.	i return s (vobj(ttx,seq),tr(seq))=TR(seq)
-	.       i seq#1 q
-	.       s $P(vobj(ttx,"status"),"|",seq)=$D(RJ(seq))
-	;
-	s obj=""
-	i return f  s obj=$o(vobj(obj)) q:obj=""  d
-	.	i vobj(obj,-1)="RecordDEP"!(vobj(obj,-1)="RecordLN") d movtoobj(obj)
-	.	i vobj(obj,-1)="RecordDEPSEG" d segtoobj(obj)
-	; Delete structures created by TTXP2
-	if '$G(par("KEEPOVR")),(par("OPTION")'=0) d KILL1^TTXP2
-	q
-	;
-	;----------------------------------------------------------------------
-acnLoad(obj)	;Private;Load account data 
-	;----------------------------------------------------------------------
-	;
-	n cid,n
-	;
-	s cid=vobj(obj,-3)
-	s n=0 f  s n=$o(vobj(obj,n)) q:n=""  s %A(cid,n)=vobj(obj,n)
-	;
-	i '$d(A(cid,49)) s A(cid,49)=$G(%A(cid,49),$G(^ACN(cid,49)))
-	i '$d(A(cid,50)) s A(cid,50)=$G(%A(cid,50),$G(^ACN(cid,50)))
-	i '$d(%A(cid,51)) s %A(cid,51)=$G(^ACN(cid,51))
-	q
-segLoad(obj)	
-	n cid,n,segment
-	;
-	s cid=$G(vobj(obj,-3))
-	s segment=$G(vobj(obj,-4))
-	i segment=""!(cid="") quit
-	S %A(cid,200,segment)=vobj(obj)
-	quit
-	;
-	;----------------------------------------------------------------------
-movtoobj(obj)	;Private;Move %A array back to the object. 
-	;----------------------------------------------------------------------
-	;
-	n cid,n
-	;
-	s cid=vobj(obj,-3)
-	if '$d(%A(cid)) q
-	s n=""
-	f  s n=$o(%A(cid,n)) q:n=""  i $d(%A(cid,n))#2 s vobj(obj,n)=%A(cid,n)
-	;
-	q
-	;
-	;----------------------------------------------------------------------
-segtoobj(obj)	;Private;Move %A array containing DEPSEG back to the object. 
-	;----------------------------------------------------------------------
-	;
-	n cid,n,segment
-	;
-	s cid=$G(vobj(obj,-3))
-	s segment=$G(vobj(obj,-4))
-	if cid=""!(segment="") quit
-	if $D(%A(cid,200,segment)) s vobj(obj)=%A(cid,200,segment)
-	;
-	q
-	;
-	;----------------------------------------------------------------------
-append(code,label)	; 
+append(code,label) ;
 	;----------------------------------------------------------------------
 	;
 	d append^UCGM(code,label)

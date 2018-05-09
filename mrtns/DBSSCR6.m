@@ -2,7 +2,7 @@ DBSSCR6	; DBS - U - V4.0 - Screen compiler, Index file logic
 	;;Copyright(c)1994 Sanchez Computer Associates, Inc.  All Rights Reserved - 10/17/94 10:33:14 - XUS
 	;     ORIG:  Bob (8447) - 09/25/89
 	;     DESC: CREATE SCREEN INDEX FILE MAINTENANCE LOGIC
-	; I18N=QUIT: Exculded from I18N standards. 
+        ; I18N=QUIT: Exculded from I18N standards.
 	;
 	; GLOBALS -  ^DBTBL,^TMP
 	;     READ:

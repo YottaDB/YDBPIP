@@ -1,4 +1,4 @@
-DBSCRT(dft,len,typ,tbl,hlp,dec,min,max,py,px,sec,recsiz)	; 
+DBSCRT(dft,len,typ,tbl,hlp,dec,min,max,py,px,sec,recsiz) ;
 	;;Copyright(c)2000 Sanchez Computer Associates, Inc.  All Rights Reserved - 02/02/00 11:54:55 - GRAY
 	;     ORIG:  Frank R. Sanchez (2497)
 	;     DESC:  Input manager for keyboard entry of string data.
@@ -30,97 +30,12 @@ DBSCRT(dft,len,typ,tbl,hlp,dec,min,max,py,px,sec,recsiz)	;
 	;                  for the screen refresh function.
 	;
 	;---- Revision History ------------------------------------------------
-	; 07/14/06 - RussellDS - CR22121
-	;	     Replaced $A references with $$BSASCII^SQLUTL to ensure
-	;	     Unicode compliance.
+	; 06/14/2008 - RussellDS - CR30801
+	;	Removed references to obsolete spawn feature.
 	;
-	; 12/08/04 - RussellDS - CR13258
-	;	     Remove obsolete parameter from call to ^DBSTBL.
-	;
-	; 2/2/2000 - GRAY - 32507
-	;	     Removed code no longer needed due to the Elimination
-	;	     of Teller/Branch Character Interface.
-	;
-	; 08/11/97 - Betty Ni - 25653
-	;            Replaced follows operator "]" with a "]]". 
-	;
-	; 12/12/95 - SPIER - arq19651
-	;            Added vptr to items which must be defined before call
-	;	     to DSPPNT. This was not defined in qa since sql release
-	;            is not in that version.
-	;
-	; 12/08/95 - WATSOND - 20404
-	;            Modified PNTM to new the variable vlen.  This corrects
-	;            a problem where field lenght 1 exceeds when running SCATAPE
-	;
-	; 12/5/95 - SPIER - arq19651
-	;	     In DSP section, do not call DSPLEN if ni is not defined.
-	;            In DSPLEN section Added conditional setting of NI to account
-	;	     for a situation where %TAB(NI) does not exist, e.g. crtl w
-	;	     while on menu prompt. A second test after the reseting
-	;	     of NI will leave vptr at its current setting if NI is not
-	;	     part of the %TAB array.
-	;
-	; 11/09/95 - SPIER - 19580
-	;            Reset vptr in DSP section when vptr indicates that
-	;	     we are off the screen(overflow). DSP always refreshs
-	;	     with the first 80 or 132 characters of the screen.
-	;	     New label DSPLEN which determines the display size of
-	;	     the data being displayed.
-	;
-	; 02/02/95 - Shaodong Tony Xu - ARQ 290
-	;            Modify the PF4 key to create correct UX array.
-	;
-	; 01/13/95 - Shaodong Tony Xu - ARQ 222
-	;            Modify the PF3 Key section to let it work.
-	;
-	; 10/27/94 - Rich Jefferson
-	;	     
-	;	     Changed cmmd array to be %cmmd array within REMAP
-	;	     subroutine
-	;
-	;	     Removed hardcoded %fkey TST and TTS
-	;
-	; 05/23/94 - Dan Russell
-	;
-	;            Modify handling of interrupts in SECRET section.  Works
-	;            with ^%ZBREAK to pass back executable string if break
-	;            is allowed.
-	;
-	;            Also changed DQnnn messages to new nnn messages.
-	;
-	; 01/26/94 - Allan Mattson - 11702
-	;
-	;            Modified strip control characters from input.
-	;
-	; 10/27/93 - Bob Chiang - I18N#7
-	;
-	;            Modified return message handling with a call to extrinsic
-	;            function $$^MSG(msgid,p1,p2...) for I18N development
-	;            (phrase independence).
-	;
-	; 10/21/93 - Bob Chiang - I18N
-	;
-	;            Modified to replace vofl array (field overflow indicator)
-	;	     with a new parameter "recsiz" (argument # 12).
-	;
-	; 10/10/93 - Frank Prendergast - I18N#18
-	;
-	; 	     Change call to DBSMBAR from DBSMENU
-	;	     Text moved to ^STBL("MBAR")
-	;
-	; 04/23/93 - Bob Chiang
-	;
-	;            Modified to correct system loop problem when use PF4
-	;            key on a field that is not in the repeat region.
-	;
-	; 02/09/93 - Bob Chiang
-	;
-	;            Modified to protect system variable %JRNL at routine
-	;               section MNU+3.
-	;
+	;	Removed old revision history.
 	;-----------------------------------------------------------------------
-	;   I18N=QUIT : Excluded From I18N Standards 
+        ;   I18N=QUIT : Excluded From I18N Standards
 	;
 	I '$D(%TO) N %TO S %TO=$$TODFT^%ZREAD
 	;
@@ -157,7 +72,6 @@ term	; Interpret terminator for function key calls
 	.	I %fkey="MNU" S X=$$MNU(X) Q
 	.	I %fkey="PRN" D PRN Q
 	.	I %fkey="DSP" D DSP(1) S %fkey="" Q
-	.	; I %fkey="SES" D:$$SES(hlp) DSP(1) Q
 	.	I %fkey="RCL" S X=$$RECALL^DBSTSINP(X) Q
 	.	I %fkey="BRK" D
 	..		N VBRK
@@ -230,17 +144,6 @@ MNU(OX)	; Select and process PF3 option
 	I X="" S X=OX,%fkey=""
 	E  S %fkey="ENT" I $L(X)>recsiz S X=$E(X,1,recsiz)
 	Q X
-	;
-	;----------------------------------------------------------------------
-SES(ref)	; Invoke linked function (hyperfunction)
-	;----------------------------------------------------------------------
-	;
-	N status
-	;
-	S %fkey=""
-	S status=$$ATTACH^DBSSPAWN(ref)
-	I status'=1 W $$MSG^%TRMVT(status) Q 0
-	Q 1
 	;
 	;----------------------------------------------------------------------
 HLP	; Invoke HELP documentation
@@ -416,7 +319,7 @@ DSP(VPT)	; Refresh the screen from line VPT
 	Q
 	;
 	;----------------------------------------------------------------------
-DSPLEN(NI)	;Return length of data display 
+DSPLEN(NI) ;Return length of data display
 	;----------------------------------------------------------------------
 	I '$D(%TAB(NI)) N NI S NI=$$BSASCII^SQLUTL($g(vgoto),1)	;12/05/95   mas
 	I '$D(%TAB(NI)) Q ""
@@ -489,7 +392,6 @@ SECRET	;
 	I %fkey="MNU" S X=$$MNU(X) G secd
 	I %fkey="PRN" D PRN G secd
 	I %fkey="DSP" D DSP(1) W $$CUP G secd
-	; I %fkey="SES" D:$$SES(hlp) DSP(1) G secd
 	I %fkey="BRK" D
 	.	N VBRK
 	.	S VBRK=$$^%ZBREAK

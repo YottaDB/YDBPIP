@@ -1,4 +1,4 @@
-DBSCMPF(rtn,src,nolink)	; Public, DQ Compiler source code library interface 
+DBSCMPF(rtn,src,nolink) ; Public, DQ Compiler source code library interface
 	;;Copyright(c)1996 Sanchez Computer Associates, Inc.  All Rights Reserved - 04/09/96 10:48:00 - CHIANG
 	;
 	; Utility to convert prodecural code into a run-time routine.

@@ -5,6 +5,25 @@ SQLCACHE	;private;SQL Cache library
 	; KEYWORDS:	DATABASE
 	;
 	;--------------- Revision History -------------------------------------
+	;
+	; 06/24/2009 - Sha Mirza - CR40944
+	;	* Modified call to RTN^SQL, with parameters.
+	;
+	; 2009-05-06 - RussellDS - CR40198
+	;	* Modified FLT section to initialize sqlcur if it doesn't exist.
+	;	  For some cached execution code, this is needed to prevent a
+	;	  undefined error, especially in call to RESULT^SQLM.
+	;
+	; 11/14/08 - GIRIDHARANB - CR36391
+	; 	     Modified sections PACK / UNPACK to save and restore 
+	;	     vsql levels for vCurID and Z.
+	;
+	; 2008-10-01, Frans S.C. Witte CR 35741/35918/35922
+	;	$$rdb^UCDB() and rdb^UCDBRT() replaced by $$isRdb^vRuntime().
+	;
+	; 08/30/2008 - RussellDS - CR30801
+	;	     Modified section SAV to quit if we are on an RDB.
+	;
 	; 07/10/07 - Pete Chenard - CR28171
 	;	     Modified usage of $C, $E, $A, and $L to use SQLUTL utilities
 	;	     in order to be unicode compliant.
@@ -38,9 +57,9 @@ SQLCACHE	;private;SQL Cache library
 	;            Its possible that not using TP in a very active environment
 	;	     may cause TMPCACHE to be corrupted.
 	;
-	; 05/29/03 - THONIYIM - 1139 
-	;            Change the reference from ^DBTBL("SYSDEV",18,spnam) 
-	;            to ^DBTBLSP(spnam) 
+        ; 05/29/03 - THONIYIM - 1139
+        ;            Change the reference from ^DBTBL("SYSDEV",18,spnam)
+        ;            to ^DBTBLSP(spnam)
 	;
 	; 06/17/02 - SPIER - 50450
 	;	     Inserts and Updates cause error in stored procedure
@@ -77,6 +96,8 @@ PACK(vsql,exe)	; Pack vsql() and exe() into a string
 	S c=c_$$LVW($G(vsql("D")))	; Column type and length
 	S c=c_$$LVW($G(vsql("F")))	; Format
 	S c=c_$$LVW($G(vsql("T")))	; 
+	S c=c_$$LVW($G(vsql("vCurID"))) ; Oracle cursor handle
+	S c=c_$$LVW($G(vsql("Z")))	; RDB Fetch Indicator
 	;
 	Q d_c
 	;
@@ -91,6 +112,8 @@ UNPACK(z,vsql,exe)	; Create vsql() & exe() from z
 	S x=$$LVP(z,5) I x'="" S vsql("D")=x	; Type_len
 	S x=$$LVP(z,6) I x'="" S vsql("F")=x	; Format
 	S x=$$LVP(z,7) I x'="" S vsql("T")=x	; temporary tables
+	S x=$$LVP(z,8) I x'="" S vsql("vCurID")=x	; Oracle cursor handle
+	S x=$$LVP(z,9) I x'="" S vsql("Z")=x	; Fetch Indicator
 	;
 	S vsql=$$LVU(d,.ptr) F i=0:1 S vsql(i)=$$LVU(d,.ptr) Q:ptr=0
 	S vsql("K")=i
@@ -101,7 +124,7 @@ UNPACK(z,vsql,exe)	; Create vsql() & exe() from z
 	;--------------------------------------------------------------------
 FLT(expr,tok,par)	; Return dynamic cache statement
 	;--------------------------------------------------------------------
-	I $$rdb^UCDB() Q 0
+	I $$isRdb^vRuntime() Q 0
 	;
 	I expr[$C(0) S expr=$$UNTOK^%ZS(expr,.tok)
 	;
@@ -127,13 +150,14 @@ FLT(expr,tok,par)	; Return dynamic cache statement
 	.	S z=exe(1)			; Routine name
 	.	I $G(par("PREPARE")) X "S vsql(""A"")=$$PREPARE^"_z_"()"	; ODBC prepare attributes
 	.	; 05/06/04, FSCW: execute only if mode allows it
-	.	I $G(mode)'<0 D RTN^SQL		; Execute run-time routine
+	.	I $G(mode)'<0 S z=$$RTN^SQL(.sqlcur,.par,.z,.hostvar)	; Execute run-time routine
 	;
 	S ^TMPCACHE("SYSDEV",hk,i)=($G(^TMPCACHE("SYSDEV",hk,i))+1)_"|"_$H
 	I $G(par("FORMAT"))'="" S vsql("F")=$$VSQLF^SQLCOL(.par)
 	;
 	S vsql("P")=$g(vsql(1)),vsql(1)=""
 	I '$D(%TOKEN) S %TOKEN=$J		;04/26/01
+	I $G(sqlcur)="" set sqlcur=0
 	I $G(mode)'<0 S vsql=$$RESULT^SQLM
 	Q 1
 	;
@@ -158,7 +182,7 @@ SAV(expr,par,hk)	; Save dynamic cache statement
 	;		vsql("A") (the ODBC prepare info), will be stored in
 	;		^TMPCACHE("SYSDEV",hk,i+.5), if defined
 	;
-	;
+	I $$isRdb^vRuntime() Q				; Relational DB
 	I $G(exe(1))["D RPCF^SQLC" Q			; Client Stub
 	;
 	N i,j,x,z,zz
@@ -265,7 +289,7 @@ FNDSP(expr,par)	; Return stored procedure associated with SQL expression
 	;--------------------------------------------------------------------
 	;
 	N sphk,spnam
-	I $$rdb^UCDBRT() new par set par=""
+	I $$isRdb^vRuntime() new par set par=""
 	S sphk=$$ELFHASH^%ZFUNC(expr_$$PARS(.par)),spnam=""
 	;
 	F  S spnam=$O(^DBINDX("SYSDEV","SPHK",sphk,spnam)) Q:spnam=""  I $$SPSQL(spnam)=expr Q
@@ -547,3 +571,4 @@ KILL(hk,i)	;private; kill a cache entry, and its related nodes
 	e  d				; "parent" node, kill related nodes
 	.	k ^TMPCACHE("SYSDEV",hk,i),^(i+.4),^(i+.5)
 	q
+

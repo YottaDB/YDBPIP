@@ -24,9 +24,9 @@ DBSTAPB	;; -  - V4.2 - Tape Input Bill File Conversion
 	;
 	;---- Revision History ------------------------------------------------
 	; 04/03/00 - TANY - 37915
-	;            Optimized performance by modifying ^SCADAT1 calls 
-	;            to ^SCAJD. Also remove revision history older than 
-	;            one year. 
+        ;            Optimized performance by modifying ^SCADAT1 calls
+        ;            to ^SCAJD. Also remove revision history older than
+        ;            one year.
 	;
 	; 03/17/98 - Matthew Zwitkowits - 25246
 	;	     Modified EXEC section:

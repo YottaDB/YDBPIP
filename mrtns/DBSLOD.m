@@ -107,11 +107,11 @@ DBSLOD(INPUT,OUTPUT,LODFLG,LVNLIST,DBOPT,NAME,RPCFLG,LODMSK,PROT)	;
 	;
 	; 12/24/96 - JIAQ - 21692
 	;            Retrofit 23209 (v5.0) to v5.2
-	; 
-	; 12/03/96 - watsond - 23209 
-	;            Modified the RPC linetag to set OUTPUT(rpcline+.5)=" 
-	;            Previously it was setting + .1 which then caused the 
-	;            Balavl variable to get overriden in the routine DEPCDI. 
+        ;
+        ; 12/03/96 - watsond - 23209
+        ;            Modified the RPC linetag to set OUTPUT(rpcline+.5)="
+        ;            Previously it was setting + .1 which then caused the
+        ;            Balavl variable to get overriden in the routine DEPCDI.
 	;
 	; 10/08/96 - Bob Chiang - 20948
 	;            Add load option 2 (LODFLG parameter) to load computed

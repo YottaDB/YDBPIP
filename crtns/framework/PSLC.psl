@@ -1,0 +1,1005 @@
+	/*
+	ORIG: Frans S.C. Witte - 2007-06-11
+	DESC: PSL compiler, Insensitive Group
+
+	---- Comments ----------------------------------------------------------
+	This is the Subroutine Collection Module contains methods to compile PSL
+	source files.
+
+	The relationship between the different parts of the compiler is as
+	follows:
+	- PSLC is the external compiler interface.
+		It instantiates the PSLTokenizer that deals with the PSL source
+		code, the PSLParser the parses the source code, and the
+		PSLTarget structure that will contain the target code.
+		This module will take care of all directory management: it will
+		locate the source file, and determine the location of the target
+		files.
+	- PSLTokenizer is the class that supplies the next input token to the
+		parser. The PSLTokenenizer will be initialized for a specific
+		PSL source file (as determined by PSLC).
+	- PSLParser is the class that "compiles" the PSL source. The instance is
+		instantiated by PSLC. PSLC will invoke the run() method of the
+		PSLParser, and provides it with a PSLTokenizer for the source
+		code, and a PSLTarget structure for the target code.
+		The PSLParser will direct its messages to the log file or to
+		standard output as it is told.
+		The PSLParser can produce a .pslx file, but the caller will need
+		to supply the location.
+		The PSLParser will interogate the PSLTokenizer to obtain the
+		full name of PSL source file, as it needs the directory of that
+		file to pass to PSLX when loading module descriptions of
+		referenced modules.
+	- PSLTarget is the generated target code structure.
+		In the current version, this is just a simple array.
+		PSLC will use the array to produce the target files (currently
+		only the .m file and indirectly the .o file).
+
+	---- Revision History --------------------------------------------------
+	2009-01-12, Frans S.C. Witte, CR 37558
+		Modified zlink() to convert "%" to "_" in module-name.
+
+	2008-11-24 - RussellDS - CRs 35741/36716
+		Modified drop to look for .m file to locate directory when doing
+		deletion, rather than .pslx file.
+	
+	2008-10-28 - RussellDS - CRs 35741/35918
+		Modified drop to use pslx file as validator and to eliminate
+		throwing an error if not found.
+	
+	2008-06-11 - RussellDS - CR: 30801
+		* Modified runCma section to allow Record class descendents
+		  in order to allow invocation of PSLRecordBuilder
+		* Added targetdir command line argument to allow override of
+		  output and specify a specific, non-package-appended,
+		  destination.
+	
+	2008-04-02 - Frans S.C. Witte - CR: 33569
+		* Corrected issue with call vSig^@module
+
+	2007-06-11 - Frans S.C. Witte - CR: 27800
+		* Initial version, compiles with UCGM
+	*/
+
+	/* ---------------------------------------------------------------------
+	The current version is implemented as Subroutine Collection Module, so
+	it can be compiled with UCGM. Once Class Definition Modules are
+	supported, this module could be turned into a class with static modules.
+	Note that such a change impacts the way that the accessible entrypoints
+	are called:
+	If this is a SCM:
+		set errCount = $$cmpA2A^PSLC()
+	if this as a CDM:
+		set errCount = PSLC.cmpA2A()
+
+	#CLASSDEF /extends=Object/public
+	*/
+	#PACKAGE framework.psl
+	#OPTION  ResultClass ON
+
+	// I18N=QUIT
+	// *******************************************************************
+	// * IMPORTANT NOTE:                                                 *
+	// * According to the rules that apply to PSL compiler upgrades,     *
+	// * the generated M routine associated with this procedure must be  *
+	// * checked into StarTeam and released with the procedure whenever  *
+	// * changes are made to this procedure.                             *
+	// *                                                                 *
+	// * The M routine will be loaded to the mrtns directory during      *
+	// * upgrades and will then be removed from that directory as part   *
+	// * of the upgrade process.  Therefore, other than during an        *
+	// * upgrade an mrtns version of this routine should not exist.      *
+	// *                                                                 *
+	// * Keep these comments as single line to ensure they exist in the  *
+	// * generated M code.                                               *
+	// *******************************************************************
+
+	#IF 1
+	/* ======== BEGIN TARGET = M ======== */
+
+	#ACCEPT CR=27800;PGM=Frans S.S. Witte;Date=2007-06-11;Group=BYPASS
+	#BYPASS
+	IF $$isRdb^vRuntime NEW vE,vM SET vE=$$DBCNCT^%DBAPI($ZTRNLNM("SCAU_DB_INI"),0,.vM) IF vE WRITE vEr," ",vRM,! QUIT
+	WRITE $$run($ZCMDLINE),!
+	#ENDBYPASS
+
+	/* ======== END TARGET = M ======== */
+	#END
+
+	#IF 0
+	/* ======== BEGIN TARGET = JAVA ======== */
+
+	/* ======== END TARGET = JAVA ======== */
+	#END
+
+	quit
+
+	// ---------------------------------------------------------------------
+public void cmdline( String sCmdline,	// command line
+	String aOpts(),			// decomposed command line options
+	String sArgless,		// argumentless single character options
+	String sQuote)			// quote characer, default: double quote
+	/* ---------------------------------------------------------------------
+	Decompose a string of command line options:
+	argument
+	-o
+	-o value
+	--option=value
+	*/
+	
+	type String sArg,sOpt
+	type Number nArgs = 0
+
+	if sQuote.get().isNull() set sQuote = """"
+	set sArgless = sArgless.get()
+
+	// replace TAB by SPACE and reduce multiple space to single space
+	set sCmdline=sCmdline.translate(9.char()," ").trim().replace("  "," ",0,0,sQuote)
+
+	while 'sCmdline.isNull() do {
+		set sOpt=sCmdline.piece(" ",1,1,sQuote)
+		set sCmdline=sCmdline.extract( sOpt.length()+2, sCmdline.length())
+		if sOpt.extract() '= "-" do {		// command argument
+			set nArgs = nArgs + 1
+			set aOpts("$"_nArgs) = sOpt
+		}
+		else  if sOpt.extract(2) = "-" do {	// --option=value
+			type String sLongOpt = sOpt.piece("=")
+			type String sVal = sOpt.extract( sLongOpt.length() + 2, sOpt.length())
+			set aOpts( sLongOpt.extract( 3, sLongOpt.length())) = sVal.stripQuotes()
+		}
+		else  do {				// -o and -o value
+			type String sArgOpt = sOpt.translate( "-"_sArgless)
+			type String sNoArgs = sOpt.translate( "-"_sArgOpt)
+			type Number nPos
+			
+			for nPos = 1:1:sNoArgs.length() set aOpts(sNoArgs.extract(nPos)) = ""
+			
+			if sArgOpt.isNull() quit
+			if sArgOpt.length() > 1 set sArgOpt = sArgOpt.extract() // and warn?
+			
+			set sOpt=sCmdline.piece(" ",1,1,sQuote)
+			set sCmdline=sCmdline.extract( sOpt.length()+2, sCmdline.length())
+			set aOpts(sArgOpt) = sOpt.stripQuotes(sQuote)
+		} // end if (start with dash) - else - else
+	} // end while 'sCmdline.isNull()
+	quit
+
+	/* ================================================================== */
+	/* public and private subroutines that replace interface in UCGM      */
+	/* ****************************************************************** */
+
+	// ---------------------------------------------------------------------
+private String cmp0begin( String mod,	// module name to use
+		String src(),		// PSL source code in array
+		String commands(,),	// ucopts overrides
+		String log(),		// error log
+		String cma())		// initiated command argument array
+	/* ---------------------------------------------------------------------
+	This subroutine handles the functionality that is shared between cmpA2A
+	and cmpA2F.
+
+	A supplied module name will be used for the source file, the ucopts
+	override and the log file.
+
+	It returns a list of all temporary files that it created.
+
+	This subroutine will setup cma() as if the following commandline arguments
+	were supplied to run():
+	--logfile=compileDirectory/mod.log or will be absent
+		according to the following rule:
+		if log("").order().isNull() (i.e an empty array is supplied on
+		input), then logfile will be absent, else a temporary log file
+		will be created, and its contents will be appended to log().
+	--ucopts=compileDirectory/PSLC_ucopts_%ProcessID.ini
+		This argument will only be supplied if commands(,).exists()
+	sourcefile: compileDirectory/mod.psl
+
+	compileDirectory will be determined by $$cmp0Dir().
+
+	It is the caller's responsibility to set the --output
+	*/
+	type literal Number LOCKTIMEOUT = 120
+
+	type String del, srcdir = $$cmp0dir("")
+
+	lock +PSLC(mod):LOCKTIMEOUT else  throw Class.new("Error", "%PSL-E-LOCK,failed to obtain LOCK on module,"_mod)
+
+	// write src() to cma("$1") in the source directory
+	set (cma("$1"),del) = srcdir_ mod_ ".psl"
+	type String ign = $$fileWrite( del, src())
+
+	// write commands(,) to file srcdir_ %RoutineName_ "_"_ %ProcessID_ ".ini"
+	if commands.data() {
+		set cma("ucopts") = $$toUcopts( srcdir, %RoutineName_"ucopts", commands(,))
+ 		set del = del_ ","_ cma("ucopts")
+ 	}
+
+	// If compiler log requested, create and rewrite temporary logfile
+	if 'log("").order().isNull() {
+		type IO rIO = Class.new( "IO")
+		set cma("logfile") = srcdir_ mod_ ".log"
+		set del = del_ ","_ cma("logfile")
+
+		set rIO.fileName = cma("logfile"), rIO.openParams = "NEWVERSION"
+		do rIO.open(),rIO.close()
+	}
+	quit del
+
+	// ---------------------------------------------------------------------
+String cmp0dir( String filename)
+	/* ---------------------------------------------------------------------
+	Return directory name derived from supplied filename:
+	- if filename.isNull() return $ZTRNLNM("SCAU_SPOOL") (ending in /)
+	- if the filename does not contain a directory, return ""
+	- else return $ZPARSE(filename,"DIRECTORY")
+
+	NOTES:
+	. For filename.isNull() several alternatives have been considered
+		- The current working directory (%UserDirectory)
+			The disadvantage of this value is that it may conflict
+			with "standard" source or target directories, in which
+			case temporary files will unintentionally overwrite
+			permanent files.
+		- The spool dirtectory from CUVAR.SPLDIR
+			The disadvantage of this value is that it places the
+			compiler in the Data group, making it very hard to
+			bootstrap.
+		- The user's home directory
+			This is risky because in productoin environments users
+			may have captive accounts without a home directory.
+			Furthermore, if temporary files are not cleaned up, it
+			may not be obvious to the user which files can be
+			removed manually.
+	. Regardless of the directory used for the temporary files, a locking
+		mechanism is needed to prevent that two concurrent processes
+		need the same temporary file name.
+	*/
+	/*
+	- if filename.isNull() return the current working directory (ending in /)
+	   if filename.isNull() quit %UserDirectory
+	*/
+	#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+	if filename.isNull() quit $$TRNLNM^%ZFUNC("SCAU_SPOOL")_"/"
+	#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+	if $$PARSE^%ZFUNC(filename,"NAME")_ $$PARSE^%ZFUNC(filename,"TYPE") = filename quit ""
+	#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+	quit $$PARSE^%ZFUNC(filename,"DIRECTORY")
+
+	// ---------------------------------------------------------------------
+private void cmp0end( String mod,	// module name
+		String del,	// files to delete
+		String log(),	// error log
+		String cma())	// initiated command argument array
+	/* ---------------------------------------------------------------------
+	Common code at end of compilation:
+	- copy the log-file into the log() array if needed
+	- delete the temporary files
+	- unlock the module
+	*/
+	type String ign1
+
+	/* If a log-file was used, read ists contents back into log().
+	   There is no need to add the filename to del, because $$cmp0begin()
+	   did that already.
+	   */
+	if 'log("").order().isNull() set ign1 = $$fileRead(cma("logfile"), log())
+
+	// remove files (.ini, .log, .psl, .pslx and .m)
+	#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+	type Number ign2 = $$DELETE^%OSSCRPT( del)
+
+	lock -PSLC(mod)
+	quit
+
+
+	// ---------------------------------------------------------------------
+String cmp0mod()	// return default fileName
+	/* ---------------------------------------------------------------------
+	Return default file name
+	*/
+	quit "_"_ %ProcessID_"_"
+
+
+	// ---------------------------------------------------------------------
+String cmpA2A( String mod,	// module name (or "" if irrelevant)
+		String src(),		// PSL source code in array
+		String commands(,),	// ucopts overrides
+		String dst(),		// compiled M code in array
+		String log())		// error log
+	/* ---------------------------------------------------------------------
+	This subroutine is a substitute for the call to cmpA2A^UCGM().
+
+	If mod is not supplied, a temporary filename will be used for the
+	sourcefile and the ucopts override. The temporary filename will use
+	%ProcessID to ensure a unique name. Note that the compilation of a CDM
+	may fail if the name of the source file does not match the actual name
+	of the class.
+
+	All temporary files will be deleted on exit.
+
+	NOTES:
+	. This subroutine uses the following file names:
+		currentWorkingDirectory/tempfile.ini
+		currentWorkingDirectory/tempfile.log
+		currentWorkingDirectory/tempfile.psl
+		SCAU_DIR/packageroot/tempfile.pslx
+		SCAU_DIR/packageroot/tempfile.m (or.java)
+	. The source array src() will be written to a file, that will be read by
+		the PSLTokenizer. The PSLTokenizer will use the line numbers
+		1:1:numberOfLines, and PSLParser will log messages based on
+		these line numbers.
+		If a caller intends to interpret the logfile created by PSLC,
+		then it is the caller's responsibility to ensure that its line
+		numbers match the line numbers that result from writing the
+		source array to a file, and reading it back form that file.
+		On 2007-06-12, the only known caller that requires this
+		relationship is EXECCOM1^TBXDQSVR() (and main^UCGM() will
+		deal with it).
+	. Because this procedure does not supply the --element command line
+		option, SYSMAP information will not be stored.
+	*/
+	type String cma(), ign1
+	if mod.isNull() set mod = $$cmp0mod()
+
+	type String del = $$cmp0begin( mod, src(), commands(,), log(), cma())
+
+	type Number cmperr = $$runCma( cma(), 1)
+
+	// read the output into dst() and the logfile into log()
+	if cmperr = 0 {
+		type String file = cma("target")_ "/"_ mod
+		type String mnam = file.translate("%","_")
+		set del = del_ ","_ file_ ".pslx,"_ mnam_ ".o"_ $$fileRead(mnam_ ".m", dst())
+	}
+
+	do cmp0end( mod, del, log(), cma())
+	quit cmperr
+
+	// ---------------------------------------------------------------------
+String cmpA2F( String src()	// source array
+		, String commands(,)	// ucopts overrides
+		, String mod		// module name (no directory, no type !)
+		, String log()		// output from log file
+		, String PGM		// elementname~elementtype
+		) // substitute for BUILDRTN^UCGM() and cmpA2F^UCGM()
+	/* ---------------------------------------------------------------------
+	This subroutine is a substitute for the call to cmpA2F^UCGM(), and for
+	BUILDRTN^UCGM() (which called cmpA2F^UCGM()). It simulates a call with
+	the following commandline options:
+	-- elemement = PGM
+		This value is assigned unconditionally
+	-- logfile
+		See $$cmp0begin()
+	-- output = $$pslRoot()
+		Output goes to the standard output directory
+	-- ucopts
+		See $$cmp0begin()
+	sourcefile
+		See $$cmp0begin()
+
+	A temporary filename will be used for the ucopts override.
+	The name of the temporary sourcefile will be derived from the name of
+	destination file to ensure proper module naming.
+	All temporary files will reside in the directory specified by the
+	environment variable $SCAU_SPOOL.
+
+	On a successfull compilation, the source file will be copied to the
+	target directory.
+
+	The temporary ucopts override file, the temporary source file, and the
+	temporary log file will be deleted on exit.
+	*/
+	type String cma(), ign1
+	
+	type String del = $$cmp0begin( mod, src(), commands(,), log(), cma())
+
+	// compile
+	set cma("element") = PGM
+	set cma("output") = $$pslRoot()
+	type Number ign2, cmperr = $$runCma( cma(), 1)
+
+	// if no errors, copy the source file to the target directory
+	if cmperr = 0 {
+		if 'commands("Options","nolink").get(false), '$$zlink(mod) do log( cma(), "%PSL-W-TARGET: Unable to ZLINK "_mod)
+		#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+		set ign2 = $$COPYFIL^%OSSCRPT( cma("$1"), cma("target"))
+	}
+
+	do cmp0end( mod, del, log(), cma())
+	quit cmperr
+
+	// ---------------------------------------------------------------------
+public void drop( String module		// name of module (case sensitive!)
+		)	// drop module related data
+	/* ---------------------------------------------------------------------
+	This subroutine will remove the .psl file, the .pslx file, the target
+	language files( .m+.o or .java+.class), and the SYSMAP* information of
+	the named module.
+
+	The SYSMAP* information will be deleted first, and independently of the
+	existence of the .m file. All file removals depend on the ability to
+	locate the .m file.  (.m chosen over psl since RecordTABLE's do not
+	generate .psl files, and .pslx since files may have been relocated
+	due to introduction of the package structure).
+	
+	This approach will need to be re-evaluated with FW4.0 and Java, but
+	for now provides better clean-up of obsoleted and relocated elements.
+	
+	Failure to locate a .m file is treated as if no clean-up needs to
+	occur and simply return.  No error will be thrown.
+	*/
+	do delTarget^UCSYSMAP(module)
+
+	type IO modIO = Class.new( "IO")
+	if '$$locate^UCIO( modIO, $$packageDirs( "", ""), ":", module_".m", 0) quit
+	type String tgtDir = modIO.directory
+
+	#IF 1
+	/* ======== BEGIN TARGET = M ======== */
+	type String dirObj = modIO.directory_"obj/"
+
+	#ACCEPT CR=27800;PGM=Frans S.S. Witte;Date=2007-07-07;Group=BYPASS
+	#BYPASS
+	ZSYSTEM "test -d "_dirObj
+	IF $ZSYSTEM SET dirObj=tgtDir
+	#ENDBYPASS
+
+	#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+	type String ign = $$DELETE^%OSSCRPT( tgtDir_module_".psl,"_tgtDir_module_".pslx,"_tgtDir_module_".m,"_dirObj_module_".o")
+	/* ======== END TARGET = M ======== */
+	#END
+
+	#IF 0
+	/* ======== BEGIN TARGET = JAVA ======== */
+
+	/* ======== END TARGET = JAVA ======== */
+	#END
+
+	quit
+
+	// ---------------------------------------------------------------------
+private String fileRead( String file, String txt())
+	/* ---------------------------------------------------------------------
+	Read txt() from compiler output file
+	*/
+	type IO rIO = Class.new( "IO")
+
+	// read from file
+	set rIO.fileName   = file
+	set rIO.openParams = "READ"
+	set rIO.recordSize = PSL.maxStringLength
+
+	type Number ln = txt("").order(-1) + 1
+	do {
+		catch xIO {
+			do rIO.close()
+		}
+		do rIO.open()
+		for ln = ln:1 set txt(ln) = rIO.read()
+	}
+	quit ","_ file
+
+	// ---------------------------------------------------------------------
+private String fileWrite( String file, String txt())
+	/* ---------------------------------------------------------------------
+	Write txt() to output file
+	*/
+	type IO rIO = Class.new( "IO")
+
+	// write file
+	set rIO.fileName   = file
+	set rIO.openParams = "NEWVERSION"
+	set rIO.recordSize = PSL.maxStringLength
+
+	type String sub = ""
+	do {
+		catch xIO {
+			if xIO.type'["IOOPEN" do rIO.close()
+			throw xIO
+		}
+		do rIO.open()
+		for  set sub=txt(sub).order() quit:sub=""  do rIO.write( txt(sub))
+		do rIO.close()
+	}
+	quit ","_ file
+
+	// --------------------------------------------------------------------
+public Number getPSLVersion()
+	/* --------------------------------------------------------------------
+	Return current compiler version.
+	*/
+	quit 3.0
+	
+	// --------------------------------------------------------------------
+public Number getPSLMinVersion()
+	/* --------------------------------------------------------------------
+	Return the minimum compiler version.
+	See UCOPTS.ini for the relevance of #PSL Version 2.6
+	*/
+	quit 2.6	
+
+	// ---------------------------------------------------------------------
+private void log( String cma()	// command line options
+		, String msg	// message text
+		)	// log a message
+	/* ---------------------------------------------------------------------
+	Log a message.
+
+	NOTES:
+	. This method is called by $$srcErr(), $$srcInfo(), and $$srsWarn().
+		It logs to this.logfile or $IO.
+	. The number of "+" signs that are written to the logfile are essential
+		for TBXDQSVR (ugh!). Do not change this value unless TBXDQSVR is
+		modified and distributed as well ...
+	*/
+
+	/* Do not replace the construct below by if-else !
+	   The current coding will ensure that logging switches to $P whenever
+	   an IO exception occurs while writing to the logfile.
+	   */
+	if cma("logfile").exists() {
+		type IO io = Class.new("IO")
+		set io.openParams = "APPEND"
+		set io.fileName = cma("logfile")
+		catch xIo {
+			if xIo.type'["%PSL-E-IOOPEN" do io.close()
+			kill cma("logfile")
+		}
+		do io.open()
+		do io.write("++++++++++++++++++++++")
+		do io.write( msg)
+		do io.close()
+	}
+	if 'cma("logfile").exists() {
+		write !,msg,!
+	}
+	quit
+
+	// ---------------------------------------------------------------------
+public String packageDirs( String pslRoot	// psl source root override
+		, String pckList		// package list override
+		)	// construct the package
+	/* ---------------------------------------------------------------------
+	Return the package search list based on pslRoot and pckList.
+
+	If pslRoot is empty, then $SCAU_CRTNS will be used
+	If pckList is empty, then $SCAU_PACKAGES will be used
+	*/
+	if pslRoot.isNull() set pslRoot = $$pslRoot()
+
+	// use default SCAU_PACKAGES. If empty return SCAU_CRTNS.
+	#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+	if pckList.isNull() set pckList = $$TRNLNM^%ZFUNC("SCAU_PACKAGES") if pckList.isNull() quit $$TRNLNM^%ZFUNC("SCAU_CRTNS")
+
+	// temporary: if list already contains directory return as is
+	if pckList["/" quit pckList
+
+	type List packageDirs = Class.new("List")
+	type Number elm
+	#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+	for elm = 1:1:pckList.length(":") set packageDirs = packageDirs.add( $$FILE^%TRNLNM( pckList.piece( ":", elm), pslRoot), ":")
+	#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+	set packageDirs = packageDirs.add( $$TRNLNM^%ZFUNC("SCAU_CRTNS"), ":")
+	quit packageDirs
+
+	// ---------------------------------------------------------------------
+public String pslRoot()	//
+	/* ---------------------------------------------------------------------
+	Return the application root directory (SCAU_CRTNS)
+	*/
+	#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+	quit $$TRNLNM^%ZFUNC("SCAU_CRTNS")
+
+	// ---------------------------------------------------------------------
+private void rtThrow( String newArg)	//
+	/* ---------------------------------------------------------------------
+	Wrapper to throw PSL exception from M code. The M code just contains a
+		DO rtThrow(newArg)
+	*/
+	throw class.new( "Error", newArg)
+	quit	// dead code
+
+	// ---------------------------------------------------------------------
+public Number run( String cmd)
+	/* ---------------------------------------------------------------------
+	Run a PSL compilation for the specified command string.
+
+	OUTPUTS:
+	. $$ = number of errors
+	*/
+	type String cma()
+
+	do cmdline( cmd, cma(), "", "'")
+	quit $$runCma( cma(), 0)
+
+	// ---------------------------------------------------------------------
+private Number runCma( String cma(),
+		Boolean bFA)		// true if compiling source array
+	/* ---------------------------------------------------------------------
+	Run a PSL compilation for the specified command array.
+
+	OUTPUTS:
+	. $$ = number of errors
+	*/
+	type public String cmpErr()	// UGH!
+	
+	type String pslroot = $$pslRoot()
+
+	type Number errCount = 0
+
+	do {
+		catch xCma {
+			type String txt = xCma.type_ ": ("_ xCma.thrownAt_ ") "_ xCma.description
+			do log( cma(), txt)
+			set errCount = errCount + 1
+		}
+		// deal with the source file-name
+		if 'cma("$1").exists() throw Class.new("Error", "%PSL-E-UNDEF,No source file specified")
+
+		#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+		if $$PARSE^%ZFUNC( cma("$1"), "TYPE").isNull() set cma("$1") = cma("$1")_ ".psl"
+
+		#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+		type String sFile = $$PARSE^%ZFUNC( cma("$1"), "NAME")_ $$PARSE^%ZFUNC( cma("$1"), "TYPE")
+		if sFile.length(".")>2 throw Class.new("Error", "%PSL-E-MISMATCH,Invalid source file name,"_ sFile)
+		if sFile '= cma("$1") {
+			/* Explicit directory is not valid if output directed to
+			   application root.
+			   NOTE: This could be considered an arbitrary limitation.
+			   */
+			quit:bFA  quit:'cma("output").exists()
+			if cma("output") = pslroot throw Class.new("Error", "%PSL-E-MISMATCH,Invalid --output option")
+		}
+
+		/* pass cma("ucopts") to a separate PSLCC because we need the
+		   #PSL Version setting to instantiate the correct PSLParser
+		   descendant.
+		   */
+		type PSLCC ucopts = Class.new( "PSLCC")
+		do ucopts.setUcopts( cma("ucopts").get(""))
+
+		// Instantiate a PSLParser descendant based on the PSL Version
+		type PSLParser pslPrsr
+		if ucopts.getSetting("PSL","Version") < 3 set pslPrsr = Class.new("PSLParser", sFile.piece("."))
+		else  set pslPrsr = Class.new("PSLParser", sFile.piece("."))
+
+		do pslPrsr.loadSettings( ucopts)
+
+		// deal with the other command line options
+
+		/* cma("element")
+		   */
+		type String elem = cma("element").get()
+		set pslPrsr.element = elem
+
+		/* cma("logfile")
+		   */
+		if cma("logfile").exists() set pslPrsr.logfile = cma("logfile")
+
+		/* cma("pslroot") and cma("packages")
+		   */
+		type String pckDirs = $$packageDirs( cma("pslroot").get(), cma("packages").get())
+
+		// locate the source file and instantiate the PSLTokenizer
+		type IO modIO = Class.new( "IO")
+		
+		if '$$locate^UCIO( modIO, pckDirs, ":", cma("$1"), 0) {
+
+			type static PSLClass
+
+			// "not found" is OK for Record descendants
+			if PSLClass.isRecord( sFile.piece(".")) = PSLClass.recordDESCENDANT do {
+				
+				set modIO.fileName = sFile
+				if 'cma("output").exists() set cma("output") = pslroot
+			}
+			else  throw Class.new("Error", "%PSL-E-UNDEF,source file not found,"_ sFile)
+		}
+		type PSLTokenizer tknzr = Class.new("PSLTokenizer", modIO)
+
+		// Compile the module
+		type String target()
+		set pslPrsr.packageDirs = pckDirs
+		set errCount = pslPrsr.run( tknzr, target())
+
+		/* cma("output"):
+		   - If "" is specified, output is suppressed
+		   - else call $$targetDir()
+		   */
+		if cma("output").get("-").isNull() quit		// suppressed
+
+		// Get the target directory
+		type String targetDir = $$targetDir(pslPrsr, cma(), modIO.directory)
+
+		// If run from array, pass back the target directory
+		if bFA set cma("target") = targetDir
+
+		quit:errCount>0		// compilation failed
+
+		/* OK to produce the output. The order is not free:
+		   - SYSMAP / UCLREGEN must be handled BEFORE the target source
+			file is compiled
+		   - the .pslx file can be stored independently
+		   */
+		if pslPrsr.toPslx( targetDir) = 0
+		if 'elem.isNull(), pslPrsr.getSetting( "boot", "restrictionlevel", 0) < 1 , $$runSysmap(target(), pslPrsr, elem) = 0
+		if $$runTgt( target(), pslPrsr.moduleName, targetDir, pslPrsr.getSetting( "boot", "restrictionlevel", 0)) = 0
+		
+		if cma("savepslgen").exists() do storePslgen(tknzr, cma(), targetDir)
+	}
+	quit errCount
+
+	// ---------------------------------------------------------------------
+private Number runSysmap( String target()	// target language source code
+		, PSLParser pslPrsr	// PSLParser
+		, String elem		// --element value
+		)	// store SYSMAP and UCLREGEN
+	/* ---------------------------------------------------------------------
+	If SYSMAP enabled then store the sysmap information and deal with
+	UCLREGEN.
+	*/
+	if pslPrsr.toSysmap( target()) = 0
+
+	/* Get the old signature, if available, before ZLINKing the new version.
+	   Update UCLREGEN, if appropriate, for all literal function labels in
+	   the routine.
+	   Note that the call to $$vSIG^@rtnname may fail under several
+	   conditions. The update of UCLREGEN must occur even if the call fails.
+	   */
+	if elem.piece("~", 2) = "Procedure" {
+		type String oldsig="", mod = pslPrsr.moduleName
+		do {
+			catch vIgnore {
+				// ignore all exceptions
+			}
+			set oldsig=$$vSIG^@mod
+		}
+		if oldsig '= elem.piece("~", 3) do SETRTN^UCLREGEN( mod)
+	}	// end if DQ Procedure
+	quit 0
+
+	// ---------------------------------------------------------------------
+private Number runTgt( String target()	// target language source code
+		, String mod		// module name
+		, String targetDir	// target directory for source
+		, Boolean nolink	// suppress ZLINK indicator
+		)	// write target source file and compile it
+	/* ---------------------------------------------------------------------
+	THROWS:
+	. %PSL-E-IOxxx
+		If the target language source file cannot be written
+	. %GTM-E-LOADRUNNING
+		If nolink was not specified, and the module could not be ZLINKed.
+
+	NOTES:
+	. This method will need to contain M and JAVA versions
+	*/
+	#IF 1
+	/* ======== BEGIN TARGET = M ======== */
+	type literal String extIn = ".m"
+
+	type String mName = mod.translate("%","_")
+	type String fileIn = targetDir_ "/"_ mName_ extIn
+	type String ign = $$fileWrite( fileIn, target())
+
+	type String dirOut = targetDir_"/obj"
+	if 'nolink,$$isCompiler^UCGMCU(mod) set nolink=1
+
+	#ACCEPT CR=27800;PGM=Frans S.C. Witte;Date=2007-07-07;Group=BYPASS
+	#BYPASS
+	ZSYSTEM "test -d "_dirOut
+	IF $ZSYSTEM SET dirOut=targetDir
+	ZSYSTEM "${GTM_DIST}/mumps -o="_dirOut_"/"_mName_".o "_fileIn
+	IF $ZSYSTEM DO rtThrow("%PSL-E-TARGET,target language compile failure")
+	#ENDBYPASS
+
+	/* ======== END TARGET = M ======== */
+	#END
+
+	#IF 0
+	/* ======== BEGIN TARGET = JAVA ======== */
+
+	/* ======== END TARGET = JAVA ======== */
+	#END
+
+	quit 0
+
+	// ---------------------------------------------------------------------
+public String storePsl( String file	// input file name (full name)
+		, String mod		// PSL module name
+		)	// store .psl file in default location
+	/* ---------------------------------------------------------------------
+	This is a utility subroutine that creates the "default" .psl file for
+	the DQ procedure: / applicationRoot / pakageRoot/ targetName.psl
+	Use this procedure with care, as it unconditionally creates the file,
+	overwriting a previous versions. As long as the new version has not yet
+	be compiled, or cannot be compiled due to errors, the .psl source file
+	and the output files (.pslx, .m/.o or .java/.class) are out-of-sync.
+
+	NOTES:
+	. The TBX software uses this subroutine to ensure that "new" .psl files
+		are available by the time the compiler is booted, or DQ elements
+		will be compiled.
+	*/
+	type IO srcIo = Class.new("IO")
+	set srcIo.fileName = file
+
+	type PSLTokenizer tknzr = Class.new("PSLTokenizer", srcIo)
+	type PSLParser prsr = Class.new("PSLParser", mod)
+
+	/* Initiate a standard module search list. This is likely to be
+	   incorrect (because the fix-pack / service-pack may contain "newer"
+	   versions). But it is the best we can do under the current rules.
+	   */
+	set prsr.packageDirs = $$packageDirs("", "")
+
+	/* This method will be called BEFORE the compiler (re)boot, so UCOPTS
+	   may be outdated or even absent. Simulate boot restrictionlevel=3,
+	   and pass the settings directly to prsr. Note that this will prevent
+	   that PSLParser.toUCOPTS() will call UCDTAUTL, which implies that all
+	   values not supplied by getBootOptions^UCGMCU() will be absent. This
+	   should not be a problem for pass0 interpretation UNLESS a standard
+	   setting of #OPTION ResultClass ON is expected by the modules in the
+	   upgrade.
+	   */
+	type String so(,), sec="", val=""
+	do getBootOptions^UCGMCU( so(,), 3)
+	for  set sec = so(sec).order() quit:sec.isNull()  {
+		for  set val = so(sec, val).order() quit:val.isNull()  {
+			do prsr.addSetting( sec, val, so(sec, val))
+		}
+	}
+
+	type PSLX ignPslx = Class.new("PSLX", mod)
+	type Number err = prsr.pass0( ignPslx, prsr.parseLevelCLASS, tknzr)
+
+	if err > 0 quit ""
+
+	type String tgt = prsr.getPackageRoot() set:'tgt.isNull() tgt = tgt_ "/"
+	set tgt = $$pslRoot()_ "/"_ tgt_ mod_ ".psl"
+	#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+	type String ign = $$COPYFIL^%OSSCRPT( file, tgt)
+
+	quit tgt
+
+	// ---------------------------------------------------------------------
+public String storePslx( String file	// DQ Procedure name
+		)	// store .pslx file in default location
+	/* ---------------------------------------------------------------------
+	This is a utility subroutine that copies the specified .pslx file to the
+	"default" location: / applicationRoot / pakageRoot/ fileName.pslx
+	Use this procedure with care, as it unconditionally creates the file,
+	overwriting a previous versions.
+	If the .pslx file has an associated .psl file, then the new .pslx file
+	does not accurately describe the .m/.o or .java/.class files.
+
+	NOTES:
+	. The TBX software uses this subroutine to ensure that "new" .pslx files
+		are available by the time the compiler is booted, or DQ elements
+		will be compiled.
+	*/
+	#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+	type String mod = $$PARSE^%ZFUNC(file, "NAME")
+	#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+	type String dir = $$PARSE^%ZFUNC(file, "DIRECTORY")
+	#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+	type PSLX pslx = Class.new("PSLX", $$FILE^%TRNLNM( mod, dir))
+
+	do pslx.classOnly()
+	if 'pslx.pslCls( mod).exists() quit ""
+
+	type PSLClass ocd = pslx.pslCls( mod)
+	type String tgt = $$pslRoot()_ "/"_ ocd.getPackageRoot()
+	#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+	type String ign = $$COPYFIL^%OSSCRPT( file, tgt)
+
+	quit tgt_ "/"_ mod_ ".pslx"
+	
+
+void storePslgen(PSLTokenizer tknzr	// Active tokenizer
+		, String cma()		// initiated command argument array
+		, String targetDir	// target directory
+		)	// store .pslgen file in requested location
+	
+	type String dir = cma("savepslgen")
+	type String sub = ""
+			
+	if dir.isNull() set dir = targetDir
+			
+	type IO pslgenIO = Class.new( "IO")
+
+	set pslgenIO.fileName   = cma("$1")_ "gen"	// make .pslgen
+	set pslgenIO.directory  = dir
+	set pslgenIO.openParams = "NEWVERSION"
+	set pslgenIO.recordSize = PSL.maxStringLength
+
+	do {
+		catch xIO {
+			if xIO.type'["IOOPEN" do pslgenIO.close()
+			throw xIO
+		}
+			
+		do pslgenIO.open()
+		for  set sub = tknzr("srcCode", sub).order() quit:sub.isNull()  do pslgenIO.write( tknzr("srcCode", sub))
+		do pslgenIO.close()
+	}
+
+	quit
+	
+	
+	// ---------------------------------------------------------------------
+public String toUcopts( String srcdir	// source directory (or "" for default)
+		, String mod		// module name (or "" for default)
+		, String commands(,)	// commands(,) options
+		)	// write commands(,) to file srcdir_ mod_ "_"_ %ProcessID_ ".ini"
+	/* ---------------------------------------------------------------------
+	*/
+	if srcdir.isNull() set srcdir = $$cmp0dir( "")
+	if mod.isNull() set mod = $$cmp0mod()
+
+	type IO rIO = Class.new("IO")
+	set rIO.fileName = srcdir_ mod_ "_"_ %ProcessID_ ".ini", rIO.openParams = "NEWVERSION"
+	do rIO.open()
+
+	type String l1 = "", l2 ="", val
+	for  set l1 = commands(l1).order() quit:l1.isNull()  {
+		for  set l2 = commands(l1,l2).order() quit:l2.isNull()  {
+			if l1 = "Options"  do rIO.write( " #OPTION "_l2_" "_commands(l1,l2)) quit
+			if ({List}"OPTIMIZE,WARN,INFO").contains(l1) do rIO.write( " #"_l1_" "_l2_" "_commands(l1,l2)) quit
+			set val = commands(l1,l2)
+			if l1 = "PSL"  do rIO.write( " #PSL "_l2_" "_$SELECT(val.isNumber():val,1:val.addQuotes())) quit
+			do rIO.write(" #DEFINE "_l1_"."_l2_" "_$SELECT(val.isNumber():val,1:val.addQuotes()))
+		}
+	}
+	do rIO.close()	
+	quit rIO.fileName
+
+	// ---------------------------------------------------------------------
+private String targetDir( PSLParser pslPrsr	// the parser that was used
+		, String cma()			// the command line options
+		, String default		// the default if no --output
+		)	// Support function to obtain the target directory
+	/* ---------------------------------------------------------------------
+	Support function to obtain the target directory.
+	
+	If cma("targetdir") exists, it has precedence and indicates a final
+	directory;
+	
+	Otherwise, if cma("output") exists, then it is used as the root directory
+	for output, i.e., packageroot will be appended, if applicable);
+	
+	Otherwise, output goes to the source directory (supplied as default).
+	*/
+	type String targetDir
+	if cma("targetdir").exists() {
+		set targetDir = cma("targetdir")
+		if 'targetDir.endsWith("/") set targetDir = targetDir_ "/"
+	}
+	else if cma("output").exists() {
+		set targetDir = cma("output")
+		if 'targetDir.endsWith("/") set targetDir = targetDir_ "/"
+		set targetDir = targetDir_ pslPrsr.getPackageRoot()
+	}
+	else set targetDir = default
+	quit targetDir
+
+	#IF 1
+	/* ======== BEGIN TARGET = M ======== */
+	// ---------------------------------------------------------------------
+private Boolean zlink( String mod		// module name
+		)	// try to ZLINK the module and tell if it succeeded
+	/* ---------------------------------------------------------------------
+	*/
+	#ACCEPT CR=27800;PGM=Frans S.S. Witte;Date=2007-07-07;Group=BYPASS
+	#BYPASS
+	NEW $ZTRAP
+	SET $ZTRAP="QUIT 0"
+	ZLINK $TRANSLATE(mod,"%","_")
+	#ENDBYPASS
+	quit true
+
+	/* ======== END TARGET = M ======== */
+	#END
+ #OPTION ResultClass ON
+public String vSIG()	quit "61374^48893^Frans S.C. Witte^36063"	// Signature - LTD^TIME^USER^SIZE

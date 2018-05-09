@@ -10,6 +10,12 @@
 *
 *   $Id$
 *   $Log:	extcall.h,v $
+ * Revision 1.3  06/10/27  thoniyim
+ * Added version info.
+ *
+ * Revision 1.2  96/03/22  16:31:46  16:31:46  zengf (Fan Zeng)
+ * more external calls
+ * 
  * Revision 1.1  95/07/24  11:26:55  11:26:55  rcs ()
  * Initial revision
  * 
@@ -19,7 +25,7 @@
  * Revision 1.2  95/05/22  15:02:22  15:02:22  sca ()
  * I VMS
  * 
-*   $Revision: 1.1 $
+*   $Revision: 1.2 $
 *
 */
 
@@ -31,7 +37,7 @@
 #define TTY 		"TTY"
 #define MT			"MT"
 #define NODENAME	"NODENAM"
-#define PHARAOH		"PHARAOH"
+#define DINO		"DINO"
 #define MTMPRIV		"MTMPRIV"
 #define SPAWN		"DETACH"
 #define MTMGRP		"sca"
@@ -40,6 +46,8 @@
 #define NETWORK		1
 #define LOCAL		3
 #define REMOTE		5
+
+#define VERSION "alerts.sl (Linux - 64 bit) V1.2 Aug 15, 2008"
 
 typedef struct {
 	char	login[24];
@@ -54,6 +62,7 @@ typedef struct {
 /*
 *	Prototypes
 */
+
 void
 clxfr(int,char *,char *,char *,char *,char *,char *,char *,char *,SLONG *);
 
@@ -64,13 +73,17 @@ void
 diff(int,char *,char *,char *,STR_DESCRIPTOR *,SLONG *);
 
 void
-ebc2asc(int,STR_DESCRIPTOR *, SLONG *);
+asc2ebc(int,STR_DESCRIPTOR *,STR_DESCRIPTOR *,SLONG *);
+
+void
+ebc2asc(int,STR_DESCRIPTOR *,STR_DESCRIPTOR *,SLONG *);
 
 void
 expsca(int,STR_DESCRIPTOR *,SLONG,STR_DESCRIPTOR *);
 
 void
 extsleep1(int,SLONG);
+
 
 void
 feptfile(int,char *,char *,char *,char *,SLONG *);
@@ -115,7 +128,7 @@ void
 getnodename(int,STR_DESCRIPTOR *);
 
 void
-getparentpid(int,SLONG *,SLONG *);
+getparentpid(int,SLONG *,SLONG *,SLONG *);
 
 void
 getprcnam(int,SLONG *,STR_DESCRIPTOR *,SLONG *);
@@ -187,7 +200,7 @@ void
 validpid(int,SLONG *);
 
 void
-pgtm(int,long,SLONG *);
+pgtm(int,SLONG,SLONG *);
 
 void
 xor(int,STR_DESCRIPTOR *,SLONG *);

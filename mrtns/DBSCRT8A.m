@@ -25,8 +25,8 @@ DBSCRT8A	;;Display action menu
 	;            Replaced $ZP references with $O.
 	;
 	; 01/30/97 - Bob Chiang - 23704
-	;            Modified %NEXT section to suppress <next> prompt if input 
-	;            data is limited to a single page. 
+        ;            Modified %NEXT section to suppress <next> prompt if input
+        ;            data is limited to a single page.
 	;
 	; 01/28/97 - Bob Chiang - 23623
 	;            Modified %PAG0 section to correct an infinite loop
@@ -100,7 +100,7 @@ DBSCRT8A	;;Display action menu
 	I X="M",%O<2 S NI=$P(vexit,"|",2)-1,vexit="" S ER=1 Q
 	I X="N",%PG=%PAGE,'($G(%REPEAT)) S X="F" G %PAGE
 	I X="F",%O=1,'$D(UX) S X="Q" G %PAG0		; *** 01/28/97
-	I X="F",%O=0,%PG<%PAGE,'$G(%REPEAT) S X="Q" G %PAGE   ;12/6/95
+   	I X="F",%O=0,%PG<%PAGE,'$G(%REPEAT) S X="Q" G %PAGE   ;12/6/95
 	;
 	S ER=0 D CHKVR0 Q:ER
 	G EXIT
@@ -320,7 +320,7 @@ YN	;
 	; ---------- VPG() array not required for access NEXT option
 	; set up page number to -1 to force CONTINUE option
 	;
-%NEXT(OP);	
+%NEXT(OP);
 	I %PG<1,$G(%PAGE)'=%PG,($G(%REPEAT)=""!($G(%REPEAT)=1)) S OPT(OP)="Continue|",I=I+1 D FKTERM("PDN",I) K MASK(OP) Q
 	I $G(%REPEAT),$G(%TAB)'="",$P(%TAB,"|",2)+(%REPEAT*$P(%TAB,"|",4))<21 Q  ; C/S screen mode *** 10/17/97
 	I $G(%REPEAT),$G(%TAB)="",%PG=%PAGE Q

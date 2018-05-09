@@ -41,70 +41,57 @@ PBSSRV	//Private;PROFILE(SCA$IBS) Server
 	***********************************************************************	
 
 	---- Revision History ------------------------------------------------
-
-	08/11/06 - ChhabriS - CR22509
-		   Retrofited the below mentioned details from V64NetBank view.
-		   Variables vzstatus, vzsrvcls and vzsvstat have been passed 
-		   to PROC section from LOOP section by reference.
-
-		02/01/06 - HAILEYM - CR19331
-		   Modified section PROC:
-		   MSGLOG entries not being updated for server messages.
-		   Variables have been removed from being new[ed] in the
-		   PROC section.  The variables vzcltokn,vzmssgid,vzstatus,
-		   vzsrvcls need to be available to log the proper MSGLOG
-		   entries.  In addition, variable vzsvstat needs to be
-		   available to log the proper server statistics.
+	02/05/2009 - RussellDS - CRs 38078/35741
+		* Modified error trapping to ensure that the appropriate
+		  rollbacks occur.  Generally, UTLERR will perform a rollback,
+		  but there are cases when it is not called.
+		* Corrected PSL warnings.
+		  
+	08/18/2008 - RussellDS - CR35331
+		Modified catch blocks to use new error logging to allow
+		proper capture of data related to errors.
 	
-	06/06/06 - RussellDS - CR21617
-		   Modified PROC section to client token and message ID, versus
-		   treating as public variables.
-		   
-		   Corrected call to OK2PROC^PBSUTL.
+	08/11/2008 - RussellDS - CR35288
+		Fix error in EXEC on date change check to add missing rs.next().
 	
-	03/15/06 - RussellDS - CR20154
-		   Add variable vzsvfape for use by ZTPROC in the event a
-		   TPTIMEOUT error is triggered and vzsvfap is not available.
-	
-	03/07/06 - RussellDS - CR19962
-		   Remove use of %ZTRAP, add use of %ZTPTRAP and update general
-		   error handling. See LOOP section comments related to %ZTPTRAP
-		   for details, as well as commentary above.
-	
-	01/04/06 - RussellDS - CR18765
-		   Replace $ZVN reference with $ZVERSION.
-		   
-		   Fixed deprecated feature warnings around .data() method.
-	
-	05/22/05 - Erik Scheetz - 15677
-		   Modified SVCNCT section to register the server process in
-		   the PROCESSID table.  
-		   
-        	   Modified LOOP section to use interrupt mechanism when
-        	   checking to stop rather than polling the SVCTRL table.
-        	   When server process is interrupted %INTRPT will be set with
-        	   the neccessary action to be taken.  Modified Loop section
-        	   to unregister server process in the event of a fatal error.
+	06/18/08 - GIRIDHARANB - CR34706
+	   Declared a new public variable vzcpmsg at the top of the LOOP section.
+	   This varaible will be used to store messsges returned from the
+	   cursor pool process, so a transaction restart will skip sending
+	   the message to the cursor process.
+	   
+	06/22/2008 - RussellDS - CR34471
+		Modified EXEC to refresh cache on userclass change now
+		that access rights are available.  Prevents use of cache
+		from prior userclass.
 		
-	05/11/05 - RussellDS - CR15943
-		   Modify EXEC section catch block to examine the error returned.
-		   If it is a %PSL-E-DBFILER error, format a return message
-		   containing the error description.  This supports changes to
-		   filers to throw an error.  This approach may be modified in
-		   the future based on long term changes to error handling.
-
-	02/05/05 - RussellDS - CR14553
-		   Added support for the Aggregate Message service class,
-		   AGMSG.
+		Removed old revision history.
+	
+	04/30/08 - SavithaV - CR33590
+		   Added a procedure header with routine name and description.
+		   This fix will cause the M routine to start the server.
 		   
-		   Changes public variables in PROC to local since the AGMSG
-		   service class calls back into the PROC section.  Clean up
-		   data typing generally.
+	04/08/08 - KELLYP - CR 33287
+		   Modified SVCNCT to add the ^DBBUF, ^DQRTSTS, ^MSGEXC, ^MSGLOG, 
+		   ^PBSBBSSP, ^SQLCUR, and ^TMPCACHE globals to the no isolation 
+		   list.  This corrects a problem where collisions were encountered
+		   during periods of high db activity related to buffered SQL
+		   statements.
+	
+	08/30/07 - RussellDS - CR28928
+		   Modified checking of change of date to only occur every 30
+		   seconds or if directory changes.  See complimentary
+		   changes in RCHK.
 		   
-		   Removed warn and optimize directives.  Cleaned up code to
-		   eliminate most PSL warnings.
+		   Added vzcache for non-table cache management within PBS*
+		   procedures.
+	
+		   Add protection for %CACHE.
 		   
-		   Removed old revision history.
+		   Add correct tracking of elapsed time for MSGLOG.  Added
+		   tracking to TP restarts for message log (from P01 project).
+		   
+		   Moved call to STATS^PBSUTL to LOGCMT.
 	*/
 
 	// I18N=QUIT
@@ -123,6 +110,14 @@ private SVCNCT(String vzsvtyp,		// Server type		/TBL=CTBLSVTYP
 	type Boolean vzactive, vzlogmsg, vzlogrep, vzsvsec, vztrap
 	type Number vzmaxtim, vzsttim, vztimer, vztimout
 	type String vzcsid, vzermsg, vzgbldir, vzmsgpgm, vzmtname, vzrole, vzsav, vzsvfap, vzsvfape
+
+	// SCA$IBS Servers which are connected to synchronous MTMs
+	if vzsvtyp="SCA$IBS" do {
+		#ACCEPT PGM=RussellDS;DATE=08/18/2008;CR=unknown
+		#BYPASS
+		view "NOISOLATION":"+^DBBUF,^DQRTSTS,^MSGEXC,^MSGLOG,^PBSBBSSP,^SQLCUR,^TMPCACHE"
+		#ENDBYPASS
+		}
 	
 	// Get system role (PRIMARY or SECONDARY)
 	set vzrole=$$ROLE^PBSUTL
@@ -146,16 +141,14 @@ private SVCNCT(String vzsvtyp,		// Server type		/TBL=CTBLSVTYP
 	set vzlogmsg=svtyp.logmsg			// Log client messages
 	set vzlogrep=svtyp.logreply			// Log server replies
 	
-	if $P($ZVERSION,"GT.M V",2)>4 do {
-		set vzmaxtim=svtyp.timeout		// Transaction TP timeout
-		if 'vzmaxtim set vzmaxtim=45		// (default is 45 seconds)
+	// Will apply to GT.M only
+	set vzmaxtim=svtyp.timeout			// Transaction TP timeout
+	if 'vzmaxtim set vzmaxtim=45			// (default is 45 seconds)
 	
-		type String vzx
-		set vzx="s $zmaxtptime="_vzmaxtim 
-		
-		#ACCEPT PGM=Erik Scheetz;DATE=11/22/02;CR=unknown
-		xecute vzx
-	}
+	#ACCEPT Date=02/05/2009; Pgm=RussellDS; CR=38078; Group=BYPASS
+	#BYPASS
+	I $P($ZVERSION,"GT.M V",2)>4 S $zmaxtptime=vzmaxtim
+	#ENDBYPASS
 
 	set vztimout=svtyp.getmsg			// Server GETMSG timeout
 	if 'vztimout set vztimout=15			// (default=15 seconds)
@@ -174,7 +167,7 @@ private SVCNCT(String vzsvtyp,		// Server type		/TBL=CTBLSVTYP
 	set svctrl.mtmsvrid=vzcsid.piece("|",2)
 	set svctrl.pid=$$DECHEX^%ZHEX(%ProcessID)
 	set svctrl.role=vzrole
-	set svctrl.datetime=$H
+	set svctrl.datetime=%CurrentDate_","_%CurrentTime
 	do svctrl.bypassSave()
 	
 	// Register M process
@@ -231,14 +224,20 @@ private SVCNCT(String vzsvtyp,		// Server type		/TBL=CTBLSVTYP
 	   process, since we'll likely just end up looping on the
 	   error.
 	*/
-	catch error {
-
-		do ZE^UTLERR
+	catch error@"LOGERR^UTLERR" {
+		
+		do Runtime.rollback()
 	}
 
-	set vztimer=$$TIM^PBSUTL($H)+(vzsttim*60)
+	set vztimer=$$TIM^PBSUTL(%CurrentDate_","_%CurrentTime)+(vzsttim*60)
 	set vzsav=$$INIT^PBSUTL
-	set vzgbldir=$ZGBLDIR
+	set vzgbldir=""
+	
+	#ACCEPT Date=02/05/2009; Pgm=RussellDS; CR=38078; Group=BYPASS
+	#BYPASS
+	S vzgbldir=$ZGBLDIR
+	#ENDBYPASS
+	
 	do XKILL^PBSUTL
 
 	// Initialization complete, continue to Processing Loop
@@ -253,12 +252,24 @@ LOOP	// Message Processing Loop
 	type public Number vztimer, vztimout
 	type public String %INTRPT(), vzcsid, vzermsg, vzgbldir, vzmsgpgm, vzmtname, vzrole, vzsav, vzsvfap, vzsvtyp
 	
-	type Number vzerror, vzsrvcls, vzstart, vzstatus
-	type String %SVCNTXT, %ZTPTRAP, vzerrepl, vzjrnl, vzpkt, vzpktid, vzreply, vzrm, vzsvstat()
+	type Cache %CACHE()			// Start cache scoping
+	type Number vzerror, vzlasttjd, vzsrvcls, vzstart, vzstatus, vztime, vztprest
+	type String %SVCNTXT, %ZTPTRAP, vzerrepl, vzjrnl, vzpkt, vzpktid
+	type String vzreply, vzrm, vzsvstat()
+	
+	/*  vzcache is available for PBS procedures to use for caching of
+	    non-table information (i.e., stuff that can't be cached to
+	    %CACHE).  Nothing outside of PBS* should ever access this
+	    cache.  Anything added to it must use a unique first key
+	    and a single additional key.
+	*/
+	type String vzcache(,)			// Non-table caching
+	
+	set vzlasttjd = 99999		// Initialize TJD reset timer
 
 	for  do {
 		
-		type String vzcltokn, vzmssgid
+		type String vzcltokn, vzcpmsg, vzmssgid
 		
 		// Check Interrupt status to shutdown or process control messages
 		if %INTRPT.data() > 1 do INTRPT^IPCMGR
@@ -327,7 +338,10 @@ LOOP	// Message Processing Loop
 		kill %SVCNTXT
 
 		// Release any outstanding locks
+		#ACCEPT Date=05/15/07; Pgm=RussellDS; CR=unknown; Group=Xecute
 		xecute "lock"
+		
+		set vztprest = 0
 
 		// Transaction start with Client/Server transaction identifier
 		do Runtime.start("CS")
@@ -337,6 +351,7 @@ LOOP	// Message Processing Loop
 			do XKILL^PBSUTL 
 			if vzsav.get()="" set vzsav=$$INIT^PBSUTL 
 			do VLOD^PBSUTL(vzsav)
+			set vztprest = vztprest + 1
 		}
 		
 		/* Provide mechanism to return control back from application in the
@@ -353,9 +368,11 @@ LOOP	// Message Processing Loop
 			
 			type Boolean vzerrRpt = 0
 			
-			catch error {
+			catch error@"LOGERR^UTLERR" {
 				
 				type public Number %ZTSEQ
+				
+				do Runtime.rollback()
 				
 				// Prevent loop
 				if vzerrRpt.get() throw error
@@ -371,7 +388,7 @@ LOOP	// Message Processing Loop
 				do LOGCMIT
 			}
 
-			set vzreply=$$PROC(vzpkt,vzsvfap,vzsvsec,.vzsav,vzmsgpgm,0,,.vzcltokn,.vzmssgid,.vzstatus,.vzsrvcls,.vzsvstat())
+			set vzreply=$$PROC(vzpkt,vzsvfap,vzsvsec,.vzsav,vzmsgpgm,0,,.vzcltokn,.vzmssgid,.vzstatus,.vzsrvcls,.vzsvstat(),vzstart,vztprest)
 
 			do LOGCMIT
 		}
@@ -381,10 +398,8 @@ LOOP	// Message Processing Loop
 		if vzreply.isNull() set vzreply = vzerrepl
 
 		// Release any outstanding locks
+		#ACCEPT Date=05/15/07; Pgm=RussellDS; CR=unknown; Group=Xecute
 		xecute "lock"
-
-		// Update statistics
-		if vzsrvcls.get()'="" do STATS^PBSUTL(.vzsvstat,vzsrvcls,vzstart)
 
 		if vzjrnl.get()'="" do {
 			use vzjrnl
@@ -398,8 +413,12 @@ LOOP	// Message Processing Loop
 			if vzermsg'="" do ERRLOG^PBSUTL(vzermsg)
 		}
 
+		// Clean up cache and reset TJD timer if change directories
 		#ACCEPT PGM=Erik Scheetz;DATE=11/22/02;CR=unknown
-		set $ZGBLDIR=vzgbldir
+		#BYPASS
+		if $ZGBLDIR'=vzgbldir kill %CACHE,vzcache set vzlasttjd=99999
+		#ENDBYPASS
+		
 		do XKILL^PBSUTL
 	}
 		
@@ -416,10 +435,11 @@ LOGCMIT		// Log and commit
 	*/
 
 	type public Boolean vzlogmsg, vzlogrep
-	type public Number vzstart, vzstatus, vzsrvcls
-	type public String vzcltokn, vzmssgid, vzpkt, vzreply
+	type public Number vzstart, vzstatus, vzsrvcls, vztprest
+	type public String vzcltokn, vzmssgid, vzpkt, vzreply, vzsvstat
 	
 	type Boolean vzkvst = 0
+	type Number vztime
 
 	// TRollback occured in application, issue new TStart
 	if $TLevel=0 do Runtime.start("CS")
@@ -430,10 +450,15 @@ LOGCMIT		// Log and commit
 		set vzstart = $$GETTIM^%ZFUNC
 		set vzkvst = 1
 	}
+	
+	set vztime = (($$GETTIM^%ZFUNC - vzstart) / 1000000).roundDec(3)
 
 	// Log message in message log
-	do LOG^PBSUTL(vzcltokn.get(),vzmssgid.get(),vzpkt.get(),vzreply.get(),vzstatus.get(),vzsrvcls.get(),"PBSSRV",vzlogmsg.get(),vzlogrep.get())
-		
+	do LOG^PBSUTL(vzcltokn.get(), vzmssgid.get(), vzpkt.get(), vzreply.get(), vzstatus.get(), vzsrvcls.get(), "PBSSRV", vzlogmsg.get(), vzlogrep.get(), vztime, vztprest.get())
+
+	// Update statistics
+	if 'vzsrvcls.get().isNull() do STATS^PBSUTL(vzsvstat(), vzsrvcls, vztime)		
+
 	do Runtime.commit()
 	
 	if vzkvst kill vzstart
@@ -452,7 +477,9 @@ private PROC(String vzpkt,		// Input message packet
 	     String vzmssgid,		// Message ID			/NOREQ/MECH=REFNAM:W
 	     Number vzstatus,		// Success/failure status	/NOREQ/MECH=REFNAM:W
 	     Number vzsrvcls,		// Service class of message	/NOREQ/MECH=REFNAM:W
-	     String vzsvstat)		// Server statistics		/NOREQ/MECH=REFNAM:W
+	     String vzsvstat,		// Server statistics		/NOREQ/MECH=REFNAM:W
+	     Number vzstart,		// Start time			/NOREQ/MECH=REFNAM:R
+	     Number vztprest)		// TP restarts			/NOREQ/MECH=REFNAM:R
 
 	/*
 	Process the incoming message
@@ -477,11 +504,12 @@ private PROC(String vzpkt,		// Input message packet
 
 	// Protect MAIN variables
 	type Boolean vzactive, vzsvid,  vztrap
-	type Number vzstart, vzsttim, vztimer, vztimout
-	type String vzcsid, vzgbldir, vzjrnl, vzmtname, vzpktid, vzreply, vzrole, vzsvtyp
+	type Number vzsttim, vztimer, vztimout
+	type String vzcsid, vzgbldir, vzjrnl, vzmtname, vzpktid, vzreply, vzrole
+	type String vzsvtyp, vztime
 	
 	// Local variables
-	type Number vzcnt, vzerror, vzerror(), vzgrprec, vznum, vzptr
+	type Number vzcnt, vzerror(), vzgrprec, vznum, vzptr
 	type Number vztyp, vzsgn, vzstfflg
 	type String TOKEN, vzclvrsn, vzcontxt, vzermsg, vzfap
 	type String vzfaps, vzident, vzinst, vzlang, vzpwd, vzrecord()
@@ -493,7 +521,7 @@ private PROC(String vzpkt,		// Input message packet
 	set vzstatus=0
 
 	// Process non-standard message
-	if vzmsgpgm'="" quit $$^PBSNSM(vzpkt,vzmsgpgm)
+	if vzmsgpgm'="" quit $$^PBSNSM(vzpkt, vzmsgpgm, vzstart.get(), vztprest.get())
 
 	// Execute server layer entry FAP
 	set vzermsg=$$FAPINP(.vzpkt,vzsvfap)
@@ -606,12 +634,13 @@ EXEC(String vzrec,		// Input record
 
 	*/
 	
+	type public Cache %CACHE()
 	type public Boolean vzsvsec
-	type public Number ER, vzsrvcls, vzstfflg, vztyp
+	type public Number ER, vzlasttjd, vzsrvcls, vzstfflg, vztyp
 	type public String %IPMODE, %STFHOST, %ZTSEQ, RM, vzcltokn, vzclvrsn, vzcontxt
 	type public String vzfap, vzident, vzmssgid, vzsav, vzstn, vzsvchnl, vzucls, vzuid
 
-	type Number vzerror
+	type Number now, vzerror
 	type String vz1, vz2, vz3, vz4, vz5, vzctxt, x
 	
 	set vzerror = 0
@@ -620,13 +649,15 @@ EXEC(String vzrec,		// Input record
 	
 	// Execute service class layer entry FAP
 	set vzrm=$$FAPINP(.vzrec,vzfap,vzsrvcls,vzstfflg) if vzrm'="" quit 1
+	
+	if (%UserClass.get() '= vzucls.get()) kill %CACHE
 
 	if vzsrvcls do {
 		set %IPMODE="NOINT"
 		set %UserID=vzuid
 		set %UserClass=vzucls
 		set %UserStation=vzstn
-		set vzctxt=vzcontxt.piece($C(28),vzsrvcls)
+		set vzctxt=vzcontxt.piece(28.char(),vzsrvcls)
 	}
 	else  set vzctxt="/TRUST="_$select(vzsvsec:1,1:0)
 
@@ -634,11 +665,28 @@ EXEC(String vzrec,		// Input record
 	if vzsav.get()="" set vzsav=$$INIT^PBSUTL
 	do VLOD^PBSUTL(vzsav)
 	
-	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
-
-	if %SystemDate'=cuvar.tjd do {
-		set vzsav=$$INIT^PBSUTL
-		do VLOD^PBSUTL(vzsav)
+	/* See if longer than 30 seconds since last check, or if date changed
+	   (will result in negative number).  If so, check for new value for
+	   %SystemDate.  Use result set since faster on CUVAR under Oracle.
+	*/
+	if vzlasttjd.get().isNull() set vzlasttjd = 99999	// Default
+	set now = %CurrentTime
+	if (((now - vzlasttjd) > 30) ! ((now - vzlasttjd) < 0)) do {
+		
+		type public String vzcache(,)
+		
+		type ResultSet rs = Db.select("TJD", "CUVAR")
+	
+		if rs.next(), %SystemDate '= rs.getCol("TJD") do {
+		
+			set vzsav=$$INIT^PBSUTL
+			do VLOD^PBSUTL(vzsav)
+			
+			// Clear cache on date change
+			kill %CACHE, vzcache
+		}
+		
+		set vzlasttjd = now
 	}
 
 	#ACCEPT PGM=Erik Scheetz;DATE=11/22/02;CR=unknown
@@ -660,8 +708,10 @@ EXEC(String vzrec,		// Input record
 	// Process the record
 	do {
 	
-		catch error {
+		catch error@"LOGEREXEC" {
 			// Error trap for EXEC
+			
+			do Runtime.rollback()
 			
 			// Filer error - don't log
 			if error.type="%PSL-E-DBFILER" do {
@@ -671,7 +721,7 @@ EXEC(String vzrec,		// Input record
 			}
 			
 			else  do {
-				do ZE^UTLERR
+				if %ZTSEQ.get().isNull() do ZE^UTLERR
 
 				// Host error number ~p1. Contact system manager.
 				set vzrm=$$ERRMSG^PBSUTL($$^MSG(1191,%ZTSEQ))
@@ -692,7 +742,7 @@ EXEC(String vzrec,		// Input record
 		type String vzmssgid = x
 
 		type Boolean vzisagm, vzlogmsg, vzlogrep, vzsvsec
-		type Number vzcnt, vzgrprec, vznum, vzsrvcls, vzstatus, vzstfflg, vztyp
+		type Number vzcnt, vzgrprec, vzlasttjd, vznum, vzsrvcls, vzstatus, vzstfflg, vztyp
 		type String vzagmrep, vzclvrsn, vzcltokn, vzcontxt, vzctxt, vzfap
 		type String vzfaptbl, vzpkt, vzrec, vzrecord, vzreply, vzsav
 		type String vzstn, vzsvfap, vzsvstat, vzucls, vzuid
@@ -700,7 +750,7 @@ EXEC(String vzrec,		// Input record
 
 		// Execute service class drivers
 		if (vz1 = 0) set vzerror = $$^PBSNMSP(.vzrm, vz2, vz3, vz4, vz5) quit
-		if (vz1 = 1) set vzerror = $$^PBSTSSP(.vzrm, vz2, vz3, vz4, vz5) quit
+		if (vz1 = 1) set vzerror = $$^PBSTSSP(.vzrm, vz2, vz3, vz4, vz5, %STFHOST) quit
 		if (vz1 = 2) set vzerror = $$^PBSFSSP(.vzrm, vz2, vz3, vz4, vz5) quit
 		if (vz1 = 3) set vzerror = $$^PBSMRPC(.vzrm, vz2, vz3, vz4, vz5) quit
 		if (vz1 = 5) set vzerror = $$^PBSMSQL(.vzrm, vz2, vz3, vz4, vz5) quit
@@ -810,7 +860,7 @@ private HDR(String vzhdr)	// Standard client request header
 	// Determine Native v. Non-Native Client
 	// 0=Native, 1=Non-native
 
-	if vzfaps'=$C(0) set vztyp=1
+	if vzfaps'=0.char() set vztyp=1
 	else  set vztyp=0,vzfaps=""
 	quit ""
 
@@ -841,7 +891,7 @@ private REPLY(String vzreply,		// Server reply message
 	set vzfld(4)=%VersionID.get()
 
 	set vzhdr=$$V2LV^MSG(.vzfld,"",1)
-	set vzpkt=vzhdr_vzreply_$C(0,0)
+	set vzpkt=vzhdr_vzreply_0.char()_0.char()
 
 	// Execute server layer exit FAP
 	quit $$FAPOUT(vzpkt,vzsvfap)
@@ -941,7 +991,7 @@ FAPINP(String vzinp,	// Packet/record  	/MECH=REFNAM:RW
 		set vzpgm=vzfaptbl(vzfap).piece("|",2) quit:vzpgm=""
 		set vzx=vzpgm_"(.vzinp"
 
-		if $G(vzsrv) set vzx=vzx_","_vzsrv_","_vzstf
+		if vzsrv.get() set vzx=vzx_","_vzsrv_","_vzstf
 		set vzx="S vzermsg="_vzx_")"
 		
 		#ACCEPT PGM=Erik Scheetz;DATE=11/22/02;CR=unknown
@@ -980,7 +1030,7 @@ private FAPOUT(String vzout,	// Message
 			set vzfaptbl(vzfap)=fap.desc_"|"_fap.pgminp_"|"_fap.pgmout
 		}
 
-		set vzpgm=$P(vzfaptbl(vzfap),"|",3) quit:vzpgm=""
+		set vzpgm=vzfaptbl(vzfap).piece("|",3) quit:vzpgm=""
 		set vzx=vzpgm_"(.vzout"
 
 		if vzsrv.get() set vzx=vzx_","_vzsrv_","_vzstf
@@ -1115,5 +1165,14 @@ private ZTPTRAP		// Error trap for TPTIMEOUT
 	do LOGCMIT
 	
 	quit
+	
+	
+public LOGEREXEC(Error err)	// Error logging from EXEC
 
-vSIG()	quit "60529^14412^SChhabria^30378"	// Signature - LTD^TIME^USER^SIZE
+	// If filer error - don't log
+	if err.type'="%PSL-E-DBFILER" do LOGERR^UTLERR(err)
+	
+	quit
+	
+ #OPTION ResultClass ON
+public String vSIG()	quit "61397^62610^Dan Russell^32222"	// Signature - LTD^TIME^USER^SIZE

@@ -1,4 +1,4 @@
-/opt/pip_V01/extcall_V1.2/extcall.sl
+/home/pip/pip_V02/extcall_V1.2/extcall.sl
 clxfr: void clxfr(I:xc_char_t *,I:xc_char_t *,I:xc_char_t *,I:xc_char_t *,I:xc_char_t *,I:xc_char_t *,I:xc_char_t *,I:xc_char_t *,O:xc_long_t *)
 colin: void sql_lv_to_bitmap(IO:xc_string_t *,O:xc_string_t *[32000])
 colout: void sql_bitmap_to_lv(IO:xc_string_t *,O:xc_string_t *[32000])
@@ -26,7 +26,7 @@ getnodename: void getnodename(IO:xc_string_t *)
 getprcnam: void getprcnam(IO:xc_long_t *,IO:xc_string_t *,IO:xc_long_t *);
 getprocessid: void getprocessid(O:xc_long_t *)
 gettime: void gettime(IO:xc_char_t *)
-getusername: void getusername(IO:xc_string_t *,IO:xc_long_t *)
+getusername: void getusername(IO:xc_char_t *,IO:xc_long_t *)
 listpids: void listpids(IO:xc_long_t *,IO: xc_long_t *)
 lnx: void lnx(I:xc_string_t *,I:xc_long_t,IO:xc_string_t *)
 logsca: void logsca(I:xc_string_t *,I:xc_long_t,IO:xc_string_t *)

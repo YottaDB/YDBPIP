@@ -23,6 +23,28 @@ DBMAP
 	Private labels are available for DATA-QWIK, SQL, and PSL only.
 
 	---- Revision History -------------------------------------------------
+	2008-10-01, Frans S.C. Witte CR 35741/35918/35922
+		$$rdb^UCDBRT() replaced by Runtime.isRdb
+		$$rdb^UCDBRT(t) replaced by $$rtIsRdb^UCXDD(t).
+
+	08/26/2008 - RussellDS - CR30801
+		Modified MAPPING section to use DBTBL1D instead of getSchemaTable
+		to improve performance, especially when loading service packs.
+	
+	01/11/2007 - GIRIDHARANB - CR31525
+
+		Modified section file of DBMAP to implement parent/child table
+		relationships.Also modified section file to report inconsistencies 
+		between DQ and RDB schemas. Compiler warnng cleanup.
+		
+		Additional changes to set DBMAPIDX entries, retrofitted code review
+		changes from profile_framewok_v27
+	
+	09/10/2007 - RussellDS - CR29295
+	
+		Modified handling of call to EXECSP^%DBAPI to handle error
+		that now might be thrown by the call.
+	
 	04/10/07 - RussellDS - CR26503
 		   Replaced call to obsoleted DBMAPDFT with USTMAPDF.
 		   
@@ -198,15 +220,14 @@ private FILE(String dqtable,	// DATA-QWIK table name
 	Build DBMAP, DBMAPT, and DBMAPIDX tables for dqtable.
 
 	Performs name replacement for names starting with % or reserved words.
-	*/
+	*/	
 	
-	type literal List SPLTTBLS = ",DEP,LN,"
-	
-	type Boolean isDEPLN, isRDBtbl, isSplit
+	type Boolean isRDBtbl
 	type Number I, pos()
-	type String acckeys, btmkey, dqcol, N, mflist(), rdbtable, RESERVED(), tblarr(,)
+	type String acckeys, btmkey, dqcol, N, mflist(),parent, PARENT(,)
+	type String rdbtable, RESERVED(), tblarr(,), tmptable
 	
-	set isRDBtbl = $$rdb^UCDBRT(dqtable)
+	set isRDBtbl = $$rtIsRdb^UCXDD(dqtable)
 	
 	do Db.fastDelete("DBMAP", "DB=:dbid,TBL=:dqtable")
 	do Db.fastDelete("DBMAPT", "DB=:dbid,TBL=:dqtable")
@@ -214,12 +235,17 @@ private FILE(String dqtable,	// DATA-QWIK table name
 	
 	quit:'Db.isDefined("DBTBL1", "%LIBS='SYSDEV' AND FID=:dqtable")
 
-	if SPLTTBLS.contains(dqtable) set isSplit = 1
-	else  set isSplit = 0
+	type RecordDBTBL1 dbtbl1 = Db.getRecord("DBTBL1", "%LIBS='SYSDEV',FID=:dqtable")
 	
-	if ((dqtable = "DEP") ! (dqtable = "LN")) set isDEPLN = 1
-	else  set isDEPLN = 0
-	
+	if 'dbtbl1.parfid.isNull() do {
+		
+		set parent=dbtbl1.parfid		
+		
+		type ResultSet rs = Db.select("DI", "DBTBL1D", "%LIBS='SYSDEV' AND FID=:parent")
+		while rs.next() if 'rs.getCol("DI").isLiteral() set PARENT(rs.getCol("DI")) = ""
+		
+		}
+			
 	// Load reserved words
 	#ACCEPT Date=10/10/2006; Pgm=RussellDS; CR=22519; Group=PSLBOOT
 	type ResultSet rs2 = Db.select("WORD", "STBLRESERVED", , , , "/PSLBOOT")
@@ -229,19 +255,21 @@ private FILE(String dqtable,	// DATA-QWIK table name
 	
 	// Need to do master fields separately, and last, since they depend
 	// on data stored for sub-fields.
-	if isSplit do {
+	if 'dbtbl1.parfid.isNull() do {
 		
-		type String ACN, COLS(,)
-				
-		// Split the table
-		do MAPPING(dbid, dqtable, .COLS(,))
+		type String COLS(,)
+		
+		if (dqtable="DEP")!(dqtable="LN") do {
 			
-		// Load list of ACN columns if DEP or LN
-		if isDEPLN do {
+			do MAPPING(dbid, dqtable, .COLS(,))
+			
+		}
+		else  do {
+			
+			type ResultSet rs = Db.select("DI", "DBTBL1D", "%LIBS='SYSDEV' AND FID=:dqtable")
+			while rs.next() if 'rs.getCol("DI").isLiteral() set COLS(dqtable,rs.getCol("DI")) = 1
 		
-			type ResultSet rs = Db.select("DI", "DBTBL1D", "%LIBS='SYSDEV' AND FID='ACN'")
-			while rs.next() set ACN(rs.getCol("DI")) = ""
-		}	
+		}
 	
 		// Build tblarr with renamed table
 		set dqcol = ""
@@ -254,9 +282,9 @@ private FILE(String dqtable,	// DATA-QWIK table name
 			if isRDBtbl, $$isSfdMaster^UCXDD(dqtable, dqcol) set mflist(dqcol) = ""
 			else  do {
 				
-				if isDEPLN, ACN(dqcol).exists() set rdbtable = "ACN"
+				if PARENT(dqcol).exists() set rdbtable = parent
 				else  set rdbtable = "W_"_dqtable_"_"_COLS(dqtable, dqcol)
-
+				
 				set tblarr(rdbtable, dqcol) = ""
 			}
 		}
@@ -296,29 +324,52 @@ private FILE(String dqtable,	// DATA-QWIK table name
 		type RecordDBMAPT dbmapt = Class.new("RecordDBMAPT", "DB=:dbid,TBL=:dqtable")
 		
 		set dbmapt.rtbls = rdbtable
-		set dbmapt.issplit = isSplit
+		set dbmapt.issplit = 'dbtbl1.parfid.isNull()
 		
 		do dbmapt.save()
 	}
         
         // Get positions in RDB	
-	if $$rdb^UCDBRT do {
+	if Runtime.isRdb do {
 		
-		type Boolean ER
 		type Number J
-		type String colpos, data, RM, table
+		type String colpos, data, table
 		
 		for I = 1:1:rdbtable.length(",") do {
 			
 			set table = rdbtable.piece(",", I)
 			
-			quit:'$$rdb^UCDBRT(table)
+			quit:'$$rtIsRdb^UCXDD(table)
+			
+			do {
+				
+				catch error {
+				
+					// Write message about error, but otherwise ignore
+					
+					write !!, "***** Error finding positions for table ", table, " - ", error.description, !
+					
+				}
 		
-			set ER = $$EXECSP^%DBAPI("", "FINDPOS", table, 1, $C(124), .data, .RM)
+				set data = $$EXECUTESP^%DBAPI("", "FINDPOS", table, 1, 124.char())
+								
+			}
+			
+			quit:'data.exists()			
 		
 			for J = 1:1:data.length("|") do {
 			
 				set colpos = data.piece("|", J)
+				
+				if colpos.piece(",", 2).isNull() do {
+					
+					// Write message when schema mismatches are detected
+					
+					write !,"SCHEMA MISMATCH IN TABLE "_table
+				
+					if 'colpos.piece(",",1).isNull() write !,colpos.piece(",", 1)_" IS MISSING "
+					
+				}
 			
 				set pos(table, colpos.piece(",", 1)) = colpos.piece(",", 2)
 			}
@@ -326,8 +377,7 @@ private FILE(String dqtable,	// DATA-QWIK table name
 	}
 	
 	// Get bottom key for use in DBMAPIDX
-	type RecordDBTBL1 dbtbl1 = Db.getRecord("DBTBL1", "%LIBS='SYSDEV',FID=:dqtable")
-	
+		
 	set acckeys = dbtbl1.acckeys
 	set btmkey = ""
 	for I = 1:1:acckeys.length(",") do {
@@ -336,7 +386,8 @@ private FILE(String dqtable,	// DATA-QWIK table name
 		
 		if 'key.isLiteral() set btmkey = key
 	}
-	if btmkey.isNull() set btmkey = $C(254)		// CUVAR-like tables
+	
+	if btmkey.isNull() set btmkey = $$byte^vRuntime(254)
 		
 	set (rdbtable, dqcol) = ""
 	for  set rdbtable = tblarr(rdbtable).order() quit:rdbtable.isNull()  do {
@@ -378,7 +429,7 @@ private FILE(String dqtable,	// DATA-QWIK table name
 		
 				type RecordDBMAPIDX dbmapidx = Class.new("RecordDBMAPIDX", "%LIBS='SYSDEV',DB=:dbid,TBL=:dqtable,POS=:position,DI=:dqcol")
 				
-				if 'isSplit set split = btmkey
+				if dbtbl1.parfid.isNull() set split = btmkey
 				else  if rdbtable.piece("_", 3).isNumber() set split = rdbtable.piece("_", 3)
 				else  set split = btmkey
 				
@@ -551,7 +602,7 @@ private nod2tbl(String dbid,		// Database ID
 	
 	if rdbtable.isLike("%,%") do {
 		
-		if node.isNull() set rdbtable = "ACN"
+		if node.isNull() set rdbtable = rdbtable.piece(",",1)
 		else  set rdbtable = "W_"_dqtable_"_"_node
 	}
 	
@@ -607,6 +658,9 @@ private MAPPING(String dbid,	// Database ID, e.g., Oracle or DB2
 	
 	Provides the ability to return the mapping information for split
 	tables DEP and LN.  Called by FILE and by CRTBL1^TBXSQL.
+	
+	If we ever add additional split tables, review/modify this section to
+	ensure that it deals with them correctly.
 	*/
 	
 	type Boolean haveERR
@@ -630,7 +684,10 @@ private MAPPING(String dbid,	// Database ID, e.g., Oracle or DB2
 		// Ignore columns not in schema
 		quit:'Db.isSchemaColumn(table, COLUMN)
 			
-		type SchemaColumn colrec = Db.getSchemaColumn(table, COLUMN)
+		// Temporary to improve preformance
+		// type SchemaColumn colrec = Db.getSchemaColumn(table, COLUMN)
+		type RecordDBTBL1D ddrec = Db.getRecord("DBTBL1D","%LIBS='SYSDEV',FID=:table,DI=:COLUMN",1)
+
 		
 		if SPLIT.isNull() do {
 			
@@ -644,11 +701,13 @@ private MAPPING(String dbid,	// Database ID, e.g., Oracle or DB2
 			
 			set ERMSG = table_"."_COLUMN_" is not in ACN and cannot be mapped to ACN"
 		}
-		if 'colrec.computation.isNull(), (SPLIT '= "COMPUTED") do {
+		//if 'colrec.computation.isNull(), (SPLIT '= "COMPUTED") do {
+		if 'ddrec.cmp.isNull(), (SPLIT '= "COMPUTED") do {
 			
 			set ERMSG = table_"."_COLUMN_" is a computed and must be mapped as 'Computed'"
 		}
-		if (SPLIT = "COMPUTED"), colrec.computation.isNull() do {
+		//if (SPLIT = "COMPUTED"), colrec.computation.isNull() do {
+		if (SPLIT = "COMPUTED"), ddrec.cmp.isNull() do {
 			
 			set ERMSG = table_"."_COLUMN_" is not a computed but is mapped as one"
 		}
@@ -921,5 +980,3 @@ ADDMISNG(String dbid,	// Database ID
 			
 			
 			
-
-vSIG()	quit "60731^85524^Dan Russell^24228"	// Signature - LTD^TIME^USER^SIZE

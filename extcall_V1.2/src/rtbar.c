@@ -21,9 +21,10 @@
 *   $Revision: 1.1 $
 *
 */
-#include<stdio.h>
-#include<string.h>
-#include<extcall.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "extcall.h"
 
 #define BAR '|'
 

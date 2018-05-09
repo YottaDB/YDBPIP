@@ -8,7 +8,7 @@ DBSUTL3	;; -  - V5.0 - DATA ITEM INDEX FILE MAINTENANCE UTILITY
 	;         Line Tag  "ENTRY" - build / list index file
 	;                   "LIST"  - List partial index file
 	;
-	; I18N=QUIT: Exculded from I18N standards. 
+        ; I18N=QUIT: Exculded from I18N standards.
 	;---------- Revision History -------------------------------------------
 	;
 	; 08/09/06 - KELLYP - CR 21987
@@ -160,9 +160,9 @@ FILER	; Level 7 (Trigger) and level 9 (Journal)
 	.	S ptr=0 F  S dinam=$$FINDINAM^DBSDD(X,.ptr) Q:dinam=""  D
 	..		S key=$P(gbl,"""",4)_"-"_$P(gbl,"""",6)
 	..		S fid=$P(dinam,".",1),di=$P(dinam,".",2) ; fid.di
-	..              I fid=""!(di="") D  Q 
-	...                     I $L(gbl,",")<5 Q              ; Header record 
-	...                     W !,gbl,!,X Q                ; Invalid syntax
+        ..              I fid=""!(di="") D  Q
+        ...                     I $L(gbl,",")<5 Q              ; Header record
+        ...                     W !,gbl,!,X Q	               ; Invalid syntax
 	..		S ^DBINDX(%LIBS,"DI",DBOPT,fid,di,key)=""
 	..		;W !,key
 	Q
@@ -310,7 +310,7 @@ BUILD	;
 	I $G(IO)="" S IO=$I
 	U IO
 	F DBOPT=13,2:1:9 D BUILD1		; *** 06/12/96
-	D CLOSE^SCAIO
+ 	D CLOSE^SCAIO
 	Q
 	;
 BUILD1	;

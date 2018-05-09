@@ -3,13 +3,13 @@ DBSTAP1	;; -  - V4.0 - Conversion Template Routine
 	;     ORIG:  MATTSON - 08/29/89
 	;     DESC:
 	;
-	; I18N=QUIT: Exculded from I18N standards. 
+        ; I18N=QUIT: Exculded from I18N standards.
 	;
 	;---------- Revision History -------------------------------------------
 	;
-	; 05/17/00 - DOUGANM- 39582 
-	;            To improve the performance of error handling, cleaned up 
-	;            call to $$NEW^%ZT, and removed use of indirection. 
+        ; 05/17/00 - DOUGANM- 39582
+        ;            To improve the performance of error handling, cleaned up
+        ;            call to $$NEW^%ZT, and removed use of indirection.
 	;	     Replaced $ZP references with $O(^gbl(...),-1) syntax.
 	;
 	; 10/04/96 - SPIER - 20948
@@ -170,4 +170,4 @@ ADDRACN	;Loan/Dep account address file
 	;-----------------------------------------------------------------------
 CMP	; Compiled code inserted here
 	;-----------------------------------------------------------------------
-	
+  

@@ -2,15 +2,15 @@ SQLOADER	;Private; Utility to import/export data fileORACLE
 	;;Copyright(c)2001 Sanchez Computer Associates, Inc.  All Rights Reserved - 08/07/01 09:47:42 - CHENARDP
 	; ORIG:	CHIANG - 04/07/98
 	;
-	; LIBRARY: 
-	;       . IMPORT   - Import text file (tab separated) into PROFILE 
+        ; LIBRARY:
+        ;       . IMPORT   - Import text file (tab separated) into PROFILE
 	;                    database
 	;
-	;       . EXPORT   - Export data from PROFILE database based on a 
+        ;       . EXPORT   - Export data from PROFILE database based on a
 	;                    SQL SELECT statement
 	;
 	;	. SCRIPT   - Export data based on a SQL-based script file
-	; 
+        ;
 	;	. EXT	   - External interface for IMPORT function
 	;
 	;	. DDL	   - SQL DDL create table statement
@@ -41,7 +41,7 @@ SQLOADER	;Private; Utility to import/export data fileORACLE
 	;----------------------------------------------------------------------
 	Q
 	;----------------------------------------------------------------------
-IMPORT(file,table,option,errfile,del)	; Private ; Import data file (EXCEL format) 
+IMPORT(file,table,option,errfile,del) ; Private ; Import data file (EXCEL format)
 	;----------------------------------------------------------------------
 	; Utility to import text file (tab separated format) into PROFILE
 	; database.  The first row of the data file identifies the column names
@@ -158,8 +158,8 @@ update	; update existing records
 	D build
 	Q
 build	;
-	D add(" S x=$$FILE^%ZOPEN(file,""READ"",5,4096) I 'x Q") 
-	D add(" S x=$$FILE^%ZOPEN(errfile,""WRITE/NEWV"",5,4096) I 'x Q") 
+        D add(" S x=$$FILE^%ZOPEN(file,""READ"",5,4096) I 'x Q")
+        D add(" S x=$$FILE^%ZOPEN(errfile,""WRITE/NEWV"",5,4096) I 'x Q")
 	D add(" U errfile W $$USERNAM^%ZFUNC,"" "",$$DAT^%ZM(+$H),"" "",$$TIM^%ZM,!")
 	D add(" U errfile W !,"_""""_$S(option:"UPDATE ",1:"INSERT ")_list_""""_",!!")
 	D add(" S data=$$^%ZREAD(file,.er) I er C file Q")	; Skip header record
@@ -362,7 +362,7 @@ EXPORT(expr,file,hdropt,del,comp)	;Private; Utility to execute SQL SELECT statem
 	I $G(hdropt) D add(" U IO W hdr,!")		; file header
 	D add(" S cnt=&&sqlopen("_""""_expr_""""_")")	; open cursor
 	;
-	D add(" I 'cnt C IO Q")				; empty
+ 	D add(" I 'cnt C IO Q")				; empty
 	D add(" F  Q:'&&sqlfetch(.data)  D")		; fetch rows
 	F i=1:1:$L(col,",") D  I ER Q			; validate each column name
 	.	S ddref=$$CVTREF^SQLDD($P(col,",",i),table) I $G(ER) Q
@@ -371,13 +371,13 @@ EXPORT(expr,file,hdropt,del,comp)	;Private; Utility to execute SQL SELECT statem
 	.	I type="D" D add(" . S "_z_"=$$DAT^%ZM("_z_","_""""_"MM/DD/YEAR"_""""_")")
 	.	I type="C" D add(" . S "_z_"=$$TIM^%ZM("_z_","_""""_"24:60:SS"_""""_")")
 	I ER Q
-	I del=9 D add(" . U IO W data,!"); fetch rows
+ 	I del=9 D add(" . U IO W data,!"); fetch rows
 	I del'=9 D add(" . U IO W $TR(data,$C(9),$C("_del_")),!")
 	D add(" C IO Q")					; close device
 	D compile(expr)
 	Q
 	;----------------------------------------------------------------------
-compile(comment)	; 
+compile(comment) ;
 	;----------------------------------------------------------------------
 	N (hdr,msrc,src,code,comment,file,errfile,fsn,ER,RM)
 	S ER=0
@@ -396,7 +396,7 @@ compile(comment)	;
 	S msrc(0.2)=" ;"
 	S msrc(0.3)=" ; "_$E(comment,1,450)
 	S msrc(0.4)=" I $$NEW^%ZT N $ZT"		; 03/10/99 BC
-	S msrc(0.5)=" S @$$SET^%ZT(""ER"") ; set up error trap" 
+        S msrc(0.5)=" S @$$SET^%ZT(""ER"") ; set up error trap"
 	S msrc(0.8)=" S file="_""""_file_""""
 	I $D(errfile) S msrc(0.9)=" S errfile="_""""_errfile_""""
 	S z=$O(msrc(""),-1)+1
@@ -409,14 +409,14 @@ compile(comment)	;
 	D DEL^%ZRTNDEL(rtn)			; Delete routine
 	Q
 	;----------------------------------------------------------------------
-add(line)	; Insert procedure code into array 
+add(line) ; Insert procedure code into array
 	;----------------------------------------------------------------------
 	N ln
 	S ln=$O(src(""),-1)+1
 	S src(ln)=line
 	Q
 	;----------------------------------------------------------------------
-vercol(table,list)	; Validate column names 
+vercol(table,list) ; Validate column names
 	;----------------------------------------------------------------------
 	N i,OK
 	S OK=1
@@ -424,7 +424,7 @@ vercol(table,list)	; Validate column names
 	I 'OK S RM="Invalid header record ("_list_")"
 	Q OK
 	;----------------------------------------------------------------------
-SCRIPT(file,hdropt,del)	; Export data based on SQL statements stored in a script file 
+SCRIPT(file,hdropt,del) ; Export data based on SQL statements stored in a script file
 	;----------------------------------------------------------------------
 	; This function opens the text file, process each SQL statement
 	; (separated by the header record) and output selected row data to
@@ -574,7 +574,7 @@ LIST(table,computed)	; Return column names
 	I $E(v)="," S v=$E(v,2,9999)
 	Q v
 	;
-DDL(table,outfile,com,index,comp,tblspace)	; Create SQL DDL script based on DQ file definition 
+DDL(table,outfile,com,index,comp,tblspace) ; Create SQL DDL script based on DQ file definition
 	;----------------------------------------------------------------------
 	; ARGUMENTS:
 	;
@@ -690,7 +690,7 @@ DDL1(table)	; Create table definition
 	I $G(index) D index(table)			; Index definition
 	Q
 	;----------------------------------------------------------------------
-default(v,type)	; default value 
+default(v,type) ; default value
 	;----------------------------------------------------------------------
 	Q
 	I v="<<TJD>>"!(v="<<+$H>>")!(v="T") W " DEFAULT CURRENT DATE" Q
@@ -701,7 +701,7 @@ default(v,type)	; default value
 	W " DEFAULT '"_v_"'"				; Text
 	Q
 	;----------------------------------------------------------------------
-comment(table)	; table and column comments 
+comment(table) ; table and column comments
 	;----------------------------------------------------------------------
 	W !,"COMMENT ON TABLE "_table_" IS '"_comment_"';"	; table description
 	;							; column description
@@ -709,7 +709,7 @@ comment(table)	; table and column comments
 	.	W !,"COMMENT ON COLUMN "_table_"."_di_" IS '"_comment(di)_"';" 
 	Q
 	;----------------------------------------------------------------------
-type(typ)	; convert DQ data type 
+type(typ) ; convert DQ data type
 	;----------------------------------------------------------------------
 	;
 	N x
@@ -780,7 +780,7 @@ DDLINDEX(outfile)	;
 	;----------------------------------------------------------------------
 	N error,fid,x
 	;
-	S x=$$FILE^%ZOPEN(outfile,"WRITE/NEWV",5) I 'x Q
+     	S x=$$FILE^%ZOPEN(outfile,"WRITE/NEWV",5) I 'x Q
 	U outfile					; create index def
 	S fid="" F  S fid=$O(^DBTBL("SYSDEV",8,fid)) Q:fid=""  D index(fid)
 	C outfile
@@ -809,7 +809,7 @@ STAT	;
 	.	W !,tbl,?10,i-1,?20,cmp,?30,i-1-cmp,?40,len," Bytes"
 	Q
 	;----------------------------------------------------------------------
-CUVAR(outfile)	; Create DDL statements for CUVAR table 
+CUVAR(outfile) ; Create DDL statements for CUVAR table
 	;----------------------------------------------------------------------
 	; Four columns will be created for each table:
 	;
@@ -833,8 +833,8 @@ CUVAR(outfile)	; Create DDL statements for CUVAR table
 	S table="CUVAR"
 	D fsn^SQLDD(.fsn,table) I $G(ER) Q	; Invalid table name
 	;
-	S x=$$FILE^%ZOPEN(outfile,"WRITE/NEWV",5) I 'x S ER=1,RM=$$^MSG(1337,outfile) Q 
-	; 
+        S x=$$FILE^%ZOPEN(outfile,"WRITE/NEWV",5) I 'x S ER=1,RM=$$^MSG(1337,outfile) Q
+        ;
 	; Create SQL create table statements
 	;
 	U outfile
@@ -866,14 +866,14 @@ ORACLE	; Build ORACLE SQL*loader control file
 	;----------------------------------------------------------------------
 	N c,cnt,coldel,i,x
 	S ctlfile=$P(file,".",1)_".CTL"
-	S x=$$FILE^%ZOPEN(ctlfile,"WRITE/NEWV",5) I 'x S ER=1,RM=$$^MSG(1337,ctlfile) Q 
+        S x=$$FILE^%ZOPEN(ctlfile,"WRITE/NEWV",5) I 'x S ER=1,RM=$$^MSG(1337,ctlfile) Q
 	U ctlfile					; Create SQL*Loader control file
 	W "LOAD DATA",!
-	W "INFILE '"_file_"'",! 
-	W "INTO TABLE "_""""_table_"""",! 
+        W "INFILE '"_file_"'",!
+        W "INTO TABLE "_""""_table_"""",!
 	I $G(del)'=9 S coldel="'"_$C(del)_"'"		; field delimiter
 	E  S coldel="X'9'"				; Tab
-	W "FIELDS TERMINATED BY "_coldel_" OPTIONALLY ENCLOSED '""'",! 
+        W "FIELDS TERMINATED BY "_coldel_" OPTIONALLY ENCLOSED '""'",!
 	S c="",cnt=0 F i=1:1:$L(col,",") D		; Build column list
 	.	S c=c_","_""""_$P(col,",",i)_""""
 	.	I $L(c)<70 Q				; break up into short line

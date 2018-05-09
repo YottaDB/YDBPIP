@@ -22,7 +22,7 @@ DBSBLD	;;DBS - REP - V3.4 - BUILD DATA QWIK ACCESS METHOD
 	;            Removed calls to $$^MSG.
 	;
 	;----------------------------------------------------------------------
-	;   I18N=QUIT : Excluded From I18N Standards 
+        ;   I18N=QUIT : Excluded From I18N Standards
 	Q
 ERR	;
 	; 

@@ -18,18 +18,20 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <extcall.h>
+#include "extcall.h"
 
 void elfhash(int count,STR_DESCRIPTOR *src,STR_DESCRIPTOR *dst, SLONG *rc)
 
 {
    unsigned long	h = 0;
-   unsigned long	g,i;
-   char			buffer[10];
+   unsigned long	g;
+   int		i = 0,len;
+   char		buffer[10];
 
    char *ptr = (char *)NULL;
 
    ptr = src->str;
+   len = src->length;
    if((ptr == (char *)NULL)
            || (src->length <= 0)
            || (dst->str == (char *)NULL)
@@ -40,7 +42,7 @@ void elfhash(int count,STR_DESCRIPTOR *src,STR_DESCRIPTOR *dst, SLONG *rc)
         */
        *rc = MUMPS_FAILURE;
        return;
-   } 
+   }
 
    for (i=0; i < src->length; i++) {
 	h = (h << 4) + src->str[i];

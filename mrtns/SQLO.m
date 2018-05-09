@@ -32,14 +32,62 @@ SQLO(frm,sel,oby,all,vsql,rng,par,tok,fsn,vdd)	;;;SQL - V5.0 -  Optimize Databas
 	;D ^SQLO("CIF,DEP",.oby,.rng,.vsql,.fsn)
 	;
 	;vsql("C")="||1*1*12*1000|12000|XCLS|1"
-	;vsql("G")="DEP,CIF"
+  	;vsql("G")="DEP,CIF"
 	;vsql("G",1)="^XCLS($C(1)_"SYSDEV.DEP.CLS"_$C(1),$C(1)_"SYSDEV.DEP.GRP
 	;"_$C(1),$C(1)_"SYSDEV.DEP.TYPE"_$C(1),$C(1)_"SYSDEV.DEP.CID"_$C(1)
 	;vsql("G",2)="^CIF($C(1)_"SYSDEV.CIF.ACN"_$C(1)
 	;
-	; I18N=QUIT: Exculded from I18N standards. 
+        ; I18N=QUIT: Exculded from I18N standards.
 	;----------------------------------------------------------------------
 	;---------- Revision History ------------------------------------------
+	; 02/23/09 - Pete Chenard
+	;	     Modified OPTIMIZE section to correct issue with table aliases.
+	;
+	; 02/18/09 - Pete Chenard
+	;	     Modified OPTIMIZE and INDEX sections to store the key level
+	;	     to return to in the index array for DISTINCT queries that
+	;	     contain non-key values in the query.  For example, the
+	;	     following query can be optimized to use index XCLS, but
+	;	     prior to this change, this index was not considered because
+	;	     the query contains a column and is not a key in the index:
+	;	     SELECT DISTINCT GRP FROM DEP WHERE BAL>100.
+	;
+
+	; 01/26/09 - Pete Chenard
+	;	     Modified DISTINI to always set the dse variable (rather than 
+	;	     quitting is all=1.  
+	;	     Modified JOIN to always determine the value of the 'all' 
+	;	     flag from the winner's entry in the 'index' array/
+	;	     This resolves an issue where DISTINI turned off the DISTINCT
+	;	     flag (i.e., set all=1) because all the keys in the primary table
+	;	     are present in the select list.  the problem is, later, in the
+	;	     OPTIMIZE section, the 'winning' plan contained different keys, which
+	;	     should have kept the DISTINCT flag on (all=0).
+	;
+	; 11/13/2008 - RussellDS - CRs 36391/35741
+	;	Modified use of substitute null character to set it up at the
+	;	beginning of the exe() array so that it is determined at
+	;	runtime, but with only one call.  This avoids problems in
+	;	code generated for PSL that is distributed to Unicode
+	;	environments.
+	;
+	; 10/01/2008 - RussellDS - CRs 35828/35741
+	;	* Fix logic related to modification to avoid use of index on
+	;	  SELECT *.  Changed to do this any time all the keys are in
+	;	  the select list.
+	;
+	; 05/05/2008 - RussellDS - CR30801
+	;	* Added code in top section to deal with access rights checking.
+	;	* Changes made by Pete to remove null index handling
+	;	* Modified to not try to use index on SELECT * without WHERE
+	;	  or ORDER BY
+	;
+	; 10/26/07 - Pete Chenard CR30087
+	;	* Replaced references to $$BYTECHAR^SQLUTL with 
+	;	  $$BYTECODE^SQLUTL to eliminate runtime determination
+	;	  of whether to use $C or $ZCH based on character set 
+	;	  configuration.
+	;
 	; 07/10/07 - Pete Chenard - CR28171
 	;	     Replaced references to $C(255) with $$BYTECHAR^SQLUTL
 	;	     for unicode compliance.
@@ -68,13 +116,13 @@ SQLO(frm,sel,oby,all,vsql,rng,par,tok,fsn,vdd)	;;;SQL - V5.0 -  Optimize Databas
 	;	     overpruning on indices with keys matching views.
 	;	    
 	; 08/12/97 - Betty Ni - 25653
-	;            Replaced follows operator "]" with a "]]". 
+        ;            Replaced follows operator "]" with a "]]".
 	;
 	; 06/10/97 - Chiang - 24835
 	;            Modified OPTIMIZE section to not use partial index files
 	;            to optimize DISTINCT statement.
 	;----------------------------------------------------------------------
-	;
+	N distinct
 	S ER=0
 	;   
 	I $D(oby)#2=0 S oby=""
@@ -84,11 +132,42 @@ SQLO(frm,sel,oby,all,vsql,rng,par,tok,fsn,vdd)	;;;SQL - V5.0 -  Optimize Databas
 	;
 	S dse=""
 	;
+	S distinct='+$G(all)
 	I $G(all)="" S all=1
-	E  I all=0 D DISTINI Q:ER 
+        E  I all=0 D DISTINI Q:ER
 	;
 	S mincost=$S(mode=1:10,1:1)
 	S plan=$G(par("PLAN"))
+	;
+	; Get SELECT access rights for all tables and set up check for
+	; each on no access.  This keeps the "no access" check as high
+	; as possible for all tables.  See ACCESS^SQLM for further code
+	; generated related to access rights checking.
+	;
+	; If setting up compiler code and there are SELECT RESTRICT rights,
+	; use a variable to determine if we need to perform that check
+	; for the particular userclass.
+	F fnum=1:1:$L(frm,",") D
+	.	N ercode
+	.	S alias=$P(frm,",",fnum)
+	.	I '$D(vsql("SELRTS",alias)) S vsql("SELRTS",alias)=$$GETSELRTS^SQLM(alias)
+	.	S ercode="S ER=1,RM=$$^MSG(6754,"""_alias_""") S vsql=-1"
+	.	; If only SELECT, a userclass either has access or not
+	.	I vsql("SELRTS",alias)="select" D
+	..		S exe=exe+1,exe(exe)="I $$vselectAccess^Record"_alias_"(%UCLS)=0 "_ercode
+	.	; Otherwise, vselectAccess will return:
+	.	;    0 = no access allowed
+	.	;    1 = unconditional access
+	.	;    2 = access based on GRANT RESTRICT qualifier
+	.	E  I vsql("SELRTS",alias)="selectRestrict" D
+	..		N symbl
+	..		S symbl="vsql("_$$NXTSYM^SQLM_")"
+	..		S $P(vsql("SELRTS",alias),"|",2)=symbl
+	..		S exe=exe+1,exe(exe)="S "_symbl_"=$$vselectAccess^Record"_alias_"(%UCLS) I "_symbl_"=0 "_ercode
+	..		S exe=exe+1,exe(exe)="S "_symbl_"="_symbl_"-1"	; Turn 1 to 0, 2 to 1
+	;
+	; SELECT with keys on single table, without order by or where - use main global
+	I frm'[",",oby="",$D(rng)<10,$$hasKeys(frm,sel,.fsn) S par("OPTIMIZE")=0
 	;
 	I $G(par("OPTIMIZE"))=0 S par("INDEX")=frm
 	I $G(par("INDEX"))'="" D EXTERNAL Q		; User supplied
@@ -103,7 +182,7 @@ SQLO(frm,sel,oby,all,vsql,rng,par,tok,fsn,vdd)	;;;SQL - V5.0 -  Optimize Databas
 	;
 	F fnum=1:1:$L(frm,",") D  Q:ER			; Check each file
 	.	;
-	.	S alias=$P(frm,",",fnum)
+ 	.	S alias=$P(frm,",",fnum)
 	.	S winner(alias)=$$OPTIMIZE(alias,.fsn,.index,plan) I ER Q
 	;
 JOIN	;
@@ -120,12 +199,12 @@ JOIN	;
 	; 2-Way Outer Joins Are not Supported
 	I lowcost="" S ER=1,RM=$$^MSG(8612) Q
 	;
-	I 'all S all=$P(index(winner(winner)),"|",6)
+	S all=$P(index(winner(winner)),"|",6)
 	;
 	F I=1:1:$L(plan(winner),",") D  Q:ER
 	.	;
 	.	S index=$P(plan(winner),",",I),alias=$P(index,".",1)
-	.	I I=1 S vsql("I")=alias
+ 	.	I I=1 S vsql("I")=alias
 	.	E  S vsql("I")=vsql("I")_","_alias
 	.	S vsql("I",alias)=index(index)
 	.	I index[".." D DYNDXS(alias)
@@ -141,7 +220,7 @@ FRMCOST(rng,index,whr,winner,fsn,tbl1,frm)	; Total join cost using tbl1
 	;
 	S index=winner(tbl1)
 	;
-	S dist=$P(index(index),"|",3)
+ 	S dist=$P(index(index),"|",3)
 	S keys=$P(fsn(tbl1),"|",3)
 	S plan(tbl1)=index
 	;
@@ -169,7 +248,7 @@ JOINCOST(tbl1,tbl2,pkeys,pdist,pcost,index,rng,fsn,join,retry)	; Return cost of 
 	;----------------------------------------------------------------------
 	;
 	N cost,i,jcost,jdist,jkeys,jindex,jprmry,record
-	;
+ 	;
 	S jprmry=tbl2_".*",record=index(jprmry)
 	S jkeys=$P(record,"|",2),jdist=$P(record,"|",3)
 	;
@@ -208,7 +287,7 @@ JOINCOST(tbl1,tbl2,pkeys,pdist,pcost,index,rng,fsn,join,retry)	; Return cost of 
 	.	S plan(tbl1)=$$ADDVAL(plan(tbl1),jindex)
 	;
 	I $E(pkeys,1,$L(jkeys))=jkeys D			; Common Structure
-	.	;
+   	.	;
 	.	I $G(join(tbl2))=tbl1,$$OUTER(tbl2,tbl1,.join,pkeys) Q
 	.	;
 	.	N ratio1,ratio2
@@ -225,7 +304,7 @@ JOINCOST(tbl1,tbl2,pkeys,pdist,pcost,index,rng,fsn,join,retry)	; Return cost of 
 	Q cost
 	;
 	;----------------------------------------------------------------------
-JIDXCOST(tbl1,tbl2,pkeys,jkeys,pdist,jdist)	; # IO's in tbl2 per record in tbl1 
+JIDXCOST(tbl1,tbl2,pkeys,jkeys,pdist,jdist) ; # IO's in tbl2 per record in tbl1
 	;----------------------------------------------------------------------
 	;
 	N ddref,keynum,ok,I,J
@@ -234,7 +313,7 @@ JIDXCOST(tbl1,tbl2,pkeys,jkeys,pdist,jdist)	; # IO's in tbl2 per record in tbl1
 	S keynum=$L(jkeys,",")
 	;
 	F I=1:1:keynum D  Q:'ok
-	.	;
+	.	Q:$P(jkeys,",",I)=""
 	.	S ddref=tbl2_"."_$P(jkeys,",",I)
 	.	I $D(rng(ddref,"=")) Q			; Constant
 	.	I '(","_$G(join(ddref))[(","_tbl1_".")) S ok=0
@@ -244,7 +323,7 @@ JIDXCOST(tbl1,tbl2,pkeys,jkeys,pdist,jdist)	; # IO's in tbl2 per record in tbl1
 	S keynum=$L(pkeys,","),ok=1
 	;
 	F J=1:1:keynum D  Q:'ok
-	.	;
+	.	Q:$P(jkeys,",",J)=""
 	.	S ddref=tbl1_"."_$P(jkeys,",",J)
 	.	I $D(rng(ddref,"=")) Q			; Constant
 	.	I '(","_$G(join(ddref))[(","_tbl2_".")) S ok=0
@@ -269,7 +348,7 @@ RETRY(frm,retry)	; See if tbl1 --> tbl3 --> tbl2 join can be done
 	.	S jkeys=$P(index(jindex),"|",2)
 	.	S jcost=$$IXCOST($P(index(jindex),"|",3))
 	.	;
-	.	S keynum=$L(jkeys,",")
+    	.	S keynum=$L(jkeys,",")
 	.	;
 	.	S ok=1
 	.	F J=1:1:keynum D  Q:'ok
@@ -293,11 +372,12 @@ OPTIMIZE(alias,fsn,index,plan)	; Find optimal access path for file
 	;
 	S ER=0
 	;
-	N file,alli,buf,cost,defined,dinam,dist,gvn,i,ixref,keylvl,keylvl
-	N keys,ixcost,lib,null,numkeys,dist,pkeys,sok,sort,vals,vptr,z,zddref
+	N dlevel,file,alli,buf,cost,defined,dinam,dist,gvn,i,ixref,keylvl,keylvl
+	N keys,ixcost,lib,numkeys,dist,pkeys,sok,sort,vals,vptr,z,zddref
 	;
-	S z=fsn(alias),gvn=$P(z,"|",2),pkeys=$P(z,"|",3),lib=$P(z,"|",11)
-	S file=alias
+	S z=fsn(alias),gvn=$P(z,"|",2),pkeys=$P(z,"|",3),lib="SYSDEV"
+	I $D(vAlias(alias)) S file=vAlias(alias)
+	E  S file=alias
 	;
 	I pkeys="" S index(alias_".*")=gvn_"|"_pkeys_"|1|1||1" Q alias_".*"
 	;
@@ -309,7 +389,7 @@ OPTIMIZE(alias,fsn,index,plan)	; Find optimal access path for file
 	F keylvl=1:1:numkeys I '$D(rng(zddref_$P(pkeys,",",keylvl),"=")) Q
 	E  S index(alias_".*")=gvn_"|"_pkeys_"|1|1||1" Q alias_".*"
 	;
-	S index="*",ixref=alias_"."_index,null=1
+	S index="*",ixref=alias_"."_index
 	;
 	set dist=$$dist(numkeys)
 	;
@@ -326,12 +406,12 @@ OPTIMIZE(alias,fsn,index,plan)	; Find optimal access path for file
 	.	S dinam=zddref_$P(pkeys,",",i)
 	.	D KEYCOST(dinam,.rng,.dist,i,vptr)
 	;
-	S ixcost=$$IXCOST(dist),alli=all
+ 	S ixcost=$$IXCOST(dist),alli=all
 	;
 	I dse'="" S alli=$$DISTINCT(pkeys)
 	I oby'="" S ixcost=$$ORDERBY(alias,pkeys,oby,ixcost)
 	;
-	S index(ixref)=gvn_"|"_pkeys_"|"_dist_"|"_ixcost_"|*|"_alli
+	S index(ixref)=gvn_"|"_pkeys_"|"_dist_"|"_ixcost_"|*|"_alli_"|||"_$G(dlevel)
 	;
 	I ixcost<mincost Q ixref
 	I oby="",'$D(rng),dse="" Q ixref
@@ -341,7 +421,7 @@ OPTIMIZE(alias,fsn,index,plan)	; Find optimal access path for file
 	S index=""
 	F  S index=$O(^DBTBL(lib,8,file,index)) Q:index=""  D  I mincost=0,plan=0 Q
 	.	;                                       ; DISTINCT can't use
-Z	.	I 'all,'^(index) Q  			; partial index file
+	.	I 'all,'^(index) Q  			; partial index file
 	.	S ixcost=$$INDEX(alias,file,.index,.rng,plan,vptr)
 	.	I ixcost<0 Q				; Don't consider
 	.	I ixcost<mincost S mincost=0
@@ -367,7 +447,7 @@ ACKEYS(file,index,fsn)	; Returns access keys list
 	.	I I>1 S gblexpr=gblexpr_","
 	.	;
 	.	S key=$P(gblkeys,",",I)
-	.	I key=+key!("""$"[$E(key))!(key="%TOKEN")!(key="sqlcur")!(key["vsql(") S gblexpr=gblexpr_key Q
+ 	.	I key=+key!("""$"[$E(key))!(key="%TOKEN")!(key="sqlcur")!(key["vsql(") S gblexpr=gblexpr_key Q
 	.	I $L(gblkeys,"""")#2=0 S gblexpr=gblexpr_key Q
 	.	;
 	.	S key=zddref_key
@@ -384,7 +464,7 @@ LODINDX	;private; Load an Index, called by INDEX
 	;
 	set z=$G(^DBTBL(lib,8,file,index))
 	;
-	set null=$P(z,"|",1),gvn=$P(z,"|",2),keys=$P(z,"|",3),sok=$P(z,"|",11)
+	set gvn=$P(z,"|",2),keys=$P(z,"|",3),sok=$P(z,"|",11)
 	set qry=$P(z,"|",7,8)
 	;
 	;
@@ -422,8 +502,6 @@ indxqry(qry,file,whr,rng,dist)	;private; There's a query on the index, see if it
 	;
 	set ER=0
 	;
-	if 'null set dist="" quit
-	;
 	set qry=$P(qry,"|",1)_$S($P(qry,"|",2)="":"",1:" AND "_$P(qry,"|",2))
 	;
 	set qry=$$WHERE^SQLCONV(qry,file) if ER set dist="" quit
@@ -443,7 +521,6 @@ indxqry(qry,file,whr,rng,dist)	;private; There's a query on the index, see if it
 	; Made it !!!  Cut this index in half
 	;
 	for i=1:1:$L(dist,"*") set $P(dist,"*",i)=$P(dist,"*",i)*.5
-	set null=1					; Has to be true
 	Q
 	;
 	;----------------------------------------------------------------------
@@ -461,7 +538,7 @@ KEYCOST(dinam,rng,dist,keylvl,vptr,vpoke)	;	Return the cost of this key
 	.	if rng(dinam,oprelat)=vptr set vpoke=keylvl quit
 	.	;
 	.	if oprelat="=" set cntkeys=$S(keylvl=1:1,1:$P(dist,"*",keylvl-1)) quit
-	.	;
+ 	.	;
 	.	if oprelat="J" quit
 	.	if oprelat="E" quit
 	.	;
@@ -497,6 +574,7 @@ PRUNE(dist,numkeys,keylvl)	; Prune key distribution
 	;
 	;----------------------------------------------------------------------
 IXCOST(dist)	; Return Current Index Cost
+
 	;----------------------------------------------------------------------
 	;
 	I dist'["*" Q dist
@@ -510,7 +588,7 @@ IXCOST(dist)	; Return Current Index Cost
 INDEX(alias,file,index,rng,plan,vptr)	; Load the index definitions for file
 	;----------------------------------------------------------------------
 	;
-	N alli,consider,dist,gvn,i,ixcost,ixref,key,keys,null,vpoke
+	N alli,consider,dist,dlevel,gvn,i,ixcost,ixref,key,keys,vpoke
 	;
 	S ixref=alias_"."_index
 	;
@@ -522,16 +600,6 @@ INDEX(alias,file,index,rng,plan,vptr)	; Load the index definitions for file
 	.	;
 	.	set key=$P(keys,",",keylvl),dinam=alias_"."_key
 	.	;
-	.	I 'null Q:consider<0  D  Q:consider<0
-	..		;
-	..		I $D(rng(dinam,"=")) S consider=$S($$VALUE(.dinam,"=")="""""":-2,1:1) Q
-	..		I $D(rng(dinam,"'=")) S consider=$S($$VALUE(.dinam,"'=")="""""":2,1:-2) Q
-	..		I $D(rng(dinam,">")) S consider=1 Q
-	..		I $D(rng(dinam,"'<")) S consider=1 Q
-	..		I $D(rng(dinam,"I")) S consider=1 Q
-	..		I $D(rng(dinam,"[")) S consider=1 Q
-	..		S consider=$S($$CONTAIN(pkeys,key):1,1:-3) Q
-	.	;
 	.	D KEYCOST(dinam,.rng,.dist,.keylvl,vptr,.vpoke)
 	.	if vpoke set $P(dist,"*",vpoke)=$S(vpoke=1:1,1:$P(dist,"*",vpoke-1))
 	;
@@ -542,32 +610,37 @@ INDEX(alias,file,index,rng,plan,vptr)	; Load the index definitions for file
 	I dse'="" S alli=$$DISTINCT(keys)
 	I oby'="" S ixcost=$$ORDERBY(file,keys,oby,ixcost)
 	;
-	; Null means that it contains pointers to all records, including null.
-	; 
-	S index(ixref)=gvn_"|"_keys_"|"_dist_"|"_ixcost_"|"_consider_"|"_alli_"|"_sok_"|"_null
+	S index(ixref)=gvn_"|"_keys_"|"_dist_"|"_ixcost_"|"_consider_"|"_alli_"|"_sok_"||"_$G(dlevel)
 	;
 	I ixcost'<lowcost Q ixcost
 	;
 	I consider<0 Q consider
-	I consider="",'null Q -2			; No matching range
 	;
 	S lowcost=ixcost,winner=ixref
-	Q ixcost
+ 	Q ixcost
 	;
 	;----------------------------------------------------------------------
 DISTINCT(keys)	; Check keys for distinct optimization
 	;----------------------------------------------------------------------
 	;
-	N i
-	F i=1:1:$L(dse,",") D  Q:'consider
+	N i,nonkey
+	S nonkey=0
+	;02/10/09 pc.  Always choose optimal index when DISTINCT even if there is data in the
+	;select list that is stored at a lower key level in the database.
+	S consider=""
+	F i=1:1:$L(dse,",") D  Q:consider=0
 	.	;
 	.	S exprcol=$P(dse,",",i)
 	.	I $P(exprcol,".",1)'=alias S consider=0 Q
+	.	I 'all,'$$CONTAIN(keys,$P(exprcol,".",2)) S nonkey=1 Q	; If DISTINCT, don't worry about data at lower level.
 	.	S consider=$$CONTAIN(keys,$P(exprcol,".",2))
 	;
 	I 'consider S ixcost=ixcost*2 Q 0
 	;
-	F i=$L(keys,","):-1:1 Q:$$CONTAIN(dse,alias_"."_$P(keys,",",i))
+	; If there is data within dse that resides at the bottom key level (like DEP.BAL for example)
+	; then we need to build the collation code using all keys into the index.
+	I $G(nonkey) S i=$L(keys,",")
+	E  F i=$L(keys,","):-1:1 Q:$$CONTAIN(dse,alias_"."_$P(keys,",",i))
 	I i<$L(keys,",") D
 	. 	;
 	.	S gvn=$P(gvn,(","_$P(keys,",",i+1)),1)
@@ -577,7 +650,7 @@ DISTINCT(keys)	; Check keys for distinct optimization
 	S alli=1 F i=1:1:$L(keys,",") D  Q:'alli
 	.	;
 	.	I $P(dist,"*",i)=1 Q			; 1 value
-	.	I $$CONTAIN(dse,alias_"."_$P(keys,",",i)) Q
+	.	I $$CONTAIN(dse,alias_"."_$P(keys,",",i)) S:nonkey dlevel=i Q  ; save distint collation level
 	.	S alli=0				; Not unique
 	;
 	I alli=0 S ixcost=ixcost*1.5
@@ -613,8 +686,7 @@ DISTINI	; Initialize SELECT expression for distinct
 	.	S z=alias_"."_$P(keys,",",j)
 	.	I '$D(rng(z,"=")),'$$CONTAIN(sel,z) S all=0
 	;
-	I all Q
-	;
+	I 'distinct Q
 	S dse=sel,i=0
 	;
 	F  S i=$O(whr(i)) Q:i=""  D
@@ -631,7 +703,7 @@ ORDERBY(file,keys,oby,cost)	; Check orderby for access optimization
 	;
 	S zdinam=file_"."
 	;
-	F I=1:1:$L(oby,",") D
+ 	F I=1:1:$L(oby,",") D
 	.	;
 	.	S dinam=$P($P(oby,",",I)," ",1)
 	.	I $D(rng(dinam,"=")) Q			; Only one entry
@@ -640,7 +712,7 @@ ORDERBY(file,keys,oby,cost)	; Check orderby for access optimization
 	.	I $D(rng(key,"=")) S I=I-1 Q		; Only one entry
 	.	;
 	.	I dinam=key Q
-	.	S cost=cost*2+1				; Add sort Penalty
+ 	.	S cost=cost*2+1				; Add sort Penalty
 	.	S I=$L(oby,",")+1			; STOP
 	;
 	Q cost
@@ -662,7 +734,7 @@ ISJOIN(tbl1,tbl2)	; Is thers a join defined between tbl1 and tbl2
 	;
 	S ddref=tbl2_".",zddref=ddref_$$BYTECHAR^SQLUTL(255)
 	F  S ddref=$O(join(ddref)) Q:ddref=""!(ddref]]zddref)  I (","_join(ddref))[(","_tbl1_".") Q
-	Q $T
+ 	Q $T
 	;
 	;----------------------------------------------------------------------
 OUTER(tbl1,tbl2,join,jkeys)	; Remove outer join if possible
@@ -694,7 +766,7 @@ OUTER(tbl1,tbl2,join,jkeys)	; Remove outer join if possible
 	;
 	I $E($O(rng(tbl1)),1,$L(tbl1))'=tbl1 S join("*",tbl1)=tbl2 K join(tbl1)
 	Q '$T
-	;
+ 	;
 	;----------------------------------------------------------------------
 VALUE(ddref,oprelat)	; Return value from the whr array
 	;----------------------------------------------------------------------
@@ -752,7 +824,7 @@ DYNDXS(file)	; Generate code to build dynamic indices
 	.	S ikeys=ikeys_$S(ikeys="":"",1:",")_$P(ddref,".",2)
 	.	D LOAD^SQLM
 	.	S v0="vsql("_$$NXTSYM^SQLM_")",vsub(ddref)=v0
-	.	S z="S "_v0_"="_NS_" I "_v0_"="""" S "_v0_"=$$BYTECHAR^SQLUTL(254)"
+	.	S z="S "_v0_"="_NS_" I "_v0_"="""" S "_v0_"="_nullsymbl
 	.	S gbref=gbref_","_v0
 	.	S exe=exe+1,exe(exe)=z
 	;
@@ -782,8 +854,8 @@ DYNDXS(file)	; Generate code to build dynamic indices
 	.	I z[goto S exe(bexe)=$P(exe(bexe),goto,1)_"S vsql="_exe
 	Q
 	;
-	;-------------------------------------------------------------------- 
-ADDVAL(str,val)	; Add Value to String 
+        ;--------------------------------------------------------------------
+ADDVAL(str,val) ; Add Value to String
 	;--------------------------------------------------------------------
 	;
 	I $G(str)=""!($G(val)="") Q $G(str)_$G(val)
@@ -800,12 +872,12 @@ EXTERNAL	; User supplied index optimization externally
 	S all=1,plan=0
 	;
 	S indexes=$g(par("INDEX"))
-	;
+ 	;
 	F i=1:1:$L(frm,",") I ","_indexes'[(","_$P(frm,",",i)_".") S indexes=indexes_","_$P(frm,",",i)
 	;
 	F i=1:1:$L(indexes,",") D  Q:ER
 	.	;
-	.	S ixref=$P(indexes,",",i),file=$P(ixref,".",1)
+   	.	S ixref=$P(indexes,",",i),file=$P(ixref,".",1)
 	.	I '$D(fsn(file)) D fsn^SQLDD(.fsn,file) Q:ER
 	.	S index=$P(ixref,".",2)
 	.	I index="" S index="*",ixref=file_".*"
@@ -821,9 +893,9 @@ EXTERNAL	; User supplied index optimization externally
 	I 'ER D JOIN
 	quit
 	;
-	;----------------------------------------------------------------------
+ 	;----------------------------------------------------------------------
 dist(numkeys)	; Return normal distributionzzz
-	;----------------------------------------------------------------------
+ 	;----------------------------------------------------------------------
 	;
 	new return
 	set return="10*100*1000*10000*100000*1000000"
@@ -831,3 +903,14 @@ dist(numkeys)	; Return normal distributionzzz
 	if numkeys=1 set return=$P(return,"*",$L(return,"*"))
 	else  set return=$P(return,"*",1,numkeys-1)_"*"_$P(return,"*",$L(return,"*"))
 	quit return
+	;
+	;----------------------------------------------------------------------
+hasKeys(tbl,sel,fsn)	; Are all keys in select?
+	;----------------------------------------------------------------------
+	new i,keys,ret
+	if (sel="*") quit 1
+	set ret=1
+	set keys=$P(fsn(tbl),"|",3)
+	set sel=","_sel_","
+	for i=1:1:$L(keys,",") if sel'[(","_$P(keys,",",i)_",") set ret=0 quit
+	quit ret

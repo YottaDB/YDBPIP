@@ -33,19 +33,19 @@ DBSTEST9	;Private;Test routine for PROFILE/SQL project
 	D ^UTLREAD I VFMQ="Q" Q
 	;
 	S par="BUFFER/TYP=N,CODE/TYP=L,DIRECTORY,EXTENSION,FORMAT/TBL=DBTBL6E,"
-	S par=par_"JOIN/TYP=L,OUTPUT,PROMPT,MATCH/TYP=N,PLAN/TYP=L," 
-	S par=par_"STATISTICS/TYP=L,OPTIMIZE/TYP=L,STATUS,DQMODE/TYP=L" 
+        S par=par_"JOIN/TYP=L,OUTPUT,PROMPT,MATCH/TYP=N,PLAN/TYP=L,"
+        S par=par_"STATISTICS/TYP=L,OPTIMIZE/TYP=L,STATUS,DQMODE/TYP=L"
 	;
 	S par("BUFFER")=20
-	S par("DIRECTORY")=$$HOME^%TRNLNM
+ 	S par("DIRECTORY")=$$HOME^%TRNLNM
 	S par("DQMODE")=z1
-	S par("EXTENSION")="SQL"
+ 	S par("EXTENSION")="SQL"
 	S par("FORMAT")=z5
 	S par("CODE")=z2
 	S par("JOIN")=z4
 	S par("MATCH")=z8
 	S par("OUTPUT")=IO
-	S par("PLAN")=z3  
+ 	S par("PLAN")=z3  
 	S par("STATISTICS")=0
 	S par("OPTIMIZE")=1
 	S par("STATUS")="OUTPUT,FORMAT,JOIN,PLAN"
@@ -57,10 +57,10 @@ DBSTEST9	;Private;Test routine for PROFILE/SQL project
 	S depcid=$O(^XCLSACN("D",""))			; First deposit account
 	S cid=depcid+200				; First account + 200
 	S cr=$C(13,10)					; CR.LF
-	S par("BUFFER")=20				; Fetch buffer size
-	S par("EXTENSION")="SQL" 
-	S par("OPTIMIZE")=1 
-	S par("STATUS")="CODE,OUTPUT,FORMAT,JOIN,PLAN" 
+ 	S par("BUFFER")=20				; Fetch buffer size
+        S par("EXTENSION")="SQL"
+        S par("OPTIMIZE")=1
+        S par("STATUS")="CODE,OUTPUT,FORMAT,JOIN,PLAN"
 	;
 	S TLO=$I,%UID=1,TJD=^CUVAR(2),%CRCD="USD"
 	;
@@ -93,7 +93,7 @@ REPEAT	;
 	..			D EXEC
 	.	C IOINPUT
 	Q
-READ	
+READ
 	K EXEC
 	S QUIT=0
 	S I=1,COUNT=0
@@ -144,24 +144,24 @@ RUN	;
 	I $G(ER) U IO W !,RM,!				; Display error message
 	I IO=$P,$ZMODE'="BATCH" U IO S GETOUT=$$^DBSMBAR(161)
 	Q
-	;---------------------------------------------------------------------- 
-RUNP(rec)	; Run an RMS file or the current Buffer 
-	;---------------------------------------------------------------------- 
-	; 
-	S ER=0 
-	; 
-	N del,dlcr,dlsp,expr,exprnum 
-	S dlcr=$C(13,10),dlsp=" " 
-	S del=";"_dlcr 
-	; 
+        ;----------------------------------------------------------------------
+RUNP(rec)      ; Run an RMS file or the current Buffer
+        ;----------------------------------------------------------------------
+        ;
+        S ER=0
+        ;
+        N del,dlcr,dlsp,expr,exprnum
+        S dlcr=$C(13,10),dlsp=" "
+        S del=";"_dlcr
+        ;
 	I $G(%TOKEN)="" S %TOKEN=$P($G(%LOGID),"|",6) I %TOKEN="" S %TOKEN=$J
-	; 
-	F exprnum=1:1:$L(rec,del) D 
-	.       ; 
-	.       N RM,ER,sqlcod,sqldta,sqlcnt 
-	.       ; 
-	.       S expr=$TR($P($G(rec),del,exprnum),dlcr,dlsp) I expr="" Q 
-	.       D RUNPROC(expr,.par,.sqlcod,.sqldta,.sqlcnt) 
+        ;
+        F exprnum=1:1:$L(rec,del) D
+        .       ;
+        .       N RM,ER,sqlcod,sqldta,sqlcnt
+        .       ;
+        .       S expr=$TR($P($G(rec),del,exprnum),dlcr,dlsp) I expr="" Q
+        .       D RUNPROC(expr,.par,.sqlcod,.sqldta,.sqlcnt)
 	I IO=$P,$ZMODE'="BATCH" W $$MSG^%TRMVT("",0,1)
 	Q
 	;----------------------------------------------------------------------
@@ -188,6 +188,7 @@ RUNPROC(expr,par,sqlcod,sqldta,sqlcnt)	; Run Interactive SQL Buffer
 	S ER=1,RM=$$^MSG(8564,z)
 	Q
 	;
+
 	;----------------------------------------------------------------------
 SELECT(expr,par,tok,sqlcnt)	; Run Interactive SQL
 	;----------------------------------------------------------------------
@@ -199,7 +200,7 @@ SELECT(expr,par,tok,sqlcnt)	; Run Interactive SQL
 	;
 	I $G(par("MASK"))'="" D Z6PP^SQLI($G(par("MASK")))
 	;
-	S stats=$G(par("STATISTICS")),noout=0
+ 	S stats=$G(par("STATISTICS")),noout=0
 	I stats N tcpu,icpu,tproc,iproc,tmdb,imdb,time D INISTAT^SQLI
 	;
 	N SELECT,FROM,WHERE,ORDER,GROUP
@@ -217,9 +218,9 @@ SELECT(expr,par,tok,sqlcnt)	; Run Interactive SQL
 	S qwt=$P(fmtr,"|",2),del=$P(fmtr,"|",3),msk=$P(fmtr,"|",7,11)
 	;
 	I msk'="" F I=1:1:5 D
-	.	;
+ 	.	;
 	.	S z=$P(msk,"|",I)
-	.	I z="*" S z=$G(@$P("%MSKD,%MSKL,%MSKC,%MSKE,%MSKN",",",I)) I z="" S z=$P("MM/DD/YY,NY,12:60 AM,.",",",I)
+   	.	I z="*" S z=$G(@$P("%MSKD,%MSKL,%MSKC,%MSKE,%MSKN",",",I)) I z="" S z=$P("MM/DD/YY,NY,12:60 AM,.",",",I)
 	.	S $P(msk,"|",I)=z
 	;
 	I del'="" S del=$C(del)
@@ -269,7 +270,7 @@ SELECT(expr,par,tok,sqlcnt)	; Run Interactive SQL
 	D CLOSE^SQLM(" ")			; Remove cursor context
 	I stats U IO D ENDSTAT^SQLI
 	;
-	D OPEN^EDIT 
+        D OPEN^EDIT
 	;
 	W $$LOCK^%TRMVT
 	;

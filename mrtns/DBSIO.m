@@ -4,7 +4,7 @@ DBSIO	;; -  - V4.4 -
 	;     DESC:  General purpose device selection utility to be used on
 	;            the last line of the screen.
 	;
-	; I18N=QUIT: Exclude from I18N standards 
+        ; I18N=QUIT: Exclude from I18N standards
 	; MODIFICATIONS:
 	; RLC	12/8/92
 	;	Modified to translate Device input to uppercase.

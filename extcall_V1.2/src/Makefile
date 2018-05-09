@@ -43,7 +43,7 @@ OBJECTS=\
 	xor.o\
 	scamd5.o\
 	md5c.o\
-	${BUILD_DIR}/sca_gtm/shlib/shlib.o
+	../shlib/shlib.o
 
 include ./rules.mk
 include ./slibrule.mk
@@ -57,84 +57,84 @@ all: ${OBJECTS} ${SHARED_LIBRARY}
 #DEBUG = -DDEBUG
 
 lnx.o:\
-	${BUILD_DIR}/sca_gtm/extcall/extcall.h\
-	${BUILD_DIR}/include/scatype.h
+	extcall.h\
+	scatype.h
 
 logsca.o:\
-	${BUILD_DIR}/sca_gtm/extcall/extcall.h\
-	${BUILD_DIR}/include/scatype.h
+	extcall.h\
+	scatype.h
 
 xor.o:\
-	${BUILD_DIR}/sca_gtm/extcall/extcall.h\
-	${BUILD_DIR}/include/scatype.h
+	extcall.h\
+	scatype.h
 
 rtb.o:\
-	${BUILD_DIR}/sca_gtm/extcall/extcall.h\
-	${BUILD_DIR}/include/scatype.h
+	extcall.h\
+	scatype.h
 
 rtbar.o:\
-	${BUILD_DIR}/sca_gtm/extcall/extcall.h\
-	${BUILD_DIR}/include/scatype.h
+	extcall.h\
+	scatype.h
 
 unpack.o:\
-	${BUILD_DIR}/sca_gtm/extcall/extcall.h\
-	${BUILD_DIR}/include/scatype.h
+	extcall.h\
+	scatype.h
 
 unpack2.o:\
-	${BUILD_DIR}/sca_gtm/extcall/extcall.h\
-	${BUILD_DIR}/include/scatype.h
+	extcall.h\
+	scatype.h
 
 ebc2asc.o:\
-	${BUILD_DIR}/sca_gtm/extcall/extcall.h\
-	${BUILD_DIR}/include/scatype.h
+	extcall.h\
+	scatype.h
 
 atmutils.o:\
         extcall.h\
-        ${BUILD_DIR}/include/scatype.h
+        scatype.h
  
 elfhash.o:\
-	${BUILD_DIR}/sca_gtm/extcall/extcall.h\
-	${BUILD_DIR}/include/scatype.h
+	extcall.h\
+	scatype.h
 
 expsca.o:\
-	${BUILD_DIR}/sca_gtm/extcall/extcall.h\
-	${BUILD_DIR}/include/scatype.h
+	extcall.h\
+	scatype.h
 
 readport.o:\
-	${BUILD_DIR}/sca_gtm/extcall/extcall.h\
-	${BUILD_DIR}/include/scatype.h
+	extcall.h\
+	scatype.h
 
 sysutils.o:\
-	${BUILD_DIR}/sca_gtm/extcall/extcall.h\
-	${BUILD_DIR}/include/scatype.h
+	extcall.h\
+	scatype.h
 
 devutils.o:\
-	${BUILD_DIR}/sca_gtm/extcall/extcall.h\
-	${BUILD_DIR}/include/scatype.h
+	extcall.h\
+	scatype.h
 
 pidutils.o:\
-	${BUILD_DIR}/sca_gtm/extcall/extcall.h\
-	${BUILD_DIR}/include/scatype.h
+	extcall.h\
+	scatype.h
 
 utils.o:\
-	${BUILD_DIR}/sca_gtm/extcall/extcall.h\
-	${BUILD_DIR}/include/scatype.h
+	extcall.h\
+	scatype.h
 
 remote.o:\
-	${BUILD_DIR}/sca_gtm/extcall/extcall.h\
-	${BUILD_DIR}/include/scatype.h
+	extcall.h\
+	scatype.h
 
 string.o:\
-	${BUILD_DIR}/sca_gtm/extcall/extcall.h\
-	${BUILD_DIR}/include/scatype.h
+	extcall.h\
+	scatype.h
 
 scamd5.o:\
-	${BUILD_DIR}/sca_gtm/extcall/scamd5.h\
-	${BUILD_DIR}/sca_gtm/extcall/md5.h\
-	${BUILD_DIR}/include/scatype.h
+	scamd5.h\
+	md5.h\
+	scatype.h
  
 md5c.o:\
-	${BUILD_DIR}/sca_gtm/extcall/md5.h\
-	${BUILD_DIR}/include/scatype.h
+	md5.h\
+	scatype.h
  
 # DO NOT DELETE THIS LINE

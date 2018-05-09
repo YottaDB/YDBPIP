@@ -2,7 +2,7 @@ DBSTSINP	;; -  - V4.3 -
 	;;Copyright(c)1994 Sanchez Computer Associates, Inc.  All Rights Reserved - 10/17/94 11:31:02 - XUS
 	;     ORIG:  FSANCHEZ - 12 OCT 1990
 	;     DESC:  
-	; I18N=QUIT: Exculded from I18N standards. 
+        ; I18N=QUIT: Exculded from I18N standards.
 	;
 	;---- Revision History ------------------------------------------------
 	; 02/14/06 - RussellDS - CR19065

@@ -23,8 +23,11 @@ These notices must be retained in any copies of any part of this
 documentation and/or software.
 */
 
-#include <scatype.h>
-#include <md5.h>
+#include "scatype.h"
+#include "md5.h"
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 
 /* Constants for MD5Transform routine. */
 #define S11 7
@@ -61,7 +64,7 @@ static BYTE PADDING[64] = {
 #define I(x, y, z) ((y) ^ ((x) | (~z)))
 
 /* ROTATE_LEFT rotates x left n bits. */
-#define ROTATE_LEFT(x, n) (((x) << (n)) | ((x) >> (32-(n))))
+#define ROTATE_LEFT(x, n) (((x) << (n)) | (((uint32_t)x) >> (32-(n))))
 
 /* 
 	FF, GG, HH, and II transformations for rounds 1, 2, 3, and 4.

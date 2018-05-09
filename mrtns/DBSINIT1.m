@@ -12,7 +12,7 @@ DBSINIT1	;;DBS - U - V4.4 - INIT DQ CONTROL TABLES ( PART II)
 	;
 	; PART 2 OF DBSINIT
 	;
-	; I18N=QUIT: Exclude from I18N standards 
+        ; I18N=QUIT: Exclude from I18N standards
 	;---- Revision History -------------------------------------------------
 	;
 	; 03/27/97 - Chiang - 24316
@@ -97,6 +97,7 @@ CNTRY	;
 	. S ^DBCTL("SYS","*RFMT","CZ","D",I)=@I
 	;
 	;-----------------------------------------------------------------------
+
 	;
 	; ---------- Set up format table for US
 	;

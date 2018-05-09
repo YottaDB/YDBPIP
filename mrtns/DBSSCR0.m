@@ -2,9 +2,13 @@ DBSSCR0	;; -  - V4.4 - SCREEN COMPILER
 	;;Copyright(c)1999 Sanchez Computer Associates, Inc.  All Rights Reserved - 07/29/99 12:00:04 - CHIANG
 	;     ORIG:  CHIANG - 15 AUG 1991
 	;     DESC:  
-	; I18N=QUIT: Exculded from I18N standards. 
+        ; I18N=QUIT: Exculded from I18N standards.
 	;
 	;---------- Revision History -------------------------------------------
+	; 08/31/2008 - RussellDS - CR30801
+	;	Removed call to ^MSG.  Causing problems with bootstrap.  Will
+	;	eventually provide framework message handler.
+	;
 	; 11/29/05 - RussellDS - CR18065
 	;	     Removed reference to DBSPARS3, which has been obsoleted.
 	;	     Replaced with call to DBS2PSL0.
@@ -36,7 +40,7 @@ DBSSCR0	;; -  - V4.4 - SCREEN COMPILER
 	S PGM=$TR(PGM,"*","S") D:PGM="" GTPGM^DBSDS S $P(^DBTBL(%LIBS,2,SID,0),"|",2)=PGM
 	;
 	; - Compile Run-Time Program - 
-	W !!,SID,?11," - ",$$^MSG("5193")," - ",PGM," "
+	W !!,SID,?11," - Compile Run-Time Program - ",PGM," "
 	W $$TIM^%ZM,"  (",$G(^CUVAR("%VN")),")",!	; *** 07/29/99
 	;
 	S %LOOP=$P(STS,"|",7)

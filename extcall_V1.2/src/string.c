@@ -21,7 +21,7 @@
 
 #include <string.h>
 #include <errno.h>
-#include <scatype.h>
+#include "scatype.h"
 
 #define	MAX_BYTE		256
 #define MAX_MSG_HEADER		5

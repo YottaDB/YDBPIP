@@ -203,6 +203,21 @@
 	;
 	;
 	;---- Revision History ------------------------------------------------
+	; 2008-10-21, Frans S.C. Witte, CR 36257
+	;	Retrofit from: 01/26/05 - Erik Scheetz - CR 14166
+	;	Modified PRCNAM section so that this function returns a null.
+	;	In UNIX, there is no name associated with a process.  The C 
+	;	program returns the same null value.  The change was made
+	;	due to the fact that the call to the C progrm is unnessary
+	;	and was causing an error in some Linux environments.
+	;
+	; 09/16/08 - Manoj Thoniyil - CR35711
+	;	     Modified RTCHR to remove the trailing characters without
+	;	     making the external call.
+	;
+	; 03/17/08 - Pete Chenard - CR31761
+	;	     Modified USERNAM to return a default username if the username
+	;	     returned from the system call is null.
 	;
 	; 05/22/05 - Erik Scheetz - 16067
 	;	     Added INTRPT section to issue an M interrupt by calling
@@ -2046,10 +2061,12 @@ PID(PID)	;Public;Next PID in the OS pid list
 	Q "$$PID^%ZFUNC"
 	;
 	;----------------------------------------------------------------------
-PRCNAM(PID)	;Public;Name of the current process
+PRCNAM(PID)	;Public Name of the current process
 	;----------------------------------------------------------------------
-	;
 	; Provide name of current process.  
+	;
+	; This function returns an empty string since UNIX and Linux do not
+	; support Process Names.
 	;
 	; KEYWORDS:	System services
 	;	
@@ -2060,15 +2077,9 @@ PRCNAM(PID)	;Public;Name of the current process
 	;	. $$%PRCNAM^%ZFUNC - Compiled code for PRCNAM
 	;
 	; EXAMPLE:
-	;	S X=$$PRCNAM^%ZFUNC(12345) => X="/gtm_dist/mumps"
+	;	S X=$$PRCNAM^%ZFUNC(12345) => X=""
 	;
-	N RC,RESULT,I
-	S RC=1
-	S RESULT=$J("",80)
-	I '$D(PID) S PID=$J
-	D &extcall.getprcnam(.PID,.RESULT,.RC)
-	I RC=0 S RESULT=RC
-	Q RESULT
+	Q ""
 	;
 	;----------------------------------------------------------------------
 %PRCNAM(VARIABLE)	;System;Return compilable code
@@ -2419,12 +2430,12 @@ RTCHR(INPUT,CHR)        ;Public; Remove trailing CH's from a string
         ;               => X="abc"_$c(0)_"XYZ"
         ;
         ;
-	N CDATA,ERRNO
-	S ERRNO=1
-	S CDATA=$J("",32000)
-	D &extcall.rtchr(INPUT,CHR,.CDATA,.ERRNO)
-	;
-	Q CDATA
+	I INPUT="" Q INPUT
+	N I
+	F I=$L(INPUT):-1:0  Q:$E(INPUT,I)'=CHR
+	I I=0 Q ""
+	Q $E(INPUT,1,I)
+
 	;
 	;----------------------------------------------------------------------
 %RTCHR(VAR1,VAR2)	;System;Return remove trailing CH's compilable code
@@ -2966,6 +2977,7 @@ USERNAM()	;Public;Username of the current process
 	S RC=1
 	S RESULT=$J("",80)
 	D &extcall.getusername(.RESULT,.RC)
+	I RESULT="" S RESULT="UNKNOWN"
 	Q RESULT
 	;
 	I RC=0 S RESULT=RC

@@ -68,7 +68,7 @@ DBSQRY	;PUBLIC;DATA-QWIK Query Parser
 	;	     Fixed bug relating to queries that use <<>> syntax.
 	;---------------------------------------------------------------------
 	;
-	; I18N=QUIT: Exculded from I18N standards. 
+        ; I18N=QUIT: Exculded from I18N standards.
 	;
 	N INPUTX
 	I $G(NI) K Q(NI)			; *** BC - 05/26/94
@@ -76,11 +76,11 @@ DBSQRY	;PUBLIC;DATA-QWIK Query Parser
 A	;					; <UNDEF> error
 	I X?." " S X="" Q			; Change blanks to NULL
 	I X?." "1"&<<".E Q
-	I "*"[X!($$UPPER^UCGMR(X)="ALL") Q	;rhj $TR replaced
+ 	I "*"[X!($$UPPER^UCGMR(X)="ALL") Q	;rhj $TR replaced
 	;
 	I X["*" D  I $G(ER) Q			; 05/03/93 BC
 	.	I X["<<*" Q
-	.       I ($P(X,"*",1)'[""""!($P(X,"*",2,99)'["""")) S ER=1,RM=$$^MSG(1475) Q    ; XUS 07/26/94 
+        .       I ($P(X,"*",1)'[""""!($P(X,"*",2,99)'["""")) S ER=1,RM=$$^MSG(1475) Q    ; XUS 07/26/94
 	S:'$D(NI) NI=$O(Q(""),-1)+1
 	;
 	N WRD,I,D,addexpr,paran,litptr,lstypobj,object,qryseq,typobj,wrdptr,z
@@ -164,8 +164,8 @@ ADDFRAG(typobj,val)	; Add section to parse string
 	..		D ERROR() Q
 	.	;
 	.	I $E(val)="'" S D(1)="'",val=$E(val,2)	; '<  '>  '=
-	.       ; Expression is before relational operator 
-	.       I object=5 D ERROR($$^MSG(8033)) Q 
+        .       ; Expression is before relational operator
+        .       I object=5 D ERROR($$^MSG(8033)) Q
 	.	S D(0)=val,object=5,lstypobj=0
 	.	I qryseq>1,D(6)="" S D(6)=$P(Q(NI,qryseq-1),"|",6)
 	.	I val="?" S D(5)=$$PARSE(.X,.wrdptr),lstypobj=5	; ?Pattern
@@ -323,31 +323,31 @@ PARSE(STR,ptr)	; Get the next word part
 	;
 	S savptr=ptr
 	F ptr=ptr:1:Y S z=$E(STR,ptr) I "%?+-=[],/\!&*#()<>'"[z,$$KEYWRD Q
-	I  I savptr<ptr S ptr=ptr-1
+ 	I  I savptr<ptr S ptr=ptr-1
 	Q $E(STR,savptr,ptr)
 	;
-KEYWRD()	; Look for special syntaxes or mask 
-	; 
-	I ptr=$L(STR),z'=")" Q 0 
-	I z="#",$G(D(6))="T" Q 0        ; *** BC - Skip invalid # or / operation 
-	I z="/",$G(D(6))="T" Q 0        ; *** 
-	I z="[",$E(STR,ptr+1,$L(STR))["]" S ptr=$F(STR,"]",ptr) Q 0 
-	I z="%",$E(STR,ptr+1)?1A Q 0                    ; %VAR 
-	I $G(vqrymsk)[z Q 0 
-	I z'="<" Q 1 
-	I $E(STR,ptr+1)'="<"!($E(STR,ptr+2)="<") Q 1 
-	; *** DSR patch - replace next line with structure DO 
-	; *** to account for variable insertion in << >> prompt syntax 
-	;I savptr=ptr S ptr=$F(STR,">>",ptr) S:'ptr ptr=savptr 
-	I savptr=ptr D 
-	.       N done,xstr 
-	.       S done=0 
-	.       ; Get next >> until equal number of << and >> 
-	.       F  s ptr=$F(STR,">>",ptr)  Q:'ptr  D  Q:done 
-	..              S xstr=$E(STR,savptr,ptr-1) 
-	..              I $L(xstr,"<<")=$L(xstr,">>") S done=1 
-	.       I 'ptr s ptr=savptr 
-	Q 1 
+KEYWRD()        ; Look for special syntaxes or mask
+        ;
+        I ptr=$L(STR),z'=")" Q 0
+        I z="#",$G(D(6))="T" Q 0        ; *** BC - Skip invalid # or / operation
+        I z="/",$G(D(6))="T" Q 0        ; ***
+        I z="[",$E(STR,ptr+1,$L(STR))["]" S ptr=$F(STR,"]",ptr) Q 0
+        I z="%",$E(STR,ptr+1)?1A Q 0                    ; %VAR
+        I $G(vqrymsk)[z Q 0
+        I z'="<" Q 1
+        I $E(STR,ptr+1)'="<"!($E(STR,ptr+2)="<") Q 1
+        ; *** DSR patch - replace next line with structure DO
+        ; *** to account for variable insertion in << >> prompt syntax
+        ;I savptr=ptr S ptr=$F(STR,">>",ptr) S:'ptr ptr=savptr
+        I savptr=ptr D
+        .       N done,xstr
+        .       S done=0
+        .       ; Get next >> until equal number of << and >>
+        .       F  s ptr=$F(STR,">>",ptr)  Q:'ptr  D  Q:done
+        ..              S xstr=$E(STR,savptr,ptr-1)
+        ..              I $L(xstr,"<<")=$L(xstr,">>") S done=1
+        .       I 'ptr s ptr=savptr
+        Q 1
 	;
 	;-----------------------------------------------------------------------
 SYNTAX	;
@@ -364,12 +364,12 @@ MACRO	; Compile MACRO code
 	N macro
 	S macro=$E(WRD,2,$L(WRD))
 	;
-	; Macro name doesn't exist 
-	I '$D(^DBTBL(%LIBS,4,macro)) D ERROR($$^MSG(1397)) Q 
-	; 
-	; Illegal use of a Macro 
-	I (D(1)_D(2)_D(4)_D(5))'=""!($TR(D(3),"(","")'="") D ERROR($$^MSG(1397)) Q 
-	; 
+        ; Macro name doesn't exist
+        I '$D(^DBTBL(%LIBS,4,macro)) D ERROR($$^MSG(1397)) Q
+        ;
+        ; Illegal use of a Macro
+        I (D(1)_D(2)_D(4)_D(5))'=""!($TR(D(3),"(","")'="") D ERROR($$^MSG(1397)) Q
+        ;
 	F  S WRD=$$PARSE(.X,.wrdptr) Q:WRD'=")"  S D(5)=D(5)_")"
 	;
 	I "!&"'[WRD S WRD=$P($G(^DBCTL("QWRD",0,WRD)),"|",1) I WRD'="!"&(WRD'="&") D ERROR() Q
@@ -396,8 +396,8 @@ VAR	; Variable insertion syntax
 	;-----------------------------------------------------------------------
 	;
 	I $F(WRD,"<<*",1) D  Q
-	.       ; Invalid variable syntax 
-	.       I $D(QEXT) D ERROR($$^MSG(1475)) Q 
+        .       ; Invalid variable syntax
+        .       I $D(QEXT) D ERROR($$^MSG(1475)) Q
 	.	S par=$p($P(WRD,"<<*",2,99),">>",1)
 	.	I $E(par)="*" S par=$E(par,2,$L(par))
 	.	I par'="" D KEYWRDL(par) I ER D ERROR(RM) Q
@@ -452,7 +452,7 @@ DATE()	; D(6)="D" - Data data type
 TIME()	; D(6)="C" - Time data type
 	;-----------------------------------------------------------------------
 	;
-	I "AMPM"[$$UPPER^UCGMR($E(X,wrdptr+2,wrdptr+3)) S WRD=WRD_$E(X,wrdptr+1,wrdptr+3),wrdptr=wrdptr+3
+ 	I "AMPM"[$$UPPER^UCGMR($E(X,wrdptr+2,wrdptr+3)) S WRD=WRD_$E(X,wrdptr+1,wrdptr+3),wrdptr=wrdptr+3
 	Q WRD
 	;
 	;-----------------------------------------------------------------------
@@ -460,13 +460,13 @@ ERROR(M)	; Input order syntax error
 	;-----------------------------------------------------------------------
 	;
 	N num
-	; Invalid Syntax 
-	I $G(M)="" S M=$$^MSG(1477) 
+        ; Invalid Syntax
+        I $G(M)="" S M=$$^MSG(1477)
 	;
 	S ER=1
 	S M=$J("",wrdptr-$L(WRD))_"^"_$TR($J("",$L(WRD)-1)," ","-")_M
 	;
-	S num=1,RM(1)=$E(X,1,80)_"|22000"
+ 	S num=1,RM(1)=$E(X,1,80)_"|22000"
 	I $L(X)>80 F num=2:1 S RM(num)=$E(X,num*80-79,num*80) I $E(X,num*80+1)="" Q
 	S num=num+1,RM(num)=$E(M,1,80)_"|23000"
 	I $L(M)>80 N z F z=2:1 S num=num+1,RM(num)=$E(M,z*80-79,z*80) I $E(M,z*80+1)="" Q
@@ -504,7 +504,7 @@ EXT	; External linecall %TAB array is defined (need operation and object)
 	N INPUTX,OLDTBL
 	S OLDTBL=I(3)					; Save look-up table
 	;
-	I "*"[X!($$UPPER^UCGMR(X)="ALL") S:X=""&(E67>2) X="ALL" S I(3)="" Q
+ 	I "*"[X!($$UPPER^UCGMR(X)="ALL") S:X=""&(E67>2) X="ALL" S I(3)="" Q
 	;
 	; <<**>> syntax with look-up table entry
 	;
@@ -516,6 +516,7 @@ EXT	; External linecall %TAB array is defined (need operation and object)
 	D A						; Parse query syntax
 	I $G(ER) S I(3)=OLDTBL				; Restore look-up table
 	Q
+
 	;
 	;-----------------------------------------------------------------------
 FILE	; File D(array) into Q(NI,qryseq)
@@ -542,11 +543,11 @@ FILE	; File D(array) into Q(NI,qryseq)
 	;
 	S WRD=""
 	;
-	; 
-	; Missing Subject 
-	I D(3)="" D ERROR($$^MSG(8041)) Q 
-	; Missing Expression 
-	I D(5)="" D ERROR($$^MSG(8040)) Q 
+        ;
+        ; Missing Subject
+        I D(3)="" D ERROR($$^MSG(8041)) Q
+        ; Missing Expression
+        I D(5)="" D ERROR($$^MSG(8040)) Q
 	;
 	I D(1)="'",$E(D(0))="'" S D(1)=""	; *** - BC - 12/29/93
 	S Q(NI,qryseq)=D(3)_"|"_D(5)_"||"_D(1)_D(0)_"|"_D(2)_"|"_D(6)
@@ -566,8 +567,8 @@ FUNCTION	; $Function input verification
 	;-----------------------------------------------------------------------
 	;
 	S wrdptr=wrdptr+1
-	; Left parenthesis expected 
-	I $E(X,wrdptr)'="(" D ERROR($$^MSG(7079)) Q 
+        ; Left parenthesis expected
+        I $E(X,wrdptr)'="(" D ERROR($$^MSG(7079)) Q
 	;
 	N expr,fnam,pcnt,savobj,listpars,valpar,inptlist,numpars,parnum,nampar,rpar,ptr
 	;
@@ -601,8 +602,8 @@ FUNCTION	; $Function input verification
 	.	D COMPILE(.WRD)
 	;
 	I ER Q
-	; Right parenthesis expected 
-	I pcnt D ERROR($$^MSG(8042)) Q 
+        ; Right parenthesis expected
+        I pcnt D ERROR($$^MSG(8042)) Q
 	;
 	I inptlist="" S inptlist=D(object)
 	;
@@ -659,8 +660,8 @@ GETPAR(str,wrdptr,delim,numpar)	; Return Parameters
 	;
 	F  S y=$F(str,")",y) Q:'y!($L($E(str,wrdptr,y-1),"""")#2)
 	;
-	; Right parenthesis expected 
-	I y=0 S wrdptr=$L(str) D ERROR($$^MSG(8042)) Q "" 
+        ; Right parenthesis expected
+        I y=0 S wrdptr=$L(str) D ERROR($$^MSG(8042)) Q ""
 	;	
 	S expr=$E(str,wrdptr+1,y-2),wrdptr=y-1,pcnt=pcnt-1
 	;
@@ -668,8 +669,8 @@ GETPAR(str,wrdptr,delim,numpar)	; Return Parameters
 	.	;
 	.	S nampar=$P($P(listpars,",",parnum),"/",1)
 	.	S valpar=$P(z,",",I) I valpar="" Q:nampar=""  S valpar=""""""
-	.       ; Unexpected parameter 
-	.       I nampar="" D ERROR($$^MSG(2814)) Q 
+        .       ; Unexpected parameter
+        .       I nampar="" D ERROR($$^MSG(2814)) Q
 	.	I $L(valpar,"""")#2=0 F I=I+1:1:$L(z,",") S valpar=valpar_","_$P(z,",",I) Q:$L(valpar,"""")#2
 	.	E  I nampar["/NOQWT" D VARPAR Q:ER
 	.	S expr=expr_"/"_nampar_"="_valpar,parnum=parnum+1
@@ -680,8 +681,8 @@ GETPAR(str,wrdptr,delim,numpar)	; Return Parameters
 	N cntpar
 	S cntpar=1,y=1
 	F  S y=$F(expr,"/",y) Q:y=0  I $L($E(expr,1,y-1),"""") S cntpar=cntpar+1
-	; Too many parameters 
-	I cntpar>numpar D ERROR($$^MSG(8043)) Q "" 
+        ; Too many parameters
+        I cntpar>numpar D ERROR($$^MSG(8043)) Q ""
 	Q valarg_expr
 	;
 	;-----------------------------------------------------------------------
@@ -761,7 +762,7 @@ QRYTEXT(z)	; Public ; Convert query into text messages
 	I and'="" S x=x_" "_$P(^DBCTL("QWRD",0,and),"|",3)
 	Q x
 	;
-D	
+D
 	;-----------------------------------------------------------------------
 EXP(X)	; Replace data Item names with dictionary reference
 	;-----------------------------------------------------------------------
@@ -784,7 +785,7 @@ PCNT	; Percentage
 	;
 	S savptr=wrdptr,z=$$PARSE(X,.wrdptr)
 	;
-	I $$UPPER^UCGMR(z)="OF" D  Q:ER  S D(object)=D(object)_val_"*",lstypobj=4 Q
+ 	I $$UPPER^UCGMR(z)="OF" D  Q:ER  S D(object)=D(object)_val_"*",lstypobj=4 Q
 	.	;
 	.	S z=$$PARSE(.X,wrdptr)
 	.	I z?.N!(z?.N1".".N) Q
@@ -793,11 +794,11 @@ PCNT	; Percentage
 	.	I z=")" Q
 	.	I z'="",$D(%UID),$D(^DBCTL("QWRD",%UID,z)) Q
 	.	I z'="",$D(^DBCTL("QWRD","*",z)) Q
-	.       ; Invalid percentage 
-	.       D ERROR($$^MSG(5324)) Q 
-	; 
-	; Invalid percentage 
-	I I=0 D ERROR($$^MSG(5324)) Q 
+        .       ; Invalid percentage
+        .       D ERROR($$^MSG(5324)) Q
+        ;
+        ; Invalid percentage
+        I I=0 D ERROR($$^MSG(5324)) Q
 	;
 	S wrdptr=savptr,lstypobj=object
 	I "+-"[op S D(object)=D(object)_"*"_(1+$S(op="+":val,1:-val)) Q
@@ -828,7 +829,7 @@ PAR(expr,list)	; Check for parameter and expression in PAR List
 	;
 	N paramnum,y,chklist
 	;
-	S par=$$UPPER^%ZFUNC($P(expr,"=",1))
+	S par=$$UPPER^UCGMR($P(expr,"=",1))
 	S expr=$P(expr,"=",2,99)
 	;
 	F  Q:$E(expr,$L(expr))'=" "  S expr=$E(expr,1,$L(expr)-1)

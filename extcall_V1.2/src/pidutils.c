@@ -20,11 +20,15 @@
 */
 #include <sys/types.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <errno.h>
 #include <pwd.h>
 #include <grp.h>
+#include <unistd.h>
 /* #include <sys/pstat.h> */
-#include <extcall.h>
+#include "extcall.h"
+
 #define	PST_MAX_PROCS	32
 
 PROCESSDATA pid_list[PST_MAX_PROCS];
@@ -82,13 +86,14 @@ getgroup(int count,SLONG *pid,SLONG *return_code)
 }
 
 void 
-getusername(int count,STR_DESCRIPTOR *response,SLONG *return_code)
+getusername(int count,char *response,SLONG *return_code)
 {
 
-	char	buf[50];
+  /*	char	buf[L_cuserid]; -- deleted per discussion with Manoj.  - Bhaskar 20100212 */
+	struct passwd   *pwd_entry = (struct passwd *)NULL;
 
-	(void)strcpy(response->str,(char *)cuserid(buf));
-	response->length=strlen(response->str);
+	pwd_entry = getpwuid(geteuid());
+	(void)strcpy(response,pwd_entry->pw_name);
 	return;
 
 }
@@ -571,19 +576,19 @@ void
 create_pid_list(SLONG *return_code)
 {
 	RETURNSTATUS 	rc = SUCCESS;
-	FILE 			*fd = (FILE *)NULL;
-	char 			*rel_dir = (char *)NULL;
-	char			mjob[24];
-	char 			cmd[128];
-	char 			str_fill[MAX_CMD_LEN];
-	int				int_fill = 0;
-	char 			job_name[MAX_CMD_LEN];
-	char			cpu_time[24];
-	char			login[24];
-	char			login_time[24];
-	char			tty[12];
-	SLONG			pid = 0;
-	SLONG			ppid = 0;
+	FILE 		*fd = (FILE *)NULL;
+	char 		*rel_dir = (char *)NULL;
+	char		mjob[24];
+	char 		cmd[128];
+	char 		str_fill[MAX_CMD_LEN];
+	int		int_fill = 0;
+	char 		job_name[MAX_CMD_LEN];
+	char		cpu_time[24];
+	char		login[24];
+	char		login_time[24];
+	char		tty[12];
+	SLONG		pid = 0;
+	SLONG		ppid = 0;
 	register int	i=0;
 	register int	j=0;
 

@@ -1,9 +1,9 @@
-UCUTIL	; PSL compiler related utility
+UCUTIL	;wittef;2008-02-05 07:19:00; PSL compiler related utility
 	;;Copyright(c)2002 Sanchez Computer Associates, Inc.  All Rights Reserved - 11/19/02 13:32:49 - CHENARDP
 	;
 	; **** All functions and subroutines in this M routine except MARKER are
-	; **** DEPRECATED, and retained for backward compatibility with Profile
-	; **** V6.4 environments only.
+	; **** DEPRECATED, and will be retained until the callers have been
+	; **** updated to use PSLTable methods.
 	;
 	; **** This routine will not be converted to PSL, and will not be part
 	; **** of the PSL-to-Java project.
@@ -11,55 +11,37 @@ UCUTIL	; PSL compiler related utility
 	; LIBRARY: MARKER	- Add PSL makker to each line of code to enable trace
 	;	   AUDIT	- **** DEPRECATED **** Wrap call to AUDIT^UCUTILN()
 	;	   fsn		- **** DEPRECATED **** Load File Header Record
-	;	   LOAD		- **** DEPRECATED **** Build Database Load Code
 	;	   OBJGBL	- **** DEPRECATED **** Return global reference in PSL object format
 	;	   OBJNAME	- **** DEPRECATED **** Return object name based on table name
 	;	   PARSE	- **** DEPRECATED **** Return MUMPS expression for ddref
 	;	   SN2OBj	- **** DEPRECATED **** Convert short name into vobj() structure
 	;
-	; REMAINING CALLS in versions V7.0 (V6.4 does not contain additional calls):
+	; REMAINING CALLS from the application (!!!)
+	;	CHECKDI^LNRENEW.proc	AUDIT^UCUTIL(.ln,.DIARRAY,10,"LN") (!!!!)
+	;
+	; REMAINING CALLS in Profile_Framework per 2008-01-15
 	;	LOG^SQLFILER.m		AUDIT^UCUTIL(obj,.vx,rtyp)
-	;	CHECKDI^LNRENEW.proc	AUDIT^UCUTIL(.ln,.DIARRAY,10,"LN")
 	;
 	;	DEFAULT^DBSSCR4.m	fsn^UCUTIL(.fsn,fid)
-	;	INSERT^SQLCMP.m		fsn^UCUTIL(.fsn,fid)
-	;	UPDATE^SQLCMP.m		fsn^UCUTIL(.fsn,fid)
-	;
-	;	UPDATE^SQLCMP.m		LOAD^UCUTIL(.vinp,.vout)
 	;
 	;	DEFAULT^DBSSCR4.m	$$OBJGBL^UCUTIL(gbl,obj)
-	;	DELETE^SQLCMP.m		$$OBJGBL^UCUTIL(gbl,obj)
-	;	MULSEL^SQLCMP.m		$$OBJGBL^UCUTIL(gbl,obj)
-	;	COMPILE^DBSFILB.proc	$$OBJGBL^UCUTIL($P(tblrec,"|",2),objName)
-	;	MAIN^DBSFILB.proc	$$OBJGBL^UCUTIL($P(tblrec,"|",2),objName)
-	;	INDEX^DBSINDXB.proc	$$OBJGBL^UCUTIL($P(tblrec,"|",2),OBJNAME)
-	;	KEYCHG^DBSTRG.proc	$$OBJGBL^UCUTIL(gbl,objName)
 	;
 	;	DEFAULT^DBSSCR4.m	$$OBJNAME^UCUTIL(fid)
-	;	INSERT^SQLCMP.m		$$OBJNAME^UCUTIL(fid)
-	;	UPDATE^SQLCMP.m		$$OBJNAME^UCUTIL(fid)
-	;	WHERE^SQLCMP.m		$$OBJNAME^UCUTIL(fid)
-	;	DELETE^SQLCMP.m		$$OBJNAME^UCUTIL(fid)
-	;	DBSINDXB^DBSINDXB.proc	$$OBJNAME^UCUTIL(fid)
-	;	DBSJRNC^DBSJRNC.proc	$$OBJNAME^UCUTIL(PRITABLE)
-	;	BLDJRN^DBSJRNC.proc	$$OBJNAME^UCUTIL(JRNTABLE)
-	;	CHKTBLS^DBSJRNC.proc	$$OBJNAME^UCUTIL(TABLE)
-	;	CASCDEL^DBSTRG.proc	$$OBJNAME^UCUTIL(fid)
 	;
 	;	DEFAULT^DBSSCR4.m	$$PARSE^UCUTIL(dinam,1)
-	;	INSERT^SQLCMP.m		$$PARSE^UCUTIL(dinam)
-	;	INSERT^SQLCMP.m		$$PARSE^UCUTIL(dinam)
-	;	VALUE^SQLCMP.m		$$PARSE^UCUTIL(v)
-	;	VALUE^SQLCMP.m		$$PARSE^UCUTIL(fid_"."_v)
-	;	REQDI^SQLCMP.m		$$PARSE^UCUTIL(dinam))
-	;	DEFAULT^SQLCMP.m	$$PARSE^UCUTIL(dinam)
-	;	LOOKTBL^SQLCMP.m	$$PARSE^UCUTIL(dinam)
 	;
 	;	EXT^DBSFILER.proc	$$SN2OBJ^UCUTIL(fid)
 	;
 	; I18N=OFF
 	;---- Revision History -------------------------------------------------
-	; 04/13/07 - RussellDS - CR26386
+	; 01/16/08 - Frans S.C. Witte - CR27800
+	;	* Removed LOAD (no longer called)
+	;	* Updated list of callers.
+	;
+	; 08/20/07 - KWANL / Frans S.C. Witte - CR 28995
+	;	* Adapted to new CATCH/THROW mechanism
+	;
+	; 04/13/07 - RussellDS - CRs 26386, 26570
 	;	     Fixed syntax error in OBJNAME.
 	;
 	; 10/11/06 - Frans S.C. Witte - CRs: 22719 / 20613
@@ -125,7 +107,7 @@ UCUTIL	; PSL compiler related utility
 	quit
 	;
 	;-----------------------------------------------------------------------
-MARKER(SRC,CURMARK)	;public void; 
+MARKER(SRC,CURMARK) ;public void;
 	;-----------------------------------------------------------------------
 	; Add a source code line marker to every line in SRC()
 	;
@@ -152,6 +134,7 @@ MARKER(SRC,CURMARK)	;public void;
 	; . A better way to achieve this is by adding this feature to the
 	;	compiler itself. The compiler does already track line numbers
 	;	and subroutine relative line numbers e.g. to show messages.
+	; . DBSBCH is the only known caller
 	;-----------------------------------------------------------------------
 	S CURMARK=$G(CURMARK)
 	N I
@@ -169,7 +152,7 @@ MARKER(SRC,CURMARK)	;public void;
 	;***********************************************************************
 	;
 	;-----------------------------------------------------------------------
-AUDIT(obj,audit,rectyp,fid)	; deprecated public void 
+AUDIT(obj,audit,rectyp,fid) ; deprecated public void
 	;-----------------------------------------------------------------------
 	; Convert vobj(obj) into audit(column_name)=old_val|new_val
 	;
@@ -187,7 +170,7 @@ AUDIT(obj,audit,rectyp,fid)	; deprecated public void
 	Q
 	;
 	;-----------------------------------------------------------------------
-fsn(fsn,file)	;deprecated public void 
+fsn(fsn,file) ;deprecated public void
 	;-----------------------------------------------------------------------
 	; Define PSL storage mapping - from short name to vobj(obj
 	;
@@ -231,59 +214,7 @@ fsn(fsn,file)	;deprecated public void
 	Q
 	;
 	;-----------------------------------------------------------------------
-LOAD(list,code,file)	;deprecated public void 
-	;-----------------------------------------------------------------------
-	; Create database loading logic
-	;
-	; ARGUMENTS:
-	; . list	input list in tbl.col format	/TYP=T/REQ/MECH=REFARRY:R
-	; . code	Database loading logic in vobj  /TYP=T/MECH=REFARRY:W
-	;               format
-	; . file	Primary table			/TYP=T/NOREQ/MECH=VAL
-	;
-	; THROWS:
-	; . %PSL-E-RDBFAIL exception
-	;	This exception will be thrown if one of the tables does not
-	;	reside in M.
-	;
-	; EXAMPLE:
-	;
-	; S A("CIF.TAXID")="",A("CIF.ATN")="" D LOAD(.A,.B)
-	;
-	; returns:
-	;
-	;  B=2
-	;  B(1)="S:$D(vobj(cif,2))#2=0 vobj(cif,2)=$G(^CIF(vobj(cif,-3),2))"
-	;  B(2)="S:$D(vobj(cif,20))#2=0 vobj(cif,20)=$G(^CIF(vobj(cif,-3),20))"
-	;-----------------------------------------------------------------------
-	N di,fid,fsn,i,j,ref,vcode,z
-	K code
-	S i=""
-	F  S i=$O(list(i)) Q:i=""  D
-	.	S ref=$TR(i,"][",".")
-	.	I ref'["." Q					; wrong format
-	.	I $L(ref,".")=3 S ref=$P(ref,".",2,3)		; remove %LIBS
-	.	S fid=$P(ref,".",1)				; table name
-	.	I $$rtIsRdb^UCXDD(fid) S $ZS="-1,"_$ZPOS_",%PSL-E-RDBFAIL,"_fid X $ZT
-	.	I '$D(fsn(fid)) D fsn(.fsn,fid)			; get attributes
-	.	S z=$$PARSE^SQLDD(ref,,.cmp,.fsn,,.vdd,,.vsub)
-	;
-	I '$D(fid) Q						; nothing to build
-	S j=1
-	S fid=""
-	F  S fid=$O(fsn(fid)) Q:fid=""  D
-	.	K vcode
-	.	I $P(fsn(fid),"|",4)=11 S fsn(fid," ")=$P(fsn(fid),",",1)_")"	; force load of top level
-	.	D LOAD^SQLDD(fid,.fsn,.vcode,,,,.vsub,.cmp)	; build load logic
-	.	I $g(file)'="",file'=fid D			; join primary table
-	..		S z=$P($P(fsn(fid),"vobj(",2),",",1),code(j)=" N "_z_" S "_z_"=$O(vobj(""""),-1)+1",j=j+1
-	..		s z=$$PARSE^SQLDD(file_"."_$P(fsn(fid),"|",3),,.cmp,.fsn,,.vdd,,.vsub)
-	..		S code(j)=" S "_$P(fsn(fid),"|",1)_"-3)="_z,j=j+1
-	.	S i=""  F  S i=$O(vcode(i)) Q:i=""  S code(j)=" "_vcode(i),j=j+1
-	Q
-	;
-	;-----------------------------------------------------------------------
-OBJGBL(gbl,obj)	; deprecated public String 
+OBJGBL(gbl,obj) ; deprecated public String
 	;-----------------------------------------------------------------------
 	; Convert global reference to vobj format
 	;
@@ -301,7 +232,7 @@ OBJGBL(gbl,obj)	; deprecated public String
 	Q zgbl_"("_$TR(gbl,";",",")
 	;
 	;-----------------------------------------------------------------------
-OBJNAME(file)	;depreacted public String 
+OBJNAME(file) ;depreacted public String
 	;-----------------------------------------------------------------------
 	; Assign default object name based on file name
 	;
@@ -310,7 +241,7 @@ OBJNAME(file)	;depreacted public String
 	Q $$LOWER^UCGMR($TR(file,"_"))		; Remove underscore
 	;
 	;-----------------------------------------------------------------------
-PARSE(str,psl)	;deprecated public String 
+PARSE(str,psl) ;deprecated public String
 	;-----------------------------------------------------------------------
 	; Convert string expression into vobj format
 	;
@@ -361,7 +292,7 @@ PARSE(str,psl)	;deprecated public String
 	Q return
 	;
 	;-----------------------------------------------------------------------
-SN2OBJ(fid)	;deprecated public Number; 
+SN2OBJ(fid) ;deprecated public Number;
 	;-----------------------------------------------------------------------
 	; Convert short name array into vobj() structure
 	;
@@ -407,11 +338,14 @@ SN2OBJ(fid)	;deprecated public Number;
 	; . The code has been rewritten to XECUTE $$getUpdAudit^UCXDD() with
 	;	"obj" and "$P(UX(fid,col),""|"")" as literal parameters. This
 	;	makes the code completely independent of the -100 structure.
+	; . This code will not be able to set the correct $STACK level of the
+	;	object that it created. We should probably generate a runtime
+	;	exception if the PSL Version is greater than 2.9
 	;-----------------------------------------------------------------------
 	;
 	; If table stored in RDB, shortname layout and vobj() layout will be
 	; inherently different. Generate runtime error
-	I $$rtIsRdb^UCXDD(fid) S $ZS="-1,"_$ZPOS_",%PSL-E-RDBFAIL,"_fid X $ZT
+	I $$rtIsRdb^UCXDD(fid) S $ZE="0,"_$ZPOS_",%PSL-E-RDBFAIL,"_fid,$EC=",U1001,"
 	;
 	N fsn,i,keys,obj,sn,type
 	D fsn^SQLDD(.fsn,fid) I $G(ER) quit ""		; File attributes

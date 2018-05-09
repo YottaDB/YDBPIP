@@ -2,7 +2,7 @@ DBSSCR3	; DBS - U - V4.4 - Screen compiler, page #2
 	;;Copyright(c)1994 Sanchez Computer Associates, Inc.  All Rights Reserved - 10/17/94 10:31:11 - XUS
 	;     ORIG:  CHIANG - 1/15/86
 	;     DESC:  CHECK VALID SCREEN ID
-	; I18N=QUIT: Exculded from I18N standards. 
+        ; I18N=QUIT: Exculded from I18N standards.
 	;
 	;---------- Revision History -------------------------------------------
 	;

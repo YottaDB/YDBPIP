@@ -57,7 +57,7 @@ VPG00	; Prompt for file name
 	;
 VPG01	; Tape format or RMS file name
 	; /DES=RMS File Name/TYP=T/LEN=50
-	I INPUT="R" S %TAB("RMS")=".RMS7/XPP=D PP01A^DBSTAP0" 
+        I INPUT="R" S %TAB("RMS")=".RMS7/XPP=D PP01A^DBSTAP0"
 	; /DES=<L>abeled or <U>nlabeled/TYP=T/LEN=1
 	E  S %TAB("LBL")=".LBL1/XPP=D PP01B^DBSTAP0"
 	; /DES=<A>SCII or <E>BCIDIC/TYP=T/LEN=1

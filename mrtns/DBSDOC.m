@@ -12,9 +12,9 @@ DBSDOC	;;DBS - U - V 4.2 - DATA QWIK DOCUMENTATION
 	;	     Replaced obsoleted calls to ^DBSANS with new procedure
 	;	     DBSGETID.
 	;
-	; 05/12/00 - DOUGANM- 39582 
-	;            To improve the performance of error handling, cleaned up 
-	;            call to $$NEW^%ZT, and removed use of indirection. 
+        ; 05/12/00 - DOUGANM- 39582
+        ;            To improve the performance of error handling, cleaned up
+        ;            call to $$NEW^%ZT, and removed use of indirection.	
 	;	     Replaced $ZP reference with $O(^gbl(...),-1) syntax.
 	;-----------------------------------------------------------------------
 	;

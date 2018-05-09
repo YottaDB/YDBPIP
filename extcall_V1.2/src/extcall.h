@@ -32,10 +32,10 @@
 #ifndef 	ZCALL_H
 #define 	ZCALL_H
 
-#include <scatype.h>
+#include "scatype.h"
 
 #define TTY 		"TTY"
-#define MT			"MT"
+#define MT		"MT"
 #define NODENAME	"NODENAM"
 #define DINO		"DINO"
 #define MTMPRIV		"MTMPRIV"
@@ -47,7 +47,7 @@
 #define LOCAL		3
 #define REMOTE		5
 
-#define VERSION "extcall.sl (Linux) V1.2 Feb 20, 2007"
+#define VERSION "extcall.sl (Linux - 64 bit) V1.2 Sept 17, 2007"
 
 typedef struct {
 	char	login[24];
@@ -143,7 +143,7 @@ void
 gettime(int,char *);
 
 void
-getusername(int,STR_DESCRIPTOR *,SLONG *);
+getusername(int,char *,SLONG *);
 
 SLONG
 job_type(SLONG ,char *,SLONG *);

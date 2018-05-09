@@ -3,18 +3,18 @@ DBSEDT(ARRAY,EDTOPT,HEADER)	;;DBS - DATA-QWIK INTERFACE TO VMS EDITOR
 	;     ORIG:  BOB CHIANG (8447) - 12/14/88
 	;     DESC:  VMS EDITORS
 	;
-	;  I18N=QUIT: Excluded from I18N standards              
+        ;  I18N=QUIT: Excluded from I18N standards             
 	;---- Revision History ------------------------------------------------
 	;
 	; 07/06/00 - SHANL - 40858
-	;            Added section STDASCII to convert a string to plain 
-	;            ASCII; 
-	;            Modified section INIT to convert extended ASCII to 
-	;            standard ASCII. 
-	; 
-	; 05/12/00 - DOUGANM- 39582 
-	;            To improve the performance of error handling, cleaned up 
-	;            call to $$NEW^%ZT, and removed use of indirection. 
+        ;            Added section STDASCII to convert a string to plain
+        ;            ASCII;
+        ;            Modified section INIT to convert extended ASCII to
+        ;            standard ASCII.
+        ;
+        ; 05/12/00 - DOUGANM- 39582
+        ;            To improve the performance of error handling, cleaned up
+        ;            call to $$NEW^%ZT, and removed use of indirection.
 	;
 INIT	; --------------------- Initialization Section ----------------------
 	;
@@ -39,7 +39,7 @@ INIT1	;
 	;
 	; Unable to open file ~p1
 	C RMS S z=$$FILE^%ZOPEN(RMS,"WRITE/NEWV",5) I 'z S RM=$$^MSG(2799,RMS) G DONE
-	;
+  	;
 	S X=0 F I=1:1 S X=$O(ARRAY(X)) Q:X=""  U RMS W ARRAY(X),!   ;  9/27/94   XUS
 	;
 	C RMS
@@ -149,13 +149,13 @@ CONV3	;
 	G CONV3
 	Q
 	;
-STDASCII(S)	;Convert a string to plain ASCII 
-	N A1,A2 
-	S A1="" 
-	S A2="AAAAAAACEEEEIIIINOOOOOOUUUUaaaaaaaceeeeiiiinoooooouuuuww" 
-	F I=192:1:207  S A1=A1_$C(I) 
-	F I=209:1:220  S A1=A1_$C(I) 
-	F I=224:1:239  S A1=A1_$C(I) 
-	F I=241:1:252  S A1=A1_$C(I) 
-	Q $TR(S,A1,A2) 
-	; 
+STDASCII(S)     ;Convert a string to plain ASCII
+        N A1,A2
+        S A1=""
+        S A2="AAAAAAACEEEEIIIINOOOOOOUUUUaaaaaaaceeeeiiiinoooooouuuuww"
+        F I=192:1:207  S A1=A1_$C(I)
+        F I=209:1:220  S A1=A1_$C(I)
+        F I=224:1:239  S A1=A1_$C(I)
+        F I=241:1:252  S A1=A1_$C(I)
+        Q $TR(S,A1,A2)
+        ;

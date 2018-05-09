@@ -3,7 +3,7 @@ DBSPARS	;Public; Data item parser
 	;
 	; Convert DQ procedural code into MUMPS code.
 	;
-	; I18N=QUIT: Exculded from I18N standards. 
+        ; I18N=QUIT: Exculded from I18N standards.
 	; KEYWORDS:	DATA-QWIK
 	;
 	; INPUTS:	
@@ -65,7 +65,7 @@ EXEC	;
 	S SVZ20=Z20,SVXX=X
 	D START1
 	S Z20=SVZ20
-	; 
+        ;
 	Q
 	;
 START1	;

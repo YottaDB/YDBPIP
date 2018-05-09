@@ -25,12 +25,18 @@ SQLPROT	;Library;Data item protection utility routine
 	;	. $$VIEW     Record level protection logic
 	;	. CHGEXEC    Modify SQL run-time execution logic
 	;----------------------------------------------------------------------
-	; I18N=QUIT: Excluded from I18N standards. 
+        ; I18N=QUIT: Excluded from I18N standards.
 	;----------------------------------------------------------------------
 	;--------------- Revision History -------------------------------------
-	; 09/22/06 - Pete Chenard - CR?????
-	;	Added section getExe that will return the executable 
-	;	array containing the protection logic.  Called from UCDBRT.
+	; 02/23/09 - Pete Chenard
+	;	Modified CONVCOLM to pass .fsn to the call to MCOL^SQLCOL.
+	;
+	; 08/23/07 - Pete Chenard - CR 28171
+	;	     Removed reference to ^CUVAR("%LIBS")
+	;
+	; 09/22/06 - Pete Chenard - CR22719
+	;	     Added section getExe that will return the executable 
+	;	     array containing the protection logic.  Called from UCDBRT.
 	;
 	; 03/30/05 - RussellDS - CR14908
 	;	     Modified VIEW and VIEW1 sections to handle changes to DI
@@ -44,7 +50,7 @@ SQLPROT	;Library;Data item protection utility routine
 	;	     Removed old revision history.
 	;
 	;----------------------------------------------------------------------
-ADDCOLM(sel,columns)	; Add one or more column names to a SELECT statement 
+ADDCOLM(sel,columns) ; Add one or more column names to a SELECT statement
 	;----------------------------------------------------------------------
 	; ARGUMENTS:
 	;	. sel		A list of column names	/TYP=T/REQ/MECH=VAL
@@ -66,17 +72,17 @@ ADDCOLM(sel,columns)	; Add one or more column names to a SELECT statement
 	.	S sel=sel_","_dinam			; Add it to the list
 	Q sel
 	;----------------------------------------------------------------------
-COLMDEL(par)	; Return field delimiter 
+COLMDEL(par) ; Return field delimiter
 	;----------------------------------------------------------------------
 	; ARGUMENTS:
 	;	. par		Parameter list		/TYP=T/REQ/MECH=REFNAM:R
 	;----------------------------------------------------------------------
 	N fmt
-	S fmt=$G(par("FORMAT"))				; Format definition
+ 	S fmt=$G(par("FORMAT"))				; Format definition
 	I fmt=""!(fmt="IMAGE") Q ""			; Return NULL delimiter
-	Q $P($G(^STBL("TFMT",fmt)),"|",3) 	; Based on table value	
+        Q $P($G(^STBL("TFMT",fmt)),"|",3)		; Based on table value	
 	;----------------------------------------------------------------------
-COLMVAL(sel,val,dinam)	;  Return column value based on a SELECT statement 
+COLMVAL(sel,val,dinam) ;  Return column value based on a SELECT statement
 	;----------------------------------------------------------------------
 	; ARGUMENTS:
 	;	. sel   A list of column names		/TYP=T/REQ/MECH=VAL
@@ -103,7 +109,7 @@ COLMVAL(sel,val,dinam)	;  Return column value based on a SELECT statement
 	I 'pos S ER=1,RM=$$^MSG(1300,dinam) Q ""	; Not in the list
 	Q $P(val,$C(9),pos)				; Return column value
 	;----------------------------------------------------------------------
-COLMPOS(sel,dinam,exact)	;  Return column value based on a SELECT statement 
+COLMPOS(sel,dinam,exact) ;  Return column value based on a SELECT statement
 	;----------------------------------------------------------------------
 	; ARGUMENTS:
 	;	. sel   A list of column names		/TYP=T/REQ/MECH=VAL
@@ -133,7 +139,7 @@ COLMPOS(sel,dinam,exact)	;  Return column value based on a SELECT statement
 	I $E(match)="," S match=$E(match,2,999)
 	Q match
 	;----------------------------------------------------------------------
-CONVCOLM(frm,sel)	;  Return SELECT statement in table.column format 
+CONVCOLM(frm,sel) ;  Return SELECT statement in table.column format
 	;----------------------------------------------------------------------
 	; ARGUMENTS:
 	;	. frm	Table names			/TYP=T/REQ/MECH=VAL
@@ -154,7 +160,7 @@ CONVCOLM(frm,sel)	;  Return SELECT statement in table.column format
 	F i=1:1:$L(sel,",") D
 	.	S dinam=$P(sel,",",i)			; Get column name
 	.	I dinam[$C(0) S dinam=$$UNTOK^%ZS(dinam,tok)
-	.	S expr=$$MCOL^SQLCOL(dinam,frm,,,,,,,,,1) ; Parse expression
+	.	S expr=$$MCOL^SQLCOL(dinam,frm,,,,.fsn,,,,,1) ; Parse expression
 	.	S dinam=""
 	.	F j=1:1:$L(expr,$C(1)) D		; Put it back again
 	..		S val=$P(expr,$C(1),j)		; Each parsed element
@@ -165,14 +171,14 @@ CONVCOLM(frm,sel)	;  Return SELECT statement in table.column format
 	I $G(ER) Q ""
 	Q $E(columns,2,999)
 	;----------------------------------------------------------------------
-NEWLIST(frm,sel)	; Private ; Return new SELECT statement 
+NEWLIST(frm,sel) ; Private ; Return new SELECT statement
 	;----------------------------------------------------------------------
 	; ARGUMENTS:
 	;	. frm		A list of table names	/TYP=T/REQ/MECH=VAL
 	;	. sel		A list of column names	/TYP=T/REQ/MECH=VAL
 	;
 	; OUTPUT:
-	;	. vsql("prot",file)
+ 	;	. vsql("prot",file)
 	;			Protection mapping info /TYP=T/MECH=REFNAM:W
 	;			vmatch|vmap|orgcolm|newcolm|routine
 	;
@@ -193,7 +199,7 @@ NEWLIST(frm,sel)	; Private ; Return new SELECT statement
 	;----------------------------------------------------------------------
 	N file,fl,maxcolm,newcolm,orgcolm,vnumcol,vmap,vmatch,vpgm,vpstat
 	N vsel,ER,RM
-	I $G(%LIBS)="" N %LIBS S %LIBS=^CUVAR("%LIBS")	; Library name
+   	I $G(%LIBS)="" N %LIBS S %LIBS="SYSDEV"		; Library name
 	;                                               ; *** 06/21/96
 	I frm[$C(0) S frm=$$UNTOK^%ZS(frm,.tok)		; Back to original list
 	I sel[$C(0) S sel=$$UNTOK^%ZS(sel,.tok)		;
@@ -218,13 +224,13 @@ NEWLIST(frm,sel)	; Private ; Return new SELECT statement
 	Q vsel
 	;
 	;----------------------------------------------------------------------
-newlist1(file,sel)	; 
+newlist1(file,sel) ;
 	;----------------------------------------------------------------------
 	S vpgm=""
 	D ^UPID(file,.vpgm)				; Run-time protection routine name
 	I vpgm="" Q vsel				; Protection logic not defined
 	I $$NEW^%ZT N $ZT				; Set up error trap
-	S @$$SET^%ZT("ZT^SQLPROT") 		; *** 03/13/96
+        S @$$SET^%ZT("ZT^SQLPROT")			; *** 03/13/96
 	X "S sel=$$ptinfo^"_vpgm_"(sel)"		; return new column names
 	S vmatch=$P(sel,"|",2),vmap=$P(sel,"|",3)	; protection attributes
 	S sel=$P(sel,"|",1)				; New SELECT list
@@ -240,9 +246,9 @@ ZT	; Error trap
 	S vpgm=""					; Disable protection logic
 	Q vsel						; Return original value
 	;
-	;---------------------------------------------------------------------- 
-VIEW(lib,fid)	; Private ; Return reocrd level protection query logic 
-	;---------------------------------------------------------------------- 
+        ;----------------------------------------------------------------------
+VIEW(lib,fid) ; Private ; Return reocrd level protection query logic
+        ;----------------------------------------------------------------------
 	; ARGUMENTS:
 	;	. lib	DATA-QWIK library name		/TYP=T/REQ/MECH=VAL
 	;	. fid	File name			/TYP=T/REQ/MECH=VAL
@@ -262,12 +268,12 @@ VIEW(lib,fid)	; Private ; Return reocrd level protection query logic
 	;----------------------------------------------------------------------
 	N qrycp,rowpt
 	S rowpt=""
-	S qrycp=$P($G(^DBTBL(lib,1,fid,14)),"|",1)       ; File control page
+        S qrycp=$P($G(^DBTBL(lib,1,fid,14)),"|",1)      	; File control page
 	I qrycp'="" S qrycp=$$WHERE^SQLCONV(qrycp,fid)		; Convert to SQL format
 	I qrycp'="" S qrycp="("_qrycp_")"
 	;
-	I $G(par("PROTECTION")),$D(^DBTBL(lib,14,fid,"*")) S rowpt=$$VIEW1(fid) 
-	; 
+        I $G(par("PROTECTION")),$D(^DBTBL(lib,14,fid,"*")) S rowpt=$$VIEW1(fid)
+        ;
 	I qrycp="",rowpt="" Q ""				; No protection
 	I qrycp'="",rowpt="" Q qrycp				; Control page query
 	I qrycp="",rowpt'="" Q rowpt				; Row level only
@@ -299,7 +305,7 @@ VIEW1(fid)	; Row level protection
 	Q WHERE
 	;
 	;----------------------------------------------------------------------
-CHGEXEC(exe,ptopt)	; Private ; Modify execution code to include protection logic 
+CHGEXEC(exe,ptopt) ; Private ; Modify execution code to include protection logic
 	;----------------------------------------------------------------------
 	; ARGUMENTS:
 	;	. exe	SQL Run-time execution code	  /TYP=T/REQ/MECH=REFNAM:RW
@@ -329,7 +335,7 @@ CHGEXEC(exe,ptopt)	; Private ; Modify execution code to include protection logic
 	Q
 	;
 	;------------------------------------------------------------
-getExe(from,select,code)	
+getExe(from,select,exe,par)
 	; Generate code that calls protection routine.
 	;
 	; ARGUMENTS:
@@ -337,8 +343,8 @@ getExe(from,select,code)
 	;		. select - Select List	/TYP=T/REQ/MECH=VAL
 	;		. code - Output Code Array /TYP=T/NOREQ/MECH=REFNAM:W
 	;
-	N sel
-	S code=+$G(code)	;init to zero is not defined
-	S sel=$$NEWLIST(from,select)
-	D CHGEXEC(.exe,$G(par("PROTECTION")))
-	Q
+        N sel
+        S exe=+$G(exe)        ;init to zero is not defined
+        S sel=$$NEWLIST(from,select)
+        D CHGEXEC(.exe,$G(par("PROTECTION")))
+        Q

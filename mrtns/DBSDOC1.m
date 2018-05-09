@@ -3,16 +3,16 @@ DBSDOC1	;;DBS -  DATA ENTRY SCREEN DOCUMENTATION
 	;     ORIG:  CHIANG - 11/1/85
 	;     DESC:  DATA QWIK SCREEN DOCUMENTATIONS
 	;
-	;  I18N=QUIT: Excluded from I18N standards 
+        ;  I18N=QUIT: Excluded from I18N standards
 	;
 	;---------- Revision History -------------------------------------------
 	; 09/28/04 - RussellDS - CR12334
 	;	     Replaced obsoleted calls to ^DBSANS with new procedure
 	;	     DBSGETID.
 	;
-	; 05/12/00 - DOUGANM- 39582 
-	;            To improve the performance of error handling, cleaned up 
-	;            call to $$NEW^%ZT, and removed use of indirection. 
+        ; 05/12/00 - DOUGANM- 39582
+        ;            To improve the performance of error handling, cleaned up
+        ;            call to $$NEW^%ZT, and removed use of indirection.
 	;	     Replaced $ZP reference with $O(^gbl(...),-1) syntax.
 	;-----------------------------------------------------------------------
 START	;
@@ -34,7 +34,7 @@ EXEC	;
 	S SAVL=""
 	;-----------------------------------------------------------------------
 ENTRY	; Private ; Called by ^DBSDS1 (print screen with documentation
-	;----------------------------------------------------------------------- 
+        ;-----------------------------------------------------------------------
 	;
 	D INIT
 	I '$D(IO) D ^SCAIO

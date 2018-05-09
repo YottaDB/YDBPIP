@@ -11,13 +11,13 @@
 #
 
 # Define Process Name
-PROCESS=${BUILD_DIR}/sca_gtm/shlib.o
+PROCESS=./shlib.o
 
 # Define your C objects list
 OBJECTS=\
 	shlib.o
 
-CFLAGS = -c  ${DEBUG}
+CFLAGS = -c -fpic ${DEBUG}
 #CFLAGS = -c  -nomember_alignment ${DEBUG}
 include ./rules.mk
  

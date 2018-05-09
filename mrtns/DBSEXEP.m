@@ -30,14 +30,14 @@ DBSEXEP	;;DBS - REP - V5.0 -  COMPILE REPORT INTO MUMPS CODE
 	;            Deleted pre-1996 revision history.
 	;
 	; 08/11/97 - Betty Ni - 25653
-	;            Replaced follows operator "]" with a "]]". 
+        ;            Replaced follows operator "]" with a "]]".
 	;
 	; 02/09/96 - Bob Chiang - 21064
 	;            Added error checking on RDn (round to n decimal position)
 	;            format to only accept an integer or NULL after the RD
 	;            format.
 	;-----------------------------------------------------------------------
-	;  I18N=QUIT: Excluded from I18N standards 
+        ;  I18N=QUIT: Excluded from I18N standards
 START	;
 	S P2=$G(P(2)),P3="V"
 	;
@@ -279,7 +279,7 @@ fmt(flist,glvn,len,dec,fmt)	; Format a string for compilers
 	I flist="N",+dec=0 Q glvn
 	;
 	N x,z
-	;
+	 ;
 	; ---------- Screen def , report def , default to Text
 	;
 	S fmt(flist)=$P($G(^DBCTL("SYS","DVFM",flist)),"|",2)
@@ -350,7 +350,7 @@ QA1	;
 	.	S L=12,TYP=FMT,DEC=0 I TYP["$"!(TYP["E") S DEC=2
 	.	D START
 	.	W !,FMT I $G(RM)'="" W ?40,RM Q
-	.	W !,?20,"P2=",P2,!?30,"P3=",P3
+	.	W ?20,P2,?30,P3
 	W !
 	C IO
 	Q

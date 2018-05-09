@@ -9,8 +9,8 @@ DBSCRT8	;; DATA-QWIK Input Parser
 	;
 	; 08/21/07 - Vertliba - CR28077
 	;	     The Variable "vni" is Newed at the top to avoid the
-	;            <UNDEFINED> error in Tax ID lookup when Customer 
-	;            Number entered as a [*]. 
+        ;            <UNDEFINED> error in Tax ID lookup when Customer
+        ;            Number entered as a [*].
 	;
 	; 07/14/06 - RussellDS - CR22121
 	;	     Replaced $A references with $$BSASCII^SQLUTL and $C with
@@ -52,14 +52,14 @@ DBSCRT8	;; DATA-QWIK Input Parser
 	;	     rather than the protected field's message.  This is called
 	;	     after the variable E4 (protection flag) is set up.
 	;
-	; 04/10/01 - SISONG - 44204 
-	;            Replaced "$D(RM)" with "$G(RM)'=""" in section READ to 
-	;            fix problem on description not showing at the bottom 
-	;            page when running @OVR001 
+        ; 04/10/01 - SISONG - 44204
+        ;            Replaced "$D(RM)" with "$G(RM)'=""" in section READ to
+        ;            fix problem on description not showing at the bottom
+        ;            page when running @OVR001
 	;
-	; 05/12/00 - DOUGANM- 39582 
-	;            To improve the performance of error handling, cleaned up 
-	;            call to $$NEW^%ZT, and removed use of indirection. 
+        ; 05/12/00 - DOUGANM- 39582
+        ;            To improve the performance of error handling, cleaned up
+        ;            call to $$NEW^%ZT, and removed use of indirection.
 	;
 	; 07/15/99 - Chiang - 34007
 	;            Modified to not allow comma as the thousand separator in
@@ -73,7 +73,7 @@ DBSCRT8	;; DATA-QWIK Input Parser
 	;	     through a screen that has most of its fields protected.
 	;
 	; 08/11/97 - Betty Ni - 25653
-	;            Replaced follows operator "]" with a "]]". 
+        ;            Replaced follows operator "]" with a "]]".
 	;
 	; 04/16/97 - HYCHKOS - 24415
 	;	     Modified VDSP section to not overwrite a null value
@@ -128,10 +128,10 @@ READ	; Input from terminal or array and process %TAB(NI)
 	;
 	I E4<3 S vgoto=$$BYTECHAR^SQLUTL(NI)_vgoto	; Build entry path
 	;
-	; Replace $D(RM) with $G(RM)'="" 
-	I I(6)'="" D XPRE I $G(RM)'="" D REPLY          ; Pre processor 
+        ; Replace $D(RM) with $G(RM)'=""
+        I I(6)'="" D XPRE I $G(RM)'="" D REPLY          ; Pre processor
 	;
-	S X=$S($D(vdft(NI)):$P(vdft(NI),"|",1),(V="")&(E8'="L"):"",1:$$EXT^%ZM(V,E8,I(9)))
+    	S X=$S($D(vdft(NI)):$P(vdft(NI),"|",1),(V="")&(E8'="L"):"",1:$$EXT^%ZM(V,E8,I(9)))
 	;
 	I 'vkeyb D PROCESS G ERROR:ER Q			; Not interactive
 	I vexit>NI D PROCESS G ERROR:ER Q		; Drop through
@@ -141,9 +141,9 @@ READ	; Input from terminal or array and process %TAB(NI)
 	N protall
 	I %fkey="CUU" D  Q:protall
 	.	N nii,x
-	. S nii="",protall=1
-	. F  S nii=$O(%TAB(nii)) Q:nii=""  I +nii,%TAB(nii)'="" D  Q:protall=0	;8/26/96 MAS
-	..              S x=%TAB(nii) I $E(x,4)<2 S protall=0   
+        .	S nii="",protall=1
+        .	F  S nii=$O(%TAB(nii)) Q:nii=""  I +nii,%TAB(nii)'="" D  Q:protall=0	;8/26/96 MAS
+        ..              S x=%TAB(nii) I $E(x,4)<2 S protall=0  
 	.	I 'protall,nii>NI S %fkey="CUD"         ;8/26/96 MAS
 	I %fkey="CUU",X=""!(vptr=0) S NI=$$CUU Q  	; Cursor up one field
 	I %fkey="PUP" D  I ER G ERROR			; Previous screen
@@ -160,9 +160,9 @@ READ	; Input from terminal or array and process %TAB(NI)
 	;
 	I %fkey="CUU" D  Q:protall
 	.	N nii,x
-	. S nii="",protall=1
-	. F  S nii=$O(%TAB(nii)) Q:nii=""  I +nii,%TAB(nii)'="" DO
-	..              S x=%TAB(nii) I $E(x,4)<2 S protall=0   
+        .	S nii="",protall=1
+        .	F  S nii=$O(%TAB(nii)) Q:nii=""  I +nii,%TAB(nii)'="" DO
+        ..              S x=%TAB(nii) I $E(x,4)<2 S protall=0  
 	I %fkey="CUU" S NI=$$CUU Q  			;Cursor up
 	I %fkey="CUD" D CUD				;Cursor down
 	Q
@@ -340,7 +340,7 @@ EXECUTE(%CODE,PGM,DFID,DLIB,preflg)	; Execute pre/post processors
 	;
 	I NI'=vni S z=vni,vni=NI,NI=z		; Save new NI variable
 	E  K vni
-	I %fkey="ESC" S vdspscr=1,X=vx,$P(vdft(NI),"|",1)=vx    ; 8/29/96  MJZ 
+        I %fkey="ESC" S vdspscr=1,X=vx,$P(vdft(NI),"|",1)=vx    ; 8/29/96  MJZ
 	I $G(vdspscr) D DSP^DBSCRT(1)		; Redisplay screen
 	Q
 	;

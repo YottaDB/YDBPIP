@@ -2,18 +2,18 @@ DBSEXE5	;;DBS - U - V4.4 - LIST REPORT DEFINITIONS
 	;;Copyright(c)1999 Sanchez Computer Associates, Inc.  All Rights Reserved - 02/24/99 08:23:45 - CHIANG
 	; ORIG:  CHIANG - 3/25/86
 	;
-	;  I18N=QUIT: Excluded from I18N standards 
+        ;  I18N=QUIT: Excluded from I18N standards
 	;---------- Revision History -------------------------------------------
 	; 09/28/04 - RussellDS - CR12334
 	;	     Replaced obsoleted calls to ^DBSANS with new procedure
 	;	     DBSGETID.
 	;
-	; 02/23/99  -  Chiang - 31754 
-	;              Modified to use +$H (system date) as the input value 
-	;              for the ^%ZM date utility. 
-	; 
+        ; 02/23/99  -  Chiang - 31754
+        ;              Modified to use +$H (system date) as the input value
+        ;              for the ^%ZM date utility.
+        ;
 	;              Replaced $ZP function call with $O.
-	;              Removed old revision history. 
+        ;              Removed old revision history.
 	;-----------------------------------------------------------------------
 LIST	;
 	;

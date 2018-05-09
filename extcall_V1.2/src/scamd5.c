@@ -10,8 +10,10 @@
 *******************************************************************************/
 
 #include <stdio.h>
-#include <scatype.h>
-#include <scamd5.h>
+#include <stdlib.h>
+#include <string.h>
+#include "scatype.h"
+#include "scamd5.h"
 
 /*
 	Function:	ProfileENC

@@ -48,22 +48,22 @@ DBSDDIMP	;
 	;
 	; <CR><LF>
 	; <CR><LF>
-	;---------- Revision History ------------------------------------------- 
-	; 07/18/06 - RussellDS - CR22121 
-	;	     Modified to allow calls to FILE^%ZOPEN to consider character
-	;	     set exceptions for Unicode.
-	;	   
-	; 02/16/06 - RussellDS - CR19065 
-	;      Modified saving of DBIMPORT data to correspond to new
-	;      table structure.
-	; 
-	; 10/31/05 - RussellDS - CR17834 
-	;      Replaced call to obsolete INS^DBSINS in IMPORT1 section with
-	;      use of DELETE^SQL.
-	; 
-	;      Removed old revision history.
+        ;---------- Revision History -------------------------------------------
+        ; 07/18/06 - RussellDS - CR22121
+  	;	     Modified to allow calls to FILE^%ZOPEN to consider character
+  	;	     set exceptions for Unicode.
+  	;	   
+        ; 02/16/06 - RussellDS - CR19065
+        ;	     Modified saving of DBIMPORT data to correspond to new
+        ;	     table structure.
+        ;
+        ; 10/31/05 - RussellDS - CR17834
+        ;	     Replaced call to obsolete INS^DBSINS in IMPORT1 section with
+        ;	     use of DELETE^SQL.
+        ;
+        ;	     Removed old revision history.
 	;----------------------------------------------------------------------
-	;   I18N=QUIT : Excluded From I18N Standards 
+        ;   I18N=QUIT : Excluded From I18N Standards
 IMPORT	;
 	;
 	N X,CDT,IDT,ZCDT,ERROR,MSG,ZMSG,MSG1,MSG2,LOG,RTNDIR,VERSION
@@ -207,10 +207,10 @@ IMPORT1	; Load export file
 	..		S z=$P($G(^DBTBL(%LIBS,LEV,NAME,0)),"|",2)
 	..		I z'="" D
 	...		I (z?1A2N1"S"3.4N)!(z?1A2N1"Q"3.4N) D DEL^%ZRTNDEL(z)
-	..              I LEV=5 D 
-	...                     N SORTRTN 
-	...                     S SORTRTN=$P(z,"S",1)_"Z"_$P(z,"S",2) 
-	...                     I $$VALID^%ZRTNS(SORTRTN) D DEL^%ZRTNDEL(SORTRTN) 
+        ..              I LEV=5 D
+        ...                     N SORTRTN
+        ...                     S SORTRTN=$P(z,"S",1)_"Z"_$P(z,"S",2)
+        ...                     I $$VALID^%ZRTNS(SORTRTN) D DEL^%ZRTNDEL(SORTRTN)
 	.	;						; *** 10/18/94 BC
 	.	
 	.	I LEV=1 K ^DBSTAT(NAME)			;1/14/98 mas
@@ -219,20 +219,20 @@ IMPORT1	; Load export file
 	..		F  S X=$O(^TRN(NAME,2,X)) Q:X=""  S ^SAVETRN(NAME,X)=^TRN(NAME,2,X)
 	.	I LEV=201 D DELETE^SQL("TRN WHERE ETC='"_NAME_"'")	; Tran code
 	.	       ; restore authorization
-	. ;I LEV=201,'DEL D                
-	.. ;	N X S X=""
-	.. ;	F  S X=$O(^SAVETRN(NAME,X)) Q:X=""  S ^TRN(NAME,2,X)=^SAVETRN(NAME,X)
-	.. ;	K ^SAVETRN(NAME)
+        .	;I LEV=201,'DEL D                
+        ..	;	N X S X=""
+        ..	;	F  S X=$O(^SAVETRN(NAME,X)) Q:X=""  S ^TRN(NAME,2,X)=^SAVETRN(NAME,X)
+        ..	;	K ^SAVETRN(NAME)
 	. 
 	.	I LEV=202,DEL D					; Tran code authorization
 	..              N X S X=""
-	..              F  S X=$O(^TRN(NAME,2,X)) Q:X=""  K ^TRN(NAME,2) Q 
+        ..              F  S X=$O(^TRN(NAME,2,X)) Q:X=""  K ^TRN(NAME,2) Q
 	.	;						; CIFTYP,DTYPE,LTYPE
-	.       I LEV=203!(LEV=204)!(LEV=205) K ^UTBLCTL(NAME) 
-	.       I LEV=203 K ^UTBLDFTC(NAME) 
-	.       I LEV=204 K ^UTBLDFTD(NAME) 
-	.       I LEV=205 K ^UTBLDFTL(NAME) 
-	.       ; 
+        .       I LEV=203!(LEV=204)!(LEV=205) K ^UTBLCTL(NAME)
+        .       I LEV=203 K ^UTBLDFTC(NAME)
+        .       I LEV=204 K ^UTBLDFTD(NAME)
+        .       I LEV=205 K ^UTBLDFTL(NAME)
+        .       ;	
 	.	I LEV=96,DEL D  				; Delete data item  [fid]di
 	..		N fid,di
 	..		S fid=$E($P(NAME,"]",1),2,99),di=$P(NAME,"]",2)
@@ -271,12 +271,14 @@ IMPORT1	; Load export file
 	I dqfile D IMP^DBSDDEXQ				; Flat file loader
 	;
 	S Z="" F  S Z=$O(HDR(Z)) Q:Z=""  DO
-	.       S TYPE=$P(HDR(Z),"|",1),NAME=$P(HDR(Z),"|",2),DEL=$P(HDR(Z),"|",3) 
+        .       S TYPE=$P(HDR(Z),"|",1),NAME=$P(HDR(Z),"|",2),DEL=$P(HDR(Z),"|",3)
 	.       I LEV=201,'DEL D
-	..              N X S X="" 
-	..              F  S X=$O(^SAVETRN(NAME,X)) Q:X=""  S ^TRN(NAME,2,X)=^SAVETRN(NAME,X) 
-	..              K ^SAVETRN(NAME) 
+        ..              N X S X=""
+        ..              F  S X=$O(^SAVETRN(NAME,X)) Q:X=""  S ^TRN(NAME,2,X)=^SAVETRN(NAME,X)
+        ..              K ^SAVETRN(NAME)
+
 	I routine D ROUTINE				; Load MUMPS routines
+
 	D CLOSE
 	Q
 	;-----------------------------------------------------------------------
@@ -389,7 +391,7 @@ RJ(X,SIZE)	;
 	Q X_$J("",SIZE-$L(X))
 	;
 	;----------------------------------------------------------------------
-EXT(IMPIO,LOG,RTNDIR)	; Import from extrnal call 
+EXT(IMPIO,LOG,RTNDIR) ; Import from extrnal call
 	;----------------------------------------------------------------------
 	;
 	;	.IMPIO	File to import (name and path)	/REQ

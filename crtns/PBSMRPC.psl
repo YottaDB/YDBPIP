@@ -1,409 +1,603 @@
-PBSMRPC(vzreply,vzstfflg,vzrecord,vzrectyp,vzcontxt)	//Private;M Remote Procedure Calls
-	/*
-	   ORIG: MATTSON - 11/08/93
-	   DESC: M Remote Procedure Calls
+private PBSMRPC(String vzreply,		// Reply message
+		Number vzstfflg,	// STF flag
+		String vzrecord,	// Input message
+		Number vzrectyp,	// Record type
+		String vzcontxt)	// Context		/NOREQ
+		
+	/* M Remote Procedure Calls
 
-	   ARGUMENTS:
-	       . vzreply  Reply message  /TYP=T/REQ/MECH=REFNAM
-	       . vzstfflg STF flag  /TYP=T/REQ/MECH=VAL
-	       . rvzecord Input message  /TYP=T/REQ/MECH=VAL
-	       . vzrectyp Record type  /TYP=N/REQ/MECH=VAL
-	       . vzcontxt Context   /TYP=T/NOREQ/MECH=VAL
+	   ORIG: MATTSON - 11/08/93
 
 	   RETURNS:
-	   . $$  Error code  /TYP=N/LEN=1
-
+	   . $$  Error code  		/TYP=L
 
 	  ------Revision History------------------------------------------------
-	
-	  12/15/06 - SHRIRAM - 24547
-	  	     Added logic to handle authorization of restrictions. Modified
-	  	     this procedure to handle new optional field vzfld(4) in the 
-	  	     input record and generate an array containing override details.
-	  	     
-	  	     Added new sections SPV and APPLYOVR.
-	  	     
-	  	     The code for private MRPC's is removed. 
-	  	     		 			
-	  12/17/03 - CARROLLJ - CR7239
-		     Added #ACCEPT prior to xecute command.
+	  2009-04-05 - RussellDS - CRs 39284/35741
+	  	* Modified checking of SCATBL5 for valid procedures since
+	  	  procedures may now be .psl files and not exist in DBTBL25.
+	  	  
+	  01/19/2009 - RussellDS - CRs 37680/35741
+		* Fix to change for CR36959 to correct problem where not
+		  checking account number in all cases.
+	  
+	  01/07/2009 - RussellDS - CR36959/35741
+		* Fixed problem of logging overrides to DAYENDXBAD
+	  
+	  06/22/2008 - RussellDS - CR30801
+	  	Modified to log if SCATBL5A.LOGFLG is set.
+	  	
+	  	Modified to look at SCATBL5.RTN to provide backward compatibility.
+	  	
+	  	Removed old revision history.
+	  
+	  04/03/2008 - MbuiM - CR 33223
+	  	Added a new section OVRMSG to build an "AU" (authorization 
+	  	restrictions) format message as a response when restrictions
+	  	are encountered, with the necessary additional LV wrapping. 
+	  	Replaced call to OVRMSG^PBSMSQL with call to new section.
+	  
+	  	Modified top section for incoming messages to deal with the new
+	  	SPV field format and creation of the TSPV() for transaction 
+	  	processing override. Declared TSPV() array and added to the
+	  	call to SPV.
+	  	
+	  	Modified SPV section to add TSPV() array as a formal parameter,
+	  	perform an initial new LV unwrap to break incoming "AU" into
+	  	authorization sets. Modified current processing to include 
+	  	TSPV() array processing.
+	  	
+	  01/03/2008 - RussellDS - CR30802
+	  	Modify means of determining MRPC name, based on ID.  This
+	  	eliminates use of obsolete SCATBL5.MRPC field.
+	  	
+		Removed exec and list sections - not used.
+		
+		General clean-up.
 
-	  05/19/03 - Erik Scheetz - 51349
-	  	     Replaced variable vzerror with rpcerror, which fixed an
-	  	     error condition that falsely returned as successful to 
-	  	     the Profile Server code (PBSSRV).  
-	  	     
-	  	     Modified code to avoid GTM-INDRMAXLEN errors when
-		     the indrection string exceeds 2K.  Indirection string
-		     now contains the vzx variables rather than their values.
-	  	     
-	  07/24/02 - SRIVASTAVAN - 49794
-		     Converted To PSL
- 
-	  05/08/00 - SHANL - 39895
-	             Modified the code to reference ^UTBL("RTNS" instead of
-	             ^STBL("RTNS".
-
-	   03/14/00 - TANY - 37587
-	              Modified SCADAT calls by passing an additional
-	              parameter to the calls to improve performance.
-	              The parameter is a "1" which will return a known
-	              julian date.
-
+		Removed old revision history.
+	  
+	  09/26/07 - VANITHAK - 29116
+	       	     For supporting automatic authorization of restrictions 
+	       	     in Profile Direct, modified SPV section to make the spvarr 
+	       	     array local to the for loop so that the information from previous 
+	  	     restriction is not included the next time loop begins and 
+	  	     changed call to LV2V inside the for loop so that same array 
+	  	     being ordered through is passed in. 
 	*/
-	new rpcerror,vzermsg,vzfld,vzlod,vzlog,vzlst,vzpar,vzptr
-	new vld24x7,vzrpc,vzsav,vzver,vzx
-	type public Boolean ER, vzrstflg
-	type String vsupv(), verrors(,)
 	
-	set rpcerror=0 
-	set ER=0
-
+	type public Cache %CACHE()
+	
+	type public Boolean vzrstflg
+	type public Number %STFHOST
+	
+	type Boolean vziserror, vzerror
+	type Number i, ignore, vzptr, vzver
+	type String TSPV(,,,), verrors(,), vzcall, vzermsg, vzfld(), vzpar, vzpgm, vzprocid, vzsupv(), vzx
+	
+	set vziserror = false
+	
 	// Public/private fields
-	set vzptr=$$LV2V^MSG(vzrecord,.vzfld)
+	set vzptr = $$LV2V^MSG(vzrecord, .vzfld())
 	
-	// MRPC ID/pgm
-	set vzrpc=$G(vzfld(1))
+	// Procedure name/RPC ID
+	set vzprocid = vzfld(1).get()
 	
 	// Version number
-	set vzver=$G(vzfld(2))
+	set vzver = vzfld(2).get()
 	
 	// Input parameters
-	set vzpar=$G(vzfld(3))
+	set vzpar = vzfld(3).get()
 	
 	// Restriction/override information
-	do SPV(vzfld(4).get(), .vsupv(), .vzrstflg)
+	do SPV(vzfld(4).get(), .vzsupv(), .vzrstflg, .TSPV(,,,))
 	
-	if vzrpc="" do { quit ER
+	if vzprocid.isNull() do { quit true
+		
 		// Server Error - request message requires an MRPC ID
-		set vzreply=$$CSERR^PBSUTL("SV_RPCIDREQ")
-		if vzstfflg do STF(vzrecord,.vzreply)
+		set vzreply = $$CSERR^PBSUTL("SV_RPCIDREQ")
+		if vzstfflg do STF(vzrecord, .vzreply)
+	}
+	
+	if vzver.isNull() do { quit true
+			
+		// Server Error - request message requires a version number
+		set vzreply = $$CSERR^PBSUTL("SV_VERSNREQ")
+		if vzstfflg do STF(vzrecord, .vzreply)
+	}
+	
+	type RecordSCATBL5 scatbl5 = %CACHE("SCATBL5").getRecord("SCATBL5", "RPCID=:vzprocid", 1)
+	
+	if (scatbl5.getMode() = 0) do { quit true
+
+		// Server Error - the MRPC requested is not valid
+		set vzreply = $$CSERR^PBSUTL("SV_INVLDRPC")
+		if vzstfflg do STF(vzrecord, .vzreply)
+	}
+	
+	/* Construct procedure to call.  If the procedure ID begins with numbers,
+	   and does not contain an up-arrow, then treat as MRPC.  Otherwise, get
+	   runtime name from DBTBL25.PGM, if it exists, otherwise use name
+	   provided since if not in DBTBL25, likely a .psl form.  */
+	   
+	// For MRPCs, pad with leading zeros if less than three digits.
+	if (vzprocid ? 1.N.E) do {
+		
+		type Number numpart = vzprocid.toNumber()
+		
+		if (numpart < 10) set vzcall = "$$^MRPC00"_ vzprocid
+		else  if (numpart < 100) set vzcall = "$$^MRPC0"_ vzprocid
+		else  set vzcall = "$$^MRPC"_ vzprocid
+		
+		set vzpgm = vzcall.piece("^", 2)
+	}
+	else  do {
+	
+		type String label, proc
+		
+		set proc = vzprocid
+		
+		if proc.isLike("%^%") do {
+			
+			set label = proc.piece("^", 1)
+			set proc = proc.piece("^", 2)
 		}
+		else  set label = ""
+		
+		type RecordDBTBL25 dbtbl25 = %CACHE("DBTBL25").getRecord("DBTBL25", "%LIBS='SYSDEV',PROCID=:proc", 1)
+		
+		// Not in DBTBL25, assume a .psl procedure
+		if (dbtbl25.getMode() = 0) set vzcall = "^"_ proc
+		else  do {
+			
+			set vzpgm = dbtbl25.pgm
+			set vzcall = "^"_ vzpgm
+		}
+		
+		set vzcall = "$$"_ vzcall
+	}
+	
+	type RecordSCATBL5A scatbl5a = %CACHE("SCATBL5A").getRecord("SCATBL5A", "RPCID=:vzprocid,UCLS=:%UserClass", 1)
 
-	// Public MRPC
-	if vzrpc'["^" do { quit rpcerror
-		if vzver="" do { quit
-			set rpcerror=1
-			// Server Error - request message requires a version number
-			set vzreply=$$CSERR^PBSUTL("SV_VERSNREQ")
-			if vzstfflg do STF(vzrecord,.vzreply)
-			}
-
-		type RecordSCATBL5 scatbl5=Db.getRecord("SCATBL5","RPCID=:vzrpc",1)
-		set vzpgm=scatbl5.mrpc
-		set vzlog=scatbl5.%sn
-
-		if vzpgm="" do { quit
-			set rpcerror=1
-			// Server Error - the MRPC requested is not valid
-			set vzreply=$$CSERR^PBSUTL("SV_INVLDRPC")
-			if vzstfflg do STF(vzrecord,.vzreply)
-			}
-
-		new UCLS
-		set UCLS="*"
-		if 'Db.isDefined("SCATBL5A","RPCID=:vzrpc,UCLS=:%UserClass"),'Db.isDefined("SCATBL5A","RPCID=:vzrpc,UCLS=:UCLS") do { quit
-			set rpcerror=1
-			// Server Error - user is not authorized to execute MRPC
-			set vzreply=$$CSERR^PBSUTL("SV_NOAUTRPC")
-			if vzstfflg do STF(vzrecord,.vzreply)
-			}
-
-		if $G(%STFHOST) do { quit:rpcerror
-			new rtn
-			set rtn=$P(vzpgm,"(",1)
-			if $E(rtn,1,2)="$$" set rtn=$E(rtn,3,$L(rtn))
-			if $L(rtn,"^")'=2 set rtn="^"_rtn
-
-			//VALID24X7
-			type RecordUTBLRTNS utblrtns=Db.getRecord("UTBLRTNS","ROUTINE=:rtn",1)
-			if utblrtns.valid24x7 quit
-
+	// Determine if authorized for this userclass
+	if (scatbl5a.getMode() = 0), '%CACHE("SCATBL5A").isDefined("SCATBL5A", "RPCID=:vzprocid,UCLS='*'") do { quit true
+		
+		// Server Error - user is not authorized to execute MRPC
+		set vzreply = $$CSERR^PBSUTL("SV_NOAUTRPC")
+		if vzstfflg do STF(vzrecord, .vzreply)
+	}
+	
+	// Check to see if valid 24x7 if in host STF mode
+	if (%STFHOST.get() > 0)) do { if vziserror quit true
+		
+		type RecordUTBLRTNS utblrtns = %CACHE("UTBLRTNS").getRecord("UTBLRTNS", "ROUTINE=:vzprocid", 1)
+		
+		if 'utblrtns.valid24x7 do {
+		
+			set vziserror = true
+	
 			// Access not allowed for MRPC ~p1 at this time
-			set ER=1 
-			set RM=$$^MSG(3247,vzrpc)
-			set rpcerror=1 
-			set vzreply=$$ERRMSG^PBSUTL($G(RM),$G(ET))
-			if vzstfflg do STF(vzrecord,.vzreply)			
-			}
+			set vzreply=$$ERRMSG^PBSUTL($$^MSG(3247, vzprocid), "")
+			if vzstfflg do STF(vzrecord, .vzreply)
+		}
+	}
 
-		// Add parameters to MRPC; execute remote procedure call
-		set vzptr=$$LV2V^MSG(vzpar,.vzx) 
-		set vzpar=$$PARAM(.vzx)
-		S vzx="S vzermsg="_vzpgm_"(.vzreply,vzver,"_vzpar_")"
+	// Add parameters to procedure and execute the call
+	set vzptr = $$LV2V^MSG(vzpar, vzx()) 
+	set vzpar = ""
+	for i = 1:1 quit:'vzx(i).exists()  set vzpar = vzpar_ "vzx("_ i_ "),"
+	set vzpar = vzpar.extract(1, vzpar.length() - 1)
+	
+	set vzcall = vzcall_ "(.vzreply,vzver,"_ vzpar_ ")"
+	
+	// Log if required
+	if scatbl5a.logflg set ignore = $$auditLog^SQLAUDIT("EXECUTE", vzpgm, vzcall, "")
+	
+	set vzx = "set vzermsg="_ vzcall
 		
-		// Execute Remote Procedure Call
-		#ACCEPT DATE=5/15/03;PGM=Erik Scheetz 
-		xecute vzx
+	// Execute Remote Procedure Call
+	#ACCEPT DATE=5/15/03; PGM=Erik Scheetz; CR=30802; Group=Xecute 
+	xecute vzx
+	
+	set vzerror = false
 		
-		if 'vzermsg.isNull() set rpcerror=1, vzreply = vzermsg
-		else  if vzrstflg.get() do {
-				if verrors.data() do APPLYOVR(.verrors(,), .vsupv())		
-				if verrors.data() do {
-					do Runtime.rollback()
-					set rpcerror = 1
-					set vzreply = $$OVRMSG^PBSMSQL(.verrors(,)) 
-				}
+	if 'vzermsg.isNull() do {
+	
+		set vzerror = true
+		set vzreply = vzermsg
+	}
+	else  if vzrstflg.get() do {
+		
+		if verrors.data() do APPLYOVR(.verrors(,), .vzsupv())		
+		if verrors.data() do {
+			
+			do Runtime.rollback()
+			
+			set vzerror = true
+			set vzreply = $$OVRMSG(.verrors(,)) 
 		}
 	}
 	
-	quit ""
+	quit vzerror
 
 
-exec()	//Private;Execute MRPC ($$tag^pgm) or stub (D @pgm)
+STF(String pkt,		// Input message
+    String reply)	// Reply		/MECH=REF:W
+    
+ 	/* Store and forward handling of rejected updates
 
-
-	new vzsav
-	if vzlst'="" set %RPC=vzlst
-	if vzlod'="" do VLOD^PBSUTL(.vzlod)
-
-	if $E(vzpgm,1,2)="$$" do {
-		#ACCEPT DATE=12/17/03;PGM=John Carroll
-		xecute "S vzx="_vzpgm
-		}
-
-	else  do @vzpgm set vzx=""
-
-	if $G(ER),vzstfflg do STF(vzrecord,$$ERRMSG^PBSUTL($G(RM),$G(ET)))
-
-	quit vzx
-
-
-list()	//Private;Return ordered list of values specified by %RPC
-
-
-	if $G(%RPC)="" quit ""
-	if $P(%RPC,",",1)'=vzver set ER=1 quit ""
-
-	new vz,vzi,vzx
-
-	set vz=""
-	for vzi=2:1 set vzx=$P(%RPC,",",vzi) quit:vzx=""  do {
-		set $P(vz,$C(28),vzi-1)=$G(@vzx)
-		}
-	quit vz
-
-
-STF(pkt,reply)	// Private; Store and forward handling of rejected updates
-
-	/*
 	   This subroutine logs the original client message to an exception
-	   RMS file along with the application reply when the message is a
+	   system file along with the application reply when the message is a
 	   store and foward message and rejects.
 
 	*/
-	new io,JD,x,X
+	
+	type IO io = Class.new("IO")
+	
+	set io.directory = $$SCAU^%TRNLNM("SPOOL")
+	set io.fileName = "STF_"_%CurrentDate.toString("DDMMYEAR")_".MRPC"
+	
+	set io.openParams = "WRITE/APPEND/SHARE"
+	set io.timeout = 2
+	set io.recordSize = 16384
+	
+	catch error {
+		
+		if 'error.type.contains("%PSL-E-IOOPEN") do io.close()
+		
+		// Problem opening or writing to file - fallback to this
+		if 'error.type.contains("%PSL-E-IOEOF") do STFGBL(pkt, .reply)
+	}
+	
+	do io.open()
 
-	set JD=+%CurrentDate
-	set X=$$DAY^SCADAT(JD,1)_$$MON^SCADAT(JD,1)_$$YEAR^SCADAT(JD,1)
-	set io=$$SCAU^%TRNLNM("SPOOL","STF_"_X_".MRPC")
+	do io.write("")
+	do io.write(pkt)		//Log original client message to RMS
+	do io.write(reply)		//Log server/application reply to RMS
 
-	set x=$$FILE^%ZOPEN(io,"WRITE/APPEND/SHARE",2,16384)
-	if 'x do STFGBL(pkt,.reply) quit
+	do io.close()
 
-	use io
-
-	// I18N=OFF
-	write !
-
-	//Log original client message to RMS
-	write pkt,!
-
-	//Log server/application reply to RMS
-	write reply,!
-
-	// I18N=ON
-	close io
-
-	set ER=0 
-	set reply=""
+	set reply = ""
 
 	quit
 
 
-STFGBL(pkt,reply)	// File record to global
+STFGBL(String pkt,	// Input message
+       String reply)	// Reply		/MECH=REF:W
+       
+	// File record to global
+	
+	type Number %seq, %sq
+	type String STF()
 
-	new i,%seq,%sq
-
+	set STF(%UserID) = ""			// Prevent warning related to lock
 	lock +STF(%UserID)
 	
-	set %sq=Db.nextVal("STF1","UID=:%UserID")
+	set %sq = Db.nextVal("STF1", "UID=:%UserID")
 
-	type RecordSTF1 stf1=Class.new("RecordSTF1")
-	set stf1.uid=%UserID
-	set stf1.seq=%sq
-	set stf1.tlo=%UserStation	
+	type RecordSTF1 stf1 = Class.new("RecordSTF1")
+	
+	set stf1.uid = %UserID
+	set stf1.seq = %sq
+	set stf1.tlo = %UserStation	
 	do stf1.bypassSave()
 
 	lock -STF(%UserID)
-
-	type RecordSTF stf
-
-	for i=1:400:$L(pkt) do {
-		set %seq=i\400+1
-		new STFMSG
-		set STFMSG=$E(pkt,i,i+399)
-
-		set stf=Class.new("RecordSTF")
-		set stf.uid=%UserID
-		set stf.seq=%sq
-		set stf.sseq=%seq
-		set stf.stfmsg=STFMSG
 	
-		do stf.bypassSave()	
-		}
+	// Save in 400 byte chunks
+	set %seq = 1
+	while 'pkt.isNull() do {
+			
+		type String saveVal = pkt.byteLimitSubstring(1, 400)
+				
+		set pkt = pkt.extract(saveVal.length() + 1, pkt.length())
 
-	for i=1:400:$L(reply) do {
-		set %seq=%seq+1
-		new STFMSG1
-		set STFMSG1=$E(reply,i,i+399)
-	 
-		set stf=Class.new("RecordSTF")
-                set stf.uid=%UserID
-                set stf.seq=%sq
-                set stf.sseq=%seq
-                set stf.stfmsg=STMSG1
- 
-                do stf.bypassSave()
-		}
+		type RecordSTF stf = Class.new("RecordSTF", "UID=%UserID,SEQ=:%sq,SSEQ=:%seq")
+
+		set stf.stfmsg = saveVal
 	
-	set ER=0
-	set reply=""
+		do stf.bypassSave()
+		set %seq = %seq + 1	
+	}
+	
+	while 'reply.isNull() do {
+			
+		type String saveVal = reply.byteLimitSubstring(1, 400)
+				
+		set reply = reply.extract(saveVal.length() + 1, reply.length())
+
+		type RecordSTF stf = Class.new("RecordSTF", "UID=%UserID,SEQ=:%sq,SSEQ=:%seq")
+
+		set stf.stfmsg = saveVal
+	
+		do stf.bypassSave()
+		set %seq = %seq + 1	
+	}
+	
+	set reply = ""
 
 	quit
 	
-SPV(String ovr, String vsupv() , Boolean vzrstflg)		//Convert override info to vsupv array
 	
-	type String vzrest(), spvarr()
-	type String INDX, SPVUID, VZPTR1
-	type Boolean DONE, ER=0
-	type ByteString SPVREST
-		
-	if ovr="" set vzrstflg=0
+SPV(String ovr,		// Override info
+    String vzsupv(),	// Supervisor override array		/MECH=REFARR:W
+    Boolean vzrstflg, 	// Restriction flag			/MECH=REF:W
+    String TSPV(,,,))	// Transaction processing override 	/MECH=REFARR:W
+    
+    	//Convert override info to vzsupv and TSPV array
+    	
+    	/*
+	Supervisory authorization
 	
-	else  do {
-		set VZPTR1=$$LV2V^MSG(ovr,.vzrest)
-		set INDX=""
+	Supervisory Information
+	          					
+	   Pos  Name    Req Description             Type  MaxLen
+	
+	   1    SPVREST Y   Restriction code        T     20
+	   2    SPVUID  Y   Supervisor ID           N     12
+	   3    SPVPWD  Y   Supervisor's password   T     12
+	   4    SPVCID  N   Account number assoc.   N     12
+
+	ARGUMENT NOTES:
+	   . TSPV	TSPV(SEQ) = AuthorizedUser|scau.%ucls
+	     		TSPV(SEQ, CID, OVR, TYP) = AuthorizedUser|scau.%ucls
+	*/
+    	
+    	type public Cache %CACHE()
+    	
+    	type Boolean DONE, ER
+	type String INDX1, INDX2, SPVREST, SPVUID, VZPTR1, VZPTR2, vzrest1()
+	
+	set vzrstflg = false
+	set DONE = false
+	set ER = false
 		
-		for  set INDX=vzrest(INDX).order() quit:INDX.isNull()  do { quit:ER.get()!DONE.get() 
-			set VZPTR1=$$LV2V^MSG(ovr,.spvarr)
+	if ovr.isNull() quit
+	
+	set VZPTR1 = $$LV2V^MSG(ovr, .vzrest1())
+	set (INDX1 , INDX2) = ""
+	for  set INDX1 = vzrest1(INDX1).order() quit:INDX1.isNull()  do { quit:ER!DONE 
+		
+		type String vzrest2()
+		
+		set VZPTR2 = $$LV2V^MSG(vzrest1(INDX1), .vzrest2())
+		for  set INDX2 = vzrest2(INDX2).order() quit:INDX2.isNull()  do { quit:ER!DONE 
+
+			type String spvarr() 
+			
+			set VZPTR2 = $$LV2V^MSG(vzrest2(INDX2), .spvarr())
 			set SPVREST = spvarr(1)
 			
-			if SPVREST = 0 do {
-				set vzrstflg = 0 
-				set DONE = 1
-				quit
+			if (SPVREST = 0) do {
+				
+				kill TSPV , vzsupv
+				
+				set vzrstflg = false
+				set DONE = true
 			}
 			
-			if (SPVREST = 1 !(SPVREST = "*" & (CUVAR.AUTOAUTH = 1))) do {
-				set vzrstflg = 1
-				#IF (CUVAR.AUTOAUTH = 1) set vsupv("*") = %UserID
-				set DONE = 1
+			if (SPVREST = 1) do {
+				
+				kill TSPV , vzsupv
+				
+				set vzrstflg = true
+				set DONE = true	
 			}
+			
 			set SPVUID = spvarr(2).get()
 			
-			if SPVUID.isNull() do {
-				#IF (CUVAR.AUTOAUTH '= 0)
-				  	set SPVUID = %UserID
+			if SPVUID.isNull() do { quit:ER
+				
+				#IF (CUVAR.AUTOAUTH <> 0)
+				set SPVUID = %UserID
 				#ELSE  
-					do Runtime.setErrMSG("CUVAR", 1504)	// Invalid user ID
+				// Invalid user ID
+				do Runtime.setErrMSG("CUVAR", 1504) quit:ER	
 				#ENDIF	
 				
 			} 
 			else  do {
+				
 				// Invalid user ~p1
-				if 'Db.isDefined("SCAU", "UID=:SPVUID") do Runtime.setErrMSG("SCAU", 7591, SPVUID) quit
-
+				if '%CACHE("SCAU").isDefined("SCAU", "UID = :SPVUID") do Runtime.setErrMSG("SCAU", 7591, SPVUID) quit:ER 
+				
 				// Invalid password
-				if '$$VALIDATE^SCADRV1(spvarr(3).get(),SPVUID) do Runtime.setErrMSG("SCAU",1419)
+				else  if '$$VALIDATE^SCADRV1(spvarr(3).get(), SPVUID) do Runtime.setErrMSG("SCAU", 1419) quit:ER
 			}
 			
-			if (SPVREST["_") set SPVREST = SPVREST.piece("_",3)
+			type RecordSCAU scau = %CACHE("SCAU").getRecord("SCAU", "UID = :SPVUID", 1)
 			
-			set vsupv(SPVREST) = SPVUID
+			#IF (CUVAR.AUTOAUTH = 1)
+			if (SPVREST = "*") do {
+				
+				set vzrstflg = true
+				
+				set vzsupv(SPVREST) = %UserID
+				
+				set TSPV(INDX1) = SPVUID_"|"_scau.%ucls
+				
+				set DONE = true
+			}
+			#ENDIF
 			
-			if SPVREST = "*" set DONE = 1
-		}
-		if vsupv.data() set vzrstflg = 1
+			quit:DONE
+						
+			//If SPVREST begins with either OVR or RFLG, set up the TSPV() array.
+			
+			if (SPVREST = "*") do {
+				
+				set TSPV(INDX1) = SPVUID_"|"_scau.%ucls
+				
+				set vzsupv(SPVREST) = SPVUID
+				
+			}
+			else  if SPVREST.beginsWith("OVR") ! SPVREST.beginsWith("RFLG") do {
+			
+				set TSPV(INDX1, spvarr(4), SPVREST.piece("_", 1), SPVREST.piece("_", 3)) = SPVUID_"|"_scau.%ucls
+				
+			}
+			else  do {
+				
+				if SPVREST.isLike("%_%") set SPVREST = SPVREST.piece("_", 3)
+				
+				set vzsupv(SPVREST) = SPVUID
+			}
+		}	
 	}
+	
+	if vzsupv.data() ! TSPV.data() set vzrstflg = true
 	
 	quit
 			
-APPLYOVR(String verrors(,), String vsupv())	//Apply overrides to restrictions
+APPLYOVR(String verrors(,),	// Errors array
+	 String vzsupv())	// Supervisor override array
+	 
+	/* Apply overrides to restrictions
 	
-	// Save overridden errors. In the event that all errors can not be overridden
-	// they must be restored so all restrictions can be passed back to client.
+	   Save overridden errors. In the event that all errors can not be overridden
+	   they must be restored so all restrictions can be passed back to client.
+	*/
 
-	type String verrsav(,)
-	type String ET, IDENT, REST, SEQ, SPVUID, TBL, UCLS, UCLSARR()
 	type Boolean DONE
-	type public Boolean ER
+	type String ET, IDENT, REST, SEQ, SPVUID, TBL, UCLS, UCLSARR(), verrsav(,)
 			
-	set DONE = 0
-	set REST = "", SEQ = ""
-
-	for  set REST=verrors(REST).order() quit:REST.isNull()  do { quit:DONE
-		for  set SEQ=verrors(REST, SEQ).order() quit:SEQ.isNull()  do { quit:DONE.get()!ER.get()
+	set DONE = false
+	
+	set REST = ""
+	set SEQ = ""
+	for  set REST = verrors(REST).order() quit:REST.isNull()  do { quit:DONE
+		
+		for  set SEQ = verrors(REST, SEQ).order() quit:SEQ.isNull()  do { quit:DONE
+			
 			set SPVUID = ""
 			set ET = verrors(REST, SEQ).piece("|",3)
-			if vsupv("*").exists() set SPVUID = vsupv("*")
-			else  if vsupv(ET).exists() set SPVUID = vsupv(ET)
+			if vzsupv("*").exists() set SPVUID = vzsupv("*")
+			else  if vzsupv(ET).exists() set SPVUID = vzsupv(ET)
 			
 			// authorization not provided
-			if SPVUID.isNull() set DONE = 1 quit
+			if SPVUID.isNull() set DONE = true quit
 			
 			// setup user class array
 			if 'UCLSARR(SPVUID).exists() do {
+			
 				type RecordSCAU scau = Db.getRecord("SCAU", "UID = :SPVUID", 1)
 
 				set UCLSARR(SPVUID)= scau.%ucls
 			}
-			set UCLS = UCLSARR(SPVUID)	
-			if 'Db.isDefined("UTBLINT","ETYPE=:ET,UCLS=:UCLS") set DONE = 1 quit
+			
+			set UCLS = UCLSARR(SPVUID)
+				
+			if 'Db.isDefined("UTBLINT","ETYPE=:ET,UCLS=:UCLS") set DONE = true quit
+			
 			set TBL = verrors(REST).piece("|",1)
 			set IDENT = verrors(REST).piece("|",2)
-			if TBL = "CIF" do {
-				type RecordDAYENDXBADC xbadc = Db.getRecord("DAYENDXBADC", "TJD=:%SystemDate,%UID=:SPVUID,ACN=:IDENT,SEQ=:REST,ET=:ET", 1)
+			
+			if (TBL = "CIF") do {
+				if IDENT.isNull() quit	// null values
+				type Number XSEQ = Db.nextVal("DAYENDXBADC","TJD=:%SystemDate,%UID=:%UserID,ACN=:IDENT")
+				type RecordDAYENDXBADC xbadc = Db.getRecord("DAYENDXBADC", "TJD=:%SystemDate,%UID=:%UserID,ACN=:IDENT,SEQ=:XSEQ,ET=:ET", 1)
 				set xbadc.uid = SPVUID
 				do xbadc.save()
 			} 
 			else  do {
-				type RecordDAYENDXBAD xbad = Db.getRecord("DAYENDXBAD", "TJD=:%SystemDate,%UID=:SPVUID,CID=:IDENT,SEQ=:REST,ET=:ET", 1)
+				type Number CID = 0
+				type Number I, X, XSEQ
+				
+				// Find account number
+				for I = 1:1:IDENT.length(",") set X = IDENT.piece(",",I).toNumber() if Db.isDefined("ACN", "CID=:X") set CID = X quit
+				
+				// Don't log unless we've got a valid account number				
+				quit:(CID'>0)	
+					
+				set XSEQ = Db.nextVal("DAYENDXBAD","TJD=:%SystemDate,%UID=:%UserID,CID=:CID")
+				
+				type RecordDAYENDXBAD xbad = Db.getRecord("DAYENDXBAD", "TJD=:%SystemDate,%UID=:%UserID,CID=:CID,SEQ=:XSEQ,ET=:ET", 1)
+				
 				set xbad.uid = SPVUID
+				set xbad.ident = IDENT
 				do xbad.save()
 			}
+			
 			set verrsav(REST) = verrors(REST)
 			set verrsav(REST, SEQ) = verrors(REST, SEQ)
+			
 			kill verrors(REST, SEQ)
-			if verrors(REST).data() < 10 kill verrors(REST)
+			
+			if (verrors(REST).data() < 10) kill verrors(REST)
 		}
 	}
 	
-	if verrors.data() do {
-		set REST = "", SEQ = ""	
+	if (verrors.data() > 0) do {
 		
-		for  set REST=verrsav(REST).order() quit:REST.isNull()  do { 
+		set REST = ""
+		set SEQ = ""	
+		
+		for  set REST=verrsav(REST).order() quit:REST.isNull()  do {
+			 
 			set verrors(REST) = verrsav(REST)
 		
-			for  set SEQ=verrsav(REST, SEQ).order() quit:SEQ.isNull()  do { 
-				set verrors(REST, SEQ) = verrsav(REST, SEQ)	
-			}
+			for  set SEQ=verrsav(REST, SEQ).order() quit:SEQ.isNull()  set verrors(REST, SEQ) = verrsav(REST, SEQ)	
 		}
 	} 
 	
 	quit
 	
-PARAM(vzx)	// Create parameter string for indirection call
+OVRMSG(String OVR(,))	// Build override message
+	/*
+	   ARGUMENTS:
 
-	type Number i
-	type String str=""
+	   . OVR	Override array		/TYP=T/REQ/MECH=REFARRY:R
 
-	// build parameter string
-	for i=1:1 quit:'vzx(i).data()  set str=str_"vzx("_i_"),"
+			OVR(BUF)=FID|keys
+			OVR(BUF,SEQ)=||err_type|||||err_desc
+			
+	   Restrictions associated with the transaction processing SPV() array
+	   are handled separately, within individual MRPCs (e.g, MRPC029)	
+
+	*/
+
+	type Number CNT
+	type String AU(), BUF, FID, KEYS, MSG(), SEQ, Z, ZAU()
+
+	set BUF = ""
+	set CNT = 0
+	set SEQ = ""
+
+	for  set BUF = OVR(BUF).order() quit:BUF.isNull()  do {
+
+		// Table name
+		set FID = OVR(BUF).piece("|",1)
+
+		// Access keys
+		set KEYS = OVR(BUF).piece("|",2)
+
+		for  set SEQ = OVR(BUF,SEQ).order() quit:SEQ.isNull()  do {
+
+			set Z = OVR(BUF,SEQ)
+			set AU(1) = "XBAD_"_FID_"_"_Z.piece("|",3)
+			set AU(2) = ""
+
+			// Error description
+			set AU(3) = Z.piece("|",8)
+
+			// Access keys
+			set AU(4) = KEYS
+
+			// SPVST flag
+			set AU(5) = ""
+			set CNT = CNT + 1
+
+			// Convert to LV format
+			set ZAU(CNT) = $$V2LV^MSG(.AU)		
+
+			}
+		}
+
+	set MSG(1) = "AU"
+	set MSG(2) = ""
+	set MSG(3) = $$V2LV^MSG($$V2LV^MSG(.ZAU))
+
+	quit $$V2LV^MSG(.MSG)
+
 	
-	// remove trailing comma
-	set str=str.extract(1,str.length()-1)
-	
-	quit str
-
-vSIG()	quit "60638^40806^Shriram Deshpande^9811"	// Signature - LTD^TIME^USER^SIZE
+ #OPTION ResultClass ON
+public String vSIG()	quit "61475^61681^Dan Russell^14970"	// Signature - LTD^TIME^USER^SIZE

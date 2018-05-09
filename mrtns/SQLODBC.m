@@ -1,4 +1,4 @@
-SQLODBC	;Library;ODBC functions
+SQLODBC ;wittef;2009-03-09 18:23:00;Library;ODBC functions
 	;;Copyright(c)2002 Sanchez Computer Associates, Inc.  All Rights Reserved - 02/21/02 15:59:19 - CHENARDP
 	; ORIG:	CHIANG - 05/06/97
 	; DESC:	ODBC functions
@@ -14,14 +14,28 @@ SQLODBC	;Library;ODBC functions
 	;
 	; I18N=OFF
 	;--------- Revision History ------------------------------------------
+	; 2009-22-06, Sha Mirza,  CR 40255
+	;	     Modified  section PREPARE() to call D CONAGGR^SQLODBC(...)			
+	;	     Added new function CONAGGR() to  calculate TYP, LEN, and DEC for 
+	;	     aggregate or function.
+	;
+	; 05/25/09 - Sha Mirza, CR 40607
+	;	     Changed signature of CONSTANT(), and changed its callers
+	;	     Added explicit handling of AVE(), COUNT(), MAX(), MIN(), and
+	;	     SUM().
+	;
+	; 03/09/09 - Pete Chenard
+	;	     Modified PREPARE to pass fsn array into PARSE^SQLDD.  This is required
+	;	     for table aliases to work correctly.
+	;
 	; 07/10/07 - Pete Chenard - CR28171
 	;            Replaced occurrences of $C(255) with the value returned
 	;            from $$BYTECHAR^SQLUTL(255).
 	;
 	; 02/21/2002 Pete Chenard - 49204
-	;	     Removed the patch for MS Access.  The code was changing 
+	;	     Removed the patch for MS Access.  The code was changing
 	;	     the data type on primary keys to Text because that's all
-	;	     MS Access can support.  This is causing problems in 
+	;	     MS Access can support.  This is causing problems in
 	;	     Xpress.  For MS Access to work, clients need to use the
 	;	     Pass Through SQL feature of that product.
 	;
@@ -79,21 +93,21 @@ SQLODBC	;Library;ODBC functions
 	;            client software.
 	;
 	;----------------------------------------------------------------------
-PREPARE(di,frm,vpack)	; Return column attributes 
+PREPARE(di,frm,vpack) ; Return column attributes
 	;----------------------------------------------------------------------
-	; ARGUMENTS: 
-	; 
-	; . di          Column name             /TYP=T/REQ/MECH=REFVAL 
-	; . frm         Table name              /TYP=T/REQ/MECH=REFVAL 
+	; ARGUMENTS:
+	;
+	; . di          Column name             /TYP=T/REQ/MECH=REFVAL
+	; . frm         Table name              /TYP=T/REQ/MECH=REFVAL
 	; . vpack	Last table.col format	/TYP=T/REQ/MECH=REF:RW
-	; 
-	; RETURNS: 
+	;
+	; RETURNS:
 	; ER 	Error flag
 	; RM		Error message
-	; $$            Column attributes 
-	; 
-	;  1 ColTable - Column's table name 
-	;  2 ColName - Column name 
+	; $$            Column attributes
+	;
+	;  1 ColTable - Column's table name
+	;  2 ColName - Column name
 	;  3 DataLen - The actual length of data as stored in database
 	;  4 DisplayLen - Max length of data when converted to a character
 	;  5 Precision - Usually the same as length
@@ -102,48 +116,43 @@ PREPARE(di,frm,vpack)	; Return column attributes
 	;  8 isNullKnow
 	;  9 isCaseSensitive Is it case sensitive?
 	; 10 isSearchable Can the column be used in a where clause?
-	; 11 isLikeable - Can this column be in a LIKE clause 
-	; 12 isUnsigned 
-	; 13 isSigned 
-	; 14 isMoney 
-	; 15 isAutoIncrement 
-	; 16 isNotAutoIncrement 
-	; 17 isUpdateable Is the column updateable? 
+	; 11 isLikeable - Can this column be in a LIKE clause
+	; 12 isUnsigned
+	; 13 isSigned
+	; 14 isMoney
+	; 15 isAutoIncrement
+	; 16 isNotAutoIncrement
+	; 17 isUpdateable Is the column updateable?
 	; 18 ColType (format T,U,F,N,$,L,D,C,B,M)
 	;
 	; Procedure_name<13,10>f1<tab>f2<tab>...f20<13,10>f1<tab>...<13,10>
 	;
-	; CREATE PROCESURE Procedure_name AS SELECT column_list FROM table_list
+	; CREATE PROCEDURE Procedure_name AS SELECT column_list FROM table_list
 	;
 	; OPEN CURSOR Cursor_name AS PROCEDURE Procedure_name	/USING/ROWS
 	;
 	; FETCH Cursor_name					/ROWS
 	;----------------------------------------------------------------------
-	N alias,dinam,f,fn,i,len,req,typ,vdd,x,ER,RM
+	N alias,dec,dinam,f,fn,i,len,req,typ,vdd,x,ER,RM
 	;
 	I frm["OUTER JOIN" S frm=jfiles			; all files 02/07/2000
 	I frm?1a.an1" "1a.an.E D			; alias mapping
 	.	F i=1:1:$L(frm,",") S f=$P(frm,",",i),alias($P(f," ",2))=$P(f," ",1)
 	S dinam=di
-	I di?1A.E1"("1E.E1")" D  Q $$CONSTANT(len,typ)	; Func_name(arg)
-	.	S fn=$P(di,"(",1),typ=$P($G(^SQL("SQLFUNC",fn)),"|",2)
-	.	I typ="" S len=500 Q			; Not defined
-	.	I typ="L" S len=1 Q			; Logical
-	.	I "N$DC"[typ S len=12 Q			; Default length
-	.	S len=500				; Text format
+	I di?1A.E1"("1E.E1")" D CONAGGR(di,frm,.typ,.len,.dec) Q $$CONSTANT(typ,len,dec)	; Func_name(arg)
 	I di[$C(0) S dinam=$$UNTOK^%ZS(di,.tok)
-	I dinam?1"'"1e.e1"'" Q $$CONSTANT($L(dinam)-2,"T") ; Text
-	I dinam?1N.E Q $$CONSTANT($L(dinam),"N")	; Numeric
+	I dinam?1"'"1e.e1"'" Q $$CONSTANT("T",$L(dinam)-2,0) ; Text
+	I dinam?1N.E Q $$CONSTANT("N",$L(dinam),$L($P(dinam,".",2)))	; Numeric
 	S dinam=$TR(dinam,$C(34),"")
 	I dinam["." D					; Replace alias
 	.	S f=$P(dinam,".",1) I $D(alias(f)) S $p(dinam,".",1)=alias(f)
 	;
-	I dinam'["." S x=$$PARSE^SQLDD(.dinam,,,,frm)
+	I dinam'["." S x=$$PARSE^SQLDD(.dinam,,,.fsn,frm)
 	I $G(ER)!(dinam?1N.N) S x="99999|21|||||||$|||||2",dinam=frm_"."
-	E  S x=$$DI^SQLDD(dinam)  		; Data item attributes
+	E  S x=$$DI^SQLDD(dinam,frm,.vdd,.fsn) 	; Data item attributes
 	S typ=$p(x,"|",9)		        ; Format type
 	S f(1)=$P(dinam,".",1)  		; Table name
-	;					; 
+	;					;
 	S f(2)=$P(dinam,".",2)  		; Column name
 	S f(5)=$P(x,"|",2)	  		; Length
 	I $P(x,"|",16)'="" D 			;
@@ -189,7 +198,7 @@ PACK()	;
 	Q x_$$BYTECHAR^SQLUTL(i-1)_$E(dinam,i,99)			; compressed format
 	;
 	;----------------------------------------------------------------------
-KEYCOL(frm)	; Return a list of access key names 
+KEYCOL(frm) ; Return a list of access key names
 	;----------------------------------------------------------------------
 	N i,j,keys,list,tbl
 	S list=""
@@ -200,30 +209,145 @@ KEYCOL(frm)	; Return a list of access key names
 	.	S keys=$P(fsn(tbl),"|",3)			; Access keys
 	.	F j=1:1:$L(keys,",") S list=list_","_tbl_"."_$P(keys,",",j)
 	Q $E(list,2,$l(list))
-	;---------------------------------------------------------------------- 
-COLATT(frm,colfmt)	; Return column format attributes 
-	;---------------------------------------------------------------------- 
-	N fmt,i,typ,v 
-	S fmt="" 
-	F i=1:2:$L(colfmt) D 
-	.       S typ=$E(colfmt,i) 
-	.       I "TUBM"[typ S fmt=fmt_"T" Q            ; Text 
-	.       I typ="F" S fmt=fmt_"F" Q           ; Frequency
-	.       I "DCL$"[typ S fmt=fmt_typ Q            ; Date, time , logical 
-	.       S fmt=fmt_$E(colfmt,i+1)                ; Precision 
+	;
+	;----------------------------------------------------------------------
+COLATT(frm,colfmt)        ; Return column format attributes
+	;----------------------------------------------------------------------
+	N fmt,i,typ,v
+	S fmt=""
+	F i=1:2:$L(colfmt) D
+	.       S typ=$E(colfmt,i)
+	.       I "TUBM"[typ S fmt=fmt_"T" Q            ; Text
+	.       I typ="F" S fmt=fmt_"F" Q          	; Frequency
+	.       I "DCL$"[typ S fmt=fmt_typ Q            ; Date, time , logical
+	.       S fmt=fmt_$E(colfmt,i+1)                ; Precision
 	I $G(frm)="" Q fmt_"|"				; Information not required (PFW fetch)
-	Q fmt_"|"_$$KEYCOL(frm)                         ; Access key information (PIA) 
+	Q fmt_"|"_$$KEYCOL(frm)                         ; Access key information (PIA)
+	;
 	;----------------------------------------------------------------------
-CONSTANT(len,type)	; Return attributes for constant 
+CONSTANT(type,len,scale) ; Return attributes for constant
 	;----------------------------------------------------------------------
-	n %,f,i,x 
-	S %=$C(9) 
+	;
+	n %,f,i,x
+	S %=$C(9)
 	I $G(type)="" S type="T"
-	S x=%_%_len_%_len_%_len_%_0_%_1_%_1_%_1_%_0_%_0_%_1_%_0_%_0_%_0_%_1_%_0_%_type 
+	S x=%_%_len_%_len_%_len_%_scale_%_1_%_1_%_1_%_0_%_0_%_1_%_0_%_0_%_0_%_1_%_0_%_type
 	F i=1:1:18 S f(i)=$P(x,%,i)
 	Q $$PACK
+	;
+	;-----------------------------------------------------------------------
+	; CONxxxx(): calculations of TYP, LEN and DEC for SQL Standard
+	; Aggregates. All functions share the same formal parameters. They only
+	; differ in the OUT values typ, len, and dec.
+	;
+	; ARGUMENTS:
+	; . di = aggregate function with argument	/TYPE=R/REQ
+	; . frm = list of tables in FROM-clause		/TYPE=R/REQ
+	; . typ = derived TYP value			/TYPE=W/REQ
+	; . len = derived LEN value			/TYPE=W/REQ
+	; . dec = derived DEC value			/TYPE=W/REQ
+	;
 	;----------------------------------------------------------------------
-DESCRIBE(expr,sqlsta,sqldta,sqlcnt)	
+CONAGGR(di,frm,typ,len,dec) ; private void; calculate TYP, LEN, and DEC for aggregate or function
+	;----------------------------------------------------------------------
+	; Use TYP from TYP of argument. Add 2 decimals, and adjust length
+	; accordingly.
+	;
+	S fn=$P(di,"(",1)
+	I fn="AVG"   D CONAVG(di,frm,.typ,.len,.dec) Q
+	I fn="COUNT" D CONCOUNT(di,frm,.typ,.len,.dec) Q
+	I fn="MAX"   D CONMINMAX(di,frm,.typ,.len,.dec) Q
+	I fn="MIN"   D CONMINMAX(di,frm,.typ,.len,.dec) Q
+	I fn="SUM"   D CONSUM(di,frm,.typ,.len,.dec) Q
+	S dec=0,typ=$P($G(^SQL("SQLFUNC",fn)),"|",2)
+	I typ="" S len=500 Q			; Not defined
+	I typ="L" S len=1 Q			; Logical
+	I "N$DC"[typ S len=18 Q			; Default length
+	S len=500				; Text format
+	Q
+	;
+	;----------------------------------------------------------------------
+CONAVG(di,frm,typ,len,dec) ; private void; calculate TYP, LEN, and DEC for AVE(di)
+	;----------------------------------------------------------------------
+	; Use TYP from TYP of argument. Add 2 decimals, and adjust length
+	; accordingly.
+	;
+	D CONTYPE(di,frm,.typ,.len,.dec)
+	S len=len+2,dec=dec+2
+	Q
+	;
+	;----------------------------------------------------------------------
+CONCOUNT(di,frm,typ,len,dec) ; private void; calculate TYP, LEN, and DEC for COUNT(di)
+	;----------------------------------------------------------------------
+	; Returns the same value regardless of the argument: Numeric(18,0)
+	;
+	S typ="N",len=18,dec=0
+	Q
+	;
+	;-----------------------------------------------------------------------
+CONMINMAX(di,frm,typ,len,dec) ; private void; calculate TYP, LEN, and DEC for MIN(di) or MAX(di)
+	;-----------------------------------------------------------------------
+	; Return TYP, LEN, and DEC of argument.
+	;
+	D CONTYPE(di,frm,.typ,.len,.dec)
+	Q
+	;
+	;----------------------------------------------------------------------
+CONSUM(di,frm,typ,len,dec) ; private void; return meta-data for SUM(di)
+	;----------------------------------------------------------------------
+	; Return TYP and DEC from argument, add 5 to LEN.
+	;
+	D CONTYPE(di,frm,.typ,.len,.dec)
+	S len=len+5
+	Q
+	;
+	;----------------------------------------------------------------------
+CONTYPE(di,frm,typ,len,dec) ; private void; derive typ, len, and dec from di and frm
+	;----------------------------------------------------------------------
+	; If the argument is a simple (qualified) column name, return the
+	; values DBTBL1D.TYP, DBTBL1D.LEN, and DBTBL1D.DEC
+	; The subroutine will also return correct values for strlit and numlit.
+	; However, if the argument is a more complex valueExpression, then the
+	; current processing falls short: it makes a single call to
+	; $$PARSE^SQLDD() and DI^SQLDD()
+	;
+	; ARGUMENTS:
+	; . see general intro on CONxxxx
+	;
+	; PUBLIC:
+	; . tok = token values in case di contains strlits
+	; . alias() = alias array
+	; . fsn() = table descriptor array
+	; . vdd() = ...
+	;
+	N dinam,x,ER,RM
+	;
+	; Get the argument
+	S dinam=$EXTRACT(di,$FIND(di,"("),$LENGTH(di)-1)
+	;
+	; The first cases are "exotic" in that they are unlikely as argument in
+	; an aggregate function, but FSCW does not know if they are already
+	; excluded elsewhere.
+	I dinam[$CHAR(0) S dinam=$$UNTOK^%ZS(dinam,.tok)
+	I dinam?1"'"1e.e1"'" S typ="T",len=$LENGTH(dinam)-2,dec=0 Q  ; String literal
+	I dinam?1N.E S typ="N",len=$LENGTH(dinam),dec=$LENGTH($PIECE(dinam,".",2)) Q  ; Numeric literal
+	;
+	; 
+	S dinam=$TRANSLATE(dinam,$CHAR(34))
+	I dinam["." D					; Replace alias
+	.	N f
+	.	S f=$P(dinam,".",1) I $D(alias(f)) S $p(dinam,".",1)=alias(f)
+	;
+	I dinam'["." S x=$$PARSE^SQLDD(.dinam,,,.fsn,frm)
+	I $G(ER)!(dinam?1N.N) S x="|21|||||||$|||||2"
+	E  S x=$$DI^SQLDD(dinam,frm,.vdd,.fsn) 	; Data item attributes
+	S typ=$p(x,"|",9)		        ; Format type
+	S len=$P(x,"|",2)	  		; Length
+	S dec=+$P(x,"|",14)		        ; Decimal precision
+	Q
+	;
+	;----------------------------------------------------------------------
+DESCRIBE(expr,sqlsta,sqldta,sqlcnt) 
 	;----------------------------------------------------------------------
 	; Return a list of column names in node and position order
 	;----------------------------------------------------------------------
@@ -246,7 +370,7 @@ DESCRIBE(expr,sqlsta,sqldta,sqlcnt)
 	; D DESCRIBE("CIF",.sqlsta,.sqldta,.sqlcnt)
 	;
 	; sqldta value:
-	;           
+	;
 	;           Column_name<tab>NOT NULL<tab>type(size)<tab>Key<13,10>
 	;
 	;           ACN<tab>NOT NULL<tab>NUMBER(12)<tab>PRIMARY KEY<13,10>
@@ -304,7 +428,7 @@ DESCRIBE(expr,sqlsta,sqldta,sqlcnt)
 	S sqlsta=0
 	Q
 	;----------------------------------------------------------------------
-type(typ)	; 
+type(typ) ;
 	;----------------------------------------------------------------------
 	I typ="B" Q "LONG RAW"
 	I typ="M" Q "LONG"
@@ -312,7 +436,7 @@ type(typ)	;
 	I "N$"[typ Q "NUMBER"
 	Q "VARCHAR2"
 	;----------------------------------------------------------------------
-PRIMARY	; Primary access keys 
+PRIMARY ; Primary access keys
 	;----------------------------------------------------------------------
 	; table name<tab>sequence<tab>column name<13,10>
 	;----------------------------------------------------------------------
@@ -329,7 +453,7 @@ PRIMARY	; Primary access keys
 	.	I i<sqlcnt S sqldta=sqldta_$C(13,10)
 	Q
 	;----------------------------------------------------------------------
-FOREIGN	; Foreign key definition DESCRIBE Table_name FOREIGN 
+FOREIGN ; Foreign key definition DESCRIBE Table_name FOREIGN
 	;----------------------------------------------------------------------
 	N fid,fk,fk1,ftbl,fcol,fcol1,v,v1
 	S sqldta="",sqlcnt=""
@@ -347,7 +471,7 @@ FOREIGN	; Foreign key definition DESCRIBE Table_name FOREIGN
 	S sqldta=$E(sqldta,1,$L(sqldta)-2)		; Remove extra 13,10
 	Q
 	;----------------------------------------------------------------------
-FORPRI	; Foreign key definition DESCRIBE table_name FOREIGN PRIMARY 
+FORPRI	; Foreign key definition DESCRIBE table_name FOREIGN PRIMARY
 	;----------------------------------------------------------------------
 	N fid,ftbl,fcol,fcol1,fcol2,fsn,pkeys,v,v1
 	S sqldta="",sqlcnt=""
@@ -366,7 +490,7 @@ FORPRI	; Foreign key definition DESCRIBE table_name FOREIGN PRIMARY
 	S sqldta=$E(sqldta,1,$L(sqldta)-2)
 	Q
 	;----------------------------------------------------------------------
-FOREIGN2	; Foreign key definition 
+FOREIGN2 ; Foreign key definition
 	;----------------------------------------------------------------------
 	N fid,ftbl,fcol,fcol1,v,v1
 	S sqldta="",sqlcnt=""
@@ -404,16 +528,16 @@ INDEX	; DESCRIBE table_name INDEX
 	N colnam,fid,i,index,order,seq,%
 	S sqldta="",sqlcnt="",%=$C(9)
 	S fid=$P(expr," ",1)  					; Table name
-	I fid="" Q	
+	I fid="" Q
 	I '$D(^DBTBL("SYSDEV",1,fid)) S ER=1,RM=$$^MSG(1484,fid) Q
-	I $P(expr,"INDEX",2)["PRIMARY" D        ; Primary index key 
-	.       D INDEXM 
-	.       S sqldta=$E(sqldta,1,$L(sqldta)-1) 
-	; 
-	E  D INDEXM 
-	S sqldta=$E(sqldta,1,$L(sqldta)-1)                      ; Index attributes 
-	S sqlsta=100                                            ; SQL status 
-	S sqlcnt=$L(sqldta,$C(13,10))                           ; Record Count 
+	       I $P(expr,"INDEX",2)["PRIMARY" D        ; Primary index key
+	       .       D INDEXM
+	       .       S sqldta=$E(sqldta,1,$L(sqldta)-1)
+	       ;
+	       E  D INDEXM
+	       S sqldta=$E(sqldta,1,$L(sqldta)-1)                      ; Index attributes
+	       S sqlsta=100                                            ; SQL status
+	       S sqlcnt=$L(sqldta,$C(13,10))                           ; Record Count
 	Q							; *** patch
 	S index=""
 	F  S index=$O(^DBTBL("SYSDEV",8,fid,index)) Q:index=""  D
@@ -427,7 +551,7 @@ INDEXM	; Primary index key
 	S order=$P(fsn(fid),"|",3)
 	D INDEXP(fid,"MAIN",order)
 	Q
-INDEXP(fid,index,order)	; 
+INDEXP(fid,index,order) ;
 	;
 	S seq=0
 	S v="",$P(v,%,13)="",$P(v,%,7)=0		; SQL_TABLE_STAT
@@ -459,13 +583,13 @@ ATTR()	; DESCRIBE table_name ATTRIBUTE
 	S R(7)=",,500,500,500,0,1,1,1,0,0,1,0,0,0,1,0,T"
 	S R(8)=",,500,500,500,0,1,1,1,0,0,1,0,0,0,1,0,T"
 	S R(9)=",,500,500,500,0,1,1,1,0,0,1,0,0,0,1,0,T"
-	S R(10)=",,500,500,500,0,1,1,1,0,0,1,0,0,0,1,0,T" 
+	S R(10)=",,500,500,500,0,1,1,1,0,0,1,0,0,0,1,0,T"
 	S R(11)=",,500,500,500,0,1,1,1,0,0,1,0,0,0,1,0,T"
 	S R(12)=R(1)
 	S z="" F i=1:1:12 S z=z_$TR(R(i),",",$C(9)) I i<12 S z=z_$C(13,10)
 	q z
 	;----------------------------------------------------------------------
-ATTR1(fid,col,nextcol)	; Column attributes DESCRIBE Table_name COLUMNS query 
+ATTR1(fid,col,nextcol) ; Column attributes DESCRIBE Table_name COLUMNS query
 	;----------------------------------------------------------------------
 	;
 	; ARGUMENTS:
@@ -485,7 +609,7 @@ ATTR1(fid,col,nextcol)	; Column attributes DESCRIBE Table_name COLUMNS query
 	; DESCRIBE LN COLUMNS
 	;
 	; Called by ODBC driver after getting the data for the first 1000 column
-	; 
+	;
 	; EXECUTE $$ATTR1^SQLODBC("LN","","SCN")
 	;----------------------------------------------------------------------
 	N R,di,i,j,rec,v,z
@@ -515,7 +639,7 @@ ATTR1(fid,col,nextcol)	; Column attributes DESCRIBE Table_name COLUMNS query
 	S sqlcnt=$L(rec,$c(13,10))-1			; Row count
 	Q rec
 	;----------------------------------------------------------------------
-TYPE(opt)	; Convert attributes
+TYPE(opt) ; Convert attributes
 	;----------------------------------------------------------------------
 	;
 	; option:
@@ -556,29 +680,29 @@ TYPE(opt)	; Convert attributes
 	Q 1
 	;
 	;----------------------------------------------------------------------
-CONCAT(stra,strb)	; Concatenate two strings 
-	;---------------------------------------------------------------------- 
-	; 
-	; ARGUMENTS: 
+CONCAT(stra,strb) ; Concatenate two strings
+	;----------------------------------------------------------------------
+	;
+	; ARGUMENTS:
 	;       . stra   First string 	/TYP=T/REQ/MECH=VAL
-	; 
+	;
 	;       . strb   Second string 	/TYP=T/REQ/MECH=VAL
 	;
-	; RETURNS: 
-	;       .     String a + string b 
-	; 
-	; EXAMPLE: 
+	; RETURNS:
+	;       .     String a + string b
+	;
+	; EXAMPLE:
 	;
 	;  CONCAT("John","Doe") => JohnDoe
 	;----------------------------------------------------------------------
 	Q stra_strb
 	;
 	;----------------------------------------------------------------------
-LIST(fid,skpcmp)	; 
+LIST(fid,skpcmp) ;
 	;----------------------------------------------------------------------
 	Q $$LIST^SQLDD(fid,$G(skpcmp))
 	;----------------------------------------------------------------------
-QA(fid)	; Return prepare information
+QA(fid) ; Return prepare information
 	;----------------------------------------------------------------------
 	;
 	; EXAMPLE:

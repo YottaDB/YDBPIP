@@ -1,7 +1,8 @@
-TBXDQINT	;Public;TBX utility for SP and fix pack installl 
+TBXDQINT ;wittef;2008-02-28 15:36:00;public;TBX utility for SP and FP installl
 	;;Copyright(c)2003 Sanchez Computer Associates, Inc.  All Rights Reserved - 09/20/05 14:45:49 - KWANL
+	;
 	; ORIG: KWANL - 09/20/05
-	; DESC: TBX utility for SP and fix pack installl
+	; DESC: TBX utility for service pack and fix pack installl
 	;
 	; KEYWORDS:
 	;
@@ -32,6 +33,15 @@ TBXDQINT	;Public;TBX utility for SP and fix pack installl
 	; mentioned System_Areas.
 	;
 	;---- Revision History -------------------------------------------------
+	; 07/24/2008 - RussellDS - CR30801
+	;	* Removed obsoled procedures DBSINDXB, DBSJRNC, DBSTRG
+	;	* Modified to make use of phase2 and filer lists from UCGMCU
+	;	* Removed setting of "phase2" "filers" since now handled in
+	;	  UCGMCU.
+	;
+	; 02/28/2008 - Frans S.C. Witte - CR27800
+	;	* Added USTMAPDF as "phase2" procedure.
+	;
 	; 02/28/2007 - RussellDS - CRs 25356 (04) / 25382 (72)
 	;	* Removed reference to obsoleted DBSQRYA
 	;
@@ -91,7 +101,9 @@ TBXDQINT	;Public;TBX utility for SP and fix pack installl
 	;		Profile Environment Creation and Upgrade Process Design
 	;		Document for more information.
 	;-----------------------------------------------------------------------
-init	; phase 1
+init	ZLINK "UCGMCU"	; Ensure using new version
+	;
+	; phase 1
 	;
 	; Routines and procedures are obtained from $$getCompiler^UCGMCU()
 	; This ensures a single place to maintain the list of phase 1 code
@@ -215,70 +227,18 @@ init	; phase 1
 	; - The number of routines will be decreasing in favor of procedures
 	;	while the remaining functionality is converted to PSL.
 	;
-	set ^TMPDQS($JOB,"phase2","routine","DBSBLD.m")=""
-	set ^TMPDQS($JOB,"phase2","routine","DBSCHK.m")=""
-	set ^TMPDQS($JOB,"phase2","routine","DBSCMP.m")=""
-	set ^TMPDQS($JOB,"phase2","routine","DBSCMPF.m")=""
-	set ^TMPDQS($JOB,"phase2","routine","DBSCRT8.m")=""
-	set ^TMPDQS($JOB,"phase2","routine","DBSDB.m")=""
-	set ^TMPDQS($JOB,"phase2","routine","DBSDSMC.m")=""
-	set ^TMPDQS($JOB,"phase2","routine","DBSDSMP.m")=""
-	set ^TMPDQS($JOB,"phase2","routine","DBSEDT.m")=""
-	set ^TMPDQS($JOB,"phase2","routine","DBSEXECU.m")=""
-	set ^TMPDQS($JOB,"phase2","routine","DBSEXEP.m")=""
-	set ^TMPDQS($JOB,"phase2","routine","DBSINT.m")=""
-	set ^TMPDQS($JOB,"phase2","routine","DBSLOD.m")=""
-	set ^TMPDQS($JOB,"phase2","routine","DBSLOG.m")=""
-	set ^TMPDQS($JOB,"phase2","routine","DBSMBAR.m")=""
-	set ^TMPDQS($JOB,"phase2","routine","DBSPARS.m")=""
-	set ^TMPDQS($JOB,"phase2","routine","DBSPARS1.m")=""
-	set ^TMPDQS($JOB,"phase2","routine","DBSPARS2.m")=""
-	set ^TMPDQS($JOB,"phase2","routine","DBSPP.m")=""
-	set ^TMPDQS($JOB,"phase2","routine","DBSQRY.m")=""
-	set ^TMPDQS($JOB,"phase2","routine","DBSRTN.m")=""
-	set ^TMPDQS($JOB,"phase2","routine","DBSSCR.m")=""
-	set ^TMPDQS($JOB,"phase2","routine","DBSSCR0.m")=""
-	set ^TMPDQS($JOB,"phase2","routine","DBSSCR1.m")=""
-	set ^TMPDQS($JOB,"phase2","routine","DBSSCR3.m")=""
-	set ^TMPDQS($JOB,"phase2","routine","DBSSCR4.m")=""
-	set ^TMPDQS($JOB,"phase2","routine","DBSSCR5.m")=""
-	set ^TMPDQS($JOB,"phase2","routine","DBSUTL3.m")=""
+	; Routines and procedures are obtained from $$getPhase2List^UCGMCU()
+	; This ensures a single place to maintain the list of phase 2 code
+	; elements.
+	; Even though not all elements occur as both routine and procedure, the
+	; extra entries do not hurt. TBXxPIN uses ^TPMDQS($JOB) only for
+	; "positive" matches
 	;
-	; Procedures -----------------------------------------------------------
-	;
-	set ^TMPDQS($JOB,"phase2","procedure","DBS2PSL.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBS2PSL0.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBS2PSL1.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBS2PSL3.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBS2PSL4.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBS2PSL5.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBSBCH.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBSDF.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBSDF9.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBSDS.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBSEDIT.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBSFILB.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBSFILER.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBSGETID.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBSINDXB.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBSINDXZ.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBSJRNC.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBSLINK.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBSLOGIT.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBSMEMO.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBSPROC.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBSPROT3.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBSPROT4.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBSREL.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBSRW.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBSRW2.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBSRW3.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBSRWQRY.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBSRWUTL.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBSTBLA.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBSTRG.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","DBSVER.PROC")=""
-	set ^TMPDQS($JOB,"phase2","procedure","SQLAG.PROC")=""
+	set list=$$getPhase2List^UCGMCU()
+	for ea=1:1:$LENGTH(list,",") do
+	.	set elm=$PIECE(list,",",ea)
+	.	set ^TMPDQS($JOB,"phase2","procedure",elm_".PROC")=""
+	.	set ^TMPDQS($JOB,"phase2","routine",elm_".m")=""
 	;
 	; Tables (and Columns) -------------------------------------------------
 	;
@@ -321,27 +281,6 @@ init	; phase 1
 	;
 	set ^TMPDQS($JOB,"phase2","mprof","MPROF.TBL")=""	; DBSBCH
 	set ^TMPDQS($JOB,"phase2","mprof0","MPROF0.TBL")=""
-	;
-	; Filers ---------------------------------------------------------------
-	;
-	; Only the filers that are called during phase 3 of an upgrade need to
-	; be compiled as part of phase 2. The relevant tables are stored in
-	; ^TBPDQS($JOB,"phase2","filer",table). An extension (eg DBTBL2.TBL) is
-	; allowed, and will be ignored by TBXDQUTL.
-	;
-	; Note that there are no StarTeam elements associated with the entries
-	; in this subtree.
-	;
-	set ^TMPDQS($JOB,"phase2","filer","DBTBL2.TBL")=""
-	set ^TMPDQS($JOB,"phase2","filer","OBJECTMET.TBL")=""
-	set ^TMPDQS($JOB,"phase2","filer","SYSMAPCALLS.TBL")=""
-	set ^TMPDQS($JOB,"phase2","filer","SYSMAPCOMMANDS.TBL")=""
-	set ^TMPDQS($JOB,"phase2","filer","SYSMAPLABELS.TBL")=""
-	set ^TMPDQS($JOB,"phase2","filer","SYSMAPLITDTA.TBL")=""
-	set ^TMPDQS($JOB,"phase2","filer","SYSMAPM.TBL")=""
-	set ^TMPDQS($JOB,"phase2","filer","SYSMAPMPROPS.TBL")=""
-	set ^TMPDQS($JOB,"phase2","filer","SYSMAPPROPDATA.TBL")=""
-	set ^TMPDQS($JOB,"phase2","filer","SYSMAPVAR.TBL")=""
 	;
 	; Data -----------------------------------------------------------------
 	;

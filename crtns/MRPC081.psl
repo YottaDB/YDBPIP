@@ -1,243 +1,179 @@
-MRPC081(return,versn,TABLE,list)	//Public;Compile DQ Runtime Routines
+	#OPTION ResultClass ON
+	
+public String MRPC081(ret String RETURN,	// Return value (always null)
+		      Number versn,		// Version number
+		      String TABLE,		// DATA-QWIK table name
+		      List elements)		// Elements to compile
+	       
 	/*
-	   ORIG: MATTSON - 09/17/93
+	Compile DQ Runtime Routines
 
-	   This procedure compiles DQ run-time programs for filers, executives,
-	   data item protection and batch definitions.
-
-	   [SCATBL5]RPCID=81
-
-	   KEYWORDS: Client/Server
-
-	   ARGUMENTS:
-	      . return   none    			/TYP=T/REQ
-	        					/MECH=REFNAM:W
-
-	      . versn 	^MRPC081 version number  	/TYP=N/REQ
-	    		 Current version = 1  		/MECH=VAL
-
-	      . table	 DQ Table Name   		/TYP=T/REQ
-	        					/MECH=VAL
-			 DBTBL1  - Filer definition
-			 DBTBL14 - Data item prot.
-			 DBTBL25 - Procedure def
-			 DBTBL33 - Batch def
-
-	      . list     Comma separated list of DQ 	/TYP=T/REQ
-	    		 definitions to be compiled 	/MECH=VAL
+	This procedure compiles DQ run-time programs for filers, procedures,
+	data item protection and batch definitions.
 
 	   RETURNS:
-	      . $$ 	 Error message   		/TYP=T
+	      . $$ 	 Error message
 	    		 Null = No error
-
-	   RELATED:
-	      . $$^PBSMRPC - MRPC Service Class Driver
 
 	   EXAMPLES:
 
-		S RM=$$^MRPC081(.val,1,"DBTBL1","CIF")
-		S RM=$$^MRPC081(.val,1,"DBTBL25","BCHUTL")
-		S RM=$$^MRPC081(.val,1,"DBTBL33","BCHCHKHLD7")
+		set RM = $$^MRPC081(.val, 1, "DBTBL1", "CIF")
+		set RM = $$^MRPC081(.val, 1, "DBTBL25", "BCHUTL")
+		set RM = $$^MRPC081(.val, 1, "DBTBL33", "BCHCHKHLD7")
 
-	  ---- Revision History ------------------------------------------------
+	---- Revision History ------------------------------------------------
+	  
+	01/21/2008 - RussellDS - CR30801
+		Removed reference to DBTBL1.UDFILE.
+		
+		Removed #PACKAGE since it forces the use of the PSL v3.0
+		compiler, which has problems with the $$V2LV^MSG call.
+		
+		Cleaned up code to avoid warnings.
+		
+		Removed old revision history.
 	   
-	   05/01/07 - Mugilvannan - 26843
-		      Changed the argument variable name from table to TABLE
-		      to avoid "Invalid table name" error.
-		      
-	   03/20/03 - GRAY - 51351
-		      Removed references to DBTBL3 since DQ Executives
-		      are now obsolete.
-
-	   01/17/03 - GRAY - 51349
-		      Corrected error, UNDEFINED,DEPLN+7^MRPC081 caused by
-		      %LIBS not being defined.
-
-	   12/12/02 - ZWITKOWITSM - 51349
-		      Correct undefined on pgm.
-
-	   05/17/02 - KRISHNAG - ARQ# 49794
-		      Converted to PSL
-	
-	   10/12/00 - ARPAV - 42312
-	              Added code to spawn compiling of DEP and LN filers
-		      into a background job.  To accomplish this, two new
-	   	      subroutines were added: DEPLN and SPAWN.
-	  ----------------------------------------------------------------------
+	05/01/07 - Mugilvannan - 26843
+		Changed the argument variable name from table to TABLE
+		to avoid "Invalid table name" error.
+	----------------------------------------------------------------------
 	*/
+	
+	type public Boolean ER
+	type public String RM
+	
+	type Number i
+	type String ET, name
 
 	// Version number of client message is not compatible with server
-	if $G(versn)'=1 quit $$ERRMSG^PBSUTL($$^MSG(2951))
+	if (versn <> 1) quit $$ERRMSG^PBSUTL($$^MSG(2951))
 
 	// Missing parameter
-	if $G(TABLE)=""!($G(list)="") quit $$ERRMSG^PBSUTL($$^MSG(8607))
+	if (TABLE.isNull() ! elements.isNull()) quit $$ERRMSG^PBSUTL($$^MSG(8607))
 
-	set ER=0
-	set %LIBS="SYSDEV"
-	new i,name,pgm
-	for i=1:1:$L(list,",") do { quit:ER
-		set name=$P(list,",",i)
-		new i,list 
-		do COMPILE(TABLE,name,.pgms) quit:ER
+	set ER = false
 
-		if (TABLE="DBTBL1")&((name="LN")!(name="DEP")) quit
-		// Send control message to server to re-link
-		// program(s) into server images
+	for i = 1:1:elements.count() do { quit:ER
+		
+		set name = elements.elementAt(i)
+		
+		// Protect variables
+		type Number i
+		type List elements
+		type String pgm = ""
 
-		for i=1:1:$L(pgms,",") do {
-				set pgm=$P(pgms,",",i)
-				if pgm="" quit
-				new i
-				do CTRLMSG^PBSUTL("EXEC ZL """_pgm_"""")
-				}
-		}
+		do COMPILE(TABLE, name, .pgm)
+		
+		if 'ER, '((TABLE = "DBTBL1") & ((name = "DEP") ! (name = "LN"))) do RELINK(pgm)
+	}
 
-	if $G(ER) quit $$ERRMSG^PBSUTL($G(RM),$G(ET))
+	if ER quit $$ERRMSG^PBSUTL(RM.get(), ET.get())
 
-	set return=$$V2LV^MSG("")
+	set RETURN = $$V2LV^MSG("")
 
 	quit ""
 
 
-COMPILE(TABLE,NAME,PGM)	//
+private void COMPILE(String TABLE,	// DATA-QWIK table name
+		     String NAME,	// Element to compile
+		     ret String pgm)	// Program compiled
 
 	/*
-	   VCA - Adding code to check for deposit and loan filers.  If they
-	   are, then spawn off the compilation process to a background job.
-	*/
-
-	if TABLE="DBTBL1" do { quit
-		if (NAME="DEP"!(NAME="LN")) do SPAWN(TABLE,NAME) quit
+	Compile the element indicated.
 	
-		do COMPILE^DBSFILB(NAME) quit:ER
+	If element is deposit or loan filer, because of the time they take to
+	compile, spawn off the compilation process to a background job.
+	*/
+	
+	type public Boolean ER
+	type public String RM
+	
+	// Build filer
+	if (TABLE = "DBTBL1") do {
+		
+		/* If the table is DEP or LN, then the compile process will
+		   cause a timeout.  Therefore, we will spawn the compile
+		   message out to a background process.
+		   
+		   NOTE:  This will have to be revisted for Java */
+		   
+		if ((NAME = "DEP") ! (NAME="LN")) do {
 
-		type RecordDBTBL1 dbtbl1=Db.getRecord("DBTBL1","%LIBS=:%LIBS,FID=:NAME")
-		set PGM=dbtbl1.udfile
+			type String PARM, PTMDIRID, X
+			
+			set PTMDIRID = CUVAR.PTMDIRID
 
-		if PGM'="",(NAME="DEP"!(NAME="LN")) set PGM=PGM_$$ADDPGM(NAME)
+			set PARM = "DEPLN^MRPC081("""_ NAME_ """)"
+
+			set X = $$^%ZJOB(PARM, "PRO="_ PTMDIRID, 1)
 		}
-
-
-	if TABLE="DBTBL14" do { quit
-		do BUILD^DBSPROT3(NAME) quit:ER
-
-		type ResultSet rs=Db.select("PROTPGM","DBTBL14","FID=:NAME")
-		if rs.isEmpty() set PGM="" quit
-		if rs.next() set PGM=rs.getCol(1)
+		else  do {
+	
+			do COMPILE^DBSFILB(NAME)
+		
+			if 'ER set pgm = "Record"_ NAME
+			
 		}
+	}
 
-	if TABLE="DBTBL25" do { quit
-		do COMPILE^DBSPROC(NAME) quit:ER
+	// Build Data Item Protection program
+	else  if (TABLE = "DBTBL14") do {
+		
+		do BUILD^DBSPROT3(NAME)
+		
+		if 'ER do ^UPID(NAME, .pgm)
+	}
 
-                type RecordDBTBL25 dbtbl25=Db.getRecord("DBTBL25","%LIBS=:%LIBS,PROCID=:NAME")
-                set PGM=dbtbl25.pgm
-		}
+	// Build procedure
+	else  if (TABLE = "DBTBL25") do {
+		
+		do COMPILE^DBSPROC(NAME, .pgm)
+	}
 
-	if TABLE="DBTBL33" do { quit
+	// Build batch
+	else  if (TABLE = "DBTBL33") do {
+		
+		type String cmpflg()
 
-		do COMPILE^DBSBCH(NAME) quit:ER
+		do COMPILE^DBSBCH(NAME, cmpflg(), .pgm)
+	}
+	
+	else  do {
 
-                type RecordDBTBL33 dbtbl33=Db.getRecord("DBTBL33","%LIBS=:%LIBS,BCHID=:NAME")
-                set PGM=dbtbl33.pgm
-		}
-
-	// Invalid table name - ~p1
-	set ER=1 
-	set RM=$$^MSG(1484,TABLE)
+		set ER = true
+		// Invalid table name - ~p1
+		set RM = $$^MSG(1484, TABLE)
+	}
 
 	quit
-
-ADDPGM(NAME)	//Private;Add supporting programs to list
-
-	new X
-	set X=$S(NAME="DEP":",DEPFILE1",1:",LNFILE1")
-
-	if $$VALID^%ZRTNS("VRULES") set X=X_",VRULES"
-
-	if $$VALID^%ZRTNS("PROD1DB") set X=X_",PROD1DB"
-
-	quit X
-
-SPAWN(TABLE,NAME)	//
-	/*
-
-	ARGUMENTS:
-		. TABLE		DQ Table Name                   /TYP=T/REQ
-	                                                 	/MECH=VAL
-				DBTBL1  - Filer definition
-				DBTBL14 - Data item prot.
-				DBTBL25 - Procedure def
-				DBTBL33 - Batch def
-
-		. NAME 		Filer Name   			/TYP=T/REQ
-							        /MECH=VAL
-
-	DESCRIPTION:
-		If the table is DEP or LN, then the compile process will cause a
-		timeout.  Therefore, we will spawn the compile message out to
-		a background process.
-
-	EXAMPLE:
-		D SPAWN("DBTBL1","DEP")
-
-	*/
-
-	new PROCNAME,PARM,x,i
-
-	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
-	set PROCNAME=cuvar.ptmdirid
-
-	set PARM="DEPLN^MRPC081("""_TABLE_""","""_NAME_""")"
-
-	set x=$$^%ZJOB(PARM,"PRO="_PROCNAME,1)
-	quit
-
-
-DEPLN(TABLE,NAME)	// compile DEP and LN filers
-
-	/*
-	ARGUMENTS:
-		. TABLE	 	DQ Table Name			/TYP=T/REQ
-								/MECH=VAL
-				DBTBL1  - Filer definition
-				DBTBL14 - Data item prot.
-				DBTBL25 - Procedure def
-				DBTBL33 - Batch def
-
-		. NAME 		Filer Name			/TYP=T/REQ
-	        						/MECH=VAL
-
-	DESCRIPTION:
-		This subroutine will compile the DEP and LN triggers and then
-		re-link them into the servers.  It is designed to be called
-		from a spawned process.
-
-	EXAMPLE:
-		D DEPLN("DBTBL1","DEP")
-
-	*/
-
-	new PGM
-	set ER=0
 	
-	if $G(%LIBS)="" new %LIBS set %LIBS="SYSDEV"
+	
+private void RELINK(String pgm)	// Routine to re-link to server
 
-	do COMPILE^DBSFILB(NAME) quit:ER
+		
+	/* Send control message to server to re-link program(s)
+	   into server images.
+			   
+	   NOTE:  This will need to be revised for Java */
 
-	type RecordDBTBL1 dbtbl1=Db.getRecord("DBTBL1","%LIBS=:%LIBS,FID=:NAME")
-	set PGM=dbtbl1.udfile
+	if 'pgm.isNull() do CTRLMSG^PBSUTL("EXEC ZL """_ pgm_ """")
 
-	if PGM'="" set PGM=PGM_$$ADDPGM(NAME)
+	quit
+	
 
-	// Also submit the linking of the new programs into the servers
-	for i=1:1:$L(PGM,",") do {
-		new pgm
-		set pgm=$P(PGM,",",i)
+void DEPLN(String NAME)		// "DEP" or "LN" to compile
 
-		new i 
-		do CTRLMSG^PBSUTL("EXEC ZL """_pgm_"""")
+	/*
+	Spawn label to compile the DEP and LN filers and then re-link them
+	into the servers.
+	*/
+	
+	type Boolean ER = false
 
-		}
+	do COMPILE^DBSFILB(NAME)
+	
+	if 'ER do RELINK("Record"_ NAME)
+
 	quit
  #OPTION ResultClass ON
-Public String vSIG()	quit "60751^38496^Saravanamuthu Mugilvannan^5400"	// Signature - LTD^TIME^USER^SIZE
+public String vSIG()	quit "61237^74513^Dan Russell^3652"	// Signature - LTD^TIME^USER^SIZE

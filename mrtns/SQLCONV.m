@@ -44,7 +44,7 @@ SQLCONV	;Private;QWIK report to SQL conversion utility
 	;----------------------------------------------------------------------
 	; I18N=QUIT
 	;----------------------------------------------------------------------
-QRPT(QRID,SQL,SELECT,FROM,WHERE,ORDER,QUERY)	; Private ; Convert QWIK report into a SQL statement 
+QRPT(QRID,SQL,SELECT,FROM,WHERE,ORDER,QUERY) ; Private ; Convert QWIK report into a SQL statement
 	;----------------------------------------------------------------------
 	; ARGUMENTS:
 	;
@@ -100,7 +100,7 @@ QRPT(QRID,SQL,SELECT,FROM,WHERE,ORDER,QUERY)	; Private ; Convert QWIK report int
 	;
 	Q
 	;----------------------------------------------------------------------
-FROM(files)	; Private ; Convert access files into FROM command 
+FROM(files) ; Private ; Convert access files into FROM command
 	;----------------------------------------------------------------------
 	; ARGUMENTS:
 	;
@@ -119,7 +119,7 @@ FROM(files)	; Private ; Convert access files into FROM command
 	;
 	Q files
 	;----------------------------------------------------------------------
-SELECT(items)	; Private ; Convert data item list into SELECT command 
+SELECT(items) ; Private ; Convert data item list into SELECT command
 	;----------------------------------------------------------------------
 	; 1. Convert [lib,fid]di and [fid]di to fid.di
 	; 2. Convert "text" to 'text'
@@ -161,7 +161,7 @@ SELECT(items)	; Private ; Convert data item list into SELECT command
 	.	S sel=sel_","_fid_"."_di		; Add it to the list
 	Q $E(sel,2,9999)
 	;----------------------------------------------------------------------
-KEYWD(name)	; Private ; place quotes for special data items and keywords 
+KEYWD(name) ; Private ; place quotes for special data items and keywords
 	;----------------------------------------------------------------------
 	N i
 	I $E(name)="%" Q """"_name_""""
@@ -169,7 +169,7 @@ KEYWD(name)	; Private ; place quotes for special data items and keywords
 	F i="SELECT","FROM","WHERE","ORDER","BY","DESC" I name=i S name=""""_name_"""" Q
 	Q name
 	;----------------------------------------------------------------------
-ORDERBY(order,from)	; 
+ORDERBY(order,from) ;
 	;----------------------------------------------------------------------
 	N di,dinam,fid,i,ord
 	;
@@ -188,7 +188,7 @@ ORDERBY(order,from)	;
 	Q $E(ord,2,9999)
 	Q order
 	;----------------------------------------------------------------------
-WHERE(qry,FILES,Q)	; 
+WHERE(qry,FILES,Q) ;
 	;----------------------------------------------------------------------
 	; ARGUMENTS:
 	;	. qry	 DATA-QWIK query synatx		/TYP=T/REQ/MECH=REFNAM:R
@@ -213,7 +213,7 @@ WHERE(qry,FILES,Q)	;
 	Q $$Q2SQL(.Q)
 	;
 	;----------------------------------------------------------------------
-Q2SQL(Q)	; Public ; Convert Q() array into SQL WHERE statement 
+Q2SQL(Q) ; Public ; Convert Q() array into SQL WHERE statement
 	;----------------------------------------------------------------------
 	; ARGUMENTS:
 	;	. Q	DATA-QWIK parsed query syntax	/TYP=T/REQ/MECH=REFNAM:R
@@ -272,7 +272,7 @@ Q2SQL(Q)	; Public ; Convert Q() array into SQL WHERE statement
 	.	I $O(cmd(i)) S cmd=cmd_" AND "		; More to follow
 	Q cmd
 	;----------------------------------------------------------------------
-OP(opr,val)	; 
+OP(opr,val) ;
 	;----------------------------------------------------------------------
 	N not
 	I opr="" S opr="="				; Default to = operation
@@ -295,7 +295,7 @@ OP(opr,val)	;
 	I opr="I",val["#" Q " IN ("_val_")"	; IN VAR(list) *** 01/31/96
 	Q not_opr_val
 	;----------------------------------------------------------------------
-VAR(str)	; Replace variable with :var syntax 
+VAR(str) ; Replace variable with :var syntax
 	;----------------------------------------------------------------------
 	N ptr,nstr,val
 	S str=$TR(str,"<>","")				; Remove <<>>
@@ -304,12 +304,12 @@ VAR(str)	; Replace variable with :var syntax
 	.	S nstr=nstr_$$VAR1(val)
 	Q nstr_$$VAR1(val)
 	;
-VAR1(val)	; 
+VAR1(val) ;
 	I val?1A.AN!(val?1"%".AN) Q ":"_val 		; Change to :var
 	I val="$J" Q $J					; *** 05/06/96
 	E  Q val
 	;----------------------------------------------------------------------
-FUNC(x)	; Convert $E(dinam,1,n)='string' to LIKE command 
+FUNC(x) ; Convert $E(dinam,1,n)='string' to LIKE command
 	;----------------------------------------------------------------------
 	N dinam,from,val
 	S from=$P(x,",",2)			; starting location
@@ -318,7 +318,7 @@ FUNC(x)	; Convert $E(dinam,1,n)='string' to LIKE command
 	S val=$P($P(x,"=",2),"'",2)		; string value
 	Q dinam_" LIKE '"_val_"%'" 		; dinam like "string%"
 	;----------------------------------------------------------------------
-complex(expr)	; Convert di syntax 
+complex(expr) ; Convert di syntax
 	;----------------------------------------------------------------------
 	N di,i,return
 	S return=""
@@ -351,7 +351,7 @@ QA	; Private ; Test/QA utility
 	F opt=4,6 D QA46(opt)
 	D CLOSE^SCAIO
 	Q
-QA46(opt)	; 
+QA46(opt) ;
 	F  S QRID=$O(^DBTBL(%LIBS,opt,QRID)) Q:QRID=""  D
 	.	U 0 W !,QRID
 	.	U IO W !,line,!,QRID,!
@@ -362,7 +362,7 @@ QA46(opt)	;
 	.	W !! F J=1:76:9999 S X=$E(SQL,J,J+74) Q:X=""  W X,!
 	Q
 	;----------------------------------------------------------------------
-CONVLN(old,len,new)	; Convert a single long line into multiple lines 
+CONVLN(old,len,new) ; Convert a single long line into multiple lines
 	;----------------------------------------------------------------------
 	; ARGUMENTS:
 	;	old	Original string			/TYP=T/REQ/REF=VAL
@@ -373,7 +373,7 @@ CONVLN(old,len,new)	; Convert a single long line into multiple lines
 	; EXAMPLE:
 	;       SQL = SELECT CID,BAL,LNM,BOO FROM DEP WHERE CID<100 ...AND IRN=10
 	;       NSQL(1)="SELECT CID,BAL,LNM,BOO FROM DEP WHERE CID<100
-	;       NSQL(2)="AND IRN=10" 
+        ;       NSQL(2)="AND IRN=10"
 	;
 	;----------------------------------------------------------------------
 	N i,seq,v
@@ -401,7 +401,7 @@ QRCONV	; QWIK report conversion routine to remove XCLS references
 	C IO
 	Q
 	;----------------------------------------------------------------------
-CONV(QRID,code)	; 
+CONV(QRID,code) ;
 	;----------------------------------------------------------------------
 	N (%LIBS,QRID)
 	I $G(%LIBS)="" N %LIBS S %LIBS=^CUVAR("%LIBS")
@@ -445,7 +445,7 @@ FILE(files)	; Remove XCLS and replace it with either DEP or LN
 	F  S i=$O(fid(i)) Q:i=""  S nfid=nfid_","_i     ; New access files
 	Q nfid
 	;----------------------------------------------------------------------
-VCHG(x,ofid,nfid)	; Replace [ofid] references with [nfid] 
+VCHG(x,ofid,nfid) ; Replace [ofid] references with [nfid]
 	;----------------------------------------------------------------------
 	N znfid,zofid
 	S znfid=""
@@ -454,7 +454,7 @@ VCHG(x,ofid,nfid)	; Replace [ofid] references with [nfid]
 	F  Q:x'[zofid  S x=$P(x,zofid,1)_znfid_$P(x,zofid,2,99)
 	Q x
 	;----------------------------------------------------------------------
-DFTORDER(from)	; ORDER BY based on primary file 
+DFTORDER(from) ; ORDER BY based on primary file
 	;----------------------------------------------------------------------
 	N file,fsn,i,keys,order
 	S order=""
@@ -467,7 +467,7 @@ DFTORDER(from)	; ORDER BY based on primary file
 	;
 	;----------------------------------------------------------------------
 DQJOIN(frm,fsn)	; Return DATA-QWIK mode FROM clause with LEFT JOIN logic
-	;-----------------------------------------------------------------------
+     	;-----------------------------------------------------------------------
 	;
 	; ARGUMENTS:
 	;
@@ -520,18 +520,19 @@ QA1	;
 	w !
 	Q
 	;----------------------------------------------------------------------
-QAJOIN	; Test library function DQJOIN logic 
-	;---------------------------------------------------------------------- 
-	N files,sql,v,RID,IO 
-	I $G(%LIBS)="" N %LIBS S %LIBS=^CUVAR("%LIBS") 
-	D ^SCAIO U IO 
-	S RID="" 
-	F  S RID=$O(^DBTBL(%LIBS,5,RID)) Q:RID=""  D 
-	.       S v=$G(^(RID,0))                        ; Report header 
-	.       S files=$P(v,"|",1)                     ; Access files 
-	.       I files'["," Q                          ; Single file 
-	.       S sql=$$DQJOIN(files)               ; Left outer join
-	.       W !,RID,?15,files,!,?15,sql 
-	W ! 
-	D CLOSE^SCAIO 
+QAJOIN  ; Test library function DQJOIN logic
+        ;----------------------------------------------------------------------
+        N files,sql,v,RID,IO
+        I $G(%LIBS)="" N %LIBS S %LIBS=^CUVAR("%LIBS")
+        D ^SCAIO U IO
+        S RID=""
+        F  S RID=$O(^DBTBL(%LIBS,5,RID)) Q:RID=""  D
+        .       S v=$G(^(RID,0))                        ; Report header
+        .       S files=$P(v,"|",1)                     ; Access files
+        .       I files'["," Q                          ; Single file
+        .       S sql=$$DQJOIN(files)              	; Left outer join
+        .       W !,RID,?15,files,!,?15,sql
+        W !
+        D CLOSE^SCAIO
 	Q
+

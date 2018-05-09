@@ -3,17 +3,14 @@ DBSQA	;DBSQA;DBS - U - DATA-QWIK QA UTILITY
 	;     ORIG:  BOB CHIANG (8447) - 06/01/88
 	;     DESC:
 	;
-	; I18N=QUIT: Exculded from I18N standards. 
+        ; I18N=QUIT: Exculded from I18N standards.
 	;---- Revision History ------------------------------------------------
-	; 01/13/03 - Dan Russell - 51351
-	;	     Replace call to ^DBSEXESO with new ^DBSRWUTL.  Removed 
-	;	     direct calls to ^CUVAR global.
+	; 01/21/2008 - RussellDS - CR30801
+	;	Removed reference to DBTBL1.UDFILE.
 	;
-	;	     Modified calls to SYS^%FUNC to avoid TrackWare issues.
+	;	Removed references to obsolete executives.
 	;
-	;	     Removed all code except INTEGRIT section.
-	;
-	;	     Removed old change history.
+	;	Removed old revision history.
 	;
 	;-----------------------------------------------------------------------
 	;
@@ -34,12 +31,12 @@ INTEGRIT	;
 	S LIBS=""
 	;
 	S opt("S")=2,opt("R")=5,opt("Q")=6,opt("X")=16,opt("P")=18
-	S name(1)="Filer",name(2)="Screen",name(3)="Executive",name(5)="Report"
+	S name(1)="Filer",name(2)="Screen",name(5)="Report"
 	S name(6)="QWIK Report",name(16)="Data Exchange"
 	S name(18)="Stored Procedure",name(22)="Aggregate",name(25)="Procedure"
 	;
 	S LIBS=%LIBS
-	F opt=1,3,22,25,"S","R","Q","X","P" D INTEG
+	F opt=1,22,25,"S","R","Q","X","P" D INTEG
 	W !!
 	D CLOSE^SCAIO
 	Q
@@ -59,8 +56,12 @@ INTEG	;
 	Q
 CHK	;
 	I '$D(^DBTBL(LIBS,DQOPT,ID)) Q			;
-	I DQOPT=1 S PGM=$P($G(^DBTBL(ID,99)),"|",2),DATE=$P($G(^(10)),"|",10) Q
-	I DQOPT=3!(DQOPT=25) S PGM=$P(^(ID),"|",2),DATE=$P(^(ID),"|",3) Q
+	I DQOPT=1 D  Q
+	.	N td
+	.	S td=$$getPslTbl^UCXDD(ID,0)
+	.	S PGM="Record"_ID
+	.	S DATE=$P($G(^(10)),"|",10)
+	I DQOPT=25 S PGM=$P(^(ID),"|",2),DATE=$P(^(ID),"|",3) Q
 	I DQOPT=16 S PGM=$P(^(ID),"|",2),DATE=$P(^(ID),"|",4) Q
 	I DQOPT=18 S PGM=$P(^(ID),"|",1),DATE=$P(^(ID),"|",6) Q
 	I DQOPT=22 S PGM=$P(^(ID),"|",4),DATE="" Q
@@ -68,10 +69,9 @@ CHK	;
 	S PGM=$P($G(^DBTBL(LIBS,DQOPT,ID,0)),"|",2),DATE=$P($G(^(0)),"|",3) Q
 	Q
 CHK1	;
-	I PGM="",DQOPT=1 Q				; Filer name
 	I "Zz"[$E(ID,1),PGM="" Q			; Backup - skipped
 	I PGM="" D MSG5 Q
-	S X=$$SCAU^%TRNLNM("CRTNS",PGM_".m") 
+        S X=$$SCAU^%TRNLNM("CRTNS",PGM_".m")
 	S X=$ZSEARCH(X) I X="" D MSG4 Q
 	;
 	I DQOPT=18 S SEQ=$E(PGM,2,8)			; Stored procedure

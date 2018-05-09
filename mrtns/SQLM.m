@@ -5,134 +5,93 @@ SQLM	;;SQL Cursor Code Generator for DATA-QWIK
 	;
 	;  LIBARY:
 	;----------------------------------------------------------------------
-	; I18N=QUIT: Excluded from I18N standards. 
+        ; I18N=QUIT: Excluded from I18N standards.
 	;----------------------------------------------------------------------
 	;---------- Revision History ------------------------------------------
-	; 07/24/07 - Pete Chenard - CR28171
-	;	* Corrected problem where null keys in indexes (stored as $C(254)
-	;	  were not being converted to "" in the result set.
-	;	* Corrected a couple additional references ot $C(254).
 	;
-	; 07/10/07 - Pete Chenard - CR28258
-	;	* Modified to repace occurance of $C(255) with call to
-	;	  UTOPTS tp obtain the value.
+	; 2009-31-07- Sha Mirza, CR 41833
+	;	* Modified OPEN section in which exe() was not building all its
+	;	  vsql(..) elements for query which has computed column in it and
+	;	  group by clause.
 	;
-	; 06/21/07 - Pete Chenard - CR 27769
-	;	* Modified RDB section to deal with very large vList values.
-	;	* Modified Rdbvsql section to deal with aggregate functions.
+	; 2009-01-06- Sha Mirza, CR 40332
+	;	* Modified SORT to deal with SQL DISTINCT combined with ORDER BY 
+	;	  does not return expected results.
+	;	* Modified SORT to deal with $ZCHAR(254).  
 	;
-	; 06/14/07 - GIRIDHARANB - CR27623
-	;	* Modified section Rdbvsql to correct call to PREPARE^SQLODBC.
+	; 04/29/09 - Pete Chenard
+	;	* Modified VIEW to pass in the last parameter into ^SQLO based
+	;	  on whether the table is part of a join or not.  This change is
+	;	  made in conjunction with a change in RANGE^SQLQ that kills the
+	;	  join array entry when appropriate.
 	;
-	; 05/31/07 - Pete Chenard - CR26333
-	;	* Modified DROPTHRU section to correct undef error on variable
-	;	  eof.   eof was split into 2 separate variables - eof1 and eof2.
+	; 04/06/09 - Pete Chenard
+	;	* Corrected logic in RESETlvn that sets the lvn value for each access 
+	;	  key into the vsub array.  It was setting the same lvn for each key.
+	;	* Modified COLLATE to append vsub(ddref) to the gbref variable prior
+	;	  to quitting from the section.
 	;
-	; 03/28/07 - RussellDS - CR26386
-	;	* Added support for archiving.
+	; 02/23/09 - Pete Chenard
+	;	* Modified VIEW to correctly deal with table aliases.
+	;	* Modified OPEN to expect the variable ojqry to be an array
+	;	  keyed by table name rather than a single variable.  This 
+	;	  corrects an issue with left outer joins.  See SQLA and SQLQ
+	;	  for corresponding changes.
+	;	* Added vAlias to New list at the top of OPEN.
 	;
-	; 04/19/07 - Pete Chenard - CR26589
-	;	* Modified TOGGLE section to correct problem with tables that
-	;	  map to the same global.
+	; 02/18/09 - Pete Chenard
+	;	* Added code to optimize DISTINCT queries.  After a match is found
+	;	  we can potentially quit collating at that key level.  See SQLO
+	;	  for corresponding modifications.
 	;
-	; 10/31/06 - Pete Chenard - CR22719
-	;	* Modified RDB section to retrieve first row of data from 
-	;	  the OPENCUR API.
+	; 01/22/09 - Pete Chenard
+	;	* Modified OPEN to check if the table name in the 'frm' variable
+	;	  is an alias for an actual table.  If so, use the real table.
 	;
-	; 08/10/06 - GIRIDHARANB - CR22562
-	;	* Modified section RDBvsql to setup vsql("A") for clients 
-	;	  connecting through the jdbc driver (prepeare=1) in the 
-	;	  RDB case.
+	; 01/19/09 - Pete Chenard
+	;	* Modified SORT to correct problem with DISTINCT clause when
+	;	  2 or more tables are in the FROM clause.
 	;
-	; 07/14/06 - RussellDS - CR22121
-	;	* Modified COLLATE section to remove use of ^UCOLLATE to make
-	;	  Unicode compliant.  Now uses combinations of ]] and ']] for
-	;	  min and max testing and adds equals test, if necessary, to
-	;	  exe array.  Removed sections ASCNXT, ASCPRE, and UCOLLATE.
+	; 01/07/2009 - RussellDS - CR37511
+	;	* Modified CLOSE to restore vsql to be able to close cursor
+	;	  on RDB side.
+	;	* Removed old revision history.
+	;	
+	; 01/01/2009 - RussellDS - CRs 37432/35741
+	;	* Modified OPEN section to set SELECT statement into variable
+	;	  and break long ones into pieces to avoid problems with audit
+	;	  logging checking for very long SELECT statement due to GT.M
+	;	  error on length of execute.
 	;
-	;	* Replaced occurrences of $C(255) with the value returned
-	;         from $$getPslValue^UCOPTS("maxCharValue").
+	; 11/14/2008 - RussellDS - CRs 36716/35741
+	;	* Modified RDBvsql to add vpack to the "new" list to prevent
+	;	  problems when lying around from a prior set of $$PREPARE
+	;	  calls, as can happen with aggregate messages.
 	;
-	; 06/01/06 - Pete Chenard CR 21587
-	;	* Modified to correct invalid label call to STBLSKWD^DBSDI
+	; 11/13/2008 - RussellDS - CRs 36391/35741
+	;	Modified use of substitute null character to set it up at the
+	;	beginning of the exe() array so that it is determined at
+	;	runtime, but with only one call.  This avoids problems in
+	;	code generated for PSL that is distributed to Unicode
+	;	environments.
 	;
-	; 03/28/06 - Pete Chenard - 20423
-	;	* Modified RDBvsql to deal with numeric literals in select list.
-	;	* Modified COLLATE section to fix problem with order by reference
-	;	  to "DESC". If a column in the order by clause contains "DESC"
-	;	  the code misinterprets it as DESCENDING qualifier.
+	; 09/29/08 - giridharanb - CR35828
+	;	* Modified section CLOSE to clean out entries in sqlcur table.
 	;
-	; 01/31/06 - Pete Chenard - CR19161
-	;	* Modified RDB section to build vsql("D") and vsql("A") rather
-	;	  than calling SQLCOL to do that.  Calling SQLCOL has other
-	;	  side effects that we don't want when running on RDB.
-	;
-	; 01/11/06 - RussellDS - CR18953
-	;	* Modify OPEN section to substitute variable names for system
-	;	  key words to allow key word usage for SELECT.
-	;
-	; 10/14/05 - Pete Chenard - CR 18258
-	;	* Modified RDB section to trim off "BY " from  the sqloby
-	;	  parameter prior to calling UCDBRT. 
-	;
-	; 08/24/05 - Pete Chenard / GIRIDHARANB - CR16791
-	;	* Added section RDB to build the exe array for a relational database
-	;	  environment. Modified section RDB to call OPEN.
-	;	* Modified section OPEN to remove code that sets up the vsql("RDB") flag.
-	;
-	; 11/12/04 - Giridharanb - CR13163
-	;	     Modified section OPEN to set vsql("RDB").
-	;
-	; 09/01/04 - Giridharanb - CR11003
-	;	     Modified section CLOSE to add support to close relational database
-	;	     Cursors.
-	;
-	; 05/03/04 - Meena kadam - 7569
-	;	     Modified section list to include an entry in the vsql array
-	;	     to keep track track of collating sequence for each key 
-	;
-	;
-	; 10/02/03 - Pete Chenard - 51672
-	;	     Modified PROT section to correctly deal with DISTINCT 
-	;	     clause.
-	;	     Also corrected a problem in ORDERBY with DISTINCT used
-	;	     in conjunction with numeric reference to an Order By 
-	;	     column.
-	;
-	; 08/13/03 - SPIER - 51640
-	;            Removed additional code form COLLATE section which was
-	;	     related to archiving. It caused vsql to be set to $select
-	;	     which psl was not interpeting correctly.
-	;
-	; 08/01/03 - SPIER - 51349
-	;            Moved all code related to variable archive added 8/10/02.
-	;	     In DBI we will need to deal with archiving at a different level.
-	;
-	; 02/14/03 - SPIER - 51423
-	;            Modified toggle section to add #2 to resc type 1 records
-	;
-	; 08/10/02 - Allan Mattson - 51132
-	;            Modified to support archived tables (currently limited to
-	;            table HIST).
-	;
-	;            Deleted pre-2001 revision history.
-	;
-	; 07/06/01 - Terrie Dougherty - 43276
-	;	     Modified PROT subroutine to remove N[ewing] of vsql. This 
-	;	     was causing problems with data item protection on the
-	;	     teller screen.
-	;	     Removed old revision history. 
-	;
-	; 06/20/01 - Pete Chenard - 43811:1
-	;	     Modified COLLATE section to store the exe sequence
-	;	     numbers for each key collation level into the vsql array.
-	;	     This is needed for aggregate functions (see corresponding
-	;	     change in SQLG.M).
-	;
-	; 02/21/01 - Pete Chenard - 43811 
-	;            Modified to add code to deal with aggregate functions, 
-	;            group by and Having clause. 
-	;
+	; 03/12/2008 - RussellDS - CR30801
+	;	* Modified archive handling to use new getArchiveFile method for
+	;	  appropriate RecordTABLE.
+	;	* Modified OPEN and ACCESS, added GETSELRTS and ACCESSRTS to deal
+	;	  with select access rights 
+	;	* Modified OPEN to deal with select audit logging
+	;	* Modified SORT section to correct an issue that caused
+	;	  unnecessary sorting to take place in some cases.
+	;	* Removed old revision history.
+	;	* Modified RDB and CLOSE sections to eliminate the use
+	;	  of ^ORACACHE global.
+	;	* Modified SORT section to assign variable name to computed
+	;	  to avoid errors on attempt to deal with nulls when using
+	;	  expression directly.
 	;----------------------------------------------------------------------
 	Q
 	;----------------------------------------------------------------------
@@ -177,7 +136,7 @@ OPEN(exe,sqlfrm,sel,sqlwhr,sqloby,grp,par,tok,mode,vdd,sqlcur,subqry)	;public; O
 	;	. RM		Error message
 	;
 	; EXAMPLE:
-	;
+ 	;
 	;S vsql=$$OPEN^SQLM(.exe,"DEP","CID,LNM,TLD,BAL","DEP.BAL>100")
 	;I vsql=0 Q
 	;----------------------------------------------------------------------
@@ -188,13 +147,25 @@ OPEN(exe,sqlfrm,sel,sqlwhr,sqloby,grp,par,tok,mode,vdd,sqlcur,subqry)	;public; O
 	; Define TOKEN variable 
 	I $G(%TOKEN)="" S %TOKEN=$P($G(%LOGID),"|",6) I %TOKEN="" S %TOKEN=$J
 	;
-	N access,all,cmp,ddref,dqm,expr,fma,file,flist,fnum,frm,fsn,gbref,gbsel,i,I
-	N j,jfiles,jkeys,join,keynum,keys,lib,min,max,num,oby,ojflg,ojqry
-	N null,p,plan,rng,rtbl,sok,v,v255,vsub,vxp,whr,z,zrng
+	N access,all,cmp,ddref,dlevel,dqm,expr,fma,file,flist,fnum,frm,fsn,gbref,gbsel,i,I
+	N inclaccrts,j,jfiles,jkeys,join,keynum,keys,lib,min,max,num,oby,ojflg,ojqry
+	N null,nullsymbl,p,plan,rng,rtbl,selcols,sok,symbl,v,vAlias,v255,vsub,vxp,whr,z,zrng
+	;
+	S selcols=sel
 	;
 	S mode=$G(mode)
 	I mode<0=0 K vsql,exe
 	;
+ 	N isRdb
+ 	S isRdb=$$RsRdb^UCDBRT(sqlfrm)
+ 	;
+ 	; Deal with access rights.  Patch FROM and WHERE if possible ($$ACCESSRTS)
+ 	I mode=-1 S inclaccrts=1	; Always include in generated code
+	E  S inclaccrts=0
+ 	I 'isRdb,'inclaccrts D
+ 	.	N fsn			; Do not want to affect later fsn usage
+ 	.	S inclaccrts=$$ACCESSRTS(.sqlfrm,.sqlwhr,mode,sel)
+ 	;
 	; Substitution of system key words is based on upper-case match since
 	; SQL expression is always upper-cased.
 	;
@@ -202,25 +173,23 @@ OPEN(exe,sqlfrm,sel,sqlwhr,sqloby,grp,par,tok,mode,vdd,sqlcur,subqry)	;public; O
 	.	N atom,delim,kwds,n,nwhere,ptr,syskwds
 	.	D STBLSKWD^DBSDI(.kwds)
 	.	S n=""
-	.	F  S n=$O(kwds(n)) Q:n=""  S syskwds($$UPPER^%ZFUNC(n))=kwds(n)
+	.	F  S n=$O(kwds(n)) Q:n=""  S syskwds($$UPPER^UCGMR(n))=kwds(n)
 	.	;
 	.	S nwhere=sqlwhr
 	.	S delim="*/+-|,()<=>"
 	.	S (cnt,ptr)=0
 	.	F  S atom=$$ATOM^%ZS(sqlwhr,.ptr,delim,,1) D  Q:'ptr
-	..		I $E(atom)=":",$D(syskwds($$UPPER^%ZFUNC($E(atom,2,999)))) D
+	..		I $E(atom)=":",$D(syskwds($$UPPER^UCGMR($E(atom,2,999)))) D
 	...			N newvar,oldvar
 	...			S oldvar=$E(atom,2,999)
 	...			S exe=$G(vsql("V"))+1,vsql("V")=exe
 	...			S newvar="V"_exe
-	...			S exe(exe)="S "_newvar_"="_syskwds($$UPPER^%ZFUNC(oldvar))
+	...			S exe(exe)="S "_newvar_"="_syskwds($$UPPER^UCGMR(oldvar))
 	...			S nwhere=$$replace(nwhere,oldvar,newvar)
 	.	S sqlwhr=nwhere
-	;
-	N isRdb
-	S isRdb=$$RsRdb^UCDBRT(sqlfrm)
-	I isRdb Q $$RDB(.exe,sqlfrm,sel,$g(sqlwhr),$g(sqloby),$g(grp),.par,$g(tok),$g(mode),.vdd,$g(sqlcur),$g(subqry))
-	;
+ 	;
+ 	I isRdb Q $$RDB(.exe,sqlfrm,sel,$g(sqlwhr),$g(sqloby),$g(grp),.par,$g(tok),$g(mode),.vdd,$g(sqlcur),$g(subqry))
+ 	;
 	I $D(par)=1 D PARSPAR^%ZS(par,.par)		; Back Compatible
 	;
 	I $G(tok)="" N tok D  I ER Q 0
@@ -245,7 +214,9 @@ OPEN(exe,sqlfrm,sel,sqlwhr,sqloby,grp,par,tok,mode,vdd,sqlcur,subqry)	;public; O
 	;
 	S vsql=0,ojflg="",ojqry="",fsn="vsql(",rng=""
 	S exe=+$G(exe),vxp=-1,jfiles="",access=""
-	S null="$$BYTECHAR^SQLUTL(254)"
+	S null=$$BYTECODE^SQLUTL(254)
+	S nullsymbl="vsql("_$$NXTSYM^SQLM_")"
+	S exe=exe+1,exe(exe)="S "_nullsymbl_"=$$BYTECHAR^SQLUTL(254)"
 	;
 	I $G(HAVING)'="" D HOSTVAR^SQLG
 	I $G(grp)'="" D INIT^SQLG Q:ER 0
@@ -259,9 +230,35 @@ OPEN(exe,sqlfrm,sel,sqlwhr,sqloby,grp,par,tok,mode,vdd,sqlcur,subqry)	;public; O
 	I $G(sqlwhr)'="" D ^SQLQ(sqlwhr,.frm,.whr,.rng,.mode,.tok,.fsn,.vdd) I ER Q 0
 	;
 	I $E(sel,1,9)="DISTINCT " S all=0,sel=$E(sel,10,$L(sel))
-	E  S all=1 I $E(sel,1,4)="ALL " S sel=$E(sel,5,$L(sel))
+  	E  S all=1 I $E(sel,1,4)="ALL " S sel=$E(sel,5,$L(sel))
 	;
 	;;I $G(grp)'="" D ^SQLG() I ER Q 0  	; Not implemented yet
+	;
+	I $$usingAuditLog^SQLAUDIT D
+	.	N cols,statement,symbl
+	.	; Treat DbSet as *; replace class with PSL.class when convert to PSL
+	.	I $G(class)="DbSet" S cols="*"
+	.	E  S cols=$$QSUB^%ZS($$UNTOK^%ZS(selcols,tok))
+	.	S statement="SELECT "_cols_" FROM "_sqlfrm
+	.	I $G(sqlwhr)'="" S statement=statement_" WHERE "_$$UNTOK^%ZS(sqlwhr,tok)
+	.	I $G(sqloby)'="" S statement=statement_" ORDER BY "_sqloby
+	.	S symbl="vsql("_$$NXTSYM^SQLM_")"
+	.	S exe=exe+1,exe(exe)="S "_symbl_"="
+	.	I $L(statement)<1900 S exe(exe)=exe(exe)_$$QADD^%ZS(statement)
+	.	E  D
+	..		S exe(exe)=exe(exe)_$$QADD^%ZS($E(statement,1,1900))
+	..		S statement=$E(statement,1901,$L(statement))
+	..		F  D  Q:statement=""
+	...			S exe=exe+1
+	...			S exe(exe)="S "_symbl_"="_symbl_"_"_$$QADD^%ZS($E(statement,1,1900))
+	...			S statement=$E(statement,1901,$L(statement))	
+	.	F I=1:1:$L(frm,",") D
+	..		N code
+	..		S code="N vauditseq S vauditseq=$$vlogSelect^Record"_$P(frm,",",I)
+	..		S code=code_"("_symbl_","
+	..		I $G(vsql("hostVars"))'="" S code=code_vsql("hostVars")_")"
+	..		E  S code=code_""""")"
+	..		S exe=exe+1,exe(exe)=code_" ;=noOpti"
 	;
 	D ^SQLO(frm,.sel,.oby,.all,.vsql,.rng,.par,.tok,.fsn,.vdd) I ER Q 0
 	;
@@ -271,12 +268,12 @@ OPEN(exe,sqlfrm,sel,sqlwhr,sqloby,grp,par,tok,mode,vdd,sqlcur,subqry)	;public; O
 	; Set up archive info
 	F I=1:1:$L(frm,",") D
 	.	; archinfo = archive table | archive key name 
-	.	;            | keys up to archive key | archive table filer
+	.	;            | keys up to archive key | archive table class
 	.	;            | archive directory variable name
 	.	;            | using index
-	.	;            | $$ARCHFILE^filerPGM code if using index (for LOAD^SQLDD)
+	.	;            | $$getArchiveFile^RecordTABLE code if using index (for LOAD^SQLDD)
 	.	N archinfo,archkey,archTbl,gbl,keys,table,td
-	.	S table=$P(frm,",",I)
+	.	S table=$P(frm,",",I) I $D(vAlias(table)) S table=vAlias(table)
 	.	S td=$$caPslTbl^UCXDD(.pslTbl,table,0)
 	.	S archTbl=$$getArchiveTable^DBARCHIVE(td)
 	.	Q:archTbl=""
@@ -285,12 +282,7 @@ OPEN(exe,sqlfrm,sel,sqlwhr,sqloby,grp,par,tok,mode,vdd,sqlcur,subqry)	;public; O
 	.	S keys=$P(td,"|",3)
 	.	S $P(archinfo,"|",2)=$P(keys,",",archkey)
 	.	S $P(archinfo,"|",3)=$P(keys,",",1,archkey-1)
-	.	I archTbl=table S filer=$P(td,"|",6)
-	.	E  D
-	..		N tdarch
-	..		S tdarch=$$caPslTbl^UCXDD(.pslTbl,archTbl,0)
-	..		S filer=$P(tdarch,"|",6)
-	.	S $P(archinfo,"|",4)=filer
+	.	S $P(archinfo,"|",4)="Record"_archTbl
 	.	S gbl=$P($P(td,"|",2),"(",1)
 	.	; Using index?
 	.	I gbl'=$P(vsql("I",table),"(",1) S $P(archinfo,"|",6)=1
@@ -314,9 +306,9 @@ OPEN(exe,sqlfrm,sel,sqlwhr,sqloby,grp,par,tok,mode,vdd,sqlcur,subqry)	;public; O
 	..		S (expr1,expr2)=""
 	..		D MAPVSQL(.expr1,.expr2,file,.jkeys,.vsub)
 	..		I expr1'="" S exe=exe+1,exe(exe)="S "_expr1
-	..		S exe=exe+1,exe(exe)="I "_join(file,1)_"="_null_" S "_expr2
+	..		S exe=exe+1,exe(exe)="I "_join(file,1)_"="_nullsymbl_" S "_expr2
 	;
-	I ojqry'="" D OUTJOIN^SQLA(.exe,.fsn,.join,.vsub,ojqry)
+	I $D(ojqry)>9 D OUTJOIN^SQLA(.exe,.fsn,.join,.vsub,.ojqry)
 	;
 	S vsql("P")=exe					; Access Pointer
 	;
@@ -328,10 +320,15 @@ OPEN(exe,sqlfrm,sel,sqlwhr,sqloby,grp,par,tok,mode,vdd,sqlcur,subqry)	;public; O
 	;
 	S vsql("K")=$O(vsql(999),-1) 			; Last key variable
 	;
-	D EXEC^SQLG
-	K vsql("AG")
+	D EXEC^SQLG 
 	;
-	D ^SQLCOL(.exe,,frm,.sel,"vd",,.tok,.fsn,.fma,.cmp,.vsub,.vdd,,.subqry)
+	; ^SQLCOL was called from EXEC^SQLG if query contains group by clause, so 
+	; it requires to kill/clean fma and cmp before it calls again ^SQLCOL 
+	; as they will be set/generated by SQLCOL again.
+	;
+	K vsql("AG"),fma,cmp
+	;
+  	D ^SQLCOL(.exe,,frm,.sel,"vd",,.tok,.fsn,.fma,.cmp,.vsub,.vdd,,.subqry)
 	I ER Q 0					; Select Error
 	;
 	S vsql(0)=vxp+1 I vsql(0)=0 S vsql(0)=1		; Bottom key return
@@ -341,7 +338,7 @@ OPEN(exe,sqlfrm,sel,sqlwhr,sqloby,grp,par,tok,mode,vdd,sqlcur,subqry)	;public; O
 	D ADDCODE^SQLAGFUN				; Add aggregate function code
 	D ADDCODE^SQLG					; Add "group By" code to executable routine
 	;
-	I $D(vsql("prot")) D CHGEXEC^SQLPROT(.exe,$G(par("PROTECTION")))
+  	I $D(vsql("prot")) D CHGEXEC^SQLPROT(.exe,$G(par("PROTECTION")))
 	I $G(par("SAVSYM"))'="" D SAVSYM		; Save symbols!!
 	I $G(par("FORMAT"))'="" S vsql("F")=$$VSQLF^SQLCOL(.par)
 	;
@@ -349,12 +346,121 @@ OPEN(exe,sqlfrm,sel,sqlwhr,sqloby,grp,par,tok,mode,vdd,sqlcur,subqry)	;public; O
 	Q $$RESULT					; Interactive
 	;
 	;----------------------------------------------------------------------
-RDB(exe,sqlfrm,sel,sqlwhr,sqloby,grp,par,tok,mode,vdd,sqlcur,subqry)	
+ACCESSRTS(sqlfrm,sqlwhr,sel,mode)
+	;----------------------------------------------------------------------
+	; If not generating compiler code (mode = -1), attempt to patch the FROM
+	; and WHERE clause for any table using selectRestrict.  Do not patch if
+	; any of the following conditions are true:
+	;
+	;	- there is already a join and at least one selectRestrict
+	;	  uses a join
+	;
+	;	- DQMODE is set and at least one selectRestrict uses a join
+	;
+	;	- the select list has MAX or MIN and there is a join
+	;
+	; In these cases, use the compiler code generation access rights checking
+	; method.
+	;
+	; Note that if we are not generating compiler code we are generating this
+	; code for a specific userclass, which is what the selectRestrict clause
+	; will be related to.
+	;
+	; ARGUMENTS:
+	;	. sqlfrm - From clause			/MECH=RW
+	;		   Will be modified if able to
+	;		   patch with selectRestrict joins
+	;
+	;	. sqlwhr - Where clause			/MECH=RW
+	;		   Will be modified to include
+	;		   selectRestrict clauses, if possible
+	;
+	; RETURN:
+	;	. $$	0 = patched, so don't include access rights checking
+	;		    in generated code
+	;		1 = not patched, include access rights checking in
+	;		    generated code (see ACCESS section)
+	;
+	;
+	N fpatched,frm,hasAGfun,hasJoin,I,isDone,isDQmode,joinclause,newfrm
+	N newwhr,origwhr,patched,restrict,rights,tbl,wpatched
+	;
+	S hasAGfun=((sel["MAX(")!(sel["MIN("))
+	S hasJoin=(sqlfrm[" JOIN ")
+	S isDQmode=$G(par("DQMODE"))
+	S (isDone,fpatched,wpatched)=0
+	;
+	; Get all tables involved
+	S frm=$$^SQLJ(sqlfrm,"",.fsn,"",.tok)
+	;
+	; Since the only time we'll patch the from clause is if it's a simple
+	; list of table (no joins), we will build newfrm and use it at the
+	; end, if we can.  We'll add restrict clauses as AND conditions to
+	; the where clause
+	S newfrm=""
+	S newwhr=$G(sqlwhr)
+	F I=1:1:$L(frm,",") D  Q:isDone
+	.	S tbl=$P(frm,",",I)
+	.	S vsql("SELRTS",tbl)=$$GETSELRTS(tbl)
+	.	I vsql("SELRTS",tbl)'="selectRestrict" S newfrm=newfrm_tbl_"," Q
+	.	; The following will throw an error if the RecordTABLE code
+	.	; is not generated.  This is appropriate since it must be if
+	.	; there is a selectRestrict clause
+	.	X "S rights=$$vselectAccess^Record"_tbl_"(%UCLS,.restrict,.joinclause)"
+	.	; Not selectRestrict for this userclass
+	.	I rights'=2 S newfrm=newfrm_tbl_"," Q
+	.	; Otherwise, it is, so try to patch from and where, as appropriate.
+	.	; These are conditions that don't allow us to patch
+	.	I joinclause'="",hasJoin!isDQmode!hasAGfun S isDone=1 Q
+	.	I joinclause'="" S newfrm=newfrm_joinclause_",",fpatched=1
+	.	E  S newfrm=newfrm_tbl_","
+	.	; Add restrict clause to where
+	.	I newwhr="" S newwhr=$$SQL^%ZS(restrict,.tok)
+	.	E  S newwhr="("_newwhr_") AND ("_$$SQL^%ZS(restrict,.tok)_") "
+	.	S wpatched=1
+	;
+	; If isDone there is a selectRestrict with join we could not patch,
+	; so return 1 to ensure 
+	I isDone Q 1
+	;
+	; If from patched there are selectRestricts with joins were were able
+	; to patch.  Otherwise, just use the original from.
+	I fpatched S sqlfrm=$E(newfrm,1,$L(newfrm)-1)
+	I wpatched S sqlwhr=newwhr
+	; If we didn't do any patching, no selectRestricts, so no need to
+	; consider to include in compiler code.
+	; 
+	Q 0
+	;
+	;----------------------------------------------------------------------
+GETSELRTS(table)	; Get SELECT access rights for this table
+	;----------------------------------------------------------------------
+	; Wrapper for calling vcheckAccessRights^RecordTABLE and returning
+	; only select related right
+	;
+	; RETURN:
+	;	. $$	"" = no select restrictions
+	;		select = has select restrictions
+	;		selectRestrict = has selectRestrict restrictions
+	;
+	N rights,td
+	;
+	I $D(vAlias(table)) S table=vAlias(table)
+	S td=$$getPslTbl^UCXDD(table,0)
+	S rights=$$checkAccessRights^UCXDD(td,0)
+	;
+	I rights["selectRestrict" Q "selectRestrict"
+	I rights["select" Q "select"
+	Q ""
+	;	
+	;----------------------------------------------------------------------
+RDB(exe,sqlfrm,sel,sqlwhr,sqloby,grp,par,tok,mode,vdd,sqlcur,subqry)
 	;----------------------------------------------------------------------
 	; Process Select on RDB
 	;
 	N ddref,maxNum,sqlx,vExpr,vList,vMap,vStatus
 	S maxNum=1900	; Maximum string size permitted for indirection
+	I $G(par("PROTECTION")) D PROT(sqlfrm,.sel) I ER Q 0
 	S sel=$$QSUB^%ZS($$UNTOK^%ZS(sel,.tok))	;Untokenize and remove quotes.
 	S ddref=sel I $E(ddref,1,9)="DISTINCT " S ddref=$E(ddref,10,$L(ddref))
 	S sqlwhr=$$QSUB^%ZS($$UNTOK^%ZS($G(sqlwhr),.tok))
@@ -378,32 +484,33 @@ RDB(exe,sqlfrm,sel,sqlwhr,sqloby,grp,par,tok,mode,vdd,sqlcur,subqry)
 	;
 	S exe(exe)="I $G(sqlcur)="""" S sqlcur=0",exe=exe+1
 	S exe(exe)="S vER=$$OPENCUR^%DBAPI("""",vExpr,$C(9),vList,.vCurID,.vd,.vRM)",exe=exe+1
-	S exe(exe)="I 'vER S ^ORACACHE(""DBI"",""cursorname"",sqlcur)=vCurID",exe=exe+1
+	S exe(exe)="I 'vER S vsql(""vCurID"")=vCurID",exe=exe+1
 	S exe(exe)="I vER S vsql=-1",exe=exe+1
 	S exe(exe)="S vsql(""Z"")=1",exe=exe+1
-	S exe(exe)="S vCurID=$G(^ORACACHE(""DBI"",""cursorname"",sqlcur))",exe=exe+1
+	S exe(exe)="S vCurID=$G(vsql(""vCurID""))",exe=exe+1
 	S exe(exe)="S:'$G(vsql(""Z"")) vER=$$FETCH^%DBAPI("""",vCurID,1,$C(9),.vd,.vRM) S vsql(""Z"")=0",exe=exe+1
 	S exe(exe)="S vsql(0)="_(exe-2),exe=exe+1	; set vsql(0) to point to fetch for the next record
 	S exe(exe)="I vER S vsql=-1"
+	I $D(vsql("prot")) D CHGEXEC^SQLPROT(.exe,$G(par("PROTECTION")))
 	S vsql("K")=$O(vsql(999),-1)
 	Q vStatus
 	;
-vList(vList,exe,maxNum)	
+vList(vList,exe,maxNum)
 	N del,i,segments
 	S del="_$C(9)_"
 	S segments=$L(vList,del)
 	S exe(exe)="S vList="_$P(vList,del,1,(segments\2)),exe=exe+1
-	S exe(exe)="S vList=vList_"_$P(vList,del,segments\2+1,segments),exe=exe+1
+	S exe(exe)="S vList=vList"_del_$P(vList,del,segments\2+1,segments),exe=exe+1
 	Q
 	;----------------------------------------------------------------------
 RDBvsql(frm,sel)	;Set up vsql array entries "A" and "D" for RDB
 	;----------------------------------------------------------------------
-	N ddref,dec,i,prepare,ret,typ,x
+	N ddref,dec,i,prepare,ret,typ,vpack,x
 	;
 	S vsql("D")="",vsql("A")=""
 	S prepare=$G(par("PREPARE"))  			; ODBC/JDBC qualifier
 	I $E(sel,1,9)["DISTINCT " S sel=$E(sel,10,$L(sel))
-	I sel="*" S sel=$$LIST^DBSDBASE(frm)
+	I sel="*" S sel=$$COLLIST^DBSDD(frm,0,1,0)
 	F i=1:1 S ddref=$$TRIM^%ZS($P(sel,",",i)) Q:ddref=""  D
 	.	N di,cmp,dec,fid,len,x
 	.	S (typ,dec)=""
@@ -421,7 +528,7 @@ RDBvsql(frm,sel)	;Set up vsql array entries "A" and "D" for RDB
 	.	S vsql("D")=vsql("D")_typ_+dec
 	.	I prepare=1 D  I ER Q
 	..		N z1 S z1=$$PREPARE^SQLODBC(ddref,fid,.vpack)	; attributes
-	..		I $L(z1)+$L(vsql("A"))<1022000 S vsql("A")=vsql("A")_z1_$C(255) Q
+	..		I $$BSL^SQLUTL(z1)+$$BSL^SQLUTL(vsql("A"))<1022000 S vsql("A")=vsql("A")_z1_$$BYTECHAR^SQLUTL(255) Q
 	..		S ER=1,RM=$$^MSG(2079)				; Buffer overflow
 	I prepare=3 S vsql("A")=$$COLATT^SQLODBC(frm,vsql("D")) ; Column formats and access keys (PFW/PIA)
 	Q
@@ -443,35 +550,55 @@ ACCESS(file,pfile)	;
 	I $$CONTAIN(jfiles,file) Q
 	;
 	N I,fcollate,gbref,hload,kcollate,keys,sok,z
-	; 
+	;
 	S z=vsql("I",file)
 	;
-	S gbref=$P(z,"|",1),sok=$P(z,"|",7)
+	S gbref=$P(z,"|",1),sok=$P(z,"|",7),dlevel=$P(z,"|",9)
 	S keys=$P(gbref,"(",2,999),gbref=$P(gbref,"(",1)_"("
 	;
 	I keys="" S gbref=$P(gbref,"(",1) Q
 	;
 	S fcollate=0,hload=0
-	F I=1:1:$L(keys,",") D  I pfile'="",fcollate Q
+	F I=1:1:$L(keys,",") D  Q:ER  I pfile'="",fcollate Q
 	.	;
 	.	I I>1 S gbref=gbref_","
 	.	;
 	.	; Add archive file if now active and not using index
 	.	I $P($G(vsql("ARCH",file)),"|",5)'="",'$P(vsql("ARCH",file),"|",6),$E(gbref,1,2)'="^|" S gbref="^|"_$P(vsql("ARCH",file),"|",5)_"|"_$E(gbref,2,$L(gbref))
 	.	S ddref=$P(keys,",",I),kcollate=0
-	.	I $$LITKEY(ddref) S gbref=gbref_ddref Q
+	.	I $$LITKEY(ddref) S gbref=gbref_ddref S:dlevel dlevel=dlevel-1 Q	;save distict level
 	.	I $L(gbref,"""")#2=0 S gbref=gbref_ddref Q
 	.	;
 	.	S ddref=file_"."_ddref
-	.	D COLLATE I pfile'="",fcollate Q
+	.	D COLLATE Q:ER  I pfile'="",fcollate Q
 	.	I $G(zrng) D QUERY 
 	.	I $D(join) D JOIN(file,pfile)
-	;
+	Q:ER
 	I pfile'="",fcollate Q
 	I '(fcollate&kcollate) D TOGGLE			; $D toggle
 	;
 	I jfiles="" S jfiles=file
 	E  I '$$CONTAIN(jfiles,file) S jfiles=jfiles_","_file
+	;
+	; If we are generating compiler code and there is selectRestrict access,
+	; set up check for access to this record.  Need to load base node to pass
+	; to vselectOptmOK.  Note that we only need to call the check if this
+	; userclass has a restrict clause.
+	I inclaccrts,$P(vsql("SELRTS",file),"|",1)="selectRestrict",'$P(vsql("SELRTS",file),"|",3) D
+	.	N code,expr,key,nod,outer,rectyp,symbl
+	.	S symbl="vsql("_$$NXTSYM_")"
+	.	S rectyp=$P(fsn(file),"|",4)
+	.	I rectyp'=10 S nod=" "
+	.	E  S nod=$P(fsn(file),"|",12)		; Exists node
+	.	I nod'="" D
+	..		S fsn(file,nod)=symbl
+	..		S outer=$G(join(file))
+	..		D LOAD^SQLDD(file,.fsn,.exe,1,.fma,outer,.vsub,.cmp)
+	.	E  S exe=exe+1,exe(exe)="S "_symbl_"="""""
+	.	S code=symbl
+	.	F I=1:1:$L(keys,",") S key=$P(keys,",",I) I '$$LITKEY(key) S code=code_","_vsub(file_"."_key)
+	.	S exe=exe+1,exe(exe)="I "_$P(vsql("SELRTS",file),"|",2)_",'$$vselectOptmOK^Record"_file_"(%UCLS,"_code_") S vsql="_vxp
+	.	S $P(vsql("SELRTS",file),"|",3)=1	; Flag that we've already done this
 	;
 	I $G(zrng) D QUERY 
 	I $D(join) D JOIN(file,pfile)
@@ -485,6 +612,7 @@ COLLATE	; Build collating section
 	N gtail,lvn,lvnval,min,max,opmin,opmax,ord,tbl,type,vxparch
 	;
 	I $D(join(ddref)),$$JOINED(ddref,.join,.vsub) Q
+	I $D(vsub(ddref)) S gbref=gbref_vsub(ddref) Q 	; this key has already been processed
 	;
 	I pfile="" S access=$$ADDVAL(access,ddref)
 	;
@@ -496,7 +624,8 @@ COLLATE	; Build collating section
 	.	;
 	.	I sok S access=$$SUBVAL(access,ddref)
 	.	E  S vsub(ddref)=v,rng=$$QRYB(ddref,"=",.rng)
-	.	S gbref=gbref_$S(v="""""":null,1:v)
+	.	S gbref=gbref_$S(v="""""":nullsymbl,1:v)
+	.	I $G(dlevel) S dlevel=dlevel-1
 	.	; May be direct access to archive key level, handle that here
 	.	S tbl=$P(ddref,".",1)
 	.	S archinfo=$G(vsql("ARCH",tbl))
@@ -520,17 +649,17 @@ COLLATE	; Build collating section
 	...			I $D(vsql("ARCH",jtbl)),$P(vsql("ARCH",jtbl),"|",1)=archtbl,$P(vsql("ARCH",jtbl),"|",2)=archkey S $P(vsql("ARCH",jtbl),"|",5)=archfile
 	..		; Build code for $$NEXTARCH
 	..		S keys=$P(archinfo,"|",3)
-	..		S arfilcod="$$ARCHFILE^"_$P(archinfo,"|",4)_"("""_tbl_""",0,"
+	..		S arfilcod="$$getArchiveFile^"_$P(archinfo,"|",4)_"("""_tbl_""",0,"
 	..		; Add keys up to archive key
 	..		F i=1:1 S key=$P(keys,",",i) Q:key=""  S arfilcod=arfilcod_vsub(tbl_"."_key)_","
 	..		; Add archive key
-	..		S arfilcod=arfilcod_$S(v="""""":null,1:v)_")"
+	..		S arfilcod=arfilcod_$S(v="""""":nullsymbl,1:v)_")"
 	..		S exe=exe+1
 	..		S exe(exe)="S "_archfile_"="_arfilcod
 	..		;I isindex S $P(vsql("ARCH",tbl),"|",7)=arfilcod
 	.	; Consider archive from here on in collation sequence
 	.	if 'isindex,$P(archinfo,"|",5)'="",gbref'["^|" S gbref="^|"_$P(archinfo,"|",5)_"|"_$E(gbref,2,$L(gbref))
-	;
+ 	;
 	S (fcollate,kcollate)=1
 	;
 	I pfile'="" Q
@@ -542,11 +671,11 @@ COLLATE	; Build collating section
 	;
 	F opmin=">","'<" S min=$$GETVAL(ddref,opmin,.rng) S:min[$C(1) min=$$SUBDINAM(.min,.vsub) I min'="" I 'sok S rng=$$QRYB(ddref,opmin,.rng) Q
 	F opmax="<","'>" S max=$$GETVAL(ddref,opmax,.rng) S:max[$C(1) max=$$SUBDINAM(.max,.vsub) I max'="" I 'sok S rng=$$QRYB(ddref,opmax,.rng) Q
-	;
+ 	;
 	I $G(rng(ddref))="" S num=(min=+min&(max=+max))
 	E  S num="N$DCL"[rng(ddref)
 	;
-	I $D(rng(ddref,"I")) D LIST Q
+	I $D(rng(ddref,"I"))!$D(rng(ddref,"=ANY")) D LIST Q
 	;
 	S lvn="vsql("_$$NXTSYM_")",vsub(ddref)=lvn,v255(lvn)=""
 	S gbref=gbref_lvn
@@ -576,7 +705,7 @@ COLLATE	; Build collating section
 	...			I $D(vsql("ARCH",jtbl)),$P(vsql("ARCH",jtbl),"|",1)=archtbl,$P(vsql("ARCH",jtbl),"|",2)=archkey S $P(vsql("ARCH",jtbl),"|",5)=archfile
 	..		; Build code for $$NEXTARCH
 	..		S keys=$P(archinfo,"|",3)
-	..		S arfilcod="$$ARCHFILE^"_$P(archinfo,"|",4)_"("""_tbl_""",0,"
+	..		S arfilcod="$$getArchiveFile^"_$P(archinfo,"|",4)_"("""_tbl_""",0,"
 	..		; Add keys up to archive key
 	..		F i=1:1 S key=$P(keys,",",i) Q:key=""  S arfilcod=arfilcod_vsub(tbl_"."_key)_","
 	..		; Add archive key
@@ -607,7 +736,7 @@ COLLATE	; Build collating section
 	; Determine starting archive directory.  If going forward and starting
 	; from null, start in primary
 	;
-	I $D(join(file))#2,$$DROPTHRU
+ 	I $D(join(file))#2,$$DROPTHRU
 	;
 	E  D
 	.	; Deal with starting point that includes an equals test
@@ -619,7 +748,7 @@ COLLATE	; Build collating section
 	..		I archkey'="" S exe(exe)=exe(exe)_","_archlast_"="_lvn_","_archfile_"="_arfilcod
 	..		S exe=exe+1
 	..		S exe(exe)="I $D("_gbref_"))"
-	..		; We need to add the end condition to the $D check as well.  
+	..		; We need to add the Where condition to the $D check as well.  
 	..		; Otherwise we could have a situation where we have a row
 	..		; in the result set that doesn't match the Where clause criteria.
 	..		S exe(exe)=exe(exe)_$S(eof2'="":",'"_eof2,1:"")_" S vsql=vsql+"_$S(archkey="":1,1:3)
@@ -720,7 +849,8 @@ DROPTHRU()	; Drop through to print if nothing at this key level
 	.	S ojflg="vsql("_$$NXTSYM_")"
 	.	S init="S "_ojflg_"=0 " ; ,ojqry=ojflg
 	.	I file=$P(vsql("I"),",",1) S eof3="!1"
-	S v="vsql("_$$NXTSYM_")"		; EOF indicator
+	;
+ 	S v="vsql("_$$NXTSYM_")"		; EOF indicator
 	S exe=exe+1,exe(exe)=$G(init)_"S "_v_"=0"
 	S exe=exe+1,exe(exe)="I "_v_" S vsql="_vxp
 	S vxpo=vxp,vxp=exe-1
@@ -735,8 +865,14 @@ DROPTHRU()	; Drop through to print if nothing at this key level
 	S eof=eof1_$S(eof2'="":"!"_eof2,1:"")
 	I ord<0 S:min'="" eof=eof_" S "_lvn_"="""""
 	E  S:max'="" eof=eof_" S "_lvn_"="""""
-	;;S exe=exe+1,exe(exe)=col_eof_" S "_v_"=1 I "_ojflg_" S vsql="_vxpo
 	S exe=exe+1,exe(exe)=col_eof_" S "_v_"=1 I "_ojflg_$G(eof3)_" S vsql="_vxpo
+	N dd,keys
+	S dd=$P(ddref,".",2)
+	S keys=$P(fsn(file),"|",3)
+	;;I dd=$P(keys,",",$L(keys,",")) D
+	S exe=exe+1
+	S exe(exe)="I "_lvn_"="""" S "_lvn_"=$$BYTECHAR^SQLUTL(254)"
+	;
 	Q 1
 	;
 	;----------------------------------------------------------------------
@@ -748,7 +884,7 @@ RESULT()	; Place cursor before the first row
 	;
 	S vsql=1
 	F  X exe(vsql) S vsql=vsql+1 Q:vsql=0!(vsql>vsql("P"))
-	I vsql=0 S vsql(0)=100 Q 0
+ 	I vsql=0 S vsql(0)=100 Q 0
 	Q (vsql("P")+1)
 	;
 	;----------------------------------------------------------------------
@@ -805,7 +941,7 @@ JDATA(ddref,jddref,flag)	; Substitute a database reference for key expression
 	S vsub(jddref)=v0
 	S v255(v0)=""
 	;
-	S z="S "_v0_"="_NS_" I "_v0_"="""" S "_v0_"="_null
+	S z="S "_v0_"="_NS_" I "_v0_"="""" S "_v0_"="_nullsymbl
 	;
 	S exe=exe+1
 	S exe(exe)=z
@@ -827,7 +963,7 @@ TOGGLE	; Toggle logic for bottom level literal to avoid infiloop
 	.	N archinfo,ext,i,key,keys
 	.	S archinfo=vsql("ARCH",file)
 	.	; Call ARCHFILE to get archive file this record would be in
-	.	S ext="^|$$ARCHFILE^"_$P(archinfo,"|",4)_"("""_file_""",0,"
+	.	S ext="^|$$getArchiveFile^"_$P(archinfo,"|",4)_"("""_file_""",0,"
 	.	; Construct keys up to archive key
 	.	S keys=$P(archinfo,"|",3)
 	.	F i=1:1 S key=$P(keys,",",i) Q:key=""  S ext=ext_vsub(file_"."_key)_","
@@ -855,7 +991,7 @@ TOGGLE	; Toggle logic for bottom level literal to avoid infiloop
 	.	I $D(join(file,1)) D
 	..		;
 	..		S exe=exe+1
-	..		S exe(exe)="I "_join(file,1)_"="_null_" S "_expr2
+	..		S exe(exe)="I "_join(file,1)_"="_nullsymbl_" S "_expr2
 	..		S z="E  "_z
 	;
 	E  S z=z_" S vsql="_vxp
@@ -872,18 +1008,18 @@ MAPVSQL(expr1,expr2,alias,jkeys,vsub,fsn,fma)	; Re-Map keys
 	S ddref=alias_".",zddref=ddref_$C(maxCharV),gblref=""
 	;
 	F  S ddref=$O(vsub(ddref)) Q:ddref=""!(ddref]zddref)  D
-	.	;
+  	.	;
 	.	S v=vsub(ddref)
 	.	;I $D(v255(v)) Q
 	.	I $E(v,1,4)="vsql",$G(jkeys(ddref))=$L(access,",") D  I v="" Q
 	..		;
 	..		N z S z=""
 	..		F  S z=$O(vsub(z)) Q:z=""  I z'=ddref,vsub(z)=v Q
-	..		E  S expr2=$$ADDVAL(expr2,v_"="_null),v=""
+	..		E  S expr2=$$ADDVAL(expr2,v_"="_nullsymbl),v=""
 	.	;
 	.	S v0="vsql("_$$NXTSYM_")"
 	.	S expr1=$$ADDVAL(expr1,v0_"="_v)
-	.	S expr2=$$ADDVAL(expr2,v0_"="_null),v255(v0)=""
+	.	S expr2=$$ADDVAL(expr2,v0_"="_nullsymbl),v255(v0)=""
 	.	S vsub(ddref)=v0
 	.	;
 	.	F  S gblref=$O(fma(gblref)) Q:gblref=""  I gblref[v D
@@ -900,11 +1036,16 @@ MAPVSQL(expr1,expr2,alias,jkeys,vsub,fsn,fma)	; Re-Map keys
 LIST	; Key is in a list or array format OPTIMIZE!
 	;----------------------------------------------------------------------
 	;
-	N arg,expr,glvn,i,keys,lvn,I,v,v0,v1,v2
+	N arg,expr,glvn,i,keys,lvn,I,v,v0,v1,v2,zrng
 	;
-	S expr=$$GETVAL(ddref,"I",.rng) I expr="" Q
+	I $D(rng(ddref,"I")) S expr=$$GETVAL(ddref,"I",.rng),zrng=rng(ddref,"I")	; save whr sequence for LISTB section
+	E  I $D(rng(ddref,"=ANY")) S expr=$$GETVAL(ddref,"=ANY",.rng),zrng=rng(ddref,"=ANY")
+	I $D(vsub(ddref)) S expr=""	; this key has already been processed
+	I expr="" Q
 	;
-	I 'sok S rng=$$QRYB(ddref,"I",.rng)
+	I 'sok D
+	.	I $D(rng(ddref,"I")) S rng=$$QRYB(ddref,"I",.rng)
+	.	E  I $D(rng(ddref,"=ANY")) S rng=$$QRYB(ddref,"=ANY",.rng)
 	;
 	S lvn="vsql("_$$NXTSYM_")"
 	;
@@ -966,24 +1107,52 @@ LISTB	;
 	S vsub(ddref)=lvn
 	S gbref=gbref_lvn
 	S kcollate=0
+	;
+	if $G(zrng)'="" D RESETlvn
 	Q
 	;
+RESETlvn  ; If the IN clause contains a subquery with more than one column in the select list,
+	; then these columns are concatenated together (delimited by <tab>) to form a single composite
+	; key into ^DBTMP.  In order to reference the record in the base table, the
+	; value of the lvn variable needs to be reset to pull out of the composite key
+	; just the portion that corresponds to the base table's primary key.
+	; This is done by matching the name of the ddref with the position of that
+	; ddref in piece 1 of the whr array.  For example, if ddref="ZCIDA.CID", then based
+	; on the whr array entry below, the value of that column is taken from piece
+	; 1 of the composite lvn value that was returned from the ^DBTMP collating code.
+	; whr(1)=$C(1)_"ZCIDA.CID"_$C(1,0,1)_"ZCIDA.DESC"_$C(1,9)_"^DBTMP(%TOKEN,sqlcur,1#)"_$C(9)_"I"_$C(9)_"N"_$C(0)_"T"_$C(9)
+	; In this case, add code in exe to set lvn to piece 1.
+	; S exe(exe)="S "_lvn_"=$P("_lvn_",$C(9),"_i_")"
+	N di,i,zlvn,zwhr
+	;
+	S zwhr=$P(whr(zrng),$C(9),1)
+	I zwhr'[$C(0) Q		; only a single column, no special processing necessary
+	I $E(zwhr)="(",$E(zwhr,$L(zwhr))=")" S zwhr=$E(zwhr,2,$L(zwhr)-1)	; Strip off parens
+	F i=1:1:$L(zwhr,$C(0)) D
+	.	S zlvn="vsql("_$$NXTSYM_")"
+	.	S exe=exe+1,exe(exe)="S "_zlvn_"=$P("_lvn_",$C(9),"_i_")"
+	.	I $TR($P(zwhr,$C(0),i),$C(1))=ddref S vsub(ddref)=zlvn
+	.	E  S di=$TR($P(zwhr,$C(0),i),$C(1)) S vsub(di)=zlvn
+	;
+	S gbref=$P(gbref,lvn,1)_vsub(ddref)	; replace the key variable with the one we just replaced.
+	;
+	Q
 	;----------------------------------------------------------------------
 STRSORT(expr,ord,min,max)	; Public ; Sort expression and return
 	;----------------------------------------------------------------------
 	;
-	N ptr,tmp,exe,vsql,vxp
+ 	N ptr,tmp,exe,vsql,vxp
 	S ptr=0,exe=0,vxp=-1
 	;
 	F  S v=$$NPC^%ZS(expr,.ptr,1) q:ptr=0  I v'="" S tmp(v)=""
-	;
+ 	;
 	D CODE("tmp(","v",ord,.min,.max)
 	;
 	S vsql=1,expr=""
 	;
 	X exe(1)
 	F  X exe(2) Q:vsql=-1  S expr=expr_","_$S(v[","!(v[""""):$$QADD^%ZS(v),1:v)
-	;
+ 	;
 	Q $E(expr,2,$L(expr))
 	;
 	;----------------------------------------------------------------------
@@ -992,12 +1161,12 @@ QUERY	; Place query expressions into executable
 	;
 	N mcode,I
 	;
-	S ER=0
+ 	S ER=0
 	;
 	D QUERY^SQLA(.rng,.whr,.mcode,.vsub,.jfiles,.fsn,dqm,.ojqry)
 	I '$D(mcode)!ER Q
 	;
-	D LOADALL I ER Q
+ 	D LOADALL I ER Q
 	;
 	F I=1:1:$G(mcode) S exe=exe+1,exe(exe)=mcode(I)
 	Q
@@ -1020,7 +1189,7 @@ SUBDINAM(expr,vsub)	; Replace data item references with data references
 	.	S expr=$P(expr,$C(1),1)_$$PARSE^SQLDD(.ddref,"",.cmp,.fsn,.frm,.vdd,,.vsub)_$P(expr,$C(1),3,999)
 	.	I ER S expr="" Q
 	;
-	I expr'="" D LOADALL
+ 	I expr'="" D LOADALL
 	Q expr
 	;
 	;----------------------------------------------------------------------
@@ -1060,7 +1229,7 @@ LOAD	; Load database from a single table
 	;
 	;----------------------------------------------------------------------
 SORT	; Sort a Results table
-	;----------------------------------------------------------------------
+ 	;----------------------------------------------------------------------
 	;
 	N I,NS
 	N arg,n,di,ddref,expr,fid,gbl,sort,null,nullchr,keys,key,tmptbl,varnum,z
@@ -1072,19 +1241,21 @@ SORT	; Sort a Results table
 	I 'all D  I 'sort S exe=exe+1,exe(exe)="S vsql(0)=100" Q
 	.	;
 	.	I oby="" S oby=sel			; *****
+	.	E  F I=1:1:$L(sel,",") I '$$CONTAIN^SQLM(oby,$P(sel,",",I)) S oby=oby_","_$P(sel,",",I)
 	.	;
 	.	F I=1:1:$L(sel,",") I '$D(rng($P(sel,",",I),"=")) S sort=1 Q
 	;
 	S fid=$P(frm,",",1),keys=$P(fsn(fid),"|",3)
 	;
-	F I=1:1:$L(oby,",") D  I keys="" S oby=$P(oby,",",1,I) Q 
-	.       ; 
-	.       S ddref=$P($P(oby,",",I)," ",1) 
-	.       I $D(rng(ddref,"=")) D SUBLIST(ddref,.oby) S I=I-1 Q 
-	.       I $P(access,",",I)=ddref Q 
+        F I=1:1:$L(oby,",") D  I keys="" S oby=$P(oby,",",1,I) Q
+        .       ;
+        .       S ddref=$P($P(oby,",",I)," ",1)
+        .	Q:ddref=""
+        .       I $D(rng(ddref,"=")) D SUBLIST(ddref,.oby) S I=I-1 Q
+        .       I $P(access,",",I)=ddref Q
 	.	I $P($G(vdd(ddref)),"|",23),$P($G(vdd(ddref)),"|",1)=$P($P(access,",",I),".",2) Q		;serial key
-	.       I $G(join(ddref))=$P(access,",",I) Q 
-	.       S sort=1 
+        .       I $G(join(ddref))=$P(access,",",I) Q
+        .       S sort=1
 	;
 	I mode=-2,'sort S vsql("O")=-1 Q
 	;
@@ -1098,16 +1269,20 @@ SORT	; Sort a Results table
 	;
 	F I=1:1:$L(oby,",") S di=$P(oby,",",I) D  I ER Q
 	.	;
-	.	N typ,x
+	.	N isCmp,typ,x
 	.	S arg=$P(di," ",2) I arg'="" S di=$P(di," ",1),arg=" "_arg
 	.	;
-	.	I di=sel S NS="vd"
-	.	E  S NS=$$PARSE^SQLDD(.di,.x,.cmp,.fsn,.frm,.vdd,"",.vsub) Q:ER
+	.	;Commentd to fix the issue :$ZCHAR(254)is displayed insted of empty,so
+	.	;comented 2 lines and added 1 line below.
+	.	;;I di=sel S NS="vd"
+	.	;;E  S NS=$$PARSE^SQLDD(.di,.x,.cmp,.fsn,.frm,.vdd,"",.vsub) Q:ER
+	.	S NS=$$PARSE^SQLDD(.di,.x,.cmp,.fsn,.frm,.vdd,"",.vsub) Q:ER
 	.	S typ=$$TYP^SQLDD(di,.x,.vdd)
+	.	S isCmp=($$CMP^SQLDD(di,.x,.vdd)'="")
 	.	;
-	.	S nullchr=$S('dqm:"$$BYTECHAR^SQLUTL(254)","N$DCL"[typ:0,1:""" """)	
+	.	S nullchr=$S('dqm:nullsymbl,"N$DCL"[typ:0,1:""" """)	
 	.	;
-	.	I $E(NS)="$" D
+	.	I ($E(NS)="$")!isCmp D
 	..		;
 	..		S z="vsql("_$$NXTSYM_")"
 	..		S expr=expr_" S "_z_"="_NS
@@ -1120,9 +1295,11 @@ SORT	; Sort a Results table
 	.	I $D(rng(di)),$$GETVAL(di,"=",.rng)'="""" Q
 	.	I $$CONTAIN(access,di),$P(di,".",1)=fid Q
 	.	;
-	.	I all S null=null_" S:"_NS_"="""" "_NS_"="_nullchr Q
-	.	S null=null_"!("_NS_"="""")"
+	.	; 01/19/2009 Pete Chenard
+	.	; Treat 'all' versus 'distinct' the same in terms of whether or not
+	.	; the row will be returned.  Always replace nulls with $C(254)
 	.	;
+	.	S null=null_" S:"_NS_"="""" "_NS_"="_nullchr Q
 	.	I $$GETVAL(di,"=",.rng)="""" S exe=exe+1,exe(exe)="S vsql=-1"
 	;
 	I ER S vsql=0 Q
@@ -1130,8 +1307,8 @@ SORT	; Sort a Results table
 	D LOADALL I ER S vsql=0 Q  ; Load sort data
 	;
 	I 'all,null'="" D
+	.	S expr=expr_null
 	.	;
-	.	S expr=expr_" I "_$E(null,2,$L(null))_" S vsql="_vxp
 	.	I $E(expr)=" " S expr=$E(expr,2,$L(expr))
 	.	S exe=exe+1,exe(exe)=expr
 	.	S expr="",null=""
@@ -1142,8 +1319,10 @@ SORT	; Sort a Results table
 	S exe=exe+1,exe(exe)=expr
 	;
 	S varnum=0
-	;
+	N zvxp
 	F I=1:1:exe I exe(I)["S vsql=-1",exe(I)["$O"!(exe(I)["$N") S exe(I)=$P(exe(I),"S vsql=-1",1)_"S vsql="_(exe+1) Q
+	I $G(dlevel) S zvxp="" F i=1:1:dlevel S zvxp=$O(vsql("COL",zvxp)) Q:zvxp=""
+	I $G(zvxp) S vxp=zvxp-1
 	S exe=exe+1,exe(exe)="S vsql="_vxp
 	;
 	S gbl=tmptbl_",",vxp=-1
@@ -1178,17 +1357,26 @@ ADDKEYS(oby,frm,fsn,join)	; Add primary keys required to mantain 1NF
 	;
 	Q
 	;----------------------------------------------------------------------
-CLOSE(sqlcur)	; Close a Results Table
+CLOSE(sqlcur)	
+	; Close a Results Table
+	; If on an RDB environment also close the open oracle cursor, vCurID
+	; denotes the cursor ID associated with the database cursor. If it is
+	; not defined then we are either operating in a M enviroment or the sql
+	; cursor was opened on a table that resides in a global.
 	;----------------------------------------------------------------------
 	I $G(sqlcur)="" S ER=1,RM=$$^MSG(8564,"CLOSE") Q  	; *** 04/25/97
-	I $$rdb^UCDB() D  Q
-	.	N cid,ER
-	.	S cid=$G(^ORACACHE("DBI","cursorname",sqlcur))
-	.	S ER=$$CLOSECUR^%DBAPI("",cid)
-	.	I 'ER K ^ORACACHE("DBI","cursorname",sqlcur)	
+	I $D(vsql("vCurID")) D
+	.	N ER,RM			; Ignore cursor not opened error
+	.	S ER=$$CLOSECUR^%DBAPI("",vsql("vCurID"))
+	E  I $$isRdb^vRuntime() D
+	.	N ER,RM			; Ignore cursor not opened error
+	.	N exe,vsql		; Only need to load to allow RDB close
+	.	N sqlcnt,sqldta		; Do not want RESTORE to modify these
+	.	D RESTORE^SQLUTL(sqlcur,.vsql,.exe)
+	.	I $D(vsql("vCurID")) S ER=$$CLOSECUR^%DBAPI("",vsql("vCurID"))
 	I $G(%TOKEN)="" N %TOKEN S %TOKEN=$J
 	K ^DBTMP(%TOKEN,sqlcur)			; Delete temp sort file
-	K ^SQLCUR(%TOKEN,sqlcur)		; Procedural code associated
+	D CLOSE^SQLUTL(%TOKEN,sqlcur)		; Procedural code associated
 	Q					; with this cursor
 	;
 	;----------------------------------------------------------------------
@@ -1215,11 +1403,11 @@ SUBLIST(DI,SEL)	; Subtract a Data Item frm a sel
 VIEW(fid,whr,fsn)	; Process file view query
 	;----------------------------------------------------------------------
 	;
-	N lib,X
+	N tbl,X
 	;
-	S lib=$P(fsn(fid),"|",11)
-	;
-	S X=$P($G(^DBTBL(lib,1,fid,14)),"|",1)      ; File control page 
+	S lib="SYSDEV"
+	S tbl=$S($D(vAlias(fid)):vAlias(fid),1:fid)
+	S X=$P($G(^DBTBL(lib,1,tbl,14)),"|",1)      ; File control page 
 	;
 	I X'="" D
 	.	;
@@ -1228,11 +1416,10 @@ VIEW(fid,whr,fsn)	; Process file view query
 	.	;
 	.	new ls
 	.	set ls=$O(whr(""),-1)+1
-	.	;($D(join(fid))#2)) last parameter
-	.	do ^SQLQ(X,fid,.whr,.rng,.mode,.tok,.fsn,.vdd,0)
+	.	do ^SQLQ(X,fid,.whr,.rng,.mode,.tok,.fsn,.vdd,($D(join(fid))#2))
 	.	if $O(whr(""),-1)=ls set join(0,fid)=ls
 	;
-	I $G(par("PROTECTION")),$D(^DBTBL(lib,14,fid,"*")) D 
+	I $G(par("PROTECTION")),$D(^DBTBL(lib,14,tbl,"*")) D 
 	.	;
 	.	S X=$$VIEW1^SQLPROT(fid)
 	.	S X=$$SQL^%ZS(X,.tok)
@@ -1257,7 +1444,7 @@ CODE(glvn,lvn,ord,min,max)	; Return Collating code for this key
 	;
 	S exe=exe+1,exe(exe)="S "_lvn_"="_$S(ord<0:$S(max="":"""""",1:max),1:$S(min="":"""""",1:min))
 	S exe=exe+1,exe(exe)=col_eof_" S vsql="_vxp
-	S glvn=glvn_lvn_","
+    	S glvn=glvn_lvn_","
 	S vxp=exe-1
 	Q
 	;
@@ -1324,17 +1511,17 @@ PROT(frm,sel)	; Data item protection logic
 	.	D fsn^SQLDD(.fsn,table)			; Create file attributes
 	S frm=$E(from,2,$L(from)-1)			; Remove comma
 	Q
-	; 
-	;-------------------------------------------------------------------- 
-ADDVAL(str,val)	; Add Value to String 
-	;-------------------------------------------------------------------- 
-	; 
-	I $G(str)="" Q $G(val) 
-	Q str_","_$G(val) 
+        ;
+        ;--------------------------------------------------------------------
+ADDVAL(str,val) ; Add Value to String
+        ;--------------------------------------------------------------------
+        ;
+        I $G(str)="" Q $G(val)
+        Q str_","_$G(val)
 	;
-	;-------------------------------------------------------------------- 
-SUBVAL(str,val)	; Subtract Value from String 
-	;-------------------------------------------------------------------- 
+        ;--------------------------------------------------------------------
+SUBVAL(str,val) ; Subtract Value from String
+        ;--------------------------------------------------------------------
 	;
 	N s,v
 	S s=","_str_",",v=","_val_","
@@ -1345,18 +1532,18 @@ SUBVAL(str,val)	; Subtract Value from String
 	I val'="" Q str_$S(str="":"",1:",")_$E(val,1,$L(val)-1)
 	Q str
 	;
-	;-------------------------------------------------------------------- 
+        ;--------------------------------------------------------------------
 QRYB(ddref,oprelat,rng)	; Set flag in rng
-	;-------------------------------------------------------------------- 
+        ;--------------------------------------------------------------------
 	;
 	N v
 	S v=$g(rng(ddref,oprelat)) I v<1 Q rng
 	;
 	Q $E(rng,1,v-1)_0_$E(rng,v+1,$L(rng))
 	;
-	;-------------------------------------------------------------------- 
+        ;--------------------------------------------------------------------
 GETVAL(ddref,oprelat,rng)	; Return value from whr based on rng pointer
-	;-------------------------------------------------------------------- 
+        ;--------------------------------------------------------------------
 	;
 	N v
 	S v=$G(rng(ddref,oprelat))
@@ -1379,13 +1566,13 @@ SAVSYM	; Save some arrays to vsql
 	.	F  S z=$Q(@z) Q:z=""!($E(z,1,$L(lvn))'=lvn)  S vsql("S",z)=@z
 	Q
 	;
-LITKEY(z)	; 
+LITKEY(z) ;
 	I z="$J" Q 1
 	Q (z=+z!($E(z)="""")!(z="%TOKEN")!(z="sqlcur")!(z["vsql("))
 	;
-replace(STRING,OLD,NEW)	;       Replace OLD with NEW in STRING 
-	; 
-	N PTR S PTR=0 
-	; 
-	F  S PTR=$F(STRING,OLD,PTR) Q:PTR=0  S STRING=$E(STRING,1,PTR-$L(OLD)-1)_NEW_$E(STRING,PTR,1024000) S PTR=PTR+$L(NEW)-$L(OLD) 
-	Q STRING 
+replace(STRING,OLD,NEW) ;       Replace OLD with NEW in STRING
+        ;
+        N PTR S PTR=0
+        ;
+        F  S PTR=$F(STRING,OLD,PTR) Q:PTR=0  S STRING=$E(STRING,1,PTR-$L(OLD)-1)_NEW_$E(STRING,PTR,1024000) S PTR=PTR+$L(NEW)-$L(OLD)
+        Q STRING

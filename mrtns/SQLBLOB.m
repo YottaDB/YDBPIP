@@ -5,9 +5,9 @@ SQLBLOB	;Private ; Library functions to mamage binary field
 	;
 	; KEYWORDS: BLOB,BINARY,PICTURE,SIGNATURE
 	;
-	; LIBRARY:
+     	; LIBRARY:
 	;       . PARSE     - Return internal expression of a binary field
-	;       . READ      - Return binary field data 
+        ;       . READ      - Return binary field data
 	;----------------------------------------------------------------------
 	;----Revision History---------------------------------------------------
 	;
@@ -68,7 +68,7 @@ PARSE(dinam)	; Return internal reference format for a binary field
 	;----------------------------------------------------------------------
 	N del,fid,fsn,gbl,i,key,keys,nod,q,ref
 	S fid=$P(dinam,".",1)			; File name
-	D fsn^SQLDD(.fsn,fid)	  	 	; File attributes
+   	D fsn^SQLDD(.fsn,fid)	  	 	; File attributes
 	I $G(ER) Q ""				;12/15/97 mas
 	S gbl=$P(fsn(fid),"|",2)		; Global reference
 	S keys=$P(gbl,"(",2),gbl=$P(gbl,"(",1)  ; Access keys

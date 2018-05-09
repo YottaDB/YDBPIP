@@ -3,7 +3,7 @@ DBSDOC2	;;DBS - UTL - V5.0 - DOCUMENTATION BY FILE ID
 	;     ORIG:  CHIANG -  4 APR 1990
 	;     DESC:  COPY/RESTORE DATA ITEM DOCUMENTATION (RMS INTERFACE)
 	;
-	;  I18N=QUIT: Excluded from I18N standards 
+        ;  I18N=QUIT: Excluded from I18N standards
 	;---------- Revision History -------------------------------------------
 	; 07/10/06 - RussellDS - CR22121
 	;	     Modified CREATE1 section to eliminate use of $A and $C for

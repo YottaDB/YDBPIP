@@ -24,6 +24,45 @@ SQLQ(X,frm,whr,rng,mode,tok,fsn,vdd,out)	;PUBLIC;SQL where clause Parser
 	; EXAMPLE:
 	;
 	;---- Revision History -----------------------------------------------
+	; 04/29/09 - Pete Chenard
+	;	     Reversed previous change.  The issue that the previous change 
+	;	     was attempting to correct has now been handled in VIEW^SQLM.  See
+	;	     revision history in SQLM for details.
+	;
+	; 03/18/09 - Pete Chenard
+	;	     Modified RANGE TO replace a line that was mistakently removed
+	;	     in a previous revision.  The line to QUIT from the loop if
+	;	     piece 3 of exprlft was not null was put back in.  Piece 3, if
+	;	     not null, contains data, or punctuation such as parenthesis
+	;	     that belong after the column defined in piece 2.
+	;
+	; 02/26/09 - Pete Chenard
+	;	     Modified RANGE section to remove the code the eliminated the
+	;	     outer join condition if there's a query on the table.  This was
+	;	     an optimization that was causing some rows to be omitted from
+	;	     the result set when they should in fact be included.
+	;
+	; 01/24/09 - Pete Chenard
+	;	     Modified SUBQUERY to call ^SQLJ to process the subquery
+	;	     FROM clause.  Without this call, table aliases are not
+	;	     handled correctly.
+	;
+	; 06/05/2008 - RussellDS - CR30801
+	;	Modified HOSTVAR to save vsql("hostVars") for use by SQL
+	;	to build using reference for audit logging.
+	;
+	;	Fixed problem in LITSTR with use of ='' for D, C, and L
+	;	datatypes.
+	;
+	;	Removed old revision history.
+	;
+	; 11/27/07 - Pete Chenard -  CR 30087
+	;	     Modified to not cache SQL statements with LIKE in 
+	;	     the where clause.
+	;
+	; 07/10/07 - Pete Chenard - CR28171
+	;	     Replaced occurances of $C(255)
+	;
 	; 09/26/06 - Pete Chenard - CR22216
 	;	     Modified SETRNG section to use $G around reference to exe.
 	;	     In cases where only a WHERE clause is present (in the case
@@ -41,40 +80,6 @@ SQLQ(X,frm,whr,rng,mode,tok,fsn,vdd,out)	;PUBLIC;SQL where clause Parser
 	;	     on type checking for sub-queries that were leading to
 	;	     query type errors where they are unnecessary.  Expanded
 	;	     error message.
-	;
-	; 12/04/05 - Pete Chenrd - CD 18258
-	;	     Eliminated the call to TYPERR^DBSVER.  Moved the logic into
-	;	     this routine.
-	;
-	; 10/12/05 - Pete Chenard - CR 17041
-	;	     Modified SRLWHR section to adjust the rng array to 
-	;	     reflect changes to the whr array when resequencing 
-	;	     for serial columns.
-	;
-	; 01/06/05 - Pete Chenard - CR13875
-	;	     Added code in SERIAL section (SRLEQOPT and SRLORD section)
-	;	     to optimize condition where a serial column is involved in
-	;	     an equals operation.
-	;
-	;	     Modified BETWEEN section to save serial flag to ensure that
-	;	     if it is set it will be added to both queries associated
-	;	     with between in order to allow optimization. 
-	;
-	;	     Modified HOSTVAR section to not return an error if
-	;	     a host variable for a key column is null.  It shouldn't
-	;	     return an error, but it should return an empty result set.
-	;
-	;	     Removed old revision history.
-	;
-	; 07/19/04 - GHODKEY - 11049
-	;	     Added SERIAL section to attempt to optimize queries that
-	;	     contain a serial (DBTBL1D.SRL = 1) column.
-	;
-	; 01/26/04 - CHENARDP - 8009
-	;	     Modified section LIKE to support host varaibles in conjunction
-	;	     with the LIKE clause.Also retrofitted changes from profile 01
-	;
-	;
 	;----------------------------------------------------------------------
 	;
 	; I18N=QUIT: Exculded from I18N standards.
@@ -136,7 +141,7 @@ INTERP(WRD)	; Interpret expression atom
 	.	D NEST(WRD,span)
 	;
 	I $E(WRD)="'" D LITSTR Q				; Strlit
-	I $E(WRD)="""" D DINAM Q				; Data Item
+	I $E(WRD)="""" D DINAM(WRD) Q				; Data Item
 	I WRD!($E(WRD)=0) D LITSTR Q				; Numlit
 	;
 	I "><="[WRD D OPRELAT(WRD) Q				; Logical OP
@@ -158,7 +163,7 @@ INTERP(WRD)	; Interpret expression atom
 	I WRD="USERID" S WRD=":%UID" D VAR Q
 	;
 	I WRD[$C(0) S WRD=$$UNTOK^%ZS(WRD,.tok)			; DBTBL1."%LIBS"
-	D DINAM Q
+	D DINAM(WRD) Q
 	;
 	;-----------------------------------------------------------------------
 NEST(X,span)	; Process paranthesis nest
@@ -239,7 +244,7 @@ LITSTR	; Object is a string or numeric literal
 	I oprelat="=",$E(WRD)="""",datatyp="N"!(datatyp="$") S WRD=+$E(WRD,2,9999)	; *** 09/11/96
 	I WRD?.N!(WRD?1N.N1".".N)!(WRD?1".".N) D		; *** 06/20/96
 	.	;
-	.	S WRD=+WRD
+	.	S WRD=+WRD	
 	.	I datatyp="" S datatyp="N"
 	.	I oprelat="=","$"[datatyp,$E(exprlft)'="+" S exprlft="+"_exprlft
 	;
@@ -247,9 +252,10 @@ LITSTR	; Object is a string or numeric literal
 	.	;
 	.	S WRD=$$QSUB^%ZS(WRD,"""")		; *** 06/19/96
 	.	S WRD=$$INT^%ZM(WRD,datatyp,"",.dec)
-	.	I ER D ERROR($$TYPERR(datatyp))
+	.	I ER D ERROR($$TYPERR(datatyp)) Q
+	.	I WRD="" S WRD=$$QADD^%ZS(WRD,"""")	;allow for ='' format 
 	;
-	E  I datatyp="U" S WRD=$$UPPER^%ZFUNC(WRD)
+	E  I datatyp="U" S WRD=$$UPPER^UCGMR(WRD)
 	E  I datatyp="" S datatyp="T"
 	;
 	I lstypobj=4,WRD'=+WRD D ERROR("Invalid Value for arithmetic operation") Q
@@ -357,7 +363,7 @@ LIKE	; WHERE ddref LIKE [NOT] LIKE
 	;-----------------------------------------------------------------------
 	;
 	D CHKEXPR Q:ER
-	;
+	S par("CACHE")=0,CACHE=0
 	I "DCL"[datatyp S exprlft="$$"_$S(datatyp="D":"DAT",datatyp="C":"TIM",1:"LOG")_"^%ZM("_exprlft_")"
 	;
 	S oprelat="L",object=5,lstypobj=0,datatyp="T"
@@ -449,35 +455,53 @@ RETLIST(exprght)	; Return a list expression
 	Q
 	;
 	;-----------------------------------------------------------------------
-DINAM	; Data item syntax
+DINAM(WRD)	; Data item syntax
 	;-----------------------------------------------------------------------
-	;
+	;02/03/2009 Pete Chenard.  Modifed to allow for multiple columns to be passed
+	; into the WRD parameter.
+	; Multiple columns will be delimited by a comma (,).  When rebuilding WRD,
+	; separate columns with $C(0).  Also the corresponding data type, decimal 
+	; precision, and serial flag will be delimited by $C(0) when multiple columns
+	; are passed in.
+	N i,TMPWRD
 	I $$GETEXPR(object)'="",4'[lstypobj D ERROR() Q
 	;
-	S z=$$DI^SQLDD(.WRD,frm,.vdd,.fsn) 
-	;
-	I ER,$D(vsql("R")) D 			; Correlated
+	F i=1:1:$L(WRD,",") D  Q:ER
+	.	S TMPWRD=$P(WRD,",",i)
+	.	S z(i)=$$DI^SQLDD(.TMPWRD,frm,.vdd,.fsn) 
 	.	;
-	.	I '$$CONTAIN(vsql("R"),$P(WRD,".",1)) Q
-	.	S v0="vsql("_$$NXTSYM^SQLM_")"
-	.	S vsql("R",v0)=WRD,WRD=v0
-	.	S ER=0
-	;
-	E  S WRD=$C(1)_WRD_$C(1)
+	.	I ER,$D(vsql("R")) D 			; Correlated
+	..		;
+	..		I '$$CONTAIN(vsql("R"),$P(TMPWRD,".",1)) Q
+	..		S v0="vsql("_$$NXTSYM^SQLM_")"
+	..		S vsql("R",v0)=TMPWRD,TMPWRD=v0
+	..		S $P(WRD,",",i)=TMPWRD
+	..		S ER=0
+	.	Q:ER
+	.	E  S TMPWRD=$C(1)_TMPWRD_$C(1)
+	.	S $P(WRD,",",i)=TMPWRD_$C(0)
 	;
 	I ER Q
 	;
+	; Multiple columns in WRD will be stored like this:
+	; $C(1)_TBL.COL1_$C(1)_$C(0)_$C(1)_TBL.COL2_$C(1)
+	I $E(WRD,$L(WRD))=$C(0) S WRD=$E(WRD,1,$L(WRD)-1)
+	S WRD=$TR(WRD,",")
+	;
 	D SET(object,WRD)
-	;
-	I object=3 S dec=$P(z,"|",14),datatyp=$P(z,"|",9),serial=$P(z,"|",23)	; 02/21/2000 FRS
-	;
-	E  I lstypobj=4 D				; Type conversions
+	F i=1:1 Q:'$D(z(i))  D
+	.	I object=3 D
+	..		S dec=$G(dec)_$S(i>1:$C(0),1:"")_$P(z(i),"|",14)
+	..		S datatyp=$G(datatyp)_$S(i>1:$C(0),1:"")_$P(z(i),"|",9)
+	..		S serial=$G(serial)_$S(i>1:$C(0),1:"")_$P(z(i),"|",23)	; 02/21/2000 FRS
 	.	;
-	.	S z=$P(z,"|",9)
-	.	I "N$"[datatyp,"DCLN$"[z S datatyp=z Q
-	.	I datatyp="D",z="D" S datatyp="N" Q
-	.	I datatyp="C",z="C" S datatyp="N" Q
-	.	D ERROR("Invalid type conversion") Q
+	.	E  I lstypobj=4 D				; Type conversions
+	..		;
+	..		S z=$P(z(i),"|",9)
+	..		I "N$"[$G(datatyp),"DCLN$"[z S datatyp=z Q
+	..		I $G(datatyp)="D",z="D" S datatyp="N" Q
+	..		I $G(datatyp)="C",z="C" S datatyp="N" Q
+	..		D ERROR("Invalid type conversion") Q
 	;
 	S typobj=object
 	S lstypobj=typobj
@@ -610,7 +634,7 @@ CONTAIN(X,Y)	Q ","_X_","[(","_Y_",")
 	;----------------------------------------------------------------------
 SUBQUERY(expr)	; Subquery
 	;----------------------------------------------------------------------
-	;
+	N isAgg,I
 	I oprelat="" D ERROR("Invalid subquery, missing operator") Q
 	N PREVFROM 
 	S PREVFROM=$G(FROM)
@@ -629,28 +653,24 @@ SUBQUERY(expr)	; Subquery
 	E  I $E(SELECT,1,8)="DISTINCT " S SELECT=$e(SELECT,9,$L(SELECT))
 	;
 	N exprsel,function
+	S isAgg=0
+	S exprsel=""
+	I oprelat="E" S ORDER="",SELECT=""
 	;
-	I oprelat="E" S ORDER="",SELECT="",exprsel=""
-	;
-	E  D  I ER Q
-	.	;
-	.	N typ,agtest
-	.	S agtest=","_$P(SELECT,"(",1)_","
-	.	I SELECT["(",",MIN,MAX,AVG,COUNT,SUM,"[agtest D
-	..		N X
+	E  F I=1:1:$L(SELECT,",") D  I ER Q	; Allow for multiple SELECT list columns
+	.	N col,typ,agtest
+	.	S col=$P(SELECT,",",I)
+	.	S agtest=","_$P(col,"(",1)_","
+	.	I col["(",",MIN,MAX,AVG,COUNT,SUM,"[agtest D
+	..		S isAgg=1
 	..		S par("SAVSYM")="rng,whr,vsub"
-	..		S X=$$OPEN^SQLM(.exe,FROM,SELECT,,,,.par,tok,-1,.vdd,,1)
-	..		S function=1
-	..		I "<>="[$E(oprelat) S oprelat=$E(oprelat)
-	..		S exprght=exprsel
-	..		I PREVFROM=FROM S vsql("GB")=1
+	..		I "<>="[$E(oprelat),(oprelat'="=ANY") S oprelat=$E(oprelat)
 	.	E  D
-	..		S exprsel=$$MCOL^SQLCOL(SELECT,FROM,,.typ,,.fsn,,,.tok,.vdd,1) Q:ER
-	..		I datatyp="" S datatyp=typ
-	..		E  I '$$VALSQTYP(datatyp,typ) S ER=1,RM="Query type error - sub-query datatype mismatch" Q
+	..		S exprsel=exprsel_","_$$MCOL^SQLCOL(col,FROM,,.typ,,.fsn,,,.tok,.vdd,1) Q:ER
+	..		I $P(datatyp,$C(0),I)="" S datatyp=typ
+	..		E  I '$$VALSQTYP($P(datatyp,$C(0),I),typ) S ER=1,RM="Query type error - sub-query datatype mismatch" Q
 	.	I "<>"[$E(oprelat),$E(exprsel)'="(" S ORDER=SELECT I $$CONTAIN("<ANY,>ALL",oprelat) S ORDER=ORDER_" DESC"
-	;
-	I $G(function) Q
+	Q:ER
 	;
 	N expr,fkey,key,lvn,newtmp,par,pf,ptr,sav0,savexe,savone,v,z,zrng,zvsub,zwhr
 	;
@@ -660,14 +680,16 @@ SUBQUERY(expr)	; Subquery
 	;	- The inner SELECT column is a single primary key
 	; Then:
 	;	The inner WHERE can be transferred up and the subquery eliminated!!!!!!
+	N zFROM
+	S zFROM=$$^SQLJ(FROM,.whr,.fsn,.tok)
+	I $L(zFROM,",")>1 S ER=1,RM="Table join in subquery not supported" Q
+	I $D(vAlias(zFROM)) S zFROM=vAlias(zFROM)
+	I '$D(fsn(zFROM)) D fsn^SQLDD(.fsn,zFROM)
+	S key=$P(fsn(zFROM),"|",3)
 	;
-	I '$D(fsn(FROM)) D fsn^SQLDD(.fsn,FROM) Q:ER
-	;
-	S key=$P(fsn(FROM),"|",3)
-	;
-	I "I="[oprelat,'notoper,$L(key,",")=1,$C(1)_FROM_"."_key_$C(1)=exprsel D  Q
+	I "I="[oprelat,'notoper,$L(key,",")=1,$C(1)_zFROM_"."_key_$C(1)=exprsel D  Q
 	.	;
-	.	I '$$CONTAIN(frm,FROM) S frm=frm_","_FROM
+	.	I '$$CONTAIN(frm,zFROM) S frm=frm_","_zFROM
 	.	;
 	.	S WHERE=$G(WHERE)
 	. 	I exprlft'=exprsel D		; Add Join expression
@@ -679,7 +701,7 @@ SUBQUERY(expr)	; Subquery
 	.	I WHERE'="" D NEST("("_WHERE_")",1)
 	;
 	I SELECT="" S expr="FROM "_FROM
-	E  S expr="DISTINCT "_SELECT_" FROM "_FROM
+	E  S expr=$S('isAgg:"DISTINCT ",1:"")_SELECT_" FROM "_FROM
 	;
 	I $G(WHERE)'="" S expr=expr_" WHERE "_WHERE
 	I $G(ORDER)'="" S expr=expr_" ORDER BY "_ORDER
@@ -735,10 +757,11 @@ SUBQUERY(expr)	; Subquery
 	;
 	S lvn=$S(key="":"",1:$G(zvsub(key)))
 	;
-	I '(oprelat="I")!(savone=1) D SUBQONE Q
+	; 01/20/09 Pete Chenard - include ANY operator in this check - it behaves similar to IN
+	I '((oprelat="I")!(oprelat["ANY"))!(savone=1) D SUBQONE Q
 	;
 	S fkey=(exe(exe)=("S vd="_lvn))			; Select is bottom key
-	I fkey,exe(exe-1)[" S vsql=-1" D SUBACC Q
+	I fkey,exe(exe-1)[" S vsql=-1" D SUBACC Q	; bottom key of a single key table 
 	;
 	S tmptbl=$$TMPTBL^SQLM
 	I 'fkey D
@@ -748,7 +771,7 @@ SUBQUERY(expr)	; Subquery
 	;
 	S exe(exe)=$S(lvn="vd":"I vd'="""" ",1:"")_"S "_tmptbl_","_lvn_")="""""
 	;
-	S exe=exe+1,exe(exe)="S vsql="_(sav0)
+	I 'isAgg S exe=exe+1,exe(exe)="S vsql="_(sav0)
 	S exprght=tmptbl_",#)"
 	S vxp=-1
 	;
@@ -978,7 +1001,9 @@ ADDVAL(str,val)	; Add Value to String
 RANGE(nbrexpr,whr,rng)	; Conditionally Build the range array
 	;----------------------------------------------------------------------
 	;
-	N datatyp,dinam,exprlft,exprght,outjoin,oprelat,X
+	N datatyp,dinam,exprlft,exprght,i,maxCharV,outjoin,oprelat,tmpexprlft,X
+	;
+	S maxCharV=$$getPslValue^UCOPTS("maxCharValue")
 	;
 	S X=whr(nbrexpr)
 	;
@@ -986,53 +1011,56 @@ RANGE(nbrexpr,whr,rng)	; Conditionally Build the range array
 	S oprelat=$P(X,$C(9),3),datatyp=$P(X,$C(9),4)
 	S outjoin=$P(X,$C(9),5)
 	;
-	S dinam=$P(exprlft,$C(1),2) I dinam="" Q
-	;
-	; Patch input for (table.column) syntax *** 08/25/00
-	I $E(exprlft)="(" S exprlft=$$POP^%ZS(exprlft)
-	I $E(exprght)="(" S exprght=$$POP^%ZS(exprght)
-	;
-	I $P(exprlft,$C(1),1)'="",$E(exprght)="""",$E(oprelat)'="'" D  Q
-	.       ;
-	.       S z=$P(exprlft,$C(1),1)
-	.       I z'="$E(",z'="$P(" Q
-	.       I $TR($P($P(exprlft,$C(1),3),",",$S(z="$E(":2,1:3)),"""","")>1 Q
-	.       ;
-	.	; 'Hide' whr() with pointer values <0 - May be used to optimize
+	; Modified to allow for multiple expressions delimited by $C(0)
+	S tmpexprlft=exprlft
+	F i=1:1:$L(tmpexprlft,$C(0)) d
+	.	S exprlft=$P(tmpexprlft,$C(0),i)
+	.	S dinam=$P(exprlft,$C(1),2) I dinam="" Q
 	.	;
-	.	N nbrexpr,oprelat
+	.	; Patch input for (table.column) syntax *** 08/25/00
+	.	I $E(exprlft)="(" S exprlft=$$POP^%ZS(exprlft)
+	.	I $E(exprght)="(" S exprght=$$POP^%ZS(exprght)
 	.	;
-	.	F nbrexpr=-1:-1 Q:'$D(whr(nbrexpr))
-	.	S oprelat="'<"
-	.	D SETWHR(nbrexpr,exprlft,exprght,oprelat,datatyp,outjoin)
-	.	D SETRNG(dinam,exprght,oprelat,datatyp)	; low range
+	.	I $P(exprlft,$C(1),1)'="",$E(exprght)="""",$E(oprelat)'="'" D  Q
+	..	       ;
+	..	       S z=$P(exprlft,$C(1),1)
+	..	       I z'="$E(",z'="$P(" Q
+	..	       I $TR($P($P(exprlft,$C(1),3),",",$S(z="$E(":2,1:3)),"""","")>1 Q
+	..	       ;
+	..		; 'Hide' whr() with pointer values <0 - May be used to optimize
+	..		;
+	..		N nbrexpr,oprelat
+	..		;
+	..		F nbrexpr=-1:-1 Q:'$D(whr(nbrexpr))
+	..		S oprelat="'<"
+	..		D SETWHR(nbrexpr,exprlft,exprght,oprelat,datatyp,outjoin)
+	..		D SETRNG(dinam,exprght,oprelat,datatyp)	; low range
+	..		;
+	..		S nbrexpr=nbrexpr-1,oprelat="'>"
+	..		S exprght=$E(exprght,1,$L(exprght)-1)_maxCharV_""""
+	..		D SETWHR(nbrexpr,exprlft,exprght,oprelat,datatyp,outjoin)
+	..		D SETRNG(dinam,exprght,oprelat,datatyp)	; high range
+	.
+	.	I $P(exprlft,$C(1),3)'="" Q			; Figure out later
 	.	;
-	.	S nbrexpr=nbrexpr-1,oprelat="'>"
-	.	S exprght=$E(exprght,1,$L(exprght)-1)_$C(255)_""""
-	.	D SETWHR(nbrexpr,exprlft,exprght,oprelat,datatyp,outjoin)
-	.	D SETRNG(dinam,exprght,oprelat,datatyp)	; high range
-	;
-	I $P(exprlft,$C(1),3)'="" Q			; Figure out later
-	;
-	I oprelat="=",$A(exprght)=1 D  Q
+	.	I oprelat="=",$A(exprght)=1 D  Q
+	..		;
+	..		D SETRNG(dinam,exprght,"J",datatyp)
+	..		D POINTER(dinam,$P(exprght,$C(1),2)) Q
 	.	;
-	.	D SETRNG(dinam,exprght,"J",datatyp)
-	.	D POINTER(dinam,$P(exprght,$C(1),2)) Q
-	;
-	D SETRNG(dinam,exprght,oprelat,datatyp)		; Set rng array
-	;
-	I outjoin Q
-	;
-	; Remove outer join because there's a query!
-	;
-	I $D(join($P(dinam,".",1)))#2,exprght'="""""" D
+	.	D SETRNG(dinam,exprght,oprelat,datatyp)		; Set rng array
 	.	;
-	.	K join($P(dinam,".",1))
-	.	S $P(whr(nbrexpr),$C(9),5)=0
-	;
-	N I,jlist
-	S jlist=$G(join(dinam))
-	I jlist'="" F I=1:1:$L(jlist,",") D SETRNG($P(jlist,",",I),exprght,oprelat,datatyp)	; Set Range variables
+	.	I outjoin Q
+	.	;
+	.	; Remove outer join because there's a query!
+	.	;
+	.	I $D(join($P(dinam,".",1)))#2,exprght'="""""" D
+	..		K join($P(dinam,".",1))
+	..		S $P(whr(nbrexpr),$C(9),5)=0
+	.	;
+	.	N I,jlist
+	.	S jlist=$G(join(dinam))
+	.	I jlist'="" F I=1:1:$L(jlist,",") D SETRNG($P(jlist,",",I),exprght,oprelat,datatyp)	; Set Range variables
 	Q
 	;
 	;----------------------------------------------------------------------
@@ -1124,6 +1152,8 @@ SWAP(exprlft,exprght,oprelat)	; Swap Left and right expressions to optimize
 HOSTVAR(expr,typ,vsub,exe)	; Host variable Processing 
 	;----------------------------------------------------------------------- 
 	;
+	N hvexpr
+	;
 	S typ=$G(typ)
 	I typ="",$$CONTAIN(":+$H,:TJD",expr) S typ="D"
 	;
@@ -1151,11 +1181,25 @@ HOSTVAR(expr,typ,vsub,exe)	; Host variable Processing
 	..		S z=exe(i)
 	..		I z[g,$P(z,g,2)'<exe S z=$P(z,g,1)_g_($P(z,g,2)+1)
 	..		S exe(i+1)=z
+	.	;
+	.	; Also need to adjust the mcode array to set vsql appropriately. pc 2/21/05
+	.	F i=1:1 Q:'$D(mcode(i))  do 
+	..		S z=mcode(i)
+	..		I z[g,$P(z,g,2)'<exe S z=$P(z,g,1)_g_($P(z,g,2)+1)
+	..		S mcode(i)=z
 	;
 	S exe=$O(exe(""),-1)+1				; next sequence
 	S vexpr=$E(expr,2,$L(expr))
 	I vexpr'["$" S z=vexpr,vexpr="$G("_vexpr_")"	; Null value
 	S exe(exe)="S "_v_"="_vexpr			; vsql(n)=host_variable		; 04/23/99
+	;
+	; Build "hostVars" so that by Xecuting "S using="_vsql(""hostVars"")" we
+	; get a string of variables and values, e.g, V1='ABC',etc.
+	I $D(vsql("hostVars")) S vsql("hostVars")=vsql("hostVars")_"_"","
+	E  S vsql("hostVars")=""""
+	I "TUF"[typ S hvexpr="$$QADD^%ZS("_vexpr_",""'"")"
+	E  S hvexpr=vexpr
+	S vsql("hostVars")=vsql("hostVars")_$E(expr,2,$L(expr))_"=""_"_hvexpr
 	;
 	I  D						; *** 08/14/98
 	.	S exe(exe)=exe(exe)_" I "_v_"="""""
@@ -1169,13 +1213,13 @@ HOSTVAR(expr,typ,vsub,exe)	; Host variable Processing
 	;						; Date conversion 10/27/99
 	I typ="" Q v					; System variable
 	I "DCL$N"'[typ Q v				; Conversion not required
-	I typ="N",'$G(dec) Q v                          ; whole number 
+        I typ="N",'$G(dec) Q v                          ; whole number
 	;						; Convert it to internal format
 	S exe=exe+1,vsql("V")=exe                       ;43218 mas
 	I typ="D" S exe(exe)="I "_v_"'?.N S "_v_"=$$FDAT^%ZM("_v_")"	; date conversion
 	I typ="C" S exe(exe)="I "_v_"'?.N S "_v_"=$$FTIM^%ZM("_v_")"	; time conversion
 	I typ="L" S exe(exe)="I "_v_"'?.N S "_v_"=$$FLOG^%ZM("_v_")"	; logical conversion
-	I typ="$"!(typ="N") S exe(exe)="S "_v_"=+"_v 		; Numeric with decimal 01/20/2000
+        I typ="$"!(typ="N") S exe(exe)="S "_v_"=+"_v			; Numeric with decimal 01/20/2000
 	Q v
 	;
 	;----------------------------------------------------------------------

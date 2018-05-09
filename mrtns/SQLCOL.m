@@ -35,6 +35,17 @@ SQLCOL(exe,parms,frm,sel,lvn,fmt,tok,fsn,fma,cmp,vsub,vdd,nlv,subqry)	;public; B
 	; EXAMPLE:
 	;
 	;---------- Revision History ------------------------------------------
+	; 07/24/2008 - RussellDS - CR30801
+	;	     Modified FUNCTION section to add support for LOWER and to
+	;	     change both LOWER and UPPER to call ^UCGMR
+	;
+	; 09/24/07 - GiridharanB - CR28353
+	;	     Replaced call to LIST^SQLDD to call COLLIST^DBSDD instead.
+	;
+	; 07/10/07 - Pete Chenard - CR28171
+	;	     Replaced occurrance of $C(255) with call to 
+	;	     $$BYTECHAR^SQLUTL(255) for unicode compliance.
+	;
 	; 01/31/05 - Pete Chenard - CR19161
 	;	     Backed out last change.  Instead, that fix will be handled 
 	;	     in SQLM.m
@@ -60,41 +71,6 @@ SQLCOL(exe,parms,frm,sel,lvn,fmt,tok,fsn,fma,cmp,vsub,vdd,nlv,subqry)	;public; B
 	;	     null indicator flag is turned on, + the result.  This
 	;	     will result in the value being treated like a 0 if it is
 	;	     null.
-	;
-	; 02/21/01 - Pete Chenard - 43811
-	;	     Modified to add functionality for aggregate functions,
-	;	     including GROUP by and HAVING clauses.
-	;
-	; 09/29/00 - SPIER - 41792
-	;            Modified COLLEXPR section, when fields are being
-	;	     concatenated together, they can not be formatted
-	;	     so they must be treated as text.
-	;
-	; 08/09/00 - SPIER - 41455
-	;            Modified COLEXPR section (change sqlfrm to frm) to
-	;	     correct error on natural join return of headings
-	;	     for ODBC.
-	;
-	; 06/28/00 - SPIER - 40788
-	;            Modified FUNCTION section to make all parameters 
-	;	     formatted. The basic standard is that functions
-	;	     must format data since client programs can not
-	;	     be expected to parse data to formats parts of it.
-	;
-	; 02/09/00  Chiang - 32557
-	;           Modified to return column attribute information for
-	;           /PREPARE=1 only.
-	;
-	; 11/10/99  Chiang - 35688
-	;           Modified COLEXPR section to support alias in the column
-	;           attributes.
-	;
-	; 05/03/99  Chiang - 32656
-	;           Modified COLEXPR section to return error message if total
-	;           column attributes exceeds 30K buffer.
-	;
-	;           Removed old revision history.
-	;
 	;----------------------------------------------------------------------
 	;
 	S ER=0
@@ -103,7 +79,7 @@ SQLCOL(exe,parms,frm,sel,lvn,fmt,tok,fsn,fma,cmp,vsub,vdd,nlv,subqry)	;public; B
 	;
 	I $E(sel)="*" S sel="" D  Q:ER
 	.	N i
-	.	F i=1:1:$L(frm,",") S sel=sel_","_$$LIST^SQLDD($P(frm,",",i))
+	.	F i=1:1:$L(frm,",") S sel=sel_","_$$COLLIST^DBSDD($P(frm,",",i),0,1,0)
 	.	S sel=$E(sel,2,99999)
 	;
 	I $G(tok)="" S sel=$$SQL^%ZS(sel,.tok) Q:ER
@@ -131,6 +107,7 @@ SQLCOL(exe,parms,frm,sel,lvn,fmt,tok,fsn,fma,cmp,vsub,vdd,nlv,subqry)	;public; B
 	; 
 	I '$D(vsql("AG")) DO  Q
 	.	F I=1:1:expr S exe=exe+1,exe(exe)=expr(I)
+
 	; Save the code generated above into vsql("AG" array for later placement into exe array
 	;
 	F I=1:1:expr  S vsql("AG","expr",I)=expr(I)
@@ -174,7 +151,7 @@ COLEXPR	;Private; Build Column Expression
 	;
 	I prepare=1 D  I ER Q
 	.    S z1=$$PREPARE^SQLODBC(str,frm,.vpack)          ; Attributes 11/10/99
-	.    I $L(z1)+$L(vsql("A"))<1022000 S vsql("A")=vsql("A")_z1_$C(255) Q 
+	.    I $$BSL^SQLUTL(z1)+$$BSL^SQLUTL(vsql("A"))<1022000 S vsql("A")=vsql("A")_z1_$$BYTECHAR^SQLUTL(255) Q 
 	.    S ER=1,RM=$$^MSG(2079)				; Buffer overflow
 	;
 	I col=1 S expr(1)="S "_lvn_"="_z Q
@@ -236,7 +213,7 @@ ATOM(str,ptr,len,typ,dec,frm,fsn,cmp,vsub,vdd,nop)	; Next Column Atom
 DDREF	;
 	I """"[z S ER=1,RM="Invalid Data Item Syntax" Q
 	;
-	I '$G(nop) S X="",z=$$PARSE^SQLDD(z,.X,.cmp,.fsn,.frm,.vdd,,.vsub,.v255)
+ 	I '$G(nop) S X="",z=$$PARSE^SQLDD(z,.X,.cmp,.fsn,.frm,.vdd,,.vsub,.v255)
 	E  I nop=1 S X=$$DI^SQLDD(.z,frm,.vdd,.fsn),z=$C(1)_z_$C(1)
 	E  S X="",z=$$PARSE^SQLDD(z,.X,.cmp,.fsn,.frm,.vdd,,.vsub,.v255),ER=0 Q
 	;
@@ -290,7 +267,8 @@ FUNCTION(expr,nop,funtyp,len,dec,tok)	; Build Scaler function expression
 	.	I fnam="$E" S func="$E(VALUE,FROM/REQ/TYP=N,TO/TYP=N)|T" Q
 	.	I fnam="$L" S func="$L(VALUE,LENGTH)|N" Q
 	.	I fnam="$P" S func="$P(VALUE,DELIMITER/REQ,FROM/REQ/TYP=N,TO/TYP=N)|T" Q
-	.	I fnam="UPPER" S func="$$UPPER^%ZFUNC(VALUE)|T" Q
+	.	I fnam="LOWER" S func="$$LOWER^UCGMR(VALUE)|T" Q
+	.	I fnam="UPPER" S func="$$UPPER^UCGMR(VALUE)|T" Q
 	.	I fnam="SUBSTR" S func="$E(VALUE,FROM/REQ/TYP=N,TO/TYP=N)|T" Q
 	;
 	S funtyp=$P(func,"|",2) I funtyp="" S funtyp="T"

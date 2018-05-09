@@ -1,0 +1,778 @@
+ZUCBOOTT // PSL Bootstrap Utilities - Target site
+	/*
+	ORIG: Frans S.C. Witte; 2005-10-18
+	DESC: PSL Bootstrap utilities - Target Site
+
+	---- Comments ----------------------------------------------------------
+	This routine can be called from a shell script to prepare a taget
+	environment for an initial environment creation. Invoke as:
+	 mumps -run ^ZUCBOOTT -options
+
+	This routine is supposed to reside in one of the directories that is
+	contained in $gtm_routines of the target environment. It is complemented
+	by ZUCBOOTS, that contains the utilities for the source environment.
+	However, the target environment does not need a copy of ZUCBOOTS,
+	becuase all common code resides in ZUCBOOTT.
+
+	-------- Revision History ----------------------------------------------
+	2005-10-18 Frans S.C. Witte
+		Original procedure.
+	*/
+	write !!,$T(+1),!!
+
+	write "The public subroutines of this routine will help prepare the",!
+	write "current GT.M and the possibly associated RDB environment for",!
+	write "initial environment creation. This will destroy all data and",!
+	write "most of the routines !!",!!
+
+	write "Do not call these entry points unless you are sure they do",!
+	write "what you intended.",!!
+
+	write "run^ZUCBOOTT() can be called from GT.M, including the GT.M",!
+	write "direct mode shell, as:",!
+	write "  do run^ZUCBOOTT(options)",!!
+
+	write "SHELL^ZUCBOOTT can be called from a unix command shell as:",!
+	write "  mumps -run SHELL^ZUCBOOTT options",!!
+
+	type Number lnr
+	type String lnc
+	type String run = ""	// trick compiler (it thinks run is a variable)
+	for lnr=1:1 set lnc=$T(run+lnr).translate(9.char()," ").trim() quit:lnc.extract()'=";"  do {
+		if lnc.beginsWith("; -") write ?2,lnc.extract(2,lnc.length()),! quit
+		write ?4,lnc.extract(2,lnc.length()),!
+	}
+	quit
+
+	// ---------------------------------------------------------------------
+private addKeep( List keep,	// Initial list
+		 String sDir, 	// directory of .csv file, shall not be empty
+		 String sFile)	// name of file
+	/* ---------------------------------------------------------------------
+	Add the names of routines from the .CSV file in the specified directory
+	to the List of routines that shall not be deleted.
+
+	NOTES:
+	. If called in the target environment, it is absolutely essential that
+		sDir is not empty. An empty value of this parameter will result
+		in a call to $$^UCXCUVAR() to get the default spool directory.
+		Depending on the initial state of the target environment, that
+		routine may not be present.
+	*/
+	type IO rIo = Class.new("IO")
+	set rIo.directory  = sDir
+	set rIo.fileName   = sFile
+	set rIo.openParams = "READ"
+	set rIo.recordSize = 32767
+
+	do rIo.open()
+
+	do {
+		catch ioErr {
+			do rIo.close()
+		}
+
+		type String line
+		type List   pslSupplied = $$getPslList()
+		type String rtn
+
+		// Record.bypassSave() does not provide TP for dynamic instances
+		for  do {
+			set line = rIo.read()	// will throw eof exception
+			set rtn  = line.piece(",")
+			if rtn.extract() = """" set rtn = rtn.stripQuotes()
+
+			if rtn.extract() = "%" quit
+			if rtn[" " quit
+			//if pslSupplied.contains( rtn) quit
+
+			set keep = keep.add( rtn, , 0)
+		}
+	}
+	quit keep.add( "UCGMCU", , 0)
+
+	// ---------------------------------------------------------------------
+public bootFrom( String bootdir)	// bootstrap directory
+	/* ---------------------------------------------------------------------
+	Bootstrap the compiler from the specified directory.
+
+	This subroutine expects a that the .pslx, .psl, and .m files for all
+	"phase 1" elements are present in the specified environment. It performs
+	the following steps:
+	1) Verify that the specified bootdir is the first in $ZROUTINES, if not,
+		it is added.
+	2) Copy all .m files to $SCAU_MRTNS
+	3) Copy the .pslx files of all pslx-only Classes to their target
+		directory. The list of these classes is obtained by calling
+		$$getCls^UCGMCU("pslx"), and storePslx^PSLC() is called to store
+		the file in the correct location.
+	4) Copy all .psl files into DBTBL25 using loadSrc^UCGMCU(,bootdir) and
+		copy the .psl and .pslx files to the target directories.
+	5) Restore $ZROUTINES
+	6) Call boot^UCGMCU()
+
+	NOTES:
+	. This subroutine mimics part of the TBX software, including the load
+		order (routines, pslx, procs).
+	*/
+	// Step 1 ==============================================================
+	type Number elm
+	type String mod, savZROU, txt
+	type List   psl
+
+	#ACCEPT DATE=2007-07-10;CR=27800;PGM=FSCW;GROUP=BYPASS;REASON=$ZROUTINES
+	#BYPASS
+	SET savZROU=$ZROUTINES
+	IF $PIECE($ZROUTINES," ")'=bootdir SET $ZROUTINES=bootdir_" "_$ZROUTINES
+	#ENDBYPASS
+
+	// Step 2 ==============================================================
+	type String ign = $$COPYFIL^%OSSCRPT(bootdir_"/*.m", $$SCAU^%TRNLNM( "MRTNS"))
+
+	// step 3 ==============================================================
+	set psl = $$getCls^UCGMCU("pslx")
+	for elm = 1:1:psl.count() {
+		set mod = psl.elementAt(elm)
+		catch vEx {
+			write mod, ".pslx NOT copied (", vEx.type, ": ",vEx.description, ")",!
+		}
+		set txt = mod_ ".pslx copied to "_ $$storePslx^PSLC(bootdir_"/"_mod_".pslx")
+		write txt,!
+	}
+
+	// Step 4 ==============================================================
+	set psl = $$getList^UCGMCU("Compiler")
+
+	for elm = 1:1:psl.count() {
+		set mod = psl.elementAt(elm)
+		catch vEx {
+			write mod, " NOT loaded (", vEx.type, ": ",vEx.description, ")",!
+		}
+		write $$bootLoad( mod, bootdir), " loaded into DBTBL25*", !
+
+		/* If load successfull, copy .psl file to its package directory
+		   */
+		set txt = mod_ ".psl copied to "_ $$storePsl^PSLC(bootdir_"/"_mod_".psl", mod)
+		write txt,!
+	}
+
+	// Step 5 ==============================================================
+	#ACCEPT DATE=2007-07-10;CR=27800;PGM=FSCW;GROUP=BYPASS;REASON=$ZROUTINES
+	#BYPASS
+	IF $ZROUTINES'=savZROU SET $ZROUTINES=savZROU
+	ZLINK "UCGMCU"
+	#ENDBYPASS
+
+	// Step 6 ==============================================================
+	do linkAll^UCGMCU(), boot^UCGMCU()
+	quit
+
+	// =====================================================================
+	/* *********************************************************************
+	Support procedure that performs a complete phase1 and phase2 bootstrap.
+	Calls boot^UCGMCU() for phase 1, and bootPhs2() for phase 2.
+
+	NOTES:
+	. This procedure assumes that all phase 0 elements and a consistent
+		version of the compiler/engine are present in the current
+		environment. If this is might not the case, consider using
+		bootFrom().
+	*/
+public bootAll( String sDataDir)	// .DAT file directory
+
+	do boot^UCGMCU( sDataDir.get())
+	do bootPhs2()
+	quit
+
+	// =====================================================================
+	/* *********************************************************************
+	Support procedure that performs the phase2 bootstrap.
+	This procudure requires an up-to-date version of TBXDQINT.
+	*/
+bootPhs2() // Perform a Phase2 bootstrap
+	#ACCEPT CR=none;Date=2006-10-17;PGM=Frans S.C. Witte;Group=GLOBAL
+	kill ^TMPDQS( %ProcessID)
+
+	do ^TBXDQINT
+
+	type String elm = ""
+
+	#ACCEPT CR=none;Date=2006-10-17;PGM=Frans S.C. Witte;Group=GLOBAL
+	for  set elm = ^TMPDQS( %ProcessID,"phase2","procedure",elm).order() quit:elm.isNull()  do bootProc^UCGMCU( elm.piece("."))
+
+	#ACCEPT CR=none;Date=2006-10-17;PGM=Frans S.C. Witte;Group=GLOBAL
+	for  set elm = ^TMPDQS( %ProcessID,"phase2","filer",elm).order() quit:elm.isNull()  do COMPILE^DBSFILB( elm.piece("."))
+	
+	#ACCEPT CR=none;Date=2006-10-17;PGM=Frans S.C. Witte;Group=GLOBAL
+	kill ^TMPDQS( %ProcessID)
+
+	quit
+
+	// =====================================================================
+	/* *********************************************************************
+	This function reads a .DAT file with table data and imports it into the
+	target database.
+
+	NOTES:
+	. Use this procedure with care!
+		This procedure does an unconditional
+			"DELETE FROM "_tbl
+		before it will use DBSDYNRA to insert new rows
+	. DBSDYNRA has never been validated against an RDB
+	*/
+bootDat( String tbl
+	, String dir
+	) // load .DAT file into table using DBSDYNRA for DBI
+	// ---------------------------------------------------------------------
+	do Runtime.start("CS")
+
+	do ^SQL("DELETE FROM "_tbl)
+
+	type Record rec = $$new^DBSDYNRA( tbl)
+
+	type IO rIo = Class.new("IO")
+	set rIo.fileName = tbl_ ".DAT"
+	set rIo.directory = dir
+	set rIo.recordSize = 32767
+	set rIo.openParams = "READ"
+
+	do rIo.open()
+
+	type String sHdr = rIo.read()
+	type String sDat
+	type Number nC
+
+	do {
+		catch xIo {
+			do rIo.close()
+			if xIo.type'="%PSL-E-IOEOF" do Runtime.rollback() throw xIo
+		}
+		for  {
+			set sDat = rIo.read()
+			for nC = 1:1:sHdr.length( 9.char()) do propSet^DBSDYNRA(rec, sHdr.piece( 9.char(), nC), sDat.piece( 9.char(), nC))
+			//do bypassSave^DBSDYNRA(rec)
+			//do rec.setMode(0)
+		}
+	}
+	do Runtime.commit()
+
+	quit
+
+	// =====================================================================
+	/* *********************************************************************
+	This function creates or replaces the DQ Procedure with the text from
+	the supplied (.psl) file.
+
+	NOTES:
+	. Use this procedure with care!
+		Even though PSLC compiles and looks at .psl files rather than DQ
+		Procedures, creating the .psl file before the call to PSLC will
+		overwrite the earlier version of the .psl file, even if the new
+		version will compile with errors.
+	*/
+bootLoad( String mod
+	, String dir
+	) // load .psl file into DBTBL25 and DBTBL25D
+	// ---------------------------------------------------------------------
+	do Runtime.start("CS")
+
+	type RecordDBTBL25 dq25 = Db.getRecord("DBTBL25","%LIBS='SYSDEV',PROCID=:mod", 1)
+
+	if dq25.getMode() {
+		if dq25.pgm '= mod throw Class.new("Error","%PSL-E-MISMATCH, names don't match")
+		do Db.delete("DBTBL25D", "%LIBS='SYSDEV' and PROCID = :mod")
+	}
+	else  {
+		set dq25.pgm = mod
+		set dq25.mplus = 1
+		set dq25.des = "loaded by "_ %RoutineName
+	}
+	set dq25.ltd = %CurrentDate
+	set dq25.time = %CurrentTime
+
+	type IO rIO = Class.new( "IO")
+	set rIO.fileName = dir_ "/"_ mod_ ".psl"
+	set rIO.openParams = "READ"
+	set rIO.recordSize = PSL.maxLineLength + 1
+
+	do rIO.open()
+
+	type RecordDBTBL25D line = Class.new("RecordDBTBL25D", "%LIBS='SYSDEV',PROCID=:mod, SEQ=1")
+	type String hdr
+
+	do {
+		catch xIO {
+			do rIO.close()
+			if xIO.type'="%PSL-E-IOEOF" do Runtime.rollback() throw xIO
+		}
+
+		// see if first line is the header-line
+		set hdr = rIO.read()
+		if hdr.extract(1,18)["DO NOT MODIFY" {
+			set dq25.des = hdr.piece("|").extract(18,hdr.length())
+			set dq25.mplus = hdr.piece("|",9).toNumber()
+		}
+		else  {
+			set line.code = hdr
+			do line.setMode(0), line.bypassSave()
+			set line.seq = 2
+		}
+		
+		for   {
+			set line.code = rIO.read()
+			do line.setMode(0), line.bypassSave()
+			set line.seq = line.seq + 1
+		}
+	}
+	do dq25.bypassSave()
+	do Runtime.commit()
+
+	quit mod
+
+	// -------------------------------------------------------------------------
+cmdline( String sCmdline,	// command line
+	String aOpts(),		// decomposed command line options	/REFARR:W
+	String sArgless,	// argumentless single character options
+	String sQuote)		// quote characer, default: double quote
+	/* -------------------------------------------------------------------------
+	Decompose a string of command line options.
+	*/
+
+	type String sArg,sOpt
+	type Number nArgs = 0
+
+	if sQuote.get().isNull() set sQuote = """"
+	set sArgless = sArgless.get()
+
+	set sCmdline=sCmdline.translate( 9.char()," ").trim().replace("  "," ",0,0,sQuote)
+
+	while 'sCmdline.isNull() do {
+		set sOpt=sCmdline.piece(" ",1,1,sQuote)
+		set sCmdline=sCmdline.extract( sOpt.length()+2, sCmdline.length())
+		if sOpt.extract() '= "-" do {		// command argument
+			set nArgs = nArgs + 1
+			set aOpts("$"_nArgs) = sOpt
+		}
+		else  if sOpt.extract(2) = "-" do {	// --option=value
+			type String sLongOpt = sOpt.piece("=")
+			type String sVal = sOpt.extract( sLongOpt.length() + 2, sOpt.length())
+			set aOpts( sLongOpt.extract( 3, sLongOpt.length())) = sVal.stripQuotes()
+		}
+		else  do {				// -o value
+			type String sArgOpt = sOpt.translate( "-"_sArgless)
+			type String sNoArgs = sOpt.translate( "-"_sArgOpt)
+			type Number nPos
+
+			for nPos = 1:1:sNoArgs.length() set aOpts(sNoArgs.extract(nPos)) = ""
+
+			if sArgOpt.isNull() quit
+			if sArgOpt.length() > 1 set sArgOpt = sArgOpt.extract() // and warn?
+
+			set sOpt=sCmdline.piece(" ",1,1,sQuote)
+			set sCmdline=sCmdline.extract( sOpt.length()+2, sCmdline.length())
+			set aOpts(sArgOpt) = sOpt.stripQuotes(sQuote)
+		} // end if (start with dash) - else - else
+	} // end while 'sCmdline.isNull()
+	quit
+
+	// ---------------------------------------------------------------------
+cmp( String m(), String name, String dir)
+	/* ---------------------------------------------------------------------
+	Store boot version of routine.
+	This subroutine does not call ^%ZRTNCMP, because that subroutine contains a
+	call to $$^CUVAR(). It calls cmpA2A^UCGM() to compile the supplied source,
+	then uses %ZTRNLNM, %ZOPEN and the PSL/M commands USE, WRITE, and CLOSE to
+	create the .m file.
+	It then calls COMPILE^%ZRTNCMP to compile the routine.
+	The .proc version of the source is not stored.
+	*/
+
+	type String IO=$$FILE^%TRNLNM(name_".m",dir)
+	if $$FILE^%ZOPEN(IO,"NEWVERSION",0,32767) do {
+		use IO
+		type Number sub=""
+		for  set sub=$O(m(sub)) quit:sub=""  write m(sub),!
+		close IO
+
+		type String DIR = dir	// required by COMPILE^%ZRTNCMP
+		type String RTN = name	// required by COMPILE^%ZRTNCMP
+		do COMPILE^%ZRTNCMP
+	}
+	quit
+
+	// ---------------------------------------------------------------------
+public cuvals( String cuvals())	// cuvals(name) = value (*1)	/MECH=REFARR:W
+	/* ---------------------------------------------------------------------
+	Create a boot version of routine CUVAR, and a CUVAR.DAT file to use for
+	*/
+	type IO rIo = Class.new( "IO")
+	set rIo.directory  = $$SCAU^%TRNLNM("DIR")
+	set rIo.fileName   = "CUVAR.DAT"
+	set rIo.openParams = "READ"
+	set rIo.recordSize = 32767
+
+	do rIo.open()
+
+	type String hdr = rIo.read()
+	type String dat = rIo.read()
+
+	do rIo.close()
+
+	type Number cnr
+	for cnr = 1:1:hdr.length(9.char()) set cuvals( hdr.piece( 9.char(), cnr)) = dat.piece( 9.char(), cnr)
+	quit
+
+	// ---------------------------------------------------------------------
+public cuvar( String cuvals())	// cuvals(name) = value (*1)	/MECH=REFARR:RW
+	/* ---------------------------------------------------------------------
+	Create a boot version of routine CUVAR, and a CUVAR.DAT file to use for
+	an initial environment creation.
+
+	This version of the subroutine creates a routine with the single entry
+	point $$^CUVAR(col). That entry point will return values for all columns
+	supplied in cuvals(). For all other columns, the generated routine will
+	return an empty string.
+
+	ARGUMENTS:
+	(*1) cuvals(columnname) = columnvalue
+		The generated routine will contain a line to return the supplied
+		value for each columnname that occus in this array.
+		The following value will be added unconditionally:
+		- cuvals("%LIBS") = "SYSDEV"
+		If cuval("%VN") does not exist and %VN exists, then the
+		following entry will be inserted:
+		- cuvals("%VN") = %VN
+
+	NOTES:
+	. This version does not use, and future version shall not use PSL constructs
+		from the Data group.
+	*/
+	type public String %VN
+
+	type String col = ""		// column name iterator
+	type Number ln  = 0		// line number in src()
+	type String src()		// CUVAR.proc source code
+
+	// force values for %LIBS (unconditionally) and %VN (conditionally)
+	set cuvals("%LIBS") = "SYSDEV"
+	if 'cuvals(%VN).exists(),%VN.exists() set cuvals("%VN") = %VN
+
+	// create routine and .DAT file by iterating over the array
+	set ln=ln+1,src(ln)="CUVAR(col) ; bootstrap version"
+
+	for  set col=cuvals(col).order() quit:col=""  do {
+		set ln = ln + 1
+		set src(ln) = " IF col="""_ col_ """ QUIT """_ cuvals(col)_ """"
+	}
+	set ln=ln+1,src(ln)=" IF col[""|"" QUIT $PIECE(col,""|"",2)"
+	set ln=ln+1,src(ln)=" QUIT """""
+
+	do cmp(.src(),"CUVAR",$$SCAU^%TRNLNM("CRTNS"))
+
+	quit
+
+	// ---------------------------------------------------------------------
+private dataImp( String tbl,
+		 String dir)
+	/* ---------------------------------------------------------------------
+	Import data for table from tbl.DAT in specified dir.
+	*/
+	type IO file = Class.new("IO")
+
+	// set file characterisitcs and open
+	set file.directory = dir
+	set file.fileName  = tbl_".DAT"
+	set file.openParams = "READ"
+	set file.recordSize = 32767
+	do file.open()
+
+	type String collist = file.read()
+
+	catch ioErr {
+		if ioErr.type = "%PSL-E-IOEOF" do {
+			do Runtime.commit()
+		}
+		else  do Runtime.rollback()
+		do file.close()
+	}
+
+	type String line
+	type Record rec
+	type Number colnr
+	type String colnm
+
+	// Record.bypassSave() does not provide TP for dynamic instances
+	do Runtime.start("BA")
+	for  do {
+		set line = file.read()	// will throw eof exception
+		set rec = Class.new( "Record", tbl)
+
+		for colnr=1:1:collist.length( 9.char()) set colnm = collist.piece( 9.char(), colnr), rec.@colnm = line.piece( 9.char(), colnr)
+
+		do rec.bypassSave()
+	}
+	quit
+
+	// ---------------------------------------------------------------------
+delGbl( List keep)	// Globals to keep
+	/* ---------------------------------------------------------------------
+	Delete all M globals except
+	- if %-global, or
+	- if routine occurs in keep List, or
+	*/
+	type String %ZG()	// %GSEL input and output
+
+	set %ZG="*" do CALL^%GSEL
+
+	type String gbl = ""
+	for  set gbl = %ZG(gbl).order() quit:gbl=""  do {
+		if gbl.extract(2) = "%" quit
+
+		if keep.contains( gbl.extract( 2, gbl.length())) quit	// Excluded
+
+		#ACCEPT DATE=2005-10-18;CR=15592;PGM=FSCW;REASON=KILL @var
+		KILL @gbl
+	}
+	quit
+
+	// ---------------------------------------------------------------------
+delRtn( List keep,	// Routines to keep
+	Boolean bMrtns)	// Keep routines in MRTNS?
+	/* ---------------------------------------------------------------------
+	Delete all M routines except
+	- if %-routine, or
+	- if routine occurs in keep List, or
+	- if bMrtns=1, and the routine resides in MRTNS, or
+	- the routine resides in a directory other than PRTNS, MRTNS or CRTNS
+
+	Delete associated .proc from CRTNS
+
+	NOTES:
+	. If CRTNS preceeds MRTNS, this subroutine will uncover the MRTNS version.
+	*/
+	type String %ZI()	// %RSEL input selection
+	type String %ZR()	// %RSEL output
+	type String CRTNS = $$PARSE^%ZFUNC($$FILE^%TRNLNM("x.y",$$SCAU^%TRNLNM("CRTNS")),"DIR")
+	type String MRTNS = $$PARSE^%ZFUNC($$FILE^%TRNLNM("x.y",$$SCAU^%TRNLNM("MRTNS")),"DIR")
+	type String PRTNS = $$PARSE^%ZFUNC($$FILE^%TRNLNM("x.y",$$SCAU^%TRNLNM("PRTNS")),"DIR")
+
+	set keep = keep.add("ORACON",,0)
+
+	set %ZI("*")="" do INT^%RSEL
+
+	type List   pslSupplied = $$getPslList()
+	type String rtn = ""
+	for  set rtn=%ZR(rtn).order() quit:rtn=""  do {
+		if rtn=%RoutineName quit
+		if rtn.extract() = "%" quit
+		if pslSupplied.contains( rtn) quit	
+
+		type String file = %ZR(rtn)_rtn_".m"
+		type String path = $$PARSE^%ZFUNC(file,"DIR")
+
+		if keep.contains(rtn) quit	// Excluded by routinename
+		if bMrtns, path = MRTNS quit	// Excluded by location
+
+		// standard derived routine: delete
+		if path = PRTNS do DEL^%ZRTNDEL(rtn) quit
+		if path = MRTNS do DEL^%ZRTNDEL(rtn) quit
+		if path = CRTNS do DEL^%ZRTNDEL(rtn),DELFILE^%ZRTNDEL(path_rtn_".proc")  quit
+
+		write path_rtn," not deleted",!
+	}
+	quit
+
+	// ---------------------------------------------------------------------
+public getPslList()
+	/* ---------------------------------------------------------------------
+	Get the list of PSL/SQL/DQ routines that will be distributed as M
+	routine (and thus can be deleted).
+	*/
+	type List psl = $$getList^UCGMCU("Insensitive")
+	set psl = psl_ ","_ $$getList^UCGMCU("Dictionary")
+	set psl = psl_ ","_ $$getList^UCGMCU("Object")
+	set psl = psl_ ","_ $$getList^UCGMCU("Upgrade")
+	quit psl
+
+	// ---------------------------------------------------------------------
+private msg()
+	/* ---------------------------------------------------------------------
+	Create a boot version of routine MSG.
+	This version of the subroutine creates a routine with the single entry
+	point $^MSG(nr). That entry point will return a standard text:
+		"Message #"_nr_" in bootstrap mode"
+	The generated routine will accept 1 or 2 actual parameters.
+	*/
+	type String src()
+	type Number ln=0
+
+	set ln=ln+1,src(ln)="MSG(nr,p1) ; bootstrap version"
+	set ln=ln+1,src(ln)=" NEW msg SET msg=""Message #""_nr_"" in bootstrap mode"""
+	set ln=ln+1,src(ln)=" IF $DATA(p1)#2 SET msg=msg_""; p1=""_$$QADD^%ZS(p1,$CHAR(34))"
+	set ln=ln+1,src(ln)=" QUIT msg"
+
+	do cmp(.src(),"MSG",$$SCAU^%TRNLNM("CRTNS"))
+	quit
+
+	// ---------------------------------------------------------------------
+private noiso()
+	/* ---------------------------------------------------------------------
+	Create a boot version of routine NOISO.
+	This version of the subroutine creates an "empty" routine. The routine
+	can be called, but nothing will be executed.
+	*/
+	type String src()
+	type Number ln=0
+
+	set ln=ln+1,src(ln)="NOISO ; bootstrap version"
+	set ln=ln+1,src(ln)=" QUIT"
+
+	do cmp(.src(),"NOISO",$$SCAU^%TRNLNM("CRTNS"))
+	quit
+
+	// ---------------------------------------------------------------------
+public run( String ZCMDLINE)	// command line options
+	/* ---------------------------------------------------------------------
+	Run the bootstrap preparation at the target side. This subroutine
+	requires a single argument: zero or more unix-style command line
+	options.
+
+	NOTES:
+	* The documentation of the supported options follows below using the
+		slash-slash comment introducer. This ensures that the comment
+		ends up in the generated M routine.
+	*/
+
+	// The following options are supported:
+	// --%VN=versionid
+	//	Specifies the Profile version at the target.
+	//	If not supplied, CUVAR.%VN of the site where ZUCBOOTT itself was
+	//	compiled will be used.
+	//
+	// --cuvar
+	//	Do not generate a boot version of routine CUVAR, but use the
+	//	existing version. Supply this option only if:
+	//	* the target environment contains a routine CUVAR, and
+	//	* the version of CUVAR is for the correct database backend
+	//
+	// --global=globalname1,globalname2
+	//	Specifies the names of the globals that shall not be KILLed.
+	//	Specify names without the leading '^'.
+	//	There is no need to include %-globals, because they will never
+	//	be killed.
+	//
+	// -l
+	//	Local reboot only. Do not delete any routine from MRTNS and do
+	//	not delete any of the PSL/SQL/DQ routines called in phase 1 or
+	//	phase 2. This option forces --cuvar --msg --noiso
+	//
+	// --msg
+	//	Do not generate a boot version of routine MSG, but use the
+	//	existing version. Supply this option only if:
+	//	* the target environment contains a routine MSG, and
+	//	* the version of MSG is for the correct database backend
+	//
+	// --noiso
+	//	Do not generate a boot version of routine NOISO, but use the
+	//	existing version. Supply this option only if:
+	//	* the target environment contains a routine CUVAR, and
+	//	* the version of NOISO is for the correct database backend
+	//
+	// --routine=fullfilename1.csv,fullfilename2.csv
+	//	Specifies the names of the files that contain the routines that
+	//	shall not be deleted. Each file shall contain lines with comma
+	//	separated values, with the routine name in the first column.
+	//	Note that the xxx.rzl.csv files created by ZUCBOOTA meet these
+	//	criteria.
+	//	The filename shall include the full path.
+	type literal List OPTIONS="%VN,cuvar,global,l,msg,noiso,routine"
+
+	type String cmds()		// command line options (decomposed)
+	type Number elm			// List iterator
+	type String file		// filename
+	type String path		// directory path to file
+	type String %VN			// version number
+
+	// get command line options
+	do cmdline( ZCMDLINE, .cmds, "l")
+
+	// get rid of unsupported options
+	type String opt = ""
+	for  set opt = cmds(opt).order() quit:opt=""  do {
+		if OPTIONS.contains( opt) quit
+		write "Unknown option "_opt,!
+		kill cmds(opt)
+	}
+
+	// no (valid) options, may be unintended call
+	quit:cmds.data()'=10
+
+	// standardize options
+	set cmds("l") = cmds("l").exists()
+
+	set %VN=cmds("%VN").get(CUVAR.%VN)
+
+	type List keepFiles = cmds("routine").get()	// List of filenames
+	type List keepRtns  = ""			// List of routines
+
+	for elm=1:1:keepFiles.count() do {
+		set file = keepFiles.elementAt( elm)
+		set path = $$PARSE^%ZFUNC( file, "DIR")
+		if file[path set file = file.extract( path.length() + 1, file.length())
+		set keepRtns = $$addKeep( keepRtns, path, file)
+	}
+
+	if cmds("l") do {
+		/* Add PSL/DQL/DQ elements to keep list,
+		   force --cuvar --msg --noiso
+		   */
+		type List cmp = $$getPslList()
+		for elm=1:1:cmp.count() set keepRtns = keepRtns.add( cmp.elementAt(elm), , 0)
+		for opt="cuvar","msg","noiso" set cmds(opt)=""
+	}
+
+	// cannot boot from a really empty environment !!
+	if keepRtns.isNull() write "%PSL-W-ABORT: No routines to save -- unable to boot",! quit
+
+	if 'cmds("cuvar").exists() do {
+		write "%PSL-I-CREATE: routine CUVAR",!
+		type String cuvar()
+		do cuvals( .cuvar())
+		do cuvar( .cuvar())
+	}
+	if 'cmds("msg").exists()   write "%PSL-I-CREATE: routine MSG",!   do msg()
+	if 'cmds("noiso").exists() write "%PSL-I-CREATE: routine NOISO",! do noiso()
+
+	// CUVAR, MSG, and NOISO are needed as present (original or new)
+	set keepRtns = keepRtns.add( "CUVAR", , 0)
+	set keepRtns = keepRtns.add( "MSG",   , 0)
+	set keepRtns = keepRtns.add( "NOISO", , 0)
+
+	// If at least one required routine is missing,
+	// then abort before deleting anything.
+	type Boolean bAbort = 0
+	for elm=1:1:keepRtns.count() set file = keepRtns.elementAt(elm) if '$$VALID^%ZRTNS(file) write "missing routine ",file,".m",! set bAbort=1
+	if bAbort write "%PSL-W-ABORT: Missing required routine",! quit
+
+	write "%PSL-I-DELETE: removing globals",!
+	do delGbl( cmds("global").get())
+
+	write "%PSL-I-DELETE: deleting routines",!
+	do delRtn( keepRtns, cmds("l"))
+
+	write "%PSL-I-OK: environment ready for initial install",!
+	quit
+
+	// ---------------------------------------------------------------------
+public SHELL ;
+	/* ---------------------------------------------------------------------
+	This subroutine provides the interface to the unix command shell.
+	It calls run($ZCMDLINE).
+
+	Because PSL does not support $ZCMDLINE, the line is #BYPASSED
+	*/
+	#ACCEPT DATE=2005-10-18;CR=15592;PGM=FSCW;GROUP=BYPASS;REASON=$ZCMDLINE
+	#BYPASS
+	DO run($ZCMDLINE)
+	#ENDBYPASS
+	quit

@@ -11,7 +11,7 @@ DBSUTL	;;DBS - U - V5.0 - DQ DELETE/COPY DEFINITIONS UTILITY
 	;         : DQSCR  - DEFINITION SCREEN NAME   ( I.E. ^DBSEXE1)
 	;         : %LIBS  - LIBRARY NAME
 	;
-	; I18N=QUIT: Exculded from I18N standards. 
+        ; I18N=QUIT: Exculded from I18N standards.
 	;---------- Revision History -------------------------------------------
 	; 05/17/06 - Allan Mattson - CR20048
 	;            Replaced calls to $$UPPER^%ZFUNC with $$UPPER^SCAUTL.
@@ -201,11 +201,11 @@ DEL(DQTABLE)	; Delete a DATA-QWIK Definition
 DELX	;
 	S OID=$$FIND^DBSGETID(DQTABLE,0) I OID="" S ALLDONE=1 Q
 	I DQTABLE="DBTBL2" S SID=OID
-	E  I DQTABLE="DBTBL4" S QID=OID 
-	E  I DQTABLE="DBTBL5H" S RID=OID 
-	E  I DQTABLE="DBTBL5Q" S QRID=OID 
-	E  I DQTABLE="DBTBL13" S PID=OID 
-	; 
+        E  I DQTABLE="DBTBL4" S QID=OID
+        E  I DQTABLE="DBTBL5H" S RID=OID
+        E  I DQTABLE="DBTBL5Q" S QRID=OID
+        E  I DQTABLE="DBTBL13" S PID=OID
+        ;
 	I DQSCR'="" S %O=3 D @DQSCR I VFMQ="Q" S ALLDONE=1 Q
 	S RUNPGM=""
 	S ZLIBS=$G(^DBTBL(%LIBS,DBOPT,OID,-3)) I ZLIBS="" G DEL0

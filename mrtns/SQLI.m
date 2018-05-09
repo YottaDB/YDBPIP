@@ -8,7 +8,7 @@ SQLI	;library;Interactive SQL shell(s)
 	; RELATED:
 	;	. $$SQL - SQL Processor
 	;
-	; I18N=QUIT: Excluded from I18N standards. 
+        ; I18N=QUIT: Excluded from I18N standards.
 	;---- Revision History ------------------------------------------------
 	; 04/25/06 - RussellDS - CR20967
 	;	     Remove obsolete schema references and reference to ^DBW.
@@ -41,7 +41,7 @@ SQLI	;library;Interactive SQL shell(s)
 	;            Modified to prompt for user ID if it's not defined.
 	;
 	;----------------------------------------------------------------------
-	; 
+        ;
 	N COLUMNS,HELP,SQLIHELP,LIST,NAME,PLIST,SCRIPT
 	N cmd,key
 	;
@@ -51,13 +51,13 @@ SQLI	;library;Interactive SQL shell(s)
 	;
 	S ER=0
 	;
-	S par("DIRECTORY")=$$HOME^%TRNLNM
+  	S par("DIRECTORY")=$$HOME^%TRNLNM
 	S par("DQMODE")=0
-	S par("EXTENSION")="SQL"
+ 	S par("EXTENSION")="SQL"
 	S par("FORMAT")="IMAGE"
 	S par("CODE")=0
 	S par("OUTPUT")=""
-	S par("PLAN")=0  
+ 	S par("PLAN")=0  
 	S par("STATISTICS")=0
 	S par("PROTECTION")=2
 	S par("STATUS")="OUTPUT,FORMAT,PROTECTION,CACHE,PLAN"
@@ -68,17 +68,17 @@ SQLI	;library;Interactive SQL shell(s)
 	S par("CACHE")=0
 	;
 	I $G(IO)="" S IO=$P
-	D SYSVAR I ER Q
+ 	D SYSVAR I ER Q
 	;
 	D EXEC
 	Q
 EXEC	;
 	S par="CODE/TYP=L,DIRECTORY,DQMODE/TYP=L,EXTENSION,FORMAT"
-	S par=par_",OUTPUT,PROMPT,MATCH/TYP=N,PLAN/TYP=L,ROWS/TYP=N" 
-	S par=par_",PROTECTION/TYP=N,STATISTICS/TYP=L,INDEX/TYP=T,STATUS" 
+        S par=par_",OUTPUT,PROMPT,MATCH/TYP=N,PLAN/TYP=L,ROWS/TYP=N"
+        S par=par_",PROTECTION/TYP=N,STATISTICS/TYP=L,INDEX/TYP=T,STATUS"
 	S par=par_",MASK/TYP=U,TIMEOUT/TYP=N,CACHE/TYP=L,BLOCK/TYP=N"
 	S par=par_",EFD/TYP=N,USING/TYP=T"  		; EFD and hhost variable
-	S par=par_",OPTIMIZE/TYP=L"                  
+        S par=par_",OPTIMIZE/TYP=L"                 
 	S par=par_",DYNAMIC/TYY=L"
 	S par=par_",DEBUG/TYP=L"  			; Debug mode
 	S par=par_",DATE/TYP=D"  			; Date format
@@ -86,12 +86,12 @@ EXEC	;
 	S par=par_",SPVOVR/TYP=L"  			; SUPV override logic
 	S par=par_",PREPARE/TYP=L"  			; ODBC column attributes
 	;
-	S SQLIHLP(1)=$$SCAU^%TRNLNM("HELP","SQLI.HLP")
-	S SQLIHLP(2)=$$SCAU^%TRNLNM("HELP","SQL.HLP")
+  	S SQLIHLP(1)=$$SCAU^%TRNLNM("HELP","SQLI.HLP")
+ 	S SQLIHLP(2)=$$SCAU^%TRNLNM("HELP","SQL.HLP")
 	S HELP(1)="Editor"
 	S HELP(2)="PROFILE/SQL-Commands"
-	S NAME="SQL Command" 
-	S SCRIPT=$$HOME^%TRNLNM("SQLI.INI") 
+        S NAME="SQL Command"
+        S SCRIPT=$$HOME^%TRNLNM("SQLI.INI")
 	;
 	S LIST("TABLES")="SELECT FID,DES,GLOBAL FROM DBTBL1"
 	S LIST("COLUMNS")="SELECT DI,DES,TYP,LEN FROM DBTBL1D WHERE FID=?"
@@ -144,7 +144,7 @@ LIST(X)	; Run Script in List buffer
 	.	S n=""
 	.	F  S n=$O(LIST(n)) Q:n=""  W n,?12,LIST(n),!
 	;
-	S name=$$UPPER^%ZFUNC(name)
+	S name=$$UPPER^UCGMR(name)
 	;
 	I $E(name)="-" D  Q				; Delete
 	.	;
@@ -188,7 +188,7 @@ LIST(X)	; Run Script in List buffer
 	.	; Missing parameter
 	.	I parms="" S ER=1,RM=$$^MSG(8607) Q
 	.	S z=$P(parms," ",1),parms=$P(parms," ",2,999)
-	.	I $E(z)'="'" s z=$$QADD^%ZS($$UPPER^%ZFUNC(z),"'")
+	.	I $E(z)'="'" s z=$$QADD^%ZS($$UPPER^UCGMR(z),"'")
 	.	S expr=$E(expr,1,y-2)_z_$E(expr,y,$L(expr))
 	;
 	I ER Q
@@ -251,7 +251,7 @@ RUN(X,rec)	; Run an RMS file or the current Buffer
 	;
 	Q 
 	;
-	;----------------------------------------------------------------------
+ 	;----------------------------------------------------------------------
 SHOW	; Show variables
 	;----------------------------------------------------------------------
 	;
@@ -277,7 +277,7 @@ RUNPROC(expr,par,sqlsta,sqldta,sqlcnt)	; Run Interactive SQL Buffer
 	N %fkey,x,z
 	;
 	S expr=$$TRIM^%ZS(expr)				; Remove extra blanks
-	S z=$$UPPER^%ZFUNC($P(expr," ",1))
+	S z=$$UPPER^UCGMR($P(expr," ",1))
 	I z="SELECT" D SELECT(expr,.par,.sqlcnt) Q
 	; Pass protection parameter only
 	I z="INSERT"!(z="UPDATE")!(z="DELETE") S x=$G(par("PROTECTION")) N par S par("PROTECTION")=x
@@ -296,15 +296,15 @@ SELECT(expr,par,sqlcnt)	; Run Interactive SQL
 	;
 	S expr=$$SQL^%ZS(expr,.tok) Q:ER
 	;
-	I $G(par("DEBUG")) D DEBUG I ER Q 
+        I $G(par("DEBUG")) D DEBUG I ER Q
 	;
 	S expr=$E(expr,8,$L(expr))
 	;
 	I $G(par("PROMPT"))'="" D PROMPT(par("PROMPT"),.par)
 	I $G(par("MASK"))'="" D Z6PP($G(par("MASK")))
-	I $D(par("EFD")) N EFD S EFD=$$FDAT^%ZM(par("EFD")) Q:ER 
+        I $D(par("EFD")) N EFD S EFD=$$FDAT^%ZM(par("EFD")) Q:ER
 	;
-	S stats=$G(par("STATISTICS")),noout=0
+ 	S stats=$G(par("STATISTICS")),noout=0
 	I stats N tcpu,icpu,tproc,iproc,tmdb,imdb,time D INISTAT
 	;
 	N SELECT,FROM,WHERE,ORDER,GROUP
@@ -318,8 +318,8 @@ SELECT(expr,par,sqlcnt)	; Run Interactive SQL
 	I $E(SELECT,1,4)="ALL " S SELECT=$E(SELECT,5,9999)
 	I SELECT="*" S SELECT="" D  Q:ER
 	.	N i
-	.       F i=1:1:$L(FROM,",") S SELECT=SELECT_","_$$LIST^SQLDD($P(FROM,",",i)) 
-	.       S SELECT=$E(SELECT,2,99999) 
+        .       F i=1:1:$L(FROM,",") S SELECT=SELECT_","_$$LIST^SQLDD($P(FROM,",",i))
+        .       S SELECT=$E(SELECT,2,99999)
 	S fmt=$G(par("FORMAT"))
 	;
 	I "IMAGE"[fmt S fmt="",fmtr="|||||3|*|*|*|*|*"
@@ -373,14 +373,14 @@ SELECT(expr,par,sqlcnt)	; Run Interactive SQL
 	;
 	U IO
 	;
-z	F sqlcnt=0:1 D  Q:vsql=0  D ROWOUT Q:vsql(0)=100
+	F sqlcnt=0:1 D  Q:vsql=0  D ROWOUT Q:vsql(0)=100
 	.	S vsql=$$^SQLF(.exe,.sqldta,.sqlind,.sqlcur)
 	;
 	D CLOSE^SQLM(0)					; Remove cursor context
 	I stats D ENDSTAT
 	;
 	D CLOSE^SCAIO
-	D OPEN^EDIT 
+        D OPEN^EDIT
 	;
 	W $$LOCK^%TRMVT
 	;
@@ -406,7 +406,7 @@ ROWOUT	; Output a formatted row
 	I $L(d)>cptr S d=$E(d,1,cptr)
 	I $P(z,"|",6)="R" S d=$J(d,cptr)
 	;
-	F I=2:1:col D
+  	F I=2:1:col D
 	.	;
 	.	S z=col(I)
 	.	S len=$P(z,"|",1),typ=$P(z,"|",2),dec=$P(z,"|",3),jus=$P(z,"|",6)
@@ -416,18 +416,18 @@ ROWOUT	; Output a formatted row
 	.	I $E($G(sqlind),I)=2 S z=$TR($J("",len)," ","*") ; display ****
 	.	;
 	.	S cptr=cptr+spa
-	.	I jus="R" S cptr=cptr+len,d=d_$J(z,cptr-$L(d))
+   	.	I jus="R" S cptr=cptr+len,d=d_$J(z,cptr-$L(d))
 	.	E  S d=d_$J("",cptr-$L(d))_$E(z,1,len),cptr=cptr+len
-	;
+ 	;
 	I IO'=$P,recdel=$C(13,10) W d,!
 	E  W d,recdel
 	;
 	I IOSL S linum=linum+1 I linum'<IOSL D WAIT
 	Q
 	;
-	;----------------------------------------------------------------------
+ 	;----------------------------------------------------------------------
 WAIT	; Wait for user response
-	;----------------------------------------------------------------------
+ 	;----------------------------------------------------------------------
 	;
 	S linum=0
 	I IO'=$P W #,hdg,! Q
@@ -447,7 +447,7 @@ WAIT	; Wait for user response
 	I x=2 S noout=1 Q
 	Q
 	;
-	;----------------------------------------------------------------------
+ 	;----------------------------------------------------------------------
 DEBUG	; Debug option is on
 	;----------------------------------------------------------------------
 	;
@@ -465,7 +465,7 @@ DEBUG	; Debug option is on
 	S ER=x=2
 	Q
 	;
-	;----------------------------------------------------------------------
+ 	;----------------------------------------------------------------------
 INISTAT	; Start Stats counter
 	;----------------------------------------------------------------------
 	;
@@ -649,9 +649,9 @@ PROMPT(list,par)	; Prompt for attributes
 	;
 	Q
 	;
-	;----------------------------------------------------------------------
+ 	;----------------------------------------------------------------------
 SEEYA	; Exit program
-	;----------------------------------------------------------------------
+ 	;----------------------------------------------------------------------
 	;
 	W $$LOCK^%TRMVT
 	W $$CLEAR^%TRMVT
@@ -661,7 +661,7 @@ SEEYA	; Exit program
 COLUMNS(X)	; Set column attributes for SELECT list
 	;----------------------------------------------------------------------
 	;
-	;  col(colnum)=Length|Type|Decimal|Format|Heading|Justify|Spaces|Math 
+        ;  col(colnum)=Length|Type|Decimal|Format|Heading|Justify|Spaces|Math
 	;
 	S list=",LENGTH,TYPE,DECIMAL,FORMAT,HEADING,JUSTIFY,SPACE,MATH,"
 	;
@@ -705,29 +705,29 @@ SHOWCOL	; SHOW column attributes
 	Q
 	;
 	;----------------------------------------------------------------------
-CONVERT(RID)	; Convert SELECT statement into a RW report 
+CONVERT(RID) ; Convert SELECT statement into a RW report
 	;----------------------------------------------------------------------
 	N sql,key,type
-	S type=$p(RID," ",1),RID=$P(RID," ",2)          ; Report type and name 
-	S type=$$UPPER^%ZFUNC(type) 
-	S type=$S(type="REPORT":5,type="QWIK":6,1:0) 
-	I 'type S ER=1,RM="Invalid Report Type" Q       ; Invalid type 
-	; 
-	I $G(RID)="" S ER=1,RM="Missing report name" Q  ; Missing RW name 
-	S sql=$TR(rec,$C(13,10)," ")                    ; Remove delimiters 
-	I sql="" Q                                      ; Invalid SQL statement 
-	; 
-	D SQLRW^DBSRWQR(sql,RID,type)                   ; Convert to RW format 
-	I $G(ER),$G(RM)="" Q 
-	I $G(ER) W $$MSG^%TRMVT(RM,"",1) Q              ; Error 
-	I '$$YN^DBSMBAR("","Run Report?",1) Q           ; Run it now? 
-	I type=5 D 
-	.       D ^DBSRW(RID,0,1)                       ; Compile it first 
-	.       D RPT^URID                              ; Run report 
-	I type=6 D 
-	.       D COMPILE^DBSEXEQ(RID)                  ; Compile QWIK report 
-	.       S QRID=RID D QRPT^URID 
-	W $$CLEAR^%TRMVT 
+        S type=$p(RID," ",1),RID=$P(RID," ",2)          ; Report type and name
+        S type=$$UPPER^UCGMR(type)
+        S type=$S(type="REPORT":5,type="QWIK":6,1:0)
+        I 'type S ER=1,RM="Invalid Report Type" Q       ; Invalid type
+        ;
+        I $G(RID)="" S ER=1,RM="Missing report name" Q  ; Missing RW name
+        S sql=$TR(rec,$C(13,10)," ")                    ; Remove delimiters
+        I sql="" Q                                      ; Invalid SQL statement
+        ;
+        D SQLRW^DBSRWQR(sql,RID,type)                   ; Convert to RW format
+        I $G(ER),$G(RM)="" Q
+        I $G(ER) W $$MSG^%TRMVT(RM,"",1) Q              ; Error
+        I '$$YN^DBSMBAR("","Run Report?",1) Q           ; Run it now?
+        I type=5 D
+        .       D ^DBSRW(RID,0,1)                       ; Compile it first
+        .       D RPT^URID                              ; Run report
+        I type=6 D
+        .       D COMPILE^DBSEXEQ(RID)                  ; Compile QWIK report
+        .       S QRID=RID D QRPT^URID
+        W $$CLEAR^%TRMVT
 	Q
 	;----------------------------------------------------------------------
 EXT	; Entry point for function DBSMSQL
@@ -753,33 +753,33 @@ EXT	; Entry point for function DBSMSQL
 	D ^UTLREAD I VFMQ="Q" Q
 	;
 	;
-	S par("DIRECTORY")=$$HOME^%TRNLNM 
+        S par("DIRECTORY")=$$HOME^%TRNLNM
 	S par("DQMODE")=z1
-	S par("EXTENSION")="SQL"
+ 	S par("EXTENSION")="SQL"
 	S par("PROTECTION")=z4
 	S par("FORMAT")=z5
 	S par("CODE")=z2
 	S par("CACHE")=z7
 	S par("OUTPUT")=IO
-	S par("PLAN")=z3  
+ 	S par("PLAN")=z3  
 	S par("STATS")=0
 	S par("STATUS")="DQMODE,FORMAT,PROTECTION,CACHE"
 	S par("ROWS")=20
-	;
+ 	;
 	D SYSVAR I ER Q
 	;
 	D Z6PP(z6)
 	D EXEC
 	Q
 SYSVAR	;Init PBS system variables
-	; 
-	N i,list,x,y 
+        ;
+        N i,list,x,y
 	D SYSVAR^SCADRV0()			; 03/15/2000
 	;
-	S %LOGID=$$LOGID^SCADRV
-	; 
-	D ^UTLO S TLO=UTLO 
-	Q 
+       	S %LOGID=$$LOGID^SCADRV
+        ;
+        D ^UTLO S TLO=UTLO
+        Q
 Z6PP(X,opt)	;
 	I $G(opt) S RM=""
 	I X="" Q				; *** 12/16/97
@@ -814,15 +814,15 @@ ZT	; Mumps error
 	K ET,%ZTSEQ
 	Q
 UID	;
-	N PWD
-	S %TAB("%UID")=".UID1/HLP=[SCAU]UID/TBL=[SCAU]" 
-	S %TAB("PWD")=".PWD1/XPP=D PWD^SQLI" 
-	S %READ="%UID/REQ,PWD/REQ/SEC" D ^UTLREAD 
+ 	N PWD
+        S %TAB("%UID")=".UID1/HLP=[SCAU]UID/TBL=[SCAU]"
+        S %TAB("PWD")=".PWD1/XPP=D PWD^SQLI"
+        S %READ="%UID/REQ,PWD/REQ/SEC" D ^UTLREAD
 	Q
 PWD	;
-	I $$VALIDATE^SCADRV1(X) S %UCLS=$P(^SCAU(1,%UID),"|",5) Q   ;Valid password 
-	; Invalid - Re-enter 
-	S ER=1,RM=$$^MSG(8301) 
+        I $$VALIDATE^SCADRV1(X) S %UCLS=$P(^SCAU(1,%UID),"|",5) Q   ;Valid password
+        ; Invalid - Re-enter
+        S ER=1,RM=$$^MSG(8301)
 	Q
 	;
 NPC(v,ptr,del)	;private; Return Next Unquoted Piece

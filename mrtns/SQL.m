@@ -53,6 +53,87 @@ SQL(expr,par,sqlsta,sqldta,sqlcnt,sqlind,tok)	;public;SQL Interpretor
 	; I18N=QUIT: Exculded from I18N standards.
 	;----------------------------------------------------------------------
 	;---- Revision History ------------------------------------------------
+	;
+	; 2009-07-07 - Sha Mirza, CR 41831 
+	;	* Modified section CHG1ROW to handle sqlcnt issue for single
+	;	  row update/delete,sqlcnt will be set/initialized by section 
+	;	  which calls RUN method because run method checks and increment
+	;	  sqlcnt variable.
+	;	* Updated DELETE section to validate Invalid systax for DELETE.
+	;
+	; 2009-06-25 - Sha Mirza, CR 40944
+	;	* Modified section EXECUTE to check for store procedure type and
+	;	  quit after execution of update/delete store procedure
+	;	* Modified section UPDATE and DELETE to fix an issue where we receive sqlcnt 
+	;	  improperly, and also correcting the issue of success for no record update
+	;	* Modified CHG1ROW section for sqlsta to get proper status depending 
+	;	  of sqlcnt.
+	;	* Modified separated RTN logic to a function and placed a call to it 
+	;	  from RUNSP section.
+	;
+	; 2009-05-25 - Sha Mirza, CR 40607
+	;	Modified call to $$CONSTANT^SQLODBC() to match new signature.
+	;
+	; 2009-03-10 - RussellDS - CRs 35741/38658
+	;	* Modified FUNC section to not treat a call to an MRPC
+	;	  that is not from the top, i.e., a call that includes a label,
+	;	  as an MRPC call.  This fixes handling of calls such as
+	;	  SPODBC^MRPC044, etc.
+	;	* Remove restriction on EXECUTE procedure not being able to
+	;	  start with leading $$ or ^.  Need to retain for backward
+	;	  compatibility.
+	;	* Consolidated FW and FW30 versions.
+	;
+	; 11/19/2008 - RussellDS - CR35741
+	;	* Modified FUNC section to correct error in creating label_pgm
+	;	  for EXECUTE.
+	;	* Modified FUNC section to remove global references and do calls
+	;	  to SQLUTL instead to avoid problems against RDB.
+	;	* Added comments related to BLOB handling in USING section.
+	;	* Modified sections SAVE and RESTORE to call SQLUTL only when
+	;	  par("SAVECUR") is set.	
+	;
+	;
+	; 2008-10-22, Joshy Paul CR 36204
+	;	Modified SELECT section to close the cursor for a single, 
+	;	non-cursor call to prevent the memory leak in a RDB environment.
+	;
+	;	A new parameter is added to the SELECT subroutine to indicate
+	;	if called from a cursor context.
+	;
+	;	Modified OPEN section to call SELECT subroutine with the cursor 
+	;	context parameter set to 1.
+	;
+	; 2008-10-01, Frans S.C. Witte CR 35741/35918/35922
+	;	rdb^UCDBRT() replaced by $$isRdb^vRuntime().
+	;
+	; 09/22/2008 - RussellDS - CR35741/35742
+	;	Corrected handling of MRPCs in FUNC section.
+	;
+	; 06/13/2008 - RussellDS - CR30801
+	;	Add GRANT and REVOKE command support.
+	;
+	;	Add AUDIT command support.
+	;
+	;	Modified ZTSQL to handle RecordTABLE code throwing errors.
+	;
+	;	Modified DELETE and UPDATE to consider access rights.
+	;
+	;	Modified FUNC to implement security on what can be executed,
+	;	and to deal with unwrapping of MRPC response to allow proper
+	;	data return.
+	;
+	;	Modified FUNC to log EXECUTE if logging on for the function.
+	;
+	;	Removed old revision history.
+	;
+	; 03/25/08 - GIRIDHARANB - CR33055
+	;	     Modified section FUNC to add calls to SQLUTL to process
+	;	     length and sql data.
+	;
+	; 09/27/07 - Lik Kwan - CR 29465
+	;	     Modified SQL to conform to the new error handling
+	;
 	; 07/13/07 - Pete Chenard - CR 28171
 	;	     Replaced calls to $E and $L with their wrapper
 	;	     functions in SQLUTL where necessary to be unicode
@@ -75,53 +156,6 @@ SQL(expr,par,sqlsta,sqldta,sqlcnt,sqlind,tok)	;public;SQL Interpretor
 	; 02/19/07 - Pete Chenard - CR25515/25514
 	;	     Added support for NOMETA parameter in OPEN section.
 	;
-	; 09/15/06 - Pete Chenard - 20049
-	;	     Retrofit of SQL from Profile04 to keep in sunc with PSL.
-	;
-	; 03/28/06 - Allan Mattson - CR20048
-	;            Modified subroutine ODBC1 to call $$ROWS^SQLUTL to compute
-	;            the row count ($$ROWS^SQLUTL is "Unicode compliant").
-	;
-	;            Modified subroutine ODBC2 to call SQLDTA^SQLUTL to build
-	;            'sqldta' ($$SQLDTA^SQLUTL is "Unicode compliant").
-	;
-	;            Modified subroutines EXECUTE, OPEN and SELECT to replace
-	;            'Q 1' with 'Q'.
-	;
-	;            Retrofitted V6.4 changes for 1Mb string support (CR13875).
-	;
-	;            Retrofitted V6.4 changes to resolve %GTM-E-NOTEXTRINSIC
-	;            errors (CR11361).
-	;
-	;            Miscellaneous changes to improve readability and
-	;            conformance to standards.
-	;
-	;            Deleted pre-2004 revision history.
-	; 03/15/06 - RussellDS - CR20159
-	;	* Modified ZTFUNC to log error and return standard message;
-	;	* Removed code in SELECT that stripped BY from ORDER BY - this
-	;	  is handled elsewhere
-	;	* Modified rollback code in RUN section to only issue call to
-	;	  %DBAPI if RDB
-	;
-	; 01/25/06 - Pete Chenard - CR19046
-	;	* Modified CNTRL section to not add quotes.  The data should be
-	;	  quoted by the application.
-	;
-	; 08/16/05 - CHENARDP/GIRIDHARANB - CR16791
-	;	* Modified sections SELECT,FETCH,ONEROW to remove rdb related code. See 
-	;	  associated changes to SQLM.m.
-	;
-	; 07/12/05 - Pete Chenard - CR16582
-	;	     Modified FILERPAR section to include VALST.
-	;
-	; 09/28/04 - RussellDS - CR12334
-	;	     Added changes from Profile01 to move stored procedure table
-	;	     from DBTBL18 to DBTBLSP.
-	;
-	; 09/01/04 - GIRIDHARANB - CR11003
-	;	     Modifed section SELECT, FETCH and SELEF to add support for 
-	;	     a relational database.
 	;----------------------------------------------------------------------
 	N z
 	S ER=0
@@ -147,6 +181,9 @@ SQL(expr,par,sqlsta,sqldta,sqlcnt,sqlind,tok)	;public;SQL Interpretor
 	I z="ALTER" D ALTER^SQLTBL(expr) Q ER
 	I z="CLOSE" D CLOSE(expr) Q ER
 	I z="DESCRIBE" D DESCRIBE^SQLODBC(expr,.sqlsta,.sqldta,.sqlcnt) Q ER
+	I z="GRANT" D GRANT^SQLGRANT(expr,.tok,.sqlcnt) Q ER
+	I z="REVOKE" D REVOKE^SQLGRANT(expr,.tok,.sqlcnt) Q ER
+	I z="AUDIT" D AUDIT^SQLAUDIT(expr,.tok,.sqlcnt) Q ER
 	S ER=1,RM=$$^MSG(8564,z)
 	Q ER
 	;
@@ -156,52 +193,110 @@ EXECUTE(expr,par,sqlsta,sqldta,sqlcnt,sqlind,tok)	;private; Parse SQL EXECUTE co
 	;
 	; EXECUTE Procedure_Name [USING HostVar-list] | $M Function
 	;
-	S ER=0
+	S ER=0,sqlcnt=0 
 	;
 	I $G(par("EFD"))'="" N EFD S EFD=$G(par("EFD")) I EFD S EFD=$S(EFD=$G(TJD):"",1:$$FDAT^%ZM(EFD)) I ER Q
 	;
-	N USING
+	N USING,isSelect
 	S expr=$$TOK(expr,"USING",.tok)
 	;
 	I expr="" S ER=1,RM=$$^MSG(8568) Q
-	I $E(expr)="$" G FUNC				; Call M routine  EXECUTE $$^pgm(p1,p2,...)
+	;
+	; If not stored procedure, treat as direct call
+	I expr'?1"S"1.N.E D FUNC Q
 	;
 	N rows,exe,vsql
 	;
 	S rows=$G(par("ROWS")) I 'rows S rows=1
 	;
-	D RUNSP(0,expr,.par,.USING) I ER Q  		; Execute stored procedure
+	S isSelect=$$RUNSP(0,expr,.par,.USING) I ER Q  		; Execute stored procedure
+	I 'isSelect D  Q
+	.	S:sqlcnt=-1 sqlcnt=0
+	.	S sqlsta=$S(sqlcnt>0:0,1:100)		;Updating SQLstate 0:Sucess,100:No data found. 	
+	;
 	D SELEF
+	; vsql("A") ODBC prepare information
 	I $G(par("PREPARE"))=3 D COLFMT($G(vsql("A")))	; Column format attributes
 	Q
 	;
 	;--------------------------------------------------------------------
 FUNC	;private; Execute a M function or extrinsic function
 	;--------------------------------------------------------------------
-	; Example: EXECUTE $$^ABC(var)
+	; Function reference must be to MRPC or procedure name registered
+	; in SCATBL5/5A.  The function will be validated to ensure that access
+	; is allowed, with the exceptions of:
 	;
-	N hostvar
+	;	- $$KEYCOL^SQLODBC( - OK, used by JDBC driver
+	;	- $$EXTERN^LNKDISB( - OK, used by PFW (disallow when PFW gone)
+	;
+	N hostvar,isMRPC
+	;
+	S isMRPC=0
+	;
+	I '(($E(expr,1,17)="$$KEYCOL^SQLODBC(")!($E(expr,1,16)="$$EXTERN^LNKDISB")) D  Q:ER
+	.	N ignore,label,mrpc,params,pgm,procid,scatbl5a,scatbl5aCk
+	.	;
+	.	; For backward compatiblity, may start with $$ or ^ - strip these
+	.	I ($E(expr,1,2)="$$") S expr=$E(expr,3,$L(expr))
+	.	I ($E(expr,1)="^") S expr=$E(expr,2,$L(expr))
+	.	;
+	.	I expr["(" S params="("_$P(expr,"(",2,$L(expr)),expr=$P(expr,"(",1)
+	.	E  S params=""
+	.	I expr["^" S label=$P(expr,"^",1),procid=$P(expr,"^",2)
+	.	E  S label="",procid=expr
+	.	; Strip MRPC and leading zeros for SCATBL5 lookup
+	.	I $E(procid,1,4)="MRPC",label="" D
+	..		S isMRPC=1
+	..		S scatbl5aCk=$E(procid,5,$L(procid))
+	..		F  Q:$E(scatbl5aCk,1)'="0"  S scatbl5aCk=$E(scatbl5aCk,2,$L(scatbl5aCk))
+	.	E  S scatbl5aCk=procid
+	.	; Get SCATBL5A.LOGFLG - need to call SQLUTL since may be in
+	.	; RDB.  Null return means no entry for this user class, otherwise
+	.	; will return 0 or 1
+	.	S scatbl5a=$$SCATBL5A^SQLUTL(scatbl5aCk,%UCLS)
+	.	; Userclass ~p1 not authorized for this function
+	.	I scatbl5a="" S ER=1,RM=$$^MSG(2898,%UCLS)_" ["_procid_"]" Q
+	.	; Get program name
+	.	S pgm=$P($G(^DBTBL("SYSDEV",25,procid)),"|",2)
+	.	; Invalid function ~p1
+	.	I pgm="" S ER=1,RM=$$^MSG(1361,procid) Q
+	.	; Check to see if valid 24x7 if in host STF mode
+	.	I $G(%STFHOST)>0 D  Q:ER
+	..		N valid24x7
+	..		S valid24x7=$$VALID24X7^SQLUTL(scatbl5aCk)
+	..		; Access not allowed for MRPC ~p1 at this time
+	..		I 'valid24x7 S ER=1,RM=$$^MSG(3247,scatbl5aCk)
+	.	; Construct program to execute
+	.	S expr="$$"_label_"^"_pgm_params
+	.	; Log it
+	.	I scatbl5a S ignore=$$auditLog^SQLAUDIT("EXECUTE",label_$S(label'="":"^",1:"")_pgm,expr,"") 
+	;
 	I $G(par("USING"))'="" N new,setexpr D USING(par("USING"),.new,.setexpr,.hostvar) Q:ER  N @new X setexpr
 	;
 	S expr=$$UNTOK^%ZS(expr,.tok)			; Parse function
 	I expr[$C(0) S expr=$$UNTOK^%ZS(expr,.tok)
 	;
-	N $ZT						; Set up error trap
-	S @$$SET^%ZT("ZTFUNC^SQL") 		; Invalid function
+        N $ET,$ES,$ZYER S $ZYER="ZE^UCGMR",$ZE="",$EC="",$ET="N vEr S vEr=$ZE D:'+vEr LOG^UCGMR(""ZTLOG^SQL"",.vEr) S $ZE=vEr Q:$Q&$ES """" Q:$ES  D ZTFUNC^SQL"
 	;
 	D 
 	.	I $L(expr)>2000 D XINDIRECT(expr) Q	; Execute Mumps routine after reducing the size of the expression
-	.	X "S sqldta="_expr			; Execute MUMPS routine
+	.	I 'isMRPC X "S sqldta="_expr		; Execute MUMPS routine
+	.	I isMRPC D				; Unwrap MRPC data
+	..		N v,vret,vx
+	..		S expr=$P(expr,"(",1)_"(.vret,"_$P(expr,",",2,999)	; Replace data return parameter
+	..		X "S sqldta="_expr		; Execute MRPC routine
+	..		S vx=$$LV2V^MSG(vret,.v)
+	..		S sqldta=v(1)
 	S sqlcnt=1					; Row count
 	S sqlsta=100					; Status
 	I $G(par("PREPARE"))=1 D  Q			; /Prepare qualifier
 	.	N b1,b2,len,v,vpack
-	. S v=$$CONSTANT^SQLODBC(32000,"M"),len=$L(v)	; prepare information
+	.	S v=$$CONSTANT^SQLODBC("M",32000,0),len=$$BSL^SQLUTL(v)	; prepare information
 	.	S b1=len\255,b2=len#255			; prepare length
-	.	S sqldta=$C(b1,b2)_v_sqldta		; return data
+	.	S sqldta=$$BYTECHAR^SQLUTL(b1,b2)_v_sqldta	; return data
 	Q
 	;--------------------------------------------------------------------------------------------------------
-XINDIRECT(line)	;xecute function calls that are too long for indirection by moving data into variables 
+XINDIRECT(line) ;xecute function calls that are too long for indirection by moving data into variables
 	;--------------------------------------------------------------------------------------------------------
 	;
 	; This label will process execute function commands that contain data>2000. Current GTM limitations
@@ -237,15 +332,24 @@ XINDIRECT(line)	;xecute function calls that are too long for indirection by movi
 	.	X execline
 	Q	
 ZTFUNC	;
-	I $P($ZS,",",3)="%PSL-E-DBFILER" D
+	N ERR S ERR=$ZE
+	I $P(ERR,",",3)="%PSL-E-DBFILER" D
 	.	N ET
-	.	S ET=$P($ZS,",",3)
-	.	D ^UTLERR
-	E  D ZE^UTLERR
+	.	;;S ET=$P($ZS,",",3)
+	.	S ET=$P(ERR,",",3)
 	S ER=1
 	; Host error number ~p1. Contact system manager.
 	S RM=$$^MSG(1191,$G(%ZTSEQ))
 	S sqldta=""
+	S $EC="",$ZE=""
+	Q
+	;
+ZTLOG(error); Eror logger
+	;
+	I $P(error,",",3)="%PSL-E-DBFILER" D 
+	.	D ^UTLERR
+	.	S $P(error,",",1)=1
+	E  D LOGERR^UTLERR(.error)
 	Q
 	;
 	;--------------------------------------------------------------------
@@ -258,7 +362,7 @@ OPEN(expr,par,sqlsta,sqldta,sqlcnt,sqlind,tok,loc)	;public; Open a Cursor or pro
 	S ER=0
 	;
 	I $G(par("EFD"))'="" N EFD S EFD=$G(par("EFD")) I EFD S EFD=$S(EFD=$G(TJD):"",1:$$FDAT^%ZM(EFD)) I ER Q
-	; 
+        ;
 	I $G(%TOKEN)="" N %TOKEN S %TOKEN=$J
 	;
 	I $G(tok)="" S expr=$$SQL^%ZS(.expr,.tok) I ER Q
@@ -280,7 +384,7 @@ OPEN(expr,par,sqlsta,sqldta,sqlcnt,sqlind,tok,loc)	;public; Open a Cursor or pro
 	;
 	D
 	.	I command="PROCEDURE" D RUNSP(sqlcur,expr,.par,.USING) Q
-	.	I command="SELECT" D SELECT(expr,.par,.sqlsta,.sqldta,.sqlcnt,.sqlind,.tok,1,sqlcur) Q
+	.	I command="SELECT" D SELECT(expr,.par,.sqlsta,.sqldta,.sqlcnt,.sqlind,.tok,1,sqlcur,1) Q	; 10/22/08 , PaulJ, Set the cursor context
 	.	D ERROR("Invalid OPEN parameter "_command)
 	;
 	I ER Q
@@ -289,14 +393,14 @@ OPEN(expr,par,sqlsta,sqldta,sqlcnt,sqlind,tok,loc)	;public; Open a Cursor or pro
 	;
 	I $G(par("PREPARE"))=1,$G(par("ROWS")) D ODBC2 Q  ; Combination of /PREPARE and /ROWS
 	I $G(par("PREPARE"))=1 D ODBC1			; Calculate row count
-	I $G(par("PREPARE"))=3 D COLFMT(vsql("A")) ; Column format attributes
+        I $G(par("PREPARE"))=3 D COLFMT(vsql("A"))	; Column format attributes
 	I $G(par("PREPARE"))=3,$G(par("ROWS")),command'="PROCEDURE" Q	; Data already fetched
-	I '$G(par("PREPARE")),command'="PROCEDURE" Q ; OPEN cursor statement
+        I '$G(par("PREPARE")),command'="PROCEDURE" Q	; OPEN cursor statement
 	I '$G(par("ROWS")) Q  				; Do not return data
 	;
 	I $G(par("USING"))'="" N new,setexpr D USING(par("USING"),.new,.setexpr,.hostvar) Q:ER  N @new X setexpr
 	D FETCH(sqlcur,.par,.sqlsta,.sqldta,.sqlcnt,.sqlind)
-	I $G(par("PREPARE"))=3 D COLFMT(vsql("A")) Q    ; Column format attributes 
+        I $G(par("PREPARE"))=3 D COLFMT(vsql("A")) Q    ; Column format attributes
 	I $G(par("PREPARE"))=1 D ODBC2			; return data
 	Q
 ODBC1	;
@@ -346,12 +450,7 @@ SAVE(name,vsql,exe)	;private; Save context into ^SQLCUR
 	; Maximum total array size is 32K due to GTM string limit
 	; String is broken into 255 byte global strings
 	;
-	I '$D(vsql("K")) Q
-	;
-	N i,z
-	;
-	S z=$C(0,2,0,2)_$$PACK^SQLCACHE(.vsql,.exe)
-	F i=0:1 S ^SQLCUR(%TOKEN,name,i)=$$BSE^SQLUTL(z,1,255),z=$$BSE^SQLUTL(z,256,$$BSL^SQLUTL(z)) Q:z=""
+	I $D(par("SAVECUR")) D SAVE^SQLUTL(name,.vsql,.exe)
 	Q
 	;
 	;----------------------------------------------------------------------
@@ -359,17 +458,22 @@ RESTORE(name,vsql,exe)	; Restore symbol table for server fetch
 	;----------------------------------------------------------------------
 	; Restore exe and vsql arrays from ^SQLCUR(%TOKEN,object_name)
 	;
-	N i,z,zz
-	;
-	S z=$G(^SQLCUR(%TOKEN,name,0))
-	I z="" S ER=1,RM="Cursor "_name_" is not OPEN",sqlcnt=0,sqldta="" Q	; 04/20/2000
-	F i=1:1 S zz=$G(^SQLCUR(%TOKEN,name,i)) Q:zz=""  S z=z_zz
-	D UNPACK^SQLCACHE(z,.vsql,.exe)
+	I $D(par("SAVECUR")) D RESTORE^SQLUTL(name,.vsql,.exe)
 	Q
 	;
 	;--------------------------------------------------------------------
-SELECT(expr,par,sqlsta,sqldta,sqlcnt,sqlind,tok,mode,sqlcur)	;public; Parse SQL SELECT command and return executable code
+SELECT(expr,par,sqlsta,sqldta,sqlcnt,sqlind,tok,mode,sqlcur,curctxt)	;public; Parse SQL SELECT command and return executable code
 	;--------------------------------------------------------------------
+	;
+	;	. mode		Process mode
+	;				-2 - Subquery
+	;				-1 - Generate compiler code
+	;				0 - Interactive
+	;				1 - Interactive (Cursor Open)
+	;	.sqlcur		SQL cursor name
+	;	curctxt		Indicates the SQL context 
+	;				0 - Indicates a single, non cursor call
+	;				1 - Indicates a cursor open
 	;
 	N hostvar
 	S ER=0
@@ -420,24 +524,26 @@ SELEF	; Fetch rows
 	;
 	D FETCHBLK^SQLF(.sqlcur,.exe,.vsql,.sqldta,.sqlcnt,.sqlind,rows)
 	S sqlsta=$G(vsql(0))
+      I '$G(curctxt) D CLOSE^SQL(sqlcur) ; 10/22/08, PaulJ, Close the cursor for a single row fetch
 	Q
 	;
 	;--------------------------------------------------------------------
 RUNSP(sqlcur,spnam,par,using)	; Run a Stored Procedure
 	;--------------------------------------------------------------------
+	;;CR 40944: seperated RTN logic into a function 
 	;
 	I '$D(%LIBS) S %LIBS="SYSDEV"
 	I '$D(%TOKEN) S %TOKEN=$J
 	;
 	I $G(sqlcur)="" S sqlcur=0
 	;
-	N hostvar,hostvars,rtn,z,z1
+	N rFlg,hostvar,hostvars,rtn,z,z1
 	;
 	S ER=0
-	;
+        ;
 	;format will be Snnnnnnn-56000-12351 which represents rtn name-date-time
 	;
-	I $P(spnam,"-",1)?1"S".N D	
+	I $P(spnam,"-",1)?1"S"1.N D	
 	.	n datechk,timechk
 	.	S datechk=$P(spnam,"-",2)		; date
 	.	S timechk=$P(spnam,"-",3)		; time
@@ -453,12 +559,17 @@ RUNSP(sqlcur,spnam,par,using)	; Run a Stored Procedure
 	S hostvars=$P(z,"|",2)
 	I hostvars'="",$G(using)'="" N @hostvars D
 	.	N i,v
-	.	F i=1:1:$L(hostvars,",") D		; Assign host variables
+ 	.	F i=1:1:$L(hostvars,",") D		; Assign host variables
 	..		S v=$$UNTOK^%ZS($P(using,",",i),.tok)
 	..		I $E(v)="'" S v=$E(v,2,$L(v)-1)	; Remove quotes
 	..		S @$P(hostvars,",",i)=v
+	S rFlg=$$RTN(.sqlcur,.par,.z,.hostvar)      ;call to RTN function 40944 
+	Q rFlg
 	;
-RTN	; entry linetag for FLT^SQLCACHE if cache maps to a procedure
+RTN(sqlcur,par,z,hostvar)	; entry linetag for FLT^SQLCACHE if cache maps to a procedure
+	;
+	; If z(Store Procedure) is for Insert/Update/Delete stored procedure 
+	; then it returns 0 else 1 (exp: SELECT)
 	;
 	N rtn,z1
 	I $G(sqlcur)="" S sqlcur=0
@@ -467,28 +578,34 @@ RTN	; entry linetag for FLT^SQLCACHE if cache maps to a procedure
 	;
 	S rtn="^"_$P(z,"|",1)				; Run-time routine name
 	;						; 06/07/99 BC
-	I $P(z,"|",8)'="",$P(z,"|",8)'="SELECT" D  Q				; Insert/Update/Delete stored procedure
-	.	S z=rtn D EXECSP			; Execute SP
-	.	S vsql=0,vsql(0)=100,vsql("A")=""	; return status
+	I $P(z,"|",8)'="",$P(z,"|",8)'="SELECT" D  Q 0	; Insert/Update/Delete stored procedure
+	.	S z=rtn D EXECSP(z)			; Execute SP
+	.	;;S vsql=0,vsql(0)=sqlcnt,vsql("A")=""	; return status
 	;
 	S z="OPEN"_rtn_"(sqlcur,.vsql)"			; Select stored procedure
 	I $G(par("PREPARE"))=1 S z1="S vsql(""A"")=$$PREPARE"_rtn_"()"		; get ODBC/JDBC prepare information
 	I $G(par("PREPARE"))=3 S z1="S vsql(""A"")=$$PREPARE3"_rtn_"()"		; get format information (PFW/PIA)
 	;
-	D EXECSP					; Execute SP routine
+	D EXECSP(z,.z1)					; Execute SP routine
 	;
 	S exe=1
 	S exe(1)="D FETCH"_rtn_"(.sqlcur,.vsql,.vd,.vi)"
-	Q
-EXECSP	;						; Handle replication logic
-	N $ZT						; Set up error trap
-	S @$$SET^%ZT("ZSPERR^SQL") 			; for missing routine
+	Q 1
+EXECSP(z,z1)						; Handle replication logic
+	;
+	; z contains the routine name,and this function execute the SP routine(z)						
+	;
+	;;N $ZT						; Set up error trap
+	;;S @$$SET^%ZT("ZSPERR^SQL") 			; for missing routine
+	N $ET,$ES,$ZYER S $ZYER="ZE^UCGMR",$ZE="",$EC="",$ET="Q:$Q&$ES """" Q:$ES  D ZSPERR^SQL"
 	D @z
 	I $D(z1),$G(par("PREPARE")) X z1		; Prepare information form ODBC driver
 	Q
 ZSPERR	;
+	N ERR S ERR=$ZE
 	;;I $ZS'["ZLINKFILE" S ER=1,RM=$$^MSG(8573,expr) Q  ; Other run-time errors
-	I $ZS'["ZLINKFILE" S ER=1,RM=$ZS Q  		; Other run-time errors
+	;;I $ZS'["ZLINKFILE" S ER=1,RM=$ZS Q  		; Other run-time errors
+	I ERR'["ZLINKFILE" S ER=1,RM=ERR,$ZE="",$EC="" Q 
 	D BUILDONE^SQLCRE($P(expr,"-",1))		; Rebuild SP run-time routine 06/02/99
 	D @z						; Execute it again
 	Q
@@ -508,138 +625,161 @@ DELSP	; Remove bad stored procedure index files
 	S sqlsta=50001					; 
 	S ER=1,RM=$$^MSG(1454,rtn)			; Bad routine name
 	Q
-	;-------------------------------------------------------------------- 
-INSERT(expr,par,sqlsta,sqldta,sqlcnt,sqlind,tok)	;private; Parse SQL INSERT 
-	;-------------------------------------------------------------------- 
-	; 
-	; INSERT [INTO] table_name [(column_list)] VALUES (value_list) 
-	; INSERT [INTO] RECORD record_name [(column_list)] VALUES (value_list) 
-	; 
-	N hostvar
+        ;--------------------------------------------------------------------
+INSERT(expr,par,sqlsta,sqldta,sqlcnt,sqlind,tok)        ;private; Parse SQL INSERT
+        ;--------------------------------------------------------------------
+        ;
+        ; INSERT [INTO] table_name [(column_list)] VALUES (value_list)
+        ; INSERT [INTO] RECORD record_name [(column_list)] VALUES (value_list)
+        ;
+	N hostvar,vauditlogseq
 	I $G(ER) S sqlcnt=0 Q
-	S ER=0,RM="",sqlcnt=0 
-	; 
-	I $G(par("EFD"))'="" N EFD S EFD=$G(par("EFD")) I EFD S EFD=$S(EFD=$G(TJD):"",1:$$FDAT^%ZM(EFD)) I ER Q 
-	I $G(par("DEC"))'="" S (%MSKE,%MSKN)=par("DEC") ; Precision 
-	; 
-	I $G(par("USING"))'="" N new,setexpr D USING(par("USING"),.new,.setexpr,.hostvar) Q:ER  N @new X setexpr 
-	; 
-	N INTO,VALUES,X,columns,exe,fsn,i,map,table,v,values,vblob,vexe,vmemo,vsub,vdd,vsql,exe,vobj,x,z 
-	; 
-	S x=$$TOK(expr,"INTO,VALUES",.tok) 
-	; 
-	I $G(VALUES)="" D ERROR("Values Parameter Required") Q 
-	I $G(INTO)="" S INTO=x I INTO="" D ERROR("Into Parameter Required") Q 
-	; 
-	S table=$$FUN(INTO,.columns,tok) 
-	I table="" S ER=1,RM=$$^MSG(1484) Q     ; Missing table name 
-	; 
-	I $G(columns)="" S ER=1,RM=$$^MSG(1286) Q       ; Missing column name 
+        S ER=0,RM="",sqlcnt=0
+        ;
+        I $G(par("EFD"))'="" N EFD S EFD=$G(par("EFD")) I EFD S EFD=$S(EFD=$G(TJD):"",1:$$FDAT^%ZM(EFD)) I ER Q
+        I $G(par("DEC"))'="" S (%MSKE,%MSKN)=par("DEC") ; Precision
+        ;
+        I $G(par("USING"))'="" N new,setexpr D USING(par("USING"),.new,.setexpr,.hostvar) Q:ER  N @new X setexpr
+        ;
+        N INTO,VALUES,X,columns,exe,fsn,i,map,table,v,values,vblob,vexe,vmemo,vsub,vdd,vsql,exe,vobj,x,z
+        ;
+        S x=$$TOK(expr,"INTO,VALUES",.tok)
+        ;
+        I $G(VALUES)="" D ERROR("Values Parameter Required") Q
+        I $G(INTO)="" S INTO=x I INTO="" D ERROR("Into Parameter Required") Q
+        ;
+        S table=$$FUN(INTO,.columns,tok)
+        I table="" S ER=1,RM=$$^MSG(1484) Q     ; Missing table name
+        ;
+        I $G(columns)="" S ER=1,RM=$$^MSG(1286) Q       ; Missing column name
+        ;
+        ; Check if need to log for audit log, and if so, log the statement
+        S vauditlogseq=$$auditLog(table,"INSERT",expr,$G(par("using")))
 	;	
-	I $G(par("CACHE"))'=0,$G(par("USING"))'="",$$FLT^SQLCACHE(expr,.tok) D  Q 
-	.       I $G(ER) Q                      ; Missing host variable 
-	.       I $G(exe)=1 Q 		; Stored procedure
-	.	D RUN(.exe)
+        I $G(par("CACHE"))'=0,$G(par("USING"))'="",$$FLT^SQLCACHE(expr,.tok) D  Q
+        .       I $G(ER) Q                      ; Missing host variable
+        .       I $G(exe)=1 Q			; Stored procedure
+	.	D RUN(.exe,vauditlogseq)
 	.	I '$G(ER) S sqlcnt=1
 	;
 	D CACHE("INSERT",.vexe)			; Run-time M code
-	I $G(ER) Q 			; Compile error
-	D RUN(.vexe)                            ; Insert record 
-	I ER Q 				; Runtime error
-	D SAVCACHE("INSERT",.vexe)  	; Save M code in cache table
+        I $G(ER) Q				; Compile error
+        D RUN(.vexe,vauditlogseq)		; Insert record
+        I ER Q					; Runtime error
+        D SAVCACHE("INSERT",.vexe) 		; Save M code in cache table
 	S sqlcnt=1				; Record count
-	Q 
-	; 
-	;-------------------------------------------------------------------- 
-UPDATE(expr,par,sqlsta,sqldta,sqlcnt,sqlind,tok)	;private; Parse SQL UPDATE 
-	;-------------------------------------------------------------------- 
-	; 
-	; UPDATE table_name SET column_name = expression [,column_name = 
-	;        expression]... [WHERE search_condition] 
-	; 
-	N hostvar
+        Q
+        ;
+        ;--------------------------------------------------------------------
+UPDATE(expr,par,sqlsta,sqldta,sqlcnt,sqlind,tok)        ;private; Parse SQL UPDATE
+        ;--------------------------------------------------------------------
+        ;
+        ; UPDATE table_name SET column_name = expression [,column_name =
+        ;        expression]... [WHERE search_condition]
+        ;
+	N hostvar,vauditlogseq
 	I $G(ER) S sqlcnt=0 Q
-	S ER=0,RM="",sqlcnt=0 
-	; 
+        S ER=0,RM="",sqlcnt=0
+        ;
 	;1/10/00 mas create array to assure that set of par(Format) does not lose parameters
 	I $D(par)=1 D PARSPAR^%ZS(par,.par)					
-	S par("FORMAT")="" 
-	I $G(par("EFD"))'="" N EFD S EFD=$G(par("EFD")) I EFD S EFD=$S(EFD=$G(TJD):"",1:$$FDAT^%ZM(EFD)) I ER Q 
-	I $G(par("DEC"))'="" S (%MSKE,%MSKN)=par("DEC") 
-	I $G(par("USING"))'="" N new,setexpr D USING(par("USING"),.new,.setexpr,.hostvar) Q:ER  N @new X setexpr 
-	; 
-	N I,SET,VALUES,VKEY1,VKEY2,VKEY3,VKEY4,VKEY5,VKEY6,VKEY7,VKEY8,VKEY9,VKEY10,WHERE 
-	N col,exprcol,exe,fsn,i,inscols,insexpr 
-	N keys,map,ptr,qrycols,table,v,v1,val,values,vc,vcurval,vexe,vmemo,vobj,vsql,vsub,x,z,zexpr 
-	; 
-	I $G(tok)="" S expr=$$SQL^%ZS(expr,.tok) I ER Q 	; If called into UPDATE directly
+        S par("FORMAT")=""
+        I $G(par("EFD"))'="" N EFD S EFD=$G(par("EFD")) I EFD S EFD=$S(EFD=$G(TJD):"",1:$$FDAT^%ZM(EFD)) I ER Q
+        I $G(par("DEC"))'="" S (%MSKE,%MSKN)=par("DEC")
+        I $G(par("USING"))'="" N new,setexpr D USING(par("USING"),.new,.setexpr,.hostvar) Q:ER  N @new X setexpr
+        ;
+        N I,SET,VALUES,VKEY1,VKEY2,VKEY3,VKEY4,VKEY5,VKEY6,VKEY7,VKEY8,VKEY9,VKEY10,WHERE
+        N col,exprcol,exe,fsn,i,inscols,insexpr
+        N keys,map,ptr,qrycols,selfrom,selrest,selrts,table,v,v1,val,values
+        N vc,vcurval,vexe,vmemo,vobj,vsql,vsub,x,z,zexpr
+        ;
+        I $G(tok)="" S expr=$$SQL^%ZS(expr,.tok) I ER Q		; If called into UPDATE directly
 	;
-	I $G(par("CACHE"))'=0,$G(par("USING"))'="",$$FLT^SQLCACHE(expr,.tok) D  Q 
+        S table=$$RET($$TOK(expr,"SET,WHERE",.tok),.tok)	; parse SET and WHERE keywords
+        I $G(SET)="" S sqlcnt=0,ER=1,RM=$$^MSG(8564) Q          ; Nothing to update
+        ;
+        I table["""" S table=$$QSUB^%ZS(table)          	; Remove quotes from table name
+        ;
+        ; Check if need to log for audit log, and if so, log the statement
+        S vauditlogseq=$$auditLog(table,"UPDATE",expr,$G(par("using")))
+	;
+        ; See if SELECT access rights - if any, then can't use single row
+        ; update since we need to do SELECT to return any records that are
+        ; valid for update.  OPEN^SQLM will include the SELECT restrict clause,
+        ; if appropriate.
+        ; selrts - 0 = no access, 1 = unconditional access, 2 = restrict clause
+        ; Error trap in the even the RecordTABLE class does not yet exist
+        D
+        .	N $ET S $ET="S selrts=1,$EC="""""
+	.	X "S selrts=$$vselectAccess^Record"_table_"("""_$G(%UCLS)_""",.selrest,.selfrom)"
+        ;
+        I (selrts=1),$G(par("CACHE"))'=0,$G(par("USING"))'="",$$FLT^SQLCACHE(expr,.tok) D  Q
 	.	I $G(ER) Q					; Missing host variable
 	.	I $G(exe)=1 Q					; Stored procedure
-	.	D CHG1ROW("UPDATE",1)				; Update single row?
+	.	D CHG1ROW("UPDATE",1,vauditlogseq)		; Update single row?
 	;
-	S table=$$RET($$TOK(expr,"SET,WHERE",.tok),.tok) ; parse SET and WHERE keywords
-	I $G(SET)="" S sqlcnt=0,ER=1,RM=$$^MSG(8564) Q          ; Nothing to update 
-	; 
-	I table["""" S table=$$QSUB^%ZS(table)           ; Remove quotes from table name
 	;
-	I $G(WHERE)'="",$$ONEROW(table,WHERE) D CHG1ROW("UPDATE") Q		; Update single row
+	I (selrts=1),$G(WHERE)'="",$$ONEROW(table,WHERE) D CHG1ROW("UPDATE",0,vauditlogseq) Q		; Update single row
 	;
-	D fsn^SQLDD(.fsn,table) I ER Q 
-	; 09/27/99 
-	S qrycols="",keys=$P(fsn(table),"|",3) I keys'="" S qrycols=$$STRDD(keys,table,.tok) 
-	S inscols=keys 
-	;                                       ; S value(1)=$p(v,tab,1),value(2)=.... 
-	S insexpr="" F i=1:1:$L(inscols,",") D 
-	.       S insexpr=insexpr_",VKEY"_i_"=$P(v,$C(9),"_i_")" 
-	S insexpr="S "_$E(insexpr,2,$L(insexpr)) 
-	; 
-	F I=1:1:$L(SET,",") D  Q:ER 
-	.       S x=$$POP^%ZS($P(SET,",",I)) 
-	.       S col=$$RET($P(x,"=",1),.tok) 
-	.       S col=$$TRIM^%ZS(col)                   ; column name 
+        D fsn^SQLDD(.fsn,table) I ER Q
+        ; 09/27/99
+        S qrycols="",keys=$P(fsn(table),"|",3) I keys'="" S qrycols=$$STRDD(keys,table,.tok)
+        S inscols=keys
+        ;                                       ; S value(1)=$p(v,tab,1),value(2)=....
+        S insexpr="" F i=1:1:$L(inscols,",") D
+        .       S insexpr=insexpr_",VKEY"_i_"=$P(v,$C(9),"_i_")"
+        S insexpr="S "_$E(insexpr,2,$L(insexpr))
+        ;
+        F I=1:1:$L(SET,",") D  Q:ER
+        .       S x=$$POP^%ZS($P(SET,",",I))
+        .       S col=$$RET($P(x,"=",1),.tok)
+        .       S col=$$TRIM^%ZS(col)                   ; column name
 	.       I col["." S col=$P(col,".",2)		;
-	.       I inscols="" S inscols=col              ; *** 09/27/99 
-	.       E  S inscols=inscols_","_col            ; Column list 
-	.       S val=$P(x,"=",2,999) 
+        .       I inscols="" S inscols=col              ; *** 09/27/99
+        .       E  S inscols=inscols_","_col            ; Column list
+        .       S val=$P(x,"=",2,999)
 	.       S val=$$TRIM^%ZS(val)
-	.       S ptr=0 
-	.       I $E(val)=":" D  I $G(ER) Q 
+        .       S ptr=0
+        .       I $E(val)=":" D  I $G(ER) Q
 	..		I '$D(@$E(val,2,$L(val))) S ER=1,RM=$$^MSG(8592,val) Q
 	..		S exprcol=@$E(val,2,$L(val))   ; Remove : from host variable name
-	.       E  S exprcol=$$NATOM(val,.ptr,.qrycols,.tok,table) 
-	.       ; 
-	; 
-	; Remove quotes from column names 
-	S inscols=$TR(inscols,$C(34),"") 
-	; 
-	S zexpr=keys_" FROM "_table 
-	I $D(WHERE) S zexpr=zexpr_" WHERE "_WHERE 
-	; 
-	D  I ER Q 							; In cache table?
-	.       I $G(par("USING"))'="",$$FLT^SQLCACHE(zexpr,.tok,.par) Q ; Get the M code
-	.       S vsql=$$OPEN^SQLM(.exe,table,qrycols,.WHERE,,,.par,tok) I ER Q 
-	.       I $G(par("USING"))'="" S par("_sqltype")="SELECT" D SAV^SQLCACHE(zexpr,.par) S par("_sqltype")="UPDATE"
-	S sqlcnt=0 
-	; 
-	S v="" I keys'="" F i=1:1:$L(keys,",") S v=v_" AND "_$P(keys,",",i)_"=:VKEY"_i 
-	I v'="" S expr=$P(expr," WHERE ",1)_" WHERE "_$E(v,6,$L(v)) 
-	; 
+        .       E  S exprcol=$$NATOM(val,.ptr,.qrycols,.tok,table)
+        .       ;
+        ;
+        ; Remove quotes from column names
+        S inscols=$TR(inscols,$C(34),"")
+        ;
+        S zexpr=keys_" FROM "_table
+        I $D(WHERE) S zexpr=zexpr_" WHERE "_WHERE
+        ;
+        D  I ER Q								; In cache table?
+	.	; If there are SELECT access restrictions, either total or with
+	.	; a restrict clause, do not use cache since we need to call
+	.	; OPEN^SQLM to set up for this userclass
+	.	;
+        .       I (selrts=1),$G(par("USING"))'="",$$FLT^SQLCACHE(zexpr,.tok,.par) Q	; Get the M code
+        .       S vsql=$$OPEN^SQLM(.exe,table,qrycols,.WHERE,,,.par,tok) I ER Q
+	.       I (selrts=1),$G(par("USING"))'="" S par("_sqltype")="SELECT" D SAV^SQLCACHE(zexpr,.par) S par("_sqltype")="UPDATE"
+        S sqlcnt=0
+        ;
+        S v="" I keys'="" F i=1:1:$L(keys,",") S v=v_" AND "_$P(keys,",",i)_"=:VKEY"_i
+        I v'="" S expr=$P(expr," WHERE ",1)_" WHERE "_$E(v,6,$L(v))
+        ;
 	D CACHE("UPDATE",.vexe)			; Generate run-time M code
 	;
-	I $G(ER) Q 
-	; 
-	F sqlcnt=0:1 S vsql=$$^SQLF(.exe,.v) Q:vsql=0  D  I ER Q 
-	.       ; 
-	.       I keys'="" X insexpr          ; Define access keys
-	.       D RUN(.vexe) Q 
-	; 
-	S sqlsta=0 
-	D SAVCACHE("UPDATE",.vexe) 	 	; Save M code in cache table
-	Q 
+        I $G(ER) Q
+        ;
+        ; Note that sqlcnt is incremented by the code in vexe()
+        F sqlcnt=0:0 S vsql=$$^SQLF(.exe,.v) Q:vsql=0  D  I ER Q
+        .       ;
+        .       I keys'="" X insexpr         	; Define access keys
+        .       D RUN(.vexe,vauditlogseq) Q
+        ;
+        S sqlsta=0
+        D SAVCACHE("UPDATE",.vexe)		 	; Save M code in cache table
+        Q
 	;----------------------------------------------------------------------
-CHG1ROW(exprtyp,cacheflg)	; Single row update/delete 
+CHG1ROW(exprtyp,cacheflg,vauditlog) ; Single row update/delete
 	;----------------------------------------------------------------------
 	I '$G(cacheflg) D  I $G(ER) Q		; Compile SQL statement
 	.	I $D(par)=1 D PARSPAR^%ZS(par,.par)	; convert par string to par array
@@ -647,18 +787,18 @@ CHG1ROW(exprtyp,cacheflg)	; Single row update/delete
 	.	I exprtyp="UPDATE" D UPDATE^SQLCMP(expr,1,.exe,1,1) Q ; Compile run-time code
 	.	D DELETE^SQLCMP(expr,1,.exe,1) Q ; Compile run-time code
 	;
-	K sqlcnt
-	S sqlcnt=1                              ; *** EWS ***
-	D RUN(.exe) 			; Update/delete single record
-	; 
-	S sqlsta=0 
+	; K sqlcnt				; no touch to sqlcnt,case it will be set by calling section
+						; and incremented by RUN section.					
+        D RUN(.exe,vauditlogseq)		; Update/delete single record
+        ;
+        S sqlsta=$S(sqlcnt>0:0,1:100) 		; Updating SQLstate 0:Sucess,100:No data found.
 	I $G(ER) S sqlcnt=0 Q			; Record count
-	S sqlcnt=+$G(sqlcnt)
+	;; S sqlcnt=+$G(sqlcnt)			; commented because sqlcnt will be incremented by the code in vexe() 
 	I $G(cacheflg) Q			; Already cached
-	D SAVCACHE(exprtyp,.exe) 	; Save M code in cache table
-	Q 
+        D SAVCACHE(exprtyp,.exe)		; Save M code in cache table
+        Q
 	;----------------------------------------------------------------------
-CACHE(opt,exe)	; 
+CACHE(opt,exe) ;
 	;----------------------------------------------------------------------
 	N mode,vsql
 	S mode=-1					; Fetch M code only (don't execute)
@@ -666,123 +806,196 @@ CACHE(opt,exe)	;
 	; M code from cache table if available
 	; Parse it
 	S expr=expr_$C(9)_$$FILERPAR(.par)		; Run-time qualifiers
-	I opt="INSERT" D INSERT^SQLCMP(expr,1,.exe,1) Q ; Compile run-time code
-	I opt="UPDATE" D UPDATE^SQLCMP(expr,1,.exe,1) Q ; Compile run-time code
-	I opt="DELETE" D DELETE^SQLCMP(expr,1,.exe,1) Q ; Compile run-time code
+        I opt="INSERT" D INSERT^SQLCMP(expr,1,.exe,1) Q	; Compile run-time code
+        I opt="UPDATE" D UPDATE^SQLCMP(expr,1,.exe,1) Q	; Compile run-time code
+        I opt="DELETE" D DELETE^SQLCMP(expr,1,.exe,1) Q	; Compile run-time code
 	Q
+	;
 	;----------------------------------------------------------------------
-RUN(vexe)	; Execute SQL INSERT/UPDATE/DELETE statement 
+auditLog(table,operation,statement,using)	; Determine if need to log and log if so
 	;----------------------------------------------------------------------
-	; 
-	I $G(ER) Q					;5/12/2000 mas do not reset ER if one has occurred
+	; ARGUMENTS:
+	;	. table		table being operated on
+	;
+	;	. operation	INSERT, UPDATE, or DELETE
+	;
+	;	. statement	SQL statement, excluding operation
+	;
+	;	. using		Using statement
+	;
+	; RETURNS:
+	;	. $$	DBAUDITLOG.SEQ if logged
+	;		0 if no logging
+	;
+        N logseq,td
+        I '$D(^DBTBL("SYSDEV",1,table)) Q 0
+        S logseq=0
+        S td=$$getPslTbl^UCXDD(table,0)
+        I $$getLogging^UCXDD(td,0)[$$LOWER^UCGMR(operation) D
+        .	N log
+        .	X ("S log=$$logUserclass^Record"_table_"(operation)")
+        .	I log S logseq=$$auditLog^SQLAUDIT(operation,table,operation_" "_statement,using)
+        Q logseq
+        ;
+	;----------------------------------------------------------------------
+RUN(vexe,vauditlogseq)       ; Execute SQL INSERT/UPDATE/DELETE statement
+	;----------------------------------------------------------------------
+	;
+	; sqlcnt will behave as public variables and will be incremented at runtime
+	; via vexe() array execution to indicate number of fetchs/counts and finally 
+	; after vexe() execution of that instance ends,then it will be checked 
+	; for its value, if sqlcnt value is not incremented then it will be reset 
+	; to 0(which indicates no data found)
+	;
+	; sqlcnt should be set/initialized by the calling method/section.
+	;
+	; ARGUMENTS:
+	;	. vexe		executable array
+	;
+	;	. vauditlogseq	DBAUDITLOG.SEQ if statement is logged.  Used
+	;			by .save() methods to log detail, if that's
+	;			required.
+        ;
+	I $G(ER) Q
+	N vauditLogSeq
 	K RM
-	TStart *                                        ; Start TP 
-	N $ZT 		                        ;
-	S @$$SET^%ZT("ZTSQL^SQL")                       ; Define error trap 
-	; 
+        TStart *                                        ; Start TP
+        ;
+        N $ET,$ES,$ZYER S $ZYER="ZE^UCGMR",$ZE="",$EC="",$ET="N vEr S vEr=$ZE D:'+vEr LOG^UCGMR(""LOGERR^UTLERR"",.vEr) S $ZE=vEr Q:$Q&$ES """" Q:$ES  D ZTSQL^SQL"
+        ;
 	; vexe(n)	- M run-time procedure code
 	;		- rely on first entry for New list
-	N vvz,v,vfsn 
+        N vvz,v,vfsn
 	S ER=0
 	S v=$O(vexe("")) I v,$E(vexe(v),1,3)=" N " N @$E(vexe(v),4,$L(vexe(v)))	; New variables,short name
 	;
-	S vvz="" F  S vvz=$O(vexe(vvz)) Q:vvz=""  X vexe(vvz) Q:$G(ER) 
+        S vvz="" S:sqlcnt<1 sqlcnt=0 F  S vvz=$O(vexe(vvz)) Q:vvz=""  X vexe(vvz) Q:$G(ER)  I sqlcnt=-1 S sqlcnt=0 Q
 	;
-	I '$Tlevel Q 				; Not under TP
-	I $G(ER) D  Q 
+        I '$Tlevel Q					; Not under TP
+        I $G(ER) D  Q
 	.	Trollback
-	.	I $$rdb^UCDBRT() D
+	.	I $$isRdb^vRuntime() D
+	..		N vER,vRM
 	..		S vER=$$EXECUTE^%DBAPI("","ROLLBACK WORK",$C(124),"",.vRM)
 	..		I vER S ER=vER,RM=vRM_"|"_RM	; Rollback transaction
 	; Only commit if at outermost fence
-	I $$rdb^UCDBRT(),$TLevel=1 S ER=$$COMMIT^%DBAPI()	; Commit transaction
-	TCommit 
-	Q 
-ZTSQL	; 
-	D ZE^UTLERR 				; Log error
-	I '$D(RM) S ET=$$ETLOC^%ZT 
-	Q 
-	; 
-	;-------------------------------------------------------------------- 
-DELETE(expr,par,sqlsta,sqldta,sqlcnt,sqlind,tok)	;private; Parse SQL DELETE 
-	;-------------------------------------------------------------------- 
-	; 
-	; DELETE [FROM] table_name [WHERE search_condition] 
-	N hostvar
-	; 
+	I $$isRdb^vRuntime(),$TLevel=1 S ER=$$COMMIT^%DBAPI()	; Commit transaction
+        TCommit
+        Q
+ZTSQL   ;
+	S ER=1
+        I '$D(RM) S RM=$P($ZE,",",4)
+        S $ZE="",$EC=""
+        I $Tlevel D
+        .	Trollback
+	.	I $$rdb^UCDBRT() D
+	..		N vER,vRM
+	..		S vER=$$EXECUTE^%DBAPI("","ROLLBACK WORK",$C(124),"",.vRM)
+	..		I vER S RM=vRM_"|"_RM	; Rollback transaction
+        Q
+        ;
+        ;--------------------------------------------------------------------
+DELETE(expr,par,sqlsta,sqldta,sqlcnt,sqlind,tok)        ;private; Parse SQL DELETE
+        ;--------------------------------------------------------------------
+        ;
+        ; DELETE [FROM] table_name [WHERE search_condition]
+	N hostvar,vauditlogseq
+        ;
 	I $G(ER) S sqlcnt=0 Q
-	S ER=0,RM="",sqlcnt=0 
-	; 
-	N FROM,WHERE,VKEY1,VKEY2,VKEY3,VKEY4,VKEY5,VKEY6,VKEY7,X 
-	N delexpr,exe,fsn,i,keys,map,mode,qrykeys,table,v,vdd,vexe,vexpr,vsql,z,zexpr 
-	; 
+        S ER=0,RM="",sqlcnt=0
+        ;
+        N FROM,WHERE,VKEY1,VKEY2,VKEY3,VKEY4,VKEY5,VKEY6,VKEY7,X
+        N delexpr,exe,fsn,i,keys,map,mode,qrykeys,selfrom,selrest,selrts
+        N table,v,vdd,vexe,vexpr,vsql,z,zexpr
+        ;
 	I $G(tok)="" S expr=$$SQL^%ZS(expr,.tok) I ER Q		; If called by P/A routines directly
 	;
 	; 05/06/04, FSCW: commented out (to obtain symmetry with UPDATE)
 	;S mode=-1
 	;
-	I $G(par("EFD"))'="" N EFD S EFD=$G(par("EFD")) I EFD S EFD=$S(EFD=$G(TJD):"",1:$$FDAT^%ZM(EFD)) I ER Q 
-	; 
-	I $G(par("USING"))'="" N new,setexpr D USING(par("USING"),.new,.setexpr,.hostvar) Q:ER  N @new X setexpr 
-	; 
-	I $G(par("CACHE"))'=0,$G(par("USING"))'="",$$FLT^SQLCACHE(expr,.tok) D  Q 
+        I $G(par("EFD"))'="" N EFD S EFD=$G(par("EFD")) I EFD S EFD=$S(EFD=$G(TJD):"",1:$$FDAT^%ZM(EFD)) I ER Q
+        ;
+        I $G(par("USING"))'="" N new,setexpr D USING(par("USING"),.new,.setexpr,.hostvar) Q:ER  N @new X setexpr
+        ;
+        S X=$$TOK(expr,"FROM,WHERE",.tok)
+        ;
+        I $G(FROM)]"",X'="" D ERROR("Invalid syntax DELETE "_X_" FROM "_FROM) Q
+        I $G(FROM)="" S FROM=X I FROM="" D ERROR("FROM Parameter Required") Q
+        ;
+        S table=$$FUN(FROM,,tok)
+        I table["""" S table=$$QSUB^%ZS(table)
+        ;
+        ; Check if need to log for audit log, and if so, log the statement
+        S vauditlogseq=$$auditLog(table,"DELETE",expr,$G(par("using")))
+        ;
+        ; See if SELECT access rights - if any, then can't use single row
+        ; delete since we need to do SELECT to return any records that are
+        ; valid for delete.  OPEN^SQLM will include the SELECT restrict clause,
+        ; if appropriate.
+        ; selrts - 0 = no access, 1 = unconditional access, 2 = restrict clause
+        ; Error trap in the even the RecordTABLE class does not yet exist
+        D
+        .	N $ET S $ET="S selrts=1,$EC="""""
+	.	X "S selrts=$$vselectAccess^Record"_table_"("""_$G(%UCLS)_""",.selrest,.selfrom)"
+        ;
+        I (selrts=1),$G(par("CACHE"))'=0,$G(par("USING"))'="",$$FLT^SQLCACHE(expr,.tok) D  Q
 	.	I $G(ER) Q
 	.	I $g(exe)=1 Q				; Stored procedure
-	.	D CHG1ROW("DELETE",1) Q			; Delete single row?
+	.	D CHG1ROW("DELETE",1,vauditlogseq) Q	; Delete single row?
 	;
-	S X=$$TOK(expr,"FROM,WHERE",.tok) 
-	; 
-	I $G(FROM)="" S FROM=X I FROM="" D ERROR("FROM Parameter Required") Q 
-	; 
-	S table=$$FUN(FROM,,tok) 
-	I table["""" S table=$$QSUB^%ZS(table) 
-	; 
+        ;
 	I '$D(WHERE),$P($P(expr,table,2,99)," ",3)'="" S ER=1,RM=$$^MSG(8564,"DELETE "_expr) Q
 	;
 	; abv - 6/18/03
 	; Invalid WHERE statement ~p1
 	I $D(WHERE),WHERE="" S ER=1,RM=$$^MSG(1507,WHERE) Q	; abv-6/18/03
 	;
-	D fsn^SQLDD(.fsn,table) I ER Q 
-	; 
-	I $$ONEROW(table,$G(WHERE)) D CHG1ROW("DELETE") Q	; Delete single row
+        D fsn^SQLDD(.fsn,table) I ER Q
+        ;
+	I (selrts=1),$$ONEROW(table,$G(WHERE)) D CHG1ROW("DELETE",0,vauditlogseq) Q	; Delete single row
 	;
-	S keys=$P(fsn(table),"|",3),qrykeys=$$STRDD(keys,table,.tok) 
-	; 
-	; Return internal data format 
-	S par("FORMAT")="" 
-	; 
+        S keys=$P(fsn(table),"|",3),qrykeys=$$STRDD(keys,table,.tok)
+        ;
+        ; Return internal data format
+        S par("FORMAT")=""
+        ;
 	S zexpr=keys_" FROM "_table
 	I $D(WHERE) S zexpr=zexpr_" WHERE "_WHERE
 	;
 	D  I ER Q
 	.	;
+	.	; If there are SELECT access restrictions, either total or with
+	.	; a restrict clause, do not use cache since we need to call
+	.	; OPEN^SQLM to set up for this userclass
+	.	;
 	.	; 05/06/04, FSCW: modified to behave excactly as in UPDATE()
-	. ;I $G(par("USING"))'="",$$FLT^SQLCACHE(zexpr,.tok,.par) S vsql=$$RESULT^SQLM Q	; In cache table  pc 5/23/01
-	. I $G(par("USING"))'="",$$FLT^SQLCACHE(zexpr,.tok,.par) Q	;OPENed by cache
-	. S vsql=$$OPEN^SQLM(.exe,table,qrykeys,.WHERE,,,.par,tok) I ER Q
-	. ;
-	. ; 05/06/04, FSCW: mark WHERE-part as SELECT when saving it in cache
-	.	I $G(par("USING"))'="" S par("_sqltype")="SELECT" D SAV^SQLCACHE(zexpr,.par) S par("_sqltype")="DELETE"
-	; 
-	S v="",delexpr="" 
-	F i=1:1:$L(keys,",") D 
-	.       I i>1 S v=v_" AND " 
-	.       S v=v_$P(keys,",",i)_"=:VKEY"_i ; Assign key to :VKEYn 
-	.       S delexpr=delexpr_",VKEY"_i_"=$P(v,$C(9),"_i_")" 
-	I v'="" D 
-	.       S expr=$P(expr," WHERE ",1)_" WHERE "_v 
-	.       S delexpr="S "_$e(delexpr,2,$L(delexpr)) 
-	; 
+        .	;I $G(par("USING"))'="",$$FLT^SQLCACHE(zexpr,.tok,.par) S vsql=$$RESULT^SQLM Q	; In cache table  pc 5/23/01
+        .	I (selrts=1),$G(par("USING"))'="",$$FLT^SQLCACHE(zexpr,.tok,.par) Q	;OPENed by cache
+        .	S vsql=$$OPEN^SQLM(.exe,table,qrykeys,.WHERE,,,.par,tok) I ER Q
+        .	;
+        .	; 05/06/04, FSCW: mark WHERE-part as SELECT when saving it in cache
+	.	I (selrts=1),$G(par("USING"))'="" S par("_sqltype")="SELECT" D SAV^SQLCACHE(zexpr,.par) S par("_sqltype")="DELETE"
+        ;
+        S v="",delexpr=""
+        F i=1:1:$L(keys,",") D
+        .       I i>1 S v=v_" AND "
+        .       S v=v_$P(keys,",",i)_"=:VKEY"_i ; Assign key to :VKEYn
+        .       S delexpr=delexpr_",VKEY"_i_"=$P(v,$C(9),"_i_")"
+        I v'="" D
+        .       S expr=$P(expr," WHERE ",1)_" WHERE "_v
+        .       S delexpr="S "_$e(delexpr,2,$L(delexpr))
+        ;
 	D CACHE("DELETE",.vexe)
 	I $G(ER) Q
-	; 
-	F sqlcnt=0:1 S vsql=$$^SQLF(.exe,.v) Q:vsql=0  D 
-	.       I delexpr'="" X delexpr         ; Define VKEYn variables 
-	.       D RUN(.vexe)                    ; Delete a single record 
-	S sqlsta=$G(vsql(0)) 
-	D SAVCACHE("DELETE",.vexe) 	; Save M code in cache table
-	Q 
+        ;
+	; Note that sqlcnt is incremented by the code in vexe()
+	F sqlcnt=0:0 S vsql=$$^SQLF(.exe,.v) Q:vsql=0  D
+        .       I delexpr'="" X delexpr         ; Define VKEYn variables
+        .       D RUN(.vexe,vauditlogseq)      ; Delete a single record
+        ;; S sqlsta=$G(vsql(0))			
+        S sqlsta=$S(sqlcnt>0:0,1:100) 		; sqlsta: Status code 
+        D SAVCACHE("DELETE",.vexe)		; Save M code in cache table
+        Q
 	;--------------------------------------------------------------------
 DROP(expr,par,sqlsta,sqldta,sqlcnt,sqlind,tok)	; Parse the DROP statement 
 	;--------------------------------------------------------------------
@@ -950,6 +1163,18 @@ USING(expr,new,setexpr,hostvar)	; Define host variables
 	;            code     = S A="abc,xyz",B=12,C="SMITH"
 	;
 	;----------------------------------------------------------------------
+	; Because we may tokenize a USING clause, it cannot contain a $C(0).
+	; This also has implications for BLOBs, since a BLOB is an arbitrary
+	; collection of bytes, which could include $C(0) as well as non-valid
+	; UTF-8 characters, if viewed as a string.  To avoid these issues,
+	; a client sending BLOB data should encode it in a manner that ensures
+	; that all bytes have values between 1 and 127.  A base64 encoding
+	; mechanism is a good approach as it will produce only printable
+	; ASCII 7-bit characters.  Alternatively, a client that knows it does
+	; not have to deal with a UTF-8 environment can encode using any 8-bit
+	; character other than 0.  And, if known to be in UTF-8, can use any
+	; valid bytes making up valid UTF-8 characters, so long as no byte has
+	; a value of 0.
 	I expr[$C(0) S ER=1,RM=$$^MSG(1477,$G(par)) Q 	; Invalid /USING syntax
 	;
 	N i,tok,vptr,v,val,var
@@ -1006,18 +1231,19 @@ CLOSE(expr)	; Close cursor
 	I sqlcur="CURSOR" S sqlcur=$P(expr," ",2)	; Skip keyword CURSOR
 	D CLOSE^SQLM(sqlcur)
 	Q
+	;
 	;----------------------------------------------------------------------
-SAVCACHE(opt,exe)	; Save INSERT/UPDATE/DELETE logic in cache table 
+SAVCACHE(opt,exe)  ; Save INSERT/UPDATE/DELETE logic in cache table
 	;----------------------------------------------------------------------
-	N vsql 
+        N vsql
 	I $G(ER) Q
 	I $G(exe) Q				; Don't cache it (memo/blob columns referenced)
 	I '$D(par("USING")) Q			; Host variable not defined
 	I $G(par("CACHE"))=0 Q			; Option disabled
-	S expr=$$UNTOK^%ZS(expr,.tok)  	; Save M code in cache table
+        S expr=$$UNTOK^%ZS(expr,.tok)	 	; Save M code in cache table
 	S expr=$P(expr,$C(9),1)			; Don't save qualifiers
-	D SAV^SQLCACHE(expr) 	
-	Q 
+        D SAV^SQLCACHE(expr)		
+        Q
 	;----------------------------------------------------------------------
 ONEROW(fid,whr)	; Update/Delete single row?
 	;----------------------------------------------------------------------
@@ -1055,10 +1281,10 @@ ONEROW(fid,whr)	; Update/Delete single row?
 	I $O(keys(""))'="" Q 0			; Not all access keys referenced
 	Q 1
 	;----------------------------------------------------------------------
-FILERPAR(par)	; Valid filer qualifiers 
+FILERPAR(par) ; Valid filer qualifiers
 	;----------------------------------------------------------------------
 	N i,name,zpar
-	S zpar=""
+	S zpar=$$initPar^UCUTILN
 	S i="" F  S i=$O(par(i)) Q:i=""  D
 	.	I ",VALST,VALDD,VALREQ,VALRI,UPDATE,INDEX,JOURNAL,TRIGBEF,TRIGAFT,SAVEUX,CASDEL,NOFKCHK,"'[(","_i_",") Q
 	.	S name=$S(i="NOFKCHK":i,$E(i,1,2)="NO":$E(i,3,20),1:i) 			;1/10/00 mas
@@ -1066,6 +1292,6 @@ FILERPAR(par)	; Valid filer qualifiers
 	.	S zpar=zpar_"/"_name
 	Q zpar
 	;
-COLFMT(v)	; 
+COLFMT(v) ;
 	S $P(sqlind,$C(0),2)=v			; Column format (PIA/PFW)
 	Q

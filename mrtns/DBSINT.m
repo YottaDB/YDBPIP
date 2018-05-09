@@ -76,7 +76,7 @@ DBSINT(str,tbl,int,ed,cd,ad,qd,vd)	;public;Command Interpreter
 	; RM(2)="                   ^----NOTNEGATABLE"
 	; RM(3)="                           ^------INVALID_COMMAND"
 	;
-	; I18N=QUIT: Exclude from I18N standards 
+        ; I18N=QUIT: Exclude from I18N standards
 	;---------- Revision History -------------------------------------------
 	; 08/30/06 - RussellDS - CR22720
 	;	     Replaced call to $$UPPER^SCAUTL with $$UPPER^UCGMR to

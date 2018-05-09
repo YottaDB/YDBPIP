@@ -6,7 +6,7 @@ DBSSCR5	; DBS - U - V5.0 - Screen compiler, page #2
 	;    INPUT:             X = (BAL,IRN) OR (BAL-,IRN-)
 	;           %NAMCUR(DINAM)= LLTT
 	;   OUTPUT:
-	; I18N=QUIT: Exculded from I18N standards. 
+        ; I18N=QUIT: Exculded from I18N standards.
 	;
 	;---------- Revision History -------------------------------------------
 	;

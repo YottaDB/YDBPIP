@@ -72,7 +72,7 @@ OPEN(exe,frm,sel,Q,oby,join,fmt,tmo,mat,buf,vdd,prot)	;public; Open a MUMPS data
 	;	. RM		Error message
 	;
 	; EXAMPLE:
-	;
+ 	;
 	;  S Q(1,1)=$C(1)_"SYSDEV.DEP.BAL"_$C(1)_"|100||>||$"   ; DQ query
 	;                     or
 	;  Q="DEP.BAL>100"					; SQL
@@ -88,7 +88,7 @@ OPEN(exe,frm,sel,Q,oby,join,fmt,tmo,mat,buf,vdd,prot)	;public; Open a MUMPS data
 	;
 	S ER=0
 	;
-	K vsql,exe
+  	K vsql,exe
 	N fid,whr,par,token,z
 	;
 	S oby=$G(oby),sel=$G(sel)
@@ -125,7 +125,7 @@ CODE(glvn,key,klvl,exe,vxp,num,qua,tmo)	; Return Collating code for this key
 	S tmo=$G(tmo)
 	;
 	S dsc=0
-	I $G(qua)'="" S qua=$$UPPER^%ZFUNC(qua) F I=1:1:$L(qua,"/") D
+	I $G(qua)'="" S qua=$$UPPER^UCGMR(qua) F I=1:1:$L(qua,"/") D
 	.	;
 	.	S z=$P(qua,"/",I) I z="" Q
 	.	I $E("DESCENDING",1,$L(z))=z S dsc=1 Q
@@ -191,7 +191,7 @@ FETCH(exe,vd,vi,sqlcur)	;public; Fetch Next Record in Results Table
 	I vsql(0)=100 Q 0			; End of table
 	;
 	F  X exe(vsql) S vsql=vsql+1 Q:vsql=0!(vsql>exe)
-	I vsql=0 S vsql(0)=100,vd="" Q 0
+ 	I vsql=0 S vsql(0)=100,vd="" Q 0
 	S vi=$G(vi)				; Protection indicator
 	Q vsql(0)				; Return status
 	;
@@ -227,7 +227,7 @@ CLOSE(sqlcur)	; Public ; Close a cursor
 	D CLOSE^SQLM(sqlcur)
 	Q
 	;----------------------------------------------------------------------
-HOSTVAR(where)	; Validate and substitute lowercase host variable name 
+HOSTVAR(where) ; Validate and substitute lowercase host variable name
 	;----------------------------------------------------------------------
 	; Example:  S abc=100 W $$HOSTVAR("CID=:abc") returns CID='100'
 	;----------------------------------------------------------------------

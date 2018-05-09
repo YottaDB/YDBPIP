@@ -3,7 +3,7 @@ DBSPNTP	;; -  - V4.0 ; Format routine for PC mode
 	;     ORIG:  Robert Chiang
 	;     DESC:  Print driver for PC
 	;
-	; I18N=QUIT: Exculded from I18N standards. 
+        ; I18N=QUIT: Exculded from I18N standards.
 	;
 START	S VOZ=$C(17)
 	D VTDISP

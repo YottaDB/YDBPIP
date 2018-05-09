@@ -19,29 +19,11 @@ DBSMACRO(expr)	;;DBS - UTL - V5.0 - Data Qwik Macro Command Interpretor
 	;	UNPROT  expr			ALL | ddref
 	;I18N=OFF
 	;---- Revision History -------------------------------------------------
-	; 07/31/06 - Pete Chenard - CR22438
-	;	     Corrected parameters passed to CUP^%TRMVT. 
-	;	     Replaced occurances of $A with $$BSASCII^SQLUTL
+	; 09/26/2008 - RussellDS - CR34099
+	;	Fix problem in DISPLAY with use of incorrect variable name.
+	;	Cannot protect NI - it's valid public scope.
 	;
-	; 04/26/06 - Allan Mattson - CR20048
-	;            Modified function $$CUP to call $$CUP^%TRMVT in order to
-	;            resolve problems with terminal emulation in a Unicode
-	;            environment.
-	;
-	;            Deleted pre-2006 revision history.
-	;
-	; 04/14/06 - Pete Chenard CR19883
-	;	     Corrects problem in RETVAL section to use current screen
-	;	     object.
-	;
-	; 02/22/06 - Pete Chenard CR19551
-	;	     Modified DISPAY and DEFAULT sections to use $G around 
-	;	     value parameter, as it is not required and may not be 
-	;	     passed in.
-	;
-	; 01/26/06 - Pete Chenard - CR19036
-	;	     Fixed error in SETVAL and RETVAL sections when reading from
-	;	     or writing to a variable (as opposed to an actual column).
+	;	Removed old revision history.
 	;-----------------------------------------------------------------------
 	;
 	N tree,CMD
@@ -179,11 +161,11 @@ DISPLAY(ddref,value,chgonly)	; Display a value on screen
 	;
 	I $E("ALL",1,$L(ddref))=ddref S vdsp=2 D VDA^@PGM,^DBSPNT(0,2) Q
 	;
-	N NI S NI=$$TAB(ddref) I 'NI Q		; Not on the current screen
+	N ni S ni=$$TAB(ddref) I 'ni Q		; Not on the current screen
 	;
-	I value'="" D DSP(value,NI) Q		; .DISPLAY. [DIF]DI=v
+	I value'="" D DSP(value,ni) Q		; .DISPLAY. [DIF]DI=v
 	;
-	D DSP($$RETVAL(ddref),NI) Q		; .DISPLAY. [FID]DI
+	D DSP($$RETVAL(ddref),ni) Q		; .DISPLAY. [FID]DI
 	Q
 	;
 	;----------------------------------------------------------------------
@@ -281,10 +263,10 @@ VTAB	; Build table cross reference	vtab(tag)=ni
 	.	;
 	.	S p2=$P(X,"|",2),p3=$P(X,"|",3)
 	.	I p3?1"[*]@"1E.E D  Q                   ; [*]@TAG
-	..           S z=$P(p3,"]",2,9)                 ; *** 01/31/97 
-	..           I '$D(vtab(z)) S vtab(z)=ni Q 
-	..           S vtab(z)=vtab(z)_"|"_ni Q  ; 
-	.       ; 
+        ..           S z=$P(p3,"]",2,9)                 ; *** 01/31/97
+        ..           I '$D(vtab(z)) S vtab(z)=ni Q
+        ..           S vtab(z)=vtab(z)_"|"_ni Q  ;
+        .       ;
 	.	S tbl=$P(p3,"]",1),col=$P(p3,"]",2)
 	.	I col="" Q
 	.	I $E(tbl)="[" S tbl=$E(tbl,2,999) 
@@ -364,6 +346,8 @@ SETVAL(ref,value)	; Set Value into @ref
 	I '$D(vtab) D VTAB				; %TAB()/NI index table
 	;
 	I "[@"[$E(ref) S ref=$$REFCNV(ref)		; Internal reference
+	N ni S ni=$$TAB(ref)
+	I $E($G(%TAB(ni)),6)="L" S value=+value		; Force 0 or 1 for logicals
 	;
 	I '$D(vtab(ref)),$E(ref)="@" DO  Q		; Not defined on current
 	.	; Invalid macro command tag name ~p1
@@ -380,8 +364,8 @@ SETVAL(ref,value)	; Set Value into @ref
 	...			S FID=$P(ref,".",1)
 	..		Q:FID=""!(DI="")
 	..		I '$D(fsn(FID)) D fsn^DBSDD(.fsn,FID)
-	.. 	S Z="vSET^"_PGM_"(FID,DI,value)"
-	.. 	D @Z
+        ..		S Z="vSET^"_PGM_"(FID,DI,value)"
+        ..		D @Z
 	.	E  D SETVAL^DBSDD(ref,value,"","","","",$G(z1))
 	;
 	I '$G(%TAB),$G(vkeyb),$G(vtab(ref)) D			; Patch into <PF1><REMOVE>
@@ -419,7 +403,7 @@ SETVAL(ref,value)	; Set Value into @ref
 RETVAL(ref)	; Return Value for ref
 	;----------------------------------------------------------------------
 	;
-	N zzz
+	N V,zzz
 	S ER=0
 	I '$D(vtab) D VTAB
 	;
@@ -430,8 +414,8 @@ RETVAL(ref)	; Return Value for ref
 	I '$D(vtab(ref)) Q $$RETVAL^DBSDD(.ref)		; Get it from disk
 	;
 	I $E(ref)'="@",$G(vPSL),$G(PGM)'="UTLREAD" DO  Q V  ; DQ screen PSL
-	.	N DI,FID,ni,Z
-	.	S ni=$$TAB(ref)
+ 	.	N DI,FID,ni,Z
+ 	.	S ni=$$TAB(ref)
 	.	S Z=$$TAB^DBSCRT8(ni)
 	.	S DI=$P(Z,"|",3)
 	.	S DI=$P(DI,"]",2)
@@ -515,4 +499,4 @@ FMTABLE(DDREF)	; Return File Maintenance Description Table
 	D fsn^SQLDD(.fsn,TBLFID)
 	;
 	; [TABLE] and Keys(nolits) (ex. [STBLIACM]IACM)
-	Q $P(FMTABLE,"]",1)_"]"_$P(fsn(TBLFID),"|",3)
+	Q "["_TBLFID_"]"_$P(fsn(TBLFID),"|",3)

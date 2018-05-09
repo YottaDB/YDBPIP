@@ -1,0 +1,222 @@
+private DBSITEM(List TABLES,		// Tables to use
+		List ITEMS,		// Elements [*]
+		String DBSATT())	// Attribute array [*]	/MECH=REFARR:RW
+			
+		 
+	/*
+	Create column attributes array
+	
+	Called by ^DBSEXEQ and ^DBSRWQR
+		    
+	ARGUMENT NOTES:
+		. ITEMS		Elements (columns, variables)
+				CID,BAL,TAXID,AGE,BAL*IRN/36500@Interest,IRN
+		. DBSATT	Attributes
+				DBSATT(seq)=data item|heading|indent|size|format|Function
+
+			            DBSATT(1)= CID   | Account@Number  | 2 | 12 | N |
+			                  (2)= BAL   | Account@Balance | 2 | 12 | E | SUM
+			                  (3)= TAXID | Tax Id          | 2 | 11 | T |
+			                  (4)= AGE   | Age             | 2 | 3  | N |
+			                  (5)= BAL*IRN/36500 |Interest | 2 | 12 | E | SUM
+			                  (6)= IRN   | Interest@Rate   | 2 | 8  | $5|
+		
+	RETURNS:
+		. $$		Error message		/TYP=T
+				Null if no error
+	
+	---- Revision History -------------------------------------------------
+	11/30/06 - RussellDS - CR35918
+		   Converted to PSL.
+		   
+		   Note that parameters HDROPT and REPTYPE are no longer used
+		   and were removed.
+
+	-----------------------------------------------------------------------
+	*/
+	
+	type Boolean isCNTFUN
+	type Number i, j, pos, userind
+	type String return
+	
+	set return = ""
+	
+	if (ITEMS.count() = 0) quit ""
+	
+	if ITEMS.elementAt(1).beginsWith("@") quit ""
+	
+	if (TABLES.count() = 0) do { quit return
+		
+		// Invalid file name - ~p1
+		set return = $$^MSG(1337)
+	}
+	
+	for i = 1:1:TABLES.count() do { quit:'return.isNull()
+		
+		type String table = TABLES.elementAt(i)
+		
+		if 'Db.isDefined("DBTBL1", "%LIBS='SYSDEV' AND FID=:table") do {
+		
+			// Invalid file name - ~p1
+			set return = $$^MSG(1337, table)
+		}
+	}
+	
+	quit:'return.isNull() return
+	
+	set pos = 1
+	set isCNTFUN = 0
+	set userind = 0
+	
+	// Note - even if get an error on an item, keep going, just ignore it
+	// but return message in return (matches old code)
+	for i = 1:1:ITEMS.count() do {
+		
+		type Boolean isER
+		type Number dec, indent, len, seq
+		type String column, fmt, fun, hdr, item, table, userhdr
+		
+		set item = ITEMS.elementAt(i)
+		
+		quit:item.isNumber()
+		
+		set seq = DBSATT("").order(-1) + 1
+		set isER = 0
+		set (column, fun, hdr) = ""
+		
+		// Allow ,, for spacing
+		if item.isNull() do { quit
+			
+			set userind = userind + 2
+		}
+		
+		// Text
+		if item.beginsWith(""""), item.endsWith("""") do { quit
+			
+			type Number indent, len
+			
+			set len = item.length() - 1
+			
+			if (seq = 1) set indent = 0
+			else  set indent = 2
+			
+			set DBSATT(seq) = item_"||"_indent_"|"_len_"|T"
+			set pos = pos + 2 + len
+		}
+	
+		// item@user_heading is valid syntax
+		if (item ? 1E.E1"@"1E.E) do {
+			
+			set userhdr = item.piece("@", 2)
+			set item = item.piece("@", 1)
+		}
+		
+		if (item ? 1"["1E.E1"]"1E.E) do {
+			
+			set table = item.piece("[", 2).piece("]", 1)
+			set column = item.piece("]", 2)
+			if column.endsWith("-") set column = column.extract(1, column.length() - 1)
+		}
+		else  do { quit:isER
+			
+			type Boolean isFOUND = 0
+			type Number I
+			
+			for I = 1:1:TABLES.count() do { quit:isFOUND
+				
+				set table = TABLES.elementAt(I)
+				
+				type ResultSet rs = Db.select("DI", "DBTBL1D", "%LIBS='SYSDEV' AND FID=:table AND DI=:item")
+				
+				if rs.next() do {
+					
+					set isFOUND = 1
+					set column = item
+				}
+			}
+			
+			if 'isFOUND do {
+			
+				if ((item ? 1"%".AN) ! (item ? 1A.AN)) do {
+			
+					// Invalid data item - ~p1
+					set return = return_"; "_$$^MSG(1298, item)
+					set isER = 1
+				}
+				// Expression, not column
+				else  do {
+			
+					type String retval
+					
+					set retval = $$FIXFMT^DBSEXEQ(item, TABLES, .len, .dec, .fmt)
+				
+					if retval.isNull() do {
+					
+						set len = 1
+						set dec = 0
+						set fmt = "T"
+						// Invalid data item
+						set userhdr = $$^MSG(1298)
+					}
+				}
+			}
+		}
+			
+		if 'column.isNull() do {
+			
+			type ResultSet rs = Db.select("LEN,TYP,DEC,SIZ,DES,RHD", "DBTBL1D", "%LIBS='SYSDEV' AND FID=:table AND DI=:column")
+			
+			if rs.next() do {
+				set len = rs.getCol("LEN")
+				if (len > 132), (rs.getCol("SIZ") > 0) set len = rs.getCol("SIZ")
+				set dec = rs.getCol("DEC")
+				set fmt = rs.getCol("TYP")
+				set hdr = rs.getCol("RHD")
+				if hdr.isNull() set hdr = rs.getCol("DES")
+			}
+		}
+		
+		if userhdr.exists() set hdr = userhdr
+		
+		if ((fmt = "U") ! (fmt = "F")) set fmt = "T"
+		
+		if (fmt = "$") do {
+			
+			set fmt = "E"
+			set len = len + 2
+			set fun = "SUM"
+		}
+		else  if (fmt = "N"), (dec > 0) set fmt = "RD"_dec
+		
+		set indent = 2
+		if (userind > 0) do {
+			
+			set indent = indent + userind
+			set userind = 0
+		}
+		
+		set hdr = hdr.extract(1, 35)
+		
+		if (seq = 1), (indent = 2) set indent = 0
+		
+		// Set field length to max of field or header
+		for j = 1:1:hdr.length("@") if (hdr.piece("@", j).length() > len) set len = hdr.piece("@", j).length()
+
+		if fun.isNull(), ({List}"T,U,F,D,C").contains(fmt), 'isCNTFUN do {
+		
+			set fun = "CNT"
+			set isCNTFUN = 1
+		}
+		
+		if (indent < 0) set indent = 0
+
+		set DBSATT(seq) = item_"|"_hdr_"|"_indent_"|"_len_"|"_fmt_"|"_fun
+		
+		set pos = pos + indent + len
+	}
+	
+	if return.beginsWith("; ") set return = return.extract(3, return.length())
+	
+	quit return	
+ #OPTION ResultClass ON
+public String vSIG()	quit "61276^62572^Dan Russell^4951"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,473 @@
+	/* In framework, but not part of the compiler
+	   */
+	#PACKAGE framework
+
+UCQRYBLD(String INPUT(), String INSTANTS, ret String TABLES, String PSLOBJ() , String PSLQRY())
+	/*
+	ORIG: RUSSELL - 01/25/2002
+	DESC: PSL query execution code generator
+	PROCEDURE ID:  UCQRYBLD
+
+	---- Comments ----------------------------------------------------------
+
+	This procedure can either take SQL FROM and WHERE clauses, or a
+	DQ query and convert it to FROM and WHERE clauses, then generate the
+	necessary PSL code to instantiate the required objects, from the FROM
+	clause, and execute the query, from the WHERE clause.
+
+	Db.record objects that will already be instantiated can be identified
+	to the procedure through the INSTANTS parameter, which allows
+	identification of the object and the object name.  These will not be
+	returned in PSLOBJ.  New objects instantiated in PSLOBJ are named
+	xobjn (where n is a number).
+
+	The PSL code returned in PSLQRY is formated without any if statements.
+	These must be added, as well as any other handling code, by the caller
+	based on requirements.  For example:
+
+		PSLQRY(1)="xobj.abc>100"
+
+	The caller may want to compile as:
+
+		if xobj.abc>100
+		else  quit
+
+		-or-
+
+		if '(xobj.abc>100)
+
+	ARGUMENTS:
+
+		. INPUT		DQ Query ID or SQL	/TYP=T/MECH=REFARR:R
+				from and where clauses	/REQ
+				For DQ, INPUT=QRYID;
+				For SQL, INPUT("FROM")=from clause
+				and INPUT("WHERE")=where clause
+				SQL clauses do not contain FROM
+				or WHERE keywords.  If FROM is
+				not provided, it will be determined
+				using the tables in the WHERE clause,
+				if any.
+
+		. INSTANTS	Existing Db.record	/TYP=T/MECH=VAL/NOREQ
+				objects in the form of
+				TABLE=obj_name[.oldVal],...
+				For any reference that includes .oldVal, use
+				the .oldVal property for column references.
+
+		. TABLES	List of tables in FROM	/TYP=T/MECH=REF:W/NOREQ
+				Returned to caller
+
+		. PSLOBJ	PSL objects code	/TYP=ARRAY/MECH=REF:W
+				Format is:		/NOREQ
+				  PSLOBJ(n)=table name | dependent | keys
+				  PSLOBJ(n,1)=PSL code
+				Where dependent = 0 => no other objects
+				  needed to load this one
+						= 1 => must load other
+				  objects first.  Order of loading is
+				  resolved in PSLOBJ order.
+
+		. PSLQRY	PSL query code		/TYP=ARRAY/MECH=REF:W
+				Format is:		/NOREQ
+				  PSLQRY(n)=test
+
+	RETURNS:
+
+		. ER		Error flag		/TYP=N
+		. RM		Error message		/TYP=T
+
+	EXAMPLE:
+
+		DQ query:
+			files = DEP,CIF
+			query = BAL>100 AND AGE<50 ;
+				OR BAL<<<XBAL>> AND AGE>50
+
+		Equivalent SQL:
+			FROM = DEP LEFT JOIN (CIF) ON ("DEP"."ACN"="CIF"."ACN")
+			WHERE = DEP.BAL>100 AND CIF.AGE<50
+				OR DEP.BAL<:XBAL AND CIF.AGE>50
+
+		Assume that Db.record object dep will already be instantiated.
+
+		D ^UCQRYBLD(qryid,"DEP=dep",.PSLOBJ,.PSLQRY)
+
+		Returns:
+			PSLOBJ(1)="CIF|1|ACN"
+			PSLOBJ(1,1)="type RecordCIF xobj2=db.getRecord(""CIF"",""ACN=:dep.acn"")"
+
+			PSLQRY=2
+			PSLQRY(1)="dep.bal>100"
+			PSLQRY(2)="xobj2.age<50&(xobj2.age'="""")!(dep.bal<XBAL)&(xobj2.age>50)"
+
+		Similarly:
+			set X("FROM")="DEP,CIF"
+			set X("WHERE")="DEP.BAL>100 AND CIF.AGE<50
+					OR DEP.BAL<:XBAL AND CIF.AGE>50"
+
+		do ^UCQRYBLD(.X,"DEP=dep",.PSLOBJ,.PSLQRY)
+
+		One means to use PSLQRY in code is to turn it into the
+		following lines in a subroutine that would return $T true
+		if the query was true, otherwise, false.
+
+			if dep.bal>100
+			else  quit
+			if xobj2.age<50&(xobj2.age'="""")!(dep.bal<XBAL)&(xobj2.age>50)
+			else  quit
+			quit
+
+	---- Revision History --------------------------------------------------
+	10/13/2008 - RussellDS - CR35741/35918
+		Modified error handling to use new logging syntax.
+	
+	04/06/2008 - RussellDS - CR30801
+		Added the ability to include .oldVal with the INSTANTS parameter
+		to reference the .oldVal property for already instantiated tables.
+	
+	01/10/2008 - RussellDS - CR27800
+		Eliminated numerous PSL warnings and did some code clean-up.
+		
+		Removed old revision history.
+
+	*/
+	// I18N=QUIT
+	// *******************************************************************
+	// * IMPORTANT NOTE:                                                 *
+	// * According to the rules that apply to PSL compiler upgrades,     *
+	// * the generated M routine associated with this procedure must be  *
+	// * checked into StarTeam and released with the procedure whenever  *
+	// * changes are made to this procedure.                             *
+	// *                                                                 *
+	// * The M routine will be loaded to the mrtns directory during      *
+	// * upgrades and will then be removed from that directory as part   *
+	// * of the upgrade process.  Therefore, other than during an        *
+	// * upgrade an mrtns version of this routine should not exist.      *
+	// *                                                                 *
+	// * Keep these comments as single line to ensure they exist in the  *
+	// * generated M code.                                               *
+	// *******************************************************************
+
+	type public Number ER = 0
+
+	type String exe, frm, FROM, fsn, I, join(), %LIBS, N, OBJ, ORDER, rng, RNG
+	type String SEQ, TABLE, vdd, vsql, vsub, vxp, WHERE, whr
+
+	// Catch GT.M errors
+	catch ERROR@"LOGERR^UTLERR" {
+		
+		set ER = 1
+	}
+
+	kill PSLOBJ, PSLQRY
+
+	set %LIBS = "SYSDEV"
+
+	// If no DQ query ID, then from and where are input
+	if INPUT.get().isNull() do {
+		
+		set WHERE = INPUT("WHERE")
+		set FROM = INPUT("FROM").get()
+		if FROM.isNull() set FROM = $$GETFROM(WHERE, INSTANTS.get())
+	}
+	// Otherwise, convert DQ query to from and where clauses
+	else  do GETSQL(INPUT)
+	quit:ER
+
+	/* Now have from and where clause, assume don't have the tables
+	   since want to get here from SQL syntax eventually, not just
+	   from DQ queries
+	*/
+
+	// Parse instants to be able to use already instantiated objects
+	for I = 1:1 set N = INSTANTS.get().piece(",",I) quit:N.isNull()  set INSTANTS(N.piece("=",1)) = N.piece("=", 2)
+
+	if 'FROM.isNull() set TABLES = $$^SQLJ(FROM, WHERE, .fsn,.join())
+	else  set TABLES = ""
+	quit:ER
+
+	/* Give each object a number and a name.
+	   Note that object names are 'xobj'_seq, unless they are already
+	   instantiated and have a name, in order to avoid problems with long 
+	   names or collisions.
+	   Set initial loading order to object numbers.
+	*/
+
+	for I = 1:1 set TABLE = TABLES.piece(",", I) quit:TABLE.isNull()  do {
+		
+		if INSTANTS(TABLE).exists() set OBJ(TABLE) = I_ "|"_ INSTANTS(TABLE)
+		else  set OBJ(TABLE) = I_ "|xobj"_ I
+		set ORDER(I) = TABLE
+	}
+
+	/* Since there will be relationships between tables if there are
+	   multiple tables, determine the order to load, since, based on joins,
+	   some must be loaded first to use their data to load subsequent
+	   objects.
+	*/
+
+	set OBJ = ""
+	for  set OBJ = OBJ(OBJ).order() quit:OBJ.isNull()  if 'INSTANTS(OBJ).exists() do {
+	
+		type String I, JOINOBJ, KEY, KEYREF, KEYS, PREREQ
+		
+		set PREREQ = 0			// Track prerequisite object
+
+		/* Find keys to this object.  If not join involved will
+		   used keyname as host variable reference to load, i.e.,
+		   must be provided.  Otherwise, determine join keys.
+
+		   For objects requiring joins, determine what other
+		   object(s) are required to get the keys -- take the
+		   object with the highest number -- ensure that the current
+		   object is loaded after all prerequisite objects.
+		*/
+
+		set KEYS = fsn(OBJ).piece("|", 3)
+		for I = 1:1:KEYS.length(",") do {
+			
+			set KEY = KEYS.piece(",", I)
+			// No join, but save keys for loading
+			if 'join(OBJ).exists() set OBJ(OBJ, KEY) = ""
+			else  do {
+				
+				set KEYREF = OBJ_"."_KEY
+				set OBJ(OBJ,KEY) = join(KEYREF)
+				set JOINOBJ = join(KEYREF).piece(".", 1)
+				if (OBJ(JOINOBJ) > PREREQ) set PREREQ = +OBJ(JOINOBJ)
+			}
+		}
+
+		set ORDER(PREREQ, OBJ) = ""		// Dependency-based loading order
+		set OBJ(OBJ).piece("|", 3) = PREREQ	// Loading order for this object
+	}
+
+	// Finalize loading order based on dependencies that get loaded later
+	set N = 0
+	for  set N = ORDER(N).order() quit:N.isNull()  do {
+		
+		type String LOADORDR
+		
+		set OBJ = ORDER(N)
+		set LOADORDR = OBJ(OBJ).piece("|", 3)
+		// If set to load after things dependent on it, move them to later
+		if (LOADORDR '< N) do {
+		
+			type String M = ""
+
+			for  set M = ORDER(N, M).order() quit:M.isNull()  do {
+				
+				set ORDER(LOADORDR + 1, M) = ""
+				kill ORDER(N,M)
+			}
+		}
+	}
+
+	/* Generate PSL code to load objects in order with reference to column
+	   name as host variable if no join, otherwise, loading reference is
+	   to previously loaded object.column
+	*/
+
+	set (N, OBJ) = ""
+	set SEQ = 1
+	for  set N = ORDER(N).order() quit:N.isNull()  do {
+		
+		for  set OBJ = ORDER(N, OBJ).order() quit:OBJ.isNull()  do {
+			
+			type String CODE, DEPEND, KEYNAME, KEYS, OBJNAME
+
+			set OBJNAME = OBJ(OBJ).piece("|", 2)
+			set CODE = "type Record"_OBJ.upperCase()_ " "_ OBJNAME
+			set CODE = CODE_ "=Db.getRecord("""_ OBJ_ ""","""
+			// Build key references for getRecord
+			// plus key list to return in PSLOBJ
+			set (KEYNAME, KEYS) = ""
+			for  set KEYNAME = OBJ(OBJ, KEYNAME).order() quit:KEYNAME.isNull()  do {
+				
+				type String VALUE
+
+				set KEYS = KEYS_ KEYNAME_ ","
+				set VALUE = OBJ(OBJ, KEYNAME)
+				/* If not join, i.e., no reference to another
+				   object, then use keyname as host variable,
+				   otherwise, get object name & column
+				*/
+				if VALUE.isNull() set VALUE = KEYNAME.upperCase()
+				else  set VALUE = $$GETNAME(VALUE)
+				set CODE = CODE_ KEYNAME_ "=:"_ VALUE_ ","
+			}
+			
+			// Remove comma from end and close parenthesis
+			set CODE = CODE.extract(1, CODE.length() - 1)_ """)"
+			set PSLOBJ(SEQ, 1) = CODE
+			if (N = 0) set DEPEND = 0	// Independent of other objects
+			else  set DEPEND = 1		// Dependent
+			set KEYS = KEYS.extract(1, KEYS.length() - 1)	// Remove comma
+			set PSLOBJ(SEQ) = OBJ_ "|"_ DEPEND_ "|"_ KEYS
+			set SEQ = SEQ + 1
+		}
+	}
+
+	/* Generate PSL code equivalent to WHERE clause.  ^SQLQ will return
+	   whr array with individual expressions parsed.  Replace $C(1)
+	   delimiters around any table.col references ($C(1)_table.col_$C(1))
+	   with $C(2) to keep them from getting converted by ^SQLA.  Also
+	   replace any variable references that were substituted with
+	   vsql() references in ^SQLQ with original variable names.
+	*/
+
+	do ^SQLQ(WHERE, TABLES, .whr, , , , .fsn, .vdd) quit:ER
+	set (N, RNG) = ""
+	for  set N = whr(N).order() quit:N.isNull()  do {
+		
+		set RNG = RNG_ 1		// Bitmap of number of queries
+		set whr(N) = whr(N).translate(1.char(), 2.char())
+		if whr(N).isLike("%vsql(%") do {
+			
+			type String M = ""
+
+			for  set M = vsub(M).order() quit:M.isNull()  if (whr(N) [ vsub(M)) set whr(N) = whr(N).replace(vsub(M), M.translate(":"))
+		}
+	}
+
+	set frm = TABLES
+	set vxp = 1			// Current executable line for ^SQLA
+	do QUERY^SQLA(RNG, .whr, .PSLQRY, .vsub, TABLES, .fsn, 0, "") quit:ER
+
+	/* ^SQLA will return m code in PSLQRY array.  Replace table.col
+	   references with object references and remove extraneous SQL code
+	   to make usable by PSL.
+
+	   Note that caller must format to do testing as prefers, e.g.,
+	   add 'if ' to beginning of line and 'else  quit' as second line
+	   if that is the desired action.  See example at top of this
+	   procedure.
+	*/
+
+	set N = ""
+	for  set N = PSLQRY(N).order() quit:N.isNull()  do {
+		
+		type Number I
+		type String X
+
+		set X = PSLQRY(N)
+		for I = 2:2:X.length(2.char()) do {
+			
+			type String VALUE
+			
+			set VALUE = X.piece(2.char(), I)
+			set VALUE = $$GETNAME(VALUE)		// Get object.col ref
+			set X.piece(2.char(), I) = VALUE
+		}
+		
+		set X = X.translate(2.char())			// Remove markers
+		set X = X.piece("I '(", 2)			// Remove beginning
+		set X = X.piece(") S vsql=1", 1)		// Remove end
+		set PSLQRY(N) = X
+	}
+	
+	quit
+
+
+	// ---------------------------------------------------------------------
+private GETNAME(String REF)	// Return correct object name and column attribute
+
+	type public String OBJ()
+
+	type String COLUMN, OBJECT, OBJNAME
+	type String OLDVAL = ""
+
+	set OBJECT = REF.piece(".", 1)
+	set OBJNAME = OBJ(OBJECT).piece("|", 2)
+	if OBJNAME.endsWith(".oldVal") do {
+		
+		set OLDVAL = ".oldVal"
+		set OBJNAME = OBJNAME.piece(".", 1)
+	}
+	set COLUMN = REF.piece(".", 2).lowerCase()
+
+	quit OBJNAME_ "."_ COLUMN_ OLDVAL
+	
+
+	// ---------------------------------------------------------------------
+private GETSQL(String QRYID)	// DATA-QWICK Query ID
+
+	/* Turn DQ query into FROM and WHERE
+
+	RETURNS:
+
+		. FROM		SQL FROM clause		/TYP=T
+
+		. WHERE		SQL WHERE clause	/TYP=T
+	*/
+
+	type public Number ER
+	type public String FROM, RM, WHERE
+
+	type String DQQRY, TABLES
+
+	if 'Db.isDefined("DBTBL4", "LIBS=""SYSDEV"",QID=:QRYID") do { quit
+	
+		set ER = 1
+		// No query definition found for ~p1
+		set RM = $$^MSG(3561,QRYID)
+	}
+
+	type RecordDBTBL4 dbtbl4 = Db.getRecord("DBTBL4", "LIBS=""SYSDEV"",QID=:QRYID")
+	set TABLES = dbtbl4.pfid
+
+	// Load the query
+	type ResultSet dbtbl4rs = Db.select("SEQ,LINE", "DBTBL4D","LIBS='SYSDEV' AND QID=:QRYID AND SEQ > 0")
+
+	if dbtbl4rs.isEmpty() do { quit
+		
+		set ER = 1
+		// Incomplete query - ~p1
+		set RM = $$^MSG(3559,QRYID)
+	}
+
+	while dbtbl4rs.next() set DQQRY(dbtbl4rs.getCol("SEQ")) = dbtbl4rs.getCol("LINE")
+
+	set FROM = $$DQJOIN^SQLCONV(TABLES)
+	set WHERE = $$WHERE^SQLCONV(.DQQRY, TABLES)
+
+	quit
+	
+
+	// ---------------------------------------------------------------------
+private GETFROM(String WHERE,
+		String INSTANTS)
+		
+	/* Determine FROM clause, with joins, from WHERE
+	   If tables already included in INSTANTS, include them in order
+	*/
+
+	type String FROM, ITEM, TABLE
+	type Number I, PTR
+	type List   TABLES = Class.new( "List", "")
+
+	if 'INSTANTS.get().isNull() do {
+	
+		for I = 1:1:INSTANTS.length(",") do {
+			
+			set TABLE = INSTANTS.piece( ",", I).piece( "=")
+			set TABLES = TABLES.add( TABLE, , 0)
+		}
+	}
+
+	set PTR = 0
+	for  quit:PTR = WHERE.length()  do {
+		set ITEM = $$FINDINAM^SQLDD(WHERE,.PTR).translate(" ")
+		if 'ITEM.isNull() do {
+		
+			set TABLE  = ITEM.piece( ".")
+			set TABLES = TABLES.add( TABLE, , 0)
+		}
+	}
+
+	set FROM = $$DQJOIN^SQLCONV(TABLES)	// Construct FROM clause
+
+	quit FROM
+ #OPTION ResultClass ON
+public String vSIG()	quit "61293^42704^Frans S.C. Witte^13557"	// Signature - LTD^TIME^USER^SIZE

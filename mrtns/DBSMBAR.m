@@ -176,7 +176,7 @@ PUP	; Move backward 1 page
 STRING	; User entered 1st character of choice
 	;----------------------------------------------------------------------
 	;
-	S X=$$UPPER^%ZFUNC(X)
+	S X=$$UPPER^UCGMR(X)
 	I $F(FC,X,FN+1) S FN=$F(FC,X,FN+1)-1+NF,STRING="" D DISPLAY Q
 	I $F(FC,X) S FN=$F(FC,X)-1+NF,STRING="" D DISPLAY Q
 	W $C(7) Q

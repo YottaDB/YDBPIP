@@ -15,7 +15,7 @@ DBSIMP(%LIBS,FID,ZLIB,ZFID,ER)	;;DBS - U - V3.6 - IMPLICIT FILE DEFINITION UTILI
 	;                       ZFID="DEP"
 	;                       ZR  =0
 	;
-	; I18N=QUIT: Excluded from I18N standards. 
+        ; I18N=QUIT: Excluded from I18N standards.
 	;
 START	;
 	N X

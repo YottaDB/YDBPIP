@@ -70,7 +70,7 @@ DBSPNT(ORIGIN,OPTION,EXTANT)	;Private;DATA-QWIK screen print driver
 	;            Deleted older revision history.
 	;
 	; 08/12/97 - Betty Ni - 25653
-	;            Replaced follows operator "]" with a "]]". 
+        ;            Replaced follows operator "]" with a "]]".
 	;
 	; 02/14/97 - JIAQ - 23857
 	;            Retrofit 23196 to v5.3:	
@@ -86,9 +86,9 @@ VT	; VT200 display
 	;
 	N D,GT,V,V99,I,X,CSI,cy,cx,cl,undl
 	; 
-	S CSI=$$CSI^%TRMVT 
-	I $G(CRT),'$D(OVR) S undl=$$CBLK(80) 
-	E  S undl=$$EBLK(80) 
+        S CSI=$$CSI^%TRMVT
+        I $G(CRT),'$D(OVR) S undl=$$CBLK(80)
+        E  S undl=$$EBLK(80)
 	S OPTION=$G(OPTION)+0
 	S V99=1,(GT,V)=""
 	;
@@ -99,7 +99,7 @@ VT	; VT200 display
 	F I=V99:1:+VO S X=VO(I) D DSPOBJ	; Display objects
 	;
 NORMAL	; Set All Terminal Attributes back to normal
-	;
+    	;
 	I GT W $$GROFF^%TRMVT ;			Toggle graphics off
 	I ($A(V)!$A(V,2)) W $$VIDOFF^%TRMVT ;	Reset video attributes
 	Q
@@ -182,7 +182,7 @@ VTWINDOW	; Display screen from origin to extant
 FINDOBJ(CY,FROM,TO)	; Find the 1'st occurrance of CY
 	;
 	I $A(VO(FROM))'<CY Q FROM  ; 1'st object beyond range
-	I $A(VO(TO))<CY Q 0 ; Last object doesn't reach CY
+   	I $A(VO(TO))<CY Q 0 ; Last object doesn't reach CY
 	F FROM=FROM:1:TO I $A(VO(FROM))'<CY Q
 	I  Q FROM
 	Q 0
@@ -349,7 +349,7 @@ DEVICE(TYPE)	;Private;Call a specified device driver
 	I TYPE="PC" D ^DBSPNTP Q	; Personal computer
 	I TYPE="LP" D LP Q		; Line printer
 	I TYPE="VT" D VT Q		; VT
-	Q
+ 	Q
 	;
 	;----------------------------------------------------------------------
 NOOUTPUT	;Private;No output
@@ -412,7 +412,7 @@ def(x,y)	;Private;Object definition
 	s grf=$e(y,11)
 	s pro=$e(y,12)
 	;
-	; Data value
+ 	; Data value
 	s val=$e(y,14,999)
 	;
 	s z=nam_"|"_tbl_"|"_typ_"|"_len_"|"_col_"|"_row_"|"_rev_"|"_hgh
@@ -456,7 +456,7 @@ INIT	; Initialize command line
 	Q
 	;
 	;-----------------------------------------------------------------------
-FRAME	; Display a Frame
+FRAME 	; Display a Frame
 	;-----------------------------------------------------------------------
 	;
 	N origin,extant

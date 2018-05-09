@@ -1,0 +1,374 @@
+	/*
+	ORIG: FSANCHEZ - 04/06/98
+	DESC: Library of class methods
+
+	----- Revision History -------------------------------------------------
+	07/07/06 - Frans S.C. Witte - CRs: 27800
+		* Added support for instantiation of object defined in a CDM.
+		* Added preliminary support for instantiation of CDM Reference
+		  descendants. That part of the code is likely to change.
+
+	03/13/06 - Frans S.C. Witte - CRs: 20280 / 18164
+		$$clsRel() copied from UCLABEL
+
+	01/20/06 - Frans S.C. Witte - CRs: 18163 / 18164
+		Modified signature of and call to newObj^UCCLASS
+
+	12/27/05 - Frans S.C. Witte - CRs: 18727 / 18728
+		Modified clasNew to use lvns instead of RecordOBJECT properties
+		because modifying properties without Record.save may not be
+		handled correctly by the compiler.
+
+	08/22/05 - Frans S.C. Witte - CRs: 15592 / 15593
+		Replaced global reference with call to UCXDD.
+		Replaced "this." by "PSL."
+		Added function $$cdNewObj() to return code to instantiate a new
+		object.
+
+	01/11/05 - Frans S.C. Witte - CRs: 11443 / 11444
+		Removed code that has been commented out by previous CRs.
+
+	10/12/04 - Frans S.C. Witte - CRs: 9793, 11445 / 11446
+		Migrated M source to PSL source.
+		Corrected behavior for Class.new() for Primitive classes and
+		Reference classes with primitive internal representation.
+		Added default behavior for second parameter of Class.new() for
+		the above classes.
+		Added implementation of Class.isAncestor(), Class.isClass(), and
+		Class.isDescendant(), and deprecation warning for Class.isValid().
+
+	05/12/04 - RussellDS - CR9676
+		Move Profile04 version to Profile01 to support single code
+		base for PSL.
+
+	02/14/03 - Sanchez/SPIER - 51423
+		Bug fixes
+
+	10/15/02 - Sanchez - 51089
+		Modifications for v7.0 enhancements
+
+	*/
+	#PACKAGE framework.psl
+	#OPTION  ResultClass ON
+
+	// I18N=QUIT
+	// *******************************************************************
+	// * IMPORTANT NOTE:                                                 *
+	// * According to the rules that apply to PSL compiler upgrades,     *
+	// * the generated M routine associated with this procedure must be  *
+	// * checked into StarTeam and released with the procedure whenever  *
+	// * changes are made to this procedure.                             *
+	// *                                                                 *
+	// * The M routine will be loaded to the mrtns directory during      *
+	// * upgrades and will then be removed from that directory as part   *
+	// * of the upgrade process.  Therefore, other than during an        *
+	// * upgrade an mrtns version of this routine should not exist.      *
+	// *                                                                 *
+	// * Keep these comments as single line to ensure they exist in the  *
+	// * generated M code.                                               *
+	// *******************************************************************
+	quit
+
+	// ---------------------------------------------------------------------
+void classNew	// method Class.new ; returns any
+	/* ---------------------------------------------------------------------
+	INPUTS:
+	. PSL.actual(1) = literal String className
+	. PSL.actual(2) = Object instParam
+	. PSL.var = assignment target (i.e. object to receive the new instance)
+	
+	OUTPUTS:
+	. PSL.return = instantiation expression. This can be:
+		* $$vNewObj(className) (if standard object, without constructor)
+		* PSL.actual(2) (or "") (if class implementation uses primitive type)
+		* value returned by constructor
+	. ER = 1 if undefined class
+	*/
+	type public PSLParser pslPrsr
+	type public Number ptr	// BAD USAGE !!
+
+	type String cls = PSL.actual(1).stripQuotes()
+
+	do pslPrsr.loadClass( .cls)
+	if 'pslPrsr.pslCls(cls).exists() do PSL.error( "Undefined class: "_cls) quit
+
+	type PSLClass ocd = pslPrsr.getPSLClass(.cls)
+	if ocd.classType < ocd.classTypeREFERENCE do PSL.error( "Not a class: "_cls) quit
+	if ocd.isAbstract do PSL.error("Illegal reference to abstract class: "_PSL.class) quit
+	if ocd.isNoInstance do PSL.error("Class is not instantiable: "_PSL.class) quit
+	type String constr = ocd.constructor
+	set PSL.class = cls
+
+	if constr.isNull() do {		// Class Definition Module
+		/* Instantiate a new CDM object:
+		   - If the class is a Record descendant that does not have an
+		   	initialize(), treat it as an ordinary Record descendant
+		   - Else return PSLClass.classNewCall()
+		   */
+		if ocd.isRecord( cls) > 1 { if 'constr.isNull() do @constr quit
+			/* if CDM for Record descendant, without initialize(),
+			   try constructor of parent table until a constructor
+			   method is found, or until a class with an initialize
+			   method is found. This will terminate as long as class
+			   Record has a constructor.
+			   */
+			for  { quit:'constr.isNull()!pslPrsr.pslMtd(cls_".initialize").exists()
+				set cls = ocd.extends
+				set ocd = pslPrsr.getPSLClass(cls)
+				set constr = ocd.constructor
+			}
+		}
+
+		if ocd.classType=ocd.classTypePRIMITIVE, PSL.cmd'="set"!(ptr>0) throw Class.new("Error", "%PSL-E-MISMATCH,Class is not instantiable in this context: "_PSL.class)
+
+		type Number lvl = $$newObjSt( PSL.var.get())
+		set PSL.return = ocd.classNewCall( PSL.postCond, cls.addQuotes(), "$ST"_$SELECT(lvl>0:-lvl,1:""), ocd.destructor.addQuotes(), ocd.adjustor.addQuotes(), PSL.actual(2))
+	}
+	else  do @constr		// Call class constructor
+
+	quit
+
+	// ---------------------------------------------------------------------
+Number clsRel( PSLParser pslPrsr,
+	String clsfp,	// class of formal parameter		/MECH=VAL
+	String clsap)	// class of actual parameter		/MECH=VAL
+	/* ---------------------------------------------------------------------
+	Return the relationship between two classes.
+
+	OUTPUTS:
+	. $$ =	0 if classes are not related (probably an error)
+		1 if classes are equal, or if the class of the actual parameter
+		  is a subclass of the class of the formal parameter,
+		  or if both classes have a primitive implementation
+		2 if the class of the actual parameter is a superclass of the
+		  class of the formal parameter.
+	NOTES:
+	. The only caller for this method is procPar^UCGM(). Since it has a
+		PSLClass cache, we should use it here, which will considerably
+		speed up the processing (no file-lookup, no pslx decomposition
+		for classes found in the cache).
+	*/
+	if clsfp="" quit 0
+	if clsap="" quit 0
+
+	if clsfp=clsap!(clsfp="Object") quit 1
+
+	/* OK if related Primitives */
+	if $$primRel^UCPRIM( clsfp, clsap) quit 1
+
+	type PSLClass ocd
+	set ocd = pslPrsr.getPSLClass( clsap) if ocd.isDescendantOf( pslPrsr, clsfp) quit 1
+	set ocd = pslPrsr.getPSLClass( clsfp) if ocd.isDescendantOf( pslPrsr, clsap) quit 2
+
+	quit 0
+
+	// ---------------------------------------------------------------------
+void intrinsic	// default constructor for intrinsic classes
+	/* ---------------------------------------------------------------------
+	INPUTS:
+	. PSL.class = name of class to be instantiated
+	. PSL.actual(2) = instatitation expression
+	
+	OUTPUTS:
+	. PSL.return = code that constructs the element
+	*/
+	type public PSLParser pslPrsr
+
+	type PSLClass ocd = pslPrsr.getPSLClass( PSL.class)
+
+	if ocd.classType = ocd.classTypeREFERENCE {
+		type Number lvl = $$newObjSt( PSL.var.get())
+		set PSL.return = $$newObj( PSL.class, "$ST"_$SELECT(lvl>0:-lvl,1:""))
+	}
+	else  {
+		if PSL.actual(2).isNull() set PSL.actual(2) = PSL.actual(2).addQuotes()
+		set PSL.return = PSL.actual(2)
+	}
+	quit
+
+	// ---------------------------------------------------------------------
+void isAncestor	// Method Class.isAncestor ; Returns Boolean
+	/* ---------------------------------------------------------------------
+	INPUTS:
+	. PSL.actual(1) = name of ancestor class
+	. PSL.actual(2) = name of descendant class
+
+	OUTPUTS:
+	. PSL.return = "$$ClsIsAnc^UCGMR(PSL.actual(1),PSL.actual(2))" or its
+	  value if both are literal.
+	*/
+	if PSL.actual(1).isNull() do PSL.error("Ancestor parameter required") quit
+	if PSL.actual(2).isNull() do PSL.error("Descendant parameter required") quit
+
+ 	set PSL.return="$$clsIsAnc^UCGMR(" _ PSL.actual(1) _ "," _ PSL.actual(2) _ ")"
+ 	if PSL.actual(1).isLiteral(), PSL.actual(2).isLiteral() do {
+		#ACCEPT DATE=10/12/04; PGM=FSCW; CR=11445; GROUP=XECUTE
+ 		xecute "set return=" _ PSL.return
+ 		if PSL.return.isNull() set PSL.return=""""""
+ 	}
+	quit
+
+	// ---------------------------------------------------------------------
+void isClass	// Method Class.isClass ; Returns Boolean
+	/* ---------------------------------------------------------------------
+	INPUTS:
+	. PSL.actual(1) = name of class
+
+	OUTPUTS:
+	. PSL.return = $$clsIsClass^UCGMR(PSL.actual(1)))
+	*/
+	if PSL.actual(1).isNull(1) do PSL.error("Class name required") quit
+
+ 	set PSL.return="$$clsIsClass^UCGMR(" _ PSL.actual(1) _ ")"
+ 	if PSL.actual(1).isLiteral() do {
+ 		set PSL.return = $$clsIsClass^UCGMR( PSL.actual(1))
+ 		if PSL.return.isNull() set PSL.return = """"""
+ 	}
+	quit
+
+	// ---------------------------------------------------------------------
+void isDescendant	// Method Class.isDescendant ; Returns Boolean
+	/* ---------------------------------------------------------------------
+	INPUTS:
+	. PSL.actual(1) = name of descendant class
+	. PSL.actual(2) = name of parent class
+
+	OUTPUTS:
+	. PSL.return = "$$ClsIsAnc^UCGMR(PSL.actual(2),PSL.actual(1))" or its
+	  value if both are literal.
+	*/
+	if PSL.actual(1).isNull() do PSL.error("Descendant parameter required") quit
+	if PSL.actual(2).isNull() do PSL.error("Ancestor parameter required") quit
+
+ 	set PSL.return="$$clsIsAnc^UCGMR(" _ PSL.actual(2) _ "," _ PSL.actual(1) _ ")"
+ 	if PSL.actual(1).isLiteral(), PSL.actual(2).isLiteral() do {
+		#ACCEPT DATE=10/12/04; PGM=FSCW; CR=11445; GROUP=XECUTE
+ 		xecute "set return=" _ PSL.return
+ 		if PSL.return.isNull() set PSL.return = """"""
+ 	}
+	quit
+
+	// ---------------------------------------------------------------------
+void isValid	// Method Class.isValid ; Returns Boolean
+	/* ---------------------------------------------------------------------
+	INPUTS:
+	. PSL.actual(1) = object id
+
+	OUTPUTS:
+	. PSL.return = '$DATA(vobj(+$G(PSL.actual(1))))
+	. PSL.return = runtime object type (vobj(oid,-1)) equals specified class
+	
+	*/
+	#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+	do WARNDEP^UCGM( 2.7, 0,"Class.isValid - use Object.exists")
+	if PSL.actual(1).isNull(1) do PSL.error("Reference object required") quit
+	if PSL.actual(1).extract()="." set PSL.actual(1) = PSL.actual(1).extract(2, PSL.actual(1).length())
+	;
+ 	set PSL.return="$D(" _ PSL.oLvn _ "(+$G("_ PSL.actual(1) _ ")))"
+	quit
+
+	// ---------------------------------------------------------------------
+String newObj( String class, String lvl)	// name of class
+	/* ---------------------------------------------------------------------
+	Return generated function that instantiates a new object in vobj(),
+	and ensure the code for the function is included in the generated code.
+
+	Calls $$cdNewRef() to obtain the actual M code that instantiates the new
+	object in vobj().
+
+	CALLED BY:
+	. getTran^UCTS
+	. classNew^UCROWSET
+	. classNew^DBSDYNRA
+	*/
+	type literal String label = "vClVobj"
+	type literal String retHead = "$$"_ label_ "("
+
+	if 'PSL.subrouExists( label) do {
+
+		type PSLSubrou sr = PSL.addSubrou( label, "(vSt,vCls)", "Create a new object")
+		do sr.addCode( " N vOid")
+		do sr.addCode( $$cdNewRef("vOid","vCls","vSt", "", ""))
+		do sr.addCode( " Q vOid")
+	}
+
+	quit retHead_ lvl_ ","""_class_ """)"
+
+	// ---------------------------------------------------------------------
+String newObjSt( PSLIdentifier asntgt)	// assingment target
+	/* ---------------------------------------------------------------------
+	Support function to centralize the generation of $STACK-related code to
+	be passed to a function that returns a new Reference descendant.
+
+	The current implementation returns an expression that ties the objects
+	stack level to the stack level of the subroutine in which it is declared
+	(i.e. regardless of the DO level where the target variable is declared).
+
+	CALLED BY:
+	. getTran^UCTS
+	. classNew^UCROWSET
+	. classNew^DBSDYNRA
+	*/
+	if asntgt.isNull() throw Class.new( "Error", "%PSL-E-MISMATCH,Class is not instantiable in this context")
+	type Number lvl = asntgt.scopeLevel
+	quit "$ST"_$SELECT(lvl>0:-lvl,1:"")
+
+	// ---------------------------------------------------------------------
+String cdNewObj( PSLIdentifier objInst,	// object instance variable
+		PSLExpression   objClass)	// object class expression
+	/* ---------------------------------------------------------------------
+	Helper function that returns the M code to create a new object of the
+	specified class. Like the $$cdXxxYyy functions in UCXDD this is a
+	low-level function that can be called by different PSL compiler
+	subroutines that need to create an object instance while still
+	maintaining a single place that constructs such code.
+
+	NOTES:
+	. because this code may be called at runtime, PSL.oLvn cannot be used.
+	*/
+	type literal String oLvn = "vobj"
+
+	quit " S "_ objInst_ "=$O("_ oLvn_ "(""""),-1)+1,"_oLvn _ "("_ objInst_ ",-1)="_ objClass
+
+	// ---------------------------------------------------------------------
+String cdNewRef( PSLIdentifier objInst,	// object instance variable
+		PSLExpression   objClass,	// object class expression
+		PSLExpression	objStack,	// stack level
+		PSLExpression	objDestr,	// finalizer
+		PSLExpression	objAdj)		// stack adjustment procedure
+	/* ---------------------------------------------------------------------
+	Helper function that returns the M code to create a new Reference object
+	of the specified class at the specified stack-level with the supplied
+	finializer and adjustment procedure.
+
+	NOTES:
+	. because this code may be called at runtime, PSL.oLvn cannot be used.
+	*/
+	type literal String oLvn = "vobj"
+
+	quit " S "_ objInst_ "=$O("_ oLvn_ "(""""),-1)+1,"_oLvn _ "("_ objInst_ ",-1)="_ $$cdNewExp( objClass, objStack, objDestr, objAdj)
+
+	// ---------------------------------------------------------------------
+String cdNewExp( PSLExpression   objClass,	// object class expression
+		PSLExpression	objStack,	// stack level
+		PSLExpression	objDestr,	// finalizer
+		PSLExpression	objAdj)		// stack adjustment procedure
+	/* ---------------------------------------------------------------------
+	Helper function that returns the M expression to assign to the -1
+	purpose lvn.
+
+	NOTES:
+	. because this code may be called at runtime, PSL.oLvn cannot be used.
+	*/
+	type String code = objClass_ "_$C(9)_"_ objStack
+
+	if objDestr.isNull(), objAdj.isNull() quit code
+
+	set code = code_ "_$C(9)"
+	if 'objDestr.isNull() set code = code_ "_"_objDestr
+	if 'objAdj.isNull() set code = code_ "_$C(9)_"_ objAdj
+
+	quit code
+	
+ #OPTION ResultClass ON
+public String vSIG()	quit "61086^28680^Frans S.C. Witte^14245"	// Signature - LTD^TIME^USER^SIZE

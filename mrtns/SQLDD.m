@@ -23,6 +23,51 @@ SQLDD	;; Library
 	Q
 	; I18N=QUIT
 	;---- Revision History ------------------------------------------------
+	; 03/18/2009 - RussellDS - CR38348
+	;	* Added checking for null character substitute in DBINDX
+	;	  references
+	;
+	; 03/09/09 - Pete Chenard
+	;	     Modified CVTREF to correctly deal with table alias.
+	;
+	; 02/23/09 - Pete Chenard
+	;	Modified CMPUTED section to correctly deal with table aliases.
+	;
+	; 11/13/2008 - RussellDS - CRs 36391/35741
+	;	Modified use of substitute null character to set it up at the
+	;	beginning of the exe() array so that it is determined at
+	;	runtime, but with only one call.  This avoids problems in
+	;	code generated for PSL that is distributed to Unicode
+	;	environments.
+	;
+	; 06/06/2008 - RussellDS - CR30801
+	;	Modified fsn section to call fsn^DBSDD to eliminate duplicate
+	;	code.
+	;
+	;	Modified FUNC to replace use of ^USUB with getSf^UCCOLSF.
+	;
+	;	Modified CVTREF to remove call to ^MSG.  Causing problems with
+	;	bootstrap.  Will eventually provide framework message handler.
+	;
+	;	Removed old revision history.
+	;
+	; 06/06/08 - Pete Chenard - CR34196
+	;	* Modified to pass nod to DBSMEMO.  nod is
+	;	  necessary to build the correct code to read the data from
+	;	  the database.
+	;
+	; 10/26/07 - Pete Chenard CR30087
+	;	* Replaced references to $$BYTECHAR^SQLUTL with 
+	;	  $$BYTECODE^SQLUTL to eliminate runtime determination
+	;	  of whether to use $C or $ZCH based on character set 
+	;	  configuration.
+	;
+	; 07/16/07 - Pete Chenard - CR 28171
+	;	     Eliminate references to $C(254)
+	;
+	; 03/28/07 - RussellDS - CR26386
+	;	     Added support for archiving in LOAD section.
+	;
 	; 01/31/07 - Pete Chenard - 24953/25147
 	;	     Modified addz2 section to deal with the situation where
 	;	     2 or more computed columns have identical expressions.  Prior
@@ -36,35 +81,6 @@ SQLDD	;; Library
 	;	     the parameter list were sometimes not loaded in the correct order prior
 	;	     to this change (they were loaded in alphabetic order rather than 
 	;	     the order in which they are referenced.
-	;
-	; 08/30/06 - RussellDS - CR22720
-	;	     Replaced call to $$UPPER^SCAUTL with $$UPPER^UCGMR to
-	;	     avoid bootstrap issues.
-	;
-	; 05/16/06 - Allan Mattson - CR20048
-	;            Replaced calls to $$UPPER^%ZFUNC with $$UPPER^SCAUTL.
-	;
-	;            Deleted pre-2005 revision history.
-	;
-	; 02/02/06 - RussellDS - CR19376
-	;	     Modified FINDINAM section to eliminate spaces in returned
-	;	     values.  Brings this code in-line with FINDINAM^DBSDD
-	;
-	; 10/25/05 - RussellDS - CR18072
-	;	     Modified call to MAP^DBMAP to handle ER as parameter, not
-	;	     public variable.
-	;
-	;	     Correct system keyword replacement in CMPUTED section.
-	;
-	; 09/28/05 - RussellDS - CR17311
-	;	     Add function GETSEQ.
-	;
-	; 09/15/05 - Pete Chenard CR16996
-	;	     Modified KEYS section to New variable I.
-	;
-	; 02/09/05 - GIRIDHARANB - CR14407
-	;	     Modified section VER resolve errors with ER set on a DBMAP
-	;	     check.
 	;
 	;----------------------------------------------------------------------
 PARSE(ddexpr,X,cmp,fsn,frm,vdd,lvn,vsub,v255)	;public; Translate Dictionary Reference to MUMPS Expression
@@ -115,7 +131,7 @@ PARSE(ddexpr,X,cmp,fsn,frm,vdd,lvn,vsub,v255)	;public; Translate Dictionary Refe
 	I $D(vsub(ddexpr)) D  Q return
 	.	;
 	.	S return=vsub(ddexpr)
-	.	I $D(v255(return)) S return="$S("_return_"=$C(254):"""",1:"_return_")"
+	.	I $D(v255(return)) S return="$S("_return_"="_$S($D(nullsymbl):nullsymbl,1:$$BYTECODE^SQLUTL(254))_":"""",1:"_return_")"
 	;
 	S file=$P(ddexpr,".",1),di=$P(ddexpr,".",2)
 	;
@@ -132,7 +148,7 @@ PARSE(ddexpr,X,cmp,fsn,frm,vdd,lvn,vsub,v255)	;public; Translate Dictionary Refe
 	I $P(X,"|",1)["*" Q $S($G(lvn)="":di,1:$G(lvn))	; Access Key
 	;
 	I $P(X,"|",9)="M" D  Q z1  			; Memo field
-	.	S z1=$$PARSE^DBSMEMO(file)		; Computed expression
+	.	S z1=$$PARSE^DBSMEMO(file,nod)		; Computed expression
 	.	; Remove [TABLE] syntax
 	.	N ptr,remfid
 	.	S remfid="["_file_"]"
@@ -166,8 +182,7 @@ FUNC()	; Apply MUMPS functions to array reference
 	.	;
 	.	N sft,sfd1,sfd2,sfp
 	.	S sft=$P(sfd,"~",1),sfd1=$P(sfd,"~",2),sfd2=$P(sfd,"~",3),sfp=$P(sfd,"~",4)
-	.	S:sfd1 sfd1=$C(sfd1) S:sfd2 sfd2=$C(sfd2)
-	.	S return="$$GET^USUB("_return_","""_sft_""","""_sfd1_""","""_sfd2_""","_+sfp_")"
+	.	S return="$$getSf^UCCOLSF("_return_","""_sft_""","""_sfd1_""","""_sfd2_""","_+sfp_")"
 	Q return
 	;
 	;----------------------------------------------------------------------
@@ -179,7 +194,7 @@ CMPUTED(cmpin)	; Decode computed data items
 	if $D(cmp(file,di)) do  quit return
 	.	set return=$P(cmp(file,di),"=",1)
 	.	if $E(return,1,2)="S " set return=$E(return,3,999)
-	; 
+        ;
 	; Do not allow set or do in computed
 	set cmpinuc=$$UPPER^UCGMR(cmpin)
 	if $E(cmpinuc,1,2)="S "!($E(cmpinuc,1,2)="D ") do  quit ""
@@ -187,9 +202,9 @@ CMPUTED(cmpin)	; Decode computed data items
 	.	; Invalid computed data item = 'di'
 	.	set RM=$$^MSG(8316,$$^MSG(595),file_"."_di)
 	;
-	set cmputed=$$TOKEN^%ZS(cmpin,.tok),return="",ER=0 
-	set dels="[]+-*/\#_'=><\*(),!&:?",ptr=0,ER=0 
-	; 
+        set cmputed=$$TOKEN^%ZS(cmpin,.tok),return="",ER=0
+        set dels="[]+-*/\#_'=><\*(),!&:?",ptr=0,ER=0
+        ;
 	; Build the M expression
 	for  do  quit:(ptr=0)!ER
 	.	;
@@ -212,7 +227,9 @@ CMPUTED(cmpin)	; Decode computed data items
 	.	;
 	.	; Shoud be column reference at this point
 	.	; Invalid Table Value (if not this table)
-	.	if '$D(^DBTBL("SYSDEV",1,file,9,atom)) set ER=1,RM=$$^MSG(7194) quit
+	.	N tbl
+	.	S tbl=$S($D(vAlias(file)):vAlias(file),1:file)
+	.	if '$D(^DBTBL("SYSDEV",1,tbl,9,atom)) set ER=1,RM=$$^MSG(7194) quit
 	.	;
 	.	; Parse the column
 	.	set ddref=file_"."_atom
@@ -314,7 +331,7 @@ FINDL	; Return linetag if found item is not legal
 	;
 	G FINDL
 	;
-VLDUNDER(X);	; Validate underscore
+VLDUNDER(X); 	; Validate underscore
 	;
 	I X?1A1"_"1A Q 0
 	I X?1A1"_"1N Q 0
@@ -382,27 +399,33 @@ CVTREF(ddref,frm,fsn,vdd)	;public; Convert dictionary references to LIB.FID.DI
 	; EXAMPLE:
 	;
 	;----------------------------------------------------------------------
-	;
+	N tmpalias
 	S ER=0
 	;
 	I ddref["""" S ddref=$$QSUB^%ZS(ddref)
-	I ddref="" D ERROR($$^MSG(1300,ddref)) Q ""
+	I ddref="" D ERROR("Invalid data item name - "_ddref) Q ""
 	;
 	N alias,f
 	;
 	S f=0
 	I $L(ddref,".")=1 D
 	.	;
-	.	I $L($G(frm),",")=1 S alias=$G(frm) Q
+	.	I $L($G(frm),",")=1 S (alias,tmpalias)=$G(frm) S:$D(vAlias(tmpalias)) tmpalias=vAlias(tmpalias) Q
 	.	;
 	.	N I
-	.	F I=1:1:$L(frm,",") I $$VER($P(frm,",",I),ddref,.fsn,.vdd) S f=f+1 Q:f>1  S alias=$P(frm,",",I),I=999
-	.	E  S alias=""
+	.	F I=1:1:$L(frm,",") D  Q:f>0
+	..		S (alias,tmpalias)=$P(frm,",",I)	;
+	..		I $D(vAlias(tmpalias)) S tmpalias=vAlias(tmpalias)
+	..		I $$VER(alias,ddref,.fsn,.vdd) S f=f+1
+	..		E  S alias=""
 	;
-	E  S alias=$P(ddref,".",1),ddref=$P(ddref,".",2)
+	E  D
+	.	S (alias,tmpalias)=$P(ddref,".",1)
+	.	S ddref=$P(ddref,".",2)
+	.	I $D(vAlias(tmpalias)) S tmpalias=vAlias(alias)
 	;
-	I 'f,'$$VER(alias,ddref,.fsn,.vdd) D ERROR($$^MSG(1300,alias_"."_ddref)) ; *** 12/18/97
-	I ER=0,$g(frm)'="",'$$CONTAIN(frm,alias) D ERROR($$^MSG(1337,ddref))
+	I 'f,'$$VER(alias,ddref,.fsn,.vdd) D ERROR("Invalid data item name - "_tmpalias_"."_ddref) ; *** 12/18/97
+	I ER=0,$g(frm)'="",'$$CONTAIN(frm,alias) D ERROR("Invalid file name "_ddref)
 	;
 	Q alias_"."_ddref
 	;
@@ -433,16 +456,20 @@ VER(alias,di,fsn,vdd)	;public; Verify the Existence of a reference
 	I $G(alias)=""!($G(di)="") Q 0
 	;
 	I '$D(fsn(alias)) D fsn(.fsn,alias) I ER D ERROR(.RM) Q 0
-	;
-	N lib,fid,ret 
-	S lib=$P(fsn(alias),"|",11) 
-	;
+ 	;
+        N ddref,lib,fid,ret
+        S lib=$P(fsn(alias),"|",11)
+ 	;
 	I lib["." S fid=$P(lib,".",2),lib=$P(lib,".",1)
 	E  S fid=alias
 	;
-	I $D(vdd(alias_"."_di))
-	E  I $D(^DBTBL("SYSDEV",1,fid,9,di)) S vdd(alias_"."_di)=^(di)
+	S ddref=alias_"."_di
+	I $D(vdd(ddref))
+	E  I $D(^DBTBL("SYSDEV",1,fid,9,di)) S vdd(ddref)=^(di)
 	S ret=$T
+	; Turn off null indicator flag if not $ or N data types, or if column
+	; is tied to a lookup table.
+	I ret,"$N"'[$P(vdd(ddref),"|",9)!($P(vdd(ddref),"|",5)'="") S $P(vdd(ddref),"|",31)=""
 	I '$$rdb^UCDB(fid) Q ret
 	;
 	N ER,d,pos,t
@@ -475,54 +502,8 @@ fsn(fsn,file,vdd)	;public; Add a file header to the fsn(file) array
 	; This subroutine loads file information into a record (fsn) to be used
 	; by compilers and other utilities that require included information.
 	;
-	; KEYWORDS:	Data Dictionary
+	D fsn^DBSDD(.fsn,file,.vdd)
 	;
-	; ARGUMENTS:
-	;	. fsn(file)	File Attributes Record	/NOREQ/MECH=REF:W
-	;
-	; Local_Array|Global|Keys (nolits)|Record_Type|Location|Filer name|nolog|
-	;    1          2          3           4          5       6     7
-	; Ref_TLD|Ref_UID|Delimiter|library|Existed indicator|Ref_TIM|system name
-	;    8       9        10       11       12              13      14                                 
-	;	. file		File Name		/REQ/TBL=[DBTBL1]
-	;	. vdd(ddref)	Dictionary Record	/NOREQ/MECH=REF:RW
-	;
-	; EXAMPLES:
-	;
-	; fsn("CUVAR")="A(|^CUVAR(||10|2|"
-	; fsn("DBTBL1D")="fDBTBL1D(|^DBTBL("SYSDEV",1,FID,9,DI|"SYSDEV",FID,DI|1|2|^DBSDFF(%O)"
-	; fsn("DEP")="DEP(|^ACN(CID|CID|10|1|^DEPFILE(%O)"
-	; fsn("HIST")="fHIST(|^HIST(CID,TSEQ|CID,TSEQ|1|1|"
-	;
-	;----------------------------------------------------------------------
-	;
-	; Invalid NULL parameter for File
-	I $G(file)="" S ER=1,RM=$$^MSG(8615) Q
-	I '$D(^DBTBL("SYSDEV",1,file)) S ER=1,RM=$$^MSG(1337,file) Q
-	;
-	N I,gvn,lvn,key,keys,netloc,rectyp,refuid,reftld,reftim,nolog,udfile,f10,f12,f16,f99,f100
-	;
-	S f10=$G(^DBTBL("SYSDEV",1,file,10))
-	;
-	S f12=$G(^DBTBL("SYSDEV",1,file,12)),f16=$G(^(16))
-	S f99=$G(^DBTBL("SYSDEV",1,file,99)),f100=$G(^(100))
-	;
-	S keys=$$KEYS(file,f16)
-	S netloc=$P(f10,"|",3),udfile=$P(f99,"|",2)
-	S gvn=$P(f100,"|",1),rectyp=$P(f100,"|",2),refuid=$P(f100,"|",3)
-	S reftld=$P(f100,"|",4),nolog=$P(f100,"|",5),reftim=$P(f100,"|",6) ; *** 07/15/96
-	;
-	I $G(fsn)="" S lvn=f12 S:lvn'["(" lvn=lvn_"("
-	E  S lvn=""
-	;
-	I $P(gvn,"(",2)="""*""" S gvn=$P(gvn,"(",1)_"("		; CUVAR
-	;
-	I $$rdb^UCDB(file) d					; Relational database
-	.	I $$wide^DBSDBASE(file) S rectyp=11		; file types
-	.	else  set rectyp=1
-	; *** 06/11/96 BC (add record existed indicator)
-	; *** 07/16/96 BC (add audit field for current timt)
-	S fsn(file)=lvn_"|"_gvn_"|"_keys_"|"_rectyp_"|"_netloc_"|"_udfile_"|"_nolog_"|"_reftld_"|"_refuid_"|"_$P(f10,"|",1)_"|SYSDEV|"_$P(f10,"|",13)_"|"_reftim_"|"_$P(f10,"|",2)
 	Q
 	;
 	;----------------------------------------------------------------------
@@ -697,13 +678,23 @@ LOAD(file,fsn,array,nlv,fma,frm,vsub,cmp,new)	;public; Generate Database Load Ex
 	N di,expr,gbl,ifflg,ifset,lvn,nod,z,zcmp
 	;
 	S gbl=$P(fsn(file),"|",2)
-	I $D(vsub) S gbl=$P(gbl,"(",1)_"("_$$LITKEY($P(gbl,"(",2,99),.vsub)
+	I $D(vsub) D
+	.	S gbl=$P(gbl,"(",1)_"("_$$LITKEY($P(gbl,"(",2,99),.vsub)
+	.	I $P($G(vsql("ARCH",file)),"|",5)'="" S gbl="^|"_$P(vsql("ARCH",file),"|",5)_"|"_$E(gbl,2,$L(gbl))
 	;
 	S ifflg=$D(join(file))#2,ifset=""
 	I ifflg,$P(fsn(file),"|",3)="" s ifflg=0	; File without access keys
 	I ifflg D IFNUL(file,join(file),.fsn,.vsub,.ifflg)
 	;
 	S di="",ifset="",nod=""
+	;
+	; If archive file and using an index and we have to load data from nodes
+	; need to add code to get correct archive file
+	I $P($G(vsql("ARCH",file)),"|",6),$O(fsn(file,""))'="" D
+	.	N archinfo
+	.	S archinfo=vsql("ARCH",file)
+	.	S array=$O(array(""),-1)+1
+	.	S array(array)="S "_$P(archinfo,"|",5)_"="_$P(archinfo,"|",7)
 	;
 	F  S nod=$O(fsn(file,nod)) Q:nod=""  D addz1(file,nod,.array,.fsn,.nlv,.fma,gbl,.new,ifflg,.ifset)
 	;
@@ -718,11 +709,11 @@ LOAD(file,fsn,array,nlv,fma,frm,vsub,cmp,new)	;public; Generate Database Load Ex
 	.	Q:zexpr'["vsql("
 	.	S zsub=$P($P(zexpr,")",1),"(",2)
 	.	S zcmp(zsub)=file_","_di
-	; 
+        ;
 	N i S i=""
 	F  S i=$O(zcmp(i)) Q:i=""  D	; Computed's
-	.       S file=$P(zcmp(i),",",1) 
-	.       S di=$P(zcmp(i),",",2)  
+        .       S file=$P(zcmp(i),",",1)
+        .       S di=$P(zcmp(i),",",2) 
 	.	S expr=cmp(file,di),lvn=$P(expr,"=",1),expr=$P(expr,"=",2,99)
 	.	I $E(lvn,1,2)="S " S lvn=$E(lvn,3,$L(lvn))
 	.	I $D(vsub(file_"."_lvn)) S lvn=vsub(file_"."_lvn)
@@ -739,8 +730,8 @@ addz1(file,nod,array,fsn,nlv,fma,gbl,new,ifflg,ifset)	; Add this nod to the load
 	;----------------------------------------------------------------------
 	;
 	N expr,lvn,lex,null,z
-	;
-	S null="$C(254)"
+	I $D(nullsymbl) S null=nullsymbl
+	E  S null=$$BYTECODE^SQLUTL(254)
 	S lvn=$P(fsn(file,nod),"|",1)			; Local storage
 	S lex=$P(fsn(file,nod),"|",2)			; Opt. Load expression
 	;
@@ -790,7 +781,7 @@ addz2(file,di)	;Build the line of M code based on lvn and expr
 	E  S fma(expr,file)=lvn
 	;
 	I $E(expr)="^" S expr="$G("_expr_")"		; Protect UNDEFINED
-	S expr="S "_lvn_"="_expr			; Assign to local
+ 	S expr="S "_lvn_"="_expr			; Assign to local
 	;
 	I $G(ifflg) S expr="E  "_expr,ifset=$S($G(ifset)="":"S ",1:ifset_",")_lvn_"="""""
 	I '$G(nlv) S expr="S:$D("_lvn_")#2=0 "_$E(expr,3,$L(expr))
@@ -810,8 +801,8 @@ IFNUL(file,pfile,fsn,vsub,ifflg)	;private; Build checking for join keys
 	;
 	N I,ddref,expr,key,keys1,keys2,null
 	;
-	S null="$C(254)"
-	;S null=""""""
+	I $D(nullsymbl) S null=nullsymbl
+	E  S null=$$BYTECODE^SQLUTL(254)
 	;
 	S keys1=$P(fsn(pfile),"|",3),keys2=$P(fsn(file),"|",3)
 	;
@@ -900,18 +891,19 @@ LIST(file,skipcmp,skipsf)	; public; Return data items in DATA-QWIK file definiti
 	;
 	;----------------------------------------------------------------------	  
 	;
-	N comp,di,fid,i,k,key,keys,lib,libs,node,on,pos,str,zdi
+	N di,fid,i,k,key,keys,lib,libs,node,nullChar,on,pos,str,zdi
 	;
 	D fsn(.fsn,file) I $G(ER) Q ""
-	;
+	;	
 	S (node,pos,di,str,keys)=""
-	S comp=0 I $G(skipcmp) S comp=254		; Include computed items
 	S keys=$P(fsn(file),"|",3)_",",lib=$P(fsn(file),"|",11),fid=file
 	;
+	S nullChar=$$BYTECHAR^SQLUTL(254)
 	F i=1:1:$L(keys,",") S di=$P(keys,",",i) I $E(di)="%" S $P(keys,",",i)=""""_di_""""
 	;
-	F  S node=$O(^DBINDX(lib,"STR",fid,node)) Q:node=""!(node=$c(comp))  D
-	.	I node?1n1"*" Q					; Skip access key
+	F  S node=$O(^DBINDX(lib,"STR",fid,node)) Q:node=""  D
+	.	I $G(skipcmp),node=nullChar Q			; Skip computeds
+	.	I node'=nullChar,node?1n1"*" Q			; Skip access key
 	.	F  S pos=$O(^DBINDX(lib,"STR",fid,node,pos)) Q:pos=""  D
 	..		s on=0					; Indicator
 	..		F  S di=$O(^DBINDX(lib,"STR",fid,node,pos,di)) Q:di=""  D
@@ -970,7 +962,7 @@ RECFST(exe,hdg,frm,sel,fmt,fsn,fma,cmp,vsub,vdd)	; Fast record load
 	;
 FSTFIL	; Individual file for fast load
 	;
-	N bk,di,fdel,keys,nod,pos,seq,segment,strpos,z,zdel,zexpr,znod,zpos
+	N bk,di,fdel,keys,nod,nullChar,pos,seq,segment,strpos,z,zdel,zexpr,znod,zpos
 	;
 	I '$D(fsn(file)) D fsn(.fsn,file) Q:ER
 	;
@@ -997,9 +989,10 @@ FSTFIL	; Individual file for fast load
 	S expr("*")=expr_"_$C("_del_")"		; Delimiter after keys
 	;
 	S nod="",pos="",di=""
-	;
+	S nullChar=$$BYTECHAR^SQLUTL(254)
 	F  S nod=$O(^DBINDX("SYSDEV","STR",file,nod)) Q:nod=""  D
 	.	;
+	.	I nod=nullChar Q			; Null substitute
 	.	I nod["*" Q				; Access Key
 	.	I nod'?.N,nod'=bk Q			; Computed's
 	.	;
@@ -1010,6 +1003,7 @@ FSTFIL	; Individual file for fast load
 	.	K segment S pos="",zpos=1,strpos=1,seq=1
 	.	F  S pos=$O(^DBINDX("SYSDEV","STR",file,nod,pos)) Q:pos=""  D
 	..		;
+	..		Q:pos=nullChar				; Null substitute
 	..		I zpos'=pos,pos?1N.N,pos'=1 D		; Not sequential
 	...			;				; Save segment			
 	...			I zpos-1=strpos S segment(seq)=strpos
@@ -1068,7 +1062,7 @@ CNV(ddexpr,x,vdd)	Q $$FIELD(ddexpr,24,.x,.vdd) ; Conversion Flag
 LTD(ddexpr,x,vdd)	Q $$FIELD(ddexpr,25,.x,.vdd) ; Last Maintained
 UID(ddexpr,x,vdd)	Q $$FIELD(ddexpr,26,.x,.vdd) ; Username
 MDD(ddexpr,x,vdd)	Q $$FIELD(ddexpr,27,.x,.vdd) ; Master Dictionary
-NUL(ddexpr,x,vdd)	Q $$FIELD(ddexpr,31,.x,.vdd) ; Null Vs. Zero Indicator 
+NUL(ddexpr,x,vdd)       Q $$FIELD(ddexpr,31,.x,.vdd) ; Null Vs. Zero Indicator
 	;
 	;----------------------------------------------------------------------
 REQITEM(fid)	; Required Data Item 

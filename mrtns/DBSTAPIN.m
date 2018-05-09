@@ -2,7 +2,7 @@ DBSTAPIN	;; -  - V3.5 - Compile Conversion Routine from ^CNVTBL layout
 	;;Copyright(c)2000 Sanchez Computer Associates, Inc.  All Rights Reserved - 04/03/00 16:10:29 - TANY
 	;     ORIG:  Allan R. Mattson (6915) - 08/28/89
 	;     DESC:
-	; I18N=QUIT: Exculded from I18N standards. 
+        ; I18N=QUIT: Exculded from I18N standards.
 	;
 	; GLOBALS - ^DBTBL(%LIB,9,^ACN,^ADDR,^CIF
 	;     READ: ^DBTBL(%LIB,9
@@ -14,9 +14,9 @@ DBSTAPIN	;; -  - V3.5 - Compile Conversion Routine from ^CNVTBL layout
 	;
 	;---- Revision History ------------------------------------------------
 	; 04/03/00 - TANY - 37915
-	;            Optimized performance by modifying ^SCADAT1 calls 
-	;            to ^SCAJD. Also remove revision history older than 
-	;            one year. 
+        ;            Optimized performance by modifying ^SCADAT1 calls
+        ;            to ^SCAJD. Also remove revision history older than
+        ;            one year.
 	;
 	;----------------------------------------------------------------------
 	;

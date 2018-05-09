@@ -5,7 +5,7 @@ DBSTEST1	;;
 	;    CALLS:  ^UTLREAD
 	;     DESC:  DEMO/QA test program for UTLREAD,DBSMENU,%TRMVT
 	;
-	; I18N=QUIT: Exculded from I18N standards. 
+        ; I18N=QUIT: Exculded from I18N standards.
 	;---------- Revision History -------------------------------------------
 	;
 	; 07/15/98 - Betty Ni - 29370

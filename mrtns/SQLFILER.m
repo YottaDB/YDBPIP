@@ -1,8 +1,8 @@
-SQLFILER(fid,obj)	; Database filer utility 
+SQLFILER(fid,obj) ; Database filer utility
 	;;Copyright(c)2000 Sanchez Computer Associates, Inc.  All Rights Reserved - 08/10/00 10:39:34 - SPIER
 	;
-	; ORIG: CHIANG - 10/05/1999 
-	; DESC: General purpose database filer utility to handle SQL 
+        ; ORIG: CHIANG - 10/05/1999
+        ; DESC: General purpose database filer utility to handle SQL
 	;       INSERT/UPDATE/DELETE statements
 	;
 	; ARGUMENTS:
@@ -27,6 +27,14 @@ SQLFILER(fid,obj)	; Database filer utility
 	; I18N=QUIT
 	;----------------------------------------------------------------------
 	;---- Revision History ------------------------------------------------
+	; 06/21/2008 - RussellDS - CR30801
+	;	Moved KEYWHR code here from DBSFILB.  This is only remaining
+	;	user.
+	;
+	; 09/29/07 - RussellDS - CR29295
+	;	     Modified RDBFILE section to remove obsolete call to
+	;	     VOBJ^DBSDBASE and replace with call to rdbSaveC^UCDBRT.
+	;
 	; 02/22/07 - GIRIDHARANB - CR25217
 	;	     Modified section LOG to call AUDIT^UCUTILN.
 	;
@@ -81,9 +89,9 @@ SQLFILER(fid,obj)	; Database filer utility
 	.	I '%O S expr="S n=-1 f  S n=$O(vobj("_obj_",n)) q:n=""""  S "_ref_"=vobj("_obj_",n)" Q
 	.	S expr="S n="""" f  S n=$O(vobj("_obj_",-100,n)) q:n=""""  I $D(vobj("_obj_",n)) S "_ref_"=vobj("_obj_",n)"
 	I log D LOG
-	Q 
+        Q
 	;----------------------------------------------------------------------
-GBLREF(fid,obj)	; Public 
+GBLREF(fid,obj) ; Public
 	;----------------------------------------------------------------------
 	; ARGUMENT:
 	;
@@ -125,9 +133,9 @@ LOG	; Log user/system table changes
 	I %O=1 D AUDIT^UCUTILN(obj,.vx,rtyp,$C($P(fsn(fid),"|",10)))		; convert -100 level into vx() array
 	D PSL(fid,%O,obj,.vx)				; Log changes
 	Q
-	;---------------------------------------------------------------------- 
-PSL(fid,%O,obj,vx)	; Called by filer to convert vx() structure into UX(FID,DI) format 
-	;---------------------------------------------------------------------- 
+        ;----------------------------------------------------------------------
+PSL(fid,%O,obj,vx) ; Called by filer to convert vx() structure into UX(FID,DI) format
+        ;----------------------------------------------------------------------
 	; ARGUMENTS:
 	;
 	; . fid		Table name		/TYP=T/REQ/MECH=VAL
@@ -136,11 +144,11 @@ PSL(fid,%O,obj,vx)	; Called by filer to convert vx() structure into UX(FID,DI) f
 	; . vx		Column changed status	/TYP=T/REQ/MECH=REFARRY:R
 	;
 	;----------------------------------------------------------------------
-	N UX,di,i 
+        N UX,di,i
 	I '%O D PSL0 Q					; Create mode
-	S di="" F  S di=$O(vx(di)) Q:di=""  S UX(fid,di)=vx(di) 
-	D ^DBSLOG(fid,%O,.UX) 			; Modify mode
-	Q 
+        S di="" F  S di=$O(vx(di)) Q:di=""  S UX(fid,di)=vx(di)
+        D ^DBSLOG(fid,%O,.UX)				; Modify mode
+        Q
 PSL0	;
 	N fsn,rtyp,sn
 	D fsn^SQLDD(.fsn,fid)				; Table attributes
@@ -156,23 +164,51 @@ PSL0	;
 	D ^DBSLOG(fid,%O)
 	Q
 	;--------------------------------------------------------------------
-RDBFILE(fid,obj);	files to the relational database. 
+RDBFILE(fid,obj); files to the relational database.
 	;---------------------------------------------------------------------
 	N del,I,keys,natfid,objName,sql,tblrec,typ,vER,vRM,vList
 	S vER=0
 	S tblrec=$$getSchTbl^UCXDD(fid)
-	S keys=$P(tblrec,"|",3),objName=$$LOWER^%ZFUNC(fid)
+	S keys=$P(tblrec,"|",3),objName=$$LOWER^UCGMR(fid)
 	S del=$C($P(tblrec,"|",10))
-	S keywhr=$$KEYWHR^DBSFILB(fid,keys,"",isRdb,1,.natfid)
+	S keywhr=$$KEYWHR(fid,keys,isRdb,.natfid)
+	I keywhr'="" set keywhr=" WHERE "_keywhr
 	I %O=3 D
-	.	I keywhr'="" set sql(1)="DELETE FROM "_natfid_" WHERE "_keywhr
-	.	E  S sql(1)="DELETE FROM "_natfid
+	.	S sql(1)="DELETE FROM "_natfid_keywhr
 	.	S vList(1)=""
 	.	F J=1:1:$L(keys,",") D
 	..		S typ=$$TYP^SQLDD(fid_"."_$P(keys,",",J))
 	..		S vList(1)=vList(1)_vobj(obj,-J-2)_del
 	.		S I="" F  S I=$order(sql(I)) Q:(I="")  S vER=$$EXECUTE^%DBAPI("",sql(I),del,vList(I),.vRM) I vER<0 Q
-	E  D VOBJ^DBSDBASE(obj,del)
+	; Although rdbSaveS can be called for one node tables, just call
+	; rdbSaveC since it will work in all cases and is probably not that much
+	; more expensive than figuring out if this table could use rdbSaveS
+	E  D rdbSaveC^UCDBRT(obj,del,keywhr)
 	; Shouldn't we pass some message back here ??
 	I vER<0 S ER=1 Q
 	Q
+	;
+KEYWHR(table,keys,isRDB,nattable)
+	;
+	S ER=0
+	;
+	N col,di,i,ret
+	;
+	S nattable=table
+	D MAP^DBMAP(%DB,.nattable)
+	;
+	I keys="" Q ""
+	;
+	S ret=""
+	F i=1:1:$L(keys,",") D  Q:ER
+	.	I i>1 S ret=ret_" and "
+	.	S di=$$LOWER^SCAUTL($piece(keys,",",i),0)
+	.	S col=$$UPPER^SCAUTL(di)
+	.	;
+	.	I isRDB D
+	..		D MAP^DBMAP(%DB,table,.col)
+	..	I ER WRITE " Aborted - ",table,".",col," not in DBMAP",!
+	.	;
+	.	I 'ER S ret=ret_col_" =:vkey"_i
+	;
+	Q ret

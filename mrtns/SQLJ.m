@@ -21,6 +21,29 @@ SQLJ(frm,whr,fsn,join,tok)	;PUBLIC;SQL FROM Clause Parser
 	; EXAMPLE:
 	;
 	;---- Revision History -----------------------------------------------
+	; 2009-05-12, Pete Chenard, CR 40607
+	;	Modified ON to account for INNER, and other valid join keywords
+	;	Also removed the resetting of jfrm in the ON section because this
+	;	was causing SQLQ to return an error if jfrm did not include
+	;	all of the tables that are refernced in the ON clause.
+	;
+	; 2009-05-06, Pete Chenard CR 40607
+	;	Modified DQJOIN to deal with alias issue.
+	;
+	; 2009-04-22, Frans S.C. Witte, 39529
+	;	Modified ON() to NEW and SET lvn 'oby'.
+	;
+	; 01/22/09 - Pete Chenard
+	;	     Modified TABLE section to create an entry in vAlias
+	;	     array as map between the alias and the actual underlying
+	;	     table.
+	;
+	; 10/15/07 - Pete Chenard - CR29774
+	;	     Modified ON section to include 'LEFT' in the list
+	;	     of keywords to look for while parsing the from clause.
+	;	     Without this, a from clause such as "CIF LEFT OUTER JOIN CIFPIC
+	;	     ON CIF.ACN=CIFPIC.ACN LEFT OUTER JOIN CIFSIG ON CIF.ACN=CIFSIG.ACN"
+	;	     will not compile correctly.
 	;
 	; 07/01/96 - Frank Sanchez
 	;            Replaced old foreign key referneces 110, with new
@@ -29,7 +52,7 @@ SQLJ(frm,whr,fsn,join,tok)	;PUBLIC;SQL FROM Clause Parser
 	;
 	;----------------------------------------------------------------------
 	;
-	; I18N=QUIT: Exculded from I18N standards. 
+        ; I18N=QUIT: Exculded from I18N standards.
 	;
 	I '$D(%LIBS) S %LIBS=$$^CUVAR("%LIBS")
 	;
@@ -50,12 +73,12 @@ SQLJ(frm,whr,fsn,join,tok)	;PUBLIC;SQL FROM Clause Parser
 	;
 	F  D INTERP($$ATOM^%ZS(.frm,.ptr,",",tok)) Q:ptr=0!ER
 	;
-	I typobj=4 D ERROR($$^MSG(1337,frm))   ;Table Name expected 
+        I typobj=4 D ERROR($$^MSG(1337,frm))   ;Table Name expected
 	;
 	I ER S return=""
 	Q return
 	;
-	;-----------------------------------------------------------------------
+     	;-----------------------------------------------------------------------
 INTERP(atm)	; Interpret expression atom
 	;-----------------------------------------------------------------------
 	;
@@ -63,13 +86,13 @@ INTERP(atm)	; Interpret expression atom
 	;
 	I $E(atm)="(" D  Q
 	.	;
-	.       I '(typobj=0!(typobj=4)) D ERROR($$^MSG(840)) Q  ;Unexpected paranthesis
+     	.       I '(typobj=0!(typobj=4)) D ERROR($$^MSG(840)) Q  ;Unexpected paranthesis
 	.	;
 	.	N frm
 	.	S frm=$$TRIM^%ZS($E(atm,2,$L(atm)-1))
 	.	;
 	.	N ptr
-	.	S ptr=0,stack=stack+1
+ 	.	S ptr=0,stack=stack+1
 	.	F  D INTERP($$ATOM^%ZS(.frm,.ptr,",",.tok))  Q:ptr=0!ER
 	.	S stack=stack-1
 	;
@@ -110,9 +133,9 @@ INTERP(atm)	; Interpret expression atom
 	S typobj=1
 	Q
 	;
-	;----------------------------------------------------------------------
+    	;----------------------------------------------------------------------
 TABLE(tbl,alias)	; Input is table name [as alias]
-	;----------------------------------------------------------------------
+    	;----------------------------------------------------------------------
 	;
 	I tbl["""" S tbl=$$QSUB^%ZS(tbl,"""")
 	;
@@ -122,19 +145,17 @@ TABLE(tbl,alias)	; Input is table name [as alias]
 	.	;
 	.	S atm=$$ATOM^%ZS(.frm,.ptr,",",tok) Q:ER
 	.	;
-	.	I atm="AS" D  Q
+	.	I atm="AS" D  ;Q
 	..		;
 	..		I ptr=0 D ERROR("Missing alias name") Q
 	..		S atm=$$ATOM^%ZS(.frm,.ptr,",",tok)
-	..		S alias=$$QSUB^%ZS(atm,"""")
+	..		;;S alias=$$QSUB^%ZS(atm,"""")
 	.	;
 	.	I '$$CONTAIN(keywords,atm) S alias=$$QSUB^%ZS(atm) Q
 	.	S ptr=savptr
 	;
-	;;I $D(fsn(alias)) D ERROR("Alias "_alias_" is already defined") Q
-	;
 	I '$D(fsn(tbl)) D fsn^SQLDD(.fsn,tbl) Q:ER
-	;
+	S vAlias(alias)=tbl
 	I alias'=tbl D
 	.	;
 	.	S fsn(alias)=fsn(tbl)
@@ -144,7 +165,7 @@ TABLE(tbl,alias)	; Input is table name [as alias]
 	S jfrm=$$ADDVAL(jfrm,alias)			; Local From Scope
 	Q
 	;
-	;----------------------------------------------------------------------
+    	;----------------------------------------------------------------------
 JOIN(tbl1,tbl2,outer,left,typjoin,fsn,join)	;
 	;----------------------------------------------------------------------
 	;
@@ -204,12 +225,12 @@ KEY(tbl1,tbl2,fsn)	; Return key join
 	F  S v1=$O(^DBTBL(lib1,19,fid1,v1)) Q:v1=""  I $P(^(v1),"|",5)=fid2 Q
 	F  S v2=$O(^DBTBL(lib2,19,fid2,v2)) Q:v2=""  I $P(^(v2),"|",5)=fid1 Q
 	;
-	I v1="" S:v2="" v2=$$NATURAL(tbl1,tbl2,.fsn) Q v2
-	I v2="" Q v1
+ 	I v1="" S:v2="" v2=$$NATURAL(tbl1,tbl2,.fsn) Q v2
+ 	I v2="" Q v1
 	;
-	; 
-	; "Tables "_tbl1_" and "_tbl2_" foreign keys refernce each other") 
-	D ERROR($$^MSG(370,tbl1,tbl2)) 
+        ;
+        ; "Tables "_tbl1_" and "_tbl2_" foreign keys refernce each other")
+        D ERROR($$^MSG(370,tbl1,tbl2))
 	Q ""
 	;
 	;----------------------------------------------------------------------
@@ -232,9 +253,9 @@ NATURAL(tbl1,tbl2,fsn)	; Return Natural join
 	;
 	Q v
 	;
-	;-----------------------------------------------------------------------
+     	;-----------------------------------------------------------------------
 DELIDX	; Remove redundant or obselete cross references
-	;-----------------------------------------------------------------------
+     	;-----------------------------------------------------------------------
 	; This subroutine exists for back compatibility -- pre V5.0 SELECTS
 	; reference 'index' files as primary files. In V6 these files should
 	; be removed from the dictionary
@@ -256,30 +277,37 @@ DELIDX	; Remove redundant or obselete cross references
 	;
 	;-----------------------------------------------------------------------
 REMREF(expr,ref)	; Remove all file references from expr
-	;-----------------------------------------------------------------------
+     	;-----------------------------------------------------------------------
 	;
 	N y
 	S y=0
 	F  S y=$F(expr,ref) Q:y=0  D  Q:ER
 	.	;
-	.       I "]."'[$E(expr,y) D ERROR($$^MSG(373)) Q  ;Invalid from clause 
+        .       I "]."'[$E(expr,y) D ERROR($$^MSG(373)) Q  ;Invalid from clause
 	.	I $E(expr,y)="." S expr=$E(expr,1,y-$L(ref)-1)_$E(expr,y+1,$L(expr))
 	.	E  S expr=$E(expr,1,y-$L(ref)-2)_$E(expr,y+1,$L(expr))
 	Q expr
 	;
 	;-----------------------------------------------------------------------
 ON	; On clause processing
-	;-----------------------------------------------------------------------
+     	;-----------------------------------------------------------------------
 	;
-	S ptr=ptr+1
-	S atm=$$GETSTRING(frm,.ptr,"JOIN",.tok)
+	; All lvns except oby are "type public".
+	; The lvn oby is referenced by SQLQ if the ON clause specifies a
+	; sequential column. This subroutine cannot / shall not rely on the
+	; caller.
+	;
+	N oby
+	S ptr=ptr+1,oby=""
+	;;S atm=$$GETSTRING(frm,.ptr,"CROSS,NATURAL,UNION,INNER,LEFT,FULL,RIGHT,OUTER,JOIN",.tok)
+	S atm=$$GETSTRING(frm,.ptr,"LEFT,RIGHT,OUTER,INNER,CROSS,NATURAL,FULL,JOIN",.tok)
 	D ^SQLQ(atm,jfrm,.whr,.rng,.mode,.tok,.fsn,.vdd,outer)
-	S jfrm="",outer=0,left=0,typjoin=-1
+	S outer=0,left=0,typjoin=-1
 	Q
 	;
 	;-----------------------------------------------------------------------
 USING	; Using clause processing
-	;-----------------------------------------------------------------------
+     	;-----------------------------------------------------------------------
 	;
 	I $L($G(return),",")=1 Q
 	;
@@ -299,9 +327,9 @@ USING	; Using clause processing
 	S jfrm="",outer=0,left=0,typjoin=-1
 	Q 
 	;
-	;-----------------------------------------------------------------------
+     	;-----------------------------------------------------------------------
 DQJOIN(frm,fsn)	; Return DATA-QWIK mode FROM clause with LEFT JOIN logic
-	;-----------------------------------------------------------------------
+     	;-----------------------------------------------------------------------
 	;
 	; ARGUMENTS:
 	;
@@ -335,11 +363,12 @@ DQJOIN(frm,fsn)	; Return DATA-QWIK mode FROM clause with LEFT JOIN logic
 	.	;
 	.	S tbl1=$P(frm,",",i)
 	.	I tbl1["""" S tbl1=$$QSUB^%ZS(tbl1,"""")
-	.	;
+	.	if tbl1[" " D ALIAS(.tbl1) Q:ER
 	.	F j=1:1:$L(frm,",") D  Q:ER
 	..		;
 	..		S tbl2=$P(frm,",",j)
 	..		I tbl2["""" S tbl2=$$QSUB^%ZS(tbl2,"""")
+	..		if tbl2[" " D ALIAS(.tbl2) Q:ER
 	..		I tbl2=tbl1!(tbl2=ptbl)	Q
 	..		S keys=$$NATURAL^SQLJ(tbl1,tbl2,.fsn)
 	..		F k=1:1:$L(keys,",") D
@@ -353,9 +382,9 @@ DQJOIN(frm,fsn)	; Return DATA-QWIK mode FROM clause with LEFT JOIN logic
 	I on'="" S return=return_" ON ("_on_")"
 	Q return
 	;
-	;-----------------------------------------------------------------------
+     	;-----------------------------------------------------------------------
 GETSTRING(str,ptr,keywords,tok)	; Return string until keywords
-	;-----------------------------------------------------------------------
+     	;-----------------------------------------------------------------------
 	;
 	N bptr,eptr,atm
 	;
@@ -364,6 +393,18 @@ GETSTRING(str,ptr,keywords,tok)	; Return string until keywords
 	;
 	I ptr=0 S eptr=$L(str)
 	Q $E(str,bptr,eptr)
+	;
+	;--------------------------------------------------------------------------------------
+ALIAS(tbl) ; Sets public scoped variables fsn and vAlias to deal with aliases in the from clause
+	;--------------------------------------------------------------------------------------
+	I '(tbl[" ") Q
+	N alias
+	S alias=$P(tbl," ",$L(tbl," "))  ; Take last atom as the alias (in case AS keyword is present)
+	S tbl=$P(tbl," ",1)
+	I '$D(fsn(tbl)) D fsn^SQLDD(.fsn,tbl) Q:ER
+	S vAlias(alias)=$P(tbl," ",1)
+	S fsn(alias)=fsn(tbl)
+	Q
 	;
 NOOP(m)	D ERROR($$^MSG(374,m)) Q          ; m Not supported
 	;

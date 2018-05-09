@@ -1,0 +1,2015 @@
+	/*
+	ORIG: Frans S.C. Witte - 2005-04-07
+	DESC: PSL compiler, Insensitive Group - compiler upgrade utilities
+
+	*************************************************************************
+	* IMPORTANT NOTE:							*
+	*	Framework upgrades, and the Framework bootstrap process	require	*
+	*	special precautions. Please read the associated (CR) documents,	*
+	*	and adhere to the rules and guidelines that are specified in	*
+	*	the documents listed below.					*
+	*************************************************************************
+
+	NOTES:  Currently, there is a dependency to SCAJD.proc and SCATIM.proc.
+	        These both get invoked via usePsl^PSLX in the call to FILE^%ZFUNC
+	        using the "CDT" option since FILE calls FDAT^%ZM and FTIM^%ZM.  If
+	        missing, the error is pretty well hidden.  This should not affect
+	        normal updates, but would have an impact for a clean installation.
+
+	        There are a handful of tables that are referenced early in the
+	        boot process.  These include DBTBL1 and DBTBL1D, as well as
+	        DBMAP* when loading to an RDB environment.  The RecordTABLE
+	        code for these tables is included (and the applicable tables
+	        maintained in the FilerPrep list).  These tables are still
+	        currently implemented in M and contained in STBLMTBLS.  At the
+	        point in time when they are moved into the RDB, this approach
+	        must change.  Methods prep and prepProc will generate the
+	        RecordTABLE code, both .m and .pslx, for inclusion in StarTeam.
+	        The .m code will be removed from mrtns as part of the boot
+	        process, and the .pslx code overwritten when these units are
+	        recompiled on site.	        
+
+	---- Relevant Documents ------------------------------------------------
+	* FrameworkUpgradeRules.doc
+		https://teams.fnfis.com/sites/ProfileFramework/Shared%20Documents/FrameworkUpgradeRules.doc
+		This document provides the current rules and guidelines that
+		apply to framework upgrades.
+	* FrameworkUpgradeDocumentation.doc
+		https://teams.fnfis.com/sites/ProfileFramework/Shared%20Documents/FrameworkUpgradeDocumentation.doc
+		This document provides the backgrounds of the current rules and
+		guidelines that apply to framework upgrades. It also documents
+		the classification of all framework elements that are compiled
+		phase 1.
+	* CR15592CompilerUpgradesDesign.doc
+		StarTeam://phlscm01/SSP/Project_Specific/Database Independence III/Requirements/CR15592CompilerUpgradesDesign.doc
+		Outlines the original changes to support PSL compiler upgrades.
+	* PSL Help, #PSL Version Setting
+		The table in this section describes the relationship between
+		Profile versions (%VersionID / %VN) and PSL versions.
+		As no Profile customer ever received a Profile version that
+		uses UCOPTS.ini or otherwise relies on the bootstrap features
+		introduced by this module (per CR15592 / CR15593), this unit
+		has no support for Profile V6.4 environments.
+		Thus this unit (and all other compiler units) will never need to
+		look at %VersionID, and  can deal exclusively with
+		PSLParser.getSetting("PSL","Version").
+
+	---- Comments ----------------------------------------------------------
+
+	This procedure will contain all functions and subroutines that support
+	the PSL Compile Upgrade proces for PSL V2.7 and up.
+
+	Library
+	boot		Bootstrap PSL compiler installation
+	bootFiler	Compile filer for specified table using the same compiler
+			command options that are in effect for the bootstrap of
+			the PSL compiler itself.
+	bootProc	Compile specified DQ procedure using the same compiler
+			command options that are in effect for the bootstrap of
+			the PSL compiler itself.
+	bootUCOPTS	Generate new version of M routine UCOPTS.
+	date		Convert a String to a Date, using features that are
+			available during bootstrap phases.
+	getCapabilities	Return the capabilities of this version of the compiler
+			with respect to the requested capabilites section.
+	getGroup	Return group that specified element belongs to
+	getList		Return list of elements that belong to specified group
+			Is complemented by $$getComList(), $$getDatList(),
+			$$getDicList(), $$getInsList(), and $$getUpgList().
+	isGroup		Does specified element belong to specified group
+			Is complemented by $$isCompiler(), $$isData(),
+			$$isDictionary(), $$isInsensitive(), $$isObject(), and
+			$$isUpgrade().
+	linkAll		ZLINK all PSL compiler units.
+	prep		Prepare framework version for bootstrap in the specified
+			target environment.
+	prepProc	Prepare a single framework unit for bootstrap in the
+			specified target environment.
+	time		Convert a String to a time, using features that are
+			available during bootstrap phases.
+
+	As part of the PSL compiler bootstrap process, the routine UCOPTS will
+	be generated. Generating UCOPTS instead of distribution UCOPTS as part
+	of Profile is based on the following considerations:
+	* The idea behind UCOPTS is to provide a mechanism to customize
+		environment settings for the PSL compiler. However, if UCOPTS
+		itself is distributed as part of a Profile release (e.g. as
+		UCOPTS.proc), there are conflicting interests when a new version
+		of UCOPTS is distributed. The new compiler release requires the
+		new version of UCOPTS, which can only be effectuated by
+		overwriting the environment specific settings in the target
+		environment.
+	* Specification of environment sensitive settings shall be separated
+		from runtime behavior of the routine. To achieve this, these
+		settings will be stored in the file UCOPTS.ini that shall reside
+		in the application's "root" directory.
+	* The compiler upgrade process will use the UCOPTS.ini file and its own
+		knowledge of the current configurable settings to generate the
+		UCOPTS routine that provides all functionality expected by the
+		current version of the compiler.
+	* "new" configurable settings that could also be specified in
+		UCOPTS.ini shall take sensible defaults when not found.
+	* Sufficient Profile-independent tools are available to support merging
+		of the "new" and the "old" UCOPTS.ini if the target environment
+		needs non-default settings.
+
+	---- Revision History ------------------------------------------------
+	2009-05-20, Frans S.C. Witte, CR 41380
+		* Modified bootUCOPTS: Added maxLitLength to IMMUTABLE
+
+	2009-02-24, Frans S.C. Witte, CR 35741/38252
+		* modules compiled in phase 2 will now be linked immediately
+		  after being compiled.
+		* Added DBSDRV and its tables to boot phase 2.
+
+	2008-12-18, Frans S.C. Witte, CR 35741, 36952
+		* Added all "phase 1" and "phase 2" filers to bootPhs2()
+		* Added vNumber.m to the INSENSITIVE group
+
+	2008-10-20, Frans S.C. Witte, CRs 35741/35918/35922
+		* Added vResultSet to the INSENSITIVE group
+		* Added Integer as pslx-only class
+
+	2008-10-09 - RussellDS - CR35741/35918
+		* Added DBSPID to the filer list.  Needed early in an Oracle
+		  environment for new stored procedure creation.
+
+	2008-07-24 - RussellDS - CR30801
+		* Removed obsoleted elements
+		* Eliminated DBSREL and DBSTBL from being needed for bootstrap.
+		* Created bootFWPh2 section to manage booting of phase 2 elements,
+		  and added lists for phase2 and filers
+		* Added FilerPrep list and code in prep and prepCmp to prep the
+		  RecordTABLE elements of that list
+
+	2008-04-22, Frans S.C. Witte, CR 33569 / 33570 (v2.7)
+		* Added linkPreBoot()
+		* Moved SQLBUF from Dictionary to Data (not updatable)
+		* Added "CLASSES" keyword to getCapabilities, and corrected
+		  keyword list.
+
+	04/11/07 - Frans S.C. Witte - CR: 27800
+		* Modified to use PSLProperty.
+		* Added %CHARSET, %DBAPI, %ZM, %ZOPEN, PSLC, PSLCC, PSLClass,
+		  PSLMethod, PSLParser, PSLProperty, PSLTokenizer, and PSLX to
+		  compiler lists.
+		* Removed UCLABEL, and UCPSLLR from lists
+		* Removed subroutines afterConst(), cascade(), cascInfo(),
+		  needCompile(), UCGMCU(). They were intended to support
+		  complier upgrades, but this is now provided by the
+		  boot* and prep* subroutines.
+		* Removed third parameter from call to getSrc^UCXDT25()
+		* Added functions $$getCls(), $$isClsCDM(), $$isClsIntrinsic(),
+		  $$isClsPslx(), $$isClsTable().
+		* Removed Object group and $$getObjList()
+		* Removed all references to and code for %VersionID = 6.x
+
+	04/10/07 - RussellDS - CR26503
+		* Removed DBMAPDFT, which has been removed from the framework
+		  view.  It is now incarnated as USTMAPDF in the application
+		  views, but is no longer needed to be listed here.
+
+	12/21/06 - Frans S.C. Witte - CRs: 24902 / 24903 / 24974
+		* calls to getSrc^UCXDT25() now pass level=0 (do not include any
+		  leaders).
+		* Extension of source files modified from ".proc" to ".psl".
+		* DBSDD moved from Data to Upgrade group.
+
+	11/10/06 - Frans S.C. Witte - CRs: 22519 / 20613
+		* Added DBMAPDFT (Insensitive), SQLUTL (Upgrade), removed
+		  SQLAG, SQLC, SQLEXT, SQLFMT, SQLI, SQLOADER, SQLTESTF,
+		  SQLTESTS, and SQLUTIL
+		* Added support for pslPrsr("boot","charsetlevel")
+
+	09/14/06 - Frans S.C. Witte - CRs: 22719 / 20613
+		* Corrected PSL.maxCharValue for UTF-8.
+		* Added %DBAPI, %ZM, and %ZOPEN to list of routines that are
+		  ZLINKed by linkAll().
+
+	08/30/06 - Frans S.C. Witte - CRs: 22720 / 22274
+		* Removed UCTEST and SCAUTL from compiler list.
+		* Added code to generate charsetName^UCUPTS() to obtain the
+		  name of the character set at runtime (e.g. for M routines).
+		* Added keyword 'void" to getCapabilites("KEYWORDS")
+
+	08/08/06 - Pete Chenard - CR 22561 / 22563
+		* Added SCAUTL to the Insensitive group since it now gets
+		  called during compilation.
+
+	07/13/06 - Frans S.C. Witte - CRs: 22273 / 22274
+		* Boot options array is now re-created for each call to "boot"
+		  a single unit (in case units contain explicit #OPTION etc.).
+		* Moved UCLABEL to Dictionary group (DBTBL33D is considered
+		  equivalent to DBTBL25D).
+		* Added UCIO0 (Insensitive)
+
+	05/24/06 - Frans S.C. Witte - CRs: 22060 / 22061
+		Added UCBYTSTR (Upgrade), UCPSLSR (Insensitive).
+		Added prep(), prepCmp(), and prepProc().
+		Removed afterDeploy().
+		Added DBMAP, DBSDBASE, DBSDDMAP, DBSMACRO, and DBSTBL (all
+		Insensitive), and DBSDD, and DBSDI (both Upgrade).
+		Added $$getCapabilities() for interaction with Profile Workbench
+		Modified getBootOptions().
+
+	05/01/06 - Frans S.C. Witte - CRs: 21394 / 21395
+		Added bootUCOPTS() (and call to it from boot()).
+		Moved UCTIME from "Upgrade" to "Insensitive" (see UCTIME).
+		info() now calls INFO^UCGM("PLSBOOT",msg).
+		getBootOptions() now turns all INFO groups off as well.
+
+	03/13/06 - Frans S.C. Witte - CRs: 20280 / 18164
+		Added UCPSLLR (Insensitive).
+		Added subroutine bootFiler().
+
+	12/27/05 - Frans S.C. Witte - CRs: 18163 / 18164
+		Added UCREC4OP (Insensitive), UCPSLST (Insensitive), and
+		UCXOBJ (Object).
+		getBootOptions() now turns object optimization off.
+		boot() now ZLINKs phase 0 files that it needs.
+
+	11/30/05 - Frans S.C. Witte - CRs: 18727 / 18727
+		Added subroutine getBootData() to instantiate the RowSets and
+		load them with data. Modified get BootOptions accordingly.
+		bootProc will delete SCAU_MRTNS version after compile
+		boot will recompile all DQ procedures that are not in the Data
+		group as well.
+		Split linkAll() in linkAll() and linkList().
+
+	11/16/05 - Frans S.C. Witte - CRs: 18247 / 15593
+		Added UCXCUVAR to Upgrade.
+		Enabled use of vDataDir in boot().
+
+	10/24/05 - Frans S.C. Witte - CRs: 17937 / 15593
+		Added UCTIME to Upgrade. Moved UCDATE to Upgrade.
+
+	06/15/05 - Frans S.C. Witte - CRs: 15592 / 15593
+		Initial procedure, derived from UCDTAUTL.
+		Function $$isCompiler() and subroutine linkAll copied from
+		UCDTAUTL.
+		Initial implementation of ^UCGMCU(), afterConst(),
+		afterDeploy(), boot(), bootCmp(), cascade(), cascInfo(),
+		getBootOptions(), getBootRws(), date(), time().
+		$$getComList(), $$getDatList(), $$getDicList(), $$getGroup(),
+		$$getInsList(),	$$getList(), $$getObjList(), $$getUpgList(),
+		info(), $$isCompiler(), $$isData(), $$isDictionary(),
+		$$isGroup(), $$isInsensitive(), $$isObject(), $$isUpgrade(),
+		$$needCompile().
+	*/
+	#PACKAGE framework.psl
+	#OPTION  ResultClass ON
+
+	// I18N=QUIT
+	// *******************************************************************
+	// * IMPORTANT NOTE:                                                 *
+	// * According to the rules that apply to PSL compiler upgrades,     *
+	// * the generated M routine associated with this procedure must be  *
+	// * checked into StarTeam and released with the procedure whenever  *
+	// * changes are made to this procedure.                             *
+	// *                                                                 *
+	// * The M routine will be loaded to the mrtns directory during      *
+	// * upgrades and will then be removed from that directory as part   *
+	// * of the upgrade process.  Therefore, other than during an        *
+	// * upgrade an mrtns version of this routine should not exist.      *
+	// *                                                                 *
+	// * Keep these comments as single line to ensure they exist in the  *
+	// * generated M code.                                               *
+	// *******************************************************************
+
+	// ---------------------------------------------------------------------
+public void boot(  String vDataDir	// directory for .DAT files (*1)
+		)	// bootstrap the PSL compiler and SQL engine
+	/* ---------------------------------------------------------------------
+	This subroutine will bootstrap the PSL compiler in an initial
+	environment, or upgrade the PSL compiler in an existing environment.
+	
+	At the completion of the bootstrap phase, compFWPh2 can be called to
+	build/rebuild the phase 2 framework elements.
+
+	According to the rules of PSL Compiler Upgrades (CR15592), all PSL
+	compiler element groups require compilation. For elements of the Data
+	group this is obvious, but for other elements, the removal of the MRTNS
+	version of the routine and the synchronisation of the CRTNS version with
+	the MRTNS version can only be guaranteed if all elements are re-compiled
+	independent of the M routines that occur in an upgrade.
+
+	Subroutine boot handles the calls to bootCmp(,) in three steps
+	1) UCOPTS is generated
+		This is achieved by calling bootUCOPTS(), which in turn uses the
+		UCOPTS.ini file for environment specific settings.
+	2) All elements of the Data group are compiled
+		For these elements bootCmp(,) will be called with the following
+		compiler options:
+		- #WARN XXX OFF for each option returned by $$allWARN^UCGMC()
+		- #OPTIMIZE XXX OFF for all options returned by
+			$$allOPTIMIZE^UCGMC() except #OPTIMIZE OBJECTS ON
+		- ("Options","nolink") will be ON, all other
+			("Options",) will be OFF
+		- ("boot","restrictionlevel") = 2
+
+	3) All other PROC elements of the compiler/engine/kernel are compiled
+		For these elements bootProc() will be called with the following compiler options:
+	- #WARN XXX OFF for each option returned by $$allWARN^UCGMC()
+	- #OPTIMIZE XXX OFF for all options returned by $$allOPTIMIZE^UCGMC()
+		except #OPTIMIZE OBJECTS ON
+	- ("Options","nolink") will be ON, all other
+		("Options",) will be OFF
+	- ("boot","restrictionlevel") = 2
+
+	ARGUMENTS:
+	(*1) vDataDir = directory for .DAT files
+		This value is required in an empty environment.
+		It is also required for an upgrade that contains modifications
+		to any of the PSL tables in the System group.
+		If the data of the PSL tables in the System group can correctly
+		be retrieved from the tables in the underlying data store, then
+		the parameter can be omitted.
+
+	NOTES:
+	* Compilation order
+		The units are compiled in the order in which they occur in the
+		list returned by $$getList("Data"). Even though the compiled
+		routines will not be ZLINKed automatically, units that are
+		compiled later can use classes for which the method generating
+		routine has been created earlier in the process. Similarly,
+		units compiled earlier cannot use classes for which the method
+		generating routine has not yet been created.
+	* This procedure ZLINKs the routines that it expects to be present in
+		their after-upgrade version, but that may have been called by
+		the installation program in phase 0, BEFORE the new routines
+		were loaded. This is restricted to OBSOLETIONS in case of an
+		Upgrade, but could include most of the SQL engine, and PSL
+		runtime routines such as UCXDD. It will also include other
+		framework routines such as DBMAP and DBSDBASE.
+		In the near future, these elements shall be classified just like
+		compiler and engine elements, and they shall be integrated into
+		the values returned by $$getList().
+		Note that linkAll() cannot be called, because that includes the
+		routines from the Data group that may not yet be present at all.
+		Note that routines from the Data group may have been called as
+		well in their pre-upgrade form, so after calling bootProc, the
+		unit must be ZLINKed explicitly.
+	*/
+
+	// Update the current image by ZLINKing the routines that may have been
+	// called before. Do this before generating and ZLINKing UCOPTS
+	do linkPreBoot(), bootUCOPTS(), linkList( "UCOPTS")
+
+	// Boot the remainder of the PSL compiler, SQL engine, and DBS kernel
+	type List sysList
+	type Number elm
+	type String unt
+
+	/* The actual compiler bootstrap */
+	set sysList = $$getList("Data")
+	for elm=1:1:sysList.count() do {
+		set unt = sysList.elementAt(elm)
+
+		if unt = "UCOPTS" quit	// UCOPTS already compiled separately
+		
+		type Primitive co(,)	// compiler options (clean set per call)
+
+		if 'vDataDir.get().isNull() set co("boot","datadirectory") = vDataDir
+
+		do getBootOptions( co(,), 2)	// use boot restrictionlevel=2
+	
+		do bootCmp( unt, co(,))
+
+		// ZLINK new, environment specific, version (to deal with polluted image)
+		do linkList( unt)
+	}
+
+	type List comList = $$getList("Compiler")
+	for elm=1:1:comList.count() do {
+		set unt = comList.elementAt( elm)
+		if sysList.contains( unt) quit	// Data group already done
+		if '$$isProc^UCXDT25( unt) quit	// not a DQ procedure
+		do bootProc( unt)
+	}
+		
+	quit
+	
+	
+	// ---------------------------------------------------------------------
+public void bootFWPh2()	// bootstrap phase 2 of the framework
+	/* ---------------------------------------------------------------------
+	This subroutine will build/rebuild the phase 2 elements for the framework.
+	This can be called after the phase 1 compiler boot or independently.
+	
+	Phase 2 occurs in four parts:
+		1) Build PSLRecordBuilder and any other elements necessary to
+		   generate RecordTABLE code
+		2) Build minimal RecordTABLE code for DBTBL* elements needed by
+		   PSLRecordBuilder
+		3) Build remaining procedures - including rebuilding in target
+		   environment DBARCHIVE and SQLAUDIT, which are delivered as
+		   M, but initially ignore archive and audit checking during
+		   software load.
+		4) Build remaing RecordTABLE FW elements
+	*/
+	
+	type Number elm
+	type String unt
+	
+	type List phase2BList = $$getList("Phase2B")
+	for elm=1:1:phase2BList.count() do {
+		set unt = phase2BList.elementAt( elm)
+		do bootProc( unt), linkList( unt)
+	}
+	
+	type List filerBList = $$getList("FilerB")
+	for elm=1:1:filerBList.count() do {
+		set unt = filerBList.elementAt( elm)
+		do bootFiler( unt, 2), linkList( "Record"_unt)
+	}
+	
+	type List phase2EList = $$getList("Phase2E")
+	for elm=1:1:phase2EList.count() do {
+		set unt = phase2EList.elementAt( elm)
+		do bootProc( unt), linkList( unt)
+	}
+	
+	type List filerEList = $$getList("FilerE")
+	for elm=1:1:filerEList.count() do {
+		set unt = filerEList.elementAt( elm)
+		do bootFiler( unt, 2), linkList( "Record"_unt)
+	}
+
+	// (re)build the DBSDRVDPL dispatcher
+	type String bldDrv = $$build^DBSDRV()
+	set:bldDrv.isNull() bldDrv = "function buildDBSDRV completed succesfully"
+	write bldDrv,!
+
+	quit
+	
+
+	// ---------------------------------------------------------------------
+public void bootCmp( String proc		// procedure to compile
+		, Primitive cco(,)	// compiler command options (*2)
+		)	// call compiler for bootstrap of a single module
+	/* ---------------------------------------------------------------------
+	This subroutine mimics the behavior of COMPILE^DBSPROC(), with the
+	following exceptions:
+	- The source will be constructed using $$getSrc^UCXDT25(), that will
+		not include the vSig label used to track source modifications.
+	- The version of the routine in SCAU_MRTNS will be deleted.
+
+	This is the simplest set of actual parameters that allows overriding
+	compiler default settings.
+
+	NOTES:
+	. The SCAU_MRTNS version will only be deleted if
+		- $$getSrc^UCXDT25() returned PSL source code.
+			This prevents the deletion of M routines.
+		- The compilation is successful.
+			This ensures that the set of routines will always be
+			"complete".
+	*/
+	type String src(), cfe
+	type String rtn = $$getSrc^UCXDT25( proc, src())
+
+	quit:rtn=""
+	quit:src.data()<10
+
+	/* call compile-arrray-to-file with:
+		- src = scr() returned by $$getSrc^UCXDT25()
+		- dst = rtn as returned by $$getSrc^UCXDT25()
+		- labels = ignored
+		- methods = ignored
+		- commands = cco(,) as passed in
+		- sysmap = ignored
+		- cmperr = cfe(), used to check that routine delete is safe
+		- PGM = rtn_"~Procedure"
+	*/
+	//do cmpA2F^UCGM( src(), rtn, , ,  cco(,), , .cfe, rtn_"~Procedure")
+	set cfe=$$cmpA2F^PSLC( src(), cco(,), rtn, , rtn_"~Procedure")
+
+	/* If the compilation was successful, delete the SCAU_MRTNS version of
+	   this element. */
+	if cfe.get().toNumber()>0 quit
+
+	#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+	do DEL^%ZRTNDEL( rtn.translate("%","_"), $$SCAU^%TRNLNM("MRTNS"))
+	quit
+
+	// ---------------------------------------------------------------------
+public void bootFiler( String table,	// table for which to compile filer
+		Number lvl		// restriction level
+		)	// bootstrap compile a filer
+	/* ---------------------------------------------------------------------
+	This subroutine calls run^PSLC to build RecordTABLE classes with the
+	bootoptions, including boot-restrictionlevel=lvl
+	It is the caller's responsibility to ensure that the filer meets
+	all other requirements that allow compilation with the PSL compiler's
+	boot options in effect.
+
+	NOTES:
+	. Unlike boot^UCGMCU() this subroutine does not accept a data directory
+		parameter. This implies that access to CUVAR, system tables,
+		and other datastructures shall be possible using the underlying
+		data store.
+		
+	. Remove any filers provided as .m files and re-link new ones.
+		Note that .pslx files for these stubs are also provided under
+		the framework directory, but these are overwritten when the new
+		filer is compled.
+	*/
+	type Primitive co(,)	// compiler options
+	type Number errors
+	type String mod = "Record"_ table
+	type String ucopts
+
+	do getBootOptions( co(,), lvl)	// compile with boot restrictionlevel=lvl
+	
+	set ucopts = $$toUcopts^PSLC("", "RecordBoot", co(,))
+	
+	set errors = $$run^PSLC("--ucopts="_ ucopts_ " "_ mod)
+	
+	#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+	do DEL^%ZRTNDEL( mod, $$SCAU^%TRNLNM("MRTNS"))
+
+	do linkList(mod)
+
+	quit
+	
+	// ---------------------------------------------------------------------
+public void bootProc( String proc	// procedure to compile using bootstap settings
+		)	// bootstrap compile a procedure
+	/* ---------------------------------------------------------------------
+	This subroutine mimics the behavior of COMPILE^DBSPROC(). However this
+	subroutine does not invoke any function or subroutine that might be
+	unavailable in an initial environment.
+	The boot options will be similar to the boot options used to boot the
+	PSL compiler (see subroutine boot() in this unit).
+	It is the caller's responsibility to ensure that the DQ procedure meets
+	all other requirements that allow compilation with the PSL compiler's
+	boot options in effect.
+
+	NOTES:
+	. Unlike boot^UCGMCU() this subroutine does not accept additional
+		parameters. This implies that access to CUVAR, system tables,
+		and other datastructures shall be possible using the underlying
+		data store.
+	*/
+	type Primitive co(,)	// compiler options
+
+	do getBootOptions( co(,), 1)	// compile with boot restrictionlevel=1
+	do bootCmp(proc, co(,))
+
+	quit
+	
+	// ---------------------------------------------------------------------
+public void bootUCOPTS()	// procedure to generate routine UCOPTS
+	/* ---------------------------------------------------------------------
+	This subroutine creates a new version of the routine UCOPTS. This call
+	is needed after changes have been made to $SCAU_DIR/UCOPTS.ini.
+
+	A call to this subroutine will be automatic for compiler bootstraps.
+
+	OUTPUTS:
+	. A new version of routine UCOTPS has been created in $SCAU_CRTNS.
+
+	NOTES:
+	. See comment throughout this subroutine, and in the generated code for
+		additional explanation.
+	*/
+	type PSLParser siteOpts = Class.new("PSLParser", "")	// values from UCOPTS.ini
+	type String uc()		// UCOPTS source code
+	type Number ln = 0		// source line pointer
+
+	#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+	do decodeFile^UCGMC( $$SCAU^%TRNLNM("DIR"), "UCOPTS.ini", siteOpts)
+
+	do ca(uc(), "private UCOPTS( String Options()) // PSL Compiler Environment Options")
+
+	do ca(uc(), " // *******************************************************************")
+	do ca(uc(), " // * IMPORTANT NOTE:                                                 *")
+	do ca(uc(), " // * According to the rules that apply to PSL compiler upgrades,     *")
+	do ca(uc(), " // * this routine is generated by the compiler from the PSL Compiler *")
+	do ca(uc(), " // * Environemnt Options file $SCAU_DIR/UCOPTS.ini                   *")
+	do ca(uc(), " // *                                                                 *")
+	do ca(uc(), " // * To modify environment settings on a permanent basis:            *")
+	do ca(uc(), " // * 1) change $SCAU_DIR/UCOPT.ini                                   *")
+	do ca(uc(), " // * 2) call bootUCOPTS^UCGMCU() to rebuild UCOPTS.m                 *")
+	do ca(uc(), " // *                                                                 *")
+	do ca(uc(), " // * To modify WARN, OPTIMIZE and Options settings on an incidental  *")
+	do ca(uc(), " // * basis, ensure that the environment variable $SCAU_UCOPTS names  *")
+	do ca(uc(), " // * the file that specifies these overwrites.                       *")
+	do ca(uc(), " // *                                                                 *")
+	do ca(uc(), " // * Note that you cannot specify incidental overwrites for values   *")
+	do ca(uc(), " // * to be returned by $$getPslValue().                              *")
+	do ca(uc(), " // *******************************************************************")
+
+	/* force defaults.
+	   Defaults are choosen in such a way that they best fit a production
+	   environment. Per introduction of this feature (JUNE 2006) there are
+	   no production sites, so a missing UCOPTS.ini will be treated as a
+	   standard production environment with code that compiles to the latest
+	   PSL version.
+
+	   All new installations as of JUNE 2006 shall have a UCOPTS.ini, that
+	   is tailored to the Profile Production Environment for that version.
+
+	   Profile Development environments and Profile QA environments will
+	   require a UCOPTS.ini file with settings that correspond to the
+	   rules and guidelines set for that environment.
+
+	   This leads to the following defaults:
+	   - WARN and INFO: all OFF
+	   - OPTIMIZE: all ON
+	   - Options: all OFF
+	   */
+	type String def()
+	type Number elm
+	type List   lst
+	type String ov
+	type String opt
+	type String val
+
+	set def("WARN")     = ""
+	set def("INFO")     = ""
+	set def("OPTIMIZE") = $$allOPTIMIZE^UCGMC()
+	set def("Options")  = ""
+
+	// insert lines that specify settings
+	for opt="WARN","INFO","OPTIMIZE","Options" do {
+		do ca(uc(), " //")
+		do ca(uc(), " // ---- "_ (opt_ " settings ").justify( 64, -1, "-"))
+		set lst = siteOpts.listSettings( opt)
+		if lst.isEmpty() {
+			do ca(uc(), " // None specified, using PSL defaults")
+			set ov = def( opt)
+		}
+		else  do {
+			set (ov, val) = ""
+			for elm=1:1:lst.count() {
+				set val = lst.elementAt(elm)
+				if 'siteOpts.getSetting( opt, val) quit
+				if ov.isNull() set ov = val quit
+				set ov = ov_ ","_ val
+			}
+		}
+
+		do ca(uc(), " set Options("_ opt.addQuotes()_ ") = "_ ov.addQuotes())
+	}
+
+	// #PSL compiler command 
+	type String cmt
+	set opt="PSL" 
+	do ca(uc(), " //")
+	do ca(uc(), " // ----  "_ (opt_ " settings ").justify( 64, -1, "-"))
+
+	// #PSL XyzMask String (default "")
+	for val = "BooleanMask","DateMask","TimeMask" {
+		if 'siteOpts.hasSetting( opt, val) do {
+			set ov="", cmt = " // defer to DBCTLDVFM.MSK at compile time"
+		}
+		else  set ov = siteOpts.getSetting( opt, val), cmt = ""
+		do ca( uc(), " set Options("_opt.addQuotes()_","_ val.addQuotes()_ ") = "_ ov.addQuotes()_ cmt)
+	}
+
+			
+	// #PSL CompileSummary String (default true)
+	set val = "CompileSummary"
+	if 'siteOpts.hasSetting( opt, val) do {
+		set ov = true, cmt = " // using compiler default"
+	}
+	else  set ov = siteOpts.getSetting( opt, val), cmt = ""
+	do ca( uc(), " set Options("_opt.addQuotes()_","_ val.addQuotes()_ ") = "_ $SELECT(ov=1:"true",1:"false")_ cmt)
+
+			
+	// #PSL Version Number (default current compiler version)
+	set val = "Version"
+	if 'siteOpts.hasSetting( opt, val) do {
+		set ov = $$getPSLVersion^PSLC(), cmt = " // using current compiler version"
+	}
+	else  set ov = siteOpts.getSetting( opt, val), cmt = ""
+	do ca( uc(), " set Options("_opt.addQuotes()_","_ val.addQuotes()_ ") = "_ ov_ cmt)
+
+	// end of #xyz sections
+	do ca(uc(), " quit")
+
+
+	// add $$charsetName()
+	do ca(uc(), "")	
+	do ca(uc(), " // *******************************************************************")
+	do ca(uc(), "private charsetName() // return current character set as runtime value")
+	do ca(uc(), " quit Runtime.charsetName")
+
+
+	// add $$getPslValue()
+	type literal List IMMUTABLE = "maxCharValue,maxLineLength,maxLitLength,maxNameLength,maxStringLength"
+	type String objdef
+	type String propID    = "PSL."
+	type String propName
+	type PSLX   pslProp = Class.new("PSLX", "PSL")
+	type PSLProperty propDes = Class.new( "PSLProperty")
+	type String rtn
+
+	do pslProp.extract()
+
+	do ca(uc(), "")	
+	do ca(uc(), " // *******************************************************************")
+	do ca(uc(), "private getPslValue( String property) // return value of PSL.xxxYyyZzz property")
+
+	/* First add the immutable values
+	   */
+	do ca(uc(), " // ---- PSL.maxCharValue ----")
+	do ca(uc(), " // This value indicates the maximum value that is allowed in $CHAR().")
+	do ca(uc(), " // The value depends on the GT.M version and if the GT.M version")
+	do ca(uc(), " // supports Unicode it also depends on the setting of $ZCHSET.")
+	do ca(uc(), " // Note that GT.M treats 0x10FFFF and 0x10FFFE as unmapped characters.")
+	do ca(uc(), " //")
+	do ca(uc(), " #IF $$rtChset^UCBYTSTR()=""UTF-8""")
+	do ca(uc(), " if property = ""maxCharValue"" quit 1114109")
+	do ca(uc(), " #ELSE")
+	do ca(uc(), " if property = ""maxCharValue"" quit 255")
+	do ca(uc(), " #END")
+
+	do ca(uc(), " //")
+	do ca(uc(), " // ---- PSL.maxLineLength ----")
+	do ca(uc(), " // This value indicates the split value that will be used to determine")
+	do ca(uc(), " // if a line of M code must be split over multiple lines.")
+	do ca(uc(), " // For example, assigning a constant with a length close to")
+	do ca(uc(), " // PSL.maxStringLength to a variable requires multiple lines:")
+	do ca(uc(), " //     set var = ""FIRST PIECE""")
+	do ca(uc(), " //     set var = var_""SECOND PIECE""")
+	do ca(uc(), " // The value leaves room for additional characters such as the")
+	do ca(uc(), " //     'set var = var_'")
+	do ca(uc(), " // in the example above.")
+	do ca(uc(), " //")
+	do ca(uc(), " #IF $$gtmLevel^UCGM(4)")
+	do ca(uc(), " if property = ""maxLineLength"" quit 1980")
+	do ca(uc(), " #ELSE")
+	do ca(uc(), " if property = ""maxLineLength"" quit 450")
+	do ca(uc(), " #END")
+
+	do ca(uc(), " //")
+	do ca(uc(), " // ---- PSL.maxLitLength ----")
+	do ca(uc(), " // The PSL compiler will try to generate code that uses literal values")
+	do ca(uc(), " // whenever possible. To prevent the construction of lines that exceed")
+	do ca(uc(), " // PSL.maxLineLength when multiple long literals occur, the maximum")
+	do ca(uc(), " // length of such a literal will be limited to PSL.maxLineLength / 4")
+	do ca(uc(), " //")
+	do ca(uc(), " #IF $$gtmLevel^UCGM(4)")
+	do ca(uc(), " if property = ""maxLitLength"" quit 511")
+	do ca(uc(), " #ELSE")
+	do ca(uc(), " if property = ""maxLitLength"" quit 255")
+	do ca(uc(), " #END")
+
+	do ca(uc(), " //")
+	do ca(uc(), " // ---- PSL.maxNameLength ----")
+	do ca(uc(), " // This value indicates how many characters are allowed in names.")
+	do ca(uc(), " // The value applies to names of")
+	do ca(uc(), " // - local variables (error)")
+	do ca(uc(), " // - labels (info)")
+	do ca(uc(), " // - routines (info)")
+	do ca(uc(), " // The compiler will issue a LENGTH error or information message")
+	do ca(uc(), " //  when the length of a name exceeds this value")
+	do ca(uc(), " //")
+	do ca(uc(), " #IF $$gtmLevel^UCGM(5)")
+	do ca(uc(), " if property = ""maxNameLength"" quit 31")
+	do ca(uc(), " #ELSE")
+	do ca(uc(), " if property = ""maxNameLength"" quit 8")
+	do ca(uc(), " #END")
+
+	do ca(uc(), " //")
+	do ca(uc(), " // ---- PSL.maxStringLength ----")
+	do ca(uc(), " // This value indicates the maximum length that is assumed for local")
+	do ca(uc(), " // variables. You can use this constant in constructs like")
+	do ca(uc(), " // String.extract(first,PSL.maxStringLength)")
+	do ca(uc(), " //")
+	do ca(uc(), " #IF $$gtmLevel^UCGM(""4.4-004"")")
+	do ca(uc(), " if property = ""maxStringLength"" quit 1048575")
+	do ca(uc(), " #ELSE")
+	do ca(uc(), " if property = ""maxStringLength"" quit 32767")
+	do ca(uc(), " #END")
+
+	/* Remaining property values
+	   */
+	do ca(uc(), " //")
+	do ca(uc(), " // ---- supplied by UCOPTS.ini ----")
+
+	for  set propID = pslProp.pslPrp( propID).order() quit:propID.extract(1,4)'="PSL."  do {
+		set propName = propID.extract( 5, propID.length())
+		if IMMUTABLE.contains(propName) quit	// not for change
+
+		set propDes = pslProp.getPSLProperty( propID)
+		set rtn = propDes.labelref
+		if rtn'[ "getPslValue^UCMETHOD(" quit	// not a PSL value
+
+		set objdef = rtn.extract( "getPslValue^UCMETHOD(x".length(), rtn.length()-1)
+		set val = siteOpts.getSetting( "DEFINE", propName, objdef)
+		if 'val.isNumber() set val = val.addQuotes()
+		do ca(uc(), " //")
+		do ca(uc(), " if property = "_ propName.addQuotes()_ " quit "_val)
+	}
+	do ca(uc(), " quit """"")
+
+	// generate M routine, using boot restrictionlevel = 3
+	type String bo(,)
+	type Number cfe
+
+	do getBootOptions( bo(,), 3)	// compile with boot restrictionlevel=3
+
+	set cfe=$$cmpA2F^PSLC( uc(), bo(,), "UCOPTS", , "UCOPTS.ini~file")
+
+	quit
+
+	// ---------------------------------------------------------------------
+private void ca( String src(), String cod) // Append cod to src()
+	/* ---------------------------------------------------------------------
+	Support function that adds a line of code to src()
+	*/
+	set src( src("").order(-1) + 1) = cod
+	quit
+
+	// ---------------------------------------------------------------------
+public Date date( String vStr	// string representation of date (*1)
+		, String vMsk	// date mask (*2)
+		)	// boot-safe String to Date conversion
+	/* ---------------------------------------------------------------------
+	Convert a String to a Date using the specified mask, without calling
+	routines that may not be avaialable.
+	See the individual arguments with respect to limitations.
+
+	ARGUMENTS:
+	(*1) date = string representation of date
+		The supplied value shall unconditionally match the supplied mask
+	(*2) mask = date mask
+		- shall contain "DD"
+		- shall contain "MM"
+		- shall contain either "YY" or "YEAR"
+
+	NOTES:
+	. If the date does not match the mask, or the mask does not match the
+		requirements, the code generated for String.toDate() will call
+		^SCAJD, which is not yet present in an initial environment.
+	*/
+	catch vErr {
+		throw Class.new("Error","%PSL-E-CONVERT,,"_vStr_"~"_vMsk)
+	}
+		
+	quit vStr.toDate( vMsk)
+
+	// ---------------------------------------------------------------------
+public void getBootData( Primitive bo(,))	// boot option array
+	/* ---------------------------------------------------------------------
+	This subroutine will instantiate the RowSet objects and load them with
+	data, provided that bo("boot","datadirectory") exists.
+
+	ARGUMENTS:
+	. bo(,) = boot option array
+		bo("boot","datadirectory") will be referenced.
+		If this node exists, then TABLE data will be loaded into
+		RowSets, and bo("boot",TABLE) will contain the RowSet for TABLE.
+
+	OUTPUTS:
+	. bo("boot","CUVAR") = RowSet instance for CUVAR data
+		If and only if bo("boot","datadirectory").exists()
+		In this case vobj(bo("boot","CUVAR")) will contain the
+		RowSet's data.
+	. bo("boot","STBLSYSKEYWD") = RowSet instance for STBLSYSKEYWD data
+		If and only if bo("boot","datadirectory").exists()
+		In this case vobj(bo("boot","STBLSYSKEYWD")) will contain the
+		RowSet's data.
+	. bo("boot","STBLPSLFUNSUB") = RowSet instance for STBLPSLFUNSUB data
+		If and only if bo("boot","datadirectory").exists()
+		In this case vobj(bo("boot","STBLPSLFUNSUB")) will contain the
+		RowSet's data.
+
+	NOTES:
+	. This subroutine must instantiate all RowSets that are ACCESSED in
+		phase 1 (compiler completion) of the bootstrap.
+	. The PSL compiler will COMPILE the correct database access to EVERY
+		table, regardless of the values in bo(,).
+	. Based on the above observations, creation of the STBLJRNFUNC RowSet is
+		not needed, because it will not be accessed by the compiler
+		itself or by the SQL engine.
+	*/
+
+	if 'bo("boot","datadirectory").exists() quit
+
+	/* First retrieve the contents of CUVAR.
+	   According to the rules established for initial environment creation,
+	   and upgrades, this file is not located in the data directory, but in
+	   the "environment root" directory. */
+	type String tbl = "CUVAR"
+	#ACCEPT CR=27800;DATE=2007-12-06;PGM=Frans S.C. Witte;GROUP=ACCESS,DEPRECATED
+	type Number ptr = $$getBootRws( $$SCAU^%TRNLNM("DIR"), tbl_".DAT").getPointer()
+	if ptr'=0 set bo("boot",tbl) = ptr
+
+	for tbl = "STBLSYSKEYWD", "STBLPSLFUNSUB" do {
+		#ACCEPT CR=27800;DATE=2007-12-06;PGM=Frans S.C. Witte;GROUP=DEPRECATED
+		set ptr = $$getBootRws( bo("boot","datadirectory"), tbl_".DAT").getPointer()
+		if ptr'=0 set bo("boot",tbl) = ptr
+	}
+	quit
+
+	// ---------------------------------------------------------------------
+void getBootOptions( Primitive bo(,)	// boot option array
+		, Number lvl			// boot level
+		) // get the boot options for the specified boot level
+	/* ---------------------------------------------------------------------
+	This subroutine returns the array of boot options that are used to
+	bootstrap the PSL compiler.
+
+	Only the required overrides are initialized here. All other settings will
+	be obtainted by main^UCGM(), which in turn calls UCINIT^UCDTAUTL().
+	
+	Note that this may result in different settings for different boot
+	restriction level values:
+	- If boot restriction level = 3, only the settings from the file named
+		by SCAU_UCOPTS will be in effect. All settings that are not
+		supplied explicitly by that file will be treated as OFF.
+		To ensure that all settings for the #PSL section are present,
+		the values are set here.
+	- If boot restriction level < 3, the "standard" UCOPTS handling is in
+		effect, and the resulting settings will apply to code generated
+		through calls to bootProc() and prepProc().
+
+	OUTPUTS:
+	. bo("boot","restrictionlevel") = lvl
+	. bo("Options","nolink") = 1
+	. bo("OPTIMIZE","FUNCTIONS") = 0
+
+	NOTES:
+	. Because UCGM NEWs vobj(), the RowSets cannot be instantiated as part
+		of the compiler set-up. The RowSet objects will be hidden by the
+		compiler even though the bo("boot",TABLE) entries suggest that
+		the RowSets shall be used.
+	. The setting of OPTIMIZE OBJECT depends on the UCOPTS settings that are
+		in effect (SCAU_UCOPTS and routine UCOPTS). The advantage of
+		this is that the units will be compiled using the same settings
+		that apply to non-Framework units. The risk of this behavior is
+		that problems with object optimization will affect the framework
+		units themselves, which is likely to result in a very corrupt
+		system. For this reason, if changes are made to the
+		implementation of object optimization, framework units shall be
+		compiled with OPTIMIZE OBJECTS OFF until the change is known to
+		be reliable.
+		Point SCAU_UCOPTS to an appropriate overwrite to achieve this.
+	. This method is also called by storePsl^PSLC() because that method will
+		be invoked by the installation software before UCOPTS has been
+		(re)generated.
+	. And this method is also called by TBXDQUTL to get boot options for the
+		compilation of filers during bootstrap processing. Note that
+		this will change when the filers are replaced by RecordTABLE
+		programs.
+	*/
+	set bo( "boot", "restrictionlevel") = lvl
+	set bo( "Options", "nolink") = 1
+	set bo( "OPTIMIZE", "FUNCTIONS") = 0
+
+	if lvl = 3 {	// Force #PSL section for restrictionlevel 3
+		set bo("PSL","BooleanMask") = "+,-"
+		set bo("PSL","CompileSummary") = true
+		set bo("PSL","DateMask") = "YEAR-MM-DD"
+		set bo("PSL","TimeMask") = "24:60:SS"
+		set bo("PSL","Version") = $$getPSLVersion^PSLC()
+	}
+
+	quit
+
+	// ---------------------------------------------------------------------
+private RowSet getBootRws( String dir, String file)
+	/* ---------------------------------------------------------------------
+	Local support funtion that instantiates the RowSet, and loads the data.
+	If the RowSet is empty, it will return "", otherwise it will return the
+	RowSet object instance.
+	*/
+	type RowSet rws = Class.new( "RowSet")
+	do {
+		catch loadExep {	// ignore rws.loadFromFile() exception
+		}
+		do rws.loadFromFile( dir, file, 1)
+	}
+	if rws.isEmpty() quit 0
+	quit rws
+
+	// ---------------------------------------------------------------------
+public String getGroup( String sRtn // the routine for which the grooup is requested
+		) // Return the PSL compiler group to which the routine belongs
+	/* ---------------------------------------------------------------------
+	Return the PSL compiler group to which the routine belongs.
+
+	OUTPUTS:
+	$$	"Insensitive" if the routine belongs to the Insensitive group
+		"Object" if the routine belongs to the Object group
+		"Dictionary" if the routine belongs to the Dictionary group
+		"Upgrade" if the routine belongs to the Upgrade group
+		"Data" if the routine belongs to the Application group, or the
+			System group, but not to the Upgrade group
+
+	NOTE:
+	. The implementation is not very efficient. It calls $$getGroup() for
+		each of the pre-defined groups, until a match is found.
+	. Because the Upgrade group is a subset of the Data group, it must be
+		tested first.
+	*/
+	type String sGrp
+	for sGrp = "Insensitive","Dictionary","Upgrade","Data" if $$getList(sGrp).contains(sRtn) quit
+	else  set sGrp = ""
+	quit sGrp
+
+	// ---------------------------------------------------------------------
+public List getCapabilities( String sSec	// section (*1)
+		)	// Return List of capabilities that is supported by this version of PSL
+	/* ---------------------------------------------------------------------
+	Return the List of capabilities that is supported by the current version
+	of the compiler.
+
+	ARGUMENTS:
+	(*1) sSec = sectionname
+		The name of the section in the (Profile Workbench) file
+		pslKeywords.ini. Currently the following sections are supported:
+		- "CLASSES"
+			Preliminary: Returns the List all PSL Intrinsic Classes.
+		- "FUNCTIONS"
+			Returns the List all M functions that are still valid
+			in PSL.
+		- "KEYWORDS"
+			Returns the List of all PSL command names, compile time
+			commands, and other keywords (like "public"). Because
+			the compiler is case insensitive with respect to these
+			keywords, all elements are returned using lowercase
+			spelling.
+
+	NOTES:
+	. pslKeywords.ini keeps the entries in a specific order. To prevent
+		mixing responsibilites, this function provides the List in an
+		"arbitrary" order (newer features occur at higher positions).
+		Thus it is the responsibility of the caller to sort the values
+		if needed.
+	. Keywords in PSL are case insensitive (like in SQL, but unlike C, Java,
+		or Pascal). The function will return the complier instructions
+		in uppercase, and all other keywords in lowercase.
+	. Like $$getList(), the implementation of this function uses a bunch of
+		literals to construct the return value.
+	. The "CLASSES" keyword only lists the PSL Intrinsic classes. Per PSL
+		Version 3 that is insufficient. ZFSWOBJ contains code that looks
+		for all CDMs in SCAU_PACKAGES (and creates keywords.ini and
+		classLib.ini files).
+	*/
+	#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+	if sSec = "FUNCTIONS" quit $$initFcts^UCGM()
+	if sSec = "CLASSES" quit $$getCls("intrinsic")
+	if sSec '= "KEYWORDS" quit ""
+
+	/* KEYWORDS: ----------------
+	   - All commands as obtained from initCmds^UCGM(), converted to
+		lowercase
+	   - access keywords ( literal, private, public)
+	   - compiler commands
+	*/
+	/* Initial PSL keywords (per AMR05) */
+	type literal List KWD05  = "literal,private,public"
+
+	/* Additional PSL keywords per AMR06 */
+	type literal List KWD06  = KWD05_ ",void"
+	
+	/* Additional PSL keywords per AMR07 */
+	type literal List KWD07  = KWD06_ ",final,protected,ret,static"
+	
+	/* Total PSL keywords per latest CR */
+	type literal List KWD = KWD07
+
+	/* Initial PSL compile time commands (per AMR05) */
+	type literal List CTC05A = "#ACCEPT,#BREAK,#BYPASS,#ELSE,#END,#ENDIF"
+	type literal List CTC05  = CTC05A_ ",#IF,#OPTIMIZE,#WARN,#WHILE,#XECUTE"
+
+	/* Additional PSL compile time commands per AMR06 */
+	type literal List CTC06  = CTC05_ ",#INFO,#OPTION"
+
+	/* Additional PSL compile time commands per AMR07 */
+	type literal List CTC07  = CTC06_ ",#CLASSDEF,#PACKAGE,#PROPERTYDEF"
+
+	/* Total PSL compile time commands per latest CR */
+	type literal List CTC = CTC07
+
+	type String acmd()
+	type String cmd = ""
+	type List   cmdl = ""
+
+	#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+	do initCmds^UCGM(.acmd())
+
+	for  set cmd = acmd( cmd).order() quit:cmd.isNull()  set cmdl = cmdl.add( cmd.lowerCase())
+	quit cmdl_ ","_ KWD_ ","_ CTC
+
+	// ---------------------------------------------------------------------
+public List getCls( String sGrp	// group; one of "intrinsic", "cdm", or "pslx"
+		)	// Return a List of all PSL Intrinsic Classes in the requested group
+	/* ---------------------------------------------------------------------
+	Return a List of all PSL Intrinsic Classes in the requested group.
+
+	OUTPUTS:
+	$$	A List instance containing all PSL Intrinsic Classes per latest
+		release of this unit, as rerquested:
+		- if sGrp = "intrinsic", then the list will contain all PSL
+			Intrinsic Classes, except the deprecated classes that
+			remain in the OBJECT tables.
+		- if sGrp = "cdm", then the list will contain the PSL Intrinsic
+			Classes that are implemented by Class Definition Modules
+		- if sGrp = "pslx", then the returned list contains those PSL
+			Intrinsic Classes that only have a .pslx file
+		- if sGrp = "table", then the returned list contains those PSL
+			Intrinsic Classes that are still described by the OBJECT
+			tables. These classes are all deprecated, and will not
+			be available for Java.
+
+	NOTES:
+	. The current list does not include the deprecated classes Blob and
+		PSLLabelRecord.
+	. This is not a serious problem because the lookup order in UCXOBJ will
+		ensure that
+		- class defintions supplied as .pslx file will hide classes in
+			the OBJECT tables
+		- class definitions not supplied as .pslx file will be taken
+			from the OBJECT tables, provided they exist in the
+			target environment. This will be the case in "old"
+			environments that use these classes.
+	*/
+	/* GUP* - general use pslx-only classes */
+	type literal List GUP07A = "Boolean,ByteString,Cache,Class,Column,Date"
+	type literal List GUP07B = GUP07A_ ",Db,DbSet,Error,Integer,IO,List"
+	type literal List GUP07C = GUP07B_ ",Memo,Number,Object,Primitive"
+	type literal List GUP07D = GUP07C_ ",Record,Reference,ResultSet,Row"
+	type literal List GUP07E = GUP07D_ ",RowSet,Runtime,SchemaColumn"
+	type literal List GUP07  = GUP07D_ ",SchemaTable,String,Time"
+
+	type literal List GUP = GUP07
+
+	/* CMP* - compiler internal pslx-only classes */
+	type literal List CMP07A = "PSL,PSLBuffer,PSLColumn,PSLExpression"
+	type literal List CMP07  = CMP07A_ ",PSLIdentifier,PSLSubrou,PSLTable"
+
+	type literal List CMP = CMP07
+
+	/* CDM* - class definition modules */
+	type literal List CDM07A = "PSLCC,PSLClass,PSLMethod,PSLParser"
+	type literal List CDM07  = CDM07A_",PSLProperty,PSLTokenizer,PSLX"
+
+	type literal List CDM = CDM07
+
+	/* TBL - OBJECT table only */
+	type literal List TBL = "HTML,Schema,TranSet"
+
+	/* complete list of "pslx" classes */
+	type literal List PSLX = GUP_ ","_ CMP
+
+	/* complete list of ALL PSL Intrinsic Classes */
+	type literal List ALL = PSLX _ ","_ CDM
+
+	if sGrp = "intrinsic" quit ALL
+	if sGrp = "cdm" quit CDM
+	if sGrp = "pslx" quit PSLX
+	if sGrp = "table" quit TBL
+	quit ""
+
+	// ---------------------------------------------------------------------
+	/* Support functions that deal with Intrinsic Classes
+	. $$isCDM( cls) returns true if and only if the supplied class name is
+		an Intrinsic Class, that is implemented as Class Definition
+		Module.
+	. $$isIntrinsic( cls) returns true if and only if the supplied class
+		name occurs in the list returned by $$getIntrinsic()
+	. $$isPSLX( cls) returns true if and only if the supplied class name is
+		an Intrinsic Class, that is not implemented as Class Definition
+		Module.
+	. $$isClsTable( cls) returns true if and only if the supplied class name
+		is a depreacted PSL Class, that is not described in the OBJECT
+		tables.
+	*/
+public Boolean isClsCDM( String cls)       quit $$getCls("cdm").contains( cls)
+public Boolean isClsIntrinsic( String cls) quit $$getCls("intrinsic").contains( cls)
+public Boolean isClsPslx( String cls)      quit $$getCls("pslx").contains( cls)
+public Boolean isClsTable( String cls)     quit $$getCls("table").contains( cls)
+
+	// ---------------------------------------------------------------------
+public List getList( String sGrp)	// Return List of PSL compiler routines in specifed group
+	/* ---------------------------------------------------------------------
+	Return List of all PSL compiler routines.
+	This function returns a List of all routines that are part of the PSL
+	compiler, the SQL engine, or the DATA-QWIK runtime system. This function
+	provides an unordered List that is used by all other functions and
+	subroutines.
+
+	The functions and subroutines that use this List rely on the fact that
+	the DQ procedure name and the M routinename are equal.
+
+	OUTPUTS:
+	$$	A List instance containing all PSL compiler routines per latest
+		release of this unit.
+
+	NOTES:
+	. All routines that are considered part of the PSL compiler are included
+	  in the list even if there (current) use is questionable such as:
+	  - UCSTAT.m	This is a utility routine that analyzes and provides
+			SYSMAP info for M routines. It is not called by the
+			compiler, but MASS^UCSTAT will indirectly invoke the
+			compiler for PSL sources such as Batches and Procedures.
+	. When the order of the units is irrelevant, the list is constructed
+		using one or more literals that reflect the historic growth of
+		the compiler.
+	. When the (compilation) order of the units does matter, the comment
+		preceeding the definition explains the order.
+	. The units DBARCHIVE and SQLAUDIT are not considered part of the compiler.
+		However they are provided as M version, prepped with conditional
+		code based on restrictionlevel -1 so as to avoid archive and audit
+		code checking or generation during compiler and framework building.
+		Phase2, framework completion, will rebuild these after the FW
+		procedures and filers are built.
+	. The unit %DBAPI is now a PSL source module, and is absolutely needed
+		for database access to an RDB. Although the unit is specifically
+		and exclusively needed for M+RDB, the unit itself does not
+		contain code that compiles differently depending on the target.
+		So the unit can reside in the Insensitive group.
+	. %-elements that are part of the framework, and that are called during
+		the bootstrap phases will be in the Insensitive group unless
+		explicitly noted otherwise.
+	*/
+	/* Initial PSL INSENSITIVE elements (per AMR05) */
+	type literal List INS05A = "UCDBSET,UCERROR,UCGMR,UCIO,UCLIST,UCMEMO"
+	type literal List INS05B = INS05A_ ",UCMETHOD,UCNUMBER,UCPATCH"
+	type literal List INS05C = INS05B_ ",UCREF"
+	type literal List INS05D = INS05C_ ",UCRESULT,UCROW,UCRUNTIM,UCSTAT"
+	type literal List INS05E = INS05D_ ",UCSTRING,UCTS,UCUTILN"
+
+	/* Initial SQL INSENSITIVE elements (per AMR05) */
+	type literal List INS05S = INS05E_ ",SQLA,SQLAGFUN,SQLBLOB,SQLF"
+	type literal List INS05  = INS05S_ ",SQLFILER,SQLFUNCS,SQLG,SQLQ"
+
+	/* Additional PSL and SQL INSENSITIVE elements per AMR06 */
+	type literal List INS06A = INS05_  ",UCCOLSF,UCDBR,UCGMCU,UCIO0,UCPSLSR"
+	type literal List INS06  = INS06A_ ",UCPSLST,UCREC4OP,UCROWSET,UCTIME"
+
+	/* Additional PSL and SQL INSENSITIVE elements per PSL2Java */
+	type literal List INS07A = INS06_  ",%CHARSET,%DBAPI,%ZM,%ZOPEN,PSLC"
+	type literal List INS07B = INS07A_ ",PSLCC,PSLClass,PSLMethod,PSLParser"
+	type literal List INS07C = INS07B_ ",PSLProperty,PSLTokenizer,PSLX"
+	type literal List INS07D = INS07C_ ",UCGMC,UCGMCONV,UCOBJECT,UCPRIM"
+	type literal List INS07  = INS07D_ ",UCXOBJ,vNumber,vResultSet,vRuntime"
+
+	/* Total PSL and SQL INSENSITIVE elements per latest CR */
+	type literal List INS    = INS07
+
+
+	/* Initial PSL DICTIONARY elements (per AMR05) */
+	type literal List DIC05A = "UCCLASS,UCCOLUMN,UCDB,UCGM,UCHTML"
+	type literal List DIC05B = DIC05A_ ",UCQRYBLD,UCRECORD,UCUTIL"
+
+	/* Initial SQL DICTIONARY elements (per AMR05) */
+	type literal List DIC05S = DIC05B_ ",SQL,SQLCACHE,SQLCMP,SQLCOL"
+	type literal List DIC05T = DIC05S_ ",SQLCONV,SQLCRE,SQLDD,SQLJ,SQLM"
+	type literal List DIC05  = DIC05T_ ",SQLO,SQLODBC,SQLPROT,SQLTBL"
+
+	/* Additional PSL, SQL and DQR DICTIONARY elements AMR06 */
+	type literal List DIC06A = DIC05_ ",UCDBRT,UCXDD,UCXDT25"
+	type literal List DIC06B = DIC06A_ ",DBMAP,DBSDBASE,DBSDF9,DBSDS"
+	type literal List DIC06  = DIC06B_ ",DBSDYNRA,DBSMACRO,DBSMEMO,DBSVER"
+
+	/* Additional PSL and SQL DICTIONARY elements per PSL2Java */
+	type literal List DIC07 = DIC06_  ",UCSCHEMA"
+
+	/* Total PSL and SQL DICTIONARY elements per latest CR */
+	type literal List DIC    = DIC07
+
+
+	/* PSL, SQL AND DQR DATA elements will need to be compiled at the
+	   beginning of the compiler bootstrap. Units that provide method 
+	   generating code shall preceed other units in the list.
+	   The compilation order also imposes limits on what classes can be
+	   used by units in the group. The compilation order also prevents
+	   separating SYSTEM and APPLICATION elements.
+	   - UCOPTS must be compiled early to provide the correct values for
+	   	calls to $$getPslValue^UCOPTS(). Whereas the compilation of some
+	   	units may succeed using conservative defaults, procedures that
+	   	store data in the database will call
+	   	$$getPslValue^UCOPTS("batchCommitCount") to generate code for
+	   	Runtime.commit(). Note that this call may be implied e.g. by a
+	   	Record.save() call.
+	   	UCOPTS.proc will be constructed and compiled as a separate step
+	   	in the bootstrap process (see subroutine bootUCOPTS()).
+	   - UCBYTSTR implements class ByteString and must be compiled "early"
+	   	In addition to the ByteString Methods, it implements the
+	   	methods String.upperCase() and String.lowerCase(). This unit
+	   	can be placed in the UPGRADE group, provided that the supplied
+	   	M routine does not contain references to possibly unsupported
+	   	GT.M constructs.
+	   - SQLUTL provides a number of utilities that use the ByteString
+		class. It is treated as an UPGRADABLE module (see UCBYTSTR), and
+		will be compiled "early" to ensure that if it is called during
+		bootstrap, it will use the target environment's character set.
+	   - UCDATE implements class Date and must be compiled "early"
+	   	Even though this unit contains Cache.getRecord("UTBLNBD"), it
+	   	can be treated as an UPGRADABLE module, because no calls to
+	   	Date.isBusDate are expected during bootstrap processing. In
+	   	addition the unit shall be treated as UPGRADABLE because the
+	   	method generating code is self-referencing with respect to code
+	   	generated for literal values. So the module must be present in
+	   	an initial environment in order to compile itself.
+	   - UCDTAUTL and UCXCUVAR are both updatable, so the associated M
+	   	routine will already be available at bootstrap time. This makes
+	   	their position in the list less relevant.
+	   - DBSDD is updatable, like UCDTAUTL, and will be compiled "close to"
+		UCDTAUTL. This unit accesses STBLSYSKEYWD, but the subroutine
+		that contains the Db.select() will never be called during phase1
+		or phase2 of a bootstrap. Having DBSDD.m around during bootstrap
+		ensures that other calls to this routine will work even if they
+		occur very early in the bootstrap.
+	   - SQLBUF references a framework table that is database dependent, so
+	   	it is NOT UPGRADABLE. The module will probably not be called
+	   	during bootstrap, but it is compiled "close to" UCDTASYS.
+	   - UCDTASYS, UCLREGEN, and UCSYSMAP will (shall)
+	   	not be called during bootstrap and can be compiled "later".
+	   	Note tha UCOPTS is needed to generate code for UCLREGEN and
+	   	UCSYSMAP.
+	   - SQLEFD references an application table, will (shall) not be called
+	   	durring bootstrap and can be compiled "later".
+	*/
+	type literal List DAT01  = "UCOPTS,UCBYTSTR,SQLUTL,UCDATE"
+	type literal List DAT02  = DAT01_ ",UCDTAUTL,DBSDD,DBSDI,UCXCUVAR"
+	type literal List DAT03  = DAT02_ ",UCDTASYS,SQLBUF,UCLREGEN,UCSYSMAP,SQLEFD"
+
+	/* Total PSL and SQL DATA elements per latest CR */
+	type literal List DAT    = DAT03
+
+	/* Initial PSL and SQL UPGRADABLE elements (per AMR05)
+	   PSL AND SQL UPGRADABLE elements are an (unordered) subset of the DATA
+	   elements (more accurately of the SYSTEM elements). The discriminating
+	   characteristics of UPGRADABLE elements are that they are included in
+	   an upgrade as M routine, but they still need to be compiled at the
+	   target site to ensure that they contain the proper target dependent
+	   code to access the data when called outside the upgrade process, or
+	   the correct defaults for CUVAR properties or other environment
+	   sensitive values.
+	   Based on this definition, UCOPTS will never belong to the UPGRADABLE
+	   group, because it is customizable by nature. */
+	type literal List UPG05  = "UCBYTSTR,UCDATE,UCDTAUTL"
+
+	/* Additional PSL and SQL UPGRADABLE elements AMR06 */
+	type literal List UPG06  = UPG05_ ",UCXCUVAR,SQLUTL,DBSDD"
+
+	/* Added with Access Rights to ensure prep M files */
+	type literal List UPG07 = UPG06_ ",DBSDI"
+
+	/* Total PSL and SQL UPGRADABLE elements per latest CR */
+	type literal List UPG    = UPG07
+
+	/* Total PSL and SQL COMPILER elements per latest CR */
+	type literal List COM    = INS_ ","_ DIC_ ","_ DAT
+
+	/* Elements to build as phase 2, after compiler done.  Phase 2 occurs
+	   in four parts - beginning (generate procedures needed to build
+	   filers), build minimal framework filers, end (generate remaining
+	   procedures, include DBARCHIVE and SQLAUDIT), and finally, remaining
+	   filers.  Phase 2 may be built separately without rebuilding compiler
+	   by calling bootFWPh2. */
+	   
+	type literal List PHASE2B = "PSLRecordBuilder"
+
+	type literal List PHASE2E01 = "DBARCHIVE,SQLAUDIT,DBS2PSL,DBS2PSL0"
+	type literal List PHASE2E02 = PHASE2E01_ ",DBS2PSL1,DBS2PSL3,DBS2PSL4,DBS2PSL5,DBSBCH"
+	type literal List PHASE2E03 = PHASE2E02_ ",DBSCMPF,DBSCRT8,DBSDB,DBSDF,DBSDRV,DBSDSMC"
+	type literal List PHASE2E04 = PHASE2E03_ ",DBSDSMP,DBSEDIT,DBSEDT,DBSEXECU,DBSEXEP,DBSFILB"
+	type literal List PHASE2E05 = PHASE2E04_ ",DBSFILER,DBSGETID,DBSINDXZ,DBSINT,DBSLINK,DBSLOD"
+	type literal List PHASE2E06 = PHASE2E05_ ",DBSLOG,DBSLOGIT,DBSMBAR,DBSPARS,DBSPARS1"
+	type literal List PHASE2E07 = PHASE2E06_ ",DBSPARS2,DBSPP,DBSPROC,DBSPROT3,DBSPROT4,DBSQRY"
+	type literal List PHASE2E08 = PHASE2E07_ ",DBSREL,DBSRTN,DBSRW,DBSRW2,DBSRW3,DBSRWQRY"
+	type literal List PHASE2E09 = PHASE2E08_ ",DBSRWUTL,DBSSCR,DBSSCR0,DBSSCR1,DBSSCR3,DBSSCR4"
+	type literal List PHASE2E10 = PHASE2E09_ ",DBSSCR5,DBSTBLA,DBSUTL3,SQLAG"
+
+	/* Although strictly speaking not a framework element, USTMAPDF.PROC will
+	   follow the framework upgrade rules, and will be distributed both as
+	   M routine and as DQ procedure. To ensure proper and automatic removal
+	   of the mrtns version, the module is listed here as a "phase2" element.
+	   This will cause it to be compiled with bootProc^UCGMCU(), which will
+	   remove the mrtns version.
+	*/
+	type literal List PHASE2E11 = PHASE2E10_ ",USTMAPDF"
+	
+	/* Total phase 2 END procedures and routines */
+	type literal List PHASE2E = PHASE2E11
+	
+	/* Total phase 2 procedures and routines */
+	type literal List PHASE2 = PHASE2B_ ","_ PHASE2E
+
+	/* RecordTABLE class "filers" ==========================================
+	   Because all access to tables is now through RecordTABLE modules,
+	   these modules are needed "early" in the process. Modules for tables
+	   accessed during the bootstrap must be supplied as M routine. Other
+	   modules can be compiled later. All tables that are accessed by the
+	   phase1 and phase2 elements are included, to ensure that phase2
+	   modules, tables, and their interface routines are in sync at the end
+	   of phase 2.
+
+	   In addition to the Framework tables listed below, the following
+	   application tables are accessed by phase1 procedures:
+		- CUVAR		by UCNUMBER
+		- DBCTLDVFM	by UCDTAUTL
+		- EFD		by SQLEFD
+		- STBLER	by DBSDI
+		- STBLXBAD	by DBSDI
+		- SVCTRLT	by UCLREGEN
+		- TMPDQ		by DBSDBASE
+		- UTBLNBD	by UCDATE
+		- XBAD		by DBSDI
+	   And the following application tables are accessed by phase2
+	   procedures:
+	   	- CUVAR		by DBS2PSL0, DBS2PSL4, DBSFILB, DBSFILER, DBSLINK, DBSRW
+	   	- DBCTLDVFM	by DBSVER
+	   	- DBCTLQRY	by DBSRWQRY
+	   	- SCASYS	by DBSDF
+	   	- SCATBL	by DBSGETID
+	   	- TMPDQ		by DBSDF9, DBSDS, DBSFILB, DBSGETID, DBSPROC, DBSRW
+	   	- UTBLKILL	by DBSINDXB
+	   	- UTBLPRODRL	by DBSTRG
+	   	- TBLPRODRT	by DBSTRG
+
+	   RecordTABLE class "Filers" that are provided as part of the release
+	   as they are needed early in the process.  These are tables that are
+	   still implemented in M only.  See NOTES at top of this procedure. 
+	   The split betweeen FILERPREPA and B relates to order of phase 2
+	   compiles for use by PSLRecordBuilder - see next paragraph.
+	   */
+	type literal List FILERPREPA = "DBTBL1,DBTBL1D"
+	type literal List FILERPREPB = "DBMAP,DBMAPT,DBMAPIDX"
+	type literal List FILERPREP = FILERPREPA_ ","_ FILERPREPB
+
+	/* RecordTABLE classes "Filers" to compile as part of the phase 2 build
+	   process. The beginning set are used by PSLRecordBuilder, and should
+	   be compiled in the order listed.  The final set are general framework
+	   completion. */
+	type literal List FILERB01 = FILERPREPA_ ",DBTBL1F,DBTBL7,DBTBL7D,DBTBL8"
+	type literal List FILERB02 = FILERB01_ ",DBTBL9,DBTBL9D,DBUTARCHIVE,DBAUDITDEF"
+	type literal List FILERB03 = FILERB02_ ","_ FILERPREPB
+
+	/* Total phase 2, beginning filers */
+	type literal List FILERB = FILERB03
+
+	/* Although CUVAR is not part of the framework, it's filer needs to be
+	   generated early so is included here. */
+	type literal List FILERE01 = "CUVAR,DBSPID,DBTBL0,DBTBL1TBLDOC"
+	type literal List FILERE02 = FILERE01_ ",DBTBL2,DBTBL2D,DBTBL2PP"
+	type literal List FILERE03 = FILERE02_ ",DBTBL4,DBTBL4D"
+	type literal List FILERE04 = FILERE03_ ",DBTBL5D,DBTBL5D1,DBTBL5DGC,DBTBL5H"
+	type literal List FILERE05 = FILERE04_ ",DBTBL5PR,DBTBL5Q,DBTBL5SQ"
+	type literal List FILERE06 = FILERE05_ ",DBTBL12"
+	type literal List FILERE07 = FILERE06_ ",DBTBL13,DBTBL13D"
+	type literal List FILERE08 = FILERE07_ ",DBTBL14,DBTBL14Q"
+	type literal List FILERE09 = FILERE08_ ",DBTBL22,DBTBL22C,DBTBL22R"
+	type literal List FILERE10 = FILERE09_ ",DBTBL25,DBTBL25D"
+	type literal List FILERE11 = FILERE10_ ",DBTBL33,DBTBL33D,DBACCRTS"
+	type literal List FILERE12 = FILERE11_ ",DBSFUNC,DBSFUNCUCLS,DBSUCLS,DBSUSER"
+	type literal List FILERE13 = FILERE12_ ",LOG,LOG1,MPROF,MPROF0"
+	type literal List FILERE14 = FILERE13_ ",OBJECT,OBJECTMET,OBJECTPROP"
+	type literal List FILERE15 = FILERE14_ ",SQLCACHE,SQLCUR,SQLFUNC"
+	type literal List FILERE16 = FILERE15_ ",STBLJRNFUNC,STBLMTBLS,STBLPSLFUNSUB"
+	type literal List FILERE17 = FILERE16_ ",STBLRESERVED,STBLSYSKEYWD"
+	type literal List FILERE18 = FILERE17_ ",SYSMAPCALLS,SYSMAPCOMMANDS,SYSMAPLABELS"
+	type literal List FILERE19 = FILERE18_ ",SYSMAPLITDTA,SYSMAPLITFNC,SYSMAPM,SYSMAPMPROPS"
+	type literal List FILERE20 = FILERE19_ ",SYSMAPPROPDATA,SYSMAPRTNS,SYSMAPVAR,TMPDQ"
+	type literal List FILERE21 = FILERE20_ ",UCLREGEN,TMPDQ"
+
+	/* Total phase 2, ending filers */
+	type literal List FILERE = FILERE21
+
+	/* Total filers */
+	type literal List FILER = FILERB_ ","_ FILERE
+
+	/* Force prep list includes non-compiler elements for which M
+	   code is released which needs to be included by prep. */
+	type literal List FORCEPREP = "TBXDQINT,DBARCHIVE,SQLAUDIT"
+
+	if sGrp = "Compiler"    quit COM
+	if sGrp = "Data"        quit DAT
+	if sGrp = "Dictionary"  quit DIC
+	if sGrp = "Filer"	quit FILER
+	if sGrp = "FilerB"	quit FILERB
+	if sGrp = "FilerE"	quit FILERE
+	if sGrp = "FilerPrep"	quit FILERPREP
+	if sGrp = "ForcePrep"	quit FORCEPREP
+	if sGrp = "Insensitive" quit INS
+	if sGrp = "Phase2"	quit PHASE2
+	if sGrp = "Phase2B"	quit PHASE2B
+	if sGrp = "Phase2E"	quit PHASE2E
+	if sGrp = "Upgrade"     quit UPG
+	quit ""
+
+	// ---------------------------------------------------------------------
+	/* Shorthand calls for each of the groups
+	*/
+public List getComList() quit $$getList("Compiler")
+public List getDatList() quit $$getList("Data")
+public List getDicList() quit $$getList("Dictionary")
+public List getFilerList()	quit $$getList("Filer")
+public List getFilerPrepList()	quit $$getList("FilerPrep")
+public List getInsList() quit $$getList("Insensitive")
+public List getPhase2List()	 quit $$getList("Phase2")
+public List getUpgList() quit $$getList("Upgrade")
+
+	// ---------------------------------------------------------------------
+void info( String info	// info text (*1)
+		)
+	/* ---------------------------------------------------------------------
+	Subroutine that wraps a call to PSLParser.log() to hide any side effect
+	caused by that call.
+
+	(*1) informative text (will occur %PSL-I-...)
+
+	EXAMPLE:
+	. do info^UCGMCU("Units recompiled: UCLIST,UCSTRING")
+		will produce:
+		
+		PSL-I-LIST: Units recompiled: UCLIST,UCSTRING
+	*/
+	type PSLParser prsr = Class.new("PSLParser", %RoutineName)
+	do prsr.log( , 0, " ", 1, "LIST", info)
+	quit
+
+	// ---------------------------------------------------------------------
+public Boolean isGroup( String grp	// name of group
+		, String rtn	// name of routine
+		)	// Is routine part of the specified PSL compiler group
+	/* ---------------------------------------------------------------------
+	Return whether the named routine is part of the specified PSL Compiler
+	group.
+
+	OUTPUTS:
+	. $$ =	1 if and only if the routine is part of that PSL compiler group
+		0 otherwise
+
+	NOTES:
+	. Because the Upgrade group is a proper subset of the Data group, units
+		that are in the $$isUpgrade() and $$isData() will both return 1.
+		On the other hand $$getGroup() will return a single group for
+		its argument.
+		So for units in the Upgrade group
+			$$isGroup( "Data", unit) ==> 1
+		but
+			$$getGroup( unit) = "Data" ==> 0
+	*/
+	quit ({List}$$getList(grp)).contains(rtn)
+
+	// ---------------------------------------------------------------------
+	/* Shorthand calls for each of the groups
+	*/
+public Boolean isCompiler( String rtn)    quit $$isGroup("Compiler", rtn)
+public Boolean isData( String rtn)        quit $$isGroup("Data", rtn)
+public Boolean isDictionary( String rtn)  quit $$isGroup("Dictionary", rtn)
+public Boolean isInsensitive( String rtn) quit $$isGroup("Insensitive", rtn)
+public Boolean isUpgrade( String rtn)     quit $$isGroup("Upgrade", rtn)
+
+	// ---------------------------------------------------------------------
+public void linkAll()
+	/* ---------------------------------------------------------------------
+	ZLINK all M routines that are part of the PSL compiler.
+	This subroutine shall be called by installation programs after the PSL
+	compiler bootstrap. Calling this subroutine ensures that the remainder
+	of the installation will use the new version of the PSL compiler to
+	perform the installation.
+
+	OUTPUTS:
+	. All routines that are part of the PSL compiler and the set of routines
+		called in phase 1 or later that may already have been called in
+		phase 0 are ZLINKed into the current process image.
+
+	NOTES:
+	* The current implementation ignores all other M routine elements that
+		may have been called by TBX. The most certain way to deal with
+		this is probably an "M only" routine checks which non-compiler
+		routines must be ZLINKed because a new version may have been
+		installed.
+	*/
+	do linkList( $$getComList())
+	quit
+
+	// ---------------------------------------------------------------------
+public void linkPreBoot()
+	/* ---------------------------------------------------------------------
+	ZLINK all M routines that are part of the PSL compiler, and that are
+	available BEFORE the PSL complier bootstrap.
+
+	This subroutine shall be called by installation programs if they need to
+	access PSL compiler modules after having loaded the new versions of the
+	M routines, but before booting the PSL compiler. Calling this subroutine
+	ensures that the installation will use the same consistent version of
+	the PSL compiler that will be used by the bootstrap itself.
+
+	Note that even though all available modules are ZLINKed, the modules
+	from the Data group that are not also in the Upgrade group, will either
+	not be available (initial installation) or be out-of-date (subsequent
+	installations).
+
+	OUTPUTS:
+	. All routines that are part of one of the following the PSL compiler
+		groups will have been ZLINKed: Insensitive, Dictionary, Object,
+		and Upgrade.
+	*/
+	do linkList( $$getList("Insensitive"))
+	do linkList( $$getList("Dictionary"))
+	do linkList( $$getList("Object"))
+	do linkList( $$getList("Upgrade"))
+	quit
+
+	// ---------------------------------------------------------------------
+public void linkList( List link)
+	/* ---------------------------------------------------------------------
+	ZLINK all M routines in the specified list.
+
+	OUTPUTS:
+	. All routines in the specified list, except the current routine,
+		are ZLINKed into the current process image.
+	*/
+	type Number i
+
+	for i = 1:1:link.count() do {
+		type String rtn = link.elementAt(i).translate("%","_")
+		#ACCEPT CR=11441; DATE=11/23/04; PGM=FSCW
+		#BYPASS
+		if rtn'=$TEXT(+0) ZLINK rtn
+		#ENDBYPASS
+	}
+	quit
+
+	// ---------------------------------------------------------------------
+public void prep( String vRtnDir	// output directory for routines (*1)
+		, String vGtmLvl	// Target GT.M version (*2)
+		, String vChrLvl	// Target charset value (*3)
+		)	// prepare a bootable version of PSL/SQL/DB for specified target environment
+	/* ---------------------------------------------------------------------
+	This subroutine will generate (almost) all files that are needed to
+	bootstrap the PSL compiler in an initial environment, or upgrade the PSL
+	compiler in an existing environment. Thus this subroutine complements
+	subroutine boot(): While boot() is used in the target environment, this
+	subroutine is used in the originating environment.
+
+	This subroutine uses the .psl file of the module as located through
+	$$packageDirs^PSLC(). Thus it effectively takes the current compiler as
+	its source. It copies the .psl file to the specified boot directory, and
+	has it compiled "in place". This will create the .m file, .o file, and
+	.pslx file that match the .psl file under the compiler settings that
+	apply to the preparation.
+
+	The subroutine also copies the .pslx files of all pslx-only classes.
+	
+	For tables, as specified by list FilerPrep, the associated RecordTABLE.m
+	and .pslx files will be generated.
+
+	On completion of the subroutine, the specified bootdirectory will
+	contain all code-related files that are needed to bootstrap or upgrade
+	the compiler. Note that the directory does not contain any data related
+	file such as .DAT files, .COL files, or .TBL files.
+
+	ARGUMENTS:
+	(*1) vRtnDir = directory for generated (or copied) routines
+		This value is required, but not validated. It is stored in the
+		compiler options array that is passed to prepCmp().
+	(*2) vGtmLvl = target GT.M version
+		This value is optional. If supplied, and non-empty it will be
+		stored in the compiler options array that is passed to prepCmp()
+	(*3) vChrLvl = target Runtime.charset value
+		This value is optional. If supplied, it will be stored in the
+		compiler options array that is passed to prepCmp().
+		If not supplied, then a value of "" will be stored.
+
+	NOTES:
+	. This subroutine calls linkAll() before it prepares any element. This
+		ensures a consistent, and recent PSL compiler.
+	. This subroutine calls getBootOptions() just like boot(). This ensures
+		that the M routine that is included in the distribution will be
+		compiled with the same settings as the M routine that will be
+		compiled in the bootstrap phase.
+	. This subroutine includes TBXDQINT in the list of elements to prepare.
+		By including this unit in the preparation, it will show up in
+		directory compares. This may help Framework developers to take
+		this unit into consideration when Framework related upgrades are
+		prepared.
+	. The vChrLvl parameter is treated differently from the other optional
+		parameters. This is due to the fact that boot versions of a
+		compiler routine MUST be "charset neutral" with respect to
+		case conversions. See UCBYTSTR for details.
+	. Per CR27800, this subroutine uses a different algorithm to prepare the
+		boot direcory. It now uses the .psl file as the compilation
+		source, and also copies the .pslx files to the specified boot
+		directory.
+	*/
+	type literal String SUBROU = "prep^UCGMCU()"
+
+	do linkAll()			// Ensure an up-to-date image
+
+	// Boot the remainder of the PSL compiler, SQL engine, and DBS kernel
+	type Primitive co(,)	// compiler options
+	type List   comList	  = $$getList("Compiler")
+	type List   filerPrepList = $$getList("FilerPrep")
+	type List   forcePrepList = $$getList("ForcePrep")
+	type Number elm
+
+	#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+	type String dir = $$SCAU^%TRNLNM("DIR")
+	type Number ign
+	type IO     io  = Class.new("IO")
+	type String pck = $$packageDirs^PSLC("","")
+	type String unt
+
+	if 'vRtnDir.get().isNull() set co("boot","rtndirectory") = vRtnDir
+
+	// adjust gtmlevel if needed
+	if vGtmLvl.get().isNull() {
+		#ACCEPT CR=none; Date=2008-01-23; PGM=Frans S.C. Witte;GROUP=BYPASS
+		#BYPASS
+		IF $PIECE($ZVERSION,"GT.M V",2)>5.1 SET co("boot","gtmlevel")=5.1
+		#ENDBYPASS
+	}
+	else set co("boot","gtmlevel") = vGtmLvl
+
+	set co("boot","charsetlevel") = vChrLvl.get()	// unconditionally!
+
+	do getBootOptions( co(,), -1)	// prepare uses boot restrictionlevel=-1
+
+	type String ucopts = $$toUcopts^PSLC( "", "", co(,))
+
+	for elm=1:1:comList.count() do {
+		set unt = comList.elementAt( elm)
+
+		if $$getGroup(unt) = "Data" {	// Data units must be copied here
+			if unt = "UCOPTS" quit	// but ignore UCOPTS completely
+			if '$$locate^UCIO( io, pck, ":", unt_ ".psl", 0) {
+				do info( "failed to copy "_unt_ ".psl")
+			}
+			#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+			else  set ign = $$COPYFIL^%OSSCRPT( io.directory_ unt_ ".psl", vRtnDir)
+		}
+		else {	// units from other groups go through prepCmp()
+			catch vEx {
+				do info("failed to prepare "_ unt_" >>> "_ vEx.toString())
+			}
+			do prepCmp( unt, co(,), ucopts)
+			do info( "prepared "_unt)
+		}
+	}
+	
+	for elm=1:1:filerPrepList.count() do {
+		set unt = "Record"_ filerPrepList.elementAt( elm)
+
+		catch vEx {
+			do info("failed to prepare "_ unt_" >>> "_ vEx.toString())
+		}
+		do prepCmp( unt, co(,), ucopts)
+		do info( "prepared "_unt)
+	}
+	
+	for elm=1:1:forcePrepList.count() do {
+		set unt = forcePrepList.elementAt( elm)
+
+		catch vEx {
+			do info("failed to prepare "_ unt_" >>> "_ vEx.toString())
+		}
+		do prepCmp( unt, co(,), ucopts)
+		do info( "prepared "_unt)
+	}
+	
+	#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+	set ign = $$DELETE^%OSSCRPT( ucopts)
+
+	// Include .pslx files of Intrinsic Classes in group "pslx"
+	type List pslxList = $$getCls("pslx")
+	set dir = $$packageDirs^PSLC("","framework").piece(":")
+	for elm = 1:1:pslxList.count() {
+		set unt = pslxList.elementAt(elm)
+
+		#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+		set ign = $$COPYFIL^%OSSCRPT( dir_ "/"_ unt_ ".pslx", vRtnDir)
+		do info( "copied "_unt)
+	}	
+	quit
+
+	// ---------------------------------------------------------------------
+public void prepCmp( String unit		// unit to prepare (*1)
+		, Primitive cco(,)	// compiler command options (*2)
+		, String ucopts		// name of UCOPTS override file
+		)	// prepare single unit
+	/* ---------------------------------------------------------------------
+	If the unit is an M routine, then this subroutine obtains the source by
+	reading from a Class IO instance.
+	If the unit is a DQ procedure, this subroutine calls $$getSrc^UCXDT25()
+	to obtain the PSL source code, and cmpA2A^UCGM() to produce the M code.
+	In both cases it writes the returned array to the output directory.
+
+	ARGUMENTS:
+	(*1) unit = PSL phase0 or phase1 unit
+		The name can either represent a DQ procedure, or an M routine.
+	(*2) cco(,) = compiler options
+		This array is passed to cmpA2A^UCGM().
+		This subroutine checks that cco("boot","rtndirectory") exists,
+		and that its value is different from SCAU_CRTNS, SCAU_MRTNS, and
+		SCAU_PRTNS.
+	THROWS:
+	. %PSL-E-PREPARE
+		If the subroutine cannot complete the prepare because of reasons
+		that it controls (e.g. PRE-condition not met)
+	. Any unexpected exception encountered during the preparation
+		Exceptions that are expected, such as %PSL-E-IO exceptions, are
+		handled internally. All other exceptions are re-thrown.
+	*/
+	type IO rIo = Class.new( "IO")
+	type String dir
+	type String pck = $$packageDirs^PSLC("","")
+
+	if 'cco("boot","rtndirectory").exists() throw Class.new("Error","%PSL-E-PREPARE,missing output directory")
+
+	#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+	for dir = "CRTNS","MRTNS","PRTNS" if cco("boot","rtndirectory") = $$SCAU^%TRNLNM(dir) throw Class.new("Error","%PSE-E-PREPARE,cannot use reserved directory,$SCAU_"_ dir)
+	if ({List}pck).contains(cco("boot","rtndirectory"),":") throw Class.new("Error","%PSE-E-PREPARE,cannot use reserved directory,$SCAU_PACKAGES")
+
+	type static PSLClass
+	
+	if PSLClass.isRecord( unit) do {	// RecordTABLE
+		type Number err
+
+		set err = $$run^PSLC( "--element="_ unit_ " --ucopts="_ ucopts_ " --targetdir="_ {String}cco("boot","rtndirectory")_ " "_ unit)
+		if err>0 throw Class.new("Error","%PSL-E-PREPARE,compilation failure(s)")
+
+		#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+		set err = $$DELETE^%OSSCRPT( {String}cco("boot","rtndirectory")_ "/"_ unit.translate("%","_")_ ".o")
+	}
+	else  if $$isProc^UCXDT25( unit) do {	// DQ Procedure
+		type Number err
+		if '$$locate^UCIO( rIo, pck, ":", unit_ ".psl", 0) throw Class.new("Error", "%PSL-E-NOTFOUND,failed to copy "_unit_ ".psl")
+
+		#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+		set err = $$COPYFIL^%OSSCRPT( rIo.directory_ unit_ ".psl", cco("boot","rtndirectory"))
+		set err = $$run^PSLC( {String}cco("boot","rtndirectory")_ "/"_ unit_ ".psl --element --ucopts="_ ucopts)
+		if err>0 throw Class.new("Error","%PSL-E-PREPARE,compilation failure(s)")
+
+		#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+		set err = $$DELETE^%OSSCRPT( {String}cco("boot","rtndirectory")_ "/"_ unit.translate("%","_")_ ".o")
+	}
+	else  do {				// M Routine
+		type String %ZI(), %ZR(), dst(), mrtn = unit.translate("%","_")
+		type String src(), stamp
+		type Number ln
+
+		set %ZI(unit) = ""
+		#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+		do INT^%RSEL
+		if '%ZR(unit).exists() throw Class.new("Error","%PSL-E-PREPARE,routine not found")
+
+		set rIo.directory = %ZR(unit)
+		set rIo.fileName  = mrtn_ ".m"
+		set rIo.openParams = "READ"
+		set rIo.recordSize = PSL.maxStringLength
+
+		/* The DO-block below is needed to deal with a memory leak issue
+		   of PSL. Even though the catch-block can exit the entire ELSE-
+		   block, it only cleans up objects that are instantiated AFTER
+		   the catch statement. Objects instantatiated BEFORE the catch
+		   statement will not be cleaned out, even though the catch
+		   statement will "pop" that DO-level. In this case rIo will not
+		   be finalized: it is declared inside the block but it is
+		   instantiated before the catch statement.
+		   */
+		do {
+			catch rEx1 {
+				do rIo.close()
+				if rEx1.type'["PSL-E-IO" throw rEx1
+			}
+			do rIo.open()
+			#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+			set stamp = $$FILE^%ZFUNC( rIo.device, "CDT")
+			for ln=1:1 set dst(ln) = rIo.read()
+		}
+
+		if dst("").order()="" quit	// nothing to write
+
+		type IO rOutFile = Class.new( "IO")
+		set rOutFile.directory = cco( "boot", "rtndirectory")
+		set rOutFile.fileName  = mrtn_ ".m"
+		set rOutFile.openParams = "WRITE/NEWV"
+		set rOutFile.recordSize = PSL.maxStringLength
+
+		catch rEx2 {
+			do rOutFile.close()
+			throw rEx2
+		}
+
+		do rOutFile.open()
+		type Number lnr, pos
+		type String txt
+		set dst(1) = $$MDCFirstLine^UCXDT25( dst(1).translate( 9.char(), " "), unit, stamp)
+		for lnr = 1:1:dst("").order( -1) {
+			set txt = dst(lnr).translate( 9.char(), " ").trim(1," ")
+			if txt.isNull() quit
+			set pos = txt.find(" ")
+			if pos=0 set txt = txt_" ", pos = txt.length()+1
+			if pos<9 set txt = txt.extract(1,pos-2)_ 9.char()_ dst(lnr).extract(pos,txt.length())
+
+			do rOutFile.write( txt)
+		}
+		do rOutFile.close()
+	}
+	quit
+
+	// ---------------------------------------------------------------------
+public void prepProc( String vUnit	// Unit name
+		, String vRtnDir	// output directory for routines (*2)
+		, String vGtmLvl	// Target GT.M version (*2)
+		, String vChrLvl	// Target Runtime.charset value (*2)
+		)	// prepare a single module for the specified target enviroment
+	/* ---------------------------------------------------------------------
+	This subroutine is primiarily included to maintain symmetry between the
+	boot/bootCmp/bootProc and prep/prepCmp/prepProc entrypoints.
+	Instead of calling prepProc() on individual elements, framework
+	developers are encouraged to call prep() in order to create a consistent
+	set of bootable framework routines.
+
+	ARGUMENTS:
+	(*2) vRtnDir, vGtmLvl, vChrLvl
+		Same as parameters to prep()
+
+	NOTES:
+	. Unlike prep(), this subroutine does NOT call linkAll(). So breakpoints
+		can be set to check specific "prepare behavior".
+	*/
+	type literal String SUBROU = "prepProc^UCGMCU()"
+
+	type Number ign
+
+	// If element denotes an Intrinsic Class in group "pslx", just copy .pslx
+	#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+	if $$getCls("pslx").contains(vUnit) set ign = $$COPYFIL^%OSSCRPT( $$packageDirs^PSLC("","framework").piece(":")_ "/"_ vUnit_ ".pslx", vRtnDir) do info( "copied "_vUnit) quit
+
+	// Set up for perpare of single unit
+	type Primitive co(,)	// compiler options
+
+	if 'vRtnDir.get().isNull() set co("boot","rtndirectory") = vRtnDir
+	if 'vGtmLvl.get().isNull() set co("boot","gtmlevel") = vGtmLvl
+	set co("boot","charsetlevel") = vChrLvl.get()	// unconditionally!
+
+	do getBootOptions( co(,), -1)	// prepare uses boot restrictionlevel=-1
+
+	type String ucopts = $$toUcopts^PSLC( "", "", co(,))
+
+	do {
+		catch vEx {
+			do info( "failed to prepare "_vUnit_ " >>> "_ vEx.toString())
+		}
+		do prepCmp( vUnit, co(,), ucopts)
+		do info( "prepared "_vUnit)
+	}
+
+	#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+	set ign = $$DELETE^%OSSCRPT( ucopts)
+	quit
+
+	// ---------------------------------------------------------------------
+public void prepUCOPTS( String file,	// name of ucopts override file
+		String cs()		// compiler settings
+		)	// create ucopts override file for prep* calls
+	/* ---------------------------------------------------------------------
+	This subroutine creates a ucopt override file that can be passed to the
+	PSL compiler using the --ucopts commandline option.
+
+	OUTPUTS:
+	. A ucopts.ini override file based on the supplied compiler settings.
+
+	NOTES:
+	. See comment throughout this subroutine, and in the generated code for
+		additional explanation.
+	*/
+	quit:'cs.data()
+
+	type IO rIO = Class.new( "IO")
+	set rIO.fileName = file, rIO.openParams = "NEWVERSION"
+	do rIO.open()
+	type String l1 = "", l2 ="", val
+
+	for  set l1 = cs(l1).order() quit:l1.isNull()  {
+		for  set l2 = cs(l1,l2).order() quit:l2.isNull()  {
+			if l1 = "Options"  do rIO.write( " #OPTION "_l2_" "_cs(l1,l2)) quit
+			if ({List}"OPTIMIZE,WARN,INFO").contains(l1) do rIO.write( " #"_l1_" "_l2_" "_cs(l1,l2)) quit
+			set val = cs(l1,l2)
+			do rIO.write(" #DEFINE "_l1_"."_l2_" "_$SELECT(val.isNumber():val,1:val.addQuotes()))
+		}
+	}
+	do rIO.close()	
+
+	quit
+
+	// ---------------------------------------------------------------------
+public Time time( String vStr	// string representation of time
+		)	// boot-safe String to Time conversion
+	/* ---------------------------------------------------------------------
+	Convert String to Time. This function uses String.toTime() to return the
+	time. It can be called by the installation routines that would otherwise
+	need to call a utility that may not yet be available.
+	
+	Because all time conversions are in-line, and there are no provisions
+	for a time mask, there are no limitiations to the supplied value that
+	would yield a result that differs from a call to the time conversion
+	utility.
+	*/
+	quit vStr.toTime()
+ #OPTION ResultClass ON
+public String vSIG()	quit "61530^32515^Frans S.C. Witte^84080"	// Signature - LTD^TIME^USER^SIZE

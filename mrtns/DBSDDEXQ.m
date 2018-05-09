@@ -10,22 +10,14 @@ DBSDDEXQ	;
 	;		IMP	Import data files
 	;
 	;---------- Revision History ------------------------------------------
+	; 01/21/2008 - RussellDS - CR30801
+	;	Removed code that was conditional based on table not having a
+	;	filer.  All now have one.
+	;
+	;	Removed old revision history
+	;
 	; 02/20/07 - GIRIDHARANB - CR25418
 	;	     Added a quit at the end of header section
-	;
-	; 12/05/05 - RussellDS - CR18400
-	;	     Redirect addz1^DBSDD and gbl^DBSDD to ^DBSLOD.
-	;
-	; 10/31/05 - RussellDS - CR17834
-	;	     Moved code sections from DBSINS into this routine as it is
-	;	     now the only user and DBSINS has been obsoleted.  This
-	;	     includes sections INS, LOCK, MAPKEY, MAPDTA, MAP, PUTSUB,
-	;	     GETSUB, vinit, DEFAULT, and ERR.
-	;
-	;	     Modified call to DBSFILER to match changes.  Now calls
-	;	     EXT.
-	;
-	;	     Removed old revision history.
 	;
 	;----------------------------------------------------------------------
 EXP(file,opt,query)	;Private;Export data files
@@ -329,9 +321,6 @@ MAPDTA(fid,sel,rec,opt,map,fsn,ver,typsave,jrn)	;Private; Map Data from rec to f
 	;
 	N V,X,ZV,i,gvn,keys,nod,pos,sf,sn,v,zn,z,zdel,ztyp,typ
 	;
-	; *** 06/10/98 BC
-	I opt=0,$p(fsn(fid),"|",6)="" D vinit(fid)	; Initialize defaults
-	;
 	S ver=$G(ver)
 	S jrn=$G(jrn)				; JMH - 02/15/99
 	S gvn=$P(fsn(fid),"|",2),keys=$P(fsn(fid),"|",3) ; Global reference and access keys
@@ -339,7 +328,7 @@ MAPDTA(fid,sel,rec,opt,map,fsn,ver,typsave,jrn)	;Private; Map Data from rec to f
 	I zdel="" S zdel=124				; *** 03/11/97
 	;
 	S sf="",zn=""
-	F i=1:1:$L(map,",") D  Q:ER			; Map Data
+  	F i=1:1:$L(map,",") D  Q:ER			; Map Data
 	.	;					;
 	.	S X=$G(rec(i))				; New data
 	.	I X=$C(0) Q				; Skip Indicator
@@ -349,15 +338,15 @@ MAPDTA(fid,sel,rec,opt,map,fsn,ver,typsave,jrn)	;Private; Map Data from rec to f
 	.	I v=$C(0) S UX=1 D  Q			; Memo field
 	..		N sn
 	..		I '$D(fsn(fid)) N fsn D fsn^DBSDD(.fsn,fid)
-	.. 	S sn=$P(fsn(fid),"|",1)_"seq)"
-	.. 	D BUF^DBSMEMO(fid,x,.sn)
+        ..		S sn=$P(fsn(fid),"|",1)_"seq)"
+        ..		D BUF^DBSMEMO(fid,x,.sn)
 	.	S pos=$P(v,".",1),nod=$P(v,".",2)
 	.	;
-	.       I pos="*" D  Q 			; *** 07/11/96
-	..              I i'>$L(keys,",") Q             ; Skip keys 
-	..              ;                               ; Allow Key changes 
-	..              S UX(fid,$P(sel,",",i))=rec(nod)_"|"_X_"|"_nod_"|"_pos_"||"_$P(jrn,"|",i) ; JMH - 02/15/99
-	.	;
+        .       I pos="*" D  Q				; *** 07/11/96
+        ..              I i'>$L(keys,",") Q             ; Skip keys
+        ..              ;                               ; Allow Key changes
+        ..              S UX(fid,$P(sel,",",i))=rec(nod)_"|"_X_"|"_nod_"|"_pos_"||"_$P(jrn,"|",i)	; JMH - 02/15/99
+  	.	;
 	.	I pos["~" S sf=$P(pos,"~",2,99),pos=$P(pos,"~",1)
 	.	I nod="" S nod=" "
 	.	I zn'=nod D
@@ -468,99 +457,7 @@ GETSUB(V,sf)	; Get subfield value
 	S:sfd1 sfd1=$C(sfd1) S:sfd2 sfd2=$C(sfd2)
 	Q $$GET^USUB(V,sft,sfd1,sfd2,sfp)
 	;
-	;----------------------------------------------------------------------
-vinit(fid)	;Private; Initialize Master files (default value) if no filer
-	;----------------------------------------------------------------------
-	; ARGUMENTS:
-	;
-	;  . fid	File name	/TYP=T/REQ/MECH=VAL/TBL=[DBTBL1]
-	;
-	; INPUTS:
-	;
-	;   Access keys
-	;
-	; RETURNS:
-	;
-	;    Internal file short name array
-	;
-	; Example:
-	;
-	;  S ACN=12345 D vinit("CIF")
-	;
-	;  CIF(14)=56699
-	;  CIF(50)="|*|CIF"
-	;----------------------------------------------------------------------
-	;
-	N z,zcode,ER
-	;
-	; djh 04/30/97   Exclude if dummy file definition
-	I $G(%LIBS)="" N %LIBS S %LIBS=^CUVAR("%LIBS")
-	I $P($G(^DBTBL(%LIBS,1,fid,10)),"|",12)=5 Q     ; Dummy file definition
-	;
-	D DEFAULT(fid,.zcode,1)				; Build exec code 12/09/99
-	I '$D(zcode) Q					; Not defined
-	S z="" F  S z=$O(zcode(z)) Q:z=""  X zcode(z) I $G(ER) Q  ; Set up defaults
-	Q
-	;
-	;---------------------------------------------------------------------- 
-DEFAULT(fid,code,mode)	; Return procedural code to create defaults in create mode 
-	;---------------------------------------------------------------------- 
-	; 
-	N (fid,code,mode,%LIBS) 
-	I $G(fid)="" Q                          ; Invalid file name 
-	I $G(%LIBS)="" N %LIBS S %LIBS=^CUVAR("%LIBS") 
-	D fsn^DBSDD(.fsn,fid) I $G(ER) Q        ; Invalid name 
-	; 
-	K code 
-	S req=$G(^DBTBL(%LIBS,1,fid,101))       ; Items with default value 
-	S node=$P(fsn(fid),"|",12)              ; Record exist indicator 
-	S gbl=$P(fsn(fid),"|",2)                ; Global reference 
-	I node="" S gbl=gbl_")"                 ; ^gbl(key1,key2,,,) 
-	E  S gbl=gbl_","_node_")"               ; ^gbl(key1,node) 
-	; 
-	S sn=$P($P(fsn(fid),"|",1),"(",1)       ; Internal storage name 
-	S rectyp=$P(fsn(fid),"|",4)             ; Record type 
-	S keys=$P(fsn(fid),"|",3)               ; Access keys 
-	S bkey=$P(keys,",",$L(keys,","))        ; Last key 
-	I keys'="" D                            ; Record defined? 
-	.       S N="" 
-	.       F I=1:1:$L(keys,",") S N=N_"!($G("_$P(keys,",",I)_")="_""""""_")" 
-	.       S code(1)=" Q:$G(%O)  S ER=0 I "_$E(N,2,999) 
-	.       S code(1)=code(1)_" S ER=1,RM=$$^MSG(1767,"_""""_keys_""""_") Q" 
-	.       S code(2)=" I $D("_gbl_")" 
-	.       I rectyp=1 S code(2)=" I $G("_gbl_")'="_""""""     ; *** 02/24/98 BC 
-	.       I $G(mode)'=2 S code(2)=code(2)_" S ER=1,RM=$$^MSG(2327)" ; *** 12/05/97 
-	.       S code(2)=code(2)_" Q  ; Already created" 
-	I req="" Q 
-	S q="""" 
-	F i=1:1:$L(req,",") D 
-	.       I $P(req,",",i)="" Q 
-	.       S dinam=fid_"."_$P(req,",",i) 
-	.       K item 
-	.       D PARSE^DBSDD(dinam,.item)              ; Get internal format 
-	.       I ER D ERR Q                            ; Item deleted? 
-	.       I rectyp>1 D 
-	..              S nod=$$NOD^DBSDD(dinam,.item) ; Node number 
-	..              I nod=bkey Q                    ; Skip 
-	..              S node(nod)=""                  ; Save node number 
-	.       S v=$$DFT^DBSDD(dinam,.item)            ; Default value 
-	.       I v="" Q 
-	.       S typ=$$TYP^DBSDD(dinam,.item)          ; Type 
-	.       S len=$$LEN^DBSDD(dinam,.item)          ; Length 
-	.       S v=$$value(v,typ)                      ; Internal format 
-	.       S code(10+i)=" I "_NS_"="_q_q_" S "_NS_"="_v_"   ; "_dinam 
-	; 
-	I rectyp#2=1 S code(3)=" S "_sn_"=$G("_sn_")"   ; Init array 
-	I rectyp=1!'$D(node) Q 
-	; 
-	S node="",n="" 
-	F  S n=$O(node(n)) Q:n=""  D 
-	.       S i=n I i'=+i S i=""""_i_""""           ; "name" 
-	.       S node=node_","_sn_"("_i_")=$G("_sn_"("_i_"))" 
-	I node'="" S code(4)=" S "_$E(node,2,999) 
-	Q 
-	; 
-	;----------------------------------------------------------------------
+       	;----------------------------------------------------------------------
 NPC(v,ptr,del,qwt)	;private; Return Next Unquoted Piece
 	;----------------------------------------------------------------------
 	;
@@ -572,33 +469,33 @@ NPC(v,ptr,del,qwt)	;private; Return Next Unquoted Piece
 	I $L($E(v,ptr,y-1),qwt)#2 S v=$E(v,ptr,y-2),ptr=y Q v
 	F  S y=$F(v,del,y) Q:'y  I $L($E(v,ptr,y-1),qwt)#2 Q
 	S v=$E(v,ptr,$S(y:y-2,1:$L(v))),ptr=y Q v
-	; 
-value(v,typ)	; Convert internal to external format 
-	;---------------------------------------------------------------------- 
-	; EXAMPLES:     External            Internal      Type 
-	; 
-	;              SystemDate           TJD            D 
-	;              CurrentDate          +$H            D 
-	;              123                  123 
-	;              XYZ                  "XYZ" 
-	;              <<ABCDE>>            ABCDE 
-	;              T                    TJD            D 
-	;              C                    +$H            D 
-	;              Y                     1             L 
-	;              N                     0             L 
-	; 
-	I v="" Q "" 
-	I $D(^STBL("JRNFUNC",v)) Q $P(^(v),"|",2)       ; System keyword 
-	I v?1n.n!(v?1n.n1".".n) Q v                     ; Numeric 
-	I v?1"<<"1e.e1">>" Q $P($P(v,"<<",2),">>",1)    ; <<variavle>> 
-	I typ="D" Q $S(v="T":"TJD",v="C":"+$H",1:"")    ; System date/Today 
-	I typ="C",v="C" Q "$P($H,"","",2)"              ; Current time 
-	I typ="L" Q $S(v="Y":1,1:0)                     ; Logical 
-	I v="""" Q """"""""""                           ; string delimitor 10/18/96 mas 
-	Q """"_v_""""                         	; "text"
-	; 
+        ;
+value(v,typ)    ; Convert internal to external format
+        ;----------------------------------------------------------------------
+        ; EXAMPLES:     External            Internal      Type
+        ;
+        ;              SystemDate           TJD            D
+        ;              CurrentDate          +$H            D
+        ;              123                  123
+        ;              XYZ                  "XYZ"
+        ;              <<ABCDE>>            ABCDE
+        ;              T                    TJD            D
+        ;              C                    +$H            D
+        ;              Y                     1             L
+        ;              N                     0             L
+        ;
+        I v="" Q ""
+        I $D(^STBL("JRNFUNC",v)) Q $P(^(v),"|",2)       ; System keyword
+        I v?1n.n!(v?1n.n1".".n) Q v                     ; Numeric
+        I v?1"<<"1e.e1">>" Q $P($P(v,"<<",2),">>",1)    ; <<variavle>>
+        I typ="D" Q $S(v="T":"TJD",v="C":"+$H",1:"")    ; System date/Today
+        I typ="C",v="C" Q "$P($H,"","",2)"              ; Current time
+        I typ="L" Q $S(v="Y":1,1:0)                     ; Logical
+        I v="""" Q """"""""""                           ; string delimitor 10/18/96 mas
+        Q """"_v_""""                        		; "text"
+        ;
 	;----------------------------------------------------------------------
-ERR	; Display error message 
-	;---------------------------------------------------------------------- 
-	W !,$$MSG^%TRMVT($G(RM)),! H 2 
-	Q 
+ERR     ; Display error message
+        ;----------------------------------------------------------------------
+        W !,$$MSG^%TRMVT($G(RM)),! H 2
+        Q

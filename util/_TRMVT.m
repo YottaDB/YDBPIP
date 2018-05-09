@@ -109,6 +109,14 @@
 	;
 	;
 	;-----Revision History-------------------------------------------------
+	; 04/18/06 - Allan Mattson - CR35492
+	;            Modified function $$CSI to return $C(27,91) instead of
+	;            $C(155) and replaced all occurences of $C(155) with $$CSI
+	;            in order to resolve problems with terminal emulation in a
+	;            Unicode environment.
+	;
+	;            Replaced naked global reference with full global reference
+	;            to conform to programming standards.
 	;
 	; 04/09/97 - Chiang - 24416
 	;            Added new section PRNTFF to control the form feed of slave
@@ -145,7 +153,7 @@ CUP(X,Y)	;System;Move to X,Y
 	; EXAMPLE:
 	;	S MOVE=$$CUP^%TRMVT(5,10)
 	;
-	Q $C(155)_$G(Y)_";"_$G(X)_"H"
+	Q $$CSI_$G(Y)_";"_$G(X)_"H"
 	;
 	;----------------------------------------------------------------------
 CUB(NUM)	;System;Move back NUM spaces
@@ -164,7 +172,7 @@ CUB(NUM)	;System;Move back NUM spaces
 	; EXAMPLE:
 	;	S BACK=$$CUB^%TRMVT(5)
 	;
-	Q $C(155)_$G(NUM)_"D"
+	Q $$CSI_$G(NUM)_"D"
 	;
 	;----------------------------------------------------------------------
 CUD(NUM)	;System;Move down NUM spaces
@@ -183,7 +191,7 @@ CUD(NUM)	;System;Move down NUM spaces
 	; EXAMPLE:
 	;	S DOWN=$$CUD^%TRMVT(5)
 	;
-	Q $C(155)_$G(NUM)_"B"
+	Q $$CSI_$G(NUM)_"B"
 	;
 	;----------------------------------------------------------------------
 CUF(NUM)	;System;Move forward NUM spaces
@@ -202,7 +210,7 @@ CUF(NUM)	;System;Move forward NUM spaces
 	; EXAMPLE:
 	;	S FORWARD=$$CUF^%TRMVT(5)
 	;
-	Q $C(155)_$G(NUM)_"C"
+	Q $$CSI_$G(NUM)_"C"
 	;
 	;----------------------------------------------------------------------
 CUU(NUM)	;System;Move up NUM spaces
@@ -221,7 +229,7 @@ CUU(NUM)	;System;Move up NUM spaces
 	; EXAMPLE:
 	;	S UP=$$CUU^%TRMVT(5)
 	;
-	Q $C(155)_$G(NUM)_"A"
+	Q $$CSI_$G(NUM)_"A"
 	;
 	;----------------------------------------------------------------------
 BTM()	;System;Move to bottom left of screen, clear line
@@ -301,7 +309,7 @@ CUON()	;System;Turn cursor on (display cursor)
 	; EXAMPLE:
 	;	S ON=$$CUON^%TRMVT
 	;
-	Q $C(155)_"?25h"
+	Q $$CSI_"?25h"
 	;
 	;----------------------------------------------------------------------
 CUOFF()	;System;Turn cursor off (hide cursor)
@@ -315,7 +323,7 @@ CUOFF()	;System;Turn cursor off (hide cursor)
 	; EXAMPLE:
 	;	S OFF=$$CUOFF^%TRMVT
 	;
-	Q $C(155)_"?25l"
+	Q $$CSI_"?25l"
 	;
 	;----------------------------------------------------------------------
 CPS()	;System;Save cursor position
@@ -367,7 +375,7 @@ CPOS(X,Y)	;System;Returns current cursor position
 	;	D CPOS^%TRMVT(.XPOS,.YPOS)
 	;
 	N Z,ZB
-	W $C(155)_"6n"
+	W $$CSI_"6n"
 	R Z:1 S ZB=$ZB
 	S ZB=$E(ZB,3,9)
 	S Y=+ZB,X=+$P(ZB,";",2)
@@ -389,7 +397,7 @@ VIDOFF()	;System;Turn video attributes off
 	; EXAMPLE:
 	;	S X=$$VIDOFF^%TRMVT
 	;
-	Q $C(155)_"m"
+	Q $$CSI_"m"
 	;
 	;----------------------------------------------------------------------
 VIDINC()	;System;Turn increased intensity on
@@ -403,7 +411,7 @@ VIDINC()	;System;Turn increased intensity on
 	; EXAMPLE:
 	;	S X=$$VIDINC^%TRMVT
 	;
-	Q $C(155)_";1m"
+	Q $$CSI_";1m"
 	;
 	;----------------------------------------------------------------------
 VIDREV()	;System;Turn reverse video on
@@ -417,7 +425,7 @@ VIDREV()	;System;Turn reverse video on
 	; EXAMPLE:
 	;	S X=$$VIDREV^%TRMVT
 	;
-	Q $C(155)_";7m"
+	Q $$CSI_";7m"
 	;
 	;----------------------------------------------------------------------
 VIDUDL()	;System;Turn underline on
@@ -431,7 +439,7 @@ VIDUDL()	;System;Turn underline on
 	; EXAMPLE:
 	;	S X=$$VIDUDL^%TRMVT
 	;
-	Q $C(155)_";4m"
+	Q $$CSI_";4m"
 	;
 	;----------------------------------------------------------------------
 VIDBLK()	;System;Turn blinking on
@@ -445,7 +453,7 @@ VIDBLK()	;System;Turn blinking on
 	; EXAMPLE:
 	;	S X=$$VIDBLK^%TRMVT
 	;
-	Q $C(155)_";5m"
+	Q $$CSI_";5m"
 	;
 	;----------------------------------------------------------------------
 VIDERR()	;System;Turn error display (reverse video) on
@@ -459,7 +467,7 @@ VIDERR()	;System;Turn error display (reverse video) on
 	; EXAMPLE:
 	;	S X=$$VIDERR^%TRMVT
 	;
-	Q $C(155)_";7m"
+	Q $$CSI_";7m"
 	;
 	;----------------------------------------------------------------------
 VIDMSG()	;System;Turn message display (increased intensity) on
@@ -473,7 +481,7 @@ VIDMSG()	;System;Turn message display (increased intensity) on
 	; EXAMPLE:
 	;	S X=$$VIDMSG^%TRMVT
 	;
-	Q $C(155)_";1m"
+	Q $$CSI_";1m"
 	;
 	;----------------------------------------------------------------------
 VIDOOE(V1)	;System;Return composite code for multiple video attributes
@@ -509,7 +517,7 @@ VIDOOE(V1)	;System;Return composite code for multiple video attributes
 	I V1\2#2 S V=V_";1" ; Highlight
 	I V1\4#2 S V=V_";4" ; Underscore
 	I V1\8#2 S V=V_";5" ; Blinking
-	Q $C(155)_V_"m"
+	Q $$CSI_V_"m"
 	;
 	;***********************************************************************
 	;********** Insert and Delete Functions ********************************
@@ -531,7 +539,7 @@ CHRINS(NUM)	;System;Insert NUM characters
 	; EXAMPLE:
 	;	S X=$$CHRINS^%TRMVT(5)
 	;
-	Q $C(155)_$G(NUM)_"@"
+	Q $$CSI_$G(NUM)_"@"
 	;
 	;----------------------------------------------------------------------
 CHRDEL(NUM)	;System;Delete NUM characters
@@ -549,7 +557,7 @@ CHRDEL(NUM)	;System;Delete NUM characters
 	; EXAMPLE:
 	;	S X=$$CHRDEL^%TRMVT(5)
 	;
-	Q $C(155)_$G(NUM)_"P"
+	Q $$CSI_$G(NUM)_"P"
 	;
 	;----------------------------------------------------------------------
 LININS(NUM)	;System;Insert NUM lines
@@ -567,7 +575,7 @@ LININS(NUM)	;System;Insert NUM lines
 	; EXAMPLE:
 	;	S X=$$LININS^%TRMVT(5)
 	;
-	Q $C(155)_$G(NUM)_"L"
+	Q $$CSI_$G(NUM)_"L"
 	;
 	;----------------------------------------------------------------------
 LINDEL(NUM)	;System;Delete NUM lines
@@ -585,7 +593,7 @@ LINDEL(NUM)	;System;Delete NUM lines
 	; EXAMPLE:
 	;	S X=$$LINDEL^%TRMVT(5)
 	;
-	Q $C(155)_$G(NUM)_"M"
+	Q $$CSI_$G(NUM)_"M"
 	;
 	;----------------------------------------------------------------------
 INSMON()	;System;Turn insert mode on
@@ -599,7 +607,7 @@ INSMON()	;System;Turn insert mode on
 	; EXAMPLE:
 	;	S X=$$INSMON^%TRMVT
 	;
-	Q $C(155)_"4h"
+	Q $$CSI_"4h"
 	;
 	;----------------------------------------------------------------------
 INSMOFF()	;System;Turn insert mode off
@@ -613,7 +621,7 @@ INSMOFF()	;System;Turn insert mode off
 	; EXAMPLE:
 	;	S X=$$INSMOFF^%TRMVT
 	;
-	Q $C(155)_"4l"
+	Q $$CSI_"4l"
 	;
 	;***********************************************************************
 	;********** Screen Clear Functions *************************************
@@ -631,7 +639,7 @@ CLEAR()	;System;Clear screen and return to home (top left corner)
 	; EXAMPLE:
 	;	S X=$$CLEAR^%TRMVT
 	;
-	Q $$VIDOFF_$C(155)_"2J"_$$CUP(1,1)
+	Q $$VIDOFF_$$CSI_"2J"_$$CUP(1,1)
 	;
 	;----------------------------------------------------------------------
 CLL()	;System;Clear to end of line, return to starting point
@@ -645,7 +653,7 @@ CLL()	;System;Clear to end of line, return to starting point
 	; EXAMPLE:
 	;	S X=$$CLL^%TRMVT
 	;
-	Q $C(155)_"K"
+	Q $$CSI_"K"
 	;
 	;----------------------------------------------------------------------
 CLP()	;System;Clear to end of page, return to starting point
@@ -659,7 +667,7 @@ CLP()	;System;Clear to end of page, return to starting point
 	; EXAMPLE:
 	;	S X=$$CLP^%TRMVT
 	;
-	Q $C(155)_"J"
+	Q $$CSI_"J"
 	;
 	;----------------------------------------------------------------------
 CLN(NUM)	;System;Clear NUM characters, return to starting point
@@ -676,7 +684,7 @@ CLN(NUM)	;System;Clear NUM characters, return to starting point
 	; EXAMPLE:
 	;	S X=$$CLN^%TRMVT(5)
 	;
-	Q $C(155)_$G(NUM)_"X"
+	Q $$CSI_$G(NUM)_"X"
 	;
 	;----------------------------------------------------------------------
 CLR(TOP,BTM)	;System;Clear region, return to top left
@@ -841,7 +849,7 @@ LOCK(TOP,BTM)	;System;Lock region specified
 	; EXAMPLE:
 	;	S X=$$LOCK^%TRMVT(5,10)
 	;
-	Q $C(155)_$G(TOP)_";"_$G(BTM)_"r"
+	Q $$CSI_$G(TOP)_";"_$G(BTM)_"r"
 	;
 	;***********************************************************************
 	;********** Display and Graphics Functions *****************************
@@ -1157,7 +1165,7 @@ SCRAWON()	;System;Turn autowrap on
 	; EXAMPLE:
 	;	S X=$$SCRAWON^%TRMVT
 	;
-	Q $C(155)_"?7h"
+	Q $$CSI_"?7h"
 	;
 	;----------------------------------------------------------------------
 SCRAWOFF()	;System;Turn autowrap off
@@ -1171,7 +1179,7 @@ SCRAWOFF()	;System;Turn autowrap off
 	; EXAMPLE:
 	;	S X=$$SCRAWOFF^%TRMVT
 	;
-	Q $C(155)_"?7l"
+	Q $$CSI_"?7l"
 	;
 	;----------------------------------------------------------------------
 SCR80()	;System;Set screen to 80 column display
@@ -1185,7 +1193,7 @@ SCR80()	;System;Set screen to 80 column display
 	; EXAMPLE:
 	;	S X=$$SCR80^%TRMVT
 	;
-	Q $C(155)_"?3l"
+	Q $$CSI_"?3l"
 	;
 	;----------------------------------------------------------------------
 SCR132()	;System;Set screen to 132 column display
@@ -1199,7 +1207,7 @@ SCR132()	;System;Set screen to 132 column display
 	; EXAMPLE:
 	;	S X=$$SCR132^%TRMVT
 	;
-	Q $C(155)_"?3h"
+	Q $$CSI_"?3h"
 	;
 	;----------------------------------------------------------------------
 SCR80XY()	;System;Set screen to 80 column display, reset $X,$Y to zero
@@ -1252,7 +1260,7 @@ PRNTRDY()	;System;Inquire if printer is ready
 	;	S READY=$$PRNTRDY^%TRMVT
 	;
 	N X
-	U 0 W $C(155)_"?15n"
+	U 0 W $$CSI_"?15n"
 	R X:5 E  Q 0 ;					Timeout
 	I $E($ZB,4,5)=10 Q 1 ;				Ready
 	Q 0 ;						Not ready
@@ -1269,7 +1277,7 @@ PRNTON()	;System;Turn slave printer on
 	; EXAMPLE:
 	;	S X=$$PRNTON^%TRMVT
 	;
-	Q $C(155)_"5i"
+	Q $$CSI_"5i"
 	;
 	;----------------------------------------------------------------------
 PRNTOFF()	;System;Turn slave printer off
@@ -1283,7 +1291,7 @@ PRNTOFF()	;System;Turn slave printer off
 	; EXAMPLE:
 	;	S X=$$PRNTOFF^%TRMVT
 	;
-	Q $C(155)_"4i"
+	Q $$CSI_"4i"
 	;----------------------------------------------------------------------
 PRNTFF()	;System; Form feed
 	;----------------------------------------------------------------------
@@ -1310,8 +1318,7 @@ CSI()	;System;Return CSI Value
 	;
 	; If differs by terminal, replace this routine with a custom routine
 	; with the following change -- disable the first line of code in this
-	; function and allow execution of the following lines.  Also, change 
-	; all $C(155) above this line to be $$CSI.
+	; function and allow execution of the following lines.
 	;
 	; KEYWORDS:	Screen handling
 	;
@@ -1321,7 +1328,8 @@ CSI()	;System;Return CSI Value
 	; EXAMPLE:
 	;	S CSI=$$CSI^%TRMVT
 	;
-	Q $C(155)
+	Q $C(27,91)
+	; Q $C(155)
 	;
 	;----------------------------------------------------------------------
 ZBINIT(OPT)	;System;Initialize function array
@@ -1353,7 +1361,7 @@ ZBINIT(OPT)	;System;Initialize function array
 KBL(O)	;Private; Return string of VT escape sequences for VT keyboard for use
 	; by ZBINIT.
 	;
-	I $G(O)'="",$D(^DBCTL("SYS","%KBUIM",O)) Q ^(O)
+	I $G(O)'="",$D(^DBCTL("SYS","%KBUIM",O)) Q ^DBCTL("SYS","%KBUIM",O)
 	;
 	Q "CUU|[A|CUD|[B|CUF|[C|CUB|[D|ALT|OP|SES|OQ|MNU|OR|DUP|OS|HLP|[28~|END|[29~|FND|[1~|INS|[2~|REM|[3~|SEL|[4~|PUP|[5~|PDN|[6~|ESC|[23~|BUF|*[3~|TOP|*[5~|BOT|*[6~|RCL|*OS|ENT|13|CLR|21|DSP|23|PRN|16|KYB|11"
 KBD()	Q "CUU|Up_Arrow|CUD|Down_Arrow|CUF|Right_Arrow|CUB|Left_Arrow|ALT|GOLD|MNU|Menu|DUP|Duplicate|HLP|Help|END|End|FND|Find|INS|Insert|REM|Remove|SEL|Select|PUP|Prev_Screen|PDN|Next_Screen|ESC|Escape|SES|Session|TOP|Top|BOT|Bottom|BUF|Buffer|RCL|Recall|ENT|Enter|DSP|Refresh_Screen|PRN|Print|KYB|Keypad_Emulate"

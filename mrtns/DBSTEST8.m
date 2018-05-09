@@ -1,3 +1,4 @@
+
 	;;Copyright(c)1997 Sanchez Computer Associates, Inc.  All Rights Reserved - 08/12/97 15:00:48 - NIB
 	;;Copyright(c)1994 Sanchez Computer Associates, Inc.  All Rights Reserved - 11/21/94 13:57:02 - XUS
 	; ORIG:	XUS - 02/28/94
@@ -13,7 +14,7 @@
 	;---- Revision History ------------------------------------------------
 	;
 	; 08/12/97 - Betty Ndi - 25653
-	;            Replace follows operator "]" with a "]]". 
+        ;            Replace follows operator "]" with a "]]".
 	;
 	; 11/21/94 - Shaodong Xu - ARQ 10195
 	;            Modified RM undefined.
@@ -64,7 +65,7 @@ BEG	;
 	; 
 	S CFID=FIDS,X=1,ER=0,MSG=" "               ; Initialize temporary variables
 	;
-	;----------------------------------------------------------------------- 
+        ;-----------------------------------------------------------------------
 	;  Withdraw all the lookup table formats from the files between
 	;  the starting file and ending file
 	;-----------------------------------------------------------------------
@@ -130,7 +131,7 @@ INITVAR	;
 	.	S INDEXTMP(II)=""                    ; initialization
 	.	I CKEY?1A1A.E D ALPHKEY              ; key is beginning with an alphabetics
 	.	I CKEY'?1A1A.E D OTHERKEY            ; other keys
-	K INDEXTMP,NGLOBAL,SYNKEY                    ; clean up   
+        K INDEXTMP,NGLOBAL,SYNKEY                    ; clean up  
 	Q
 	;
 	;-----------------------------------------------------------------------  
@@ -143,14 +144,14 @@ ALPHKEY	;   The key is alphabetics
 	I II=3 S SYNKEY(3)=NGLOBAL_"(INDEXTMP(1),INDEXTMP(2),INDEXTMP(3))"
 	I II=4 S SYNKEY(4)=NGLOBAL_"(INDEXTMP(1),INDEXTMP(2),INDEXTMP(3),INDEXTMP(4))"
 	I II=5 S SYNKEY(5)=NGLOBAL_"(INDEXTMP(1),INDEXTMP(2),INDEXTMP(3),INDEXTMP(4),INDEXTMP(5))"
-	S INDEXTMP(II)=$S(II=1:$O(@SYNKEY(1)),II=2:$O(@SYNKEY(2)),II=3:$O(@SYNKEY(3)),II=4:$O(@SYNKEY(4)),II=5:$O(@SYNKEY(5)))      
+        S INDEXTMP(II)=$S(II=1:$O(@SYNKEY(1)),II=2:$O(@SYNKEY(2)),II=3:$O(@SYNKEY(3)),II=4:$O(@SYNKEY(4)),II=5:$O(@SYNKEY(5)))     
 	I (II=2)&(CFID["LNOLC") S INDEXTMP(II)=$O(@SYNKEY(2))  ; for special files
 	I INDEXTMP(II)="" S II=$L(MKEY) Q                      ; quit when no entry
 	S @CKEY=INDEXTMP(II) S MSG(3)=MSG(3)_CKEY_"="_INDEXTMP(II)_"     "
 	Q
 	;
 	;----------------------------------------------------------------------
-OTHERKEY;	Deal with keys which is number,constant or system variable  
+OTHERKEY; Deal with keys which is number,constant or system variable 
 	;----------------------------------------------------------------------
 	;
 	I (CKEY?1N.N) S INDEXTMP(II)=CKEY Q              ; the key is a number

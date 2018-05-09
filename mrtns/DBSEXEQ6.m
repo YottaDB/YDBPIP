@@ -3,10 +3,10 @@ DBSEXEQ6	;DBSEXEQ6; -  - V5.0 - BUILD QWIK REPORT SORT FILE
 	;     ORIG:  CHIANG - 10/16/89
 	;
 	;---- Revision History ------------------------------------------------
-	; 
-	; 10/17/96 - Bob Chiang - 20948 
-	;            Modified to replace node 1-7 references with node 16 
-	;            (file access keys). 
+        ;
+        ; 10/17/96 - Bob Chiang - 20948
+        ;            Modified to replace node 1-7 references with node 16
+        ;            (file access keys).
 	;
 	; 06/21/96 - Bob Chiang -20948
 	;            Modified to remove DQ level 20 references.
@@ -15,7 +15,7 @@ DBSEXEQ6	;DBSEXEQ6; -  - V5.0 - BUILD QWIK REPORT SORT FILE
 	;            Modified LIBRARY section to return the correct target
 	;            library name.
 	;----------------------------------------------------------------------
-	; I18N=QUIT: Excluded from I18N standards. 
+        ; I18N=QUIT: Excluded from I18N standards.
 	;----------------------------------------------------------------------
 	Q
 	;
@@ -113,3 +113,4 @@ SELECT	;
 	I ZORD="" S Z=Z_X_"," Q
 	S Z=Z_X_"/"_ZORD_","
 	Q
+

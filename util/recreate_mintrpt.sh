@@ -1,4 +1,4 @@
-#!/bin/ksh
+#!/bin/bash
 # recreate_mintrpt.sh - Recreate image for PROFILE interrupt processing
 # Copyright(c)2005 Fidelity Information Services.  All Rights Reserved
 

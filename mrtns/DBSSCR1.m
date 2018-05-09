@@ -2,7 +2,7 @@ DBSSCR1	;DBSDS5A;DBS - U - V4.4 - PART II OF ^DBSSCR
 	;;Copyright(c)1996 Sanchez Computer Associates, Inc.  All Rights Reserved - 08/23/96 15:03:49 - SPIER
 	;     ORIG:  BOB CHIANG (8447) - 07/11/86
 	;     DESC:  PART II OF ^DBSDS5
-	; I18N=QUIT: Exculded from I18N standards. 
+        ; I18N=QUIT: Exculded from I18N standards.
 	;
 	;---------- Revision History -------------------------------------------
 	;

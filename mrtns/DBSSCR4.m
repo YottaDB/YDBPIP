@@ -27,10 +27,10 @@ DBSSCR4	;DBSDS8A; -  - V5.0 - SCREEN COMPILER ( PART 2)
 	;
 	;            Removed old revision history.
 	;
-	; 03/12/98 - SPIER - 26685 
-	;            Modified BLD4 section, commented code which deals with 
-	;            screen (pre and display) processers. The code is repeated 
-	;            in BLD4A. The results was && compiled labels were duplicated. 
+        ; 03/12/98 - SPIER - 26685
+        ;            Modified BLD4 section, commented code which deals with
+        ;            screen (pre and display) processers. The code is repeated
+        ;            in BLD4A. The results was && compiled labels were duplicated.
 	;
 	; 12/05/97  Chiang - 26857
 	;           Modified VDFT section to include the data item default
@@ -485,7 +485,7 @@ DOUBLE(X)	; Change every " to ""
 	S XL=0
 	F  S XL=$F(X,Q,XL) Q:XL<1  S X=$E(X,1,XL-2)_Q_Q_$E(X,XL,999),XL=XL+1
 	Q X
-PPUTIL(node,tag)	; 
+PPUTIL(node,tag) ;
 	;
 	N ZIPP,OM,X,X1,X2,I
 	;
@@ -572,15 +572,15 @@ DEFAULT(fid,code,mode)	; Return procedural code to create defaults in create mod
 	Q
 	;
 SCR	;
-	I rectyp#2=1 S code(3)=" S "_sn_"=$G("_sn_")"   ; Init array 
-	I rectyp=1!'$D(node) Q 
-	; 
-	S node="",n="" 
-	F  S n=$O(node(n)) Q:n=""  D 
-	.       S i=n I i'=+i S i=""""_i_""""           ; "name" 
-	.       S node=node_","_sn_"("_i_")=$G("_sn_"("_i_"))" 
-	I node'="" S code(4)=" S "_$E(node,2,999) 
-	Q 
+        I rectyp#2=1 S code(3)=" S "_sn_"=$G("_sn_")"   ; Init array
+        I rectyp=1!'$D(node) Q
+        ;
+        S node="",n=""
+        F  S n=$O(node(n)) Q:n=""  D
+        .       S i=n I i'=+i S i=""""_i_""""           ; "name"
+        .       S node=node_","_sn_"("_i_")=$G("_sn_"("_i_"))"
+        I node'="" S code(4)=" S "_$E(node,2,999)
+        Q
 	;
 	;----------------------------------------------------------------------
 value(v,typ,var)	; Convert internal to external format

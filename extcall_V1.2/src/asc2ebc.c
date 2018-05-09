@@ -23,7 +23,9 @@
 */
 
 #include <stdio.h>
-#include <extcall.h>
+#include <stdlib.h>
+#include <string.h>
+#include "extcall.h"
 
 
 static char asc_ebc_table[]={

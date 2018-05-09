@@ -23,8 +23,9 @@
 */
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <math.h>
-#include <extcall.h>
+#include "extcall.h"
 
 void
 logsca(	int count,

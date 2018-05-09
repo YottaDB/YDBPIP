@@ -1,0 +1,193 @@
+	/*
+	ORIG:	Frans S.C. Witte, 2005-11-30
+	DESC:	This unit contains the remaining runtime functions and
+		subroutines that deal object names and the object hierarchy.
+		This unit will be obsoleted as soon as these methods have been
+		relocated.
+
+	*************************************************************************
+	* IMPORTANT NOTE:							*
+	*	Although there are currently no rules pertaining to access to	*
+	*	the Object tables, this DQ procedure shall only access these	*
+	*	tables using Db.select() and the ResultSet methods.		*
+	*	This ensures that a future migration of the Object tables to	*
+	*	the set of data store dependent tables will only require the	*
+	*	addition of the "/PSLBOOT" qualifier to the Db.select() calls	*
+	*	in order to be able to obtain the Object definitions from the	*
+	*	associated .DAT file.						*
+	*************************************************************************
+
+	---- Comments ----------------------------------------------------------
+	This procedure contains runtime functions.
+
+	---- Revision History --------------------------------------------------
+	03/27/07 - Frans S.C. Witte - CR: 27800
+		* Most OBJECT* manipulation are now either part of PSLClass,
+		  PSLMethod, PSLProperty, PSLParser, or PSLX. The remaining code
+		  in this module is $$omTryPrim(), whcih is likely to be moved
+		  to PSLParser, and the runtime code for Class.isAncestor and
+		  Class.isClass. These subroutines can probably be moved to
+		  PSLClass.
+
+	07/11/06 - Frans S.C. Witte - CRs: 22720 / 22274
+		* Added support for source-contained method definitions.
+		* All $$oxGet() functions now return a complete Row, including
+		  the "primary key". This allows callers to derive the correct
+		  spelling of names from the returned value.
+		* OMROW.RETURN will now contain "void" if the OBJECTMET.RETURN
+		  IS NULL.
+
+	05/18/06 - Frans S.C. Witte - CRs: 21394 / 21395
+		Added omAll and opAll, and WARNings now call warnGroup^UCGM().
+
+	11/30/05 - Frans S.C. Witte - CRs: 18163 / 18164
+		New unit. Contains $$opGet() and opRowDef
+	*/
+	#PACKAGE framework.psl
+	#OPTION  ResultClass ON
+
+	// I18N=QUIT
+	// *******************************************************************
+	// * IMPORTANT NOTE:                                                 *
+	// * According to the rules that apply to PSL compiler upgrades,     *
+	// * the generated M routine associated with this procedure must be  *
+	// * checked into StarTeam and released with the procedure whenever  *
+	// * changes are made to this procedure.                             *
+	// *                                                                 *
+	// * The M routine will be loaded to the mrtns directory during      *
+	// * upgrades and will then be removed from that directory as part   *
+	// * of the upgrade process.  Therefore, other than during an        *
+	// * upgrade an mrtns version of this routine should not exist.      *
+	// *                                                                 *
+	// * Keep these comments as single line to ensure they exist in the  *
+	// * generated M code.                                               *
+	// *******************************************************************
+	quit
+
+	/* ****************************************************************** */
+	/* OBJECT RELATED FUNCTIONS AND SUBROUTINES			      */
+	/* ****************************************************************** */
+
+	// ---------------------------------------------------------------------
+public Boolean rtClsIsAnc( String a,	// Ancestor class
+			   String d)	// Descendant class
+	/* ---------------------------------------------------------------------
+	Runtime implementation of Class.isAncestor(,). Called at runtime by
+	$$clsIsAnc^UCGMR()
+
+	Both a and d shall have the correct spelling (the caller enforces this
+	by calling $$ocClsByName^UCXOBJ() for each.
+	*/
+	if d="Object"!(d=a) quit 0
+	if a="Object" quit 1
+
+	type PSLParser cache = Class.new("PSLParser", "")
+	set cache.packageDirs = $$packageDirs^PSLC("","")	// set default for all calls
+
+	type static PSLClass
+	type PSLClass ocd
+
+	for  {  quit:a=d!(d="Object")
+		if PSLClass.isRecord( d) > 1 {
+			set d = d.extract( PSLClass.RECORDCLASS.length()+1, d.length())
+			type PSLTable td = PSL.getPSLTable( d)
+			set d = PSLClass.RECORDCLASS_ td.parentTable
+		}
+		else  {	
+			set ocd = cache.getPSLClass( d)
+			set d = ocd.extends
+		}
+	}
+	quit d'="Object"
+
+	// ---------------------------------------------------------------------
+public String rtClsByName( String CLS)	// class name (*1)
+	/* ---------------------------------------------------------------------
+	Return the official class name of CLS as it occurs in OBJECT or as class
+	definition module.
+	Called at runtime by $$clsIsCls^UCGMR() and $$clsIsAnc^UCGMR().
+
+	ARGUMENTS:
+	(*1) CLS = class name, any spelling
+
+	OUTPUTS:
+	. $$ = name of class in the correct spelling
+	*/
+	type static PSLClass
+	if PSLClass.isRecord( CLS) > 0 quit CLS
+
+	/* Not a Record class. Look for a Module with the supplied name. If one is
+	   returned, get its case-sensitive name, and check if the module is
+	   indeed a class definition module. If not found, check OBJECT table.
+	   */
+	type String name = ""
+	do {
+		catch vEx {
+			set name = ""
+			type ResultSet rs = Db.select( "CLASS", "OBJECT", "LOWER(CLASS) = :CLS.lowerCase()")
+			if rs.next() set name = rs.getCol(1)
+		}
+		/* Instantiate a PSLX object. Does not set PSLX.packageDirs as
+		   PSLX can figure that out itself for this single call. */
+		type PSLX pslx = Class.new("PSLX", CLS)
+		do pslx.classOnly()
+		set name = pslx.moduleName	// will have correct spelling
+		type PSLClass rwCls = pslx.pslCls( name)
+		if rwCls.classType < 0 set name = ""
+	}
+	quit name
+
+	/* ****************************************************************** */
+	/* OBJECTMET RELATED FUNCTIONS AND SUBROUTINES			      */
+	/* ****************************************************************** */
+
+	// ---------------------------------------------------------------------
+public String omTryPrim( PSLParser prsr,	// Parser
+		PSLTokenizer tknzr,		// Tokenizer
+		String cls,		// class name (*1)
+		String mtd)		// method name (*1)
+	/* ---------------------------------------------------------------------
+	Try to find the method descriptor in one of the Primitive classes.
+
+	ARGUMENTS:
+	(*1) All arguments are the same as for $$omGet()
+
+	OUTPUTS:
+	. $$ = value of $$omGet(,cls,mtd) of the first matching
+		combination in the following order:
+		1) String, Number, Date, Time with case sensitive search
+		2) String, Number, Date, Time with case in-sensitive search
+
+	NOTES:
+	. This function is derived from tryMethA^UCGMCONV()
+	. Earlier versions of this function used the order in which rows were
+		returned by the underlying ResultSet, in combination with the
+		order of the classes returned by $$primNext^UCPRIM().
+		With the addition of class ByteString for Unicode support, that
+		class shares method names with class String and class Number,
+		and any processing based on ORDER becomes "arbitrary" with
+		respect to predictability (and programmer's expectation).
+		To deal with this, the current implementation uses a List that
+		specifies the order in which the classes are searched for a
+		matching method name.
+	*/
+	type literal List PRIMITIVE = "String,Number,Date,Time"
+
+	type Number elm, nCase
+	type String pcls, retval = ""
+
+	// try case sensitive before case in-sensitive for selected PRIMITIVEs
+	for nCase=0,1 do { quit:retval.isNull()
+		for elm=1:1:PRIMITIVE.count() do { quit:'retval.isNull()
+			set pcls = PRIMITIVE.elementAt(elm)
+			if 'prsr.pslCls( pcls).exists() do prsr.loadClass( pcls)
+			set retval = prsr.findPSLMethod( tknzr, pcls_ "."_ mtd, nCase)
+		}
+	}
+
+	#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+	if 'retval.isNull() do warnGroup^UCGM( "MISMATCH", "Cast expression to class: "_pcls_"."_mtd)
+
+	quit retval
+ #OPTION ResultClass ON
+public String vSIG()	quit "61058^29773^Frans S.C. Witte^7689"	// Signature - LTD^TIME^USER^SIZE

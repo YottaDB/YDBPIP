@@ -58,7 +58,7 @@ DBSCHK	;;DBS - U - V5.0 - CONVERT DATA ITEM INTO MUMPS INTERNAL REFERENCE
 	;           default syntax.  
 	;
 	;-----------------------------------------------------------------------
-	;   I18N=QUIT : Excluded From I18N Standards 
+        ;   I18N=QUIT : Excluded From I18N Standards
 START	;
 	N ZFLAG,ZCOMP
 	S ER="",ZFLAG=0,ZCOMP=0,Q=$C(34)

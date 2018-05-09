@@ -21,6 +21,12 @@ DBSLOG(file,%O,UX)	;Public ; Log the file changes
 	;     .RM       Error message				 /TYPE=T/COND
 	;
 	;---- Revision History ------------------------------------------------
+	;
+	; 08/19/2008 - RussellDS - CR30801
+	;	Modified code in FILE section to be able to use up to 100
+	;	sequence numbers per second to prevent timeouts on larger
+	;	file deletions with logging.
+	;
 	; 08/30/06 - RussellDS - CR22720
 	;	     Replaced call to $$LOWER^SCAUTL with $$LOWER^UCGMR to
 	;	     avoid bootstrap issues.
@@ -190,9 +196,20 @@ FILE	;Private ; Files the data to the Log file
 	S time=$P(date,",",2)
 	S date=$P(date,",",1)
 	;
-	F  D  Q:(seq>0)
-	.	S seq=$$GETSEQ^SQLDD("LOG")*100
-	.	I $D(^LOG(date,seq)) H 1 S seq=0 Q
+	F  D  Q:(seq>0)				; Loop on getseq
+	.	N cnt,getseq
+	.	; Get unique sequence number
+	.	S getseq=$$GETSEQ^SQLDD("LOG")
+	.	S cnt=0
+	.	F  D  Q:(seq>0)			; Loop on seq
+	..		S seq=(getseq*100)+cnt
+	..		I $D(^LOG(date,seq)) D
+	...			S seq=0
+	...			S cnt=cnt+1
+	...			I (cnt>99) D
+	....				H 1
+	....				S getseq=$$GETSEQ^SQLDD("LOG")
+	....				S cnt=0
 	.	S ^LOG(date,seq)=file_"|"_ackeys_"|"_vkeys_"|"_%O_"|"_$G(%UID)_"|"_$G(TLO)_"|SYSDEV|"_time
 	;
 	I $L(ditem)+$L(nv)+$L(ov)'>255 S ^LOG(date,seq,1)=ditem_"|"_nv_"|"_ov Q
@@ -221,16 +238,16 @@ FILE	;Private ; Files the data to the Log file
 	I tmpdi'="",tmpnv'=tmpov S ^LOG(date,seq,subseq)=tmpdi_"|"_tmpnv_"|"_tmpov
 	Q
 	;
-	;----------------------------------------------------------------------
-QUOTE(dv);Add	quotes to data item if the data already has quotes. 
-	;----------------------------------------------------------------------- 
-	N I,char,qdata 
-	S qdata="" 
+ 	;----------------------------------------------------------------------
+QUOTE(dv);Add quotes to data item if the data already has quotes.
+        ;-----------------------------------------------------------------------
+        N I,char,qdata
+        S qdata=""
 	;
-	F I=1:1:$L(dv) D 
-	.       S char=$E(dv,I) 
-	.       I char="""" S char=$C(34)_char 
-	.       S qdata=qdata_char 
-	.       ; 
-	S dv=qdata 
-	Q dv 
+        F I=1:1:$L(dv) D
+        .       S char=$E(dv,I)
+        .       I char="""" S char=$C(34)_char
+        .       S qdata=qdata_char
+        .       ;
+        S dv=qdata
+        Q dv

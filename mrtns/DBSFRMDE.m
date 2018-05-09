@@ -1,8 +1,8 @@
-DBSFRMDE(dft,len,typ,tbl,hlp,dec,min,max,py,px,sec,rsiz)	; 
+DBSFRMDE(dft,len,typ,tbl,hlp,dec,min,max,py,px,sec,rsiz) ;
 	;;Copyright(c)1998 Sanchez Computer Associates, Inc.  All Rights Reserved - 07/23/98 09:40:00 - WATSOND
-	; 
-	; ORIG: CHIANG - 06/15/94 
-	; DESC: Input manager for keyboard entry of string data.
+        ;
+        ; ORIG: CHIANG - 06/15/94
+ 	; DESC: Input manager for keyboard entry of string data.
 	;
 	; KEYWORDS:	DATA-QWIK,SCREEN,DATA ENTRY
 	;
@@ -31,7 +31,7 @@ DBSFRMDE(dft,len,typ,tbl,hlp,dec,min,max,py,px,sec,rsiz)	;
 	;       . VPGM   The callback program VREPRNT^@VPGM	/TYP=T/NOREQ
 	;                for the screen refresh function.
 	;
-	; I18N=QUIT: Excluded from I18N standards. 
+        ; I18N=QUIT: Excluded from I18N standards.
 	;-----------------------------------------------------------------------
 	;
 	; 12/08/04 - RussellDS - CR13258
@@ -41,7 +41,7 @@ DBSFRMDE(dft,len,typ,tbl,hlp,dec,min,max,py,px,sec,rsiz)	;
 	;            25 external accounts during CIF create.
 	;
 	; 08/12/97 - Betty Ni - 25653
-	;            Replaced follows operator "]" with a "]]". 
+        ;            Replaced follows operator "]" with a "]]".
 	;
 	; 02/04/97 - Bob Chiang - 23697
 	;            Modified CUD section to terminate data entry mode when the
@@ -511,7 +511,7 @@ REMAP(fkey,nkey,code)	; Replace Key keyname with code
 	Q
 	;
 	;----------------------------------------------------------------------
-PROCESS	; Process function key 
+PROCESS ; Process function key
 	;----------------------------------------------------------------------
 	;
 	I %fkey="INS" D insert(vrec) Q			; <Insert> key
@@ -529,8 +529,8 @@ PROCESS	; Process function key
 	;
 	I %fkey="PDN",$G(%REPEAT) D  Q				; <Next> page	
 	.	I %O>1,'$D(vbuf(vfrm,voff+%REPEAT+1)) Q	; On the last page now
-	.       S vrec=vrec+%REPEAT                     ; New record number 
-	.       S voff=voff+%REPEAT-voff1          ; Display data
+        .       S vrec=vrec+%REPEAT                     ; New record number
+        .       S voff=voff+%REPEAT-voff1 	        ; Display data
 	.	I vrec#%REPEAT>0 S voff=vrec\%REPEAT*%REPEAT
 	.	D display
 	;
@@ -557,7 +557,7 @@ PROCESS	; Process function key
 	S %fkey="ENT"					; Default for <ENT>
 	Q
 	;----------------------------------------------------------------------
-insert(vrec)	; Insert a blank record at location vrec 
+insert(vrec) ; Insert a blank record at location vrec
 	;----------------------------------------------------------------------
 	N i,j,di
 	I vi(1)'?1N1"*" S NI=NI-1,%fkey="ENT" Q		; Not on the key field
@@ -572,7 +572,7 @@ insert(vrec)	; Insert a blank record at location vrec
 	;;D keys
 	Q
 	;----------------------------------------------------------------------
-remove(vrec)	; Remove record at location vrec 
+remove(vrec) ; Remove record at location vrec
 	;----------------------------------------------------------------------
 	N i,j,di
 	S i=$O(vbuf(vfrm,""),-1)				; Find last record
@@ -584,17 +584,17 @@ remove(vrec)	; Remove record at location vrec
 	D dsp(vlast)
 	Q
 	;----------------------------------------------------------------------
-display	; Display full page 
+display ; Display full page
 	;----------------------------------------------------------------------
 	D VDAPNT^@PGM
 	S %fkey="",voff1=0
 	D showkey
-	I '$D(NI) Q          ;1/29/97 
+        I '$D(NI) Q          ;1/29/97
 	I NI>$G(%REPEAT) Q   ;1/29/97
 	S V=$$RESET^DBSFRMCS(NI,.vbuf,"",.vhdr,.vsiz,.vtyp),X=V ;1/29/97 
 	Q
 	;----------------------------------------------------------------------
-dsp(ln)	; Display region 
+dsp(ln) ; Display region
 	;----------------------------------------------------------------------
 	D VPR^@PGM,VDA^@PGM				; Reset VO buffer
 	I ln'[";" S ln=ln_";"_vlast

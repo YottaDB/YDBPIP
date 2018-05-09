@@ -1,4 +1,4 @@
-UCSTAT	; local ; Utility Code SYSMAP Statistics for M Routines
+UCSTAT	;wittef;2008-01-20 22:19:00; Utility Code SYSMAP Statistics for M Routines
 	;;Copyright(c)2003 Sanchez Computer Associates, Inc.  All Rights Reserved - 11/05/03 15:11:05 - SPIER
 	; ORIG: SPIER - 26 DEC 2002
 	; DESC: Generates PSL or M parsed information
@@ -14,7 +14,25 @@ UCSTAT	; local ; Utility Code SYSMAP Statistics for M Routines
 	;
 	; I18N=QUIT
 	;---------- Revision History -------------------------------------------
-	; 11/10/06 - Frans S.C. WItte - CRs: 22719 / 20613
+	; 2009-06-05, Frans S.C. Witte, CR 41003/41004
+	;	* corrected spelling errors in label names.
+	;
+	; 2009-03-02, Frans S.C. Witte, CRs  35741/38252/38491
+	;	* Added TRESTART, ZCOMPILE, ZEDIT, ZKILL, ZTSTART, ZTCOMMIT
+	;	* Corrected TCOMMIT (must be argless)
+	;
+	; 2008-10-23, Frans S.C. Witte, CRs 35741/35918
+	;	init now instantiates a PSLParser (instead of a PSLCC).
+	;
+	; 06/14/07 - Frans S.C. Witte - CR: 27800
+	;	* Rewrote code that prevents gathering of SYSMAP info for
+	;	  routines that were generated from DQ sources (to get rid of
+	;	  call to $$isDQsig^UCLABEL())
+	;	* Copied addXref from UCGM to work locally on sysmap(,,), and
+	;	  modified assignments to sysmap(,,) to confrom to new layout.
+	;	* Message.component is now "%M" (was "M").
+	;
+	; 11/10/06 - Frans S.C. Witte - CRs: 22719 / 20613
 	;	* modified init to call UCINIT^UCDTAUTL().
 	;	* added labels for ZALLOCATE, ZDEALLOCATE, and ZPRINT
 	;
@@ -47,8 +65,8 @@ UCSTAT	; local ; Utility Code SYSMAP Statistics for M Routines
 	;	  SYSMAP info for a DQ source, this will be corrected when that
 	;	  DQ source is recompiled.
 	;	* Removed references to primtyp()
-	;	* Removed assignment to commands() nodes that are not M commands.
-	;	  Modified commands() to allow argumentless DO
+	;	* Removed assignment to pslPrsr() nodes that are not M commands.
+	;	  Modified pslPrsr() to allow argumentless DO
 	;	* Removed code that handles CATCH, THROW, TYPE, WHILE.
 	;	* Added public subroutine rtnInfo() to analyze any M routine.
 	;
@@ -69,26 +87,26 @@ UCSTAT	; local ; Utility Code SYSMAP Statistics for M Routines
 	; PART 1: Public subroutines and logic that calls main()
 	;
 	;-----------------------------------------------------------------------
-batch(UNIT)	; local ; compile specified DQ Batch unit 
+batch(UNIT) ; local ; compile specified DQ Batch unit
 	;-----------------------------------------------------------------------
 	;
-	new AUDIT,$ZT
-	set $ZT="ZG "_$ZL_":batchZT^"_$T(+0)
-	set AUDIT=$P(^DBTBL("SYSDEV",33,UNIT),"|",3,4)
-	write !,UNIT,?20,$ZD($P(AUDIT,"|",1)),?40,$P(AUDIT,"|",2)
+	new AUDIT,$ZTRAP
+	set $ZTRAP="ZGOTO "_$ZLEVEL_":batchZT^"_$T(+0)
+	set AUDIT=$piece(^DBTBL("SYSDEV",33,UNIT),"|",3,4)
+	write !,UNIT,?20,$ZDATE($piece(AUDIT,"|",1)),?40,$piece(AUDIT,"|",2)
 	do COMPILE^DBSBCH(UNIT)
 	quit
-batchZT	; local ; Fatal M error while compiling batch unit 
-	use $P if $G(UNIT)'="" write !,UNIT," batch error checking" quit
-	write !,$G(LINE)," error checking"
+batchZT ; local ; Fatal M error while compiling batch unit
+	use $principal if $get(UNIT)'="" write !,UNIT," batch error checking" quit
+	write !,$get(LINE)," error checking"
 	quit
 	;
 	;-----------------------------------------------------------------------
-file2rtn(FILE)	; public ; extract routine name from file name 
+file2rtn(FILE) ; public ; extract routine name from file name
 	;-----------------------------------------------------------------------
 	; This function returns $$PARSE^%ZFUNC(FILE), and translates "_" to "%"
 	;
-	quit $TR($$PARSE^%ZFUNC(FILE,"NAME"),"_","%")
+	quit $translate($$PARSE^%ZFUNC(FILE,"NAME"),"_","%")
 	;
 	;-----------------------------------------------------------------------
 MASS	; public ; Mass compile of all DQ and M units, rebuilds all SYSMAP info
@@ -111,34 +129,34 @@ MASS	; public ; Mass compile of all DQ and M units, rebuilds all SYSMAP info
 	;   routines.
 	;
 	new UNIT
-	use $P write !
-	do dellAll^UCSYSMAP()
+	use $principal write !
+	do delAll^UCSYSMAP()
 	;
 	; Do routines first. All "false negatives" will be corrected when the DQ
 	; sources are recompiled: ^UCSYSMAP will rewrite the SYSMAP info.
 	do RTNS
 	set UNIT=""
-	for  set UNIT=$O(^DBTBL("SYSDEV",25,UNIT)) quit:UNIT=""!($E(UNIT)="Z")  do proc(UNIT)
+	for  set UNIT=$order(^DBTBL("SYSDEV",25,UNIT)) quit:UNIT=""!($extract(UNIT)="Z")  do proc(UNIT)
 	set UNIT=""
-	for  set UNIT=$O(^DBTBL("SYSDEV",33,UNIT)) quit:UNIT=""!($E(UNIT)="Z")  do batch(UNIT)
+	for  set UNIT=$order(^DBTBL("SYSDEV",33,UNIT)) quit:UNIT=""!($extract(UNIT)="Z")  do batch(UNIT)
 	set UNIT=""
-	for  set UNIT=$O(^DBTBL("SYSDEV",7,UNIT)) quit:UNIT=""!($E(UNIT)="Z")  do table(UNIT)
+	for  set UNIT=$order(^DBTBL("SYSDEV",7,UNIT)) quit:UNIT=""!($extract(UNIT)="Z")  do table(UNIT)
 	quit
 	;
 	;----------------------------------------------------------------------
-proc(UNIT)	; local ; compile specified DQ Procedure unit 
+proc(UNIT) ; local ; compile specified DQ Procedure unit
 	;----------------------------------------------------------------------
 	;
-	new AUDIT,$ZT
-	set $ZT="ZG "_$ZL_":procZT^"_$T(+0)
-	set AUDIT=$P(^DBTBL("SYSDEV",25,UNIT),"|",2,4)
-	write !,UNIT,?20,$ZD($P(AUDIT,"|",2)),?40,$P(AUDIT,"|",3)
+	new AUDIT,$ZTRAP
+	set $ZTRAP="ZGOTO "_$ZLEVEL_":procZT^"_$T(+0)
+	set AUDIT=$piece(^DBTBL("SYSDEV",25,UNIT),"|",2,4)
+	write !,UNIT,?20,$ZDATE($piece(AUDIT,"|",2)),?40,$piece(AUDIT,"|",3)
 	do COMPILE^DBSPROC(UNIT)
 	quit
 	;
 procZT	; local ; Fatal M error	while compiling DQ Procedure
-	use $P if $G(UNIT)'="" write !,UNIT," procedure error checking" quit
-	write !,$G(LINE)," error checking"
+	use $principal if $get(UNIT)'="" write !,UNIT," procedure error checking" quit
+	write !,$get(LINE)," error checking"
 	quit
 	;
 	;----------------------------------------------------------------------
@@ -147,57 +165,60 @@ RTNS	; public ; analyze all M routines
 	; This subroutine can be executed from the M direct mode prompt, or be
 	; called as a DATA-QWIK function. This subroutine will analyze all
 	; files with a ".m" extension in the directories named in
-	; - $SCAU_PRTNS
-	; - $SCAU_SRTNS
 	; - $SCAU_MRTNS
-	; - $SCAU_CRTNS
+	; - $SCAU_SRTNS
+	; - $SCAU_PRTNS
 	;
 	; NOTES:
 	; * This subroutine will also analyze M routines that contain the
-	;   signature of a DATA-QWIK generated routine. However, because it uses
-	;   the elementtype "Routine", this data will not interfere with data
-	;   that will be collected for the DQ elementtype.
-	;   See DQ Procedure UCLABEL for the definition of the DATA-QWIK
-	;   signature.
+	;   signature of a DATA-QWIK generated routine, which will overwrite any
+	;   information gathered by the PSL compiler. For this reason, the files
+	;   in $SCAU_CRTNS will no longer be anaylzed by this subroutine.
+	; * The order of the directories is the reverse of the order in which
+	;   they occur in $ZROUTINES. This ensures that if a routine exists in
+	;   more than one directory, the version that GT.M will invoke will be
+	;   analyzed last. So the information in SYSMAP represents the actual
+	;   application behavior.
 	;
 	new DIR,ROUT,UNIT
-	use $P write !,"Routines",!
+	use $principal write !,"Routines",!
 	;
-	for DIR=$$SCAU^%TRNLNM("PRTNS"),$$SCAU^%TRNLNM("SRTNS"),$$SCAU^%TRNLNM("MRTNS"),$$SCAU^%TRNLNM("CRTNS") do
+	for DIR=$$SCAU^%TRNLNM("MRTNS"),$$SCAU^%TRNLNM("SRTNS"),$$SCAU^%TRNLNM("PRTNS") do
 	.	if DIR="" quit
 	.	set ROUT=$$FILE^%TRNLNM("*.m",DIR)
 	.	for  set UNIT=$$SEARCH^%ZFUNC(ROUT,127) quit:UNIT=""  do rtn(UNIT)
 	quit
+	;
 	;----------------------------------------------------------------------
-rtn(FILE)	; local ; analyze specified M routine 
+rtn(FILE) ; local ; analyze specified M routine
 	;----------------------------------------------------------------------
 	;
-	new isDQ,src,$ZT
-	set $ZT="ZG "_$ZL_":rtnZT^"_$T(+0)
-	use $P write !,FILE
+	new isDQ,src,$ZTRAP
+	set $ZTRAP="ZGOTO "_$ZLEVEL_":rtnZT^"_$T(+0)
+	use $principal write !,FILE
 	set isDQ=$$rtnLoad(FILE,.src)
-	if isDQ<0 write !,"PSL-E-ACCESS:",$p(isDQ,"|",2),! quit
+	if isDQ<0 write !,"PSL-E-ACCESS:",$piece(isDQ,"|",2),! quit
 	if isDQ write !,"PSL-I-ACCESS: DATA-QWIK generated routine",!
 	;
 	; This seems to be a hand-made M routine, analyze it
-	do main(.src,$$file2rtn(FILE)_"~Routine")
+	do main($$file2rtn(FILE),.src,$$file2rtn(FILE)_"~Routine")
 	quit
 rtnZT	; local ; Fatal M error while compiling M routine
-	use $P write $G(FILE)," routine error checking",!,$ZSTATUS
+	use $principal write $get(FILE)," routine error checking",!,$ZSTATUS
 	quit
 	;
 	;----------------------------------------------------------------------
-rtn2file(rtn)	; public String ; return default routine file 
+rtn2file(rtn) ; public String ; return default routine file
 	;----------------------------------------------------------------------
 	;
 	new %ZI,%ZR
 	set %ZI(rtn)=""
 	do INT^%RSEL
-	if $D(%ZR(rtn)) quit %ZR(rtn)_$TR(rtn,"%","_")_".m"
+	if $data(%ZR(rtn)) quit %ZR(rtn)_$translate(rtn,"%","_")_".m"
 	quit ""
 	;
 	;----------------------------------------------------------------------
-rtnInfo(file,info,cco)	; public ; analyze M routine into local info() array 
+rtnInfo(file,info,cco) ; public ; analyze M routine into local info() array
 	;----------------------------------------------------------------------
 	; Analyze single M source file, and report errors and warnings.
 	; Do not generate SYSMAP info, but instead return information in the
@@ -220,39 +241,38 @@ rtnInfo(file,info,cco)	; public ; analyze M routine into local info() array
 	;	cco("WARN",group) can specify warning groups that need to be
 	;	included or ignored. Will be completed by UCINIT^UCDTASYS()
 	;
-	new cal,isDQ,lab,mes,src,$ZT
-	set $ZT="ZSHOW ""S"" BREAK"
-	;;set $ZT="ZG "_$ZL_":rtnZT^"_$t(+0)
+	new cal,isDQ,lab,mes,rtn,src,$ZTRAP
+	set $ZTRAP="ZSHOW ""S"" BREAK"
+	;;set $ZTRAP="ZGOTO "_$ZLEVEL_":rtnZT^"_$t(+0)
 	set isDQ=$$rtnLoad(file,.src)
-	if isDQ<0 write !,"PSL-E-ACCESS:",$p(isDQ,"|",2),! quit
+	if isDQ<0 write !,"PSL-E-ACCESS:",$piece(isDQ,"|",2),! quit
 	if isDQ write !,"PSL-I-ACCESS: DATA-QWIK generated routine",!
-	do main(.src,.cco,.mes,.lab,.cal)
+	set rtn=$$file2rtn(file)
+	do main(rtn,.src,.cco,.mes,.lab,.cal)
 	;
 	; merge results into info
-	new act,at,lbl,lblCal,rtn,rtnCal
-	;
-	set rtn=$$file2rtn(file)
+	new act,at,lbl,lblCal,rtnCal
 	;
 	merge info("MSG",rtn)=mes
 	merge info("LAB",rtn)=lab
 	;
 	; Derive info("CAL") from cal() on a per routine basis.
 	set cal=""
-	for  set cal=$o(cal(cal)) quit:cal=""  do
-	.	set lblCal=$p(cal,"(")
-	.	set act=$e(cal,$L(lblCal)+1,$L(cal))
-	.	set rtnCal=$p(lblCal,"^",2)
-	.	set lblCal=$p(lblCal,"^")
+	for  set cal=$order(cal(cal)) quit:cal=""  do
+	.	set lblCal=$piece(cal,"(")
+	.	set act=$extract(cal,$length(lblCal)+1,$length(cal))
+	.	set rtnCal=$piece(lblCal,"^",2)
+	.	set lblCal=$piece(lblCal,"^")
 	.	if rtnCal="" set rtnCal=rtn
 	.	if lblCal="" set lblCal=rtnCal
 	.	set (lbl,at)=""
-	.	for  set lbl=$o(cal(cal,lbl)) quit:lbl=""  do
-	..		for  set at=$o(cal(cal,lbl,at)) quit:at=""  do
+	.	for  set lbl=$order(cal(cal,lbl)) quit:lbl=""  do
+	..		for  set at=$order(cal(cal,lbl,at)) quit:at=""  do
 	...			set info("CAL",rtnCal,lblCal,rtn,lbl,at)=act
 	quit
 	;
 	;----------------------------------------------------------------------
-rtnLoad(FILE,into)	; local ; load M routine into array 
+rtnLoad(FILE,into) ; local ; load M routine into array
 	;----------------------------------------------------------------------
 	; Load M routine (from specified directory) into a local array.
 	;
@@ -263,43 +283,45 @@ rtnLoad(FILE,into)	; local ; load M routine into array
 	;
 	; OUTPUTS:
 	; $$ -1 If open failed
-	;     0 If DATA-QWIK signature is not found in routine source
-	;     1 If DATA-QWIK signature is found in first comment section of
-	;	routine
+	;     0 If the element type returned by $$getElement^UCSYSMAP() is
+	;	empty, or if it is "routine"
+	;     1 if the elementtype is anything else
 	; . into() = M source code
 	;	lines will be numbered sequentially. TAB will have been converted
 	;	to SPACE. CR and LF will have been removed.
 	;
-	new line,rec,isDQ,curIO
-	set curIO=$i,rec=$$FILE^%ZOPEN(FILE,"READ",,32767),isDQ=""
-	if 'rec quit "-1|"_$P(rec,"|",2)
+	new curIO,elem,line,rec
+	set curIO=$io,rec=$$FILE^%ZOPEN(FILE,"READ",,32767)
+	if 'rec quit "-1|"_$piece(rec,"|",2)
 	;
 	use FILE
-	for line=1:1 quit:$ZEOF  read rec set into(line)=$TR(rec,$C(9,10,13)," ") set:isDQ="" isDQ=$$isDQsig^UCLABEL(rec)
+	for line=1:1 quit:$ZEOF  read rec set into(line)=$translate(rec,$char(9,10,13)," ")
 	use curIO close FILE
-	quit +isDQ
+	set elem=$$getElement^UCSYSMAP($$PARSE^%ZFUNC(FILE))
+	if elem=""!($piece(elem,"~",2)="Routine") quit 0
+	quit 1
 	;
 	;----------------------------------------------------------------------
-table(UNIT)	; local ; compile specified DQ filer unit 
+table(UNIT) ; local ; compile specified DQ filer unit
 	;----------------------------------------------------------------------
 	;
-	new %LIBS,PGM,$ZT
-	set $ZT="ZG "_$ZL_":tableZT^"_$T(+0)
-	set PGM=$P($G(^DBTBL("SYSDEV",1,UNIT,99)),"|",2)
+	new %LIBS,PGM,$ZTRAP
+	set $ZTRAP="ZGOTO "_$ZLEVEL_":tableZT^"_$T(+0)
+	set PGM=$piece($get(^DBTBL("SYSDEV",1,UNIT,99)),"|",2)
 	if PGM="" quit
 	set %LIBS="SYSDEV"
 	do COMPILE^DBSFILB(UNIT)
 	quit
-tableZT	; local ; Fatal M error while compiling DQ Filer unit 
-	use $P if $G(UNIT)'="" write !,UNIT," filer error checking" quit
-	write !,$G(LINE)," error checking"
+tableZT ; local ; Fatal M error while compiling DQ Filer unit
+	use $principal if $get(UNIT)'="" write !,UNIT," filer error checking" quit
+	write !,$get(LINE)," error checking"
 	quit
 	;
 	;=======================================================================
 	; PART 2: cmd(), init(), line(), and main()
 	;
 	;-----------------------------------------------------------------------
-cmd(str,ptr,cmd)	; local ; Next M command 
+cmd(str,ptr,cmd) ; local ; Next M command
 	;-----------------------------------------------------------------------
 	; Handles a single argument of a single M command.
 	;
@@ -337,23 +359,23 @@ cmd(str,ptr,cmd)	; local ; Next M command
 	;
 	; Argumentless commmand at end of line
 	if ptr=0 do cmdExpr(str,.ptr,cmd) quit
-	set ptr=ptr+1,del=$E(str,ptr)
+	set ptr=ptr+1,del=$extract(str,ptr)
 	;
 	if del=":" do  quit:ER
 	.	;
-	.	if $P(cmmds(cmd),"|",3) do ERROR("SYNTAX","Invalid post-conditional expression") quit
+	.	if $piece(cmmds(cmd),"|",3) do ERROR("SYNTAX","Invalid post-conditional expression") quit
 	.	do condBool($$ATOM^%ZS(str,.ptr,"",,1))
 	.	if ER do ERROR("SYNTAX",.RM) quit
 	.	set postCond=1
-	.	if ptr=0 set del="" quit:$P(cmmds(cmd),"|",2)
-	.	else  set ptr=ptr+1,del=$E(str,ptr)
+	.	if ptr=0 set del="" quit:$piece(cmmds(cmd),"|",2)
+	.	else  set ptr=ptr+1,del=$extract(str,ptr)
 	.	if del'=" " do ERROR("SYNTAX","Expression Expected")
 	;
 	do cmdExpr(str,.ptr,cmd)
 	quit
 	;
 	;-----------------------------------------------------------------------
-cmdArg(str,ptr)	; local ; Return command argument expression 
+cmdArg(str,ptr) ; local ; Return command argument expression
 	;-----------------------------------------------------------------------
 	;
 	; ARGUMENTS:
@@ -368,7 +390,7 @@ cmdArg(str,ptr)	; local ; Return command argument expression
 	new return
 	;
 	if ptr=0 quit ""
-	set return=$E(str,ptr+1)
+	set return=$extract(str,ptr+1)
 	if return=" " set ptr=ptr+1 quit ""     	; Argumentless command
 	if return=";" quit ""                   	; M style comment
 	set return=$$ATOM^%ZS(str,.ptr,",",,1)
@@ -376,7 +398,7 @@ cmdArg(str,ptr)	; local ; Return command argument expression
 	quit return
 	;
 	;-----------------------------------------------------------------------
-cmdExpr(str,ptr,cmd)	; local ; Process a command expression e.g. Set abc="string" 
+cmdExpr(str,ptr,cmd) ; local ; Process a command expression e.g. Set abc="string"
 	;-----------------------------------------------------------------------
 	;
 	; ARGUMENTS:
@@ -391,19 +413,19 @@ cmdExpr(str,ptr,cmd)	; local ; Process a command expression e.g. Set abc="string
 	new indexp,expr
 	set expr=$$cmdArg(str,.ptr)
 	;
-	if expr="",'$P(cmmds(cmd),"|",2) do ERROR("SYNTAX","Expression expected") quit
-	set sysmap("T",subRou,cmd)=$G(sysmap("T",subRou,cmd))+1
+	if expr="",'$piece(cmmds(cmd),"|",2) do ERROR("SYNTAX","Expression expected") quit
+	set sysmap("T",subRou,cmd)=$get(sysmap("T",subRou,cmd))+1
 	;
 	; Command level indirection will be handled here for all commands
 	; If any of the test succeeds, we have a case of commandlevel indirection
 	; If all fail, indexp is reset to indicate this
-	if $E(expr="@") do  quit:indexp'=""
-	.	set indexp=$e(expr,2,$L(expr))
+	if $extract(expr="@") do  quit:indexp'=""
+	.	set indexp=$extract(expr,2,$length(expr))
 	.	if $$isGlvn(indexp)
 	.	else  if $$isExtr(indexp)
 	.	else  if indexp?1"(".E1")"
-	.	else  if $$isKwd(.funcs,$p(indexp,"("))
-	.	else  if $$isKwd(.svars,$p(indexp,"("))
+	.	else  if $$isKwd(.funcs,$piece(indexp,"("))
+	.	else  if $$isKwd(.svars,$piece(indexp,"("))
 	.	else  set indexp="" quit
 	.	do valExpr(indexp,.class)
 	;
@@ -411,14 +433,13 @@ cmdExpr(str,ptr,cmd)	; local ; Process a command expression e.g. Set abc="string
 	quit
 	;
 	;-----------------------------------------------------------------------
-init()	; local ; Initialize local structures with module scope
+init(rtn) ; local ; Initialize local structures with module scope
 	;-----------------------------------------------------------------------
 	; OUTPUTS:
 	; . literal String cmmds() = M commands that are recognized
 	;	cmmds(fullname) = Abbreviation | Argumentless? | noPostCond?
-	; . Boolean commands(,) = compiler options ("WARN")
-	;	Only the "WARN" subtree is used by this program. The subntrees
-	;	"Options" and "OPTIMIZE" are deleted.
+	; . PSLParser pslPrsr = parser instance
+	;	Only the "WARN" subtree is used by this program.
 	; . literal String funcs() = M functions that are recognized
 	;	funcs(fullname) = Abbreviation | Class | Functiontype
 	;	Functiontype has the following meaning:
@@ -436,13 +457,19 @@ init()	; local ; Initialize local structures with module scope
 	;	Constant used as separator in several structures (e.g. type(,),
 	;	and to standardize the whitespace of an M line.
 	;
+	; NOTES:
+	; . This subroutine simulates a Class.new("PSLParser", rtn) by calling
+	;	the generated vcdmNew() subroutine, which makes the code
+	;	vulnarable to changes to implementation of the Class.new()
+	;	method.
+	;
 	; initialize variables required from DB
 	new dummy
-	do UCINIT^UCDTAUTL(.commands)
+	do vcdmNew^PSLParser(.pslPrsr,"PSLParser",rtn)	; !!!!
+	do setUcopts^PSLCC(.pslPrsr,"")
 	;
 	; Adjust warnings for GLOBALs
-	kill commands("WARN","GLOBAL")
-	kill commands("Options"),commands("OPTIMIZE")
+	do addSetting^PSLCC(.pslPrsr,"WARN","GLOBAL",0)
 	;
 	; cmmds(full)=abbrev|argless?|nopostcond?
 	set cmmds("BREAK")="B|1"
@@ -473,14 +500,19 @@ init()	; local ; Initialize local structures with module scope
 	set cmmds("XECUTE")="X"
 	set cmmds("ZALLOCATE")="ZA"
 	set cmmds("ZBREAK")="ZB|1"
+	set cmmds("ZCOMPILE")="ZCOM"
 	set cmmds("ZDEALLOCATE")="ZD"
+	set cmmds("ZEDIT")="ZED"
 	set cmmds("ZGOTO")="ZG|1"
 	set cmmds("ZLINK")="ZL"
-	set cmmds("ZMESSAGE")="ZME|1"
+	set cmmds("ZKILL")="ZK"
+	set cmmds("ZMESSAGE")="ZME"
 	set cmmds("ZPRINT")="ZPR|1"
 	set cmmds("ZSHOW")="ZSH|1"
 	set cmmds("ZSYSTEM")="ZSY"
-	set cmmds("ZWITHDRAW")="ZWI|1"
+	set cmmds("ZTCOMMIT")="ZTC|1"
+	set cmmds("ZTSTART")="ZTS|1"
+	set cmmds("ZWITHDRAW")="ZWI"
 	set cmmds("ZWRITE")="ZWR|1"
 	;
 	; funcs(full)=abbrev|datatype|varAndAssign
@@ -493,28 +525,44 @@ init()	; local ; Initialize local structures with module scope
 	set funcs("$GET")="$G|String|1"
 	set funcs("$JUSTIFY")="$J|String|0"
 	set funcs("$LENGTH")="$L|Number|0"
+	set funcs("$NAME")="$NA|String|1"
+	set funcs("$NEXT")="$N|String|1"
 	set funcs("$ORDER")="$O|String|1"
 	set funcs("$PIECE")="$P|String|2"
+	set funcs("$QLENGTH")="$QL|Number|1"
+	set funcs("$QSUBSCRIPT")="$QS|String|1"
 	set funcs("$QUERY")="$Q|String|1"
+	set funcs("$RANDOM")="$R|Number|0"
+	set funcs("$REVERSE")="$RE|String|0"
 	set funcs("$TEXT")="$T|String|0"
 	set funcs("$TRANSLATE")="$TR|String|0"
 	set funcs("$RANDOM")="$R|Number|0"
 	set funcs("$REVERSE")="$RE|String|0"
 	set funcs("$SELECT")="$S|String|0"
+	set funcs("$STACK")="$ST|String|0"
+	set funcs("$TEXT")="$T|String|0"
+	set funcs("$TRANSLATE")="$TR|String|0"
 	set funcs("$VIEW")="$V|String|0"
 	set funcs("$ZDATE")="$ZD|String|0"
 	set funcs("$ZJOBEXAM")="$ZJOBEXAM|String|0"
 	set funcs("$ZMESSAGE")="$ZM|String|0"
 	set funcs("$ZPARSE")="$ZPARSE|String|0"
+	set funcs("$ZQGBLMOD")="$ZQGBLMOD|Boolean|1"
 	set funcs("$ZSEARCH")="$ZSEARCH|String|0"
 	set funcs("$ZTRNLNM")="$ZTRNLNM|String|0"
 	;
 	; svars(full)=abbrev|datatype|assignAndNew
+	set svars("$DEVICE")="$D|String|0"
+	set svars("$ECODE")="$EC|String|1"
+	set svars("$ESTACK")="$ES|Number|0"
+	set svars("$ETRAP")="$ET|String|1"
 	set svars("$HOROLOG")="$H|String|0"
 	set svars("$IO")="$I|String|0"
 	set svars("$JOB")="$J|Number|0"
+	set svars("$KEY")="$K|String|0"
 	set svars("$PRINCIPAL")="$P|String|0"
 	set svars("$QUIT")="$Q|Boolean|0"
+	set svars("$STACK")="$ST|Number|0"
 	set svars("$STORAGE")="$S|Number|0"
 	set svars("$SYSTEM")="$SY|String|0"
 	set svars("$TEST")="$T|Boolean|0"
@@ -524,57 +572,71 @@ init()	; local ; Initialize local structures with module scope
 	set svars("$Y")="$Y|Number|1"
 	set svars("$ZA")="$ZA|Number|0"
 	set svars("$ZB")="$ZB|String|0"
+	set svars("$ZCMDLINE")="$ZCMD|String|0"
+	set svars("$ZCOMPILE")="$ZCMO|String|1"
+	set svars("$ZCSTATUS")="$ZC|Number|0"
+	set svars("$ZDATEFORM")="$ZDA|Number|1"
+	set svars("$ZDIRECTORY")="$ZDIR|String|1"
+	set svars("$ZEDIT")="$ZED|Number|0"
 	set svars("$ZEOF")="$ZEOF|Number|0"
+	set svars("$ZERROR")="$ZER|String|1"
 	set svars("$ZGBLDIR")="$ZG|String|1"
 	set svars("$ZININTERRUPT")="$ZINI|Boolean|0"
 	set svars("$ZINTERRUPT")="$ZINT|String|1"
+	set svars("$ZIO")="$ZIO|String|0"
+	set svars("$ZJOB")="$ZJ|Number|0"
 	set svars("$ZLEVEL")="$ZL|Number|0"
+	set svars("$ZMAXTPTIME")="$ZMAXTPTI|Number|1"
+	set svars("$ZMODE")="$ZMO|String|0"
 	set svars("$ZPOSITION")="$ZPOS|String|0"
+	set svars("$ZPROMPT")="$ZPROM|String|1"
 	set svars("$ZROUTINES")="$ZRO|String|1"
+	set svars("$ZSOURCE")="$ZSO|String|0"
 	set svars("$ZSTATUS")="$ZS|String|1"
 	set svars("$ZSTEP")="$ZSTEP|String|1"
 	set svars("$ZSYSTEM")="$ZSY|String|0"
+	set svars("$ZTEXIT")="$ZTE|Boolean|1"
 	set svars("$ZTRAP")="$ZT|String|2"
 	set svars("$ZVERSION")="$ZV|String|0"
 	set svars("$ZYERROR")="$ZYER|String|1"
 	;
-	set tab=$C(9)
+	set tab=$char(9)
 	quit
 	;
 	;-----------------------------------------------------------------------
-line(rec)	; local ; Parse a line of M code 
+line(rec) ; local ; Parse a line of M code
 	;-----------------------------------------------------------------------
 	;
 	new atom,cmd,cmdNum,dot,ifLevel,forLevel,ptr,mTSL
 	;
 	set ER=0,ifLevel=0,forLevel=0
-	set rec=$$RTRIM^%ZS($TR(rec,tab," "))	; Turn tab's into spaces, trim
+	set rec=$$RTRIM^%ZS($translate(rec,tab," "))	; Turn tab's into spaces, trim
 	if rec="" quit
 	;
 	set ptr=0,rec=$$TOKEN^%ZS(rec,.mTSL,"")
 	;
-	if $E(rec,1)'=" " do
+	if $extract(rec,1)'=" " do
 	.	do subRou($$ATOM^%ZS(rec,.ptr,""),.subRou,.labels,.type)
 	.	set (labels(subRou,line),dot)=0
 	.	;
 	.	; Derive subroutine access from first "word" of comment
-	.	new access set access=$$UPCASE($P($$TRIM^%ZS($P(rec,";",2))," "))
-	.	if access="PUBLIC" set $P(labels(subRou),tab,2)=2 quit
-	.	if access="PRIVATE" set $P(labels(subRou),tab,2)=1 quit
-	.	set $P(labels(subRou),tab,2)=0
+	.	new access set access=$$UPCASE($piece($$TRIM^%ZS($piece(rec,";",2))," "))
+	.	if access="PUBLIC" set $piece(labels(subRou),tab,2)=2 quit
+	.	if access="PRIVATE" set $piece(labels(subRou),tab,2)=1 quit
+	.	set $piece(labels(subRou),tab,2)=0
 	;
 	; Find level of this line, and backup to position ptr at the beginning of
 	; the first command.
 	else  do
 	.	; force comment on dot-only line
-	.	if $tr(rec,".")?." " set rec=rec_" ;"
+	.	if $translate(rec,".")?." " set rec=rec_" ;"
 	.	for dot=0:1 set atom=$$ATOM^%ZS(rec,.ptr,".",mTSL) quit:atom'="."!'ptr
-	.	set ptr=ptr-$L(atom)
+	.	set ptr=ptr-$length(atom)
 	.	if ptr<0 set rec=" "_atom,ptr=1
 	if ptr=0 quit
 	;
 	; Check for dead code. Suppress warning if line starts with comment
-	if subRou="" do:$TR(rec,".")'?1." "1";".E WARN("DEAD","Dead code") quit
+	if subRou="" do:$translate(rec,".")'?1." "1";".E WARN("DEAD","Dead code") quit
 	;
 	; dot = level of this line,
 	; level = level of previous line.
@@ -594,12 +656,13 @@ line(rec)	; local ; Parse a line of M code
 	quit
 	;
 	;-----------------------------------------------------------------------
-main(msrc,PGM,cmperr,labels,called)	; local ; Main label for routine parsing 
+main(rtn,msrc,PGM,cmperr,labels,called) ; local ; Main label for routine parsing
 	;-----------------------------------------------------------------------
 	; Analyze the supplied source array, and generate SYSMAP info for the
 	; specified PGM (unit~type combination).
 	;
 	; ARGUMENTS:
+	; . String rtn = name of M routine
 	; . String msrc() = source array with M code		/MECH=REF:R
 	; . String PGM = name of routine and type unit		/NOREC/MECH=VAL
 	;	This information is passed to ^UCSYSMAP.
@@ -627,10 +690,10 @@ main(msrc,PGM,cmperr,labels,called)	; local ; Main label for routine parsing
 	;	* data = class, scopeLine, scope, asgnLine, refLine, killLine
 	;	* class = derived primitive class. Will usually be "String"
 	;	* scopeLine = line where variable is scoped:
-	;		if "FORMAL", then the line where the subroutine occurs
+	;		if "FORMALRET", then the line where the subroutine occurs
 	;		if "PUBLIC", then the line where the subroutine occurs
 	;		if "NEW", then the line where the NEW command occurs
-	;	* scope = scope of variable (FORMAL, PUBLIC, NEW)
+	;	* scope = scope of variable (FORMALRET, PUBLIC, NEW)
 	;	* asgnLine = highest line number where value was assigned (*1)
 	;	* refLine = highest line number where variable was referenced
 	;		(*1)
@@ -671,14 +734,15 @@ main(msrc,PGM,cmperr,labels,called)	; local ; Main label for routine parsing
 	;	This value contains the subscript of the current line in msrc().
 	;	$ORDER() is used to "increment" this variable.
 	;	Note that if msrc() contains entries 1:1:max, then lptr = line.
-	; . PSLLabelRecord pslLR() = label records of all local and external
-	;	labels. Will be filled by getLblRec^UCPSLLR().
-	; . String sysmap() = SYSMAP infor:
+	; . PSLMethod pslPrsr("pslMtd",) = method descriptors of all local and
+	;	external labels. Will be filled by calls to ^PSLX.
+	; . String sysmap() = SYSMAP info:
+	;	sysmap("L",subroutine,0) = TAB noise TAB noise TAB formallist
 	;	sysmap("T",subroutine,commandword) = count of commands
 	;	sysmap("Gn",subroutine+offset,gvn,seqnr) = PUBLIC, class
 	;	sysmap("Vn",subroutine+offset,lvn,seqnr) = scope, class
 	;	* n = 0 if referenced, n=1 if set, n=-1 if killed
-	;	* scope = "PUBLIC", "FORMAL", or "NEW"
+	;	* scope = "PUBLIC", "FORMALRET", or "NEW"
 	;	* class = "String", "Number", or "Boolean"
 	; . String subRou = name of current subroutine
 	;	Contains the name of the current subroutine, or SPACE if no
@@ -697,20 +761,19 @@ main(msrc,PGM,cmperr,labels,called)	; local ; Main label for routine parsing
 	; . This subroutine shall NEW all variables it uses.
 	;
 	new ER,RM
-	new bDoBlock,cmmds,commands,funcs,level,line,lptr
-	new primtyp,pslLR,subRou,subLine,svars,sysmap,tab,type
+	new bDoBlock,cmmds,funcs,level,line,lptr
+	new primtyp,pslPrsr,subRou,subLine,svars,sysmap,tab,type
 	;
 	; initialize variables required from DB
-	do init()
+	do init(rtn)
 	;
 	set level=0
 	set lptr="",subRou=" ",subLine=1,bDoBlock=0
 	set labels(subRou)=1
 	;
-	; FSCW CR20465: UCPSLR requires CR20280
-	do getLblRec^UCPSLLR(.msrc,"",0,.pslLR)
+	if $$getLabels(.pslPrsr,"^"_rtn)
 	;
-	for line=1:1 set lptr=$O(msrc(lptr)) quit:lptr=""  do line(msrc(lptr))
+	for line=1:1 set lptr=$order(msrc(lptr)) quit:lptr=""  do line(msrc(lptr))
 	if subRou'="" do line(" Q")
 	;
 	; FSCW CR15492: storing SYSMAP info is responsibility of ^UCSYSMAP
@@ -719,9 +782,9 @@ main(msrc,PGM,cmperr,labels,called)	; local ; Main label for routine parsing
 	.	;
 	.	; Save labels info for sysmap
 	.	new label
-	.	set label=""
-	.	for  set label=$O(labels(label)) quit:label=""  set sysmap("L",label)=$C(9)_labels(label)
-	.	set sysmap("RTNNAME")=$p(PGM,"~")
+	.	set label="" kill sysmap("L")
+	.	for  set label=$order(labels(label)) quit:label=""  set $piece(sysmap("L",label,0),$char(9),4)=$piece(labels(label),$char(9),3)
+	.	set sysmap("RTNNAME")=rtn
 	.	do ^UCSYSMAP(PGM,.msrc,.sysmap,.cmperr)
 	quit
 	;
@@ -737,7 +800,7 @@ CLOSE	; local ; M command: CLOSE device:(par1=val1,par2)
 	new atom,ptr
 	set ptr=0,atom=$$ATOM^%ZS(expr,.ptr,":",,1)
 	do valExpr(atom) if ER quit
-	if ptr do devPars($E(expr,ptr+2,$L(expr)))
+	if ptr do devPars($extract(expr,ptr+2,$length(expr)))
 	quit
 	;
 	;-----------------------------------------------------------------------
@@ -750,7 +813,7 @@ DO	; local; M command: DO label^routine(act1,act2):postcond
 	;
 	new atom,ptr
 	set ptr=0,atom=$$ATOM^%ZS(expr,.ptr,":",,1)
-	do actual(atom) if ptr do condBool($E(expr,ptr+2,$L(expr)))
+	do actual(atom) if ptr do condBool($extract(expr,ptr+2,$length(expr)))
 	quit
 	;
 	;-----------------------------------------------------------------------
@@ -775,7 +838,7 @@ FOR	; local ; M command; FOR lvn=range,range
 	set ptr=0
 	set var=$$ATOM^%ZS(expr,.ptr,"=",,1)
 	if '$$isLvn(var) do ERROR("SCOPE","Local variable expected") quit
-	if $E(expr,ptr+1)'="=" do ERROR("SYNTAX","Equal sign expected") quit
+	if $extract(expr,ptr+1)'="=" do ERROR("SYNTAX","Equal sign expected") quit
 	;
 	do forRange(expr,ptr+1)
 	quit
@@ -786,11 +849,11 @@ GOTO	; local ; M command: GOTO label+offset^routine:postcond
 	;
 	if level do ERROR("SYNTAX","Invalid inside nested structures") quit
 	;
-	new lblref set lblref=$P(expr,":")
+	new lblref set lblref=$piece(expr,":")
 	;
 	if lblref["(" do ERROR("SYNTAX","GOTO does not allow an actuallist") quit
 	do actual(lblref)
-	if expr[":" do condBool($P(expr,":",2))
+	if expr[":" do condBool($piece(expr,":",2))
 	quit
 	;
 	;-----------------------------------------------------------------------
@@ -807,15 +870,15 @@ KILL	; local ; M command: KILL and KILL glvn1,glvn2,(name1,name2)
 	;
 	if expr="" do
 	.	; set killLine in type() for all leftexprs in scope
-	else  if $e(expr)="(" do
+	else  if $extract(expr)="(" do
 	.	new pos,name
-	.	set expr=$E(expr,2,$L(expr)-1)
-	.	for pos=1:1:$L(expr,",") do
-	..		set name=$P(expr,",",pos)
+	.	set expr=$extract(expr,2,$length(expr)-1)
+	.	for pos=1:1:$length(expr,",") do
+	..		set name=$piece(expr,",",pos)
 	..		if '$$isName(name) do ERROR("SYNTAX","KILL() requires unsubscripted name: "_name)
 	.	; set kill at in type for all leftexprs in scope, except if name in list
-	else  if $E(expr)="@" do
-	.	do valExpr($E(expr,2,$L(expr)))
+	else  if $extract(expr)="@" do
+	.	do valExpr($extract(expr,2,$length(expr)))
 	else  do varExpr(expr,-1)
 	quit
 	;
@@ -827,8 +890,8 @@ MERGE	; local ; M command: MERGE glvn1=glvn2
 	set ptr=0,atom=$$ATOM^%ZS(expr,.ptr,"=",,1)
 	if ER do ERROR("SYNTAX",.RM) quit
 	;
-	if $E(expr,ptr+1)'="=" do ERROR("SYNTAX","Equal sign expected") quit
-	set expr=$E(expr,ptr+2,$L(expr))
+	if $extract(expr,ptr+1)'="=" do ERROR("SYNTAX","Equal sign expected") quit
+	set expr=$extract(expr,ptr+2,$length(expr))
 	;
 	if '$$isGlvn(atom) do ERROR("SYNTAX","MERGE requires variables") quit
 	if '$$isGlvn(expr) do ERROR("SYNTAX","MERGE requires variables") quit
@@ -839,7 +902,7 @@ MERGE	; local ; M command: MERGE glvn1=glvn2
 NEW	; local ; M command: NEW and NEW A,B,(C,D)
 	;-----------------------------------------------------------------------
 	;
-	if $E(expr)="(" do
+	if $extract(expr)="(" do
 	.	set expr=$$POP^%ZS(expr) do WARN("SCOPE","Exclusive NEW ("_expr_")")
 	.	new atom,ptr
 	.	set ptr=0
@@ -852,8 +915,8 @@ NEW	; local ; M command: NEW and NEW A,B,(C,D)
 	.	do typeIns(expr,"String",line,"NEW")
 	else  if $$isKwd(.svars,.expr) do
 	.	;check if NEW allowed for this svn
-	.	if $P(svars(expr),"|",3)'=2 do ERROR("SCOPE","NEW not allowed for "_expr)
-	.	do typeIns(expr,$P(svars(expr),"|",2),line,"NEW")
+	.	if $piece(svars(expr),"|",3)'=2 do ERROR("SCOPE","NEW not allowed for "_expr)
+	.	do typeIns(expr,$piece(svars(expr),"|",2),line,"NEW")
 	else  do ERROR("SCOPE","Variable expected") quit
 	quit
 	;
@@ -880,7 +943,7 @@ OPEN	; local ; M command: OPEN device:(par1=val1,par2):timeout
 	;
 	; Looking for timeout
 	if atom'=":" do ERROR("SYNTAX","Open timeout expected") quit
-	do valExpr($E(expr,ptr+1,$L(expr)))
+	do valExpr($extract(expr,ptr+1,$length(expr)))
 	quit
 	;
 	;-----------------------------------------------------------------------
@@ -906,16 +969,16 @@ READ	; local ; M command: READ #!?intexpr,"stringlit",lvn#length:timeout,*lvn
 	;
 	do WARN("READ","Restricted command")
 	;
-	if "!#?"[$E(expr) do writeFmt(expr) quit
+	if "!#?"[$extract(expr) do writeFmt(expr) quit
 	;
 	new atom,newLevel,ptr,var,z
 	set ptr=0
 	;
-	if $E(expr,1)="*" set expr=$e(expr,2,$L(expr))
+	if $extract(expr,1)="*" set expr=$extract(expr,2,$length(expr))
 	;
 	set atom=$$ATOM^%ZS(expr,.ptr,":#",,1)
 	;
-	if $$isLit(atom) quit
+	if $$isLit($$UNTOK^%ZS(atom,.mTSL)) quit
 	;
 	if '$$isLvn(atom) do ERROR("SYNTAX","READ requires local variable") quit
 	do varExpr(atom,1)
@@ -943,23 +1006,31 @@ SET	; M command ; Process the set command
 	set ptr=0,atom=$$ATOM^%ZS(expr,.ptr,"=",,1)
 	if ER do ERROR("SYNTAX",.RM) quit
 	;
-	if $E(expr,ptr+1)'="=" do ERROR("SYNTAX","Equal sign expected") quit
-	set expr=$E(expr,ptr+2,$L(expr))
+	if $extract(expr,ptr+1)'="=" do ERROR("SYNTAX","Equal sign expected") quit
+	set expr=$extract(expr,ptr+2,$length(expr))
 	;
-	if $E(atom)="@" set atom=$E(atom,2,$L(atom))
+	if $extract(atom)="@" set atom=$extract(atom,2,$length(atom))
 	;
-	if $E(atom)="(" do			; set (v1,v2,vn)=val
+	if $extract(atom)="(" do			; set (v1,v2,vn)=val
 	.	;
-	.	if $E(atom,$L(atom))'=")" do ERROR("SYNTAX","Parenthesis expected") quit
+	.	if $extract(atom,$length(atom))'=")" do ERROR("SYNTAX","Parenthesis expected") quit
 	.	;
 	.	new atoms
-	.	set atoms=$E(atom,2,$L(atom)-1),ptr=0
+	.	set atoms=$extract(atom,2,$length(atom)-1),ptr=0
 	.	if atoms="" do ERROR("SYNTAX","Expression expected") quit
 	.	;
 	.	for  set atom=$$ATOM^%ZS(atoms,.ptr,",",,1) do  quit:ptr=0!ER
 	..		if atom'="," do assign(atom,expr)
 	;
 	else  do assign(atom,expr)
+	quit
+	;
+	;-----------------------------------------------------------------------
+TCOMMIT ; local ; M command: TCOMMIT
+TRESTART ; local ; M command: TRESTART
+ZTSTART ; local ; M command: ZTSTART
+	;-----------------------------------------------------------------------
+	if expr'="" do ERROR("SYNTAX",cmd_" must be argumentless")
 	quit
 	;
 	;-----------------------------------------------------------------------
@@ -984,8 +1055,8 @@ VIEW	; local ; M command: VIEW expr1[:[expr2]...]
 WRITE	; local ; M command: WRITE #!!?intexpr,*intexpr,expr
 	;-----------------------------------------------------------------------
 	;
-	if "#!?"[$E(expr) do writeFmt(expr) quit
-	if $E(expr)="*" do valExpr($E(expr,2,$L(expr))) quit
+	if "#!?"[$extract(expr) do writeFmt(expr) quit
+	if $extract(expr)="*" do valExpr($extract(expr,2,$length(expr))) quit
 	do valExpr(expr)
 	quit
 	;
@@ -1018,11 +1089,18 @@ ZGOTO	; local ; M command: ZGOTO intexpr:entryref:postcond
 	.	if atom'=":" do ERROR("SYNTAX","colon expected") quit
 	.	;
 	.	; handle postcond
-	.	do condBool($E(expr,ptr+1,$L(expr))) quit:ER
+	.	do condBool($extract(expr,ptr+1,$length(expr))) quit:ER
 	.	set postCond=1
 	if 'postCond,'forLevel,'ifLevel do
 	.	set expr=""
 	.	for  do QUIT quit:subRou=""
+	quit
+	;
+	;-----------------------------------------------------------------------
+ZKILL	; local ; M command: ZKILL glvn1,glvn2
+	;-----------------------------------------------------------------------
+	;
+	do varExpr(expr,-1)
 	quit
 	;
 	;-----------------------------------------------------------------------
@@ -1041,18 +1119,18 @@ ZLINK	; local ; M command: ZLINK expr:expr
 	; Looking for compile parameters
 	set atom=$$ATOM^%ZS(expr,.ptr,":",,1)
 	if atom'=":" do ERROR("SYNTAX","colon expected") quit
-	do valExpr($E(expr,ptr+1,$L(expr)))
+	do valExpr($extract(expr,ptr+1,$length(expr)))
 	quit
 	;
 	;-----------------------------------------------------------------------
-ZSYSTEM	; local ; M command: ZSYSTEM expr 
+ZSYSTEM ; local ; M command: ZSYSTEM expr
 	;-----------------------------------------------------------------------
 	;
 	do valExpr(expr)
 	quit
 	;
 	;-----------------------------------------------------------------------
-ZWITHDRAW	; local ; M command: ZWITHDRAW glvn 
+ZWITHDRAW ; local ; M command: ZWITHDRAW glvn
 	;-----------------------------------------------------------------------
 	;
 	do varExpr(expr,-1)
@@ -1062,18 +1140,18 @@ ZWITHDRAW	; local ; M command: ZWITHDRAW glvn
 	; PART 4: supporting subroutines and functions in alphabetic order
 	;
 	;-----------------------------------------------------------------------
-actual(expr)	; Process actual parameters 
+actual(expr) ; Process actual parameters
 	;-----------------------------------------------------------------------
 	;
 	new act,atom,byRef,class,name,ptr,tag
 	;
-	set tag=$p(expr,"("),expr=$E(expr,$L(tag)+1,$L(expr))
+	set tag=$piece(expr,"("),expr=$extract(expr,$length(tag)+1,$length(expr))
 	if tag["@" set tag=$$UNTOK^%ZS(tag,.mTSL)
 	;
 	if "()"[expr do called(tag_expr) quit
-	if '($E(expr)="("&($E(expr,$L(expr))=")")) do ERROR("SYNTAX","Parenthesis expected") quit
+	if '($extract(expr)="("&($extract(expr,$length(expr))=")")) do ERROR("SYNTAX","Parenthesis expected") quit
 	;
-	set expr=$E(expr,2,$L(expr)-1)
+	set expr=$extract(expr,2,$length(expr)-1)
 	;
 	set (act,ptr)=0,tag=tag_"("
 	;
@@ -1082,14 +1160,14 @@ actual(expr)	; Process actual parameters
 	.	if atom="," set tag=tag_"," quit
 	.	;
 	.	set act=act+1
-	.	if $E(atom)=".",$E(atom,2)'?1N do
-	..		set name=atom,atom=$E(atom,2,$L(atom))
+	.	if $extract(atom)=".",$extract(atom,2)'?1N do
+	..		set name=atom,atom=$extract(atom,2,$length(atom))
 	..		if '$$isName(atom) do ERROR("MISMATCH","pass-by-name requires M name")
-	..		if $D(byRef(atom)) do ERROR("MISMATCH","Illegal multiple reference: "_atom)
+	..		if $data(byRef(atom)) do ERROR("MISMATCH","Illegal multiple reference: "_atom)
 	..		set byRef(atom)=""
 	..		do varExpr(atom,1,.class)
 	.	else  do
-	..		if $$isLvn(atom) set name=$p(atom,"(")
+	..		if $$isLvn(atom) set name=$piece(atom,"(")
 	..		else  set name="val"_act
 	..		do valExpr(atom,.class)
 	.	;
@@ -1101,7 +1179,23 @@ actual(expr)	; Process actual parameters
 	quit
 	;
 	;-----------------------------------------------------------------------
-assign(var,expr)	; local ; handle M assignment expression 
+addXref(topic,ref,val) ;local void; Add to sysmap(,,)
+	;-----------------------------------------------------------------------
+	; ARGUMENTS:
+	; . String topic = topic				/MECH=VAL
+	;	as required by UCSYSMAP
+	; . String ref = third level subscript			/MECH=VAL
+	;	as required by UCSYSMAP
+	; . String val = value to store in sysmap(,,)		/MECH=VAL
+	;	as required by UCSYSMAP
+	;
+	new loc
+	set loc=$piece(subRou,"(",1)_"+"_(line-subLine)
+	set sysmap(topic,loc,ref)=val
+	quit
+	;
+	;-----------------------------------------------------------------------
+assign(var,expr) ; local ; handle M assignment expression
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
 	; . String var = leftexpr				/MECH=VAL
@@ -1125,12 +1219,12 @@ assign(var,expr)	; local ; handle M assignment expression
 	do valExpr(expr,.clsR)
 	if clsR="" do ERROR("SCOPE","Expression must return a class: "_expr) quit
 	;
-	if $$isKwd(.funcs,$P(var,"(")) do valFunc(var,1,clsR) quit
+	if $$isKwd(.funcs,$piece(var,"(")) do valFunc(var,1,clsR) quit
 	do varExpr(var,1,clsR)
 	quit
 	;
 	;-----------------------------------------------------------------------
-blockEnd(level)	; local ; handle end-of-block 
+blockEnd(level) ; local ; handle end-of-block
 	;-----------------------------------------------------------------------
 	; This procedure copies the information from type(level) into the
 	; structure labels(subRou,line) where line is the line where the block is
@@ -1150,21 +1244,21 @@ blockEnd(level)	; local ; handle end-of-block
 	new ln set ln=""
 	;
 	; search in labels(,) for the line that started this level
-	for  set ln=$O(labels(subRou,ln)) quit:ln=""  quit:labels(subRou,ln)=level
+	for  set ln=$order(labels(subRou,ln)) quit:ln=""  quit:labels(subRou,ln)=level
 	if ln="" set ln=line,labels(subRou,ln)=level		; ???
 	merge labels(subRou,ln)=type(level)
 	kill type(level)
 	;
 	; If no new leftexprs for this block, remove its reference.
 	; This will keep the structure clean.
-	if $D(labels(subRou,ln))<10 kill labels(subRou,ln)
+	if $data(labels(subRou,ln))<10 kill labels(subRou,ln)
 	quit
 	;
 	;-----------------------------------------------------------------------
-called(tag)	; local; Build Call stack structure and validate call 
+called(tag) ; local; Build Call stack structure and validate call
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
-	; . tag = called tag, with label and all actual parameters
+	; . tag = called tag, with label and all actual parameter signatures
 	;
 	; INPUTS:
 	; . line = m source line number (used by SYSMAP to denote the line)
@@ -1173,39 +1267,37 @@ called(tag)	; local; Build Call stack structure and validate call
 	;
 	; OUTPUTS:
 	; . called(tag,subRou,line) = ""
-	; . sysmap("C",subRou,line,lbl^rtn)=params
-	; . pslLR() for all labels in rtn will exist
+	; . sysmap("C",subRou+offset,lbl^rtn)=params
+	; . pslPrsr("pslMtd",*) for all labels in rtn will exist
 	;
 	new tagrtn,params
 	set called(tag,subRou,line)=""
 	;
-	set tagrtn=$P(tag,"(",1)
-	set params=$P(tag,"(",2)
-	set params=$E(params,1,$L(params)-1)
-	set sysmap("C",subRou,line,tagrtn)=params
-	;
-	; FSCW CR20465: code below requires CR20280
-	;;quit
+	set tagrtn=$piece(tag,"(",1)
+	set params=$extract(tag,$length(tagrtn)+1,32767)
+	do addXref("C",tagrtn,$extract(params,2,$length(params)-1))
 	;
 	; Validate the call (if possible). A routine-not-found warning will have
 	; been provided by $$getlabels() if applicable
-	if $$getLabels(.pslLR,tagrtn)=2 quit
+	if $$getLabels(.pslPrsr,tagrtn)=2 quit
 	;
 	; check label
-	if '$D(pslLR(tagrtn)) do WARN("MISMATCH","subroutine "_tagrtn_" not found") quit
+	new mtd set mtd=$piece(tagrtn,"^",2)_"."_$piece(tagrtn,"^")
+	set:$extract(mtd)="." mtd=pslPrsr("moduleName")_mtd
+	set:$extract(tagrtn)="^" mtd=mtd_$piece(tagrtn,"^",2)
+	if '$data(pslPrsr("pslMtd",mtd)) do WARN("MISMATCH","subroutine "_tagrtn_" not found") quit
 	;
 	; check number of parameters (if any). Do not check an absent ap list,
 	; because the tag may be from a $$lbl^rtn call without the empty list
-	quit:$TR(params,"()")=""
+	quit:$translate(params,"()")=""
 	new apcnt,fpcnt
-	if $P(tagrtn,"^")="" set $p(tagrtn,"^")=$p(tagrtn,"^",2)
-	set apcnt=$$getFpCount^UCPSLLR($$fromSubrou^UCPSLLR(tag,0,0))
-	set fpcnt=$$getFpCount^UCPSLLR(pslLR(tagrtn))
+	set apcnt=$length(params,",")
+	set fpcnt=$$getFpCount^PSLMethod(pslPrsr("pslMtd",mtd))
 	if apcnt>fpcnt do WARN("MISMATCH","more actual parameters ("_apcnt_") than formal parameters ("_fpcnt_")")
 	quit
 	;
 	;-----------------------------------------------------------------------
-clsAsgn(clsL,clsR)	; local ; are classes assignment compatible 
+clsAsgn(clsL,clsR) ; local ; are classes assignment compatible
 	;-----------------------------------------------------------------------
 	; Check if clsR can be assigned to clsL.
 	; Both clsL and clsR shall be one of the basic M types:
@@ -1220,7 +1312,7 @@ clsAsgn(clsL,clsR)	; local ; are classes assignment compatible
 	quit clsR="Boolean"
 	;
 	;-----------------------------------------------------------------------
-clsBinEx(clsL,oper,clsR)	; local ; derive type of binary operation 
+clsBinEx(clsL,oper,clsR) ; local ; derive type of binary operation
 	;-----------------------------------------------------------------------
 	; This subroutine shall be called after each operand as been decomposed.
 	; The first call will have 'clsL' is empty. If 'oper' is not empty in
@@ -1246,17 +1338,17 @@ clsBinEx(clsL,oper,clsR)	; local ; derive type of binary operation
 	.	;
 	.	; handle unary operators: strip right-to-left, force type of clsR
 	.	if oper'="" do
-	..		for p=$L(oper):-1:1 set clsR=$S($E(oper,p)="'":"Boolean",1:"Number")
+	..		for p=$length(oper):-1:1 set clsR=$select($extract(oper,p)="'":"Boolean",1:"Number")
 	.	set clsL=clsR,(oper,clsR)=""
 	if clsR="" quit
 	;
 	; second and following passes
 	; Strip trailing unary oprators: they don't influence the result class
-	if $L(oper)>1 do
+	if $length(oper)>1 do
 	.	;
 	.	; terminates with p>=1, so oper will be non-empty afterwards
-	.	for p=$L(oper):-1:1 quit:"+-'"'[oper
-	.	set oper=$E(oper,1,p)
+	.	for p=$length(oper):-1:1 quit:"+-'"'[oper
+	.	set oper=$extract(oper,1,p)
 	if oper="_" set clsL="String"
 	else  if "+-*/\#"[oper set clsL="Number"
 	else  set clsL="Boolean"
@@ -1264,7 +1356,7 @@ clsBinEx(clsL,oper,clsR)	; local ; derive type of binary operation
 	quit
 	;
 	;-----------------------------------------------------------------------
-clsOrd(clsL,clsR)	; local ; Return relative class order 
+clsOrd(clsL,clsR) ; local ; Return relative class order
 	;-----------------------------------------------------------------------
 	; Compare "order" of classes, using "Boolean" < "Number" < "String"
 	;
@@ -1280,10 +1372,10 @@ clsOrd(clsL,clsR)	; local ; Return relative class order
 	new numL,numR
 	set numL=$$listPos("Boolean,Number,String",clsL)
 	set numR=$$listPos("Boolean,Number,String",clsR)
-	quit $s(numL<numR:-1,1:numL>numR)
+	quit $select(numL<numR:-1,1:numL>numR)
 	;
 	;-----------------------------------------------------------------------
-condBool(expr)	; local ; Evaluate boolean conditions 
+condBool(expr) ; local ; Evaluate boolean conditions
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
 	; . String expr = expression to evaluate		/MECH=VAL
@@ -1305,7 +1397,7 @@ condBool(expr)	; local ; Evaluate boolean conditions
 	quit
 	;
 	;-----------------------------------------------------------------------
-condRel(expr)	; local ; Parse relational clauses 
+condRel(expr) ; local ; Parse relational clauses
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
 	; . expr = expression to decompose			/MECH=VAL
@@ -1327,22 +1419,22 @@ condRel(expr)	; local ; Parse relational clauses
 	quit
 	;
 	;-----------------------------------------------------------------------
-devPars(expr)	; local ; Parse device parameters: (par1=val1:par2) 
+devPars(expr) ; local ; Parse device parameters: (par1=val1:par2)
 	;-----------------------------------------------------------------------
 	;
 	new atom,par,ptr
-	if $E(expr)="(",$E(expr,$L(expr))=")" set expr=$E(expr,2,$L(expr)-1)
+	if $extract(expr)="(",$extract(expr,$length(expr))=")" set expr=$extract(expr,2,$length(expr)-1)
 	;
 	set ptr=0
 	for  set atom=$$ATOM^%ZS(expr,.ptr,":",,1) do  quit:'ptr
 	.	if atom=":" quit
-	.	set par=$p(atom,"=")
+	.	set par=$piece(atom,"=")
 	.	if '$$isName(par) do ERROR("SYNTAX","device keyword expected: "_par)
-	.	if atom["=" do valExpr($E(atom,$F(atom,"="),$L(atom)))
+	.	if atom["=" do valExpr($extract(atom,$find(atom,"="),$length(atom)))
 	quit
 	;
 	;-----------------------------------------------------------------------
-ERROR(grp,msg)	; local ; Report Compiler Error 
+ERROR(grp,msg) ; local ; Report Compiler Error
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
 	; . message = error message				/MECH=VAL
@@ -1356,14 +1448,14 @@ ERROR(grp,msg)	; local ; Report Compiler Error
 	; OUTPUTS:
 	; . public Number ER = 2
 	;
-	if $G(ER)=2 quit
+	if $get(ER)=2 quit
 	set ER=2
 	;
 	do msg(grp,msg,2)
 	quit
 	;
 	;-----------------------------------------------------------------------
-forRange(expr,ptr)	; local ; range in FOR command: init[:increment[:end]] 
+forRange(expr,ptr) ; local ; range in FOR command: init[:increment[:end]]
 	;-----------------------------------------------------------------------
 	;
 	new atom,argNum,class
@@ -1378,7 +1470,7 @@ forRange(expr,ptr)	; local ; range in FOR command: init[:increment[:end]]
 	quit
 	;
 	;-----------------------------------------------------------------------
-getGlvnT(expr)	; local ; get M glvn type 
+getGlvnT(expr) ; local ; get M glvn type
 	;-----------------------------------------------------------------------
 	; Returns an indication of the kind of expr:
 	; 0 = expr is not a glvn
@@ -1389,15 +1481,15 @@ getGlvnT(expr)	; local ; get M glvn type
 	;
 	if '$$isGlvn(expr) quit 0
 	new ret
-	if $E(expr)="^" set ret=3
+	if $extract(expr)="^" set ret=3
 	else  set ret=1
 	if expr'["(" set ret=ret+1
 	quit ret
 	;
 	;-----------------------------------------------------------------------
-getLabels(lblRec,lblref)	;local Number; Add labels to lblRec() 
+getLabels(pslPrsr,lblref) ;local Number; Add labels to lblRec()
 	;-----------------------------------------------------------------------
-	; Add the labels of the routine specified by lblref to lblRef() and
+	; Add the labels of the routine specified by lblref to pslPrsr(,) and
 	; return an error indicator.
 	;
 	; OUTPUT:
@@ -1409,7 +1501,7 @@ getLabels(lblRec,lblref)	;local Number; Add labels to lblRec()
 	;		This value indicates that a routine with this name was
 	;		found, but that it was impossible to trace the routine
 	;		back to a PSL source.
-	;		lblRec() will contain the PSLLabelRecords, but the
+	;		pslPrsr("pslMtd") will contain the PSLMethods, but the
 	;		declarations are based on the M routine.
 	;	2 = no routine found
 	;		This value will be returned when no M file could be
@@ -1420,50 +1512,50 @@ getLabels(lblRec,lblref)	;local Number; Add labels to lblRec()
 	;
 	if lblref["@" quit 2
 	if lblref'["^" quit 0
-	new rtn set rtn=$P(lblref,"^",2)
-	if $D(lblRec("^"_rtn)) quit 1
+	new rtn set rtn=$piece(lblref,"^",2)
+	if $data(pslPrsr("pslCls",rtn)) quit 1
 	if '$$VALID^%ZRTNS(rtn) do WARN("MISMATCH","Routine "_rtn_" not found") quit 2
-	new ignore,src
-	set ignore=$$rtnLoad($$rtn2file(rtn),.src)
-	do getLblRec^UCPSLLR(.src,rtn,0,.lblRec)
-	set lblRec("^"_rtn)=""
+	new pslx
+	do vcdmNew^PSLX(.pslx,"PSLX",rtn),fromTarget^PSLX(.pslx) ; !!!!
+	set pslPrsr("pslCls",rtn)=pslx("pslCls",rtn)
+	merge pslPrsr("pslMtd")=pslx("pslMtd")
 	quit 1
 	;
 	;-----------------------------------------------------------------------
-isExp(expr)	; local ; is expr a number in exponential notation 
+isExp(expr) ; local ; is expr a number in exponential notation
 	;-----------------------------------------------------------------------
 	; In order to qualify, the part before the "E" must be a fraction, and
 	; the part after the first "E" must consist of an optional dash and 1 or
 	; more digits.
 	;
-	quit $$isFrac($P(expr,"E"))&($P(expr,"E",2,999)?.1"-"1.N)
+	quit $$isFrac($piece(expr,"E"))&($piece(expr,"E",2,999)?.1"-"1.N)
 	;-----------------------------------------------------------------------
-isExtr(expr)	; local ; is expr an extrinsic function 
+isExtr(expr) ; local ; is expr an extrinsic function
 	;-----------------------------------------------------------------------
 	; The validation is rather minimal. Only the part preceeding the "(" is
 	; validated.
 	;
-	set expr=$tr($p(expr,"("),"%@","AA")
+	set expr=$translate($piece(expr,"("),"%@","AA")
 	quit (expr?1"$$"1.AN)!(expr?1"$$".AN1"^"1.AN)
 	;
 	;-----------------------------------------------------------------------
-isFrac(expr)	; local ; is expr a fractional number 
+isFrac(expr) ; local ; is expr a fractional number
 	;-----------------------------------------------------------------------
 	; helper function, called by $$isExp() and $$isNum().
 	;
 	quit expr?.1"-".N.1"."1.N
 	;
 	;-----------------------------------------------------------------------
-isGlvn(expr)	; local ; is expr a valid M glvn ((un)subscripted global or local) 
+isGlvn(expr) ; local ; is expr a valid M glvn ((un)subscripted global or local)
 	;-----------------------------------------------------------------------
 	; For gvn: replace "^" by "A". This translates naked references into
 	; normal local references and is harmless for full gobal references
 	;
-	if $E(expr)="^" quit $$isLvn("A"_$E(expr,2,$L(expr)))
+	if $extract(expr)="^" quit $$isLvn("A"_$extract(expr,2,$length(expr)))
 	quit $$isLvn(expr)
 	;
 	;-----------------------------------------------------------------------
-isKwd(kws,kwd)	; local ; lookup and translate a keyword 
+isKwd(kws,kwd) ; local ; lookup and translate a keyword
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
 	; . $$	1 if keyword or its abbreviation occurs in kws()
@@ -1477,48 +1569,48 @@ isKwd(kws,kwd)	; local ; lookup and translate a keyword
 	;	keyword in uppercase.
 	;
 	set kwd=$$UPCASE(kwd)
-	if $D(kws(kwd)) quit 1
+	if $data(kws(kwd)) quit 1
 	;
 	new z set z=kwd
-	for  set z=$O(kws(z)) quit:$E(z,1,$L(kwd))'=kwd  if $P(kws(z),"|")=kwd set kwd=z quit
+	for  set z=$order(kws(z)) quit:$extract(z,1,$length(kwd))'=kwd  if $piece(kws(z),"|")=kwd set kwd=z quit
 	quit z=kwd
 	;
 	;-----------------------------------------------------------------------
-isLit(expr)	; local ; is expr a stringliteral or numeric literal 
+isLit(expr) ; local ; is expr a stringliteral or numeric literal
 	;-----------------------------------------------------------------------
 	;
 	quit expr?1"""".E1""""!$$isNum(expr)
 	;
 	;-----------------------------------------------------------------------
-isLvn(expr)	; local ; is expr a valid M lvn (subscripted or unsubscripted) 
+isLvn(expr) ; local ; is expr a valid M lvn (subscripted or unsubscripted)
 	;-----------------------------------------------------------------------
 	;
-	if '$$isName($P(expr,"(",1)) quit 0		; Not valid M name
+	if '$$isName($piece(expr,"(",1)) quit 0		; Not valid M name
 	new y
-	set y=$F(expr,"(") if y=0 quit 1		; unsubscripted is OK
+	set y=$find(expr,"(") if y=0 quit 1		; unsubscripted is OK
 	set y=y+1					; Reject ()
-	for  set y=$F(expr,")",y)  quit:y=0!($L($E(expr,1,y-1),"(")=$L($E(expr,1,y-1),")"))
-	quit $L(expr)+1=y
+	for  set y=$find(expr,")",y)  quit:y=0!($length($extract(expr,1,y-1),"(")=$length($extract(expr,1,y-1),")"))
+	quit $length(expr)+1=y
 	;
 	;-----------------------------------------------------------------------
-isName(expr)	; local ; is expr a valid M name 
+isName(expr) ; local ; is expr a valid M name
 	;-----------------------------------------------------------------------
 	; An expr is a valid variable if it starts with an alpha or percentsign,
 	; and is folllowed by zero or more alphanumerics.
 	; Or if expr starts with the indirection character ("@"), and the
 	; remainder is a variable.
 	;
-	quit expr?1A.AN!(expr?1"%".AN)!($E(expr)="@"&$$isName($E(expr,2,$l(expr))))
+	quit expr?1A.AN!(expr?1"%".AN)!($extract(expr)="@"&$$isName($extract(expr,2,$length(expr))))
 	;
 	;-----------------------------------------------------------------------
-isNum(expr)	; local ; is expr an M numeric value 
+isNum(expr) ; local ; is expr an M numeric value
 	;-----------------------------------------------------------------------
 	; true if it is a fractional number or a number in exponential notation
 	;
 	quit $$isFrac(expr)!$$isExp(expr)
 	;
 	;-----------------------------------------------------------------------
-listAdd(L,V)	; local ; List.add() 
+listAdd(L,V) ; local ; List.add()
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
 	; . List L = original value				/MECH=VAL
@@ -1531,7 +1623,7 @@ listAdd(L,V)	; local ; List.add()
 	quit L_","_V
 	;
 	;-----------------------------------------------------------------------
-listCont(L,V)	; local ; List.contains() 
+listCont(L,V) ; local ; List.contains()
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
 	; . List L = list (comma separated)
@@ -1540,16 +1632,16 @@ listCont(L,V)	; local ; List.contains()
 	quit ","_L_","[(","_V_",")
 	;
 	;-----------------------------------------------------------------------
-listPos(L,V)	; local ; List.position() 
+listPos(L,V) ; local ; List.position()
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
 	; . List L = list (comma separated)
 	; . String V = value
 	;
-	quit $L($P(","_L_",",","_V_","),",")
+	quit $length($piece(","_L_",",","_V_","),",")
 	;
 	;-----------------------------------------------------------------------
-msg(grp,msg,sev)	; local ; Report a message 
+msg(grp,msg,sev) ; local ; Report a message
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
 	; .grp = group						/MACH=VAL
@@ -1584,24 +1676,24 @@ msg(grp,msg,sev)	; local ; Report a message
 	;
 	new erline1,erline2,erline3
 	;
-	set erline1=$TR($G(msrc(+$G(lptr))),$C(9)," ")
-	set erline2="M-"_$e("IWE",sev+1)_"-"_grp_": "_$$UNTOK^%ZS(msg,.mTSL)
-	set erline3="At source line: "_$G(lptr)
+	set erline1=$translate($get(msrc(+$get(lptr))),$char(9)," ")
+	set erline2="%M-"_$extract("IWE",sev+1)_"-"_grp_": "_$$UNTOK^%ZS(msg,.mTSL)
+	set erline3="At source line: "_$get(lptr)
 	;
-	if $G(PGM)]"" do
-	.	use $P
+	if $get(PGM)]"" do
+	.	use $principal
 	.	write !,erline1,!
 	.	write erline2,!
 	.	write erline3,!
 	;
-	set cmperr($O(cmperr(""),-1)+1)="++++++++++++++++++++++"
-	set cmperr($O(cmperr(""),-1)+1)=erline1
-	set cmperr($O(cmperr(""),-1)+1)=erline2
-	set cmperr($O(cmperr(""),-1)+1)=erline3
+	set cmperr($order(cmperr(""),-1)+1)="++++++++++++++++++++++"
+	set cmperr($order(cmperr(""),-1)+1)=erline1
+	set cmperr($order(cmperr(""),-1)+1)=erline2
+	set cmperr($order(cmperr(""),-1)+1)=erline3
 	quit
 	;
 	;-----------------------------------------------------------------------
-subRou(expr,subRou,labels,type)	; local ; Set up a subroutine 
+subRou(expr,subRou,labels,type) ; local ; Set up a subroutine
 	;-----------------------------------------------------------------------
 	;
 	; ARGUMENTS:
@@ -1619,18 +1711,18 @@ subRou(expr,subRou,labels,type)	; local ; Set up a subroutine
 	; OUTPUTS:
 	; . labels(label)= sourceline, , formallist
 	;
-	new return set return=$P(expr,"(")
+	new return set return=$piece(expr,"(")
 	;
-	if $D(labels(return)) do ERROR("MISMATCH","Label already exists: "_return) quit
-	set labels(return)=line_tab_tab_$E(expr,$L(return)+1,$L(expr))
+	if $data(labels(return)) do ERROR("MISMATCH","Label already exists: "_return) quit
+	set labels(return)=line_tab_tab_$extract(expr,$length(return)+1,$length(expr))
 	set subLine=line
 	;
 	if " "'[subRou do
 	.	do WARN("SCOPE","label inside subroutine: "_subRou)
-	.	set $P(labels(return),tab,4)=subRou
+	.	set $piece(labels(return),tab,4)=subRou
 	.	do called(return)	; treat as if new label called by subRou
 	;
-	set subRou=return,expr=$E(expr,$L(return)+2,$L(expr)-1)
+	set subRou=return,expr=$extract(expr,$length(return)+2,$length(expr)-1)
 	;
 	if expr="" quit
 	;
@@ -1646,12 +1738,12 @@ subRou(expr,subRou,labels,type)	; local ; Set up a subroutine
 	.	if $$listCont(return,var) do ERROR("SCOPE","Parameter "_var_" is multiply defined") quit
 	.	if '$$isName(var) do ERROR("SCOPE","Variable expected") quit
 	.	;
-	.	do typeIns(var,"String",line,"FORMAL")
+	.	do typeIns(var,"String",line,"FORMALRET")
 	.	set return=return_var
 	quit
 	;
 	;-----------------------------------------------------------------------
-typeAsgn(leftexpr)	; local ; register assignment to leftexpr in type() 
+typeAsgn(leftexpr) ; local ; register assignment to leftexpr in type()
 	;-----------------------------------------------------------------------
 	; This subroutine calls typeUpd(leftexpr,4)
 	;
@@ -1663,7 +1755,7 @@ typeAsgn(leftexpr)	; local ; register assignment to leftexpr in type()
 	quit
 	;
 	;-----------------------------------------------------------------------
-typeGet(leftexpr,pos)	; local ; get value from field of type() 
+typeGet(leftexpr,pos) ; local ; get value from field of type()
 	;-----------------------------------------------------------------------
 	; This subroutine returns the value of the supplied field.
 	;
@@ -1691,10 +1783,10 @@ typeGet(leftexpr,pos)	; local ; get value from field of type()
 	; NOTES:
 	; . The call to $$typeLvl() will ensure the entry is correctly defined.
 	;
-	quit $P($G(type($$typeLvl(leftexpr),leftexpr)),tab,pos)
+	quit $piece($get(type($$typeLvl(leftexpr),leftexpr)),tab,pos)
 	;
 	;-----------------------------------------------------------------------
-typeIns(leftexpr,class,newPtr,scope)	; local ; insert new entry in type() 
+typeIns(leftexpr,class,newPtr,scope) ; local ; insert new entry in type()
 	;-----------------------------------------------------------------------
 	; This subroutine inserts a complete new variable in the type() array.
 	; It will be inserted at the current level.
@@ -1712,7 +1804,7 @@ typeIns(leftexpr,class,newPtr,scope)	; local ; insert new entry in type()
 	quit
 	;
 	;-----------------------------------------------------------------------
-typeLvl(leftexpr)	; local ; return the level at which the leftexpr occurs in type 
+typeLvl(leftexpr) ; local ; return the level at which the leftexpr occurs in type
 	;-----------------------------------------------------------------------
 	; This function returns the highest level where the variable name of
 	; leftexpr occurs. If the name does not occur at all, the name will be
@@ -1722,19 +1814,19 @@ typeLvl(leftexpr)	; local ; return the level at which the leftexpr occurs in typ
 	; is created with the same settings as the name.
 	;
 	new lvl,name
-	set name=$P(leftexpr,"(")
-	for lvl=level:-1:0 quit:$D(type(lvl,name))
+	set name=$piece(leftexpr,"(")
+	for lvl=level:-1:0 quit:$data(type(lvl,name))
 	;
 	; If not found, insert at level=0
-	if '$D(type(lvl,name)) new level set level=0 do typeIns(name,"String",subLine,"PUBLIC")
+	if '$data(type(lvl,name)) new level set level=0 do typeIns(name,"String",subLine,"PUBLIC")
 	;
 	; If type() for subscripted leftexpr does not exist, copy it
 	; from the definition of the unsubscripted name.
-	if '$D(type(lvl,leftexpr)) set type(lvl,leftexpr)=type(lvl,name)
+	if '$data(type(lvl,leftexpr)) set type(lvl,leftexpr)=type(lvl,name)
 	quit lvl
 	;
 	;-----------------------------------------------------------------------
-typeSet(leftexpr,pos,val)	; local ; register modification to leftexpr in type() 
+typeSet(leftexpr,pos,val) ; local ; register modification to leftexpr in type()
 	;-----------------------------------------------------------------------
 	; This subroutine stores the supplied value in the supplied field.
 	;
@@ -1765,11 +1857,11 @@ typeSet(leftexpr,pos,val)	; local ; register modification to leftexpr in type()
 	; NOTES:
 	; . The call to $$typeLvl() will ensure the entry is correctly defined
 	;
-	set $P(type($$typeLvl(leftexpr),leftexpr),tab,pos)=val
+	set $piece(type($$typeLvl(leftexpr),leftexpr),tab,pos)=val
 	quit
 	;
 	;-----------------------------------------------------------------------
-typeUpd(leftexpr,pos)	; local ; register modification to leftexpr in type() 
+typeUpd(leftexpr,pos) ; local ; register modification to leftexpr in type()
 	;-----------------------------------------------------------------------
 	; This subroutine stores the line where the assignment occurs.
 	;
@@ -1806,16 +1898,16 @@ typeUpd(leftexpr,pos)	; local ; register modification to leftexpr in type()
 	; . The call to $$typeLvl() will ensure the entry is correctly defined
 	;
 	new lvl,name
-	set lvl=$$typeLvl(leftexpr),name=$P(leftexpr,"(")
+	set lvl=$$typeLvl(leftexpr),name=$piece(leftexpr,"(")
 	;
-	set $P(type(lvl,leftexpr),tab,pos)=line
-	if leftexpr'=name,$P(type(lvl,name),tab,pos)'>0 set $P(type(lvl,name),tab,pos)=-line
+	set $piece(type(lvl,leftexpr),tab,pos)=line
+	if leftexpr'=name,$piece(type(lvl,name),tab,pos)'>0 set $piece(type(lvl,name),tab,pos)=-line
 	quit
 	;-----------------------------------------------------------------------
-UPCASE(string)	quit $TR(string,"abcdefghijklmnopqrstuvwxyz","ABCDEFGHIJKLMNOPQRSTUVWXYZ") 
+UPCASE(string) quit $translate(string,"abcdefghijklmnopqrstuvwxyz","ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 	;
 	;-----------------------------------------------------------------------
-valArr(str,arrType)	; Process an array expression 
+valArr(str,arrType) ; Process an array expression
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
 	; . String str = M glvn					/MECH=VAL
@@ -1826,8 +1918,8 @@ valArr(str,arrType)	; Process an array expression
 	;
 	new atom,ptr
 	;
-	set ptr=0,arrType=$P(str,"(",1)_"("
-	set str=$E(str,$L(arrType)+1,$L(str)-1)
+	set ptr=0,arrType=$piece(str,"(",1)_"("
+	set str=$extract(str,$length(arrType)+1,$length(str)-1)
 	;
 	for  set atom=$$ATOM^%ZS(str,.ptr,",",,1) do  if ptr=0!ER quit
 	.	;
@@ -1838,7 +1930,7 @@ valArr(str,arrType)	; Process an array expression
 	quit
 	;
 	;-----------------------------------------------------------------------
-valExpr(str,class)	; local ; Process a value expression e.g. set a= |1*3+5| 
+valExpr(str,class) ; local ; Process a value expression e.g. set a= |1*3+5|
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
 	; . String str = string to decompose			/MECH=VAL
@@ -1858,17 +1950,17 @@ valExpr(str,class)	; local ; Process a value expression e.g. set a= |1*3+5|
 	.	set atom=$$ATOM^%ZS(str,.ptr,dels,,1) if ER quit
 	.	;
 	.	; incomplete Exponential notation
-	.	if atom?.N.1"."1.N1"E" set ptr=ptr+1,atom=atom_$E(str,ptr)_$$ATOM^%ZS(str,.ptr,dels,,1)
+	.	if atom?.N.1"."1.N1"E" set ptr=ptr+1,atom=atom_$extract(str,ptr)_$$ATOM^%ZS(str,.ptr,dels,,1)
 	.	;
-	.	if $A(atom)=0 set clsR="String"
-	.	else  if $A(atom)=1 set clsR="String"
-	.	else  if $E(atom)="(" do
-	..		do valExpr($E(atom,2,$L(atom)-1),.clsR)
-	.	else  if $E(atom)="$" do
+	.	if $ascii(atom)=0 set clsR="String"
+	.	else  if $ascii(atom)=1 set clsR="String"
+	.	else  if $extract(atom)="(" do
+	..		do valExpr($extract(atom,2,$length(atom)-1),.clsR)
+	.	else  if $extract(atom)="$" do
 	..		;
-	..		if $$isExtr(atom) do valExtr($e(atom,3,$L(atom)),.clsR) quit
-	..		if atom["(",$$isKwd(.funcs,$p(atom,"(")) do valFunc(atom,0,.clsR) quit
-	..		if $$isKwd(.svars,.atom) set clsR=$P(svars(atom),"|",2) quit
+	..		if $$isExtr(atom) do valExtr($extract(atom,3,$length(atom)),.clsR) quit
+	..		if atom["(",$$isKwd(.funcs,$piece(atom,"(")) do valFunc(atom,0,.clsR) quit
+	..		if $$isKwd(.svars,.atom) set clsR=$piece(svars(atom),"|",2) quit
 	..		set ER=1
 	.	;
 	.	else  if atom="?" set atom=$$ATOM^%ZS(str,.ptr,dels,,1),class="Boolean" quit
@@ -1881,7 +1973,7 @@ valExpr(str,class)	; local ; Process a value expression e.g. set a= |1*3+5|
 	quit
 	;
 	;-----------------------------------------------------------------------
-valExtr(expr,class)	; local ; Process Extrinsic Function Logic 
+valExtr(expr,class) ; local ; Process Extrinsic Function Logic
 	;-----------------------------------------------------------------------
 	; Decompose labelref(arg1,.arg2,...)
 	;
@@ -1895,25 +1987,27 @@ valExtr(expr,class)	; local ; Process Extrinsic Function Logic
 	quit
 	;
 	;-----------------------------------------------------------------------
-valFunc(expr,fset,class)	; local ; Process Intrinsic Function Logic 
+valFunc(expr,fset,class) ; local ; Process Intrinsic Function Logic
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
 	; . String expr = function expression (incl "$")	/MECH=VAL
 	; . String fset = assign / reference / kill indicator	/MECH=VAL
 	;	Only the values 1 (assign) and 0 (reference) are allowed.
 	;
-	new arg,farg,fnam,ptr
+	new arg,farg,fdes,fnam,ptr
 	;
 	set ptr=0
-	set fnam=$P(expr,"(")
-	if '$$isKwd(.funcs,.fnam) do ERROR("SYNTAX","Invalid function") quit
-	set class=$P(funcs(fnam),"|",2)
-	set farg=$P(expr,"(",2,999)
-	set farg=$E(farg,1,$L(farg)-1)			; Strip Parenthesis
+	set fnam=$piece(expr,"(")
+	if $$isKwd(.funcs,.fnam) set fdes=funcs(fnam)
+	else  set fdes="|String|" do ERROR("SYNTAX","Unknown function "_fnam)
 	;
-	if fset,$P(funcs(fnam),"|",3)'=2 do ERROR("MISMATCH","Invalid assignment function") quit
+	set class=$piece(fdes,"|",2)
+	set farg=$piece(expr,"(",2,999)
+	set farg=$extract(farg,1,$length(farg)-1)			; Strip Parenthesis
 	;
-	if $E("$SELECT",1,$L(fnam))=fnam do
+	if fset,$piece(fdes,"|",3)'=2 do ERROR("MISMATCH","Invalid assignment to function "_fnam) quit
+	;
+	if $extract("$SELECT",1,$length(fnam))=fnam do
 	.	;
 	.	new exprBool,exprVal
 	.	for  set atom=$$ATOM^%ZS(farg,.ptr,",",,1) do  quit:ptr=0!ER
@@ -1921,7 +2015,7 @@ valFunc(expr,fset,class)	; local ; Process Intrinsic Function Logic
 	..		;
 	..		new ptr set ptr=0
 	..		set exprBool=$$ATOM^%ZS(atom,.ptr,":",,1)
-	..		set exprVal=$E(atom,ptr+2,999)
+	..		set exprVal=$extract(atom,ptr+2,999)
 	..		if exprBool=""!(exprVal="") do ERROR("SYNTAX","Invalid $SELECT syntax") quit
 	..		do condBool(exprBool)
 	..		do valExpr(exprVal,.class)
@@ -1931,14 +2025,14 @@ valFunc(expr,fset,class)	; local ; Process Intrinsic Function Logic
 	.	if atom="," quit
 	.	;
 	.	; First argument may require a glvn
-	.	; This does not catch illegal constructs like: SET $P($X,D,P)=V
-	.	if arg=1,$P(funcs(fnam),"|",3)=1!fset do varExpr(atom,fset)
+	.	; This does not catch illegal constructs like: SET $piece($X,D,P)=V
+	.	if arg=1,$piece(fdes,"|",3)=1!fset do varExpr(atom,fset)
 	.	do valExpr(atom)
 	;
 	quit
 	;
 	;-----------------------------------------------------------------------
-varExpr(atom,fset,class)	; local ; Decompose a variable expression 
+varExpr(atom,fset,class) ; local ; Decompose a variable expression
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
 	; . String atom = expratom to evaluate			/MECH=VAL
@@ -1960,31 +2054,31 @@ varExpr(atom,fset,class)	; local ; Decompose a variable expression
 	;
 	; OUTPUTS:
 	; . If M gvn, then
-	;	addXref^UCGM("G"_fset,gvn,"PUBLIC"_tab_class) will have been called
+	;	addXref("G"_fset,gvn,"PUBLIC"_tab_class) will have been called
 	; . Else
-	;	addXref^UCGM("V"_fset,gvn,scope_tab_class) will have been called
+	;	addXref("V"_fset,gvn,scope_tab_class) will have been called
 	;	(even if atom is invalid)
 	;
 	new leftexpr set leftexpr=atom
 	;
 	if atom="" set class="" do ERROR("SYNTAX","Variable expected "_atom) quit
-	if fset=1 set class=$G(class,"String")
+	if fset=1 set class=$get(class,"String")
 	;
 	if $$getGlvnT(atom)#2 do valArr(atom,.leftexpr)
 	;
-	;;if $E(atom)="^" do  quit			; Global variable
+	;;if $extract(atom)="^" do  quit			; Global variable
 	;;.	set:fset'=1 class="String"		; String if referenced
-	;;.	do addXref^UCGM("G"_fset,$$UNTOK^%ZS(atom,mTSL),"PUBLIC"_$C(9)_class)
+	;;.	do addXref("G"_fset,$$UNTOK^%ZS(atom,mTSL),"PUBLIC"_$char(9)_class)
 	;
 	new svn set svn=atom
 	new scope
 	if $$isKwd(.svars,.svn) do
 	.	set scope="PUBLIC"
-	.	if fset=0 set class=$P(svars(svn),"|",2)
+	.	if fset=0 set class=$piece(svars(svn),"|",2)
 	.	else  if fset<0 do ERROR("SCOPE","KILL not allowed: "_atom)
 	.	else  do				; must be fset>0
-	..		if $P(svars(svn),"|",3)=0 do ERROR("SCOPE","SET not allowed: "_atom) quit
-	..		new scls set scls=$P(svars(svn),"|",2)
+	..		if $piece(svars(svn),"|",3)=0 do ERROR("SCOPE","SET not allowed: "_atom) quit
+	..		new scls set scls=$piece(svars(svn),"|",2)
 	..		if '$$clsAsgn(scls,class) do WARN("SCOPE","Cannot assign '"_class_"' to '"_scls_"'")
 	else  if $$isGlvn(atom) do
 	.	;
@@ -2000,16 +2094,16 @@ varExpr(atom,fset,class)	; local ; Decompose a variable expression
 	.	set scope="PUBLIC",class="String"
 	.	do ERROR("SYNTAX","Variable expected "_atom)
 	;
-	do addXref^UCGM($S($E(atom)="^":"G",1:"V")_fset,leftexpr,scope_$C(9)_class)
+	do addXref($select($extract(atom)="^":"G",1:"V")_fset,leftexpr,scope_$char(9)_class)
 	;
 	quit
 	;
 	;-----------------------------------------------------------------------
-WARN(grp,msg)	; local ; Report a warning 
+WARN(grp,msg) ; local ; Report a warning
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
 	; . grp = PSL WARN group
-	;	The warning will only be reported if commands("WARN",grp) does
+	;	The warning will only be reported if pslPrsr("WARN",grp) does
 	;	exist
 	; . msg = tokenized message				/MECH=VAL
 	;	All tokens are supposed to be from the current source line, and
@@ -2019,18 +2113,18 @@ WARN(grp,msg)	; local ; Report a warning
 	; . subRou = current subroutine
 	;	Used to suppress warnings in subroutines generated by PSL
 	;
-	if $E(subRou)="v",subRou'?1"v".UN quit
-	if $D(commands("WARN",grp)) do msg(grp,msg,1)
+	if $extract(subRou)="v",subRou'?1"v".UN quit
+	if $$getSetting^PSLCC(.pslPrsr,"WARN",grp,0) do msg(grp,msg,1)
 	quit
-		;
+	 	;
 	;-----------------------------------------------------------------------
-writeFmt(expr)	; local ; Write format: #!#!?intexpr 
+writeFmt(expr) ; local ; Write format: #!#!?intexpr
 	;-----------------------------------------------------------------------
 	;
 	; Strip "#" and "!"
 	new ptr
-	for ptr=1:1:$L(expr)+1 quit:"#!"'[$E(expr,ptr)
-	if $E(expr,ptr)="?" do valExpr($E(expr,ptr+1,$l(expr)))
+	for ptr=1:1:$length(expr)+1 quit:"#!"'[$extract(expr,ptr)
+	if $extract(expr,ptr)="?" do valExpr($extract(expr,ptr+1,$length(expr)))
 	quit
 	;
 	;#######################################################################
@@ -2045,22 +2139,24 @@ BREAK	;
 HANG	;
 HALT	;
 JOB	;
-TCOMMIT	; 
-TROLLBACK	; 
+TROLLBACK ;
 XECUTE	;
+ZCOMPILE ;
+ZEDIT	;
+ZMESSAGE ;
 ZSHOW	;
-ZMESSAGE	; 
+ZTCOMMIT ;
 ZWRITE	;
 	if expr'="" do valExpr(expr)
 	quit
 ZPRINT	;
 	if expr="" quit
-	new lblref set lblref=$P(expr,":")
+	new lblref set lblref=$piece(expr,":")
 	;
 	if lblref["(" do ERROR("SYNTAX","ZPRINT does not allow an actuallist") quit
 	do actual(lblref)
 	quit:expr'[":"
-	set lblref=$P(expr,":",2)
+	set lblref=$piece(expr,":",2)
 	;
 	if lblref["(" do ERROR("SYNTAX","ZPRINT does not allow an actuallist") quit
 	do actual(lblref)
@@ -2073,8 +2169,8 @@ TSTART	; M command ; Start a transaction
 	quit
 	;
 	;-----------------------------------------------------------------------
-ZALLOCATE	; same syntax as LOCK 
-ZDEALLOCATE	; same syntax as LOCK 
+ZALLOCATE ; same syntax as LOCK
+ZDEALLOCATE ; same syntax as LOCK
 	;
 LOCK	; M command ; Lock a reference
 	;-----------------------------------------------------------------------
@@ -2083,7 +2179,7 @@ LOCK	; M command ; Lock a reference
 	;
 	new ptr
 	set ptr=0
-	if "+-"[$E(expr) set expr=$E(expr,2,$L(expr))
+	if "+-"[$extract(expr) set expr=$extract(expr,2,$length(expr))
 	do varExpr($$ATOM^%ZS(expr,.ptr,":",mTSL),0)
-	if ptr do valExpr($E(expr,ptr+2,$L(expr)))
+	if ptr do valExpr($extract(expr,ptr+2,$length(expr)))
 	quit

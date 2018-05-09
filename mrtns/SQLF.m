@@ -21,39 +21,16 @@ SQLF(exe,vd,vi,sqlcur)	;public; Fetch Next Row in Results table
 	;			0 = End of Table
 	;			1-n Success
 	;------ Revision History ----------------------------------------------
-	; 07/10/06 - RussellDS - CR22121
-	;	     Modified maximum length checking to use byte string method
-	;	     by calling BSL^SQLUTL to make Unicode compliant.
-	;
-	; 08/30/05 - Giridharanb - 16791
-	;	     Removed section RFETCH (see associated change to SQLM.m)
-	;
-	; 01/06/05 - Pete Chenard - 13875
-	;	     Modified to support 1Mb strings.
-	;
-	; 11/12/04 - GIRIDHARANB - CR13163
-	;	     Modified call to Rfetch to check for rdb indicator vsql("RDB")
-	;	     See associated change in OPEN^SQLM to set up vsql("RDB")
-	;
-	; 09/13/04 - GIRIDHARANB - CR11860
-	;	     Minor change to correct an undefined error on variable "FROM"
-	;
-	; 09/01/04 - Giridharanb - CR11003
-	;	     Added section Rfetch to support fetching a result set from 
-	;	     Relational database. 
-	;
-	; 05/13/99 - Chiang - 32656
-	;            Modified FETCHBLK section to return protection indicators
-	;            based on PROTECTION qualifier.
-	;
-	; 10/01/97 - Chiang - 26294
-	;            Modified FORMAT section to not format NULL data for $
-	;            (Currency) and N (Numeric) data types.
+	; 12/08/2008 - RussellDS - CRs 35741/36952/36954
+	;	* Modified to handle condition of aggregates only to return
+	;	  correct data.
+	;	* Removed old revision history.
 	;----------------------------------------------------------------------
 	;
 	I '$D(sqlcur) S sqlcur=0
 	;
-	I vsql(0)=100 S vd="" Q 0
+	; If aggregates only, we need to finish in order to get return data
+	I vsql(0)=100,'$D(vsql("AGONLY")) S vd="" Q 0
 	;
 	F  X exe(vsql) S vsql=vsql+1 Q:vsql=0!(vsql>exe)
 	I vsql=0 S vsql(0)=100,vd="" Q 0
@@ -67,6 +44,9 @@ FETCHBLK(sqlcur,exe,vsql,sqldta,sqlcnt,sqlind,rows)	; Fetch a block of records
 	S sqlind=""
 	S sqlcnt=0,vsql=$$SQLF(.exe,.sqldta,.sqlind,.sqlcur)
 	I vsql=0!sqlcnt Q
+	;
+	; Want COUNT if no records to return data and record count of 0
+	I $G(vsql("AGCOUNT")),+$G(vsql(vsql("AGCOUNT")))=0 set sqlcnt=0 Q
 	;
 	S sqlcnt=1 I $G(rows)<2!(vsql(0)=100) Q
 	;
@@ -128,3 +108,4 @@ FORMAT(vd)	; Format record based on vsql("F")
 	;
 	I flddel'=9,flddel S vd=$TR(vd,$C(9),$C(flddel))
 	Q vd
+

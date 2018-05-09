@@ -3,10 +3,10 @@ DBSDSMP	;;DBS - U - V4.4 -  Multiple page screen driver / VT mode only
 	; ORIG:  Frank R. Sanchez  (2497)
 	; DESC:  Compiles driver section of multiple page screens
 	;
-	;  I18N=QUIT: Excluded from I18N standards 
+        ;  I18N=QUIT: Excluded from I18N standards
 	;
-	;---------- Revision History ------------------------------------------- 
-	; 09/28/04 - RussellDS - CR12334 
+        ;---------- Revision History -------------------------------------------
+        ; 09/28/04 - RussellDS - CR12334
 	;	     Replaced obsoleted calls to ^DBSANS1 with new procedure
 	;	     DBSGETID.
 	;
@@ -28,9 +28,9 @@ DBSDSMP	;;DBS - U - V4.4 -  Multiple page screen driver / VT mode only
 	; 08/23/96 - SPIER - 22638
 	;	    Changed $n to $o
 	;            
-	; 05/10/96  Bob Chiang - 20948 
-	;           Modified VDEF section to build the correct default logic 
-	;           in the screen run-time routine. 
+        ; 05/10/96  Bob Chiang - 20948
+        ;           Modified VDEF section to build the correct default logic
+        ;           in the screen run-time routine.
 	;
 	; 03/20/96 - Bob Chiang 21403
 	;            Modified SEQ section to remove a bad MUMPS New command.

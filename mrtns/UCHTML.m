@@ -1,7 +1,7 @@
-UCHTML	;Library; Library of HTML methods
+UCHTML	;wittef;2007-12-13 19:21:00;Library; Library of HTML methods
 	;;Copyright(c)2004 Sanchez Computer Associates, Inc.  All Rights Reserved - 01/29/04 19:28:00 - RUSSELL
 	; ORIG: FSANCHEZ - 03/15/2000
-	; DESC: Library of HTML methods 
+	; DESC: Library of HTML methods
 	;	addAttrib		// Adds <! Attributes elementName  attribute >
 	;	addCol			// Adds a column from the results set
 	;	addElement		// Adds <! ELEMENT elementName (attributes)>
@@ -11,10 +11,13 @@ UCHTML	;Library; Library of HTML methods
 	;	addString		// Adds <tag>String</tag>, or String if no tag)
 	;	addTitle		// adds <XML> <!doctype  doc [  ]>
 	;
-	; 
-	; KEYWORDS:     DATABASE 
+	;
+	; KEYWORDS:     DATABASE
 	;
 	;---------- Revision History ------------------------------------------
+	; 05/14/07 - Frans S.C. Witte - CR: 27800
+	;	Replaced $D(labels()) with $$hasSubr^UCGM()
+	;
 	; 04/20/05 - SIGDAE / Frans S.C. Witte - CRs: 17056 / 18164
 	;	* Added section escape to escape XML special characters.
 	;	* Modified section addSingle to call section escape to escape XML
@@ -30,7 +33,7 @@ UCHTML	;Library; Library of HTML methods
 	;	     base for PSL.
 	;
 	; 01/30/04 - RussellDS - CR8092
-	;	     Fixed addRow and addCol methods to deal with new 
+	;	     Fixed addRow and addCol methods to deal with new
 	;	     structures used by compiler -- struct() vs. type()
 	;
 	; 04/26/00 - SPIER - 37158
@@ -39,7 +42,7 @@ UCHTML	;Library; Library of HTML methods
 	;
 	; 04/11/00 - SPIER - 37246
 	;            Added Currency to attributes. Also provided ability to
-	;	     split a return line when addRow and AddList have a 
+	;	     split a return line when addRow and AddList have a
 	;	     large number of columns.
 	;
 	; 03/24/00 - SPIER - 35208
@@ -49,7 +52,7 @@ UCHTML	;Library; Library of HTML methods
 	quit
 	;
 	;-----------------------------------------------------------------------
-addAttrib;	method HTML.addAttrib // Adds <! ELEMENT elementName  attribute >
+addAttrib ; method HTML.addAttrib // Adds <! ELEMENT elementName  attribute >
 	;-----------------------------------------------------------------------
 	; Pass record name and (column=date or boolean), columns can be
 	; comma delimited to specify multiple formats
@@ -58,15 +61,14 @@ addAttrib;	method HTML.addAttrib // Adds <! ELEMENT elementName  attribute >
 	S element=$G(actual(1)) if element="" set return="" quit
 	S attrib=$g(actual(2))
 	S label="vAddAttr"
-	I '$D(labels(label)) D
-	.	S labels(label)=""
+	I '$$hasSubr^UCGM(label) D
 	.	D addSubr^UCGM(label,"(element,attribut)","Add element to XML header")
 	.	N level S level=0
 	.	S code="N attr,col,data,n,trailer" D append(tab_code,label)
 	.	S code="S data=$P($G("_stringname_"),""]>"",1)" D append(tab_code,label)
 	.	S code="S trailer=$P($G("_stringname_"),""]>"",2)" D append(tab_code,label)
-	.;	S code="S "_stringname_"=data_""<!ATTLIST ""_element_$C(13,10)" D append(tab_code,label) 
-	.	S code="S "_stringname_"=data_$C(13,10)" D append(tab_code,label) 
+	.;	S code="S "_stringname_"=data_""<!ATTLIST ""_element_$C(13,10)" D append(tab_code,label)
+	.	S code="S "_stringname_"=data_$C(13,10)" D append(tab_code,label)
 	.	S code="S n=""""" D append(tab_code,label)
 	.	;
 	.	; start structure do block structure
@@ -83,26 +85,26 @@ addAttrib;	method HTML.addAttrib // Adds <! ELEMENT elementName  attribute >
 	.	D append($$initLine^UCGM(level)_code,label)
 	.	;
 	.	S code="I $G(attr)=""DATE"" S "_stringname_"="_stringname_"_""<!ATTLIST ""_col_"" STARTDATE CDATA #FIXED '1/1/1841'>""_$C(13,10)"
-	.	D append($$initLine^UCGM(level)_code,label)  
+	.	D append($$initLine^UCGM(level)_code,label)
 	.	;
 	.	S code="E  I $G(attr)=""BOOLEAN"" S "_stringname_"="_stringname_"_""<!ATTLIST ""_col_"" BOOLEAN CDATA FORMAT #FIXED '0/1'>""_$C(13,10)"
-	.	D append($$initLine^UCGM(level)_code,label)  
+	.	D append($$initLine^UCGM(level)_code,label)
 	.	;
 	.	S code="E  I $G(attr)=""CURRENCY"" S "_stringname_"="_stringname_"_""<!ATTLIST ""_col_"" CURRENCY CDATA #FIXED 'CURRENCY'>""_$C(13,10)"
-	.	D append($$initLine^UCGM(level)_code,label)  
-	.	S code="E  S "_stringname_"="_stringname_"_$C(9)_col_"" CDATA #REQUIRED""_$C(13,10)" 
+	.	D append($$initLine^UCGM(level)_code,label)
+	.	S code="E  S "_stringname_"="_stringname_"_$C(9)_col_"" CDATA #REQUIRED""_$C(13,10)"
 	.	D append($$initLine^UCGM(level)_code,label)
 	.	;
 	.	; end structured do block structure
 	.	D endBlock^UCGM
-	.	; 
+	.	;
 	.	S code="S "_stringname_"="_stringname_"_$C(13,10)_""]>""_trailer" D append(tab_code,label)
 	.	S code="Q "_stringname D append(tab_code,label)
 	S return="$$vAddAttr("_element_","_attrib_")"
 	Q
 	;
 	;-----------------------------------------------------------------------
-addCol	; method HTML.addCol // 
+addCol	; method HTML.addCol	//
 	;-----------------------------------------------------------------------
 	;
 	new class,col,record,var,varPtr,z
@@ -126,7 +128,7 @@ addCol	; method HTML.addCol //
 	Q
 	;
 	;-----------------------------------------------------------------------
-addElement	; method HTML.addElement // Adds <! ELEMENT elementName (attributes)>
+addElement ; method HTML.addElement // Adds <! ELEMENT elementName (attributes)>
 	;-----------------------------------------------------------------------
 	;
 	new element,attributes,stringname
@@ -140,15 +142,14 @@ addElement	; method HTML.addElement // Adds <! ELEMENT elementName (attributes)>
 	; Create one and only one label to process the information, this label
 	; will be used by all calls to add a element list
 	;
-	I '$D(labels(label)) D
+	I '$$hasSubr^UCGM(label) D
 	.	;
-	.	S labels(label)=""
 	.	D addSubr^UCGM(label,"(element,attribut)","Add element to XML header")
 	.	S code="N data,trailer" D append(tab_code,label)
 	.	S code="S data=$P($G("_stringname_"),""]>"",1)" D append(tab_code,label)
 	.	S code="S trailer=$P($G("_stringname_"),""]>"",2)" D append(tab_code,label)
-	.	S code="S "_stringname_"=data_""<!ELEMENT ""_element" D append(tab_code,label) 
-	.	S code="I $G(attribut)'="""" S "_stringname_"="_stringname_"_"" (""_attribut_"")*""" D append(tab_code,label)  
+	.	S code="S "_stringname_"=data_""<!ELEMENT ""_element" D append(tab_code,label)
+	.	S code="I $G(attribut)'="""" S "_stringname_"="_stringname_"_"" (""_attribut_"")*""" D append(tab_code,label)
 	.	S code="S "_stringname_"="_stringname_"_"" >""_$C(13,10)_""]>""_trailer" D append(tab_code,label)
 	.	S code="Q "_stringname D append(tab_code,label)
 	S return="$$vAddElement("_element_","_attrib_")"
@@ -186,16 +187,15 @@ addRow	;method; HTML.addRow() Adds <columnName>value</columnName>... for entire 
 	if $L(return)>450 d
 	.	N str,label,substr,i
 	.	S label=$$newLabel^UCGM("AddRw",.labels)	; Get next label
-	.	S label=label_"()"
 	.	D Splitret
-	.	S return="$$"_label
+	.	S return="$$"_label_"()"
 	;
 	quit
 	;
-Splitret;	
+Splitret ;
 	; Split the return field into multiple lines of code. This is done to
 	; prevent compile time errors.
-	D addSubr^UCGM(label,"","; ")   	; header
+	D addSubr^UCGM(label,"()","; ")   	; header
 	do append(" n X",label)
 	do append(" S X=""""",label)
 	for i=1:7 D  Q:return=""
@@ -211,7 +211,7 @@ Splitret;
 	do append(" Q X",label)
 	Q
 	;-----------------------------------------------------------------------
-addList;	method HTML.addList Adds Muliple <columnName>value</columnName>
+addList ; method HTML.addList Adds Muliple <columnName>value</columnName>
 	;-----------------------------------------------------------------------
 	n col,collist,delimitr,element,stringname,var,varlist,I
 	S element=$G(actual(1)) I element="" set return="" quit
@@ -229,9 +229,9 @@ addList;	method HTML.addList Adds Muliple <columnName>value</columnName>
 	if $L(return)>450 d
 	.	N str,label,substr,i
 	.	S label=$$newLabel^UCGM("AddLs",.labels)	; Get next label
-	.	S label=label_"()"
+	.	S label=label
 	.	D Splitret
-	.	S return="$$"_label
+	.	S return="$$"_label_"()"
 	Q
 	;
 addObj	;
@@ -249,9 +249,9 @@ addObj	;
 	F I=1:1 S di=$P(list,",",I) Q:di=""  D
 	.	S diattrib=$$DI^SQLDD(di,file,,.fsn)
 	.	S z=$P(diattrib,"|",1)			; column attributes (node number)
-	.	S col=$$LOWER^%ZFUNC(di)		; Lower case item name
+	.	S col=$$LOWER^UCGMR(di)		; Lower case item name
 	.	S filecol=objnam_"."_col
-	.	;I18N=OFF 
+	.	;I18N=OFF
 	.	S mcode=$$initLine^UCGM(level)
 	.	S x=" set "_setVar_"="_setVar_"_$C(13,10,9)_""<"_di_">""_"_filecol_"_""</"_di_">"""
 	.	D line^UCGM(x)
@@ -260,7 +260,7 @@ addObj	;
 	S (mcode,return)=""
 	Q
 	;-----------------------------------------------------------------------
-addProp;	method HTML.addProp Adds <columnName>value</columnName>
+addProp ; method HTML.addProp Adds <columnName>value</columnName>
 	;-----------------------------------------------------------------------
 	n col,var
 	S col=$G(actual(1)) I col="" set return="" quit
@@ -269,11 +269,11 @@ addProp;	method HTML.addProp Adds <columnName>value</columnName>
 	set return="$G("_setVar_")"
 	do addSingle(col,var)
 	Q
-addSingle(col,var);	Private; add single <columnname>value</columnname>  
+addSingle(col,var); Private; add single <columnname>value</columnname>
 	set return=return_"_$C(13,10,9)_""<"_col_">""_$$escape^UCHTML("_var_")_""</"_col_">"""
 	Q
 	;-----------------------------------------------------------------------
-addString;	method; HTML.addString() Adds <tag>String</tag>, or String if no tag) 
+addString ; method; HTML.addString() Adds <tag>String</tag>, or String if no tag)
 	;-----------------------------------------------------------------------
 	new string,sstring
 	set string=$G(actual(1)) if string="" set return="" quit
@@ -287,7 +287,7 @@ addString;	method; HTML.addString() Adds <tag>String</tag>, or String if no tag)
 	E  S return=return_sstring_">"""
 	Q
 	;-----------------------------------------------------------------------
-addTitle;	method; HTML.addTitle() adds <XML> <!doctype  doc[  ]> 
+addTitle ; method; HTML.addTitle() adds <XML> <!doctype  doc[  ]>
 	;-----------------------------------------------------------------------
 	new title,stitle
 	;
@@ -307,37 +307,37 @@ new	; Class.new
 	quit
 	;
 	;-----------------------------------------------------------------------
-append(code,label)	; Add code to the append
+append(code,label) ; Add code to the append
 	;-----------------------------------------------------------------------
 	;
-	D append^UCGM(code,label) 
+	D append^UCGM(code,label)
 	Q
 	;
 	;-----------------------------------------------------------------------
-escape(data)	;public String; Escape XML special characters
+escape(data) ;public String; Escape XML special characters
 	;-----------------------------------------------------------------------
 	; This function will be called at runtime to escape characters in the data
 	; that are not allowed in XML CDATA.
 	;
-	; The ampersand character (&) and the left angle bracket (<) MUST NOT 
-	; appear in their literal form, except when used as markup delimiters, 
-	; or within a comment, a processing instruction, or a CDATA section. 
-	; If they are needed elsewhere, they MUST be escaped using either 
-	; numeric character references or the strings "&amp;" and "&lt;" 
-	; respectively. The right angle bracket (>) MAY be represented using 
-	; the string "&gt;", and MUST, for compatibility, be escaped using 
-	; either "&gt;" or a character reference when it appears in the string 
-	; "]]>" in content, when that string is not marking the end of a CDATA 
+	; The ampersand character (&) and the left angle bracket (<) MUST NOT
+	; appear in their literal form, except when used as markup delimiters,
+	; or within a comment, a processing instruction, or a CDATA section.
+	; If they are needed elsewhere, they MUST be escaped using either
+	; numeric character references or the strings "&amp;" and "&lt;"
+	; respectively. The right angle bracket (>) MAY be represented using
+	; the string "&gt;", and MUST, for compatibility, be escaped using
+	; either "&gt;" or a character reference when it appears in the string
+	; "]]>" in content, when that string is not marking the end of a CDATA
 	; section.
 	;
-	; In the content of elements, character data is any string of characters 
-	; which does not contain the start-delimiter of any markup and does not 
-	; include the CDATA-section-close delimiter, "]]>". In a CDATA section, 
-	; character data is any string of characters not including the 
+	; In the content of elements, character data is any string of characters
+	; which does not contain the start-delimiter of any markup and does not
+	; include the CDATA-section-close delimiter, "]]>". In a CDATA section,
+	; character data is any string of characters not including the
 	; CDATA-section-close delimiter, "]]>".
 	;
-	; To allow attribute values to contain both single and double quotes, 
-	; the apostrophe or single-quote character (') MAY be represented as 
+	; To allow attribute values to contain both single and double quotes,
+	; the apostrophe or single-quote character (') MAY be represented as
 	; "&apos;", and the double-quote character (") as "&quot;".
 	;-----------------------------------------------------------------------
 	;
@@ -349,7 +349,7 @@ escape(data)	;public String; Escape XML special characters
 	Q data
 	;
 	;-----------------------------------------------------------------------
-replace(data,chr,expr)	;local String; replace 1 character by (escape) string
+replace(data,chr,expr) ;local String; replace 1 character by (escape) string
 	;-----------------------------------------------------------------------
 	; Note that the code in the FOR-loop explicitly uses the fact that chr
 	; is a single character, and that expr will not contain chr.

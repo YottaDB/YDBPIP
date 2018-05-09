@@ -14,11 +14,11 @@ DBSTEST	;;PBS -  - V5.0 - QUERY SELECTION MUMPS CODE PARSER
 	;	     Removed use of DBSPARS, which is to be obsoleted.
 	;
 	; 08/12/97 - Betty Ndi - 25653
-	;            Replace follows operator "]" with a "]]". 
+        ;            Replace follows operator "]" with a "]]".
 	;
-	; 10/17/96 - Bob Chiang - 20948 
-	;            Modified to replace node 1-7 references with node 16 
-	;            (file access keys). 
+        ; 10/17/96 - Bob Chiang - 20948
+        ;            Modified to replace node 1-7 references with node 16
+        ;            (file access keys).
 	;
 	; 02/23/96 - SPIER - 20925
 	;            Added new utility to display converted DQ queries to SQL
@@ -40,9 +40,9 @@ A	;
 	;
 	S (%A1,%A2,%A4,%A5,%A6,%A7,%A8,%A9,%A10,%A11)=0   
 	S %TAB("%A1")="/DES=DATA-QWIK Query Syntax/TYP=L/LEN=1"
-	S %TAB("%A2")="/DES=Report Display Format/TYP=L/LEN=1" 
-	S %TAB("%A4")="/DES=File Relationship/TYP=L/LEN=1" 
-	S %TAB("%A5")="/DES=DATA-QWIK Utility (UTLREAD,DBSMENU,DBSTBL)/TYP=L/LEN=1" 
+        S %TAB("%A2")="/DES=Report Display Format/TYP=L/LEN=1"
+        S %TAB("%A4")="/DES=File Relationship/TYP=L/LEN=1"
+        S %TAB("%A5")="/DES=DATA-QWIK Utility (UTLREAD,DBSMENU,DBSTBL)/TYP=L/LEN=1"
 	S %TAB("%A6")="/DES=SQL Command (Tutorial)/TYP=L/LEN=1"
 	S %TAB("%A7")="/DES=SQL SELECT statement (QWIK report)/TYP=L/LEN=1"
 	S %TAB("%A8")="/DES=Convert DATA-QWIK Query to SQL/TYP=L/LEN=1"
@@ -96,7 +96,7 @@ TEST1	;
 	S SEQBY=$E(SEQBY,1,$L(SEQBY)-1),^TMP($J)=FILES
 	Q
 	;
-CVTQUERY;	
+CVTQUERY;
 	; Convert DATA-QWIK query to SQL query
 	;
 	N %FRAME

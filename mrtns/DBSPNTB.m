@@ -3,7 +3,7 @@ DBSPNTB	;; -  - V4.0 - Print driver for Burroughs Poll Select terminal
 	;     ORIG:  Robert Chiang
 	;     DESC:  Print driver for block mode terminal (BPS)
 	;
-	; I18N=QUIT: Exculded from I18N standards. 
+        ; I18N=QUIT: Exculded from I18N standards.
 	;----- Revision History -----------------------------------------------
 	; 05/17/06 - Allan Mattson - CR20048
 	;            Replaced calls to $$UPPER^%ZFUNC with $$UPPER^SCAUTL.

@@ -44,20 +44,18 @@
 *
 */
 #include <stdio.h>
-#include <extcall.h>
+#include <stdlib.h>
+#include <string.h>
+#include "extcall.h"
 
-void unpack2(	int count,
-				STR_DESCRIPTOR *src,
-				SLONG length,
-				SLONG signd,
-				SLONG left_nibble,
-				STR_DESCRIPTOR *ret_data)
+void unpack2(	int count, STR_DESCRIPTOR *src, SLONG length, SLONG signd, 
+		SLONG left_nibble, STR_DESCRIPTOR *ret_data)
 {
-	int		  i	= 0;
-	int		  location	= 0;
-	int		  signmult = 1;
-	double	  result	= 0;
-	unsigned char  ch;
+	int		i = 0;
+	int		location = 0;
+	int		signmult = 1;
+	double	  	result	= 0;
+	unsigned char  	ch;
 
 #ifdef DEBUG
 printf("src->str %s\n",src->str);
@@ -67,45 +65,44 @@ sca_fflush(stdout);
 	result = 0;
 
 	for (;;) {
-		ch = src->str[i];					/* Get byte */
+		ch = src->str[i];		/* Get byte */
 
-		if (left_nibble) ch = ch>>4;		/* Shift to rightmost 4 bits */
-			else ch = ch&15;				/* or mask leftmost 4 */
+		if (left_nibble) ch = ch>>4;	/* Shift to rightmost 4 bits */
+			else ch = ch&15;	/* or mask leftmost 4 */
 
-		left_nibble = !left_nibble;			/* Switch nibble to work */
-		if (left_nibble) ++i;				/* Increment byte pointer */
+		left_nibble = !left_nibble;	/* Switch nibble to work */
+		if (left_nibble) ++i;		/* Increment byte pointer */
 
-		if (signd) {						/* Get sign, if signd */
-			if (ch == 11 || ch == 13) {		/* B or D => negative */
-			signmult = -1;
-			++location;
-		}
-			signd = 0;						/* Turn off sign flag */
-			continue;						/* Go get next nibble */
+		if (signd) {			/* Get sign, if signd */
+			if (ch == 11 || ch == 13) {	/* B or D => negative */
+				signmult = -1;
+				++location;
+			}
+			signd = 0;		/* Turn off sign flag */
+			continue;		/* Go get next nibble */
 		}
 
 		result = result * 10 + ch;
 		++location;
 
-		--length;							/* Decrement length */
-		if (!length) break;					/* If done, stop */
-
+		--length;			/* Decrement length */
+		if (!length) break;		/* If done, stop */
 	}
 
 	result = result * signmult;
 
 #ifdef DEBUG
-printf("result %.14f\n",result);
-sca_fflush(stdout);
-printf("ret_data->length %d\n",ret_data->length);
-sca_fflush(stdout);
+	printf("result %.14f\n",result);
+	sca_fflush(stdout);
+	printf("ret_data->length %d\n",ret_data->length);
+	sca_fflush(stdout);
 #endif
 
 	(void)sprintf(ret_data->str,"%.14f",result);
 
 #ifdef DEBUG
-printf("ret_data->str %s\n",ret_data->str);
-sca_fflush(stdout);
+	printf("ret_data->str %s\n",ret_data->str);
+	sca_fflush(stdout);
 #endif
 
 	ret_data->length = strlen(ret_data->str);

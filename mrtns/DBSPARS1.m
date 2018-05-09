@@ -15,7 +15,7 @@ DBSPARS1	;DBSPARS1;DBS - U - V4.4 - POST PROCESSOR MACRO COMMAND
 	;           RM     - ERROR MESSAGE
 	;           ER     - ERROR FLAG
 	;
-	; I18N=QUIT: Exculded from I18N standards. 
+        ; I18N=QUIT: Exculded from I18N standards.
 	;---- Revision History ------------------------------------------------
 	; 08/30/06 - RussellDS - CR22720
 	;	     Replaced call to $$UPPER^SCAUTL with $$UPPER^UCGMR to
@@ -142,7 +142,7 @@ NCOMP	;
 	S SEQ=$O(COMP(SEQ)) I SEQ="" Q
 	I '$D(^DBTBL(DLIB,1,DFID,9,SEQ)) G NCOMP
 	I COMP(SEQ)?1"D ".E S LOAD(S)=" "_COMP(SEQ)
-	E  S LOAD(S+100)=" S "_SEQ_"="_COMP(SEQ) 
+	       E  S LOAD(S+100)=" S "_SEQ_"="_COMP(SEQ) 
 	S S=S+1 G NCOMP
 	;
 	;

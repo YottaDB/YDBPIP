@@ -3,14 +3,15 @@ DBSTEST6	;Private;DBSFETCH DEMO/QA UTILITY
 	; ORIG:	CHIANG - 11/08/93
 	; DESC:	DBSFETCH DEMO/QA UTILITY
 	;
-	; I18N=QUIT: Exculded from I18N standards. 
+        ; I18N=QUIT: Exculded from I18N standards.
 	;------------ Revision History ---------------------------------------
 	;
 	; 08/12/97 - Betty Ndi - 25653
-	;            Replace follows operator "]" with a "]]". 
+        ;            Replace follows operator "]" with a "]]".
 	;
 	; 08/23/94 - Shaodong Tony Xu - ARQ 14621
 	;            Modified the variables %READ and %TAB.
+
 	K
 	I $G(%LIBS)="" S %LIBS=^CUVAR("%LIBS")
 	;
@@ -121,7 +122,7 @@ PACKEY(X)	;
 	F I=1:1:L S K=$P(X,",",I) I '((K?1N.N)!($E(K)="""")) S Z=Z_K_","
 	Q $E(Z,1,$L(Z)-1)
 	;
-CHGDI(X)	; 
+CHGDI(X) ;
 	; ---------- Convert [fid]di syntax to fid.di
 	;
 	S X=$TR(X,"[","")

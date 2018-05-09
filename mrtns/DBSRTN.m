@@ -1,4 +1,4 @@
-DBSRTN(RTN,ARRAY,START,LTAGS,NOKILL)	; 
+DBSRTN(RTN,ARRAY,START,LTAGS,NOKILL) ;
 	;;Copyright(c)1993 Sanchez Computer Associates, Inc.  All Rights Reserved - 08/17/93 09:49:17 - CHIANG
 	;     ORIG:  Bob Chiang
 	;     DESC:  Utility to build DQ compiler template programs.  This

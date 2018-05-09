@@ -1,4 +1,4 @@
-#!/bin/ksh
+#!/bin/bash
 # ------------------------------------------------------------------------
 # dm - GT.M and PROFILE/Anyware direct mode script
 #

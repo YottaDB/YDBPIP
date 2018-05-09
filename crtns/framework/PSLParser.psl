@@ -1,0 +1,2795 @@
+	/*
+	ORIG: Frans S.C. Witte - 2006-12-21
+	DESC: PSL compiler, Insensitive Group - #CLASSDEF for PSLParser
+
+	---- Comments ----------------------------------------------------------
+	The PSLParser class is used to decompose a PSL source structure into
+	individual tokens.
+
+	The decomposition parts use a PSLTokeninzer that is tailored to PSL.
+
+	---- Revision History --------------------------------------------------
+	2008-08-05, Frans S.C. Witte, CR34739
+		* Added support for Polymorphism in PSL-to-M
+
+	06/11/2008 - RussellDS - CR 30801
+		* Modified run section to call PSLRecordBuilder
+		* Modified toPslx() to save the .pslx files in a compressed
+		  form, i.e., one line per method/property, instead of per
+		  attribute of each.  This reduces the number of lines read
+		  when using a pslx file, which improves performance.
+	
+	2008-04-02, Frans S.C. Witte, CR 33569
+		* fixed issue with keyword 'final' in method declaration
+
+	12/20/06 - Frans S.C. Witte, CR 27800
+		* Initial version (2006-12-20) compiled with UCGM.
+		  Current version declares the unit as a CDM.
+		  Although this version can compile CDMs that declare reference
+		  classes, a compile-time error will be reported because full
+		  support of arbitrary Reference classes requires additional
+		  compiler changes, in particular with respect to object
+		  management.
+	*/
+	#PACKAGE  framework.psl
+	#CLASSDEF extends=PSLCC public
+
+	// top-node properties -------------------------------------------------
+	// ---------------------------------------------------------------------
+	#PROPERTYDEF methodName		class=String public readonly position=2
+		/* -------------------------------------------------------------
+		The name of the method that is currently being parsed (or "" if
+		before first method).
+		*/
+
+	#PROPERTYDEF lastLine		class=Number private position=3
+		/* -------------------------------------------------------------
+		The last line number of the original PSL source module.
+		This value is used by PSLParser.toPslx() to skip methods that
+		occur later in the source.
+		*/
+
+	// ---------------------------------------------------------------------
+	#PROPERTYDEF element		class=String public position=4
+		/* -------------------------------------------------------------
+		The elementName and elementType, separated by "~", to be passed
+		to UCSYSMAP.
+		*/
+
+	// node-only properties ------------------------------------------------
+	// ---------------------------------------------------------------------
+	#PROPERTYDEF logCounts		class=String private node="logCounts"
+		/* -------------------------------------------------------------
+		The number of messages that were logged as
+		nrOfInfos | nrOfWarns | nrOfErrors
+		*/
+
+	// ---------------------------------------------------------------------
+	#PROPERTYDEF logfile		class=String public node="logfile"
+		/* -------------------------------------------------------------
+		The name of the file that will be used to log messages.
+		If logfile.isNull(), then the parser uses the write-statement to
+		log messages, otherwise an IO instance is used to APPEND the
+		messages to the file.
+		*/
+
+	// ---------------------------------------------------------------------
+	#PROPERTYDEF moduleName		class=String public readonly node="moduleName"
+		/* -------------------------------------------------------------
+		The name of the module (without the extension) that will be
+		parsed.
+		*/
+
+	// ---------------------------------------------------------------------
+	#PROPERTYDEF parseLevel		class=Number node="parseLevel"
+		/* -------------------------------------------------------------
+		The level of validition that will be applied to the parsing of
+		the module:
+		*/
+		#PROPERTYDEF parseLevelCLASS = 0	public literal
+			/* Sufficient to provide Class.isAncestor(),
+			   Class.isClass(), and Class.isDecendant() information.
+			   Note that although this will result in a PSLClass
+			   instance, it may return incorrect values for some of
+			   the PSLClass properties including:
+			   - adjustor
+			   - classType
+			   - destructor
+			   */
+		#PROPERTYDEF parseLevelPSLX  = 1	public literal
+			/* Sufficient to provide .pslx file information
+			   At this level, parsing will be limited to the module
+			   itself if possible. The following validations that
+			   require access to a different module will be
+			   suppressed:
+			   - verify if a class named in a #PROPERTYDEF, or
+			   	method declaration exists
+			   - verify if a #PROPERTYDEF or a method declaration
+			   	conflicts with a declaration in an ancestor
+			   	class.
+			   Only minimal semantic actions will be performed. This
+			   implies:
+			   - duplicate formal parameter names will not be
+			   	reported
+			   - a missing #PACKAGE from a Class Definition Module
+			   	will not be reported
+			   A pass at this level may need to access the class
+			   descriptor of the immediate ancestor to derive the
+			   properties PSLClass.destructor and PSLClass.ancestor.
+			   */
+		#PROPERTYDEF parseLevelPSL   = 2	public literal
+			/* sufficient to compile the current module
+			   */
+		#PROPERTYDEF parseLevelFULL  = 3	public literal
+			/* apply all sematantic actions
+			   */
+
+	// ---------------------------------------------------------------------
+	#PROPERTYDEF refPrp		class=List readonly node="refPrp"
+		/* -------------------------------------------------------------
+		The List of Reference properties of the class being compiled.
+		*/
+
+	// ---------------------------------------------------------------------
+	#PROPERTYDEF targetComment	class=String readonly node="tgtCmt"
+		/* -------------------------------------------------------------
+		The sequence of characters that starts a comment-to-end-of-line
+		in the target language. The parser uses this when it inserts
+		comments in generated code.
+		*/
+
+	// array properties ----------------------------------------------------
+	// ---------------------------------------------------------------------
+	#PROPERTYDEF prpExt()		class=String protected node="prpExt"
+		/* -------------------------------------------------------------
+		The class names of the properties of all ancestor classes,
+		indexed by unqualified property name.
+		*/
+
+	// ---------------------------------------------------------------------
+	#PROPERTYDEF prpXnp(,)		class=String protected node="prpXnp"
+		/* -------------------------------------------------------------
+		Crossreference of (node, position) to propertyName for this
+		class and all ancestor classes
+		*/
+
+	// ---------------------------------------------------------------------
+	#PROPERTYDEF pslPoly()		class=String protected node="pslPoly"
+		/* -------------------------------------------------------------
+		This array contains the cross-reference of methods overridden by
+		the current class:
+		pslPoly(class.method) = closest ancestor implementing the method
+		*/
+
+	// ---------------------------------------------------------------------
+	#PROPERTYDEF symTab()		class=String private node="symTab"
+		/* -------------------------------------------------------------
+		The parser's internal symbol table. The current version is only
+		used to store literals (string and number) and comment.
+		Currently the contents of this property is just an array of
+		String, and each String is a tab-delimited entry. A later
+		version is likely to use a separate PSL class for symbol table
+		entries.
+		*/
+
+	// ---------------------------------------------------------------------
+	#PROPERTYDEF sysmap(,,)		class=String private node="sysmap"
+		/* -------------------------------------------------------------
+		The SYSMAP information collected by the parser.
+		The information in this array will be re-arranged before it is
+		passed to ^UCSYSMAP. 
+		*/
+
+	/* ---------------------------------------------------------------------
+	Additional token types used for syntactic elements and rules
+	*/
+	#PROPERTYDEF tknTypeEFALSE = -3010	class=Number public literal
+			// keyword false
+	#PROPERTYDEF tknTypeETRUE  = -3011	class=Number public literal
+			// keyword true
+	#PROPERTYDEF tknTypeEVSIG  = -3012	class=Number public literal
+			// variable signature
+	#PROPERTYDEF tknTypeEFPDEC = -3013	class=Number public literal
+			// formal param decl.
+	#PROPERTYDEF tknTypeSMTD   = -4000	class=Number public literal
+			// method descriptor
+
+	// I18N=QUIT
+	// *******************************************************************
+	// * IMPORTANT NOTE:                                                 *
+	// * According to the rules that apply to PSL compiler upgrades,     *
+	// * the generated M routine associated with this procedure must be  *
+	// * checked into StarTeam and released with the procedure whenever  *
+	// * changes are made to this procedure.                             *
+	// *                                                                 *
+	// * The M routine will be loaded to the mrtns directory during      *
+	// * upgrades and will then be removed from that directory as part   *
+	// * of the upgrade process.  Therefore, other than during an        *
+	// * upgrade an mrtns version of this routine should not exist.      *
+	// *                                                                 *
+	// * Keep these comments as single line to ensure they exist in the  *
+	// * generated M code.                                               *
+	// *******************************************************************
+
+	/* ================================================================== */
+	/* Initializer							      */
+	/* ****************************************************************** */
+
+	// ---------------------------------------------------------------------
+private void initialize( Object initObj	// {String} moduleName
+		)	// constructor
+	/* ---------------------------------------------------------------------
+	The initialize method will cast the initObj to a String, and interpret
+	it as the name of the source module (= class name).
+
+	The method will not load any source code.
+	*/
+	do this.reset()
+
+	set this.moduleName = {String}initObj
+
+	quit
+
+	/* ================================================================== */
+	/* Non-local static methods					      */
+	/* ****************************************************************** */
+
+	// ---------------------------------------------------------------------
+static String addPostCond( String pc	// current postcondition
+		, String add		// condition to be added
+		) 
+	/* ---------------------------------------------------------------------
+	Support function that adds a condition to postcond (or creates one if it
+	was empty).
+
+	NOTES:
+	. The current implementation assumes bot pc and add are M code and will
+		return the M code for a postconditional.
+	*/
+	if pc.isNull() quit ":"_ add
+
+	#ACCEPT GROUP=ACCESS;CR=27800;DATE=2008-02-27;PGM=Frans S.C. Witte
+	if $$isSingle^UCGM(add) quit pc_ "&"_ add
+	quit pc_ "&("_ add_ ")"
+
+	// ---------------------------------------------------------------------
+public static List getClasses() quit {List}"Boolean,ByteString,Cache,Class,Column,Date,Db,DbSet,Error,HTML,IO,List,Memo,Number,Object,Primitive,Record,Reference,ResultSet,Row,RowSet,Runtime,SchemaColumn,SchemaTable,String,Time,TranSet,PSL,PSLBuffer,PSLColumn,PSLExpression,PSLSubrou,PSLTable"
+	/* ---------------------------------------------------------------------
+	Support function that returns the List of Intrinsic Classes supported by
+	this version of the parser.
+	*/
+
+	// ---------------------------------------------------------------------
+public static List getKwds() quit {List}"and,false,final,literal,new,not,or,private,protected,public,static,super,this,true,void"
+	/* ---------------------------------------------------------------------
+	Support function that returns the List of keywords supported by this
+	version of the parser.
+	*/
+
+	// ---------------------------------------------------------------------
+public static List getRsvd() quit {List}(PSLParser.getStms()_","_PSLParser.getKwds())
+	/* ---------------------------------------------------------------------
+	Support function that returns the List of reserved words supported by
+	this version of the parser. The List of reserved words combines the List
+	of keywords with the List of statements.
+	*/
+
+	// ---------------------------------------------------------------------
+public static List getStms() quit {List}"catch,do,else,for,hang,halt,if,job,kill,lock,quit,read,set,type,while,write"
+	/* ---------------------------------------------------------------------
+	Support function that returns the List of statements supported by this
+	version of the parser.
+	*/
+
+	/* ================================================================== */
+	/* Non-local instance methods					      */
+	/* ****************************************************************** */
+
+	// ---------------------------------------------------------------------
+void addSysmap( String topic
+		, String loc
+		, String ref
+		, String val
+		) // Append val to TAB-delimited this.sysmap(topic,loc,ref)
+	/* ---------------------------------------------------------------------
+	Adds the sysmap information to this.sysmap(,,).
+	The parameters correspond to the levels observed by UCSYSMAP
+	*/
+	set this.sysmap( topic, loc, ref) = this.sysmap( topic, loc, ref).get()_ val_ 9.char()
+	quit
+
+	// ---------------------------------------------------------------------
+public final String findPSLClass( PSLTokenizer tknzr
+		, String cid			// either class or class(,)
+		)	// search PSLClass cache for matching name
+	/* ---------------------------------------------------------------------
+	Support function mostly for symmetry. PSLParser.getPSLClass() will do
+	case-insensitive lookups anyway. This function consumes the notFound
+	exception, and returns the modified cid or "".
+
+	NOTES:
+	. class name lookups are always case insensitive
+	*/
+	do {
+		catch xNotFound {
+			set cid = ""
+		} 
+		type String ocid = cid.piece("(")
+		type PSLClass ignore = this.getPSLClass( .cid)
+		if cid'=ocid do this.srcWarn(tknzr, "MISMATCH","Classname is case sensitive: "_ocid)
+	}
+	quit cid
+
+	// ---------------------------------------------------------------------
+public final String findPSLMethod( PSLTokenizer tknzr
+		, String mid		// className.methodName
+		, Number nCase		// methodName case handling (*2)
+		)	// search PSLMethod cache for matching instance
+	/* ---------------------------------------------------------------------
+	Find and return the method ID for the specified cls.mtd if it exists.
+
+	ARGUMENTS:
+	(*1) mid = className . methodName
+		The spelling of className shall match the spelling in
+		this.pslCls(). The spelling of methodName depends on the value
+		of nCase.
+	(*2) nCase = case handling of prp
+		0 = case sensitive
+		1 = case insensitive
+
+	OUTPUTS:
+	. $$ = method identification
+		1 If this.pslMtd(mid) exists, then pid will be returned
+		2 Else if this.pslMtd(cls.mid1) with mid1.lowerCase() = mid.lowerCase()
+		  exists, then cls.mid1 will be returned
+		3 Else step 2 is repeated for all ancestors of cls
+		4 If no match is found "" will be returned
+	*/
+	type String acls = mid.piece(".")	// ancestor class iterator 
+	type String amtd = mid.piece(".",2)	// ancestor property iterator 
+	type String omtd = amtd			// original property
+	type String head
+	type String rtrn = ""			// return value
+	type PSLClass ocd
+
+	while (rtrn.isNull() & 'acls.isNull()) do {
+		set head = acls_ "."
+		// step 1: try in cache, with mtd as supplied
+		if this.pslMtd( head_ amtd).exists() set rtrn = head_ amtd quit
+
+		// step 2: ensure class is loaded
+		if 'this.pslCls( acls).exists() do this.loadClass( acls)
+
+		// step 3: try in cache, case as requested
+		set amtd = head
+		for  set amtd = this.pslMtd( amtd).order() quit:'amtd.beginsWith( head)  if this.equals(amtd.piece(".",2), omtd, nCase) set rtrn = amtd quit
+
+		// setp 4: If not found try ancestor
+		if rtrn.isNull() set ocd = this.pslCls( acls), acls = ocd.extends, amtd = omtd
+	}
+
+	if 'rtrn.isNull(), rtrn.piece(".",2)'= omtd do this.srcWarn(tknzr, "MISMATCH","Methodname is case sensitive: "_omtd)
+	quit rtrn
+
+	// ---------------------------------------------------------------------
+public final String findPSLProperty( PSLTokenizer tknzr
+		, String pid		// className.propertyName
+		, Number nCase		// propertyName case handling (*2)
+		)	// search PSLProperty cache for matching instance
+	/* ---------------------------------------------------------------------
+	Find and return the property ID for the specified cls.prp if it exists.
+
+	ARGUMENTS:
+	(*1) pid = className . propertyName
+		The spelling of className shall match the spelling in
+		this.pslCls(). The spelling of propertyName depends on the value
+		of nCase.
+	(*2) nCase = case handling of prp
+		0 = case sensitive
+		1 = case insensitive
+
+	OUTPUTS:
+	. $$ = property identification
+		1 If this.pslPrp(pid) exists, then pid will be returned
+		2 Else if this.pslPrp(cls.prp1) with prp1.lowerCase() = prp.lowerCase()
+		  exists, then cls.prp1 will be returned
+		3 Else step 2 is repeated for all ancestors of cls
+		4 If no match is found "" will be returned
+	*/
+	type String acls = pid.piece(".")	// ancestor class iterator 
+	type String aprp = pid.piece(".",2)	// ancestor property iterator 
+	type String oprp = aprp			// original property
+	type String head
+	type String rtrn = ""			// return value
+	type PSLClass ocd
+
+	while (rtrn.isNull() & 'acls.isNull()) do {
+		set head = acls_ "."
+		// step 1: try in cache, with prp as supplied
+		if this.pslPrp( head_ aprp).exists() set rtrn = head_ aprp quit
+
+		// step 2: ensure class is loaded
+		if 'this.pslCls( acls).exists() do this.loadClass( acls)
+
+		// step 3: try in cache, case as requested
+		set aprp = head
+		for  set aprp = this.pslPrp( aprp).order() quit:'aprp.beginsWith( head)  if this.equals(aprp.piece(".",2), oprp, nCase) set rtrn = aprp quit
+
+		// setp 4: If not found try ancestor
+		if rtrn.isNull() set ocd = this.pslCls( acls), acls = ocd.extends, aprp = oprp
+	}
+	if 'rtrn.isNull(), rtrn.piece(".",2)'= oprp do this.srcWarn(tknzr, "MISMATCH","Propertyname is case sensitive: "_oprp)
+	quit rtrn
+
+	// ---------------------------------------------------------------------
+public final String getPackageRoot( ) //
+	/* ---------------------------------------------------------------------
+	Return the package root that wiil be appended to the output root when
+	writing the compiler output files.
+
+	If this.pass0() has not yet been called, "" will be returned, else
+	the explicit or implicit value will be returned.
+	*/
+	type String cls = this.moduleName
+
+	if 'this.pslCls( cls).exists() quit ""
+
+	type PSLClass clsdes = this.pslCls( cls)
+	quit clsdes.getPackageRoot()
+
+	// ---------------------------------------------------------------------
+public void log( PSLTokenizer tknzr,
+		Number lnr,	// line number (-1 = this.srcLine)
+		String srn,
+		Number lvl,	// log level (1=info, 2=warning, 3=error)
+		String grp,	// message group
+		String msg)	// message text
+	/* ---------------------------------------------------------------------
+	Log a message.
+
+	NOTES:
+	. This method is called by $$srcErr(), $$srcInfo(), and $$srcWarn().
+		It logs to this.logfile or $IO.
+	. The number of "+" signs that are written to the logfile are essential
+		for TBXDQSVR (ugh!). Do not change this value unless TBXDQSVR is
+		modified and distributed as well ...
+	*/
+	type String erline1,erline2,erline3
+
+	set:lnr=-1 lnr = tknzr.srcLine
+	set:srn.isNull() srn = this.methodName
+
+	set erline2 = "%PSL-"_ ("IWE".extract(lvl))_"-"_grp_": "_msg
+	if lnr>0 {
+		set erline1 = tknzr.srcCode( lnr)
+		set erline3 = "At source code line: "_ lnr.toString()
+		set:'srn.isNull() erline3 = erline3_ " in subroutine: "_ srn
+	}
+	else  set erline1 = "", erline3 = "In module: "_ this.moduleName
+
+	/* Do not replace the construct below by if-else !
+	   The current coding will ensure that logging switches to $P whenever
+	   an IO exception occurs while writing to the logfile.
+	   */
+	if 'this.logfile.isNull() {
+		type IO io = Class.new("IO")
+		set io.openParams = "APPEND"
+		set io.fileName = this.logfile
+		catch xIo {
+			if xIo.type'["%PSL-E-IOOPEN" do io.close()
+			set this.logfile=""
+		}
+		do io.open()
+		do io.write("++++++++++++++++++++++")
+		do io.write(erline1)
+		do io.write(erline2)
+		do io.write(erline3)
+		do io.close()
+	}
+	if this.logfile.isNull() {
+		write !,erline1,!
+		write erline2,!
+		write erline3,!
+	}
+
+	type String lc = this.logCounts
+	set lc.piece("|",lvl) = lc.piece("|",lvl) + 1, this.logCounts = lc
+	quit
+
+	// ---------------------------------------------------------------------
+void srcWarnDep( PSLTokenizer tknzr	// PLSTokenizer
+		, Number depVer		// PSL Version where deprecated
+		, Number disVer		// PSL Version where discontinued (0 = not yet)
+		, String msg		// message text
+		)	// report DEPRECATED warning of error
+	/* ---------------------------------------------------------------------
+	Report a DEPRECATED error or warning, if applicable.
+	An error will be reported if this.getSetting("PSL","Version")'<disVer
+	A warning will be reported if this.getSetting("PSL","Version")'<depVer
+	*/
+	type literal String DEPR = "DEPRECATED"
+	quit:this.parseLevel < this.parseLevelPSL
+	quit:this.cs("PSL","Version") < depVer	// not deprecated at this level
+
+	if disVer = 0 do this.srcWarn( tknzr, DEPR, msg) quit	// not yet discontinued
+	if this.cs("PSL","Version") < disVer do this.srcWarn( tknzr, DEPR, msg) quit
+
+	type Number n = this.srcErr( tknzr, DEPR, msg, 0)
+	quit
+
+	// ---------------------------------------------------------------------
+public Number toPslx( String dir)	// Produce .pslx file in specified directory
+	/* ---------------------------------------------------------------------
+	Produce the .pslx file for this module, provided output is not
+	suppressed.
+	*/
+	type IO pslx = Class.new("IO")
+	type PSLTokenizer tknzr = Class.new("PSLTokenizer", pslx)
+	set tknzr.charEscape = "\"
+
+	type String cls = this.moduleName
+	type PSLClass ocd = this.pslCls( cls)
+	type String json = ocd.toJSON( tknzr)
+	set json = json.extract(1, json.length() - 2)	// strip ' }'
+
+	set pslx.directory = dir
+	set pslx.fileName = cls_".pslx"
+	set pslx.recordSize = 32767
+	set pslx.openParams = "NEWVERSION"
+
+	do pslx.open()
+
+	/* Enable the next three lines and comment out the fourth line to return
+	   the creation of pslx files in a more readable, non-compressed form.
+	   Do the same in the methods and properties sections. */
+	//type Number i
+	//do pslx.write( json.piece( 9.char()))
+	//for i = 2:1:json.length(9.char()) do pslx.write( "  "_ json.piece( 9.char(), i))
+	do pslx.write( json)
+	set cls = cls_"."
+
+	// write methods array
+	type String nam = this.pslMtd( cls).order()
+	type PSLMethod omd
+	if nam.beginsWith( cls) {
+		do pslx.write( ", ""methods"" : [ ")
+		set json = ""
+		while nam.beginsWith( cls) {
+			set omd = this.pslMtd( nam)
+			/* Include only if method belongs to original source
+			   */
+			if omd.sourceLine '> this.lastLine {
+				set json = json _ omd.toJSON( tknzr)
+				//do pslx.write( "    "_ json.piece( 9.char()))
+				//for i = 2:1:json.length(9.char()) do pslx.write( "      "_ json.piece( 9.char(), i))
+				do pslx.write( json)
+				set json = ","_ 9.char()
+			}
+			set nam = this.pslMtd( nam).order()
+		}
+		do pslx.write( "  ]")
+	}
+
+	// write properties array
+	type PSLProperty opd
+	set nam = this.pslPrp( cls).order()
+	if nam.beginsWith( cls) {
+		do pslx.write( ", ""properties"" : [ ")
+		set json = ""
+		while nam.beginsWith( cls) {
+			set opd = this.pslPrp( nam)
+			set json = json _ opd.toJSON( tknzr)
+			//do pslx.write( "    "_ json.piece( 9.char()))
+			//for i = 2:1:json.length(9.char()) do pslx.write( "      "_ json.piece( 9.char(), i))
+			do pslx.write( json)
+			set json = ","_ 9.char()
+			set nam = this.pslPrp(nam).order()
+		}
+		do pslx.write( "  ]")
+	}
+	do pslx.write("}")
+	do pslx.close()
+	quit 0
+
+	// ---------------------------------------------------------------------
+public Number toSysmap( String target())
+	/* ---------------------------------------------------------------------
+	Store the SYSMAP information.
+	*/
+	type String sysmap(,,)
+
+	/* Note: The order of the statements is relevant!
+	   The array assignment KILLs sysmap(,,).
+	   */
+	set sysmap(,,) = this.sysmap(,,)
+	set sysmap("RTNNAME") = this.moduleName
+	type Number retval = 0
+	do {
+		catch xSysmap {
+			do this.log(,0,"",2,"SYSMAP","Error while saving sysmap data: "_xSysmap.description_","_xSysmap.context)
+			set retval = -1
+		}
+		do ^UCSYSMAP( this.element, target(), sysmap(,,))
+	}
+	quit retval
+
+	/* ================================================================== */
+	/* Pass0							      */
+	/* ****************************************************************** */
+
+	// ---------------------------------------------------------------------
+Number pass0( ret PSLX info,		// the target PSLX instance.
+		Number parseLevel,		// the parseLevel
+		PSLTokenizer tknzr)		// tokenizer /NOREQ
+	/* ---------------------------------------------------------------------
+	Run one of the compiler passes that do not produce target code.
+	This method extracts information from the module specified by
+	this.moduleName from the .psl file.
+	If the .psl file is not found, -1 will be returned.
+
+	This method will delete all class/property/method desciptors of the
+	current instance, but will not delete any information from the info
+	instance.
+
+	RETURNS:
+	. $$ = compilation result:
+		0 = OK
+		-1 = module not found
+		>0 = number of compilation errors
+
+	NOTES:
+	. This method shall also look at #IMPORT instructions.
+	. The #PROPERTYDEF and #OPTION compiler instructions are interpreted
+		even if parseLevel=this.parseLevelCLASS. This is needed because
+		the value of PSLClass.classType for classes that extend
+		Primitive will only be known after all property declarations
+		have been processed.
+	*/
+	type IO modIO = Class.new( "IO")
+
+	/* Romove results from previous call */
+	kill this.pslCls(), this.pslCln(), this.pslPrp(), this.pslMtd(), this.pslTbl()
+
+	if 'tknzr.exists() { quit:'tknzr.exists() -1
+		quit:'$$locate^UCIO( modIO, this.packageDirs, ":", this.moduleName_ ".psl", 0)
+
+		/* Create the PSLTokenizer instance */
+		set tknzr = Class.new("PSLTokenizer", modIO)
+	}
+	else  do tknzr.rewind()
+
+	type String code
+	type Number tkn, nod
+
+	do this.setUcopts( this.ucopts)	// ensure UCOPTS has been processed
+
+	type static PSLClass
+	if PSLClass.isRecord( this.moduleName) do {
+		
+		type String clsNm = this.moduleName
+		
+		type PSLTable td = this.getPSLTable( PSLClass.tableNameOf( clsNm), 0)
+		
+		set this.pslCls( clsNm) = PSLClass.recordMod( td)
+		set this.cs("Options","ResultClass") = 1
+	}
+	else  set this.pslCls( this.moduleName) = PSLClass.subColMod( this.moduleName)
+
+	set this.parseLevel = parseLevel
+	set tknzr.tknIgnEOL = false
+	for  { quit:tkn = tknzr.tknTypeEOF
+	    do {
+		catch xSntx {
+			type String xGrp = xSntx.type.piece( "-", 3)
+			set:xGrp.isNull() xGrp = "SYNTAX"
+			set tkn = this.srcErr( tknzr, "SYNTAX", xSntx.description, 2)
+		}
+		set tkn = tknzr.nextToken()
+		quit:tkn = tknzr.tknTypeEOL  quit:tkn = tknzr.tknTypeEOF
+
+		/* Start of new method declaration. If parseLevelCLASS, we are done
+		   */
+		if tkn = tknzr.tknTypeMTD { quit
+			if parseLevel = this.parseLevelCLASS set tkn = tknzr.tknTypeEOF quit
+			set nod = this.ps0mtd( tknzr)
+			do tknzr.treeRemove( nod)
+			set tkn = tknzr.skip2EOL()
+		}
+
+		/* If not # (as first token on the line), then ignore the line
+		   */
+		if tkn '= "#".ascii() set tkn = tknzr.skip2EOL() quit
+
+		/* #xxx: get the compiler instruction, if not a word, ignore
+		   here, else convert to uppercase and dispatch
+		   */
+		set tkn = tknzr.nextToken()
+		if tkn '= tknzr.tknTypeWRD set tkn = tknzr.skip2EOL() quit
+
+		set code = tknzr.tknValue.upperCase()
+		if code = "CLASSDEF"    set nod = this.piCls( tknzr) quit
+		if code = "PACKAGE"     set nod = this.piPck( tknzr) quit
+	
+		if code = "OPTION"      set nod = this.piOpn( tknzr) quit
+		if code = "PROPERTYDEF" set nod = this.piPrp( tknzr) quit
+
+		/* All others: ignore
+		   */
+		set tkn = tknzr.skip2EOL()
+	    }
+	} 
+
+	/* ---------------------------------------------------------------------
+	All levels:
+	- #PACKAGE is required if #CLASSDEF was found
+	*/
+	type String cls = this.moduleName
+	type PSLClass ocd = this.pslCls( cls)
+
+	if ocd.classType > ocd.classTypeNOCLASS, ocd.package.isNull() do this.log( tknzr, "", "", 3, "SYNTAX", "Missing #PACKAGE")
+
+	/* ---------------------------------------------------------------------
+	If parseLevel > parseLevelCLASS, update the class descriptor once all
+	properties and methods are known.
+	This block updates:
+	- PSLClass.classType
+	- PSLClass.flags
+	It also validates that:
+	- The classType is not equal to classTypePRIM0PROP
+	- The initalize method is either declared as initialize() or as
+		initialize(Object o)
+	- A Primitive descendant does not contain a Finalize() method
+	- The finalize method (of Reference descendants) has an empty formalList
+	*/
+	if parseLevel>this.parseLevelCLASS {
+		type String fpl
+
+		quit:ocd.classType = ocd.classTypeNOCLASS
+
+		if ocd.classType = ocd.classTypePRIM0PROP do this.log( tknzr, "", "", 3, "SYNTAX", "Missing #PROPERTYDEF")
+
+		/* Use this.getClass to obtain the descriptor of the ancestor
+		   because it will not have been loaded for parseLevel = PSLX !!
+		   */
+		type PSLClass ocdanc = this.getPSLClass( ocd.extends), ocdprp
+		type PSLMethod omd
+		type PSLProperty opd
+		type List refprps = Class.new("List")
+
+		if this.pslMtd( cls_ ".initialize").exists() {
+			
+			if PSLClass.isRecord( cls) = PSLClass.recordDESCENDANT throw Class.new("Error", ",initialize method not allowed for Record class descendants")
+			
+			set omd = this.pslMtd( cls_".initialize")
+			set fpl = omd.formalList
+			if fpl.isNull() set ocd.flags = ocd.flagMTDINI0 quit
+
+			set ocd.flags = ocd.flagMTDINI1
+			/* With parameter. Validate its type is Object
+			   */
+			if parseLevel>this.parseLevelPSLX, fpl.piece(" ",1,2) '="noret Object" do this.log( tknzr, omd.sourceLine, "initialize", 3, "MISMATCH", "invalid formal parameter initialize(" _ fpl_ ")")
+		}
+
+		if this.pslMtd( cls_ ".finalize").exists() {
+			set ocd.flags = ocd.flags_ ocd.flagMTDFIN
+
+			/* Validation of appropriateness and correctness of
+			   finalize() only if parseLevel > parseLevelPSLX
+			   */
+			quit:parseLevel=this.parseLevelPSLX
+			set omd = this.pslMtd( cls_".finalize")
+			if ocd.classType '= ocd.classTypeREFERENCE do this.log( tknzr, omd.sourceLine, "finalize", 3, "MISMATCH", ocd.PRIMITIVECLASS_ " descendants cannot have a finalize() method.")
+			set fpl = omd.formalList
+			if fpl.isNull() quit
+			do this.log( tknzr, omd.sourceLine, "finalize", 3, "MISMATCH", "finalize(" _ fpl.translate(";",",")_ ") cannot have formal parameter(s)")
+		}
+
+		type String prp = cls_"."
+		for  set prp = this.pslPrp( prp).order() quit:prp.piece(".")'=cls  {
+			set opd = this.pslPrp( prp)
+			if 'opd.initialValue.isNull(), opd.restricted '= opd.restrictedLITERAL, ocd.flags '[ ocd.flagPRPINIT set ocd.flags = ocd.flags_ ocd.flagPRPINIT
+	
+			set ocdprp = this.getPSLClass( opd.resultClass)	// may need to load!
+			if ocdprp.classType = ocdprp.classTypeREFERENCE {
+				if ocd.flags '[ ocd.flagPRPREF set ocd.flags = ocd.flags_ ocd.flagPRPREF
+				set refprps = refprps.add( opd.property)
+			}
+		}
+		do ocd.fillExt( this)
+		set this.pslCls( cls) = ocd
+		set this.refPrp = refprps
+	}
+
+	#ACCEPT date=2007-05-08; CR=27800; PGM=Frans S.C. Witte; group=BYPASS
+	#BYPASS
+	MERGE info("pslCls")=this("pslCls")
+	MERGE info("pslMtd")=this("pslMtd")
+	MERGE info("pslPrp")=this("pslPrp")
+	#ENDBYPASS
+
+	quit 0
+
+	/* ================================================================== */
+	/* Pass0 utility wrappers					      */
+	/* ****************************************************************** */
+
+	// ---------------------------------------------------------------------
+Number passClass( ret PSLX info	// the target PSLX instance.
+		)	// run class-only-pass of the compiler
+	/* ---------------------------------------------------------------------
+	Run class-only-pass of the compiler. This extracts just the #CLASSDEF
+	and #PACKAGE information from the module specified by this.moduleName.
+
+	This method is a wrapper for this.pass0( info, this.parseLevelCLASS)
+
+	RETURNS:
+	. $$ = this.pass0( info, this.parseLevelCLASS)
+	*/
+	quit this.pass0( info, this.parseLevelCLASS)
+
+	// ---------------------------------------------------------------------
+Number passPsl( ret PSLX info	// the target PSLX instance
+		)	// extract the equivalent of a psl description (level 2)
+	/* ---------------------------------------------------------------------
+	Extract the equivalent of a pslx description from the module specified
+	by this.moduleName.
+
+	This is a wrapper function for this.pass0( info, this.parseLevelPSL)
+
+	RETURNS:
+	. $$ = this.passExtract( info, this.parseLevelPSL)
+	*/
+	quit this.pass0( info, this.parseLevelPSL)
+
+	// ---------------------------------------------------------------------
+Number passPslx( ret PSLX info	// the target PSLX instance
+		)		// extract the equivalent of a pslx description
+	/* ---------------------------------------------------------------------
+	Extract the equivalent of a pslx description from the module specified
+	by this.moduleName.
+
+	This is a wrapper function for this.pass0( info(,), this.parseLevelPSLX)
+
+	RETURNS:
+	. $$ = this.pass0(ret info, this.parseLevelPSLX)
+	*/
+	quit this.pass0( info, this.parseLevelPSLX)
+
+	/* ================================================================== */
+	/* Pass 1							      */
+	/* ****************************************************************** */
+
+	// ---------------------------------------------------------------------
+public Number run( PSLTokenizer tknzr, String target())
+	/* ---------------------------------------------------------------------
+	Compile the source supplied in the PSLTokenizer and return the target
+	code.
+	*/
+	
+	type String recClass = ""
+	
+	do this.setUcopts( this.ucopts)	// ensure UCOPTS has been processed
+	
+	type static PSLClass
+
+	if PSLClass.isRecord(this.moduleName) = PSLClass.recordDESCENDANT do {
+		
+		set recClass = this.moduleName
+		
+		type PSLRecordBuilder rb = Class.new("PSLRecordBuilder", PSLClass.tableNameOf(recClass))
+	
+		do rb.build(tknzr)
+	}
+
+	type Number err = this.pass0(, this.parseLevelPSL, tknzr)
+
+	/* Set up for pass 1.
+	   Set the parse level, reset the tokenizer, clear the output structure.
+	   If this is a Subroutine Collection Module, reset Options,ResultClass,
+	   because its value may have changed during pass 0.
+	   */
+	set this.parseLevel = this.parseLevelFULL
+	set this.lastLine = tknzr.srcLast
+	do tknzr.rewind() kill target
+
+	/* Load class definitions for datatypes of literals and Columns
+	   */
+	type String cls
+	for cls = "Boolean", "ByteString", "Date", "Memo", "Number", "String", "Time" do this.loadClass( cls)
+
+	/* Insert introductory comment
+	   */
+	type String dqname
+	if 'this.element.piece( "~", 2).isNull() {
+		set dqname="DATA-QWIK "_ this.element.piece( "~", 2)_" "_this.element.piece( "~")
+	}
+	else  if 'this.element.piece( "~").isNull() {
+		set dqname="code generated by "_ this.element.piece( "~")
+	}
+	else  set dqname="unknown source"
+	do this.tgtAddCmt( target(), "")
+	do this.tgtAddCmt( target(), "**** Routine compiled from "_dqname_" ****")
+	do this.tgtAddCmt( target(), "")
+	do this.tgtAddCmt( target(), $$cmpStamp^UCXDT25())
+	do this.tgtAddCmt( target(), "")
+
+	/* Reset #OPTION ResultClass (may have been set by pass0), and force
+	   minimum compliance level for modules that contain #PACKAGE.
+	   */
+	type PSLClass thisClass = this.pslCls(this.moduleName)
+	if thisClass.classType = thisClass.classTypeNOCLASS set this.cs("Options","ResultClass") = 0
+	if this.cs("PSL","Version")<3, 'thisClass.package.isNull() set this.cs("PSL","Version") = 3
+
+	#ACCEPT CR=27800;Date=2007-10-09;PGM=Frans S.C.Witte;GROUP=MISMATCH,ACCESS
+	type String ucgm = $$run^UCGM(.this, .tknzr, target())
+
+	/* Insert vcdm* subroutines for Class Definition Modules.  Do not insert
+	   vcdmNew for Record class, as this is build by PSLRecordBuilder.
+	   */
+	if thisClass.classType > thisClass.classTypeNOCLASS {
+		
+		if recClass.isNull() do this.tgtNew( target())	// insert vcdmNew()
+		do this.tgtDes( target())			// insert vcdmDes()
+		do this.tgtAdj( target())			// insert vcdmAdj()
+	}
+
+	type Number lvl, cnt
+	type String msg = "", lc = this.logCounts
+	for lvl = 3,2,1 {
+		set cnt = lc.piece( "|", lvl) + ucgm.piece( "|", lvl)
+		set msg = msg_ cnt_ " informational message, warning, error".piece( ",", lvl)
+		set:cnt'=1 msg = msg_ "s" set:lvl>1 msg = msg_ ", "
+		set lc.piece( "|", lvl) = cnt
+	}
+	set this.logCounts = lc, cnt = this.logCounts.piece( "|", 3)
+	if this.getSetting( "PSL", "CompileSummary", true) {
+		set:cnt>0 msg = msg_ " ** failed **"
+		do this.log( tknzr, 0, "", 1, "LIST", msg)
+	}
+	quit cnt
+
+	/* ================================================================== */
+	/* a* methods: semantic actions					      */
+	/* 								      */
+	/* Due to the nature of the handling semantics, each action method    */
+	/* is likely to have a separate signature.			      */
+	/* ****************************************************************** */
+
+	/* ================================================================== */
+	/* Expression elements						      */
+	/* ****************************************************************** */
+
+	// ---------------------------------------------------------------------
+private Number ae0class( PSLTokenizer tknzr	// tokenizer
+		, String cls		// class name (token value)
+		)
+	/* ---------------------------------------------------------------------
+	Semantic actions for className
+
+	OUTPUT:
+	. $$ = error indicator
+		0 = OK
+		1 = case mismatch (not validated if this.parseLevel<parseLevelPSL)
+		2 = reserved word (not validated if this.parseLevel<parseLevelPSLX)
+		3 = class not defined (not validated if this.parseLevel<parseLevelPSL)
+	*/
+	quit:this.parseLevel<this.parseLevelPSLX 0
+
+	if this.getRsvd().contains( cls) quit 2
+
+	quit:this.parseLevel<this.parseLevelPSL 0
+
+	if 'this.pslCls( cls).exists() do this.loadClass( .cls) if 'this.pslCls( cls).exists() quit 3
+	type PSLClass ocd = this.pslCls( cls)
+	if ocd.classType = -1 quit 3
+	if ocd.class '= cls do this.srcWarn(tknzr, "MISMATCH", "classname case mismatch "_cls_" shall be "_ocd.class) quit 1
+	quit 0
+
+	/* ================================================================== */
+	/* Compiler Instructions					      */
+	/* ****************************************************************** */
+
+	// ---------------------------------------------------------------------
+private Number ai0onOff( List rule	// rule constructed by di0onOff()
+		, String sect	// section (1st level subscript in this.cs(,)
+		, List valid	// List of valid values (*3)
+		)	// semantic actions for rule di0onOff
+	/* ---------------------------------------------------------------------
+	Semantic actions for rule di0onOff
+
+	ARGUMENTS:
+	(*3) valid = List of valid values
+		The purpose of this List is two fold:
+		- an entry will only be added to cmds(cls,) if the element from
+			vals occurs in valid (ignoring case)
+		- the entry will be added using the case in valid, not the case
+			in rule.
+	OUTPUTS:
+	. $$ = result
+		0 = OK
+		1 = invalid switch indicator (0, 1, false, off, on, true)
+	*/
+	type Number elm,pos
+	type String val
+	type Boolean switch
+
+	set val = rule.elementAt(1)
+	if ({List}"true,on,1").contains(val,,true) set switch = true
+	else if ({List}"false,off,0").contains(val,,true) set switch = false
+	else quit 1
+
+	if rule.elementAt(2) = "*" set rule = ","_valid
+
+	for elm=2:1:rule.count() do {
+		set val = rule.elementAt(elm)
+		set pos = valid.position( val, , 1)
+		if pos>0 set this.cs( sect, valid.elementAt(pos)) = switch
+	}
+	quit 0
+
+
+	/* ================================================================== */
+	/* d* methods: syntax decomposition				      */
+	/* 								      */
+	/* All modules decomposition modules call PSLTokenizer for the	      */
+	/* decomposition, and create tree() entries for all recognized	      */
+	/* constructs. Howeve, no semantic actions are performed here.	      */
+	/* All methods have 2 parameters (in addition to this):		      */
+	/* - PSLTokenizer tknzr						      */
+	/*	The PSLTokenizer instance will be called to obtain the next   */
+	/*	token(s).						      */
+	/* 								      */
+	/* All methods return the parse tree index that contains the rule     */
+	/* that they parsed.						      */
+	/* ****************************************************************** */
+
+	/* ================================================================== */
+	/* Expression elements						      */
+	/* ****************************************************************** */
+
+	// ---------------------------------------------------------------------
+private Number de0lit( PSLTokenizer tknzr)	// #option
+	/* ---------------------------------------------------------------------
+	Decomposes:
+	lit : numlit
+	    | strlit
+	    | tvlit
+	    ;
+
+	Adds the applicable rule:
+	tknzr.tknTypeNUM / valueOf(numlit)
+	tknzr.tknTypeSTR / valueOf(strlit)
+	tknTypeXRL - 3001 / false
+	tknTypeXRL - 3002 / true
+	*/
+	type Number tkn = tknzr.nextToken()
+	type String val = tknzr.tknValue
+
+	if tkn = tknzr.tknTypeNUM quit tknzr.treeAdd( tknzr.tknTypeNUM, val)
+	if tkn = tknzr.tknTypeSTR quit tknzr.treeAdd( tknzr.tknTypeSTR, val)
+	if tkn = tknzr.tknTypeWRD, val = "false" quit tknzr.treeAdd( this.tknTypeEFALSE, "false")
+	if tkn = tknzr.tknTypeWRD, val = "true"  quit tknzr.treeAdd( this.tknTypeETRUE, "true")
+
+	throw Class.new("Error", ",invalid literal "_val)
+	quit -1  // dead code, but needed to indicate end-of-method to compiler
+
+	/* ================================================================== */
+	/* Compiler Instructions					      */
+	/* ****************************************************************** */
+
+	// ---------------------------------------------------------------------
+private Number di0onOff( PSLTokenizer tknzr)	// #option
+	/* ---------------------------------------------------------------------
+	Decomposes:
+	di0onOff : lstOrAll wordOrNumber EOL
+	         | wordOrNumber EOL
+	         ;
+
+	lstOrAll = wordLst
+	         | "*"
+	         ;
+
+	wordLst = word "," wordlist
+	        | word
+	        ;
+
+	Adds rule # tknTypXRL-1901:
+	valueOf(wordOrNumber) , valueOf(word) ...
+
+	The nodes of the individual words will have been removed from the tree.
+	*/
+	type String rule = ""
+	type Number tkn = 0
+
+	set tkn = tknzr.nextToken()
+	if tkn = tknzr.tknTypeWRD {
+		for  { quit:tkn'=",".ascii()
+			set rule = rule_ tknzr.tknValue
+			set tkn = tknzr.nextToken()
+			if tkn = ",".ascii() set rule = rule_ ","
+		}
+	}
+	else if tkn = "*".ascii() set rule = "*", tkn = tknzr.nextToken()
+
+	// special case: #instruction ON
+	if tkn = tknzr.tknTypeEOL, rule.isNull() set rule = "*" do tknzr.pushBack()
+	if tkn'= tknzr.tknTypeWRD,tkn'=tknzr.tknTypeNUM throw Class.new("Error", ",Invalid setting specification")
+
+	set rule = tknzr.tknValue_ ","_ rule, tkn = tknzr.nextToken()
+	set tkn = tknzr.chkEOL()
+
+	quit tknzr.treeAdd( tknzr.tknTypeXRL-1901, rule)
+
+	// ---------------------------------------------------------------------
+private Number di0qua( PSLTokenizer tknzr)	//
+	/* ---------------------------------------------------------------------
+	Decomposes:
+	di0qua : word
+	       | word "=" litOrWrd
+	       ;
+
+	litOrWrd = literal
+	         | word
+	         ;
+
+	Adds rule #tknTypeXRL:
+	valueOf(word) , nodeOf(litOrWrd)
+
+	NOTES:
+	. The current version only accepts a single stlit or numlit.
+		A future version shall call deExpr() and return the parsetree
+		of the expression. In that case it is the responsibility of the
+		caller to deal with non-literal values.
+	*/
+	type Number tkn = tknzr.nextToken()
+	if tkn'=tknzr.tknTypeWRD quit -1
+
+	type String rule = tknzr.tknValue
+	set tkn = tknzr.nextToken()
+	if tkn = "=".ascii() {
+		set tkn = tknzr.nextToken()
+		if tkn '= tknzr.tknTypeNUM, tkn'=tknzr.tknTypeSTR, tkn'=tknzr.tknTypeWRD throw Class.new("Error", ",expected literal; found '"_ tknzr.tknValue_ "'")
+		set rule = rule_ ","_ tknzr.treeAdd( tkn, tknzr.tknValue)
+	}
+	else  {
+		do tknzr.pushBack()
+		set rule = rule_","
+	}
+	quit tknzr.treeAdd( tknzr.tknTypeXRL, rule)
+
+	// ---------------------------------------------------------------------
+private Number di0quaLst( PSLTokenizer tknzr)	//
+	/* ---------------------------------------------------------------------
+	Decomposes:
+	di0quaLst : di0qua di0quaLst
+	          | di0qua
+	          ;
+
+	Adds rule # tknTypeXRL-1001:
+	valueOf(di0qual) ...
+
+	NOTES:
+	. This method will add a rule that contains the complete list of
+		name-value-pairs returned by all the $$di0qua() calls.
+		The rule may contain duplicate qualifiers, and it may contain
+		"empty" values (see $$diQual).
+		It may also contain invalid qualifier names or unsupported
+		combinations (unexpected or missing value).
+	. If the next token is not ",", then an empty list will be added to the
+		tree.
+	*/
+	type String rule = ""
+
+	type Number qual, tkn
+
+	for  set qual = this.di0qua( tknzr) quit:qual<0  {
+		set rule = rule_ ","_ tknzr.treeValue( qual)
+		do tknzr.treeRemove( qual)	// remove $$di0qua rule
+	}
+	quit tknzr.treeAdd( tknzr.tknTypeXRL-1001, rule.extract(2, rule.length()))
+
+	// ---------------------------------------------------------------------
+private Number diPrp( PSLTokenizer tknzr)	// #propertydef
+	/* ---------------------------------------------------------------------
+	Decomposes:
+	diPrp : name dimension? initVal? di0quaLst? EOL
+	      ;
+
+	dimension : "(" ")"
+	          | "(" dimCommaLst ")"
+	          ;
+
+	dimCommaLst : "," dimcommaLst
+	            | ","
+	            ;
+
+	initVal : "=" literal
+	        ;
+
+	Adds rule # :
+	valueOf(name) , nodeOf(dimension) , nodeOf(literal), nodeOf(di0quaLst)
+
+	THROWS:
+	. untyped: property-name expcted
+	. untyped: invalid name
+	. untyped: invalid dimension specification
+	. Any syntax error thrown by the invoked sub-rule functions
+	*/
+	// property name =======================================================
+	type Number tkn = tknzr.nextToken()
+	if tkn '= tknzr.tknTypeWRD throw Class.new("Error", ",property-name expected; found "_tknzr.tokenType( tkn))
+
+	type String rule = tknzr.tknValue, val
+	if 'this.isName( rule) throw Class.new("Error", ",invalid name "_rule)
+
+	// dimension (optional) ================================================
+	set tkn = tknzr.nextToken(), rule = rule_","
+	if tkn = "(".ascii() {		// array dimension specification
+		set val = "(" 
+		for  set tkn = tknzr.nextToken() quit:tkn'=",".ascii()  set val = val_ ","
+		if tkn'=")".ascii() throw Class.new("Error", ",invalid dimension specification '"_ val_ tknzr.tknValue_ "'")
+		set rule = rule_ tknzr.treeAdd( this.tknTypeEVSIG, val_")")
+		set tkn = tknzr.nextToken()
+	}
+
+	// initial value =======================================================
+	set rule = rule _","
+	if tkn = "=".ascii() {		// initial value specification
+		set val = this.de0lit( tknzr)
+		set rule = rule_ val
+	}
+	else  do tknzr.pushBack()
+
+	// qualifiers ==========================================================
+	if tkn'=tknzr.tknTypeEOL set rule = rule_ ","_ this.di0quaLst( tknzr)
+
+	set tkn = tknzr.chkEOL()
+	quit tknzr.treeAdd( tknzr.tknTypeXRL - 2201, rule)
+
+	/* ================================================================== */
+	/* PSL Statements (that are relevant for module description)	      */
+	/* ****************************************************************** */
+
+	// ---------------------------------------------------------------------
+private Number ds0mtd( PSLTokenizer tknzr, String tree())
+	/* ---------------------------------------------------------------------
+	Decomposes:
+	ds0mtd : modLst? resultClass? name ds0fplLst?
+	       ;
+
+	Adds Rule # TknTypeMtd:
+	nodeOf(modLst) , valueOf(resultClass) , valueOf(name) , nodeOf(ds0fpLst)
+
+	NOTES:
+	. On entry tknType = tknTypeMTD, and tknValue is the word that started
+		at the first position of the line. This shall be either an
+		access modifier (public, protected, private, static, final) or
+		the name of the ResultClass, or the name of the method (if and
+		only if #OPTION ResultClass OFF)
+	. This method uses this.Options("ResultClass") to decide whether the
+		word following the access modifiers is the resultClass or the
+		method name. This assumes that whatever pass invokes this
+		method must have interpreted #OPTION compiler instructions.
+	. This rule does not yet support the ClassName.methodName syntax that
+		is used in subroutine collection modules to complement the
+		#IMPORT instruction.
+	*/
+	type String rule = ""
+	type Number tkn = tknzr.tknTypeWRD	// not tknTypeMTD !! (if no modifiers)
+	type String atom = tknzr.tknValue
+
+	// access modifiers ====================================================
+	while ({List}"final,public,private,protected,static").contains(atom.lowerCase()) {
+		if atom'?1.L do:0 this.srcWarn(tknzr,"SYNTAX","keywords shall be all lowercase: "_atom) set atom=atom.lowerCase()
+		type PSLClass clsdes = this.pslCls( this.moduleName)
+		if atom="private",clsdes.package.isNull() set atom = "public"	// temporary: upgrade "old" private to public
+		set rule = rule_ ","_ atom
+		set tkn = tknzr.nextToken()
+		set atom = tknzr.tknValue
+	}
+	set rule = tknzr.treeAdd( tknzr.tknTypeXRL, rule.extract(2, rule.length()))_ ","
+
+	// resultClass =========================================================
+	if this.cs("Options","ResultClass").get( false) do {
+		/* ResultClass shall be specified.
+		   The lvn atom contains the resultClass. Add it to the rule and
+		   obtain the next token (which contains the label).
+		   */
+		if tkn'=tknzr.tknTypeWRD throw Class.new("Error", ",invalid resultClass '"_atom_"'")
+		set rule = rule_ atom, tkn = tknzr.nextToken()
+		set atom = tknzr.tknValue
+	}
+
+	// label ===============================================================
+	if tkn = "(".ascii() {
+		/* keyword used as label.
+		   Note that #OPTION ResultClass OFF will be in effect. If not,
+		   an error would have been reported on the ResultClass. Also
+		   note that there is no reason to add similar checking to the
+		   ResultClass, because keywords are invalid ResultClass values.
+		   */
+		do tknzr.pushBack()
+		type Number tree = rule.piece(",").toNumber()
+		type String modwords = {String}(tknzr.treeValue( tree))
+		do tknzr.treeRemove( tree)
+		set atom = modwords.piece( ",", modwords.length(","))
+		set modwords = modwords.piece( ",", 1, modwords.length(",")-1)
+		do this.srcWarn(tknzr,"DEPRECATED","method name shall not be PSL keyword: "_atom)
+		set rule.piece(",") = tknzr.treeAdd( tknzr.tknTypeXRL, modwords) 
+		set tkn=tknzr.tknTypeWRD
+	}
+	if tkn'=tknzr.tknTypeWRD, tkn'=tknzr.tknTypeNUM throw Class.new("Error", ",invalid method name '"_atom_"'")
+	set rule = rule_ ","_ atom_ ","
+
+	// formal parameter list ===============================================
+	/* turn tknIgnEOL on until the closing parenthesis of the declaration is
+	   detected. By turning it on after looking for the "(" we enforce that
+	   the open-parenthesis must occur on the same line as the method name.
+	   */
+	set tkn = tknzr.nextToken()
+
+	if tkn = "(".ascii() do {		// has parameters
+		type List fpl = ""
+		set tknzr.tknIgnEOL = true	// ignore EOL until close-parenthsis
+		set tknzr.tknIgnCMT = 2	// ignore all CMT
+		if tknzr.nextToken()'=")".ascii() {
+			do tknzr.pushBack()
+			for  { quit:tkn=")".ascii()
+				set fpl = fpl.add( this.ds0mtdFp( tknzr))
+				set tkn=tknzr.nextToken()
+				if tkn'=",".ascii(), tkn'=")".ascii() throw Class.new("Error", ",comma or close parenthesis expected in method declaration")
+			}
+		}
+		set rule = rule_ tknzr.treeAdd( tknzr.tknTypeXRL, fpl)
+		set tknzr.tknIgnEOL = false
+		set tknzr.tknIgnCMT = 1	// ignore block-comment only
+	}
+	else do tknzr.pushBack()
+
+	quit tknzr.treeAdd( tknzr.tknTypeMTD, rule)
+
+	// ---------------------------------------------------------------------
+private Number ds0mtdFp( PSLTokenizer tknzr)
+	/* ---------------------------------------------------------------------
+	Decomposes:
+	s0mtdFp	: fpName
+		| fpType fpName
+		| fpAccess fpType fpName
+		;
+	fpName = name
+	       | name dimension
+	       ;
+
+	Adds Rule # tknzr.tknTypeEFPDEC:
+	fpAccess " " fpType " " fpName
+
+	NOTES:
+	. The values are delimited by a SPace, not by a comma !!
+	*/
+	// Default access type of parameter is determined by module type
+	type PSLClass clsdes = this.pslCls( this.moduleName)
+
+	/* first token must be word */
+	type Number tkn = tknzr.nextToken()
+	type String rule = tknzr.tknValue
+	if tkn'=tknzr.tknTypeWRD throw Class.new("Error",",invalid formal parameter specification '"_ rule_ "'")
+
+	set tkn = tknzr.nextToken()
+	if tkn = tknzr.tknTypeWRD {
+		set rule = rule_ " "_ tknzr.tknValue
+		set tkn = tknzr.nextToken()
+		if tkn = tknzr.tknTypeWRD set rule = rule_ " "_ tknzr.tknValue, tkn = tknzr.nextToken()
+		else set rule = " "_ rule
+	}
+	else set rule = " String "_ rule
+
+	// dimension (optional) ================================================
+	if tkn = "(".ascii() {		// array dimension specification
+		set rule = rule_ "(" 
+		for  set tkn = tknzr.nextToken() quit:tkn'=",".ascii()  set rule = rule_ ","
+		if tkn'=")".ascii() throw Class.new("Error", ",invalid dimension specification '"_ rule.piece(" ",3)_ tknzr.tknValue_ "'")
+		set rule = rule_ ")"
+	}
+	else  do tknzr.pushBack()
+
+	if '({List}"literal,,noret,ret").contains(rule.piece(" ")) throw Class.new("Error", ",unexpected access modifier '"_rule.piece(" ")_"' in formal parameter declaration")
+
+	/* Standardize access modifier:
+	   - if no explicit access modifier, make it ret or noret depending on
+		clsdes.package. Note that this may create the combination
+			ret SomeType array()
+		which would not be allowed for package modules. Unfortunately
+		there is a lot of code around that supplies
+			.ap()
+		as actual parameter
+	   - an explicit ret is not allowed for array parameters
+	   */
+	if rule.piece(" ").isNull() set rule.piece(" ")=$SELECT('clsdes.package.isNull():"noret",1:"ret") 
+	else  if rule.piece(" ")="ret",rule.piece(" ",3)["(" throw Class.new("Error", ",access modifier 'ret' cannot be applied to array parameter "_rule.piece(" "))
+
+	quit tknzr.treeAdd( this.tknTypeEFPDEC, rule)
+
+
+	/* ================================================================== */
+	/* p* methods: parse (decompose + actions)			      */
+	/* 								      */
+	/* The non-local general parse procedures will call the p* modules    */
+	/* to handle both the syntax decomposition and semantic actions.      */
+	/* The p* methods usually call the d* methods to decompose the source */
+	/* according to a parse rule, and either handle the semantics	      */
+	/* within the method, or call an associated a* methods to perform the */
+	/* semantic actions.						      */
+	/* With this model it is possible that external code uses a d* method */
+	/* to do the decomposition, but associate a different action with the */
+	/* rule.							      */
+	/* 								      */
+	/* All methods have the same parameters as the d* methods.	      */
+	/* 								      */
+	/* All methods return the parse tree index that contains the rule     */
+	/* that they parsed.						      */
+	/* ****************************************************************** */
+
+	/* ================================================================== */
+	/* Compiler Instructions					      */
+	/* ****************************************************************** */
+
+	// ---------------------------------------------------------------------
+protected Number instruction( PSLTokenizer tknzr,
+		String ins) // instruction name (*1)
+	/* ---------------------------------------------------------------------
+	Decompose the current compiler instruction (as passed).
+
+	This protected method implements the dispatch to instruction handlers
+	for the standard PSL compiler instructions. To add instructions, perform
+	the following steps:
+	1) Define a new class that extends PSLParser, say ExtendedParser
+	2) Override the PSLParse.instruction() method
+	3) Handle the additional instructions in ExtendedParser.instruction()
+	4) Call super.instruction() to handle the standard PSL instructions
+
+	ARGUMENTS:
+	(*1) ins = instrcution name
+		The name of the instrcution, converted to lower-case.
+		Note that this corresponds to this.tknValue.lowerCase().
+
+	NOTES:
+	. The formal parameter is a convenience parameter only. For standard
+		PSL it is of limited use. However, if the parser is extended
+		as described above, passing the name ensures a standardized
+		spelling, and reduces overhead.
+	*/
+	if ins = "accept"           quit tknzr.skip2EOL()
+	else if ins = "bypass"      quit tknzr.skip2EOL()
+	else if ins = "classdef"    quit this.piCls( tknzr)
+	else if ins = "else"        quit tknzr.skip2EOL()
+	else if ins = "end"         quit tknzr.skip2EOL()
+	else if ins = "endbypass"   quit tknzr.skip2EOL()
+	else if ins = "endif"       quit tknzr.skip2EOL()
+	else if ins = "if"          quit tknzr.skip2EOL()
+	else if ins = "info"        quit tknzr.skip2EOL()
+	else if ins = "optimize"    quit this.piOpz( tknzr)
+	else if ins = "option"      quit this.piOpn( tknzr)
+	else if ins = "package"     quit this.piPck( tknzr)
+	else if ins = "porpertydef" quit this.piPrp( tknzr)
+	else if ins = "warn"        quit tknzr.skip2EOL()
+	else if ins = "while"       quit tknzr.skip2EOL()
+	else if ins = "xecute"      quit tknzr.skip2EOL()
+
+	quit this.srcErr( tknzr, "SYNTAX", "invalid compiler intstruction '#"_ ins_ "'", 1)
+
+	// ---------------------------------------------------------------------
+private Number piCls( PSLTokenizer tknzr)
+	/* ---------------------------------------------------------------------
+	Parse #CLASSDEF compiler instruction.
+	This command is only valid once per source module.
+
+	Validatations:
+	. Only one #CLASSDEF per module (all):
+		Detected as follows:
+		- passXyz() will create a Subroutine Collection Module entry for
+			the current source (with extends="" and classType=-1)
+		- if the cache entry still contains the above settings, then
+			this is the first #CLASSDEF
+		- this function will set extends, and update classType, so any
+			successive #CLASSDEF will find extends.isNotNull() and
+			classType>-1
+	. If the module implies a class definition for a Record descendant, then
+		it must name a valid DQ table, and it shal not specify /extend
+		(all).
+	. value of delimiter must be non-negative integer (all)
+	. extends does not name a SCM or a PSL intrinsic class other than
+		Reference or Primitive (all)
+	. extends does not name Reference or one of its descendants
+		(TEMPORARY, all)
+
+	Other semantic actions (2):
+	. load all propertyname to classname mappings of all ancestor properties
+		into this.prpExt() and their (position,node) combinations into
+		this.prpXnp(,)
+
+	INPUTS:
+	. this.pslCls( this.className) exists
+
+	OUTPUTS:
+	. this.pslCls( this.className) updated to reflect #CLASSDEF qualifiers
+		If the #CLASSDEF specifies /extends=Primitive, then the value
+		of PSLClass.classType will be set to classTypePRIM0PROP.
+		This value shall be modified as appropriate when the qualifiers
+		of a #PROPERTYDEF specify 'node' and/or 'position'.
+	*/
+	// TEMPORARY !!!!
+	type public PSLTable pslTbl()
+
+	type String cls = this.moduleName, qual, val
+	type PSLClass clsdes = this.pslCls( cls)
+	type Boolean dups()
+	type Number elm, tkn
+
+	if clsdes.classType > clsdes.classTypeNOCLASS set tkn = this.srcErr( tknzr, "SYNTAX", "duplicate #CLASSDEF", 2) quit 0
+
+	/* fill clsdes with defaults */
+	set clsdes.accessLevel  = clsdes.accessLevelPACKAGE
+	set clsdes.classType    = clsdes.classTypeREFERENCE
+	set clsdes.extends      = clsdes.REFERENCECLASS
+	set clsdes.delimiter    = 124		// vertical bar
+	set clsdes.isNoInstance = false		// can be instantiated
+
+	/* If this is a Record descendant, derive the extends from the PSLTable
+	   descriptor and set dups("extends") to prevent explicit specification.
+	   */
+	if clsdes.isRecord( cls) > 1 {
+		catch vExTable {
+			set tkn = this.srcErr( tknzr, "MISMATCH", "Missing table definition for "_cls, 0)
+		}
+		type PSLTable td = this.getPSLTable( cls.extract( clsdes.recordPREFIX.length() + 1, cls.length()), 0)
+		set clsdes.extends = clsdes.recordPREFIX_ td.parentTable
+		set dups("extends") = false
+		set clsdes.delimiter = td.columnDelimiter
+		set dups("delimiter") = false
+	}
+	   
+	/* Decompose the source line, retrieve the rule, and delete it from the
+	   tree */
+	type Number nod = this.di0quaLst( tknzr)
+	type List rule = {List}(tknzr.treeValue( nod))
+	do tknzr.treeRemove( nod)
+
+	for elm = 1:2:rule.count() {
+		set qual = rule.elementAt(elm)
+		set nod  = rule.elementAt(elm+1)
+		if 'nod.isNull() {
+			set val = {String}(tknzr.treeValue( nod))
+			set tkn = tknzr.treeType( nod)
+			do tknzr.treeRemove( nod)
+		}
+		else  set val = "", tkn = 0
+
+		set dups( qual) = dups( qual).exists()
+		if dups( qual) set tkn = this.srcErr(tknzr, "SYNTAX", "qualifier '"_ qual_ "' occurs more than once", 0) quit
+
+		if qual = "delimiter" {
+			if tkn'=tknzr.tknTypeNUM set tkn = this.srcErr(tknzr, "SYNTAX", "delimiter must be a Number", 0) quit
+			if val.toNumber()<0 set tkn = this.srcErr(tknzr, "SYNTAX", "delimiter value cannot be negative", 0) quit
+			if 'val.isInteger() set tkn = this.srcErr(tknzr, "SYNTAX", "delimiter must be an Integer", 0) quit
+			set clsdes.delimiter = val.toNumber()
+		}
+		else  if qual = "extends" {
+			if tkn'=tknzr.tknTypeWRD set tkn = this.srcErr(tknzr, "SYNTAX", "invalid extends specification", 0) quit
+			set clsdes.extends = val
+		}
+		else  if qual = "public" {
+			if 'nod.isNull() set tkn = this.srcErr(tknzr, "SYNTAX", "'public' does not accept a value", 0) quit
+			set clsdes.accessLevel = 2
+		}
+		else  set tkn = this.srcErr(tknzr, "SYNTAX", "unknown CLASSDEF qualifier '"_ qual_ "'", 0)
+	}
+
+	/* Derive classType from extends.
+	   Without having seen any property definition, assume that an immediate
+	   descendant of Primitive will be a PSL Intrinsic "no property" class.
+	   This will need to be updated when a #PROPERTYDEF is found.
+	   Do not bother to derive the classType for Record descendants, because
+	   that has already been taken care of.
+	   */
+	type String ext = clsdes.extends
+	type PSLClass ocd
+	if ext = clsdes.ROOTCLASS, '$$isClsIntrinsic^UCGMCU( cls) set tkn = this.srcErr(tknzr, "SYNTAX", "class cannot extend Object", 0)
+	else  if ext = clsdes.PRIMITIVECLASS set clsdes.classType = clsdes.classTypePRIM0PROP
+	else  if ext '= clsdes.REFERENCECLASS, clsdes.isRecord( ext) '= 2 {
+		/* All "pslx only" classes (except Primitive and Reference)
+		   are final. So they are not allowed in extends. */
+		if $$isClsPslx^UCGMCU( ext), '$$isClsPslx^UCGMCU(cls) set tkn = this.srcErr(tknzr, "SYNTAX", "class cannot extend PSL Intrinsic Class "_ext, 0)
+
+		/* For all other classes, the classType is inherited from the
+		   the parent class. If parseLevel > CLASS, then check if that
+		   class can be extended: exclude SCMs and PSL Intrinsic
+		   Primitives. */
+		quit:this.parseLevel '> this.parseLevelCLASS
+		if 'this.pslCls(ext).exists() do this.loadClass( ext) if 'this.pslCls(ext).exists() set tkn = this.srcErr(tknzr, "SYNTAX", "invalid extends specification", 0) quit
+		set ocd = this.pslCls( ext)
+		if ocd.classType < ocd.classTypeREFERENCE ! (ocd.classType = ocd.classTypePRIM0PROP) set tkn = this.srcErr(tknzr, "SYNTAX", "class cannot extend "_ext, 0)
+		set clsdes.classType = ocd.classType
+	}
+
+	// CDM Support Version 1 limitation: Do not allow Reference descendants
+	if clsdes.classType = clsdes.classTypeREFERENCE, this.parseLevel > this.parseLevelPSLX, 'clsdes.isRecord(cls) set tkn= this.srcErr( tknzr, "SYNTAX", "Reference descendants not yet supported", 0)
+
+	if this.parseLevel = this.parseLevelPSL {	// fill prpExt() and prpXnp(,)
+		type PSLProperty opd
+		type String      prp	// property iterator
+		type String      nod	// node of property
+		set ocd = this.getPSLClass( ext)
+		while ocd.extends '= ocd.ROOTCLASS {
+			set prp = ext_"."
+			for  set prp = this.pslPrp( prp).order() quit:prp.piece(".") '= ext  {
+				set opd = this.pslPrp( prp)
+				set this.prpExt(opd.property) = opd.class
+				set nod = opd.node set:nod.isNull() nod = -1
+				set:opd.restricted'=opd.restrictedLITERAL this.prpXnp( nod, prp) = prp
+			}	// end for each property of this class
+			set ext = ocd.extends, ocd = this.getPSLClass( ext)
+		}	// end for each ancestor
+	}
+
+	set this.pslCls( cls) = clsdes
+
+	set this.cs("Options","ResultClass") = 1
+
+	set tkn = tknzr.chkEOL()
+	quit 0
+
+	// ---------------------------------------------------------------------
+private Number piOpn( PSLTokenizer tknzr)	// #option
+	/* ---------------------------------------------------------------------
+	Decomposition of #OPTION compiler command.
+	*/
+	type String nod = this.di0onOff( tknzr)
+	type List rule = {List}(tknzr.treeValue( nod))
+	do tknzr.treeRemove( nod)
+
+	if this.ai0onOff( rule, "Options", $$allOptions^UCGMC())'=0 set nod = this.srcErr(tknzr, "SYNTAX", "invalid switch '"_ rule.elementAt(1)_"' in #OPTION", 0)
+	quit 0
+
+	// ---------------------------------------------------------------------
+private Number piOpz( PSLTokenizer tknzr)	// #optimize
+	/* ---------------------------------------------------------------------
+	Decomposition of #OPTIMIZE compiler command:
+	*/
+	type String nod = this.di0onOff( tknzr)
+	type List rule = {List}(tknzr.treeValue( nod))
+	do tknzr.treeRemove( nod)
+
+	if this.ai0onOff( rule, "OPTIMIZE", $$allOPTIMIZE^UCGMC())'=0 set nod = this.srcErr(tknzr, "SYNTAX", "invalid switch '"_ rule.elementAt(1)_"' in #OPTIMIZE", 0)
+	quit 0
+
+	// ---------------------------------------------------------------------
+private Number piPck( PSLTokenizer tknzr)	// #PACKAGE
+	/* ---------------------------------------------------------------------
+	Parse #PACKAGE compiler instruction.
+	
+	Validations:
+	. Only one #PACKAGE per module (all)
+		Detected as follows:
+		- pass0() will create a SCM entry for the current module with
+			PSLClass.package=""
+		- if the cache entry still contains the above setting, then this
+			is the first #PACKAGE
+		- this function will set .package, so any successive #PACKAGE
+			will find PSLClass.package.isNotNull()
+	. This instruction must preceed all method declarations (all)
+		Detected by checking that this.pslMtd() does not yet contain
+		methods for the current class.
+	. This instruction must preceed all property declarations (all)
+		Detected by checking that this.pslPrp() does not yet contain
+		properties for the current class.
+	. Valid package name (all)
+		dot-delimited indentifiers. The current validation is louzy
+		it will accept constructs like x..y and x.1y.
+
+	This function does not have an associated diPck() function because the
+	only syntactic element is the package name
+
+	INPUTS:
+	. this.pslCls( this.className) exists
+
+	OUTPUTS:
+	. this.pslCls( this.className) updated to reflect #PACKAGE
+	*/
+	type PSLClass clsdes = this.pslCls( this.moduleName)
+
+	if 'clsdes.package.isNull() quit this.srcErr(tknzr, "SYNTAX", "duplicate #PACKAGE", 2)
+
+	type Number tkn = tknzr.nextToken()
+	if tkn '= tknzr.tknTypeWRD quit this.srcErr(tknzr, "SYNTAX", "name of package expected", 2)
+	type String pck = tknzr.tknValue
+
+	for  set tkn= tknzr.nextToken() quit:tkn'=".".ascii()  {
+		set tkn = tknzr.nextToken()
+		if tkn'=tknzr.tknTypeWRD set tkn = this.srcErr(tknzr, "SYNTAX", "name of package expected", 2)
+		set pck = pck_ "."_ tknzr.tknValue
+	}
+
+	if pck.translate(".","9")'?1A.AN quit this.srcErr(tknzr, "SYNTAX", "invalid package name '"_ pck_ "'", 2)
+
+	type String nm = this.pslMtd( this.moduleName_".").order()
+	if nm.piece(".") = this.moduleName quit this.srcErr(tknzr, "SYNTAX", "#PACKAGE must preceed declarations", 2)
+	set nm = this.pslPrp( this.moduleName_".").order()
+	if nm.piece(".") = this.moduleName quit this.srcErr(tknzr, "SYNTAX", "#PACKAGE must preceed declarations", 2)
+
+	set clsdes.package = pck
+	set this.pslCls( this.moduleName) = clsdes
+
+	set tkn = tknzr.chkEOL()
+	quit 0
+
+	// ---------------------------------------------------------------------
+private Number piPrp( PSLTokenizer tknzr)	// #propertydef
+	/* ---------------------------------------------------------------------
+	Parse #PROPERTYDEF compiler instruction
+
+	Validations (all):
+	. #PROPERTYDEF must follow #CLASSDEF
+		Detected by this.pslCls( this.className).classType>=0
+	- #PROPERTYDEF must occur before any method declaration
+		'this.pslMtd( this.className).data() (i.e. no methods for this
+		class yet)
+	. Propertyname must be unique
+	. 'class' specifies a valid class (see $$ae0class)
+		Function $$ae0class() determines the appropriate level of
+		validation.
+	. 'node' specifies a valid literal
+	. 'position' specifies an integer greater than 0
+		Furthermore, the classType will be updated from PRIM0PROP to
+		PRIM0NODE if and only if the class extends Primitive
+	. mutual consistency between'literal', 'readonly', 'node', and 'position'
+	. mutual consistency between 'public', 'private', and 'protected'
+	. missing 'class' qualifier
+
+	Validations for all classTypes (parseLevelPSL, parseLevelFULL)
+	. #PROPERTYDEF not allowed for Record descendants
+	. The propertyname is not used in an ancestor class.
+	. Either 'node' or 'position' is specified
+	. 'position' is only allowed if 'class' specifies one of the PSL Intrinsic
+		"zero property" classes other than ByteString or Memo.
+	. 'node' is allowed for this class
+		Furthermore, the classType will be updated from PRIM0PROP or
+		PRIM0NODE to PRIMITIVE if and only if the class extends
+		Primitive
+	. The combination ('position', 'node') is unique (across the entire
+		class hierarchy)
+	. The classType of the resultclass shall not be classTypePRIMITIVE
+		(i.e. multi-node primitives cannot occur as property)
+
+	Validations for Primitive descendants (parseLevelPSL, parseLevelFULL)
+	. The combination node="" and position=1 is not allowed
+	. The classType of the resultClass shall not be classTypeREFERENCE
+
+	The following is not (yet) validated:
+	. The value 'literal' is consistent with 'class'
+
+	The following is implicitly guaranteed:
+	. Because Primitive descendants only have PRIM0PROP or PRIM0NODE
+		properties, property arrays will map to arrays of strings in M.
+		These arrays do not require special destroy code.
+	*/
+	type String cls = this.moduleName
+	type Boolean clsmod = false
+	type PSLClass clsdes = this.pslCls( cls)
+
+	if clsdes.classType < clsdes.classTypeREFERENCE throw Class.new("Error", ",#PROPERTYDEF without #CLASSDEF")
+	if this.pslMtd( cls_".").order().piece(".")=cls  throw Class.new("Error", ",#PROPERTYDEF after start of method code")
+
+	// Decompose:
+	// valueOf(name) , nodeOf(dimension) , nodeOf(initVal), nodeOf(di0quaLst) 
+	type String nod = this.diPrp( tknzr)
+	type List rule = {List}(tknzr.treeValue( nod))
+	do tknzr.treeRemove( nod)
+
+	/* name ================================================================
+	   - syntactically correct, but could be duplicate
+	   - for .pslx validation, the following is NOT validated
+	   	- name overwrites visible name in ancestor class
+	   */
+	type String prp = rule.elementAt(1)
+	if this.pslPrp( cls_ "."_ prp).exists() throw Class.new("Error", ",duplicate property name '"_ prp_ "'")
+	if this.prpExt( prp).exists() throw Class.new("Error", ",property already defined in ancestor class '"_ this.prpExt( prp)_ "'")
+
+	type PSLProperty prpdes = Class.new( "PSLProperty")
+	set prpdes.class = cls, prpdes.property = prp
+	set prpdes.accessLevel = 1	// package access
+	set prpdes.position = 0		// no position
+	set prpdes.restricted = 0	// not restricted
+
+	/* dimension ===========================================================
+	   Copy valueOf(dimension) to prpdes.dimension and clean up.
+	   */
+	set nod = rule.elementAt(2)
+	if 'nod.isNull() {
+		set prpdes.dimension = {String}(tknzr.treeValue( nod))
+		do tknzr.treeRemove( nod)
+	}
+
+	// initial value =======================================================
+	set nod = rule.elementAt(3)
+	type String initCls = ""
+	if 'nod.isNull() {
+		type Number initTyp = tknzr.tknTree( nod).piece( 9.char())
+		type String initVal = tknzr.tknTree( nod).piece( 9.char(), 2)
+		do tknzr.treeRemove( nod)
+		if initTyp = tknzr.tknTypeNUM {
+			set initCls = "Number", prpdes.initialValue = initVal
+		}
+		else if initTyp = tknzr.tknTypeSTR {
+			/* Current version adds M quotes !! */
+			set initCls = "String", prpdes.initialValue = initVal.addQuotes()
+		}
+		else if initTyp = this.tknTypeEFALSE {
+			set initCls = "Boolean", prpdes.initialValue = false
+		}
+		else if initTyp = this.tknTypeETRUE {
+			set initCls = "Boolean", prpdes.initialValue = true
+		}
+		// currently de0lit ensures that only one of the above applies
+	}
+
+	// qualifiers ==========================================================
+	set nod = rule.elementAt(4)
+	type Boolean dups()
+	type Number elm, tkn
+	type String qua, val
+	type List quaLst = {List}(tknzr.treeValue( nod))
+
+	do tknzr.treeRemove( nod)
+
+	for elm = 1:2:quaLst.count() {
+		set qua = quaLst.elementAt(elm)
+		set nod = quaLst.elementAt(elm+1)
+		if 'nod.isNull() {
+			set val = {String}(tknzr.treeValue( nod))
+			set tkn = tknzr.treeType( nod)
+			do tknzr.treeRemove( nod)
+		}
+		else  set val = "", tkn = 0
+
+		set dups( qua) = dups( qua).exists()
+		if dups( qua) set tkn = this.srcErr(tknzr, "SYNTAX", "qualifier '/"_ qua_ "' occurs more than once", 0) quit
+
+		// class = className ==========================================
+		if qua = "class" {
+			if this.ae0class( tknzr, val)'= 0 set tkn = this.srcErr(tknzr, "SYNTAX", "invalid super class '"_ val_ "'", 0) quit
+			set prpdes.resultClass = val
+		}
+		// literal ====================================================
+		else if qua = "literal" {
+			if 'val.isNull()          set tkn = this.srcErr( tknzr, "SYNTAX", "value ignored for literal='"_ val_ "'", 0)
+			if prpdes.restricted = 1  set tkn = this.srcErr( tknzr, "SYNTAX", "'readonly' ignored for 'literal'", 0)
+			if 'prpdes.node.isNull()  set tkn = this.srcErr( tknzr, "SYNTAX", "'node' ignored for 'literal'", 0) set prpdes.node = ""
+			if prpdes.position>0      set tkn = this.srcErr( tknzr, "SYNTAX", "'position' ignored for 'literal'", 0) set prpdes.position = 0
+			set prpdes.restricted = 2
+		}
+		// node = litval ==============================================
+		else if qua = "node" {
+			if tkn = tknzr.tknTypeNUM {
+				if val<0 set tkn = this.srcErr(tknzr, "VALUE", "negative node numbers ("_ val_ ") are reserved for PSL", 0) quit
+			}
+			else if tkn '= tknzr.tknTypeSTR set tkn = this.srcErr(tknzr, "VALUE", "'node=' must specify a literal value", 0) quit
+			if prpdes.restricted = 2 set tkn = this.srcErr( tknzr, "SYNTAX", "'node' is ignored for 'literal'", 0) quit
+			set prpdes.node = val
+		}
+		// position = intval ==========================================
+		else  if qua = "position" {
+			if tkn '= tknzr.tknTypeNUM set tkn = this.srcErr(tknzr, "VALUE", "position value must be positive integer",0) quit
+
+			type Number pos = {Number}val
+			if val["."!(pos<1) set tkn = this.srcErr(tknzr, "VALUE", "position must be integer, greater than zero ("_ val_ ")", 0) quit
+			if prpdes.restricted = 2 set tkn = this.srcErr( tknzr, "SYNTAX", "'position' is ignored for 'literal'", 0) quit
+			if 'prpdes.dimension.isNull() set tkn = this.srcErr( tknzr, "SYNTAX", "'position' is ignored for array property", 0) quit
+			/* If this is the fist 'position', update the classType.
+			   This can be done without additional checking, because
+			   the #CLASSDEF validated that the /extends is OK */
+			if clsdes.classType = clsdes.classTypePRIM0PROP set clsdes.classType = clsdes.classTypePRIM0NODE, clsmod = true
+			set prpdes.position = pos
+		}
+		// private, protected, public ===============================
+		else if qua = "private" ! (qua = "protected") ! (qua = "public")   {
+			if prpdes.accessLevel '= 1 set tkn = this.srcErr(tknzr, "SYNTAX", "conflicting access modifiers", 0) quit
+			set prpdes.accessLevel = ({List}"protected,private,,public").position(qua) - 2
+			if 'val.isNull() set tkn = this.srcErr( tknzr, "SYNTAX", "value ignored for /"_ qua_ "='"_ val_ "'", 0)
+		}
+		// readonly ===================================================
+		else if qua = "readonly" {
+			if prpdes.restricted = 2 set tkn = this.srcErr( tknzr, "SYNTAX", "'readonly' ignored for 'literal'", 0) quit
+			set prpdes.restricted = 1
+			if 'val.isNull() set tkn = this.srcErr( tknzr, "SYNTAX", "value ignored for readonly='"_ val_ "'", 0)
+		}
+		// invalid qualifier ===========================================
+		else  set tkn = this.srcErr(tknzr, "SYNTAX", "unknown PROPERTYDEF qualifier '"_ qua_ "'", 0)
+	}
+
+	// the class qualifier is required, except for 'literal', where it can be inferred
+	if 'dups( "class").exists() {
+		set prpdes.resultClass = initCls
+		if 'dups("literal").exists() set tkn = this.srcErr(tknzr,"SYNTAX", "missing 'class' qualifier for "_prp, 0)
+	}
+
+	/* Update the classType will be updated from PRIM0PROP or PRIM0NODE to
+	   PRIMITIVE if and only if the class extends Primitive.
+	   Perform this update for all parselevels to ensure a proper value even
+	   for pslx-level information.
+	   */
+	set nod = prpdes.node
+	if 'nod.isNull() {
+		if clsdes.classType '< clsdes.classTypePRIM0NODE, clsdes.extends = clsdes.PRIMITIVECLASS set clsdes.classType = clsdes.classTypePRIMITIVE, clsmod = true quit
+		if clsdes.classType = clsdes.classTypePRIM0NODE set tkn = this.srcErr(tknzr, "VALUE", "'node' not allowed for this class", 0) quit
+	}
+
+	if this.parseLevel > this.parseLevelPSLX {	// Semantic validation
+		// All classTypes (except if 'literal' property)
+		quit:prpdes.restricted = prpdes.restrictedLITERAL
+
+		/* No properties of Record descendants through #PROPERTYDEF
+		   */
+		if clsdes.isRecord( clsdes.class) set tkn = this.srcErr( tknzr, "SYNTAX", "#PROPERTYDEF not allowed for Record descendant", 0) quit
+
+		type String res = prpdes.resultClass quit:res.isNull()
+		type Number pos = prpdes.position
+
+		/* Either 'node' or 'position' is specified (except for 'literal')
+		   */
+		if nod.isNull(), pos = 0 set tkn = this.srcErr( tknzr, "SYNTAX", "Either 'node' or 'position' must be specified", 0) quit
+
+		/* The classType of the resultclass shall not be PRIMITIVE
+		   */
+		type PSLClass ocdres = this.pslCls( res)
+		if ocdres.classType = ocdres.classTypePRIMITIVE set tkn = this.srcErr( tknzr, "VALUE", "class="_ res_ " is an invalid property type", 0) quit
+
+		/* 'position' is only allowed if 'class' specifies one of the
+		   PSL Intrinsic "zero property" classes other than Memo or
+		   ByteString. */		
+		if pos > 0, ocdres.classType '= ocdres.classTypePRIM0PROP ! ({List}"ByteString,Memo").contains( res) set tkn = this.srcErr( tknzr, "VALUE", "'class="_ res_ "' incompatible with 'position'", 0) quit
+
+		/* The combination (node, position) is unique
+		   */
+		if nod.isNull() {	// use -1 as substitute node
+			if this.prpXnp( -1, pos).exists() set tkn = this.srcErr( tknzr, "VALUE", "position already used for "_ this.prpXnp( -1, pos), 0) quit
+			set this.prpXnp( -1, pos) = prp
+		}
+		else  do {
+			if this.prpXnp( nod, pos).exists() set tkn = this.srcErr( tknzr, "VALUE", "'node' and 'position' already used for "_ this.prpXnp( pos, pos), 0) quit
+			set this.prpXnp( nod, pos) = prp
+		}
+
+		// Primitive descendants
+		if clsdes.classType '= clsdes.classTypeREFERENCE {
+			/* The combination position=1, node='' is not allowed
+			   */
+			if pos = 1, nod.isNull() set tkn = this.srcErr(tknzr, "VALUE", "node='', position=1 is reserved", 0)
+
+			/* cannot have REFERENCE properties
+			   */
+			if ocdres.classType > ocdres.classTypePRIMITIVE quit
+			set tkn = this.srcErr(tknzr, "SYNTAX", "Primitive class can only have Primitive properties; 'class'="_ prpdes.resultClass_ " invalid", 0)
+		}	// end Primitive descendant
+	}	// end parseLevel > this.parseLevelPSLX
+
+	set this.pslPrp( cls_ "."_ prp) =  prpdes
+	if clsmod set this.pslCls( cls) = clsdes
+
+	set tkn = tknzr.chkEOL()
+	quit 0
+
+	/* ================================================================== */
+	/* Statement methods						      */
+	/* ****************************************************************** */
+
+	// ---------------------------------------------------------------------
+protected Number statement( PSLTokenizer tknzr,
+		String stm) // statement name (*1)
+	/* ---------------------------------------------------------------------
+	Decompose the current statement (as passed).
+
+	This protected method implements the dispatch to statement handlers for
+	the standard PSL statements. To add statements, perform the following
+	steps:
+	1) Define a new class that extends PSLParser, say ExtendedParser
+	2) Override the PSLParse.statement() method
+	3) Handle the additional commands in ExtendedParser.statement()
+	4) Call super.statement() to handle the standard PSL statements
+
+	ARGUMENTS:
+	(*1) stm = statement name
+		The name of the statement, converted to lower-case.
+		Note that this corresponds to this.tknValue.lowerCase().
+
+	NOTES:
+	. The formal parameter is a convenience parameter only. For standard
+		PSL it is of limited use. However, if the parser is extended
+		as described above, passing the statement name ensures a
+		standardized spelling, and reduces overhead.
+	*/
+	if stm = "set"        quit this.skip2stm(tknzr)
+	else if stm = "type"  quit this.skip2stm(tknzr)
+	else if stm = "if"    quit this.skip2stm(tknzr)
+	else if stm = "do"    quit this.skip2stm(tknzr)
+	else if stm = "quit"  quit this.skip2stm(tknzr)
+	else if stm = "for"   quit this.skip2stm(tknzr)
+	else if stm = "kill"  quit this.skip2stm(tknzr)
+	else if stm = "else"  quit this.skip2stm(tknzr)
+	else if stm = "write" quit this.skip2stm(tknzr)
+	else if stm = "throw" quit this.skip2stm(tknzr)
+	else if stm = "while" quit this.skip2stm(tknzr)
+	else if stm = "catch" quit this.skip2stm(tknzr)
+	else if stm = "lock"  quit this.skip2stm(tknzr)
+	else if stm = "read"  quit this.skip2stm(tknzr)
+	
+	else if stm = "new"    quit this.skip2stm(tknzr)
+	else if stm = "xecute" quit this.skip2stm(tknzr)
+
+	else if stm = "open"  quit this.skip2stm(tknzr)
+	else if stm = "use"   quit this.skip2stm(tknzr)
+	else if stm = "close" quit this.skip2stm(tknzr)
+
+	else if stm = "break"     quit this.skip2stm(tknzr)
+	else if stm = "halt"      quit this.skip2stm(tknzr)
+	else if stm = "hang"      quit this.skip2stm(tknzr)
+	else if stm = "trollback" quit this.skip2stm(tknzr)
+	else if stm = "zbreak"    quit this.skip2stm(tknzr)
+	else if stm = "zprint"    quit this.skip2stm(tknzr)
+	else if stm = "zshow"     quit this.skip2stm(tknzr)
+	else if stm = "zwrite"    quit this.skip2stm(tknzr)
+	else if stm = "zwithdraw" quit this.skip2stm(tknzr)
+	else if stm = "zwrite"    quit this.skip2stm(tknzr)
+
+	quit this.srcErr( tknzr, "SYNTAX", "invalid statement '"_ stm_ "'", 1)
+
+	// ---------------------------------------------------------------------
+private String ps0mtd( PSLTokenizer tknzr)
+	/* ---------------------------------------------------------------------
+	Decomposition of method declaration
+	This extracts the method declaration from the srcCode() property, and
+	adds it to this.pslMtd(,).
+
+	On entry tknType = tknTypeMTD, and tknValue is the word that started at
+	the first position of the line. This shall be either an access modifier
+	(public, protected, private, static, final) or the name of the
+	ResultClass, or the name of the label (if #OPTION ResultClass OFF)
+	*/
+	type String cls = this.moduleName
+	type PSLClass clsdes = this.pslCls( cls)
+	type Number tkn, elm
+	type String mtd, val
+	type PSLMethod mtddes = Class.new( "PSLMethod")
+
+	set mtddes.accessLevel = mtddes.accessLevelPACKAGE	// absent = package
+	set mtddes.class = cls
+	set mtddes.sourceLine = tknzr.srcLine
+	set mtddes.inLiteral = false
+	set mtddes.methodType = $SELECT(clsdes.classType<0:mtddes.methodTypeSTATIC,1:mtddes.methodTypeINSTANCE)
+
+	// Decompose:
+	// nodeOf(modLst) , valueOf(resultClass) , valueOf(name) , nodeOf(ds0fpLst)
+	type Number nod = this.ds0mtd( tknzr)
+	type List rule = {List}(tknzr.treeValue( nod))
+	do tknzr.treeRemove( nod)
+
+	// access modifiers ====================================================
+	set nod = rule.elementAt(1)
+	type List modLst = {List}(tknzr.treeValue( nod))
+	do tknzr.treeRemove( nod)
+
+	for elm = 1:1:modLst.count() {
+		set val = modLst.elementAt(elm)
+		if val = "final" {
+			if mtddes.methodType '= mtddes.methodTypeINSTANCE set tkn = this.srcErr(tknzr,"SYNTAX","unexpected acess modifier 'final'",0)
+			set mtddes.methodType = mtddes.methodTypeFINAL
+		}
+		else  if val = "static" {
+			if mtddes.methodType '= mtddes.methodTypeINSTANCE set tkn = this.srcErr(tknzr,"SYNTAX","unexpected acess modifier 'static'",0)
+			set mtddes.methodType = mtddes.methodTypeSTATIC
+		}
+		else  {
+			if mtddes.accessLevel '= mtddes.accessLevelPACKAGE set tkn = this.srcErr(tknzr,"SYNTAX","duplicate access modifier '"_val_ "'",0) quit
+			set mtddes.accessLevel = ({List}"protected,private,,public").position( val) - 2
+		}
+	}
+
+	/* temporary (?): If not part of a package, and no access modifier
+	   specified, downgrade to private.
+	   This relies on the fact that ds0mtd replaced the keyword 'private'
+	   by 'public'. */
+	if clsdes.package.isNull(),mtddes.accessLevel=mtddes.accessLevelPACKAGE set mtddes.accessLevel = mtddes.accessLevelPRIVATE
+
+	// resultClass =========================================================
+	set val = rule.elementAt(2)
+	if 'val.isNull(), val'="void", this.ae0class( tknzr, val) '= 0 set tkn = this.srcErr(tknzr, "VALUE", "invalid resultClass '"_val_"'", 0)
+	set mtddes.resultClass = val
+
+	// methodName ==========================================================
+	set mtd = rule.elementAt(3)
+	if clsdes.classType < 0 {
+		quit:mtd?1A.AN  quit:mtd?1"%".AN  quit:mtd?1.N
+		set tkn = this.srcErr(tknzr, "SYNTAX", "invalid label "_ mtd,0)
+	}
+	else  if 'this.isName(mtd) set tkn = this.srcErr(tknzr, "SYNTAX", "invalid method name "_ mtd,0)
+	set mtddes.method = mtd
+
+	// formal parameter list ===============================================
+	set nod = rule.elementAt(4)
+
+	/* If nod.isNull() then there was no formal parameter specification
+	   (i.e. label), which is only allowed for subroutine collection modules
+	   If nod.isNotNull(), then rule will be loaded with the list of formal
+	   parameters.
+	   If rule.isNull() then there is an empty list (i.e. label())
+	   */
+	if nod.isNull() {
+		if clsdes.classType > -1 set tkn = this.srcErr(tknzr,"SYNTAX", "missing formal parameter list in method declaration", 0) quit
+		set mtddes.methodType = mtddes.methodTypeNOFPL	// or LBAEL (if inside subroutine)
+	}
+	else  {
+		set rule = {List}(tknzr.treeValue( nod))
+		do tknzr.treeRemove( nod)
+		type Number elm
+		type List fpl = "", names = ""
+		type String nam
+
+		for elm = 1:1:rule.count() {
+			set nod = rule.elementAt(elm)
+			set val = {String}(tknzr.treeValue( nod))
+			do tknzr.treeRemove( nod)
+
+			/* Validate formal parameter names.
+			   This is currently needed for parseLevel=PSL AND FULL,
+			   because UCGM calls this method and uses the value
+			   returned to produce the M code. */
+			if this.parseLevel > this.parseLevelPSLX {
+				set val = this.ps0mtdFp( tknzr, val, "T")
+				set nam = val.piece(" ",3).piece("(")
+				if ({List}"super,this").contains( nam), clsdes.classType>-1 set tkn = this.srcErr(tknzr,"SYNTAX", "invalid formal name '"_nam_"'", 0)
+				if names.contains( nam) set tkn = this.srcErr(tknzr,"SYNTAX", "duplicate formal name '"_nam_"'", 0)
+				set names = names.add( nam)				
+			}
+			set fpl = fpl.add( val, ";")
+		}
+		set mtddes.formalList = fpl
+	}
+
+	// comment after closing ')', but before the end-of-line ===============
+	set tkn = tknzr.nextToken()
+	if tkn = tknzr.tknTypeCMT {
+		set mtddes.comment = tknzr.tknValue.trim()
+	}
+	else  do tknzr.pushBack()
+
+	/* If at parseLevelFULL, the declaration has already been processed,
+	   and will already occur in the array. We only need to apply the level 3
+	   semantic actions (to be determined).
+	   If at a lower level, add the declaration to the parser
+	   */
+	if this.parseLevel = this.parseLevelFULL {
+		// semantic actions to be determined
+	}
+	else  {
+		if this.pslMtd( cls_"."_ mtd).exists() set tkn = this.srcErr(tknzr,"MISMATCH","duplicate method declaration '"_mtd_"'", 0)
+		else  if this.pslPrp( cls_"."_ mtd).exists() set tkn = this.srcErr(tknzr,"MISMATCH","method declaration '"_mtd_"' conflicts with property declaration", 0)
+		else  set this.pslMtd( cls_"."_ mtd) = mtddes
+	}
+
+	// validate against ancestor classes
+	if this.parseLevel = this.parseLevelPSL {
+
+		quit: clsdes.classType < 0
+
+		/* validate that
+		   - the method name does not conflict with a property name in an
+			ancestor class
+		   - if this method overrides an ancestor method, then
+			- the accessType is not narrower than the ancestor's
+			- the formal parameters are of the same access and type
+		   */
+		type PSLClass cd
+		type PSLMethod md
+		type String ext = clsdes.extends
+		type Number mtdac = mtddes.accessLevel, extac
+		type List extok
+		while 'ext.isNull() { set ext = cd.extends quit:this.pslPoly( cls_"."_mtd).exists()
+			if 'this.pslCls( ext).exists() do this.loadClass( ext)
+			set cd = this.pslCls( ext)
+			if this.pslPrp( ext_"."_mtd).exists() set tkn = this.srcErr(tknzr,"MISMATCH","method declaration '"_mtd_"' conflicts with property declaration in class "_ext, 0)
+			quit:'this.pslMtd( ext_"."_mtd).exists()
+
+			set md = this.pslMtd( ext_"."_mtd)
+			set extac = md.accessLevel
+			set extok = {List}("-1,2;-1,0,2,2;-1,1,2;2".piece(";",extac+2))
+			if 'extok.contains( mtdac) set tkn =  this.srcErr( tknzr,"MISMATCH","access type '"_mtddes.getAccess()_"' in "_mtddes.method_ " conflicts with with access type '"_md.getAccess()_"' in "_ext, 0)
+			if mtddes.formalList '= md.formalList, mtd'="initialize" do this.srcWarn( tknzr, "MISMATCH","method may hide "_ ext_"."_mtd)
+			if 'this.pslPoly( cls_"."_mtd).exists() set this.pslPoly( cls_"."_mtd) = ext
+		}
+	}
+	quit tknzr.treeAdd( tknzr.tknTypeMTD, mtddes)
+
+	// ---------------------------------------------------------------------
+private String ps0mtdFp( PSLTokenizer tknzr
+		, String occ		// occurrence to validate
+		, String cntxt		/* context shall be one of:
+						"T" - type declaration
+						"S" - assignment target
+						"E" - expression
+						"K" - kill / out-out-of-scope
+					*/
+		)	// validate Identifier occurrence
+	/* ---------------------------------------------------------------------
+	Temporary function that validates if the formal parameter declaration
+	contains system keywords that should not be there ...
+
+	This function can probably be adapted to conform to whatever we decide
+	on the use of system keywords.
+
+	NOTES:
+	. The current version uses the same array as UCGM. Proper incorporation
+		into the PSLParser structure will be postponed until it has
+		been determined how future PSL versions are going to deal with
+		the System keywords (in particular scoping and replacement).
+	. Although the current function will be called for parseLevelPSL, it will
+		not substitute any keywords, because the keywords() array has
+		not yet been loaded.
+	*/
+	type Number pos = $SELECT( cntxt = "T":3, 1:1)
+	type String id  = occ.piece( " ", pos)
+
+	quit:id.extract()'="%" occ
+
+	type public String keywords()
+	type String z = keywords(id).get() quit:z.isNull() occ
+
+	type Number acc = z.piece( "|", 2)
+	if acc = -1, cntxt '= "E" set acc = this.srcErr( tknzr, "SYSVAR", id_" is reference-only", 0) quit occ
+	if acc = 1, "SK"[cntxt do this.srcWarn( tknzr, "SYSVAR", "Modifying system variable: "_id)
+	if cntxt = "T", z.piece("|",3) '= occ.piece( " ", 2)  set occ.piece( " ",2) = z.piece("|",3) do this.srcWarn( tknzr, "SYSVAR", "cannot modify type "_ z.piece("|",3)_ " of "_id)
+
+	set id = z.piece( "|") 
+
+	/* Code below will only work for M !!
+	   In a multi-pass compiler, the translation of an 'EFD' occurrence to
+	   M code is probably postponed until the very last phase. */
+	if cntxt = "E", id = "EFD",this.cs( "Options", "$GetEFD") set id = "$G(EFD)"
+
+	/* Similarly, only lvn-alias-keywords shall be replaced here, all other
+	   replacements shall be postponed. */
+	if "1,isLvnAliasKeyword" set occ.piece( " ", pos) = id	// replace keyword by variable
+
+	quit occ
+
+	/* ================================================================== */
+	/* Instance support methods					      */
+	/* ****************************************************************** */
+
+	// ---------------------------------------------------------------------
+private Number addSymbol( String name
+		, String dim
+		, String scope
+		, String cls
+		, String val
+		)
+	/* ---------------------------------------------------------------------
+	Add a symbol to symbol-table, and return its symbol number (which will
+	also be stored as PSLSymbol.ident)
+	This is a place-holder method until we decide about the layout of the
+	symbole table.
+	*/
+	type Number id = this.symTab("").order(-1) + 1
+
+	/*
+	type PSLSymbol sym = Class.new( "PSLSymbol", id.toString())
+
+	set sym.dimension = dim
+	set sym.name = name
+	set sym.occExpr = val
+	set sym.resultClass = cls
+	set sym.scope = scope
+	//set sym.sourceIdent = tknzr.moduleName_":"_this.methodName_":"_tknzr.srcLine
+
+	set this.symTab( id) = sym
+	*/
+	set this.symTab( id) = name_ 9.char() _ dim_ 9.char()_ scope_ 9.char()_ cls_ 9.char()_ val
+	quit id
+
+	// ---------------------------------------------------------------------
+public final String getSuper( String mid	// the method id (class.method)
+		) // return the ancestor class that implements super.method
+	/* ---------------------------------------------------------------------
+	Support function that returns contenxts of pslPoly( mid) or "" if there
+	is no super.method.
+	*/
+	quit this.pslPoly( mid).get()
+
+	// ---------------------------------------------------------------------
+protected final Boolean isName( String wrd)
+	/* ---------------------------------------------------------------------
+	Return if word is a valid name:
+	- not a reserved word
+	- starts with alpha, and followed by zero or more alphanumerics
+	*/
+	if wrd.beginsWith("%") set wrd.extract() = "Z"
+	if wrd'?1A.AN quit false
+
+	if this.getRsvd().contains( wrd) quit false
+
+	quit true
+
+	// ---------------------------------------------------------------------
+private Boolean isStm( Number tkn, String wrd)
+	/* ---------------------------------------------------------------------
+	Return if combination of token and word are a statement keyword
+	*/
+	type static PSLTokenizer
+	if tkn = PSLTokenizer.tknTypeWRD, this.getStms().contains( wrd.lowerCase()) quit true
+	quit false
+
+	// ---------------------------------------------------------------------
+protected void reset()	// reset all pointers
+	/* ---------------------------------------------------------------------
+	*/
+	set this.logCounts = "0|0|0"
+	set this.logfile = ""
+
+	set this.methodName = ""
+
+	set this.parseLevel = this.parseLevelPSL
+
+	set this.targetComment = ";"
+
+	kill this.cs(,), this.prpExt(), this.prpXnp(,), this.symTab(), this.sysmap(,,)
+
+	quit
+
+	// ---------------------------------------------------------------------
+private Number skip2stm( PSLTokenizer tknzr)
+	/* ---------------------------------------------------------------------
+	Skip tokens until next command word
+	*/
+	quit tknzr.skip2WRD( this.getStms(), 1)
+
+	// ---------------------------------------------------------------------
+private Number srcErr( PSLTokenizer tknzr,	// PLSTokenizer
+		String grp,		// log group
+		String msg,		// message text
+		Number skipTo)		// update token pointer indicator (*3)
+	/* ---------------------------------------------------------------------
+	Report an error in the source file.
+
+	ARGUMENTS:
+	(*3) skipTo = skip to indicator
+		0 - do not advance token pointer
+		1 - skip-to-word
+			In that case words and ignCase are required, and will be
+			passed to $$skip2WRD()
+		2 - skip-to-end-of-line
+			quits $$skip2EOL()
+	*/
+	do this.log( tknzr, -1, "", 3, grp, msg)
+
+	type Number tkn = tknzr.tknType
+
+	if skipTo = 1 set:'this.isStm(tknzr.tknValue) tkn = this.skip2stm(tknzr)
+	if skipTo = 2 set:tkn'=tknzr.tknTypeEOL&(tkn'=tknzr.tknTypeEOF) tkn = tknzr.skip2EOL()
+	quit tkn
+
+	// ---------------------------------------------------------------------
+private void srcInfo( PSLTokenizer tknzr,	// PLSTokenizer
+		String grp,		// log group
+		String msg)		// message text
+	/* ---------------------------------------------------------------------
+	Report an informational message
+	*/
+	quit:'this.cs("INFO",grp).get( false)
+
+	#ACCEPT date=2007-07-05; CR=27800; PGM=Frans S.C. Witte; group=BYPASS
+	#BYPASS
+	quit:$D(this("ACCEPT",tknzr("srcLine")))#2
+	quit:$D(this("ACCEPT",tknzr("srcLine"),grp))#2
+	#ENDBYPASS
+
+	do this.log( tknzr, -1, "", 1, grp, msg)
+	quit
+
+	// ---------------------------------------------------------------------
+private void srcWarn( PSLTokenizer tknzr,	// PLSTokenizer
+		String grp,		// log group
+		String msg)		// message text
+	/* ---------------------------------------------------------------------
+	Report a warning, unless suppressed.
+	The warning will be suppressed if:
+	- the parseLevel < parseLevelPSL (i.e. the module is parsed for
+		reference by another module)
+	- warnings for this group are turned off by #WARN
+	- warnings for this line are turned off by #ACCEPT without GROUP=...
+	- warnings for this line are turned off for this group by #ACCCEPT with
+		GROUP = grp
+	*/
+	quit:this.parseLevel < this.parseLevelPSL
+	quit:'this.cs("WARN",grp).get( false)
+
+	#ACCEPT date=2007-07-05; CR=27800; PGM=Frans S.C. Witte; group=BYPASS
+	#BYPASS
+	quit:$D(this("ACCEPT",tknzr("srcLine")))#2
+	quit:$D(this("ACCEPT",tknzr("srcLine"),grp))#2
+	#ENDBYPASS
+
+	do this.log( tknzr, -1, "", 2, grp, msg)
+	quit
+
+	/* ================================================================== */
+	/* Target code generation methods				      */
+	/* ****************************************************************** */
+
+	// ---------------------------------------------------------------------
+private void tgtAdd( String target(), String code)
+	/* ---------------------------------------------------------------------
+	Add line of code to target()
+	*/
+	type Number ln = target("").order(-1) + 1
+	set target( ln) = code
+	quit
+
+	// ---------------------------------------------------------------------
+private void tgtAddCmt( String target(), String comment)
+	/* ---------------------------------------------------------------------
+	Add comment line to target()
+	*/
+	do this.tgtAdd( target(), " "_ this.targetComment_ " "_comment)
+	quit
+
+	// ---------------------------------------------------------------------
+private void tgtAdj( String target())
+	/* ---------------------------------------------------------------------
+	Add stack adjustment code for Class Definition Module to target(),
+	provided this class has properties that descend from Reference.
+	*/
+	type literal String FOROBJ = " F vO="
+
+	type List refprps = this.refPrp
+	quit:refprps.isNull()
+
+	type String cls = this.moduleName
+	type PSLClass ocd = this.pslCls( cls)
+	type List arrprp = Class.new( "List")
+
+	do this.tgtAdd(target(), ocd.ADJUSTORLABEL_ "(this,vS) Q:this=0  Q:'$D(vobj(this))")
+	do this.tgtAdd(target(), " N vD,vA,vO")
+	do this.tgtAdd(target(), " Q:$P(vobj(this,-1),$C(9),2)'>vS")
+
+	type Number elm
+	type String dlm = "", prp
+	type PSLExpression code = FOROBJ
+	type PSLProperty opd
+	for elm = 1:1:refprps.count() {
+		if 'code.fitsLineLength(40) {
+			do this.tgtAdd(target(), code_ " D:vO]""""")
+			do this.tgtAdjBlock(target())
+			set code = FOROBJ, dlm = ""
+		}
+		set prp = refprps.elementAt( elm)
+		if prp["(" set arrprp = arrprp.add( prp) quit
+		set opd = this.pslPrp( cls_"."_prp)
+		set code = code_ dlm_ opd.getExpr( "this", "", ocd), dlm = ","
+	}
+
+	if code '= FOROBJ {
+		do this.tgtAdd(target(), code_ " D:vO]""""")
+		do this.tgtAdjBlock(target())
+	}
+
+	// Insert adjustment code for array-of-reference objects
+	type Number dim, lvl, max = 0
+	type String hdr, nod, sub
+	for elm = 1:1:arrprp.count() {
+		set prp = arrprp.elementAt( elm)
+		set opd = this.pslPrp( cls_"."_prp)
+		set dim = opd.dimension.length( ",")
+		set nod = opd.node
+		if 'nod.isNumber() set nod = nod.addQuotes()
+		set hdr = "vobj(this,"_ nod
+		if dim>max {
+			set code = ""
+			for max=max+1:1:dim set code = code_ " N v"_ max_ " S v"_ max_ "="""""
+			do this.tgtAdd(target(), code)
+		}
+		set code="", sub = hdr
+		for lvl = 1:1:dim {
+			set sub = sub_ ",v"_ lvl
+			set code = code_ " F  S v"_ lvl_ "="_ sub_ ") Q:v"_ lvl_ "="""" "
+		}
+		do this.tgtAdd(target(), code_" S vO="_sub_") D")
+		do this.tgtAdjBlock(target())
+	}
+
+	/* Add code to adjust this, or code that calls vcdmAdj() of an ancestor
+	   that needs one.
+	   */
+	type PSLClass ext = this.getPSLClass( ocd.extends)
+	if ext.adjustor.isNull() do this.tgtAdd(target(), " S $P(vobj(this),$C(9),2)=vS ; or decrement here")
+	else  do this.tgtAdd(target(), " D "_ ext.adjustor_ "(.this,vS)")
+	do this.tgtAdd(target(), " Q")
+	
+	quit
+
+	// ---------------------------------------------------------------------
+private void tgtAdjBlock(String target())
+	/* ---------------------------------------------------------------------
+	Add stack adjustment code for single node.
+	*/
+	do this.tgtAdd(target(), " . S vD=$G(vobj(vO,-1)),vA=$P(vD,$C(9),4)")
+	do this.tgtAdd(target(), " . I vA="""" S:$P(vD,$C(9),2)>vS $P(vobj(vO),$C(9),2)=vS Q")
+	do this.tgtAdd(target(), " . D @(vA_""(vO,vS)"")")
+	quit
+
+	// ---------------------------------------------------------------------
+private void tgtDes( String target())
+	/* ---------------------------------------------------------------------
+	Add destructor code for this Class Definition Module to target(),
+	provided this class either has a finalize() method or has properties
+	that descend from Reference.
+
+	NOTES:
+	. The code for the destructor is slightly but essentially different from
+		the code for the adjustor. The destructor code does not destroy
+		the object itself (i.e. does not contain a KILL vobj(this)). It
+		is the callers responsibility to this. Note that this simplifies
+		the generated code: the caller must conditionally call the
+		destructor, but can always unconditionally kill the vobj() entry
+		(cf code generated for this method).		
+	*/
+	type literal String FOROBJ = " F vO="
+
+	type String cls = this.moduleName
+	type PSLClass ocd = this.pslCls( this.moduleName)
+	if ocd.flags'["F", ocd.flags'["R" quit
+
+	do this.tgtAdd( target(), ocd.DESTRUCTORLABEL_ "(this) Q:this=0  Q:'$D(vobj(this))")
+	if ocd.flags["F" do this.tgtAdd( target(), " D finalize(.this)")
+
+	type Number elm
+	type String dlm = "", prp
+	type PSLExpression code = FOROBJ
+	type PSLProperty opd
+	type List refprps = this.refPrp
+	type List arrprp = Class.new( "List")
+
+	if 'refprps.isNull() {
+		do this.tgtAdd( target(), " N vD,vO,vS")
+		do this.tgtAdd( target(), " S vS=$P(vobj(this,-1),$C(9),2)")
+		for elm = 1:1:refprps.count() {
+			if 'code.fitsLineLength(50) {
+				do this.tgtAdd( target(), code_" I vO]"""",$P($G(vobj(vO,-1)),$C(9),2)=vS D")
+				do this.tgtDesBlock( target())
+				set code = FOROBJ
+			}
+			set prp = refprps.elementAt( elm)
+			if prp["(" set arrprp = arrprp.add( prp) quit
+			set opd = this.pslPrp( cls_"."_prp)
+			set code = code_ dlm_ opd.getExpr( "this", "", ocd), dlm = ","
+		}
+		if code '= FOROBJ {
+			do this.tgtAdd( target(), code_" I vO]"""",$P($G(vobj(vO,-1)),$C(9),2)=vS D")
+			do this.tgtDesBlock( target())
+		}
+	}
+
+	// Insert destructor code for array-of-reference objects
+	type Number dim, lvl, max = 0
+	type String hdr, nod, sub
+	for elm = 1:1:arrprp.count() {
+		set prp = arrprp.elementAt( elm)
+		set opd = this.pslPrp( cls_"."_prp)
+		set dim = opd.dimension.length( ",")
+		set nod = opd.node
+		if 'nod.isNumber() set nod = nod.addQuotes()
+		set hdr = "vobj(this,"_ nod
+		if dim>max {
+			set code = ""
+			for max=max+1:1:dim set code = code_ " N v"_ max_ " S v"_ max_ "="""""
+			do this.tgtAdd(target(), code)
+		}
+		set code="", sub = hdr
+		for lvl = 1:1:dim {
+			set sub = sub_ ",v"_ lvl
+			set code = code_ " F  S v"_ lvl_ "="_ sub_ ") Q:v"_ lvl_ "="""" "
+		}
+		do this.tgtAdd(target(), code_" S vO="_sub_") D:$P($G(vobj(vO,-1)),$C(9),2)=vS")
+		do this.tgtDesBlock( target())
+	}
+
+	/* Add code that calls vcdmDes() of an ancestor that needs one.
+	   */
+	type PSLClass ext = this.getPSLClass( ocd.extends)
+	if 'ext.destructor.isNull() do this.tgtAdd(target(), " D "_ ext.destructor_ "(.this)")
+	do this.tgtAdd(target(), " Q")
+
+	quit
+
+	// ---------------------------------------------------------------------
+private void tgtDesBlock(String target())
+	/* ---------------------------------------------------------------------
+	Add object destruction code for single node.
+	*/
+	do this.tgtAdd( target(), " . S vD=$P(vobj(vO,-1),$C(9),3)")
+	do this.tgtAdd( target(), " . D:vD]"""" @(vD_""(vO)"") K vobj(vO)")
+	quit
+	
+	// ---------------------------------------------------------------------
+private void tgtNew( String target())
+	/* ---------------------------------------------------------------------
+	Add code for Class.new() of Class Definition Module to target()
+
+	NOTES:
+	. For clssTypePRIMITIVE the generated code shall be adapted to include
+		save/restore $TEST when an initialize procedure is present or
+		when the assignment of initial values would result in code that
+		uses M IF-commands.
+	*/
+	type static PSLMethod
+
+	type String cls = this.moduleName
+	type PSLClass clsdes = this.pslCls( cls)
+	type PSLMethod mtddes
+	type String codeInit = ""
+
+	do this.tgtAdd(target(), clsdes.classNewDecl( "vC", "vS", "vD", "vA", "vInitObj")_ " ; Constructor, called for Class.new()")
+
+	/* If this not passed as parameter, NEW it here, else the method is
+	   called with DO, and $TEST must be saved and restored ...
+	   */
+	if clsdes.classType '= clsdes.classTypePRIMITIVE {
+		do this.tgtAdd(target(), " N this")
+	}
+	else  do this.tgtAdd(target(), " N vT S vT=$T")
+
+	/* Add code that calls constructor of the superclass */
+	do this.tgtAdd(target(), this.tgtNewAnc(clsdes, "vC", "vS", "vD", "vA", "vInitObj"))
+
+	type String tgtlvn = $SELECT(clsdes.classType=clsdes.classTypeREFERENCE:"vobj(this",1:"this")
+	type String tgtsep = $SELECT(tgtlvn["(":",",1:"(")
+	type String tgtend = $SELECT(tgtlvn["(":")",1:"")
+	type String prp0 = cls_".", prp = prp0
+
+	/* Add code that initializes the properties */
+	for  set prp = this.pslPrp( prp).order() quit:'prp.beginsWith( prp0)  {
+		type PSLProperty prpdes = this.pslPrp( prp)
+		quit:prpdes.restricted = prpdes.restrictedLITERAL	// literal
+
+		type String initval = prpdes.initialValue
+		quit:initval.isNull()		// no initial value
+
+		type String nod = prpdes.node
+		type String pos = prpdes.position
+
+		type String code = tgtlvn
+		if nod.isNull() set code = code_ tgtend
+		else  {
+			if 'nod.isNumber() set nod = nod.addQuotes()
+			set code = code_ tgtsep_ nod_ ")"
+		}
+		if pos>0 set code = "$P("_ code_ ",$C("_ clsdes.delimiter_ "),"_ pos_ ")"
+		do this.tgtAdd(target(), " S "_ code_ "="_ initval)
+	}
+
+	/* Add code that ensures that the method-override dispatch entries for
+	   this class are defined. Insert the block only if there is at least
+	   one method for this class.
+	   It is tempting to add the code that copies the dispatch from the
+	   ancestor only if at least one ancestor overrides something.
+	   Unfortunately, this requires full analyses of all overrides of all
+	   ancestors, and more importantly, it is vulnarable to changes that are
+	   made later to one of the ancestors. So always add the code to copy.
+	   Note that bFirst will still be true if this class did not override
+	   any method.
+	   There are two approaches:
+	   a) use MERGE to create the copy from the ancestor, then add the
+		overrides for this class
+	   b) create the overrides for this class, then add only the "missing"
+		nodes from the ancestor (requires a for-loop).
+	   The efficiency depends probably on the ratio between classes
+	   overriden by all ancestors versus the overrides in this class.
+	   The current implementation uses MERGE.
+	   */
+	type Boolean bFirst = true
+	type String mtd0 = cls_ ".", mtd = mtd0
+
+	/* The code below uses the MERGE variant.
+	   The merge-from-ancestor is only useful if the class does not extend
+	   Primitive or Reference (because these "pseudo root" classes do not
+	   override anything.
+	   */
+	if clsdes.extends '= clsdes.PRIMITIVECLASS, clsdes.extends '= clsdes.REFERENCECLASS {
+		do this.tgtAdd(target(), " I '$D("_ PSLMethod.POLYDISPATCH_ "("""_ cls_ """)) D")
+		do this.tgtAdd(target(), " . M "_ PSLMethod.POLYDISPATCH_ "("""_ cls_ """)="_ PSLMethod.POLYDISPATCH_ "("""_ clsdes.extends_ """)")
+		set bFirst = false
+	}
+	
+	for  set mtd = this.pslPoly( mtd).order() quit:'mtd.beginsWith( mtd0)  {
+		set mtddes = this.pslMtd( mtd)
+		quit:mtddes.methodType > mtddes.methodTypeFINAL
+		quit:mtddes.method = "initialize"
+		quit:mtddes.method = "finalize"
+
+		if bFirst {
+			do this.tgtAdd(target(), " I '$D("_ mtddes.POLYDISPATCH_ "("""_ cls_ """)) D")
+			set bFirst = false
+		}
+		do this.tgtAdd(target(), " . S "_ mtddes.POLYDISPATCH_ "("""_ cls_ ""","""_ mtddes.method_ """)="""_ cls_ """")
+	}
+
+	/* ================ variant that adds missing nodes at the end
+	if bFirst {
+		do this.tgtAdd(target(), " I '$D("_ mtddes.POLYDISPATCH_ "("""_ cls_ """)) D")
+		set bFirst = false
+	}
+	set ext = clsdes.extends
+	do this.tgtAdd(target(), " . N vM s vM=""""")
+	do this.tgtAdd(target(), " . F  s vM=$O("_ mtddes.POLYDISPATCH_ "("""_ ext_ """,vM)) Q:vM=""""  S:'$D("_ mtddes.POLYDISPATCH_ "("""_ cls_ """,vM)) "_ mtddes.POLYDISPATCH_ "("""_ cls_ """,vM)="_ mtddes.POLYDISPATCH_ "("""_ ext_ """,vM)")
+	================ */
+
+	if this.pslMtd( cls_".initialize").exists() {
+		type PSLMethod mtddes = this.pslMtd( cls_".initialize")
+		type String fpInit = mtddes.formalList
+		if 'fpInit.isNull() set codeInit = " D initialize(.this,.vInitObj)"
+		else  set codeInit = " D initialize(.this)"
+		do this.tgtAdd(target(),  codeInit)
+	}
+
+	if clsdes.classType '= clsdes.classTypePRIMITIVE {
+		do this.tgtAdd(target(), " Q this")
+	}
+	else {
+		do this.tgtAdd(target(), " I vT")	// restore $TEST
+		do this.tgtAdd(target(), " Q")
+	}
+	quit
+
+	// ---------------------------------------------------------------------
+private String tgtNewAnc( PSLClass ocd
+		, String varCls
+		, String varStk
+		, String varDtr
+		, String varAdj
+		, String varIni
+		)
+	/* ---------------------------------------------------------------------
+	Return the call to the constructor of the ancestor class of the supplied
+	object class descriptor.
+
+	NOTES:
+	. This code is a simplified version of the code in classNew^UCCLASS.
+		The simplification is possible because the Class Definition
+		Module never inherits from a class that has a constructor
+		generator.
+	*/
+	/* Look for the next ancestor class that has an initialize method.
+	   But stop if the ancestor is either Primitive or Reference
+	   */
+	type literal String LEFTEXMARK  = 31.char()
+
+	type String cls = ocd.extends
+	type PSLClass ext = this.pslCls( cls)
+	type String flg = ext.flags
+	while (cls '= ocd.REFERENCECLASS)&(cls '= ocd.PRIMITIVECLASS)&flg.translate(flg.translate("IiP")).isNull() {
+		set cls = ext.extends
+		set ext = this.pslCls( cls)
+		set flg = ext.flags
+	}
+
+	/* If the ancestor class that was found is Reference return the
+	   standard Class.new("Reference") code, else if the ancestor class is
+	   Primitive return code that stores the className in the -1 node (if
+	   classTypePRIMITIVE) or in this (if classTypePRIMITIVE0NODE).
+	   */
+	if cls = ext.REFERENCECLASS quit $$cdNewRef^UCCLASS( "this", varCls, varStk, varDtr, varAdj)
+	if cls = ext.PRIMITIVECLASS,ext.classType=ext.classTypePRIMITIVE quit " S this(-1)="_varCls
+	if cls = ext.PRIMITIVECLASS quit " S this="_varCls
+
+	type String code = ext.classNewCall( "", varCls, varStk, varDtr, varAdj, varIni)
+	if code [ LEFTEXMARK quit code.piece( LEFTEXMARK)_"this"_code.piece( LEFTEXMARK, 2)
+	quit " S this="_ code
+ #OPTION ResultClass ON
+public String vSIG()	quit "61461^42879^Frans S.C. Witte^108508"	// Signature - LTD^TIME^USER^SIZE

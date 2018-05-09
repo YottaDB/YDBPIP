@@ -44,6 +44,7 @@
 	;	. DELETE   - Delete a disk file
 	;	. EDTOPT   - Execute specified editor
 	; 	. EXCHMSG  - MTM control message exchange
+	;	. FAILOVER - Server Failover command
 	;	. FILENAM  - Return file name from output record
 	;	. FORMNAM  - Printer forms types
 	;	. MERGE    - Merge/append a file on to another
@@ -56,6 +57,16 @@
 	;
 	;
 	;-----Revision History-------------------------------------------------
+	; 06/06/05 - RussellDS - CR21619
+	;	     Added missing FAILOVER section.
+	;
+	; 06/16/05 - DALYE - CR 12360
+	;	     Modified the FMSPOST section to properly set up and run
+	;	     the FMS autopost script if the IBS and FMS directories 
+	;	     reside on separate nodes. Added code to handle situation
+	;	     where a user ID is required by a firewall in order to
+	;	     process remote commands on the FMS node. Added function
+	;	     documentation.
 	;
 	; 12/15/04 - RussellDS - CR14106
 	;	     Modified SBMTBCH section to eliminate need for global
@@ -843,6 +854,26 @@ EXCHMSG(CMD,PARAMS,MTMID,RM,NOP)	;Private;Exchange message with an MTM
 	Q X
 	;
 	;----------------------------------------------------------------------
+FAILOVER(SCRIPT,INIFIL,WAIT) ; Failover startup (switch from SECONDARY to PRIMARY role)
+        ;----------------------------------------------------------------------
+	; Invoke a pre-defined script to handle a failover situation.
+	; Execute failover startup script
+	;
+	; ARGUMENTS:
+	;	. SCRIPT -	Translated logical name that points to a 
+	;			specific script or command procedure
+	;					/TYP=T/REQ/MECH=VAL
+	;
+	;	. INIFIL -	The initialization file used to store
+	;			state information.
+	;					/TYP=T/REQ/MECH=VAL
+        ;----------------------------------------------------------------------
+	;
+	N X 
+	S X=$$SYS^%ZFUNC(SCRIPT_" "_INIFIL_" "_WAIT)
+	Q X
+	;
+	;----------------------------------------------------------------------
 FILENAM(rec)	;Private; Return filename from string
 	;----------------------------------------------------------------------
 	; This private function parses a record from an output file that 
@@ -1057,9 +1088,41 @@ VALIDNM(pnam,running)	;Public;Check process status
 	Q STATUS
 	;
 	;----------------------------------------------------------------------
-FMSPOST(CO,BATCH,POSTFILE,LIST)	
+FMSPOST(CO,BATCH,POSTFILE,LIST)	;Public; Call FMS batch posting script
 	;----------------------------------------------------------------------
-	N ER,IDIR,IO,X,FILE,SYSNODE,NODE,FMSDIR
+	;
+	; This function will be called by functions RGLXFR/QUE096 to 
+	; automatically post IBS end-of-day batches into FMS.
+       	;
+	; KEYWORDS:	FMS,AUTOPOST
+	;	
+	; ARGUMENTS:
+	;	. CO		GL posting company 	/TYP=T/REQ/MECH=VAL
+	;			short name
+	;
+	;	. BATCH		Up-bar delimited list	/TYP=T/NOREQ/MECH=VAL
+	;			of batch numbers to post
+	;
+	;	. POSTFILE	Up-bar delimited list	/TYP=T/NOREQ/MECH=VAL
+	;			of batch files to post
+	;
+	;	, LIST		Array of batch files to	/TYP=ARR/NOREQ/MECH=REFARR
+	;			post
+	;
+	; INPUTS:
+	;	Environmental variables used by this function:
+	;	. fmspost	FMS posting script
+	;	. fmsnodir	FMS node and directory
+	;	. ibsnodir	IBS node and directory (optional)
+	;	. fmsuser	FMS user ID for remote access (optional)
+	;
+	; RETURNS:
+	;	. 1 or 0
+	;
+	; EXAMPLE:
+	;	S ER=$$FMSPOST^%OSSCRPT(CO,,)  
+	;
+	N DIR,ER,FILE,FILENAME,FMSDIR,FMSUSER,IDIR,IO,NODE,SPLDIR,SYSNODE,X
 	;
 	S ER=0
 	;
@@ -1067,12 +1130,14 @@ FMSPOST(CO,BATCH,POSTFILE,LIST)
 	S NODIR=$$TRNLNM^%ZFUNC("fmsnodir")
 	S FMSDIR=$P(NODIR,"::",2)	; FMS directory
 	;
-	; CREATE TEMPORARY SCRIPT FILE TO CALL AUTOPOST SCRIPT FILE
+	; Create temporary script file, FMSTMP.sh, to call 
+	; the FMS Autopost script file
+	;
 	S SPLDIR=$$SCAU^%TRNLNM("SPOOL")
 	S DIR=$$SCAU^%TRNLNM("DIR")
 	S FILENAME="FMSTMP.sh"
 	S IO=$$FILE^%TRNLNM(FILENAME,SPLDIR)
-	S X=$$FILE^%ZOPEN(IO,,2) I 'X S ER=1 Q ER
+	S X=$$FILE^%ZOPEN(IO,"NEWV",2) I 'X S ER=1 Q ER
 	S args=DIR_" "_CO_" "
 	S args=args_""""_BATCH_""""
 	S args=args_" "
@@ -1081,26 +1146,52 @@ FMSPOST(CO,BATCH,POSTFILE,LIST)
 	W "ksh "_FMSDIR_"/"_FILE_" "_args
 	C IO
 	;
-	S SYSNODE=$$NODENAM^%ZFUNC()
+	; Make sure the FMSTMP.sh script file has execute privileges for
+	; the owner and group
+	;
+	S X=$$SYS^%ZFUNC("chmod u+x,g+x "_IO)
+	;
+	; Get current node information. Use ibsnodir environment variable
+	; if defined. Otherwise, use $$NODENAM^%ZFUNC
+	; 
+	S SYSNODE=$$TRNLNM^%ZFUNC("ibsnodir")
+	I SYSNODE="" S SYSNODE=$$NODENAM^%ZFUNC()
+	;
+	; Get node of FMS directory
+	;
 	S NODE=$P(NODIR,":",1)
 	;
+	; IBS/FMS directories on same node. Copy batch files (if necessary)
+	; to the FMS spool subdirectory and launch FMSTMP.sh
 	;
-	; IBS/FMS same node
-	I NODE=""!(NODE=SYSNODE) D
+	I NODE=""!(NODE=SYSNODE) D  Q ER
 	.	I POSTFILE'="" D
 	..		S FMSFILE=""
 	..		F  S FMSFILE=$O(LIST(FMSFILE)) Q:FMSFILE=""  D
 	...			S X=$$SYS^%ZFUNC("cp "_SPLDIR_"/"_FMSFILE_" "_FMSDIR_"/spool/"_FMSFILE)
 	.	S X=$$SYS^%ZFUNC("ksh "_IO)
 	;
-	; Remote submit
-	I NODE'="",NODE'=SYSNODE D
-	.	S X=$$SYS^%ZFUNC("rcp "_SPLDIR_"/"_FILENAME_" "_NODE_":/"_FMSDIR_"/FMSTMP.ksh")
-	.	I POSTFILE'="" D
-	..		S FMSFILE=""
-	..		F  S FMSFILE=$O(LIST(FMSFILE)) Q:FMSFILE=""  D
-	...			S X=$$SYS^%ZFUNC("rcp "_SPLDIR_"/"_FMSFILE_" "_NODE_":/"_FMSDIR_"/"_FMSFILE)
-	.	S X=$$SYS^%ZFUNC("ksh "_NODE_":/"_FMSDIR_"/"_FILENAME)
+	; IBS/FMS directories on separate nodes. Remote copy the batch 
+	; files and the FMSTMP.sh script and remote submit FMSTMP.sh
+	;
+	; If the firewall between nodes requires user information in the
+	; remote call, env. variable fmsuser must be defined and will be
+	; used in the rcp and rsh commands. Otherwise, fmsuser should be
+	; undefined and will be set to null by TRNLNM^%ZFUNC
+	;
+	S FMSUSER=$$TRNLNM^%ZFUNC("fmsuser")
+	I FMSUSER'="" S FMSUSER=FMSUSER_"@"
+	S X=$$SYS^%ZFUNC("rcp "_SPLDIR_"/"_FILENAME_" "_FMSUSER_NODE_":"_FMSDIR_"/"_FILENAME)
+	I POSTFILE'="" D
+	.	S FMSFILE=""
+	.	F  S FMSFILE=$O(LIST(FMSFILE)) Q:FMSFILE=""  D
+	..		S X=$$SYS^%ZFUNC("rcp "_SPLDIR_"/"_FMSFILE_" "_FMSUSER_NODE_":"_FMSDIR_"/spool/"_FMSFILE)
+	;
+	; Modify FMSUSER for remote shell call (if necessary), stripping
+	; off the "@" added for the remote copy calls
+	;
+	I FMSUSER'="" S FMSUSER=" -l "_$E(FMSUSER,1,$L(FMSUSER)-1)
+	S X=$$SYS^%ZFUNC("rsh"_FMSUSER_" "_NODE_" "_FMSDIR_"/"_FILENAME)
 	Q ER
 	;
 	;----------------------------------------------------------------------

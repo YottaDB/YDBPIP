@@ -3,7 +3,7 @@ DBSEXE2E	;;DBS - U - V4.2 - /QL COMMAND PROCESSOR ; 17 Apr 89  9:47 AM - 8447
 	;     ORIG:  BOB CHIANG (8447) - 02/06/89
 	;     DESC:  /QL  COMMAND PROCESSOR( quick layout )
 	;
-	;  I18N=QUIT: Excluded from I18N standards 
+        ;  I18N=QUIT: Excluded from I18N standards
 	;---- Revision History ------------------------------------------------
 	; 06/21/96 - Bob Chiang - 20948
 	;            Modified to remove DQ level 20 references.

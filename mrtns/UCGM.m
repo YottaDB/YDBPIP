@@ -1,4 +1,4 @@
-UCGM(srcfile,outfile,sysmap,cmperr,PGM)	;public void; Utility Code Generator (M) 
+UCGM	;wittef;2008-03-28 14:03:00; keep label + the word 'cmperr' in this line for TBXDQSVR
 	;;Copyright(c)2003 Sanchez Computer Associates, Inc.  All Rights Reserved - 10/24/03 10:17:12 - SPIER
 	; ORIG: FSANCHEZ - 25 DEC 1998
 	; DESC: Interprets PSL script and generates M code
@@ -79,14 +79,83 @@ UCGM(srcfile,outfile,sysmap,cmperr,PGM)	;public void; Utility Code Generator (M)
 	; 	They behave as parenthesis, and can be nested.
 	;	All use of these characters is encapsulated in UCREC4OP.
 	; 9	used as separator in type(,), dbAcc(,,)
-	;	used for patched code as returned by $$patch^UCPATCH()
-	;	Note that this prevents storing "patched" code in the structures
-	;	that use this character as field delimiter.
 	; 10	data returned by DB API may contain this character as (line)
 	;	delimiter.
-	; 31	accepted and used as placeholder for rightexpr in assignment
+	; 31	accepted and used as placeholder for rightexpr in code returned
+	;	for leftexpr in assignment, or as placeholder for leftexpr in
+	;	code returned for rightexpr in assignment
 	;
 	;---------- Revision History -------------------------------------------
+	; 2009-03-30, Frans S.C Witte, CRs 35741/39032
+	;	* Added "Integer" to list of functions that accept methods of
+	;	  other Primitives.
+	;	* ResultClass of $SELECT() is now derived from last argument.
+	;
+	; 2009-03-11, Frans S.C. Witte, CR 37572
+	;	* Added return statement
+	;	* Corrected issue with assignment of Primitive to Object().
+	;	* Prevent references to instance methods or properties under
+	;	  static scope.
+	;	* added "new x" in toLit()
+	;	* references to M svns are now recorded in SYSMAP
+	;	* Corrected compClass() to deal with unary ops.
+	;	* valExpr() now distinguishes intlit from numlit.
+	;
+	; 2009-02-13, Frans S.C. Witte, CR 35741/38252/38491
+	;	* Refined method() to not create a call-by-value instantiation
+	;	  if the method is static.
+	;
+	; 2008-11-06, Frans S.C. Witte, CR 35741/36391/36492
+	;	* Subroutine impQuit() now reports %PSL-E-SYNTAX instead of
+	;	  %PSL-W-SYNTAX for missing block-terminators.
+	;
+	; 2008-10-24, Frans S.C. Witte / Russelds, CR 35741/35918
+	;	* %PSL-I-READ no longer supplied because READ and WRITE will be
+	;	  supported in PSL Version 4.
+	;	* setInst() needs to create patch(0,) for DbSet as well.
+	;
+	; 2008-10-04, Frans S.C. Witte, CR 35741/35821
+	;	Suppress warning for routinename that starts with "v"
+	;
+	; 2008-07-21 - Russellds - CR38081
+	;	* Modified to use .DAT files when booting at level 3 as well as 2
+	;	* Modified chkAccess to allow label^routine or class.method in
+	;	  logger
+	;
+	; 2008-07-09, Frans S.C. Witte, CR34739
+	;	* Added support for Polymorphism in PSL-to-M
+	;
+	; 11/28/07 - Frans S.C. Witte - CR: 27800
+	;	* Major rewrite in order to support CDMs. UCGM is no longer the
+	;	  compiler's main routine. All public subroutines are retained
+	;	  for backward compatibility, but call ^PSLC instead. The "old"
+	;	  compiler's main processing code is now in $$run(), which is
+	;	  called by run^PSLParser().
+	;	* Removed VIEW command
+	;	* All hard-code position references to OBJECT* "rows" have been
+	;	  replaced by calls to $$rowPos^PSLXyz()
+	;	* Added $$hasSubr^UCGM(() as replacement for $D(labels())
+	;	* keyword 'ret' replaces 'public' in formal parameter
+	;	  specifications, keyword local no longer supported.
+	;	* all generated subroutines now use the append() array instead
+	;	  of the labels() array.
+	;	* fsn() array no longer maintained here. It is only used by
+	;	  UCRECORD.m (and UCUTIL.m), and by SQL*
+	;	* Added deprecation warnings for all statements, functions, and
+	;	  SVNs that will or may not be portable to Java.
+	;	* Removed isRecord() and getReTable(), and replaced calls by
+	;	  calls to ^PSLClass
+	;
+	; 11/27/07 - Frans S.C. Witte - CR: 30811
+	;	* Added auto-rollback-to-savepoint for unmatched Runtime.start()
+	;	  before breaking down the stack to prevent %GTM-E-TPQUIT errors.
+	;	* Added group indication (e.g. SYNTAX, MISMATCH) to most errors.
+	;
+	; 08/20/07 - KWANL / Frans S.C. Witte - CR 28995
+	;	* CATCH and THROW completely rewritten.
+	;	  Code now uses $E* instead of $Z* whenever possible, and stack
+	;	  is broken down before a catch-block is invoked.
+	;
 	; 06/27/07 - Frans S.C. Witte - CR: 27486
 	;	* Fixed bug in toLit()
 	;	* Fixed bug with $SELECT() in valFun()
@@ -122,9 +191,9 @@ UCGM(srcfile,outfile,sysmap,cmperr,PGM)	;public void; Utility Code Generator (M)
 	; 07/16/06 - Frans S.C. Witte - CRs: 22720 / 22274
 	;	* Added support for #OPTION ResultClass.
 	;	* Added support for source-contained method definitions.
-	;	* OBJECT descriptions now cached in pslCls().
-	;	* Modified $$property to use pslPrp() and ^UCXOBJ
-	;	* Modified $$method to use pslMtd() and ^UCXOBJ, and to mark
+	;	* OBJECT descriptions now cached in pslPrsr("pslCls",).
+	;	* Modified $$property to use pslPrsr("pslPrp",) and ^UCXOBJ
+	;	* Modified $$method to use pslPrsr("pslMtd",) and ^UCXOBJ, and to mark
 	;	  calls to methods of Record descendants as pass-by-value to
 	;	  subroutine.
 	;	* Introduced pslToken()
@@ -170,10 +239,10 @@ UCGM(srcfile,outfile,sysmap,cmperr,PGM)	;public void; Utility Code Generator (M)
 	;
 	; 06/15/06 - Frans S.C. Witte - CRs: 21791 / 21792
 	;	* Corrected lvn spelling error in BUILDRTN.
-	;	* Corrected lvn scope: pslRtns in main() and cmd in line().
+	;	* Corrected lvn scope: pslRtns in cmp() and cmd in line().
 	;
 	; 05/01/06 - Frans S.C. Witte - CRs: 21394 / 21395
-	;	* Modified main() to deal with boot-restrictionlevel 3.
+	;	* Modified cmp() to deal with boot-restrictionlevel 3.
 	;	* Modified setScope to report an error for names that are too
 	;	  long.
 	;	* Modified valExpr() to adjust the way PRECEDENCE warnings are
@@ -207,7 +276,7 @@ UCGM(srcfile,outfile,sysmap,cmperr,PGM)	;public void; Utility Code Generator (M)
 	;	* Corrected issues with missing block-ends and missing QUITs
 	;	* Added calls to setAssign^UCREC4OP() to distinguish call-by-
 	;	  value from call-by-name in actual parameter, and to indicate
-	;	  local or public formal parameter (see UCREC4OP).
+	;	  ret or noret formal parameter (see UCREC4OP).
 	;	* Added function $$gtmLevel().
 	;
 	; 02/24/06 - Frans S.C. Witte - CRs: 19972 / 18164
@@ -229,7 +298,7 @@ UCGM(srcfile,outfile,sysmap,cmperr,PGM)	;public void; Utility Code Generator (M)
 	;	* removed type as formal parameter from function property() and
 	;	  .type as actual parameter in call to $$property.
 	;	* Corrected problems with OPEN, USE, and CLOSE
-	;	* Added support for commands("Options","nofile")
+	;	* Added support for pslPrsr("Options","nofile")
 	;	* (New) DQ signature is now added by cmpX2F().
 	;
 	; 12/23/05 - Frans S.C. Witte - CRs: 18727 / 18728
@@ -245,11 +314,11 @@ UCGM(srcfile,outfile,sysmap,cmperr,PGM)	;public void; Utility Code Generator (M)
 	;	* $$isCompiler^UCDTAUTL() replaced by $$isCompiler^UCGMCU()
 	;	* Added support for compiler bootstrap (calls to ^UCDTAUTL and
 	;	  to ^UCDTASYS
-	;	* Subroutine main(): Modified data passed in sysmap("L"),
+	;	* Subroutine cmp(): Modified data passed in sysmap("L"),
 	;	  modified call LitInst^UCDB(), rearranged init code and added
 	;	  boot support, added "PSL" as reserved pre-instantiated static
 	;	  class instance.
-	;	* subroutines main() and line(): removed use of lvn debug
+	;	* subroutines cmp() and line(): removed use of lvn debug
 	;	* UCLREGEN updates now invoked from cmpX2F()
 	;	* calls to CLOSE^SCAIO replaced by M CLOSE command (SCAIO not
 	;	  available at boot time).
@@ -324,17 +393,17 @@ UCGM(srcfile,outfile,sysmap,cmperr,PGM)	;public void; Utility Code Generator (M)
 	;	* Subroutine QUIT has been corrected to handle variables with
 	;	  LITERAL scope (must be substituted at compile time).
 	;	* Changed access to cmpF2X() from local to private.
-	;	* Variables i, n, pslSchCln, and pslSchTbl NEWed in main().
+	;	* Variables i, n, pslSchCln, and pslSchTbl NEWed in cmp().
 	;	* Removed dead code following BUILDRTN (old version of BUILDRTN).
 	;	* Subroutine procPar() modified to support $func() / $$extref()
 	;	  / $svn as actual parameter.
-	;	* Set general trap handler in main() to ZT^UCGM and added support
+	;	* Set general trap handler in cmp() to ZT^UCGM and added support
 	;	  to quit from extrinsic or subroutine using $QUIT in ZT.
 	;
 	; 02/10/05 - Frans S.C. Witte - CRs: 14569 / 14578
 	;	* Removed subroutine keyword() (no subroutine body)
 	;	* Added accessibility of private subroutines/functions
-	;	* Subroutine main(): %DB is initialized before calling $$^CUVAR,
+	;	* Subroutine cmp(): %DB is initialized before calling $$^CUVAR,
 	;	  and it now NEWs and SETs %LIBS if it is undefined.
 	;	* Subroutine cmpF2X() corrected variable name "mdst" to "psrc".
 	;	* Created function $$getReTable() that returns the table name of
@@ -366,7 +435,7 @@ UCGM(srcfile,outfile,sysmap,cmperr,PGM)	;public void; Utility Code Generator (M)
 	;	* All references to primtyp() now call either $$primVar^UCPRIM()
 	;	  or $$primDes^UCPRIM() in case of doubt $$primVar is used (and
 	;	  doubt noted). Filling primtyp is now handled by init^UCPRIM()
-	;	  (called by main()).
+	;	  (called by cmp()).
 	;	* ZLINK of generated routine is now suppressed if the subroutine
 	;	  $$isCompiler^UCDTAUTL() returns 1.
 	;	* Removed routine name from calls to ^UCGM itself.
@@ -424,9 +493,9 @@ UCGM(srcfile,outfile,sysmap,cmperr,PGM)	;public void; Utility Code Generator (M)
 	;	  the outfile if it contains one, or the SCA default if none not
 	;	  included.
 	;	* Added subroutines cmpA2A(), cmpA2F(), cmpF2A(), and cmpF2F()
-	;	  that have the same signature as main(), but with either a File
+	;	  that have the same signature as cmp(), but with either a File
 	;	  or an Array as the source or the destination. Note that cmpA2A()
-	;	  is exactly the same as main(). It is included for symmetry only.
+	;	  is exactly the same as cmp(). It is included for symmetry only.
 	;	  Added cmpF2X() that reads a source file and produces a source
 	;	  array, and cmpX2F() that produces a destination file from a
 	;	  destination array.
@@ -444,8 +513,8 @@ UCGM(srcfile,outfile,sysmap,cmperr,PGM)	;public void; Utility Code Generator (M)
 	;	  (the generated code would be incorrect anyway).
 	;
 	; 08/16/04 - Frank Sanchez / Frans S.C. Witte - CRs: 11660 / 11661
-	;	Modified subroutines FOR and WHILE to increment ifLevel in addition
-	;	to forLevel, in order to prevent incorrect use of values assigned
+	;	Modified subroutines FOR and WHILE to increment inIF in addition
+	;	to inFOR, in order to prevent incorrect use of values assigned
 	;	inside the scope of these statements as literals outside the scope
 	;	of these statements. The effect of this change is that the scopes
 	;	of these statements are treated with the same "unreliability" as
@@ -527,88 +596,146 @@ UCGM(srcfile,outfile,sysmap,cmperr,PGM)	;public void; Utility Code Generator (M)
 	;	Bug fixes
 	;
 	; 11/20/02 - CHENARDP - 45497
-	;	Added setting of %DB system variable in main().
+	;	Added setting of %DB system variable in cmp().
 	;
 	; 11/14/02 -Sanchez/Spier 51089
 	;	Release 7.0 Checkpoint
 	;
 	;----------------------------------------------------------------------
-	;
-	new commands,line,m2src,msrc,OK,rec
-	;
-	set OK=$$FILE^%ZOPEN(srcfile,"READ")
-	if 'OK set ER=1,RM=$P(OK,"|",2)
-	;
-	use srcfile
-	for line=1:1 quit:$ZEOF  read rec set m2src(line)=rec
-	close srcfile
-	;
-	do main(.m2src,.msrc,,,.commands,.sysmap,.cmperr)
-	;
-	;;if $G(outfile)'="" do ^%ZRTNCMP(outfile,"msrc")
-	if $G(outfile)'="" do cmpX2F(outfile,.msrc,,.commands,.sysmap,.cmperr,$G(PGM))
+	; NO ENTRY FROM TOP
 	quit
 	;
 	;----------------------------------------------------------------------
-BUILDRTN(m2src,outfile,cmperr,PGM)	;public void;Build a routine from an array of PSL code 
+BUILDRTN(src,dst,cmperr,PGM) ;public void deprecated;Build a routine from an array of PSL code
 	;----------------------------------------------------------------------
 	; This label is used to generate a routine from an array of PSL code.
 	;
-	; KEYWORDS:	Compiler
+	; ARGUMENTS:
+	; . String src()
+	; 	PSL source code array
+	; . String dst
+	; 	Name of target (M) program
+	; . ret Number cmperr
+	;	Total number of compilation errors (zero = success)
+	; . PGM
+	;	elementname~elementtype for SYSMAP
+	;-----------------------------------------------------------------------
+	;
+	if dst]"" set cmperr=$$cmpA2F^PSLC(.src,,dst,.cmperr,$GET(PGM))
+	quit
+	;
+	;-----------------------------------------------------------------------
+main(src,dst,ignore3,ignore4,commands,ignore6,cmperr) ;public void deprecated;
+	;-----------------------------------------------------------------------
+	; Old main compiler processing subroutine.
+	; This subroutine is maintained for backward compatibility.
+	; It calls $$cmpA2A^PLSC(), and is the only entry point that sets and
+	; returns the logfile from PSLParser.
 	;
 	; ARGUMENTS:
-	;	. m2src 	array of PSL code		/TYP=T/REQ/MECH=REF
-	;	. outfile 	M program name to be created	/TYP=T/REQ/MECH=REF
-	;	. cmperr	array of compile errors		/TYP=T
-	;	. PGM		unit name for SYSMAP		/TYP=T/NOREQ/MECH=REF:RW
-	; RETURNS:
-	;	. cmperr	compiler errors			/TYP=T
-	;-----------------------------------------------------------------------
+	; . String src()
+	;	PSL source code array
+	; . String dst()
+	;	Compiled target code array
+	; . Primitive commands(,)
+	;	UCOPTS compiler overrides
+	; . Number cmperr / String cmperr()
+	;	The top node of this parameter will hold the error count.
+	;	cmperr() will contain the text of the logfile.
+	; . ignore3, ignore4, ignore6
+	;	Placeholders for obsoleted parameters. Ignored
 	;
-	if outfile="" do cmpA2A(.m2src,,,,,,.cmperr,.PGM) quit
-	do cmpA2F(.m2src,outfile,,,,,.cmperr,.PGM)
+	; NOTES:
+	; * The most important caller of this entry point is ^TBXDQSVR, for the
+	;	Profile: Test compile option of Profile Application Workbench.
+	;	This caller explicitly skips src(1) because that is the DBTBL25
+	;	row of the DQ procedure. Furthermore, all PSL compiler logging
+	;	reports the subscript (!) not the line-number counting from 1.
+	;	This is important because the reported line-number is used by
+	;	Application Workbench to position the markers.
+	;	Because this seems to be the only caller that does not supply
+	;	src(1), and that relies on the returned line numbers, src(1)
+	;	is forced to be present here, before cmpA2A^PSLC will write the
+	;	array to a file.
+	; * TBXDQSVR uses the cmperr() array to display the messages on the
+	;	Fidelity Console-pane, and to fill the Problems-pane.
+	;	To do this correctly, it needs the separator line with exactly
+	;	the number of "+" signs that are currently in log^PSLParser(),
+	;	and in log^UCGM().
+	; * Another important requirement for TBXDQSVR is that the topline of
+	;	this routine ($TEXT(UCGM^UCGM)) contains the word 'cmperr'.
+	;	If this requirement is not met, the interface will report that
+	;	the compiler is not available.
+	; * TBXDQSRV does not supply the name of the module being compiled.
+	;	It does have the name of the procedure in the lvn PROCID.
+	;	The value of this lvn is used as the name of the module to
+	;	reduce the number of false-negative errors for CDMs.
+	;	If the module is a new Class Definition Module, for which there
+	;	is neither a .pslx nor a .psl file, self-references (eg in
+	;	methods that return an instance of the class) will report a
+	;	class-not-found error until the the module has a .psl(x) file.
+	;	Standard compiles do not suffer from this mechanism because they
+	;	supply the correct module name.
+	;
+	kill cmperr
+	set cmperr(1)=""
+	new z for z=1:1:$ORDER(src(""),-1) set src(z)=$GET(src(z))
+	set cmperr=$$cmpA2A^PSLC($P($G(PROCID),"."),.src,.commands,.dst,.cmperr)
 	quit
+	;
 	;-----------------------------------------------------------------------
-cmpA2A(src,dst,labels,methods,commands,sysmap,cmperr,PGM)	;public void; Array to Array 
+cmpA2A(src,dst,ignore3,ignore4,commands,ignore6,cmperr) ;public void deprecated; Array to Array
 	;-----------------------------------------------------------------------
-	; This subroutine is a substitute for main(). It contains exactly the same
-	; parameters, and in exactly the same order as main()
+	; Similar to main(). It contains exactly the same parameters, and in
+	; exactly the same order as main(), but does NOT return the logfile from
+	; PSLParser.
 	;
 	; ARGUMENTS:
-	; . String src() = PSL source code in array (single subscript)
-	; . String dst() = compiled M code in array (single subscript)
-	; . labels,methods,commands,sysmap,cmperr,PGM
-	;	See main()
+	; . String src()
+	;	PSL source code array
+	; . String dst()
+	;	Compiled target code array
+	; . Primitive commands(,)
+	;	UCOPTS compiler overrides
+	; . ret Number cmperr
+	;	Total number of compilation errors (zero = success)
+	; . ignore3, ignore4, ignore6
+	;	Placeholders for obsoleted parameters. Ignored
 	;
-	do main(.src,.dst,.labels,.methods,.commands,.sysmap,.cmperr)
+	set cmperr=$$cmpA2A^PSLC("",.src,.commands,.dst,.cmperr)
 	quit
+	;
 	;-----------------------------------------------------------------------
-cmpA2F(src,dst,labels,methods,commands,sysmap,cmperr,PGM)	;public void; Array to File 
+cmpA2F(src,dst,ignore3,ignore4,commands,ignore6,cmperr,PGM) ;public void deprecated; Array to File
 	;-----------------------------------------------------------------------
 	; Compile PSL code in array and produce a .psl file from the input, and
 	; a .m file for the output.
 	;
 	; ARGUMENTS:
-	; . String src() = PSL source code in array (single subscript)
-	; . String dst = routinename for output files
-	;	If dst includes a directory specification, then the .psl file
-	;	will be placed in the specified directory.
-	;	If dst does not include a directory specification, the .psl file
-	;	will be placed in the directory specified by the environment
-	;	variable SCA_CRTNS (that will also be used for the .m file)
-	;	The target directory for the .m file is determined by ^%ZRTNCMP().
-	; . labels,methods,commands,sysmap,cmperr,PGM
-	;	See main()
+	; . String src()
+	; 	PSL source code array
+	; . String dst
+	; 	Name of target (M) program
+	; . Primitive commands(,)
+	;	UCOPTS compiler overrides
+	; . ret Number cmperr
+	;	Total number of compilation errors (zero = success)
+	; . String PGM
+	;	elementname~elementtype for SYSMAP
+	; . ignore3, ignore4, ignore6
+	;	Placeholders for obsoleted parameters. Ignored
 	;
-	new cnt,element,elemtype,i,mdst,m2src,oldsig,rtnname
+	set cmperr=$$cmpA2F^PSLC(.src,.commands,dst,.cmperr,$GET(PGM))
+	quit
+	;-----------------------------------------------------------------------
+	; The code below needs to be examined, and it needs to be decided if it
+	; needs to execute as part of the compiler.
 	;
-	kill cmperr
-	;
-	merge m2src=src
-	do main(.m2src,.mdst,.labels,.methods,.commands,.sysmap,.cmperr)
-	;
-	; pass ORIGINAL PSL source
-	if '$g(cmperr) do cmpX2F(dst,.mdst,.src,.commands,.sysmap,.cmperr,$G(PGM))
+	; PGM Indicates where the source originated. This will be used by
+	; cmpX2F() as a comment in the generated target code, and by
+	; UCSYSMAP to cross-reference its data to the origin of the source
+	; code. It will also be used in the summary message written to the
+	; principal device.
 	;
 	; Write success/fail message and counts for info/warnings/errors
 	use $P
@@ -626,119 +753,38 @@ cmpA2F(src,dst,labels,methods,commands,sysmap,cmperr,PGM)	;public void; Array to
 	if cnt(2) write ?5,cnt(2)," warning" write:cnt(2)'=1 "s" write !
 	if cnt(3) write ?5,cnt(3)," error" write:cnt(3)'=1 "s" write !
 	quit
-	;-----------------------------------------------------------------------
-cmpF2A(src,dst,labels,methods,commands,sysmap,cmperr,PGM)	;public void; File to Array 
-	;-----------------------------------------------------------------------
-	; Compile PSL code in (.psl) file, and return the M code in an array.
-	;
-	; ARGUMENTS:
-	; . String src = name of file that contains the PSL source code
-	;	If src includes a directory specification, then the source is
-	;	read from the specified file.
-	;	If src does not include a directory, then the file shall reside
-	;	in the directory specified by the environment variable SCA_CRTNS.
-	; . String dst() = compiled M code in array (single subscript)
-	; . labels,methods,commands,sysmap,cmperr,PGM
-	;	See main()
-	;
-	new psrc
-	do cmpF2X(src,.psrc) quit:'$D(psrc)
-	do main(.psrc,.dst,.labels,.methods,.commands,.sysmap,.cmperr)
-	quit
-	;-----------------------------------------------------------------------
-cmpF2F(src,dst,labels,methods,commands,sysmap,cmperr,PGM)	;public void; File to File 
-	;-----------------------------------------------------------------------
-	; Compile PSL code in (.psl) file, and produce a .m file for the output.
-	; This subroutine will not (re)produce the .psl file.
-	;
-	; ARGUMENTS:
-	; . String src = name of file that contains the PSL source code
-	;	If src includes a directory specification, then the source is
-	;	read from the specified file.
-	;	If src does not include a directory, then the file shall reside
-	;	in the directory specified by the environment variable SCA_CRTNS.
-	; . String dst = routinename for .m file
-	;	The target directory for the .m file is determined by ^%ZRTNCMP().
-	; . labels,methods,commands,sysmap,cmperr,PGM
-	;	See main()
-	;
-	new mdst,psrc
-	do cmpF2X(src,.psrc) quit:'$D(psrc)
-	do main(.psrc,.mdst,.labels,.methods,.commands,.sysmap,.cmperr)
-	;
-	; don't pass the PSL source
-	if '$g(cmperr) do cmpX2F(dst,.mdst,,.commands,.sysmap,.cmperr,$g(PGM))
-	quit
 	;
 	;-----------------------------------------------------------------------
-cmpF2X(src,psrc)	;private void; read source file into source array 
-	;-----------------------------------------------------------------------
-	; This subroutine is also called by $$equal^UCGMCU() to read the M code
-	; from the standard CRTNS directory.
-	;
-	new ER,IO,sub
-	set IO=$$FILE^%TRNLNM(src,$$SCAU^%TRNLNM("CRTNS"))
-	if '$$FILE^%ZOPEN(IO,"READ",0,32767) quit
-	use IO
-	;
-	for sub=1:1 set psrc(sub)=$$^%ZREAD(IO,.ER) quit:ER
-	;;do CLOSE^SCAIO
-	close IO
-	;
-	; Remove trailing empty lines
-	for sub=sub:-1:1 quit:psrc(sub)'=""  kill psrc(sub)
-	quit
-	;
-	;-----------------------------------------------------------------------
-cmpX2F(dst,mdst,psrc,commands,sysmap,cmperr,PGM)	;local void; write input to .psl file and output to .m file 
+cmpX2F(PslPrsr,mdst,sysmap,cmperr) ;private void; write input to .psl file and output to .m file
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
-	; . String dst = name of M routine (and of .psl file)
-	;	May include target directory specification.
-	;	Will be passed to ^%ZRTNCMP.
-	;	The routinename will be extracted from this value.
-	;	If a target directory is present the routine will not be ZLINKED
+	; . String pslPrsr(,) = PSL compile options
+	;	This function will look at:
+	;	- pslPrsr("boot","restrictionlevel"),
+	;	- pslPrsr("Options,"nolink"),
+	;	- pslPrsr("element"),
+	;	- pslPrsr("logfile"),
+	;	- pslPrsr("moduleName"),
+	;	- pslPrsr("pslCls",moduleName)
 	; . String mdst() = M code
 	;	will end up in dst.m
-	; . String psrc() = (original) PSL sourcecode		/NOREQ
-	;	will end up in dst.psl
-	; . String commands() = PSL compile options		/MECH=REFARR:R
-	;	This function will look at commands("boot","restrictionlevel") and
-	;	commands("Options,"nolink")
-	; . String sysmap() = SYSMAP data
+	; . String sysmap(,,) = SYSMAP data
 	; . String cmperr() = error array
-	; . String PGM = element name ~ element type
+	;
+	; PUBLICS:
+	; . cma()
 	;
 	; Quit if filing is prohibited.
-	; By inserting this check here, callers to cmpX2F will not have to worry
-	; about this option.
-	quit:$G(commands("Options","nofile"))
+	; This temporarily refers to the array used by runCma^PSLC !!!!
+	quit:$G(cma("output"),"*")=""
 	;
-	new IO,name,oldsig,sub
+	new dqname,dstdir,IO,oldsig,rtnname
 	;
-	new rtnname set rtnname=$$PARSE^%ZFUNC(dst,"NAME")
-	set sysmap("RTNNAME")=rtnname
+	; derive output filename (current version always writes to standard dir)
+	set rtnname=pslPrsr("moduleName")
+	set dstdir=$$targetDir^PSLC(.pslPrsr,.cma)
 	;
-	if $G(commands("boot","restrictionlevel"))<1 do
-	.	if $$VALID^%ZRTNS("UCSYSMAP") do ^UCSYSMAP(PGM,.mdst,.sysmap,.cmperr)
-	.	;
-	.	; Get old signature, if available, before link new version
-	.	; Update UCLREGEN, if appropriate, for all literal function labels in
-	.	; routine.
-	.	; Note that the call to $$vSIG^@rtnname may fail under several
-	.	; conditions. The value of $ZT ensures that the nested DO terminates
-	.	; silently. Because the first DO-block may throw the exception, which
-	.	; shall result in an update of UCLREGEN, a second IF+DO is needed to
-	.	; update the table.
-	.	;
-	.	set oldsig=""
-	.	if $P(PGM,"~",2)="Procedure" do
-	..		new $ZTRAP
-	..		set $ZTRAP="Q"
-	..		set oldsig=$$vSIG^@rtnname
-	.	if $P(PGM,"~",2)="Procedure",oldsig'=$P(PGM,"~",3) do SETRTN^UCLREGEN(rtnname)
-	;
-	quit:+$g(cmperr)
+	new PGM set PGM=pslPrsr("element")
 	;
 	; Insert reference to soure element (if present), and compilation stamp
 	; Assume all lines need to be inserted
@@ -747,94 +793,90 @@ cmpX2F(dst,mdst,psrc,commands,sysmap,cmperr,PGM)	;local void; write input to .ps
 	set:ln1="" ln1=ln0+6
 	set inc=ln1-ln0/6
 	set ln0=ln0+inc,mdst(ln0)=" ;"
-	if $p(PGM,"~",2)'="" do  	; add the "this is generated ..." text
-	.	set ln0=ln0+inc,mdst(ln0)=" ; **** Routine compiled from DATA-QWIK "_$P(PGM,"~",2)_" "_$P(PGM,"~")_" ****"
-	.	set ln0=ln0+inc,mdst(ln0)=" ;"
+	; add the "this is generated ..." text and timestamp
+	if $p(PGM,"~",2)'="" do		; elementname~elementtype
+	.	set dqname="DATA-QWIK "_$P(PGM,"~",2)_" "_$P(PGM,"~")
+	else  if $p(PGM,"~",1)'="" do  	; caller
+	.	set dqname="code generated by "_$P(PGM,"~")
+	else  set dqname="unknown source"
+	set ln0=ln0+inc,mdst(ln0)=" ; **** Routine compiled from "_dqname_" ****"
+	set ln0=ln0+inc,mdst(ln0)=" ;"
 	set ln0=ln0+inc,mdst(ln0)=" ; "_$$cmpStamp^UCXDT25()
 	set ln0=ln0+inc,mdst(ln0)=" ;"
 	;
 	; Overwrite "nolink" for PSL compiler routines, or if target direcory
-	; explicitly specified
-	new dstdir set dstdir=""
-	new nolink set nolink=$G(commands("Options","nolink"))
-	if dst'=rtnname set nolink=1,dstdir=$$PARSE^%ZFUNC(dst,"DIR")
+	; not contained in $ZROU
+	new nolink set nolink=$$getSetting^PSLCC(.pslPrsr,"Options","nolink",0)
+	if '$$CONTAIN($TR($ZROU,"( )",",,,"),dstdir) set nolink=1
 	if 'nolink,$$isCompiler^UCGMCU(rtnname) set nolink=1
 	;
 	; Now compile the routine. If %ZRTNCMP throws an exception other than
-	; a ZLINK exception, treat it as a compiler exception, and no NOT create
-	; the .psl file.
+	; a ZLINK exception, treat it as a compiler exception.
 	do
 	.	new $ZTRAP
 	.	set $ZTRAP="ZGOTO "_$ZLEVEL_":cmpX2FX^"_$TEXT(+0)
-	.	do ^%ZRTNCMP(dst,"mdst",nolink,dstdir)
-	quit:+$g(cmperr)
-	;
-	; OK to create .psl file
-	if $d(psrc) do		; .psl only if input supplied
-	.	set sub=$l($$PARSE^%ZFUNC(dst,"TYPE"))
-	.	set name=$e(dst,1,$l(dst)-sub)
-	.	set IO=$$FILE^%TRNLNM(name_".psl",$$SCAU^%TRNLNM("CRTNS"))
-	.	if $$FILE^%ZOPEN(IO,"NEWVERSION",0,32767) do
-	..		use IO
-	..		set sub=""
-	..		for  set sub=$O(psrc(sub)) quit:sub=""  write psrc(sub),!
-	..		close IO
+	.	do ^%ZRTNCMP(rtnname,"mdst",nolink,dstdir)
 	quit
 	;
 	;-----------------------------------------------------------------------
-cmpX2FX	; exception handler for cmpX2F 
+cmpX2FX ; exception handler for cmpX2F
 	;-----------------------------------------------------------------------
 	; If the error is related to ZLINK, report a warning, else report an
 	; error.
 	;
-	if $ZSTATUS["%GTM-E-LOADRUNNING" d warnGroup("DYNAMIC","Cannot load "_dst_" dynamically; Compile with #OPTION NoLink ON") quit
-	do ERROR("TARGET: failed to produce taget code "_dst)
+	if $ZSTATUS["%GTM-E-LOADRUNNING" do warnGroup("DYNAMIC","Cannot load "_dstdir_"/"_rtnname_" dynamically; Compile with #OPTION NoLink ON") quit
+	do ERROR("TARGET: failed to produce target code "_dstdir_"/"_rtnname_": "_$ZSTATUS)
 	quit
+	;
 	;-----------------------------------------------------------------------
-main(m2src,msrc,labels,methods,commands,sysmap,cmperr)	;local void; main label 
+run(pslPrsr,tknzr,msrc) ;package String; temporary entrypoint for PSLC
 	;-----------------------------------------------------------------------
-	; About level, ifLevel/ifStack, forLevel/forStack, doStack, and pslSt.
+	; This is a temporary entrypoint that is called from run^PSLParser() as
+	; long as PSLParser itself is not yet handling the main loop.
+	;
+	; This function behaves as a (future) call to PSLParser.run( tknzr),
+	; which implies that it only compiles the source code.
+	;
+	; ARGUMENTS:
+	; . PSLParser pslPrsr
+	;	The PSLParser instance as initialized by PSLC.
+	; . PSLTokenizer tknzr
+	;	The PSLTokenizer instance as initialized by PSLC.
+	;	It will contain the source array in its "srcCode" node
+	;	This code will be copied to m2src until all references to m2src
+	;	have been eliminated from UC* modules.
+	; . PSLTarget msrc
+	;	The target ISO-M source code.
+	;
+	; About level, inIF/ifStack, inFOR/forStack, and pslSt.
 	; The compiler's main loop maintains a couple of variables that are
 	; stored in type(,), and copied into patch() and dbAcc().
 	; - level = current M line level
 	;	Starts at 0
 	;	incremented in initBLock, and decremented in endblock
-	; - ifLevel = number of IFs/ELSEs encountered on current line
-	;	This variable is initiated to zero for each line.
-	;	It is incremented for each IF or ELSE statement encountered on
-	;	the line.
-	; - ifStack = stacked ifLevels from outer DO levels
-	;	This variable is initiated to "" in main().
+	; - inIF = true if an IF or ELSE statement has been encountered on the
+	;	current line.
+	; - ifStack = stacked inIFs from outer DO levels
+	;	This variable is initiated to "" in cmp().
 	;	It is reset to "" in endBlock if level reaches zero.
-	;	The current value of ifLevel is appended in initBlock.
+	;	The current value of inIF is appended in initBlock.
 	;	The value at position 'level' is popped in endBlock.
-	; - forLevel = number of FOR statements encountered on the line
-	;	Behaves like ifLevel, but only used in UCGM itself (i.e. not
-	;	stored in type(,) etc.).
-	; - forStack = stacked forLevels from outer DO levels
+	; - inFOR = true if a FOR or WHILE statement has been encountered on the
+	;	current line. Behaves like inIF, but only used in UCGM itself
+	;	(i.e. not stored in type(,) etc.).
+	; - forStack = stacked inFORs from outer DO levels
 	;	Behaves like ifStack, but only used in UCGM itself (i.e. not
 	;	stored in type(,) etc.).
-	; - doStack = stacked DO code blocks
-	;	Initiated to "" in main() and in endBlock when reaching level 0
-	;	Filled with (msrc+1) in initBlock when level=1
-	;	Piece #level incremented in initBlock when level>1
-	;	Note that the behavior of the first piece of doStack differs
-	;	from the behavior of the other pieces of doStack. This may
-	;	impact code generation for example when a DO-level is added or
-	;	removed.
-	;	FSCW CR18163: There is no documentation as to the reason of this
-	;	difference. Neither did I find evidence that differences in
-	;	generated code (depending on level) is intended.
 	; - pslSt = PSL State
 	;	This variable is introduced by CR18163. See UCPSLST.proc for
 	;	details.
-	;	subRou calls set^UCPSLST(.pslSt,$$getDcLnr,0,0)
+	;	subRou calls set^UCPSLST(.pslSt,$$getDcLnr,0,0).
 	;	IF and ELSE will call push^UCPSLST(.pslSt,$$getDcLnr,1,0) for the
-	;	first conditional statement on the line
+	;	first conditional statement on the line.
 	;	FOR and WHILE will call push^UCPSLST(.pslSt,$$getDcLnr,1,1) for the
-	;	first iterative statement on the line
-	;	initblock will call push^UCPSLST(.pslSt,$$getDcLnr,0,0)
-	;	endblock will call pop^UCPSLST(.pslSt,,.ifLevel,.forLevel)
+	;	first iterative statement on the line.
+	;	initblock will call push^UCPSLST(.pslSt,$$getDcLnr,0,0).
+	;	endblock will call pop^UCPSLST(.pslSt,,.inIF,.inFOR).
 	;	line will check if the FOR-top is set, and if so will call pop,
 	;	then it will check if the IF-top is set, and if so it will call
 	;	pop.
@@ -843,27 +885,12 @@ main(m2src,msrc,labels,methods,commands,sysmap,cmperr)	;local void; main label
 	; . type Number fCompile and type String fCompile()
 	;	This traditional M array is used to manage #IF and #WHILE scope
 	;	See IF^UCGMC.proc for a complete description.
-	; . type PSLLabelRecord labels()
-	;	Each label detected by the compiler or inserted by method
-	;	generating code will be added to labels(). See OBJECTPROP for
-	;	the definitions of the individual properties.
-	;	labels(label).codeLine.isNull() indicates that the label has
-	;	been inserted by method generating code, and is still to be
-	;	compiled (or has been inserted as M code).
-	;	labels(label).comment is used by method generating code to look
-	;	for a matching subroutine (eg for Db.select()).
 	; . type PSLColumn pslCln()
 	;	This is the PSLColumn cache. Its single subscript is
 	;	table.column. Many compiler units will pass this cache to
 	;		$$caPslCln^UCXDD( .pslCln(), table.column)
 	;	There are no subroutines that remove entries from this cache, so
 	;	it grows during compilation.
-	; . type String pslCls()
-	;	Contains the PSL object class descriptors
-	;	pslCls(className) = class descriptor
-	;	Each node can be converted to a Row instance using the following
-	;	constructor:
-	;		type Row rwCls = pslCls(cls).toRow("#$$ocRowDef^UCXOBJ")
 	; . type String pslLong()
 	;	Contains the "long" names that are used in a subroutine.
 	;	The first PSL.maxNameLength characters will be used in the nam
@@ -886,9 +913,37 @@ main(m2src,msrc,labels,methods,commands,sysmap,cmperr)	;local void; main label
 	;	of temporary variables. Code appended to this variable shall
 	;	contain complete "pass 1 code" (such as a leading space for M
 	;	code).
-	; . type List pslRtns
-	;	This list contains all routines for which label records have
-	;	been added to labels().
+	; . type PSLParser pslPrsr
+	;	As passed into this function. UCGM itself uses the following
+	;	properties of PSLParser:
+	;	. PSLClass pslPrsr("pslCls",className)
+	;		Contains the PSL object class descriptors
+	;		This M routine calls $$rowPos^PSLClass to translate
+	;		property names to positions.
+	;	. PSLMethod pslPrsr("pslMtd",methodName)
+	;		Contains the PSL object method descriptors
+	;		This M routine calls $$rowPos^PSLClass to translate
+	;		property names to positions.
+	;	. PSLProperty pslPrsr("pslPrp",propertyName)
+	;		Contains the PSL object property descriptors
+	;		This M routine calls $$rowPos^PSLClass to translate
+	;		property names to positions.
+	;	. Boolean pslPrsr("INFO",group)
+	;		Info groups that are enabled or disabled.
+	;		Settings from commands("INFO",group) will be merged as
+	;		the initial settings.
+	;	. Boolean pslPrsr("OPTIMIZE",group)
+	;		Optimize groups that are enabled or disabled.
+	;		Settings from commands("OPTIMIZE",group) will be merged
+	;		as the initial settings.
+	;	. Boolean pslPrsr("Options",option)
+	;		Options that are enabled or disabled.
+	;		Settings from commands("Option",option) will be merged as
+	;		the initial settings.
+	;	. Boolean pslPrsr("WARN",group)
+	;		Warning groups that are enabled or disabled.
+	;		Settings from commands("WARN",group) will be merged as
+	;		the initial settings.
 	; . type PSLTable pslTbl()
 	;	This is the PSLTable cache. Its single subscript is table. This
 	;	array effectively replaces the fsn() array. Many compiler units
@@ -905,39 +960,44 @@ main(m2src,msrc,labels,methods,commands,sysmap,cmperr)	;local void; main label
 	; . type String type(newLevel,var) =
 	;	01	Class
 	;	02	msrc where scoped
-	;	03	scope (NEW,FORMAL,PUBLIC,LITERAL)
+	;	03	scope (NEW,FORMAL,FORMALRET,PUBLIC,LITERAL)
 	;	04	msrc where instantiated
 	;	05	Instantiation expression
-	;	06	Stack level at instantiation
-	;	07	If level at instantiation
-	;	08	If stack at instantiation
-	;	09 	Do stack at instantiation
+	;	06	do level at instantiation
+	;	07	inIF setting at instantiation
+	;	08	If stack at instantiation (from pslSt)
+	;	09 	Do stack at instantiation (from pslSt)
 	;	10	Object optimization switch (any number = off)
 	;	11+	Class specific information
+	;	Note that msrc indicates a line in the target M code
 	;
-	new append,called,calls,class,cmmds,cmp,dbLoad,dbAcc,del,doStack
-	new ER,errTrap,fCompile,fline,forLevel,forStack,fsn,funcs,i,ifLevel
-	new ifStack,label,level,line,load,lptr,keywords,mcode,n,newInst
-	new oLvn,objectName,parlist,patch,postCond,postProc,primtyp
+	new append,called,calls,class,cmmds,cmp,dbAcc,del
+	new ER,xcatch,fCompile,fline,forStack,fsn,funcs,i,inFOR,inIF
+	new ifStack,label,level,lptr,keywords,mcode,methods,n
+	new newInst,oLvn,objectName,parlist,patch,postCond,postProc,primtyp
 	;
-	new pslCln,pslCls,pslLong,pslMtd,pslNew,pslPrp,pslRtns,pslSt,pslTbl
+	new pslCln,pslLong,pslNew,pslSt,pslTbl
 	new pslToken,pslVarNr
 	;
-	new rec,reClass,reset,RM,scope,struct,subLine,subRou,tab,type,xindex
-	new xref,xtype,vdd,vobj
+	new rec,reset,RM,scope,struct,subRou,tab,type
+	new xindex,xref,xtype,vdd,vobj,z
+	;
+	; TEMPORARY UNTIL RESOLVED:
+	new m2src merge m2src=tknzr("srcCode")
+	new cmperr set cmperr=0
 	;
 	; set general catch-all exception handler
-	new $ZTRAP set $ZTRAP="DO ZT^"_$text(+0)_"("_$ZLEVEL_")"
+	new $ETRAP,$ESTACK,$ZYER set $ZYER="ZE^UCGMR",$ZERROR="",$ECODE="",$ETRAP="Q:$Q&$ES """" Q:$ES  D ERROR^"_$T(+0)_"($ZERROR) Q $P(cmpErr,""|"",2,4)"
 	;
 	; cmmds(cmd)=Abbrv.|Argumentless|noPostCond
-	;
 	do initCmds(.cmmds)
 	;
 	set funcs=","_$$initFcts()_","
+	set tab=$C(9)
 	;
 	; Ensure DATA from TABLES accessed by the compiler is available when the
 	; boot restriction level requires RowSets
-	if $G(commands("boot","restrictionlevel"))=2 do getBootData^UCGMCU(.commands)
+	if $$getSetting^PSLCC(.pslPrsr,"boot","restrictionlevel",0)=2 do getBootData^UCGMCU(.pslPrsr)
 	;
 	; Ensure %LIBS is set
 	if '$D(%LIBS) new %LIBS set %LIBS="SYSDEV"
@@ -946,36 +1006,52 @@ main(m2src,msrc,labels,methods,commands,sysmap,cmperr)	;local void; main label
 	if '$D(%VN) set %VN=$$^UCXCUVAR("%VN")
 	;
 	; Build keywords array from STBLKEYWORDS table.
-	; Get the commands("mask",*) values
-	; Initiate commands() settings that depend on SCAU_UCOPTS and UCOPTS.m
 	do keywords^UCDTAUTL(.keywords)
-	do masks^UCDTAUTL(.commands)
-	do UCINIT^UCDTAUTL(.commands)
 	;
-	set reClass=$$getReClass()		; Record Class Sentinal
-	do init^UCPRIM()			; reClass needed by init^UCPRIM()
+	do init^UCPRIM()
 	;
-	set tab=$C(9)
-	set append=0,pslVarNr=0,fline=0,ifLevel=0
-	set doStack="",ifStack="",forStack=""
+	set append=0,pslVarNr=0,fline=0,inIF=0
+	set ifStack="",forStack=""
 	set pslSt="" do set^UCPSLST(.pslSt,0,0,0)
-	set fCompile=0,lptr="",oLvn="vobj",subRou=" ",subLine=1
+	set fCompile=0,lptr="",oLvn="vobj",subRou=" ",pslNew(subRou)=""
 	;
-	; Get all PSLLabelRecords for the source array, but do not validate the
-	; declarations. Initiate pslRtns.
-	do getLblRec^UCPSLLR(.m2src,"",0,.labels)
-	set labels(subRou)=1
-	set pslRtns=","
+	;;; Get all PSLLabelRecords for the source array, but do not validate the
+	;;; declarations. Initiate pslRtns.
+	;;do getLblRec^UCPSLLR(.m2src,"",0,.labels)
+	;;set labels(subRou)=1
+	;;set pslRtns=","
 	;
-	; Intrinsic default classes and identifiers for PSL
+	; Mixed implementation classes with STATIC scope
 	set level=-1,msrc=-1,mcode=""
-	for objectName="Db","Class","Object","PSL","Runtime","Schema" do
+	for objectName="Class","Db" do
 	.	;
-	.	;;do setScop(objectName,-1,0,"NEW")
-	.	;;do setType(objectName,objectName,-1)
+	.	do setScope(objectName,"","","STATIC",objectName)
+	.	do setInst(objectName,-1,"")
+	.	do setOpti(objectName,-1,-1)
+	;
+	; Mixed implementation classes with NEW scope
+	; These classes have "read-only" properties that cannot be substituted
+	; at compile time.
+	set level=-1,msrc=-1,mcode=""
+	for objectName="PSL","Runtime" do
+	.	;
 	.	do setScope(objectName,"","","NEW",objectName)
 	.	do setInst(objectName,-1,"")
 	.	do setOpti(objectName,-1,-1)
+	;
+	; Current class name and super in case of class definition module
+	set z=pslPrsr("pslCls",pslPrsr("moduleName"))
+	if $P(z,tab,$$rowPos^PSLClass("CLASSTYPE"))>-1 do
+	.	;
+	.	set objectName=pslPrsr("moduleName")
+	.	do setScope(objectName,"","","STATIC",objectName)
+	.	do setInst(objectName,-1,"")
+	.	do setOpti(objectName,-1,-1)
+	.	quit:objectName="Object"
+	.	set z=$P(z,tab,$$rowPos^PSLClass("EXTENDS"))
+	.	do setScope("super","","","NEW",z)
+	.	do setInst("super",-1,"")
+	.	do setOpti("super",-1,-1)
 	;
 	; Intrinsic default "literals" false and true
 	do typeCrea("false","Boolean",-1,"LITERAL",0,0)
@@ -986,12 +1062,11 @@ main(m2src,msrc,labels,methods,commands,sysmap,cmperr)	;local void; main label
 	;
 	set level=0,level(level)=""
 	;
-	for i=1:1 quit:'$D(commands("execute",i))  X commands("execute",i)
-	;
 	set msrc=$O(msrc(""),-1)+0			; Point to the end
 	;
-	for line=1:1 set lptr=$O(m2src(lptr)) quit:lptr=""  do line(m2src(lptr)) quit:lptr=""
+	for  set lptr=$O(m2src(lptr)) quit:lptr=""  do line(m2src(lptr)) quit:lptr=""
 	;
+	; ================ Post processing ================
 	if level for i=level:-1:0 do impQuit(i)		; Clean up the stack
 	else  do
 	.	;
@@ -1004,106 +1079,126 @@ main(m2src,msrc,labels,methods,commands,sysmap,cmperr)	;local void; main label
 	set n=""
 	for  set n=$O(postProc(n)) quit:n=""  do @postProc(n)	; Method post processor
 	;
-	; FSCW CR18163: The order of the calls is important! The call to UCPATCH
-	; will ensure that all occurrences that go through patch^UCPATCH() have
-	; been translated before the call to optNload^UCREC4OP().
-	;
 	; FSCW CR22719: Because the decision to use vobj() or voxn for certain
 	; cases is postponed until optNload^UCREC4OP(), ^UCPATCH must be called
 	; after optNload^UCREC4OP() has made the final decisions.
-	if $D(dbAcc) do optNload^UCREC4OP(.msrc,''$G(commands("OPTIMIZE","OBJECTS")),0)
+	if $D(dbAcc) do optNload^UCREC4OP(.msrc,''$$getSetting^PSLCC(.pslPrsr,"OPTIMIZE","OBJECTS",0),0)
 	if $D(patch) do ^UCPATCH
 	if $D(dbLoad) do warnGroup("INTERNAL","dbLoad exists")
 	;
 	; Add NEW of pslNew() variables to all subroutines
-	set subRou=""
+	set class=pslPrsr("moduleName"),subRou=""
 	for  set subRou=$o(pslNew(subRou)) quit:subRou=""  do
 	.	if pslNew(subRou)="" quit
-	.	set msrc($P(labels(subRou),tab)+1E-5)=" N "_pslNew(subRou)
+	.	if subRou=" " set msrc(+1E-5)=" N "_pslNew(subRou) quit
+	.	set msrc($P(pslPrsr("pslMtd",class_"."_subRou),tab,$$rowPos^PSLMethod("CODELINE"))+1E-5)=" N "_pslNew(subRou)
 	;
+	new lblcatch
 	set label=""
 	for  set label=$O(append(label)) quit:label=""  do
+	.	;
+	.	if label["vCatch" set lblcatch($E(label,7,$L(label)))=label quit
 	.	;
 	.	set n=0
 	.	for  set n=$O(append(label,n)) quit:n=""  set mcode=append(label,n) do ADD(mcode)
 	.	;
-	.	new record
-	.	set record=$G(append(label))
-	.	if $P(record,tab,3) do move(label,record,.msrc)
+	new index
+	set index=""
+	for  set index=$O(lblcatch(index),-1) quit:index=""  do
+	.	set label=lblcatch(index)
+	.	set n=0
+	.	for  set n=$O(append(label,n)) quit:n=""  set mcode=append(label,n) do ADD(mcode)
+	.	;
+	.	; move catch blocks from in-line block to their vtrapN label
+	.	new descr
+	.	set descr=$G(append(label))
+	.	if $P(descr,tab,3) do move(label,descr,.msrc)
 	;
-	; Save labels info for sysmap
-	set label=""
-	for  set label=$O(labels(label)) quit:label=""  if label'["^" set $P(sysmap("L",label),tab,4)=$TR($P(labels(label),tab,5),";",",")
+	; Save labels info for sysmap, and delete descriptors of PSL
+	; generated methods.
+	set subRou=class_"."
+	for  set subRou=$O(pslPrsr("pslMtd",subRou)) quit:$P(subRou,".")'=class  do
+	.	set label=$P(subRou,".",2)
+	.	if $$isNamePSL(label) quit
+	.	do addSysmap^PSLParser(.pslPrsr,"L",label,0,tab_tab_tab_$TR($P(pslPrsr("pslMtd",subRou),tab,$$rowPos^PSLMethod("FORMALLIST")),";",","))
 	;
-	; FSCW CR20280: no longer needed here
-	; If not in boot mode, check calls to external routines for
-	; parameter mismatches.
-	;;if $G(commands("boot","restrictionlevel"))<1 do chkCalls^UCLABEL(.called,.commands,.labels,$C(9),5)
-	;
-	quit
-	;
+	; If log file expected, copy cmperr() to logfile
+	if pslPrsr("logfile")'="" do
+	.	new IO,sub
+	.	set IO=$$FILE^%TRNLNM(pslPrsr("logfile"),$$SCAU^%TRNLNM("DIR"))
+	.	if $$FILE^%ZOPEN(IO,"APPEND",0,32767) do
+	..		use IO
+	..		set sub=""
+	..		for  set sub=$O(cmperr(sub)) quit:sub=""  write cmperr(sub),!
+	..		close IO
+	quit $P(cmperr,"|",2,4)
 	;-----------------------------------------------------------------------
-line(rec)	;private void; Parse the line of Script code 
+line(rec) ;package void; Parse the line of Script code
 	;-----------------------------------------------------------------------
 	;
-	set ER=0
+	new cmd,cmdNum,inIF,inFOR,mcode,ptr,sln,tok,z	;FSCW CR11445: added mcode
 	;
-	new cmd,cmdNum,ifLevel,forLevel,mcode,ptr,tok,z	;FSCW CR11445: added mcode
-	;
-	set ifLevel=0,forLevel=0,mcode=""
+	set inIF=0,inFOR=0,mcode=""
 	;
 	set rec=$$RTCHR^%ZFUNC($TR(rec,$C(9)," ")," ")
 	if rec="" do addComment quit
 	;
-	set ptr=0,rec=$$TOKEN^%ZS(rec,.tok,"") if ER set ER=0
+	set ptr=0
 	;
 	; set exception handler for exceptions during single line compile
 	new $ZTRAP set $ZTRAP="DO ZT^"_$text(+0)_"("_$ZLEVEL_")"
 	;
-	if $E(rec,1)=" " set mcode=$$initLine(level)
-	else  do  if ptr=0 do ADD(mcode_";") quit
+	; Align PSLTokenizer in case errors are reported by PSLParser.
+	; NB: $$TOKEN^%ZS() may set ER, but that should be irrelevant here
+	if $E(rec,1)=" " set tknzr("srcLine")=lptr,mcode=$$initLine(level),rec=$$replaceAndNotOr^UCGMC($$TOKEN^%ZS(rec,.tok,"")),ER=0
+	else  do  quit:ptr=0
 	.	;
-	.	; If opening parenthesis and closing parenthesis not on same
-	.	; line, join lines until a complete formal list is present
-	.	set z=$$stripCmt^UCPSLLR(rec,0)
-	.	if $L(z,"(")'=$L(z,")") set rec=$$joinFpl(.lptr,.tok)
+	.	; if "//" in first position, treat as regular comment line
+	.	; ptr is still zero, so we will quit the subroutine as well.
+	.	if $e(rec,1,2)="//" do ADD($$initLine(level)_";"_$E(rec,3,$L(rec))) quit
 	.	;
-	.	set (mcode,z)=$$ATOM^%ZS(rec,.ptr,"",tok)
-	.	if $$CONTAIN("LOCAL,PRIVATE,PUBLIC",$$UPCASE(z)) set mcode=$$ATOM^%ZS(rec,.ptr,"",tok),z=z_" "_mcode
-	.	if $G(commands("Options","ResultClass")),mcode="void"!$$clsIsClass^UCGMR(mcode) set z=z_" "_$$ATOM^%ZS(rec,.ptr,"",tok)
-	.	set mcode=$$subRou(z,.subRou,.labels,.type)_" "
+	.	; align PSLTokenizer to get method descriptor from PSLParser
+	.	set tknzr("srcLine")=lptr-1,tknzr("srcChar")=0,tknzr("tknPushBack")=0
+	.	set ptr=$$nextToken^PSLTokenizer(.tknzr)	; force tknTypeMTD
+	.	set ptr=$$ps0mtd^PSLParser(.pslPrsr,.tknzr)
+	.	set z=$$treeValue^PSLTokenizer(.tknzr,ptr)
+	.	do treeRemove^PSLTokenizer(.tknzr,ptr)
 	.	;
-	.	; Check to see if line that starts subroutine does contain code
-	.	; If so split the line. 'ptr' is passed to $$atom by value to
-	.	; prevent that it is changed (we effectively perform a
-	.	; look-ahead).
-	.	if ptr=0 quit
-	.	set z=$$ATOM^%ZS(rec,ptr,":;,",tok)
-	.	if $E(z)=";" quit
-	.	if $E(z,1,2)="//" quit
-	.	do ADD(mcode_";")
-	.	set rec=$E(rec,ptr+1,$L(rec)),ptr=1,mcode=" "
+	.	; perform subroutine set up for the returned descriptor (this
+	.	; may return multiple lines separated by LF)
+	.	set z=$$subRou(z,.subRou,.type)
+	.	for sln=1:1:$LENGTH(z,$CHAR(10)) do ADD($PIECE(z,$CHAR(10),sln))
+	.	;
+	.	; Continue at current position of PSLTokenizer, but be aware
+	.	; of pushBack value. The code takes the shortcut that it assumes
+	.	; the token value is not a string literal.
+	.	; Also remove trailing whitespace (PSLTokenizer doesn't care)
+	.	set lptr=tknzr("srcLine"),rec=tknzr("srcCode",lptr),ptr=tknzr("srcChar")
+	.	set:ptr>$length(rec) ptr=0 if ptr=0 quit
+	.	set rec=$$RTCHR^%ZFUNC($E(rec,ptr,$L(rec))," ")
+	.	if tknzr("tknPushBack") set rec=" "_tknzr("tknValue")_rec
+	.	set rec=$$TOKEN^%ZS(rec,.tok,""),ptr=1,mcode=" ",ER=0
 	;
-	if $$ATOM^%ZS(rec,0,".",tok)="." do ERROR("MUMPS structured block syntax is not supported") quit
+	if $$ATOM^%ZS(rec,0,".",tok)="." do ERROR("SYNTAX: MUMPS structured block syntax is not supported") quit
 	;
 	for cmdNum=1:1 do command(.rec,.ptr) quit:ptr=0!ER
 	do ADD(mcode)
 	;
 	; pop levels pushed by this line. The order is important:
-	; - a FOR/WHILE always sets ifLevel, so no IF/ELSE will be pushed AFTER
+	; - a FOR/WHILE always sets inIF, so no IF/ELSE will be pushed AFTER
 	;	a FOR/WHILE
 	; - an IF/ELSE that preceded the FOR/WHILE will be uncovered by the pop,
 	;	and must be popped itself. The 'public' ilLevel cannot be used,
 	;	because FOR/WHILE will have set it to a non-zero value.
-	; The code cannot refer to  forLevel and doLevel because DO { may have
+	; The code cannot refer to  inFOR and doLevel because DO { may have
 	;	pushed a value that cannot be popped until the end of that block
 	;	is detected.
-	if $$topFor^UCPSLST(pslSt) do pop^UCPSLST(.pslSt,,.ifLevel,.forLevel)
-	if $$topIf^UCPSLST(pslSt) do pop^UCPSLST(.pslSt,,.ifLevel,.forLevel)
+	if $$topFor^UCPSLST(pslSt) do pop^UCPSLST(.pslSt,,.inIF,.inFOR)
+	if $$topIf^UCPSLST(pslSt) do pop^UCPSLST(.pslSt,,.inIF,.inFOR)
 	quit
 	;
 	;-----------------------------------------------------------------------
-command(str,ptr)	;local void; Next 'M' command 
+command(str,ptr) ;private void; Next 'M' command
 	;-----------------------------------------------------------------------
 	;
 	new atom,cmdDel,isDirctv
@@ -1130,22 +1225,24 @@ command(str,ptr)	;local void; Next 'M' command
 	.	if $E(atom,2)="/" set mcode=mcode_";"_$$COMMENT(str,.ptr,.tok) quit
 	.	if $E(atom,2)="*" do blockC quit
 	;
-	if subRou="",fCompile=0,$E($$UPCASE(atom))'="#" do  quit
+	if subRou="",fCompile=0,$E(atom)'="#" do  quit
 	.	;
 	.	set ptr=0
 	.	if '$d(struct(7)) do warnGroup("DEAD","Dead code")
 	;
-	if atom="{" set:ptr=0 ptr=$L(str) set atom="D",ptr=ptr-2	; default DO
+	if atom="{" set:ptr=0 ptr=$L(str) set atom="do",ptr=ptr-2	; default DO
 	if atom="}" do endBlock quit
 	;
 	if fline=0 set fline=1,$P(level(level),tab,2)=msrc	; 1st non-comment ptr
 	;
-	set cmd=$$UPCASE(atom)
 	;;if $E(cmd)="#" set isDirctv=1 do ^UCGMC quit
-	if $E(cmd)="#",cmdNum>1 do ERROR("#COMMAND must occur as first command on the line") quit
-	if $E(cmd)="#" set isDirctv=1,mcode=mcode_$$^UCGMC(cmd,.m2src,.lptr,str,.ptr,tok) quit
+	if $E(atom)="#",cmdNum>1 do ERROR("SYNTAX: #COMMAND must occur as first command on the line") quit
+	if $E(atom)="#" set isDirctv=1,mcode=mcode_$$^UCGMC($$UPCASE(atom),.m2src,.lptr,str,.ptr,tok) quit
 	;
-	if '$D(cmmds(cmd)) set cmd=$$getCommand(.cmmds,cmd) if cmd="" do ERROR("Invalid command: "_atom) quit
+	set cmd=$$getCommand(.cmmds,atom) if cmd="" quit
+	;
+	if cmd="break"!($e(cmd)="z") do WARNDEP(3,4,cmd_" - statement may not port to Java")
+	else  if $$CONTAIN("close,open,use",cmd) do WARNDEP(3,4,cmd_" - use class IO and its methods")
 	;
 	set postCond=""
 	;
@@ -1157,25 +1254,25 @@ command(str,ptr)	;local void; Next 'M' command
 	.	do occMark^UCREC4OP()	; mark occurrence position for postCond
 	.	set postCond=$$condRel($$nextExpr(str,.ptr,.tok,1))
 	.	if ER do ERROR($g(RM)) quit
-	.	if $P(cmmds(cmd),"|",3) do ERROR("Command does not support a post-conditional expression: "_cmd) quit
+	.	if $P(cmmds(cmd),"|",3) do ERROR("MISMATCH: Statement does not support a post-conditional expression: "_cmd) quit
 	.	;
 	.	if $$isLit(postCond),$$QSUB^%ZS(postCond) set postCond="",struct(7,subRou)=""
 	.	else  set postCond=":"_postCond
 	.	;
-	.	if ptr=0 set del="" quit:$$CONTAIN("QUIT,TROLLBACK,TCOMMIT",cmd)
+	.	if ptr=0 set del="" quit:$$CONTAIN("quit,trollback,tcommit",cmd)
 	.	else  set ptr=ptr+1,del=$E(str,ptr)
 	.
-	.	if del'=" " do ERROR("Expression Expected")
+	.	if del'=" " do ERROR("SYNTAX: Expression Expected")
 	;
 	do cmdExpr
 	quit
 	;
 	;-----------------------------------------------------------------------
-blockC	;local void; Process block comment
+blockC	;private void; Process block comment
 	;-----------------------------------------------------------------------
 	;
 	new z
-	set z=$E(str,ptr,$L(str)),str=$E(str,1,ptr-3),ptr=$L(str)
+	set z=$E(str,ptr+1,$L(str)),str=$E(str,1,ptr-2),ptr=$L(str)
 	for  quit:z["*/"  set lptr=$O(m2src(lptr)) quit:lptr=""  set z=$$getLine(lptr)
 	if lptr="" do warnGroup("SYNTAX","Multi-line comment terminator expected: */")
 	;
@@ -1186,7 +1283,7 @@ blockC	;local void; Process block comment
 	quit
 	;
 	;-----------------------------------------------------------------------
-cmdExpr	;local void; Process a command expression e.g. Set abc="string" 
+cmdExpr ;private void; Process a command expression e.g. Set abc="string"
 	;-----------------------------------------------------------------------
 	;
 	; type public String cmd
@@ -1196,46 +1293,47 @@ cmdExpr	;local void; Process a command expression e.g. Set abc="string"
 	; type public Number ptr
 	; type public String str
 	; type public String subRou
-	; type public String sysmap(,,)
+	; type public String pslPrsr("sysmap","T",,)
 	;
-	new expr	; type exposed String
-	new pslP1Ap	; type exposed String
+	new expr	; type public new String
+	new pslP1Ap	; type public new String
 	set expr=$$getOpand(str,.ptr),pslP1Ap=""
 	;
-	if expr="",'$P(cmmds(cmd),"|",2) do ERROR("Expression expected") quit
+	if expr="",'$P(cmmds(cmd),"|",2) do ERROR("SYNTAX: Expression expected") quit
 	;
-	set sysmap("T",subRou,cmd)=$G(sysmap("T",subRou,cmd))+1
-	do occMark^UCREC4OP(),@cmd	; mark occurrence position
+	set pslPrsr("sysmap","T",subRou,cmd)=$G(pslPrsr("sysmap","T",subRou,cmd))+1
+	do occMark^UCREC4OP(),@$$UPCASE(cmd)	; mark occurrence position
 	if pslP1Ap'="" set mcode=mcode_pslP1Ap,cmdDel=" "
 	quit
 	;
 	;-----------------------------------------------------------------------
-getCommand(cmmds,expr)	;local String; Return command from command table 
+getCommand(cmmds,expr) ;private String; Return command from command table
 	;-----------------------------------------------------------------------
 	;
 	if $D(cmmds(expr)) quit expr
 	;
-	new z
-	set z=expr
-	for  set z=$O(cmmds(z)) quit:$E(z,1,$L(expr))'=expr  if $P(cmmds(z),"|",1)=expr quit
+	new f,y,z
+	set (y,z)=$$LOCASE(expr) if $D(cmmds(z)) do WARNDEP(3,0,"keyword spelling: "_expr_"; use "_z) quit z
+	for f=0:0:0 set z=$O(cmmds(z)) quit:$E(z,1,$L(y))'=y  if $P(cmmds(z),"|",1)=y do WARNDEP(3,0,"keyword spelling: "_expr_"; use "_z) set f=1 quit
 	;
-	else  set z=""
-	quit z
+	quit:f z
+	do ERROR("MISMATCH: Invalid statement: "_expr)
+	quit ""
 	;
 	;-----------------------------------------------------------------------
-getOpand(str,ptr)	;local String; Return expression after command 
+getOpand(str,ptr) ;private String; Return expression after command
 	;-----------------------------------------------------------------------
 	;
 	new return
 	;
 	if ptr=0 quit ""
-	if $E(str,ptr+1)=" " quit ""			; Argumentless command
+	if $E(str,ptr+1)=" " quit ""			; Argumentless statement
 	if $E(str,ptr+1)=";" quit ""			; M style comment
 	if $E(str,ptr+1)="/","/*"[$E(str,ptr+2) quit "" ; Comment
 	quit $$nextExpr(str,.ptr,.tok,1)
 	;
 	;-----------------------------------------------------------------------
-nextExpr(str,ptr,tok,cvt,more)	;private String; Return the next expression 
+nextExpr(str,ptr,tok,cvt,more) ;package String; Return the next expression
 	;-----------------------------------------------------------------------
 	;
 	; NOTES:
@@ -1265,7 +1363,7 @@ nextExpr(str,ptr,tok,cvt,more)	;private String; Return the next expression
 	quit return
 	;
 	;-----------------------------------------------------------------------
-valExpr(str,class,setVar)	; Process a value expression e.g. set a= |1*3+5| 
+valExpr(str,class,setVar) ; Process a value expression e.g. set a= |1*3+5|
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
 	; . str = rightexpr					/REQ/MECH=VAL
@@ -1275,7 +1373,7 @@ valExpr(str,class,setVar)	; Process a value expression e.g. set a= |1*3+5|
 	;	$$valExpr().
 	;
 	; INPUTS:
-	; . cmd = current command
+	; . cmd = current statement
 	;
 	; LOCALS:
 	; . cbin = binary operator under construction
@@ -1287,7 +1385,7 @@ valExpr(str,class,setVar)	; Process a value expression e.g. set a= |1*3+5|
 	;	to check for possible PRECEDENCE misconceptions
 	; . cun = unary operator(s) under construction
 	;
-	if str="" do ERROR("Expression Expected") quit ""
+	if str="" do ERROR("SYNTAX: Expression Expected") quit ""
 	;
 	new atom,cbin,cexpr,cun,dels,fc,i,ptr,return
 	;
@@ -1307,9 +1405,9 @@ valExpr(str,class,setVar)	; Process a value expression e.g. set a= |1*3+5|
 	...			; binary operator at start is error, except if
 	...			; '*' as first char in WRITE *
 	...			; set fc = the last character previous expratom
-	...			if cmd'="WRITE",return="" set ER=1 quit
+	...			if cmd'="write",return="" set ER=1 quit
 	...			set fc=$E(return,$L(return))
-	...			if cmd="WRITE",atom="*",fc="" quit
+	...			if cmd="write",atom="*",fc="" quit
 	...			;
 	...			; append this binop to cbin
 	...			; done if previous not a binary operator
@@ -1400,14 +1498,14 @@ valExpr(str,class,setVar)	; Process a value expression e.g. set a= |1*3+5|
 	.	set cexpr=cexpr_cun,(cbin,cun)=""
 	.	set fc=$E(atom)
 	.	if fc="{" set return=return_$$valCast(atom,0,.setVar,.class) quit
-	.	if fc="""" do ERROR("Literal delimiter ("") expected") quit
+	.	if fc="""" do ERROR("SCOPE: Literal delimiter ("") expected") quit
 	.	if $$isObj(atom) set return=return_$$valObj(atom,0,.setVar,.class) quit
 	.	;
-	.	if "0123456789."[fc set return=return_atom,class="Number" quit
+	.	if "0123456789."[fc set return=return_atom,class=$S(+atom[".":"Number",1:"Integer") quit
 	.	;
 	.	; tokenized string literal
 	.	if fc=$C(0) do  quit			; String
-	..		if '($F(atom,$C(0),2)>$L(atom)) do ERROR("Space or operator expected after: "_$$UNTOK^%ZS($P(atom,$C(0),1,2)_$C(0),tok)) quit
+	..		if '($F(atom,$C(0),2)>$L(atom)) do ERROR("SYNTAX: Space or operator expected after: "_$$UNTOK^%ZS($P(atom,$C(0),1,2)_$C(0),tok)) quit
 	..		set atom=$$UNTOK^%ZS(atom,tok)
 	..		set return=return_atom
 	..		set class=$$getClass(atom)
@@ -1418,15 +1516,17 @@ valExpr(str,class,setVar)	; Process a value expression e.g. set a= |1*3+5|
 	..		set y=$F(atom,")")
 	..		if $L($E(atom,1,y-1),"(")=$L($E(atom,1,y-1),")")	; Match
 	..		else  for  set y=$F(atom,")",y) quit:y=0  if $L($E(atom,1,y-1),"(")=$L($E(atom,1,y-1),")") quit
-	..		if '($L(atom)+1=y) do ERROR("Unexpected character: "_$E(atom,y)) quit
-	..		set return=return_"("_$$valExpr($E(atom,2,$L(atom)-1),.class,.setVar)_")"
+	..		if '($L(atom)+1=y) do ERROR("SYNTAX: Unexpected character: "_$E(atom,y)) quit
+	..		set atom=$$valExpr($E(atom,2,$L(atom)-1),.class,.setVar)
+	..		if '$$isSingle(atom) set return=return_"("_atom_")"
+	..		else  set return=return_atom
 	.	;
 	.	if fc="$" do  quit
 	..		;
 	..		if $$isFun(atom) set return=return_$$valFun(atom,0,,.class) quit
 	..		if $$isExt(atom) set return=return_$$valFun(atom,0,,.class) quit
 	..		set class="String"		; for now
-	..		if $$isSys(atom) set return=return_atom quit
+	..		if $$isPslSvn(atom) set return=return_atom do addXref("V0",atom,"NEW"_$C(9)_"String") quit
 	..		set ER=1
 	.	;
 	.	; Other special cases:
@@ -1440,7 +1540,7 @@ valExpr(str,class,setVar)	; Process a value expression e.g. set a= |1*3+5|
 	.	if fc="@" set atom=$E(atom,2,$L(atom))	; @var
 	.	;
 	.	set atom=$$varExpr(atom,0,.class,.newLevel,.scope) if ER quit
-	.	if scope="LITERAL",$$primVar^UCPRIM(class) set atom=$$getExpr(atom,.newLevel)
+	.	if scope="LITERAL",$$primStr^UCPRIM(.pslPrsr,class) set atom=$$getExpr(atom,.newLevel)
 	.	if fc="@" do
 	..		if '$$isLit(atom) set atom=$$toLit(atom,.tok)
 	..		if '$$isLit(atom) set atom="@"_atom
@@ -1448,26 +1548,29 @@ valExpr(str,class,setVar)	; Process a value expression e.g. set a= |1*3+5|
 	.	if class="" set ER=1
 	.	;
 	.	; FSCW CR11445:
-	.	; The statements below use $$primVar^UCPRIM() to accept values.
+	.	; The statements below use $$primStr^UCPRIM() to accept values.
 	.	; This implies that PSL programmers are allowed to use constructs
 	.	; that imply knowledge of the implementation of the object.
-	.	; The cleaner solution would be to use $$primDes^UCPRIM().
+	.	; The cleaner solution would be to use $$primVal^UCPRIM().
 	.	; However, much of the PSL code generated to implement methods
 	.	; (like PSL.mExpr(), and PSLBuffer) is sloppy with respect to
 	.	; proper object typing, so only a warning will be generated.
 	.	if return'="",class'="" do
-	..		i '$$primVar^UCPRIM(class) set ER=1 quit
-	..		i '$$primDes^UCPRIM(class) do warnGroup("MISMATCH","Cast expression to primitive class: "_class)
+	..		if '$$primStr^UCPRIM(.pslPrsr,class) set ER=1 quit
+	..		if '$$primVal^UCPRIM(.pslPrsr,class) do warnGroup("MISMATCH","Class "_class_" has no implied value")
 	.	set return=return_atom
 	;
-	if ER set return="" do ERROR("Invalid expression: "_$$UNTOK^%ZS(atom,.tok))
+	if ER set return="" do ERROR("SYNTAX: Invalid expression: "_$$UNTOK^%ZS(atom,.tok))
 	;
 	; Resolve the class of a compound expression
 	if '(cexpr="") set class=$$compClass(cexpr_class)
+	;
+	; Load class description of result
+	do initClass(class)
 	quit return
 	;
 	;-----------------------------------------------------------------------
-compClass(cexpr)	; Resolve the class of a compound expression 
+compClass(cexpr) ; Resolve the class of a compound expression
 	;-----------------------------------------------------------------------
 	; Resolve the class of a compound expression based on the operators and
 	; look for possible PRECEDENCE misconceptions.
@@ -1485,11 +1588,11 @@ compClass(cexpr)	; Resolve the class of a compound expression
 	; following syntax decomposition tree
 	; 1) boolexpr = boolterm ! boolterm
 	; 2) boolterm = boolfact & boolfact
-	; 3) boolfact = strgexpr compop strgexpr ( < = > [ ? ])
+	; 3) boolfact = strgexpr compop strgexpr	( < = > [ ? ])
 	; 4) strgexpr = aritexpr _ aritexpr
-	; 5) aritexpr = aritterm + aritterm (+ -)
-	; 6) aritterm = aritfact * aritfact (* / \ #)
-	; 7) aritfact = aritexpo ^ aritexpo (exponent, M/PSL **)
+	; 5) aritexpr = aritterm + aritterm		(+ -)
+	; 6) aritterm = aritfact * aritfact		(* / \ #)
+	; 7) aritfact = aritexpo ^ aritexpo		(exponent, M/PSL **)
 	; Unambiguous expression evaluation will occur as long as the precedence
 	; values of the binops are non-increasing from left-to-right (each next
 	; precedence value is equal to or less than the previous value).
@@ -1508,16 +1611,26 @@ compClass(cexpr)	; Resolve the class of a compound expression
 	if cexpr="" quit ""
 	;
 	new class,class1,class2,lop,op,opm,pv0,pv1
-	set cexpr=cexpr,class=$p(cexpr," "),lop="",pv0=9
+	set cexpr=cexpr,class=$piece(cexpr," "),lop="",pv0=9
 	;
-	for  do  if '(cexpr[" ") quit
+	; Handle unop on first operand
+	set:"+-'"[$extract(class) class=$$unopClass(class),$piece(cexpr," ")=class
+	;
+	if cexpr[" " for  do  if '(cexpr[" ") quit
 	.	;
 	.	set class1=$P(cexpr," ",1),op=$P(cexpr," ",2),class2=$P(cexpr," ",3)
 	.	set cexpr=$P(cexpr," ",4,$L(cexpr))
 	.	;
+	.	; handle unop of class2 (class1 will not have a unop)
+	.	set:"+-'"[$e(class2) class2=$$unopClass(class2)
+	.	;
 	.	; construct modified binop (see intro)
 	.	set opm=$TR(op,"'")
 	.	if $L(opm)>1 set opm=$S(opm="**":"^",1:$E(opm))
+	.	;
+	.	; Check primObj = primObj for Reference decendants
+	.	if class1'="",$G(primtyp(class1))=0,opm="=" do
+	..		do WARN("%PSL-W-SYNTAX: Cannot compare "_class1_" = "_$TR(class2,"+-'")_" ; Use "_class1_".equals()") quit
 	.	;
 	.	; convert binop to precedence value (see intro)
 	.	set pv1=$E("x1233333345566667",$F("!&<=>[?]_+-*/\#^",opm))
@@ -1535,13 +1648,13 @@ compClass(cexpr)	; Resolve the class of a compound expression
 	.	if "[]=><&!?"[opm set class="Boolean"
 	.	else  if "+-*/\#^"[opm set class="Number"
 	.	else  set class="String"
-	.	;
-	.	; Before checking for combinations, take care of unary
-	.	; operator preceeding the class name:
-	.	if $E(class1)="'" set class1="Boolean"
-	.	else  if "+-"[$E(class1) set class1="Number"
-	.	if $E(class2)="'" set class2="Boolean"
-	.	else  if "+-"[$E(class2) set class2="Number"
+	.	;;;
+	.	;;; Before checking for combinations, take care of unary
+	.	;;; operator preceeding the class name:
+	.	;;if $E(class1)="'" set class1="Boolean"
+	.	;;else  if "+-"[$E(class1) set class1="Number"
+	.	;;if $E(class2)="'" set class2="Boolean"
+	.	;;else  if "+-"[$E(class2) set class2="Number"
 	.	;
 	.	; Check for combinations with known different result
 	.	if '(class1=""),'(class2="") do
@@ -1555,7 +1668,25 @@ compClass(cexpr)	; Resolve the class of a compound expression
 	quit class
 	;
 	;-----------------------------------------------------------------------
-valFun(expr,fset,srcVar,class)	; Process Function Logic 
+unopClass(cexpr) ; Resolve the class of a unary expression
+	;-----------------------------------------------------------------------
+	; Uses the following algorithm:
+	; * if the leftmost unary operator is NOT, the result will always be a
+	;	Boolean,
+	; * else, if cexpr contains a unary NOT, the result will always be an
+	;	Integer
+	; * else, if the class in cexpr (discarding the unary ops) is Boolean or
+	;	Integer, the result is Integer
+	; * else the result is Number
+	; 
+	quit:cexpr="" ""
+	new cun
+	set cun=$E(cexpr) quit:cun="'" "Boolean" quit:cexpr["'" "Integer"
+	set cexpr=$TR(cexpr,"+-")
+	quit $S(cexpr="Integer":"Integer",cexpr="Boolean":"Integer",1:"Number")
+	;
+	;-----------------------------------------------------------------------
+valFun(expr,fset,srcVar,class) ; Process Function Logic
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
 	; . String expr = intrinsic or extrinsic function	/REQ/MECH=VAL
@@ -1579,7 +1710,7 @@ valFun(expr,fset,srcVar,class)	; Process Function Logic
 	;	require explicit casts to the "known" return type if a method is
 	;	subsequently invoked on the return value (e.g. $$fun().find()).
 	;
-	if $G(commands("OPTIMIZE","FUNCTIONS")) set expr=$$convert^UCGMCONV(expr,.funcs,.tok,.commands) if $$isObj(expr) quit $$valObj(expr,.fset,.srcVar,.class)
+	if $$getSetting^PSLCC(.pslPrsr,"OPTIMIZE","FUNCTIONS",0) set expr=$$convert^UCGMCONV(expr,.funcs,.tok) if $$isObj(expr) quit $$valObj(expr,fset,.srcVar,.class)
 	;
 	new atom,cls,del,farg,fnam,islit,isvar,ptr,return,undef
 	;
@@ -1596,15 +1727,20 @@ valFun(expr,fset,srcVar,class)	; Process Function Logic
 	set farg=$E(farg,1,$L(farg)-1)			; Strip Params
 	;
 	set fnam=$$UPCASE(fnam)
-	if $F(funcs,(","_fnam))=0 do ERROR("Invalid function") quit ""
+	if $F(funcs,(","_fnam))=0 do ERROR("MISMATCH: Invalid function") quit ""
+	if fnam="$S" do
+	.	do WARNDEP(3,0,"keyword spelling: $s - use $select")
+	else  if fnam="$SELECT" set fnam="$S"
+	else  if $extract(fnam,2)="Z"!(fnam="$T") do WARNDEP(3,0,"function "_fnam_" - may not port to Java")
+	else  do WARNDEP(3,0,"function "_fnam_" - replace by method")
 	;
 	set return=fnam_"("
 	;
 	set islit=1,isvar=0,undef=0
 	;
-	if $G(fset) do  if ER quit ""			; Allow set $piece(
+	if fset do  if ER quit ""			; Allow set $piece(
 	.	;
-	.	if $E("$PIECE",1,$L(fnam))'=fnam do ERROR("Invalid assignment function: "_fnam) quit
+	.	if $E("$PIECE",1,$L(fnam))'=fnam do ERROR("MISMATCH: Invalid assignment function: "_fnam) quit
 	.	set islit=0,isvar=1,undef=-1
 	;
 	if $E("$GET",1,$L(fnam))=fnam set isvar=1,islit=0,undef=-1
@@ -1620,9 +1756,11 @@ valFun(expr,fset,srcVar,class)	; Process Function Logic
 	..		new ptr set ptr=0
 	..		set exprBool=$$ATOM^%ZS(atom,.ptr,":",.tok,1)
 	..		set exprVal=$E(atom,ptr+2,999)
-	..		if exprBool=""!(exprVal="")!(ptr=0) do ERROR("Invalid $SELECT syntax") quit
+	..		if exprBool=""!(exprVal="")!(ptr=0) do ERROR("MISMATCH: Invalid $SELECT syntax") quit
 	..		set exprBool=$$condRel(exprBool)
-	..		set exprVal=$$valExpr(exprVal,.cls,.setVar)
+	..		;
+	..		; set class of $S() equal to class of (last) exprVal
+	..		set exprVal=$$valExpr(exprVal,.class,.setVar)
 	..		if islit set islit=$$isLit(exprBool)
 	..		if islit set islit=$$isLit(exprVal)
 	..		set return=return_exprBool_":"_exprVal
@@ -1634,14 +1772,14 @@ valFun(expr,fset,srcVar,class)	; Process Function Logic
 	.	;
 	.	if $E(atom)=".",'($E(atom,2)?1N) set atom=$E(atom,2,$L(atom))	; White noise
 	.	; FRS - 06/17/03
-	.	if isvar set atom=$$varExpr(atom,undef,.cls)	; fset=0
+	.	if isvar set atom=$$varExpr(atom,undef,.cls)	; undef=-1 for $G(), $D(), $O()
 	.	else  set atom=$$valExpr(atom,.cls,.setvar)
 	.	;
 	.	if islit set islit=$$isLit(atom)
 	.	set return=return_atom
 	.	;
 	.	if isvar set isvar=0,undef=0 if fset set srcVar=atom
-	.	else  if '$$primDes^UCPRIM(cls) do ERROR("Object is invalid function argument")
+	.	else  if '$$primVal^UCPRIM(.pslPrsr,cls) do ERROR("SCOPE: Object is invalid function argument")
 	;
 	set return=return_")"
 	;
@@ -1651,12 +1789,13 @@ valFun(expr,fset,srcVar,class)	; Process Function Logic
 	.	xecute "set literal="_return
 	.	; Don't change if results contain control characters or $C(254) since won't
 	.	; be valid string in M code
-	.	if literal'?.e1c.e,literal'[$C(254) set return=literal if return'=+return set return=$$QADD^%ZS(return)
+	.	quit:$L(literal)>$$getPslValue^UCOPTS("maxLitLength")
+	.	if literal?.ANP,literal'[$C(254) set return=literal if return'=+return set return=$$QADD^%ZS(return)
 	;
 	quit return
 	;
 	;-----------------------------------------------------------------------
-valObj(atom,fset,setVar,class,new)	; Process an object expression 
+valObj(atom,fset,setVar,class,mpid) ; Process an object expression
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
 	; . String atom = the object expression			/REQ/MECH=VAL
@@ -1679,7 +1818,9 @@ valObj(atom,fset,setVar,class,new)	; Process an object expression
 	;	instance (e.g. its optimizability), or provide "late" warnings
 	;	or errors.
 	; . class = data type of return value			/NOREQ/MECH=REF:W
-	; . new = ???
+	; . mpid = method ID or property ID			/NOREQ/MECH=REF:W
+	;	If supplied it will receive the identification of the property
+	;	descriptor or method desciptor that describes atom.
 	;
 	; INPUTS:
 	; . tok = tokenized literals
@@ -1710,6 +1851,7 @@ valObj(atom,fset,setVar,class,new)	; Process an object expression
 	set ptr=ptr-1
 	set objectName=$E(atom,1,ptr-1),ref=$$ATOM^%ZS(atom,.ptr,".",tok,1)
 	set objectName=$$valExpr(objectName,.class,.setVar) if ER quit ""
+	set mpid=class_"."_$PIECE(ref,"(")
 	;
 	if '($$isVar(objectName)!$$isArr(objectName)) do
 	.	;
@@ -1721,20 +1863,21 @@ valObj(atom,fset,setVar,class,new)	; Process an object expression
 	;
 	else  if '$$getInst(objectName,.newLevel) do
 	.	;
-	.	if $$primDes^UCPRIM(class) do setInst(objectName,$P(labels(subRou),tab,1),"") quit
+	.	;;if $$primDes^UCPRIM(class) do setInst(objectName,$P(pslPrsr("pslMtd",pslPrsr("moduleName")_"."_subRou),tab,$$rowPos^PSLMethod("CODELINE")),"") quit
+	.	if $$primVar^UCPRIM(.pslPrsr,class) do setInst(objectName,$$getNew(objectName,newLevel),"") quit
 	;
 	if ER quit ""
 	;
-	if ref["(" set return=$$method(objectName,newLevel,ref,.type,.class,.setVar)
-	else  set return=$$property(objectName,newLevel,ref,.class,.setVar)
+	if ref["(",'$$isObjPrp(class,ref) set return=$$method(objectName,newLevel,ref,fset,.class,.setVar,.mpid)
+	else  set return=$$property(objectName,newLevel,ref,fset,.class,.setVar,.mpid)
 	;
 	if ptr do  if ER quit ""				; Nested Expression
 	.	;
-	.	if class="" do ERROR("Invalid void method in nested syntax: "_atom) quit
+	.	if class="" do ERROR("MISMATCH: Invalid void method in nested syntax: "_atom) quit
 	.	;
 	.	; FSCW CR11445: check on primitive already included in $$isClass
 	.	;if '$$primVar^UCPRIM(class),'$$isClass(.class) do ERROR("Undefined class: "_class) quit
-	.	if '$$isClass(.class) do ERROR("Undefined class: "_class) quit
+	.	if '$$isClass(.class) do ERROR("MISMATCH: Undefined class: "_class) quit
 	.	;
 	.	; FSCW CR 27486: The code below has been commented out because
 	.	; the recursive call to valObj(lit) will change the class of
@@ -1747,7 +1890,7 @@ valObj(atom,fset,setVar,class,new)	; Process an object expression
 	.	;;.	set atom=$$TOKEN^%ZS(return,.tok)_$E(atom,ptr+1,$L(atom))
 	.	;;.	set return=$$valObj(atom,.fset,.setVar,.class)
 	.	;
-	.	new expr,lvn,scope
+	.	new expr,lvn,mpid,scope
 	.	if $$isLit(return) set lvn=$$nxtSym,scope="LITERAL"
 	.	else  if $DATA(pslTmpLvn) set lvn=pslTmpLvn,scope="NEW"
 	.	else  set lvn=$$nxtSym,scope="NEW"
@@ -1758,19 +1901,191 @@ valObj(atom,fset,setVar,class,new)	; Process an object expression
 	.	set type(level,lvn)=class_tab_(msrc+1)_tab_scope_tab_(msrc+1)_tab_return
 	.	;
 	.	set atom=lvn_$E(atom,ptr+1,$L(atom))
-	.	set return=$$valObj(atom,.fset,.setVar,.class)
+	.	set return=$$valObj(atom,fset,.setVar,.class,.mpid)
+	.	if fset,mpid]"",$D(pslPrsr("pslMtd",mpid)) do ERROR("SYNTAX: Method "_mpid_" cannot be applied in this context")
 	.	set expr=$$getExpr(lvn)
-	.	if expr[$C(0) set expr=$TR(expr,$C(0),$C(6))
-	.	set return=$$varSub^UCPATCH(return,lvn,expr)
+	.	;
+	.	; if the classType is classTypePRIMITIVE, return will contain
+	.	; .lvn, and we cannot used the lvn as an expression substitute,
+	.	; but really need to use the lvn as an intermeidate variable
+	.	; NOTES:
+	.	; The code that is APPENDED may
+	.	; - never execute (if the construct occurs in an if-statement
+	.	;	or quit-statement)
+	.	; - execute multiple times (if the constrcut occurs in a
+	.	;	for-statement or while-statement
+	.	; A false postconditonal on the original statement behaves OK
+	.	; The specific command must deal with this. If there is append
+	.	;	code, rewrite the original
+	.	;		if exprOrig
+	.	;	to
+	.	;		set voN1=obj,voN2=exprMod,obj=voN1 if voN2
+	.	;	(i.e. use an intermediate variable for the expr).
+	.	;	Note that the rewrite above must be postponed until the
+	.	;	argument has been evaluated completely.
+	.	;	Also note that it may not be simple to find the correct
+	.	;	expr that needs to be replaced in a for-statement (must
+	.	;	be detected per expr in the for-list).
+	.	if $translate(return,"()",",,")[(",."_lvn_",") do
+	.	.	do p1prepend(" N "_lvn_" S "_lvn_"="_expr)
+	.	.	do p1append(" S "_expr_"="_lvn)
+	.	else  do
+	.	.	if expr[$C(0) set expr=$TR(expr,$C(0),$C(6))
+	.	.	set return=$$VarSub^UCPATCH(return,lvn,expr)
 	;
 	; If fset=1, use setVar to return the name of object variable
 	if fset set setVar=objectName
 	quit return
 	;
 	;-----------------------------------------------------------------------
-valCast(atom,fset,setVar,class,new)	; Process a cast expression 
+valCast(atom,fset,setVar,class) ;private String; Process a cast expression
 	;-----------------------------------------------------------------------
 	;
+	; NOTES:
+	; .Casting in PSL had a number of interesting side effects. For example,
+	;	the construct
+	;		{typeName}inst.method()
+	;	would take the shortest possible match (cast inst as typeName),
+	;	as opposed to Java, which takes the longest match (i.e. cast
+	;	the return value of inst.method() as typeName).
+	;	In addition it would change the datatype of inst from whatever
+	;	it was to typeName. This effect would occur regardless of the
+	;	position of the construct (i.e. as leftexpr, rightexpr or even
+	;	as part of a more complex rightexpr).
+	;	So a PSL cast forces a permanent datatype change if applied to
+	;	a variable. For unsubcripted variables or non-variable casts, an
+	;	entry in the type(,) array would be generated as well, which may
+	;	result in unexpected compiler behavior because the compiler will
+	;	unconditionally use the datatype of an exact match in the array.
+	;	To obtain predictable behavior of code following the cast, this
+	;	function has been rewritten so that it does not add or modify
+	;	entries in the type array().
+	; . For the introduction of CDMs (CR 27800) an attempt has been made to
+	;	modify the behavior of PSL casting to behave the same as Java
+	;	casts: take the longest 'primary'. The Java Language
+	;	Specification contains a formalization that we may be able to
+	;	use for PSL. However, it turned out that there are a substantial
+	; 	number of cases where existing code relies on the 'shortest
+	;	match'. In the best case scenario, the compiler will generate a
+	;	compile time error because it cannot compile this code according
+	;	to the 'longest match rule'. In a slighty worst case, the
+	;	compiler will report a casting warning. In these cases, the
+	;	generated code may well be wrong.
+	;	The real problems are those where the compiler generates
+	;	different code without warning. One prominent example is the
+	;	following construct:
+	;		{List}"AB,CD,EF".contains("B")
+	;	Under the shortest match rule' this is interpreted as
+	;		({List}"AB,CD,EF").contains("B")
+	;	which yields false. Under the 'longest match rule', this will be
+	;	interpreted as {List}("AB,CD,EF".contains("B"))
+	;	which yields a List consisting of the string interpretation of
+	;	the results of String.contains(), which yields 1.
+	; . A formalization of the 'shortest match rule' will probably look
+	;	like:
+	;
+	;	castExpr : { typeName } castPrimary
+	;	         ;
+	;
+	;	castPrimary : lvn		(subscripted or unsubscripted)
+	;	            | ( expr )
+	;	            | literal		(strlit, numlit, tvlit)
+	;	            | $$ extfunc
+	;                   ;
+	;
+	;	primary : castPrimary
+	;	        | property
+	;               | method
+	;	        | $ mintrinsic		(M intrinsic function of svn)
+	;	        | ...
+	;		;
+	;
+	;	property : primary . propertyName
+	;	         ;
+	;
+	;	method : primary . methodName ( )
+	;	       | primary . methodName ( actualList )
+	;	       ;
+	;
+	new cast,expr,ptr
+	set ptr=1,cast=$$ATOM^%ZS(atom,.ptr,"}",.tok,1)
+	;
+	if ptr=0 do ERROR("SYNTAX: Casting terminator expected") quit ""
+	set expr=$E(atom,ptr+2,$L(atom))
+	;
+	if '$$isClass(.cast) do ERROR("MISMATCH: Undefined class: "_cast) quit ""
+	;
+	; If the expr contains object syntax (xxx.method() or xxx.property()),
+	; then the cast shall be applied to the first dot-component.
+	if $$isObj(expr) do
+	.	;
+	.	; Find first dot-component
+	.	new atom,i,dotpos
+	.	for i=1:1:$L(expr,".") set atom=$P(expr,".",1,i) if $L(atom,"(")=$L(atom,")") quit
+	.	set dotpos=$l(atom)+1	; position of dot
+	.	;
+	.	; If the cast was applied to a parenthesized expr, strip the
+	.	; enclosing layers of parenthesis.
+	.	if $E(atom)="(" do
+	.	.	for i=1:1 if $E(atom,i)'="("!($E(atom,$L(atom)-i+1)'=")") set atom=$E(atom,i,$L(atom)-i+1) quit
+	.	else  do:0 warnGroup("PRECEDENCE","Ambiguous cast operation {"_cast_"}"_atom_".")
+	.	;
+	.	; The cast must be applied to atom, so call $$valCastTo()
+	.	; It will interpret atom, and check the cast compatibilities.
+	.	set atom=$$valCastTo(cast,atom,fset)
+	.	if fset>0,$$isVar(atom)!$$isArr(atom) set setVar=atom
+	.	;
+	.	; Casting to a Record descendant in combination with a property
+	.	; reference is not supported, because we cannot link purpose
+	.	; nodes of the castTo class to the variable of the castFrom
+	.	; class. We could probably handle method references, but for
+	.	; simplicity, these are excluded as well.
+	.	if $$isRecord^PSLClass(cast)>1 do ERROR("MISMATCH: Cast of Record descendant cannot be combined with method or property reference") quit
+	.	;
+	.	; now deal with the .method or .property part
+	.	; add a temp entry to type(,) etc. just like for "nested"
+	.	; object properties (cf $$valObj())
+	.	; Note that the class to be returned in this case is not cast,
+	.	; but the class of the object reference (of the casted object),
+	.	; and the setVar has already been assigned (this call will
+	.	; return the value of tmp).
+	.	new tmp
+	.	set tmp=$$tokenPush^UCPATCH(atom,cast,1)
+	.	set expr=$$valObj(tmp_$e(expr,dotpos,$L(expr)),fset,,.class)
+	.	set expr=$$tokenPop^UCPATCH(expr,1)
+	else  do
+	.	;
+	.	; No object syntax involved. Must be simple primary
+	.	set expr=$$valCastTo(cast,expr,fset)
+	.	set class=cast
+	quit expr
+	;
+	;-----------------------------------------------------------------------
+valCastTo(cast,expr,fset) ;private String;
+	;-----------------------------------------------------------------------
+	; Evaluate expr and verify that it can be casted to cast.
+	;
+	new class
+	set expr=$$valExpr(expr,.class)
+	;
+	; easy cases:
+	; 1) cast is no-op
+	; 2) casting across PRIMP0PROPs (is OK for now)
+	; 3) cast to ancestor
+	; 4) cast to descendant (is OK for now)
+	if class=cast quit expr
+	if $$primRel^UCPRIM(cast,class) quit expr
+	if $$isAncestor(class,cast) quit expr
+	if $$isAncestor(cast,class) quit expr
+	;
+	; Look for and apply the appropriate Class.toCast()
+	new tocast set tocast="to"_cast
+	new des set des=$$findPSLMethod^PSLParser(.pslPrsr,.tknzr,class_"."_tocast,0)
+	if des="" do ERROR("MISMATCH: Invalid cast - Class: "_class_" can not be cast as: "_cast) quit expr
+	quit $$method(expr,$$getLevel(expr),tocast_"()",fset,class)
+	;
+	; ******** BEGIN DEAD CODE ********
+	; FSCW CR 27800
 	new cast,expr,ptr,newLevel
 	set ptr=1,cast=$$ATOM^%ZS(atom,.ptr,"}",.tok,1)
 	;
@@ -1811,7 +2126,7 @@ valCast(atom,fset,setVar,class,new)	; Process a cast expression
 	; Do not implicitly convert primitive classes (at least for now)
 	if $$primVar^UCPRIM(cast),$$primVar^UCPRIM(class) set class=cast quit expr
 	;
-	if ifLevel!(postCond'="") do ERROR("Object cast cannot be conditionally executed") quit expr
+	if inIF!(postCond'="") do ERROR("Object cast cannot be conditionally executed") quit expr
 	;
 	if '$$isAncestor(class,cast),'$$isAncestor(cast,class) do ERROR("Invalid cast - Class: "_class_" can not be cast as: "_cast) quit expr
 	;
@@ -1827,8 +2142,11 @@ valCast(atom,fset,setVar,class,new)	; Process a cast expression
 	do setType(var,class)
 	quit expr
 	;
+	; FSCW CR 27800
+	; ******** END DEAD CODE ********
+	;
 	;-----------------------------------------------------------------------
-property(objectName,objectLevel,ref,class,setVar)	;private String; 
+property(objectName,objectLevel,ref,fset,class,setVar,pid) ;package String;
 	;-----------------------------------------------------------------------
 	; Decompose object.property
 	;
@@ -1836,16 +2154,23 @@ property(objectName,objectLevel,ref,class,setVar)	;private String;
 	; . objectName = object variable (may be subscripted)
 	; . objectLevel = DO level where objectName is declared
 	; . ref = property name
-	; . class = name of class			/MECH=REFNAM:RW
-	;	On INPUT this contains the class of objectName
-	;	On OUTPUT this is supposed to contain the class of the property.
+	; . fset = leftexpr or rightexpr indicator
+	; . class = signature of class			/MECH=REFNAM:RW
+	;	On INPUT this contains the class of objectName (or its cast)
+	;	On OUTPUT this is supposed to contain the class of the property,
+	;	with its dimension if an entire array is referenced.
 	; . setVar = ?
+	; . pid = property id				/MECH=REFNAM:W
+	;	contains the class.property identification to obtain the
+	;	property descriptor from the property cache.
 	;
 	; INPUTS:
 	; . atom = complete object expression as passed to $$objVal()
 	;	This value will be passed to $$curVal^UCCOLUMN()
 	; . ptr = character pointer into atom
 	;	This value will be passed-by-reference to $$curVal^UCCOLUMN()
+	;	This value is also used to decide if a literal value can be
+	;	returned.
 	;
 	; NOTES:
 	; . Passing atom and .ptr to $$curVal is questionable behavior, because
@@ -1854,9 +2179,9 @@ property(objectName,objectLevel,ref,class,setVar)	;private String;
 	; . This function is also called by colProp^UCCOLUMN
 	;	That caller will pass a class="Column"
 	;
-	if ref="" do ERROR("Property name expected") quit ""
+	if ref="" do ERROR("SYNTAX: Property name expected") quit ""
 	;
-	set fset=+$G(fset)
+	set pid=class_"."_$P($P(ref,"("),".")
 	;
 	new litexpr
 	if 'fset,'ptr do  if '(litexpr="") quit litexpr	; Return Literal if possible
@@ -1865,83 +2190,103 @@ property(objectName,objectLevel,ref,class,setVar)	;private String;
 	.	if $$isLit(litexpr) set class=$$getClass(objectName_"."_ref,objectLevel)
 	.	else  set litexpr=""
 	;
-	if $$isRecord(class) quit $$curVal^UCCOLUMN(objectName,ref,fset,atom,.ptr)
+	; If column pass to $$curVal^UCCOLUMN().
+	; Pass both objectName and table to deal with {RecordDEP}acn.depcol
+	if $$isRecord^PSLClass(class)>0 quit $$curVal^UCCOLUMN(objectName,$$tableNameOf^PSLClass(class),ref,fset,atom,.ptr)
 	;
-	new aclass,del,idx,nod,pgm,pos,return,y,yz,z
+	new aclass,del,dim,idx,nod,pgm,pos,prp,res,return,subs,tail,y,yz,z
 	;
-	set y=$F(ref,"{")
+	if ref["(" do
+	.	set ref=$$valArr(ref,.tail),prp=$P(ref,"("),subs=$E(ref,$L(prp)+1,$L(ref))
+	.	if tail>0,fset=0 do ERROR("MISMATCH: Invalid subscripted property: "_pid_subs)
+	else  set prp=ref,subs="",tail=0
+	set z=$$findPSLProperty^PSLParser(.pslPrsr,.tknzr,class_"."_prp,0)
+	if z="" set z=$$findPSLProperty^PSLParser(.pslPrsr,.tknzr,class_"."_prp,1)
 	;
-	if y=0 set idx=""
-	else   do  if yz=0 do ERROR("Right Index delimiter '}' Expected: "_ref) quit ""
-	.	;
-	.	new class
-	.	set yz=$F(ref,"}",y) if yz=0 quit
-	.	for  set idx=$E(ref,y,yz-2) quit:$L(idx,"{")=$L(idx,"}")!'yz  set yz=$F(ref,"}",yz)
-	.	set idx=$$valExpr(idx,.class)
-	.	set ref=$E(ref,1,y-2)_$E(ref,yz,$L(ref))
-	set z=$$opGet^UCXOBJ(.pslPrp,class,ref,0)
-	if z="" set z=$$opGet^UCXOBJ(.pslPrp,class,ref,1)
+	; NOTE:
+	; the code below has multiple exits for properties of Intrinsic Classes
+	; that use code generators. None of these exits will consider array
+	; properties
 	;
 	; Property not found, if there is a property handler on the original
 	; class, call it, otherwise we have an error
-	; NOTE: hard-coded positions for OBJECTROW: PROPDELIM=8, PROPPROC=9
 	if z="" do  quit return
 	.	set return=""
-	.	set z=$$ocGet^UCXOBJ(.pslCls,class,0)
-	.	set del=$P(z,"|",8),pgm=$P(z,"|",9) if del="" set del=124
+	.	set z=$$getPSLClass^PSLCC(.pslPrsr,class)
+	.	set del=$P(z,tab,$$rowPos^PSLClass("DELIMITER")),pgm=$P(z,tab,$$rowPos^PSLClass("PROPPROC"))
 	.	set del=$S(del>31&(del<127):""""_$C(del)_"""",1:"$C("_del_")")
-	.	if pgm="" do ERROR("Undefined property: "_class_"."_ref) quit
-	.	do @pgm
-	;
-	; NOTE: hard-coded positions for OBJECTPROPROW:
-	;	CLASS,PROPERTY,RETURN,NOD,POS,ROUTINE,ISREADONLY,ARRAY
+	.	if pgm="" do ERROR("MISMATCH: Undefined property: "_class_"."_prp) quit
+	.	do @pgm,initClass(.class):class'=""
 	;
 	; Get the delimiter from the (ancestor) class that contains the property
-	set aclass=$P(z,"|",1)
-	set del=$P($$ocGet^UCXOBJ(.pslCls,aclass,0),"|",8) if del="" set del=124
+	set pid=z
+	set z=$$getPSLProperty^PSLCC(.pslPrsr,z)
+	set aclass=$P(z,tab,$$rowPos^PSLProperty("CLASS"))
+	set del=$P($$getPSLClass^PSLCC(.pslPrsr,aclass),tab,$$rowPos^PSLClass("DELIMITER")) if del="" set del=124
 	set del=$S(del>31&(del<127):""""_$C(del)_"""",1:"$C("_del_")")
 	;
-	; FSCW CR11441: check isReadOnly
-	if fset,$piece(z,"|",7) do ERROR("Property is read-only: "_class_"."_ref) quit ""
+	; FSCW CR11441: check restricted (0 = not, 1 = read-only, 2 = literal)
+	set res=$piece(z,tab,$$rowPos^PSLProperty("RESTRICTED"))
+	if class=pslPrsr("moduleName"),res=1 set res=0
+	if fset,res>0 do ERROR("Property is read-only: "_class_"."_ref) quit ""
 	;
-	set ref=$P(z,"|",2),nod=$P(z,"|",4),pos=$P(z,"|",5),class=$P(z,"|",3),pgm=$P(z,"|",6)
+	new ocd set ocd=pslPrsr("pslCls",pslPrsr("moduleName"))
+	if '$$hasAccess^PSLProperty(.z,.pslPrsr,ocd) do ERROR("Property cannot be accessed: "_class_"."_ref) quit ""
 	;
-	if pgm'="" do @pgm quit $G(return)
+	set class=$P(z,tab,$$rowPos^PSLProperty("RESULTCLASS"))
+	if res=2 do initClass(.class) quit $piece(z,tab,$$rowPos^PSLProperty("INITIALVALUE"))
 	;
-	; FSCW CR11445: replaced lines below
-	; If class has primitive representation use objectName
-	if $$primVar^UCPRIM(aclass) set return=objectName
+	; All non-literal properties are instance properties. Make sure the
+	; scope of the object is not STATIC
+	if $$getScope(objectName,objectLevel)="STATIC" do ERROR("SCOPE: Unsupported property under static scope: "_class_"."_ref) quit ""
 	;
-	else  do
-	.	set return=oLvn_"("_objectName
-	.	;
-	.	if nod'="" S:nod'=+nod nod=""""_nod_"""" set return=return_","_nod
-	.	if idx'="" set return=return_","_idx
-	.	set return=return_")"
+	; Check dimension: must be EXACT match!
+	set dim=$P(z,tab,$$rowPos^PSLProperty("DIMENSION"))
+	if "P"_dim'=$$leftSig("P"_subs) do ERROR("MISMATCH: Property subscripts don't match; expected: "_prp_dim_", found: "_prp_subs) quit ""
+	set ref=$P(z,tab,$$rowPos^PSLProperty("PROPERTY"))_subs
+	set nod=$P(z,tab,$$rowPos^PSLProperty("NODE"))
+	set pos=$P(z,tab,$$rowPos^PSLProperty("POSITION"))
+	set pgm=$P(z,tab,$$rowPos^PSLProperty("LABELREF"))
 	;
+	if pgm'="" do @pgm,initClass(.class):class'="" quit $G(return)
+	;
+	; "standard" property
+	do initClass(.class):class'=""
+	;
+	; If true reference class use vobj() else use objectName
+	if $$primVar^UCPRIM(.pslPrsr,aclass) set return=objectName
+	else  set return=oLvn_"("_objectName_")"
+	;
+	if nod'="" do
+	.	if return[")" set return=$EXTRACT(return,1,$LENGTH(return)-1)_","
+	.	else  set return=return_"("
+	.	S:nod'=+nod nod=""""_nod_""""
+	.	set return=return_nod_")"
+	;
+	; Add subscripts, if present
+	if subs'="" do
+	.	if tail set class=class_dim if subs'=dim  do ERROR("MISMATCH: Property subscripts don't match; expected: "_prp_dim_", found: "_prp_subs) quit
+	.	if return'[")" set return=return_subs quit
+	.	set return=$EXTRACT(return,1,$LENGTH(return)-1)_","_$EXTRACT(subs,2,$LENGTH(subs))
 	if pos set return="$P("_return_","_del_","_pos_")"
 	;
 	quit return
 	;
 	;-----------------------------------------------------------------------
-method(objectName,objectLevel,ref,type,class,var)	; Object method syntax 
+method(objectName,objectLevel,ref,fset,class,var,mid) ; Object method syntax
 	;-----------------------------------------------------------------------
 	;
 	; INPUTS:
 	; . %VN = Profile version number
-	; . fset = assignment indicator
-	; . fsn() = array of table descriptors for SQL*
 	; . funcs = list of PSL functions
 	; . msrc = The last line in the code output buffer
 	; . methods(,,) = "finalize" code
 	; . pslPrsr(,) = Parser instance
 	; . pslTbl() = PSLTable cache
-	; . reClass = Record class prefix
 	; . subRou = current subroutine
 	; . tab = TAB character
 	;
 	; OUTPUTS:
-	; . fsn(TABLE) - created if RecordTABLE instance detected
 	; . pslTbl(TABLE) - created if RecordTABLE instance detected
 	; . methods(,,) - entries may have been added by code generators
 	;
@@ -1955,7 +2300,7 @@ method(objectName,objectLevel,ref,type,class,var)	; Object method syntax
 	; varLevel    = Stack level where var was scoped         eg. 2
 	; objectName  = Name of the object identifier            eg. rs
 	; objectLevel = Stack level where identifier was scoped  eg. 1
-	; objectScope = Scope of identifier (FORMAL,NEW,PUBLIC,LITERAL)
+	; objectScope = Scope of identifier (FORMAL,FORMALRET,NEW,PUBLIC,LITERAL)
 	; objectVar   = value of objectName before objectName.toLiteral()
 	;
 	; class       = Expected return class of this method     eg. String
@@ -1965,27 +2310,32 @@ method(objectName,objectLevel,ref,type,class,var)	; Object method syntax
 	; mcode       = Current M generated code for this line
 	; method      = name of the method			 eg. getCol
 	; msrc        = The last line in the code output buffer
-	; reClass     = Record<class> Prefix                     eg. Record
 	;
 	; Expected return:
 	;
 	; return      = Legal M expression or Null (Void)        eg: $P(vobj(rs),$C(9),2))
 	;
+	; A method occurrence is not allowed if fset<0
+	if fset=-1 do ERROR("MISMATCH: method reference not allowed in this context: "_objectName_"."_ref) quit ""
 	new actual,attrib,expr,formal,litPars,mclass,method,newPtr
 	new objectScope,objectVar,rclass,res,return,routine,rwMtd,table,varLevel,z
 	;
-	new nPrimDes set nPrimDes=$$primDes^UCPRIM(class)
+	; FSCW CR27800: nPrimDes=2 is now reserved for the early PSL primitive
+	; classes only. Boolean, Integer and Primitive are acceptable until v3.2
+	; (see below), and ByteString is excluded: it shall always be properly
+	; type(caste)d.
+	new nPrimDes set nPrimDes=$$primVal^UCPRIM(.pslPrsr,class)
+	if ",Date,Memo,Number,String,Time,"[(","_class_",") set nPrimDes=2
 	;
 	set method=$P(ref,"(",1),mclass=class
 	do addXref("M",class_"."_method,objectName)
 	;
 	;;set isPrimtyp=$D(primtyp(class))
 	set newPtr=$$getNew(objectName,objectLevel)
-	;;if $$isRecord(class) set table=$E(class,$L(reClass)+1,$L(class))
-	if $$isRecord(class) do
-	.	set table=$$getReTable(class) if table="" quit
+	;;if $$isRecord^PSLClass(class)>0 set table=$E(class,$L($$getReClass())+1,$L(class))
+	if $$isRecord^PSLClass(class)>0 do
+	.	set table=$$tableNameOf^PSLClass(class) if table="" quit
 	.	if '$D(pslTbl(table)) set pslTbl(table)=$$getPslTbl^UCXDD(table,0)
-	.	if '$D(fsn(table)) do fsn^SQLDD(.fsn,table)
 	;
 	; find the method:
 	; 1) case sensitive
@@ -1995,69 +2345,104 @@ method(objectName,objectLevel,ref,type,class,var)	; Object method syntax
 	;    if it contains actuals (Number.char(v2,v3,v4,...))
 	; 3) case insensitve
 	; 4) in another Primitive class (if class.isPrimitive())
-	set rwMtd=$$omGet^UCXOBJ(.pslMtd,class,method,0,.pslCls)
-	if %VN<7,(rwMtd="")!((method="char")&(ref'="char()")),nPrimDes=2,$F(funcs,(",$"_$$UPCASE(method))) quit $$mintrnsc(ref,objectName,.class)
-	if rwMtd="" set rwMtd=$$omGet^UCXOBJ(.pslMtd,class,method,1,.pslCls)
-	if rwMtd="",nPrimDes=2 set rwMtd=$$omTryPrim^UCXOBJ(.pslMtd,class,method,.pslCls)
-	if rwMtd="" do ERROR("Undefined method: "_class_"."_method) quit ""
+	set mid=$$findPSLMethod^PSLParser(.pslPrsr,.tknzr,class_"."_method,0)
+	if $$getSetting^PSLCC(.pslPrsr,"PSL","Version")<2.7,(mid="")!((method="char")&(ref'="char()")),nPrimDes=2,$F(funcs,(",$"_$$UPCASE(method))) quit $$mintrnsc(ref,objectName,.class)
+	if mid="" set mid=$$findPSLMethod^PSLParser(.pslPrsr,.tknzr,class_"."_method,1)
+	if mid="",",Boolean,Integer,Primitive,"[(","_class_","),$$getSetting^PSLCC(.pslPrsr,"PSL","Version")<3.2 set nPrimDes=2
+	if mid="",nPrimDes=2 set mid=$$omTryPrim^UCXOBJ(.pslPrsr,.tknzr,class,method)
+	if mid="" do ERROR("MISMATCH: Undefined method: "_class_"."_method) quit ""
 	;
-	; NOTE: Hard-coded OBEJECTMETROW references:
-	;	CLASS,METHOD,RETURN,PARAMETERS,ROU,VALLIT
-	set method=$P(rwMtd,"|",2),rclass=$P(rwMtd,"|",3),formal=$P(rwMtd,"|",4),routine=$P(rwMtd,"|",5)
+	set rwMtd=$$getPSLMethod^PSLCC(.pslPrsr,mid)
+	set method=$P(rwMtd,tab,$$rowPos^PSLMethod("METHOD"))
+	set rclass=$P(rwMtd,tab,$$rowPos^PSLMethod("RESULTCLASS"))
+	set formal=$P(rwMtd,tab,$$rowPos^PSLMethod("FORMALLIST"))
+	set routine=$P(rwMtd,tab,$$rowPos^PSLMethod("METHODPROC"))
 	;
-	; FSCW CR11441:
-	; has been generalized to: don't change if the resultclass is ancestor
-	;set mclass=class if '(rclass="Object") set class=rclass
-	set mclass=class if '$$isAncestor(rclass,class) set class=rclass
+	; Ensure the declarations of the ResultClass are present as well
+	do:rclass'="void" initClass(.rclass)
+	;
+	new ocd set ocd=pslPrsr("pslCls",pslPrsr("moduleName"))
+	if '$$hasAccess^PSLMethod(.rwMtd,.pslPrsr,ocd) do ERROR("ACCESS: method cannot be accessed: "_class_"."_method) quit ""
+	;
+	; FSCW CR27800:
+	; Although in general there is nothing special about the relationship
+	; between the class of the object and the class of the result, PSL has
+	; some exceptional cases:
+	; - RecordTABLE.copy() is supposed to return an object of class
+	;	RecordTABLE, even though the method is "implemented" in the
+	;	ancestor class Record.
+	; - Reference.copy() returns an object of the descendant class even
+	;	though the method return is declared as Reference.
+	; - Primitive.get() returns an object of the descendant class, even
+	;	though the method return is declared as Primitive.
+	; Instead of the generalization that used to be allowed before, the
+	; restrictions are hardcoded here.
+	; This is a very poor solution. There are (at least) two alternatives:
+	; a) Generalize as follows:
+	;	If a method in class Xyz returns an object of class Xyz, then
+	;	applying the method to XyzDes, that is descendant of Xyz, and
+	;	that does not override the method, will return an object of
+	;	class XyzDes instead of instance of Xyz.
+	;	In java terms: the code translates to:
+	;		{XyzDes}XyzDes.method()
+	; b) Apply the above generalization only to PSL Intrinsic Classes that
+	;	have a special indicator in the PSLMethod.resultClass field
+	;	(e.g. PSLMethod.resultClass = "Record*" indicates that the
+	;	method returns an instance of the descendant class)
+	;;; FSCW CR11441:
+	;;; has been generalized to: don't change if the resultclass is ancestor
+	;;;;set mclass=class if '(rclass="Object") set class=rclass
+	;;set mclass=class if '$$isAncestor(rclass,class) set class=rclass
+	if $P(mid,".")="Record",rclass="Record" set rclass=class
+	if $P(mid,".")="Reference",rclass="Reference" set rclass=class
+	if $P(mid,".")="Primitive",rclass="Primitive" set rclass=class
+	set mclass=class,class=rclass
 	;
 	; Switch off object optimization (can switch back on in method)
 	if newPtr,'nPrimDes,'$$getOpti(objectName,objectLevel) do setOpti(objectName,objectLevel,msrc+1)
 	;
 	set objectScope=$$getScope(objectName,.objectLevel)
 	;
-	; NOTE: Hard-coded OBEJECTMETROW references: VALLIT=6
-	if objectScope="LITERAL",nPrimDes=0,'$P(rwMtd,"|",6) do ERROR("Unsupported method under literal scope: "_mclass_"."_method)
+	if objectScope="LITERAL",nPrimDes=0,'$P(rwMtd,tab,$$rowPos^PSLMethod("INLITERAL")) do ERROR("SCOPE: Unsupported method under literal scope: "_mclass_"."_method) quit ""
+	if objectScope="STATIC",$P(rwMtd,tab,$$rowPos^PSLMethod("METHODTYPE"))'=2 do ERROR("SCOPE: Unsupported method under static scope: "_mclass_"."_method) quit ""
 	;
 	if $D(var) set varLevel=$$getLevel(var)
 	;
-	; Must distinguish objectVar (shall always by the instancevariable of the object),
+	; Must distinguish objectVar (shall always by the instance variable of the object),
 	; and its VALUE, which, in case of primitive values, may be optimized at compile time
 	set objectVar=objectName
 	;
-	; NOTE: Hard-coded OBEJECTMETROW references: VALLIT=6
-	if nPrimDes>0,$P(rwMtd,"|",6),'fset,'$$isLit(objectName) set objectName=$$toLit(objectName)
+	if nPrimDes>0,$P(rwMtd,tab,$$rowPos^PSLMethod("INLITERAL")),'fset,'$$isLit(objectName) set objectName=$$toLit(objectName)
 	;
 	set expr=$E(ref,$L(method)+2,$L(ref)-1),litPars=""
-	do valParams(formal,expr,.actual,.attrib,.res,.litPars)
+	;;do valParams(formal,expr,.actual,.attrib,.res,.litPars)
+	do valParams(formal,expr,.actual,.attrib,.res)
 	if ER quit ""
 	;
-	; FSCW CR18163: The code below is rather tricky, because the value
-	; returned in litPars (by valParams()) depends on which parameters are
-	; declared LITERAL in OBJECTMET. For example Db.getRecord() requires a
-	; literal tablename and a literal keyExpr. However, if keyExpr were
-	; declared litral in OBJECTMET, then DB.getRecord("LN","CID=:CID1") and
-	; Db.getRecord("LN","CID=:CID2") would end up as different litPars, and
-	; thus in different vDb() subroutines.
-	if litPars="" set return=""
-	else  set return=$G(methods(mclass,method,litPars))	; Default return
+	;;; FSCW CR18163: The code below is rather tricky, because the value
+	;;; returned in litPars (by valParams()) depends on which parameters are
+	;;; declared LITERAL in OBJECTMET. For example Db.getRecord() requires a
+	;;; literal tablename and a literal keyExpr. However, if keyExpr were
+	;;; declared literal in OBJECTMET, then DB.getRecord("LN","CID=:CID1") and
+	;;; Db.getRecord("LN","CID=:CID2") would end up as different litPars, and
+	;;; thus in different vDb() subroutines.
+	;;if litPars="" set return=""
+	;;else  set return=$G(methods(mclass,method,litPars))	; Default return
+	set return=""
 	;
-	; if the method lives in a Record descendant, then mark this
-	; occurrence as a pass-by-value to subroutine
-	;
-	; NOTE: Hard-coded OBEJECTMETROW.CLASS (=1)
-	set z=$P(rwMtd,"|",1)
-	if $$isRecord(z),z'=reClass new dummy set dummy=$$insByOvs^UCREC4OP(subRou,objectName,"","U")
+	; if the method lives in a Record descendant, and is not static, then
+	; mark this occurrence as a pass-by-value to subroutine.
+	set z=$P(rwMtd,tab,$$rowPos^PSLMethod("CLASS"))
+	if $$isRecord^PSLClass(z)>1,$P(rwMtd,tab,$$rowPos^PSLMethod("METHODTYPE"))<2 new dummy set dummy=$$insByOvs^UCREC4OP(subRou,objectName,"","U")
 	;
 	; If no method generation routine specified, generate call based on
-	; method declaration
+	; method declaration. Turn off optimization because the generated code
+	; will not be seen by UCREC4OP.
 	if routine="" do
 	.	;
-	.	; return can be derived from method signature
-	.	; first get class where method actually lives
-	.	;
-	.	; NOTE: Hard-coded OBJECTROW.CONSTRUCTOR (=3)
-	.	do methodGen($P(pslCls(z),"|",3),rclass'="void")
-	.	set litPars=""
+	.	; Method of Class Definition Module
+	.	set return=$$getCall4M^PSLMethod(rwMtd,objectName,.actual,pslPrsr("moduleName"),.pslPrsr)
+	.	set litPars="" do setOpti(objectName,objectLevel,-1)
 	;
 	else  do @routine if ER do ERROR($g(RM)) quit ""
 	;
@@ -2081,22 +2466,7 @@ method(objectName,objectLevel,ref,type,class,var)	; Object method syntax
 	quit return
 	;
 	;-----------------------------------------------------------------------
-methodDef(rtn,ref,objectName,actual)	; return default runtime call 
-	;-----------------------------------------------------------------------
-	; Returns ref^rtn(objectName,actual(1),actual(2),...)
-	;
-	; NOTES:
-	; . The caller will have to decide if this is a subroutine call or a
-	;	function call (in which case "$$" must be added).
-	new na,return
-	;
-	; Object instance is first parameter, followed by all actuals
-	set return=ref_"^"_rtn_"("_objectName
-	for na=1:1:$o(actual(""),-1) set return=return_","_actual(na)
-	quit return_")"
-	;
-	;-----------------------------------------------------------------------
-methodGen(rtn,bFun)	; private void ; generate default method call 
+methodGen(rtn,bFun) ;package void ; generate default method call
 	;-----------------------------------------------------------------------
 	; This subroutine can be specified as method generator in OBJECTMET.ROU
 	; when the method follows the default pattern
@@ -2113,29 +2483,42 @@ methodGen(rtn,bFun)	; private void ; generate default method call
 	;	if bFun=0, then $$methodDef(rtn,method,objectName,.actual)
 	;	else "$$"_$$methodDef(rtn,method,objectName,.actual)
 	;
-	set return=$$methodDef(rtn,method,objectName,.actual)
+	new na
+	;
+	; Object instance is first parameter, followed by all actuals
+	set return=ref_"^"_rtn_"("_objectName
+	for na=1:1:$o(actual(""),-1) set return=return_","_actual(na)
+	set return=return_")"
 	if bFun set return="$$"_return
 	quit
 	;
 	;-----------------------------------------------------------------------
-incrLabel(return)	;private void; Increment reference 
-	;-----------------------------------------------------------------------
-	; Also called by propRef^UCDBSET
+incrLabel(call) ;package void; Increment reference
+	;-----------------------------------------------------------------------\
+	; ARGUMENTS:
+	; . return = "$$"_locallabel
+	;
+	; NOTES:
+	; . Also called by propRef^UCDBSET
 	;
 	new label
-	set label=$E($P(return,"(",1),3,$L(return))
-	if $D(append(label)) set append(label)=$G(append(label))+1
+	set label=$piece(call,"(")
+	if $extract(label,1,2)="$$" set label=$extract(label,3,$length(label))
+	if $D(append(label)) set $P(append(label),tab)=$G(append(label))+1
 	quit
 	;
 	;-----------------------------------------------------------------------
-decrLabel(call)	;private void; Decrement reference 
+decrLabel(call) ;package void; Decrement reference
 	;-----------------------------------------------------------------------
 	; Decrement reference to generated label.
 	; Optimizing code that replaces a call to subroutine generated in pass 1
 	; with a call to a different subroutine, shall call this subroutine.
 	; It will decrement the reference count, and delete the append(call,)
 	; array if the count reaches zero.
-	; The label(call) entry will not be deleted, so labels cannot be re-used
+	; After deleting append(call), a placeholder entry will be created
+	; because a "hole" will cause $$findSubr() to stop at the deleted entry.
+	; So labels cannot be re-used, even if the assocated code has been
+	; removed.
 	;
 	; ARGUMENTS:
 	; . call = label or function call
@@ -2145,50 +2528,50 @@ decrLabel(call)	;private void; Decrement reference
 	new label
 	set label=$piece(call,"(")
 	if $extract(label,1,2)="$$" set label=$extract(label,3,$length(label))
-	;;if $D(append(label)) set append(label)=$get(append(label))-1 if append(label)<1 kill append(label),labels(label)
-	if $D(append(label)) set append(label)=$get(append(label))-1 if append(label)<1 kill append(label)
+	quit:'$D(append(label))
+	set $P(append(label),tab)=$get(append(label))-1
+	quit:append(label)>0
+	kill append(label)
+	set append(label)=-1_tab_"**** DELETED BY PSL ****"
 	quit
 	;
 	;-----------------------------------------------------------------------
-ancestor(class)	;private String; Return the immediate ancestor of this class 
+ancestor(class) ;package String; Return the immediate ancestor of this class
 	;-----------------------------------------------------------------------
 	; INPUTS:
-	; . reClass = record class prefix
-	; . pslCls() = class descriptor cache
+	; . pslPrsr("pslCls",) = class descriptor cache
 	;
 	if class="Object" quit ""			; End of the food-chain
 	;
 	new return
 	;
-	if $$isRecord(class),'(class=reClass) do
+	if $$isRecord^PSLClass(class)>1 do
 	.	;
-	.	set return=$$getReTable(class)
-	.	set return=reClass_$P($G(^DBTBL("SYSDEV",1,return,10)),"|",4)
-	;
-	; NOTE: hard-coded OBJECTROW.SUPERTYPE (=2) reference
-	else  set return=$P($$ocGet^UCXOBJ(.pslCls,class,0),"|",2)
+	.	set return=$$tableNameOf^PSLClass(class)
+	.	set return=$$getReClass()_$P($G(^DBTBL("SYSDEV",1,return,10)),"|",4)
+	else  do loadClass^PSLCC(.pslPrsr,.class) set return=$P($$getPSLClass^PSLCC(.pslPrsr,class),tab,$$rowPos^PSLClass("EXTENDS"))
 	;
 	if return="" set return="Object"		; Ancestor to all
 	quit return
 	;
 	;-----------------------------------------------------------------------
-isAncestor(a,b)	;private Boolean; Return a is an ancestor of b 
+isAncestor(a,b) ;package Boolean; Return a is an ancestor of b
 	;-----------------------------------------------------------------------
 	;
-	if b="Object" quit 0
+	if b="Object"!(b="") quit 0
 	;
 	for  set b=$$ancestor(b) quit:(b="")  if (a=b) quit
 	quit $T
 	;
 	;-----------------------------------------------------------------------
-mintrnsc(ref,var,cls)	; Intrinsic Primitive methods 
+mintrnsc(ref,var,cls) ; Intrinsic Primitive methods
 	;-----------------------------------------------------------------------
 	; Intrinsic M function, that is not in class hierarchy is entered as
 	; method syntax.
 	;
 	; Provide a warning, except for Number.char() without actuals.
 	;
-	if $$UPCASE($P(ref,"(",1))="SELECT" do ERROR("Undefined method: "_cls_"."_ref) quit ""
+	if $$UPCASE($P(ref,"(",1))="SELECT" do ERROR("MISMATCH: Undefined method: "_cls_"."_ref) quit ""
 	if (ref'="char")!($P(ref,"(",2)'=")") do warnGroup("FUNCTION","Undefined method: "_cls_"."_ref_", replaced by M $"_method_"() function")
 	;
 	new return
@@ -2201,15 +2584,16 @@ mintrnsc(ref,var,cls)	; Intrinsic Primitive methods
 	quit $$valFun(return,0,,.cls)
 	;
 	;-----------------------------------------------------------------------
-valParams(formal,expr,actual,attrib,res,litpars)	; Validate parameter syntax 
+valParams(formal,expr,actual,attrib,res) ; Validate parameter syntax
 	;-----------------------------------------------------------------------
 	; Called by THROW to decompose the Class.new()
 	; Called by $$method() to decompose the method's actuallist
 	;
 	; ARGUMENTS:
 	; . String formal = formal parameter declaration list.
-	;	This is a comma separated list of formal parameter specifications.
-	;	Each specification has one of the following forms:
+	;	This is a semi-colon separated list of formal parameter
+	;	specifications. Each specification has one of the following
+	;	forms:
 	;	* var
 	;	* type var
 	;	* any of the above preceeded by one of the keywords 'literal'
@@ -2221,25 +2605,25 @@ valParams(formal,expr,actual,attrib,res,litpars)	; Validate parameter syntax
 	; . String actual() = array to receive the individaul actual parameters
 	; . String attrib(,) = array to receive actual parameter attributes
 	; . String res =					/NOREQ/MECH=REF:W
-	; . String litpars = list of literal values		/NOREQ/MECH=REF:W
-	;	When supplied the variable will contain a comma separated list
-	;	of the actual values of parameters that are declared LITERAL in
-	;	the formallist.
+	;;; . String litpars = list of literal values		/NOREQ/MECH=REF:W
+	;;;	When supplied the variable will contain a comma separated list
+	;;;	of the actual values of parameters that are declared LITERAL in
+	;;;	the formallist.
 	;
 	; PUBLICS:
 	; . ER = Error indicator, shall be zero on entry, will contain non-zero
 	;	value when error encountered during decomposition
 	; . tab = TAB character, referenced
 	;
-	; NOTES:
-	; . The use of the keyword LITERAL in the formallist (i.e. as speficied
-	;	in OBJECTMET), will impact the behavior of the compiler:
-	;	The value of litpars returned by valParams() is used in
-	;	$$method() to propose the return value of the method call.
-	;
+	;;; NOTES:
+	;;; . The use of the keyword LITERAL in the formallist (i.e. as speficied
+	;;;	in OBJECTMET), will impact the behavior of the compiler:
+	;;;	The value of litpars returned by valParams() is used in
+	;;;	$$method() to propose the return value of the method call.
+	;;;
 	new atom,bpar,count,ptr
 	;
-	set bpar=0,count=1,ptr=0,litpars="",res=""
+	set bpar=0,count=1,ptr=0,res=""
 	;
 	; Special trick to deal with comma in first position. The trick is
 	; needed because
@@ -2257,16 +2641,17 @@ valParams(formal,expr,actual,attrib,res,litpars)	; Validate parameter syntax
 	.	;
 	.	if atom="," set count=count+1,bpar=0 quit
 	.	;
-	.	if bpar do ERROR("comma expected") quit
+	.	if bpar do ERROR("SYNTAX: comma expected") quit
 	.	set bpar=1
-	.	do procPar(count,$P(formal,",",count),atom,.actual,.attrib)
+	.	do procPar(count,$P(formal,";",count),atom,.actual,.attrib)
 	.	if ER quit
 	.	if $P(attrib(count,0),tab,4)="LITERAL" do
 	..		;
 	..		new v set v=actual(count)
 	..		;;if v="" set v=""""""
-	..		if $$isLit(v)!(v="") set litpars=$$addList(.litpars,v)
-	..		else  do ERROR("Literal parameter expected: "_$p(formal,",",count))
+	..		;;if $$isLit(v)!(v="") set litpars=$$addList(.litpars,v)
+	..		;;else  do ERROR("SCOPE: Literal parameter expected: "_$p(formal,";",count))
+	..		if $$isLit(v)'!(v="") do ERROR("SCOPE: Literal parameter expected: "_$p(formal,";",count))
 	.	else  if $D(attrib(count,1)) do
 	..		do p1prepend(attrib(count,1))
 	..		set res=res_attrib(count,2)
@@ -2280,46 +2665,52 @@ valParams(formal,expr,actual,attrib,res,litpars)	; Validate parameter syntax
 	;
 	; All parameters are handled, check total number, and provide empty
 	; values for all missing parameters.
-	set actual=$S(formal="":0,1:$L(formal,","))
+	set actual=$S(formal="":0,1:$L(formal,";"))
 	if count=1,actual(1)="" kill actual(1),attrib(1) set count=0
-	if count>actual do ERROR("More actual parameters ("_count_") than formal parameters ("_actual_")") quit
+	if count>actual do ERROR("MISMATCH: More actual parameters ("_count_") than formal parameters ("_actual_")") quit
 	for count=1:1:actual set actual(count)=$G(actual(count))
 	quit
 	;
 	;-----------------------------------------------------------------------
-valArr(str,fset)	; Process an array expression 
+valArr(str,tail) ; Process an array expression
 	;-----------------------------------------------------------------------
+	; ARGUMENTS:
+	; . String str
+	;	string to be decomposed
+	; . ret Number tail
+	;	Returns the number of "empty" trailing subscripts in str such as
+	;	arr(), arr(X,) (both with tail=1), or arr(X,,) (with tail=2)
+	;
+	; Empty subscripts "in the middle" will be reported as an error.
 	;
 	new atom,class,lvn,ptr,return
 	;
-	set ptr=0
+	set (ptr,tail)=0
 	set lvn=$P(str,"(",1),return=lvn_"("
 	set str=$E(str,$L(return)+1,$L(str)-1)
+	if str="" set tail=1 quit return_")"
 	;
 	for  set atom=$$nextExpr(str,.ptr,.tok,1) do  if ptr=0!ER quit
 	.	;
-	.	if atom="," set return=return_atom quit
+	.	if atom="," set:"(,"[$E(return,$L(return)) tail=tail+1 set return=return_atom quit
+	.	if tail>0 do ERROR("SYNTAX: invalid subscripted reference: "_lvn_"("_$$UNTOK^%ZS(str,tok)_")")
 	.	if atom[oLvn set return=return_$$UNTOK^%ZS(atom,tok) quit
 	.	set atom=$$valExpr(atom,.class,.setVar)
-	.	if $$isVar(atom) set atom=$$toLit(atom) ;;if fset=1,$$isVar(atom) do
-	.	;;.	;
-	.	;;.	new newLevel
-	.	;;.	set newLevel=$$getLevel(atom)
-	.	;;.	set watch(newLevel,atom,lvn)=""
-	.	;
+	.	if $$isVar(atom) set atom=$$toLit(atom)
 	.	set return=return_atom
 	;
+	set:$E(return,$L(return))="," tail=tail+1
 	quit return_")"
 	;
 	;-----------------------------------------------------------------------
-condBool(expr)	;private String; Legacy function 
+condBool(expr) ;package String; Legacy function
 	;-----------------------------------------------------------------------
 	; Also called by IF^UCGMC (#IF) and WHILE^UCGMC (#WHILE)
 	;
 	quit $$condRel(expr)
 	;
 	;-----------------------------------------------------------------------
-condRel(expr)	;local String; Parse relational clauses 
+condRel(expr) ;private String; Parse relational clauses
 	;-----------------------------------------------------------------------
 	quit $$toLit($$valExpr(expr,,.setVar))
 	;
@@ -2330,7 +2721,8 @@ TYPE	; PSL  Command ; Type a variable
 	; I don't like it but it's the only way to spread attributes
 	; type Public String var1,var2 both get Public String (FRS)
 	;
-	if ifLevel do ERROR("Type command cannot be conditionally executed") quit
+	if inIF do ERROR("SCOPE: type statement invalid on same line as if statement") quit
+	if inFOR do ERROR("SCOPE: type statement invalid on same line as for statement") quit
 	;
 	new atom,curScope,doExpr,killExpr,lvn,varScope
 	;
@@ -2339,19 +2731,34 @@ TYPE	; PSL  Command ; Type a variable
 	.	set type=expr,expr=$$nextExpr(str,.ptr,.tok,1) if ER quit
 	.	;
 	.	set scope=$$UPCASE(type)
-	.	if scope="PUBLIC"!(scope="LITERAL") set type=expr,expr=$$nextExpr(str,.ptr,.tok,1)
+	.	if scope="PUBLIC"!(scope="LITERAL") do
+	..		do:type'?.L WARNDEP(3,0,"keyword spelling: "_type_"; use "_$$LOCASE(type))
+	..		set type=expr,expr=$$nextExpr(str,.ptr,.tok,1)
+	.	else  if scope="STATIC"	do
+	..		do:type'?.L ERROR("SYNTAX: keyword spelling: "_type_"; use "_$$LOCASE(type))
+	..		set type=expr	; type static ClassName
 	.	else  set scope="NEW"			; Default scope
 	;
-	if '(type="*"),'$$isClass(.type) do ERROR("Undefined class: "_type) quit
+	if '(type="*"),'$$isClass(.type) do ERROR("MISMATCH: Undefined class: "_type) quit
 	;
 	set atom=$P(expr,"=",1),expr=$P(expr,"=",2,999)
 	if $E(atom)="%",$D(keywords(atom)) set atom=$p(keywords(atom),"|",1)
 	;
 	if cmdDel="," set mcode=mcode_" ",cmdDel=" "
 	;
-	if '(atom["."),'($$objPtr(atom)=atom) do ERROR("Invalid Object identifier: "_atom) quit
+	; FSCW CR27800:
+	; - why would dot be valid in declaration?
+	; - it turns out that there is PSL code that declares M SVNS or strlits.
+	;	This was appearantly accepted by the compiler. So keep accepting
+	;	it if the PSL Version is less than 3, else report an error.
+	;;if '(atom["."),'($$leftSig(atom)=atom) do ERROR("SYNTAX: Invalid Object identifier: "_atom) quit
+	if '$$leftSig(atom)=atom do ERROR("SYNTAX: Invalid Object identifier: "_atom) quit
+	if '$$isVar($p(atom,"(")) do srcWarnDep^PSLParser(.pslPrsr,.tknzr,2.7,3,"Invalid object identifier in declaration") quit
 	;
 	set lvn=$P(atom,"(",1)
+	;
+	; array of classTypePRIMITIVE is not allowed.
+	if lvn'=atom,$piece(pslPrsr("pslCls",type),$char(9),$$rowPos^PSLClass("classType"))=1 do ERROR("SYNTAX: array of "_type_" not supported: "_atom) quit
 	;
 	set curScope=$$getScope(atom,level)		; Get previous scope
 	;
@@ -2366,8 +2773,11 @@ TYPE	; PSL  Command ; Type a variable
 	.	; - any to LITERAL
 	.	; - LITERAL to any
 	.	; - LOCAL to PUBLIC
+	.	; - FORMAL to PUBLIC
+	.	; - any to STATIC and STATIC to any, including re-declare
+	.	if (scope="STATIC")!(curScope="STATIC") do ERROR("SCOPE: cannot redeclare "_atom_" from "_curScope_" to "_scope) quit
 	.	if (scope="LITERAL")!(curScope="LITERAL"),scope'=curScope do ERROR("SCOPE: cannot change "_atom_" from "_curScope_" to "_scope) quit
-	.	if curScope="NEW",scope="PUBLIC" do  quit
+	.	if (curScope="NEW")!(curScope["FORMAL"),scope="PUBLIC" do  quit
 	.	.	;
 	.	.	; Give a warning that the scope was not changed.
 	.	.	; Unfortunately, there are programs out in the field
@@ -2388,17 +2798,22 @@ TYPE	; PSL  Command ; Type a variable
 	.	; The variable has already been instantiated (UGH!)
 	.	; killObj() may (!) remove type(level,atom), so set curScope=""
 	.	; to ensure a new type(,) entry will be created
-	.	if curScope'="FORMAL",$$getInst(atom,level) do killObj(atom,.doExpr,.killExpr,level) set curScope=""
+	.	if curScope'["FORMAL",$$getInst(atom,level) do killObj(atom,.doExpr,.killExpr,level) set curScope=""
 	.	;
-	.	; FSCW CR11445:
-	.	; Temporarily suppress warning when first declaration is FORMAL,
-	.	; and second declaration is PUBLIC. The generated code for
-	.	; Reference objects, differs with or without the additional
-	.	; PUBLIC. This needs to be investigated first
-	.	if curScope="FORMAL",scope="PUBLIC",'$$primDes^UCPRIM(type) set $P(type(level,atom),tab,3)="PUBLIC" quit
+	.	;;; FSCW CR11445:
+	.	;;; Temporarily suppress warning when first declaration is FORMAL,
+	.	;;; and second declaration is PUBLIC. The generated code for
+	.	;;; Reference objects, differs with or without the additional
+	.	;;; PUBLIC. This needs to be investigated first
+	.	;;if curScope["FORMAL",scope="PUBLIC",'$$primVar^UCPRIM(.pslPrsr,type) set $P(type(level,atom),tab,3)="PUBLIC" quit
 	.	do warnGroup("SCOPE","Variable declared more than once: "_atom)
+	.	;
+	.	; FSCW CR27800:
+	.	; There is code out in the field that declares both the name and
+	.	; an array. Until that is resolved, just merge the types ...
+	.	do:$$getSetting^PSLCC(.pslPrsr,"PSL","Version",2.7)'<3 typeDrop($PIECE(atom,"(")) set curScope=""
 	;
-	; Check long names (except for LITERALs
+	; Check long names (except for LITERALs)
 	if scope'="LITERAL" do trackNam(atom)
 	;
 	; If first declaration, or varScope is NEW, create entry in type(,)
@@ -2407,13 +2822,13 @@ TYPE	; PSL  Command ; Type a variable
 	if (curScope="")!(varScope="NEW") do
 	.	do setScope(atom,"","",varScope,type)
 	.	if varScope="NEW" do scope("N",lvn,.doExpr,.killExpr)
-	if varScope="PUBLIC" do setInst(atom,"","")
+	if varScope="PUBLIC"!(varScope="STATIC") do setInst(atom,"","")
 	;
 	; No assignment on type statement: done
 	if expr="" quit
 	;
 	; type class identifier=expression
-	if '(lvn=atom) do ERROR("Invalid assignment on array: "_expr) quit
+	if '(lvn=atom) do ERROR("MISMATCH: Invalid assignment on array: "_expr) quit
 	;
 	set mcode=mcode_" "
 	do SETandTYPE(atom,expr)
@@ -2422,30 +2837,127 @@ TYPE	; PSL  Command ; Type a variable
 	;-----------------------------------------------------------------------
 CATCH	; M++ Command ; Catch a runtime error
 	;-----------------------------------------------------------------------
+	; The throw-catch behavior of PSL is implemented in M using the ISO-M
+	; standard errorhandling variables $ECODE, $ETRAP, and $ESTACK, and the
+	; GT.M specific extensions $ZERROR and $ZYERROR:
+	; - $ZERROR will contain the Error object during stack-breakdown.
+	; - $ZYERROR is used to ensure that GT.M runtime exceptions end up in
+	;	$ZERROR as well.
+	; - $ETRAP is used to invoke the exception-logger, and to pop DO-levels
+	;	until $ESTACK=0, and then invoke the code in the catch-block.
+	;	Note that a QUIT from $ETRAP will only invoke $ETRAP at the
+	;	"new" DO-level if $ECODE is not empty. In particular, the call
+	;	to the logger must be wrapped to enforce this.
+	; - The throw-statement will assign the Error instance to $ZERROR and
+	;	assign the value ",U1001," to $ECODE.
 	;
-	new class,label,objectName,errType,z
+	; The ISO-M error handling distinguishes 2 processing modes: normal and
+	; error. If an additional runtime error occurs while in error mode, it
+	; pops DO-levels until the next outer level that NEWed $ETRAP. The GT.M
+	; implementation exhibits this behavior even if $ETRAP is NEWed and
+	; redefined while in error mode. This behavior implies that a catch-
+	; statement inside a catch statement would be usesless because its code
+	; will never be invoked.
+	; In order to ensure consistent behavior, all PSL code (with the
+	; exception of the log-wrapper LOG^UCGMR) will execute in normal mode.
+	; To achieve this, $ECODE is set to "" before executing the code inside
+	; the catch-block. Because an exception thrown from inside a catch-block
+	; shall pop a catch level, the code inside the catch-block executes
+	; under a different $ETRAP (="QUIT").
+	; Since the logger is invoked with a DO while in error mode, a wrapper
+	; (LOG^UCGMR) is needed to prevent the logger from swallowing the
+	; exception, and from executing in error mode. See the comment in
+	; LOG^UCGMR for details.
 	;
-	set class="Error"				; Only supported class
-	;;set primtyp(class)=""				; handled by UCPRIM
+	; NOTES:
+	; . A non-empty value for $ECODE is only essential to pop DO-levels
+	;	until $ESTACK=0. It would be sufficient to ZGOTO the DO-level of
+	;	the catch-block (without unwinding one level at a time).
+	;	Unfortunately, this has the side effect of switching from error
+	;	mode to normal mode, without setting $ECODE to "". This in turn
+	;	impacts the behavior of a throw-statement inside a catch-block.
+	; . FSCW CR28995:
+	;	The last change made to the exception handling sets $ECODE="" at
+	;	the beginning of the catch-block. With that change in place,
+	;	is probably no need to set $ECODE="" in the code that will be
+	;	generated for the catch-statement (i.e. the code that set $ETRAP
+	;	etc.). In that case, the log-wrapper must explicitly turn-off
+	;	error mode before it calls the logger.
 	;
-	set label=$$errTrap(level)
+	if inIF do ERROR("SCOPE: catch statement invalid on same line as if statement") quit
+	if inFOR do ERROR("SCOPE: catch statement invalid on same line as for statement") quit
+	new class,code,label,objectName,vlblref,vfltr,xptr
 	;
-	set mcode=mcode_"N $ZT S $ZT=""D ZX^UCGMR(""_+$O(vobj(""""),-1)_"",""_$ZL_"","""""_label_"^""_$T(+0)_"""""")"""
+	;private pointer variable operates on expr
+	set xptr=0
 	;
-	set objectName=$P(expr,":",1)
-	if objectName="" do ERROR("Object identifier required") quit
-	if '$$isVar(objectName) do ERROR("Object identifier must be name") quit
+	set objectName=$$ATOM^%ZS(expr,.xptr,"@:",tok,1)
 	;
-	set errType=$P(expr,":",2,$L(expr))
+	if objectName="" do ERROR("SYNTAX: Object identifier required") quit
+	if '$$isVar(objectName) do ERROR("SYNTAX: Object identifier must be name") quit
 	;
-	if errType'="" do
-	.	;
-	.	do stackErr(level,.level)
-	.	do append(tab_"I $P($ZS,"","",3)'="""_errType_""" X voZT Q",label)
+	;;set label=$$addTrap("(voPtr)")
+	set label=$$addTrap("")
 	;
-	do append(tab_"N "_objectName_" S "_objectName_"=$ZS",label)
+	; set the errorObject=$ZERROR, $ECODE="", and $ETRAP="QUIT" only at the
+	; first catch-block. GOTO will be used to "Skip" a catch-block if the
+	; exception does not match the filter.
+	; Note that there is no need to set $ZYERROR because a new exception will
+	; not be handled here.
+	do append(" N "_objectName_",$ET,$ES S "_objectName_"=$ZE,$EC="""",$ET=""Q"",$ZE=""""",label)
 	;
-	if expr'=""
+	set vfltr=""
+	;
+	if xptr'=0 set atom=$$ATOM^%ZS(expr,.xptr,"@:",tok,1)
+	if atom="@" do			; logger specified
+	.	if xptr=0 do ERROR("Label name required") quit
+	.	set vlblref=$$ATOM^%ZS(expr,.xptr,":",tok,1)
+	.	if (vlblref=":") do ERROR("Label name required") quit
+	.	set vlblref=$$valExpr(vlblref)
+	.	if $$isLit(vlblref) do
+	..		set vlblref=$$QSUB^%ZS(vlblref)
+	..		do chkAccess(vlblref)
+	.	else  do ERROR("Invalid label reference")
+	.	if vlblref'["^" set vlblref=vlblref_"^""_$T(+0)_"""
+	.	set code="N voxEr S voxEr=$ZE D:'+voxEr LOG^UCGMR("""""_vlblref_""""""_",.voxEr) S $ZE=voxEr "
+	.	if xptr=0!ER quit
+	.	set atom=$$ATOM^%ZS(expr,.xptr,":",tok,1)
+	else  set code=""
+	set mcode=mcode_"N $ET,$ES,$ZYER S $ZYER=""ZE^UCGMR"",$ZE="""",$EC="""",$ET="""_code_"D:$TL>""_$TL_"" "_$$callRollback^UCRUNTIM("""_$TL_""")_" Q:$Q&$ES """""""" Q:$ES  N voxMrk s voxMrk=""_+$O(vobj(""""),-1)_"" G "_label_"^""_$T(+0)"
+	;
+	if atom=":" do
+	.	if xptr=0 quit
+	.	set vfltr=$$ATOM^%ZS(expr,.xptr,":",tok,1)
+	.	set $P(xcatch(level),tab,1)=0
+	.	set $P(xcatch(level),tab,2)=objectName
+	.	set $P(xcatch(level),tab,5)=label
+	;
+	if ER quit
+	;
+	do CATCH2(vfltr,objectName,label)
+	;
+	quit
+	;
+	;-----------------------------------------------------------------------
+CATCH2(filter,objectName,label);private void ; continue to setup the rest of the code for a catch block
+	;-----------------------------------------------------------------------
+	;
+	; INPUTS:
+	; . level = static DO level
+	; . level()
+	; . msrc = target code line number
+	; . ptr = pointer into original PSL code line, as passed to command()
+	; . str = original PSL code line, as passed to command()
+	; . tab = TAB character
+	;
+	; NOTES:
+	; . This subroutine
+	;	- is called from CATCH, which is called from cmdExpr, which is
+	;	  called from command()
+	;	- is called from endBlock, which is called from command()
+	;	Both call path have access to str and ptr
+	;
+	new expr		; NEWed by cmdExpr but not by command()
 	set ptr=ptr+1
 	;
 	if $E(str,ptr)'=" " do ERROR("Command delimiter expected") quit
@@ -2454,24 +2966,79 @@ CATCH	; M++ Command ; Catch a runtime error
 	if expr'="{" do ERROR("Block initiator expected") quit
 	;
 	do initBlock
+	set $P(level(level),tab,6)=label
 	;
-	set ifLevel=0,forLevel=0
+	;;set inIF=0,inFOR=0
 	;
-	;;do setScop($$objPtr(objectName),level,msrc,"NEW",class)
-	;;do setType(objectName,class,level)
-	;;do setInst(objectName,msrc,"Class.new")
-	do setScope(objectName,"","","NEW",class)
+	do setScope(objectName,"","","NEW","Error")		; only supported class
 	do setInst(objectName,msrc+1,"Class.new")
 	do setOpti(objectName,level,1)
+	;
+	; this is the catch all block if filter is empty
+	; the level has just been increased by 1 in initBlock
+	if filter="" kill xcatch(level-1)
+	else  do xptFltr(filter,label)
+	;
 	quit
 	;
 	;-----------------------------------------------------------------------
-stackErr(z,level)	; Save the previous error on the stack 
+CATCHC	; M++ Command ; Continuation of a CATCH block for chained filter-block
 	;-----------------------------------------------------------------------
 	;
-	if $P($G(level(z)),tab,3) quit
-	set $P(level(z),tab,3)=1			; Already done
-	do newLine("N voZT set voZT=$ZT",$P(level(z),tab,2),z)
+	; INPUTS:
+	; . expr = current statement argument expression (:filter)
+	; . level = current DO-level
+	; . tab = TAB character
+	; . xcatch() = stack of unfinished catch-statements
+	;
+	; OUTPUTS:
+	; . mcode = ""
+	;
+	new label,objectName
+	;
+	; the endblock decrement the level by 1
+	; therefore the level in xcatch is the same "level" when xcatch is defined
+	; in CATCH
+	set label=$P(xcatch(level),tab,4)
+	set objectName=$P(xcatch(level),tab,2)
+	set $P(xcatch(level),tab,5)=label
+	;
+	; Strip the colon from expr before passing it to CATCH2()
+	do CATCH2($E(expr,2,$L(expr)),objectName,label)
+	;
+	; add the following line after calling the initBlock in CATCH2
+	; so that the start position in the level array is pointing to
+	; this line.
+	set mcode=$$initLine(level)_";"
+	do ADD(mcode)
+	set mcode=""
+	;
+	quit
+	;
+	;-----------------------------------------------------------------------
+xptFltr(fltr,label) ; Exception filter
+	;-----------------------------------------------------------------------
+	;
+	new expr,nlabel,objectName,prop,val
+	;
+	; the level in xcatch array is setup before calling the initBlock
+	; therefore to refer the same level in xcatach the level needs to decrement by 1
+	set objectName=$P(xcatch(level-1),tab,2)
+	;
+	if $L(fltr,"=")'=2  do ERROR("SYNTAX: 'property=value' expected") quit
+	set prop=$P(fltr,"=",1)
+	set val=$P(fltr,"=",2)
+	;
+	set prop=$$property(objectName,level,prop,0,"Error") quit:ER
+	if '$$isLit(val) do  quit:ER
+	.	set val=$$valExpr(val)
+	.	if '$$isLit(val) do ERROR("SCOPE: The value of the Error property must be a literal")
+	;
+	set nlabel=$$addTrap("")
+	set $P(xcatch(level-1),tab,4)=nlabel
+	;
+	do append(" I '("_prop_"="_val_") G "_nlabel,label)
+	;
 	quit
 	;
 	;-----------------------------------------------------------------------
@@ -2480,7 +3047,7 @@ THROW	; PSL Command - Throw a runtime error
 	;
 	new i
 	;
-	; FSCW CR9792: the if-command and its associated code block accept a
+	; FSCW CR9792: the if-statement and its associated code block accept a
 	; lot of garbage as valid argument: As long as it looks like method
 	; syntax and has 2 actual parameters, the first of which equals the
 	; literal "ERROR", it is accepted (e.g. yabba.dabba.doo("Error","blooper"))
@@ -2490,7 +3057,7 @@ THROW	; PSL Command - Throw a runtime error
 	.	new actual,formal,msgnr
 	.	;
 	.	set expr=$P(expr,"(",2,99),expr=$E(expr,1,$L(expr)-1)
-	.	set formal="literal String class,String init"
+	.	set formal="literal String class;String init"
 	.	;
 	.	do valParams(formal,expr,.actual) if ER quit
 	.	if $$QSUB^%ZS(actual(1))'="Error" do ERROR("Thrown object must be class Error")
@@ -2524,16 +3091,18 @@ THROW	; PSL Command - Throw a runtime error
 	..		; we are lucky, literal part contains a comma
 	..		if $l($p($e(actual(2),1,pos-1),","),"-")=3 set msgnr=-1
 	..		else  set msgnr=0
-	.	if msgnr'="" set expr="$ZS="""_msgnr_",""_$ZPOS_"",""_"_actual(2) quit
+	.	;;if msgnr'="" set expr="$ZS="""_msgnr_",""_$ZPOS_"",""_"_actual(2) quit
+	.	if msgnr'="" set expr="$ZE=""0,""_$ZPOS_"",""_"_actual(2) quit
 	.	new sym set sym=$$nxtSym()
 	.	set mcode=mcode_"N "_sym_" "
-	.	set expr=sym_"="_actual(2)_",$ZS=($L($P("_sym_","",""),""-"")=3*-1)_"",""_$ZPOS_"",""_"_sym
+	.	;;set expr=sym_"="_actual(2)_",$ZS=($L($P("_sym_","",""),""-"")=3*-1)_"",""_$ZPOS_"",""_"_sym
+	.	set expr=sym_"="_actual(2)_",$ZE=""0,""_$ZPOS_"",""_"_sym
 	;
 	else  do
 	.	;
 	.	if $$getClass(expr)'="Error" do ERROR("Thrown object must be class Error")
 	.	; [FRS] Changed class from reference to primitive
-	.	set expr="$ZS="_expr
+	.	set expr="$ZE="_expr
 	;
 	if ER quit
 	;
@@ -2543,15 +3112,16 @@ THROW	; PSL Command - Throw a runtime error
 	;;if postCond="" set mcode=mcode_"S "_expr,ptr=0
 	;;else  do mapPost set mcode=mcode_"S"_postCond_" "_expr,postCond=""
 	if $$checkDead(rec,.ptr) do warnGroup("DEAD","code following throw-statement will never execute")
-	set mcode=mcode_"S "_expr
-	;
-	set mcode=mcode_" X "
-	;
-	; If the THROW occurs in a CATCH block, generate code that XECUTEs voZT
-	; (i.e. previous exception handler), else generate code that XECUTEs $ZT
-	for i=level:-1:0 if $P($G(level(i)),tab,1)="CATCH" quit
-	set mcode=mcode_$S($T:"vo",1:"$")_"ZT"
-	if $T do stackErr(i-1,.level)
+	;;set mcode=mcode_"S "_expr
+	;;;
+	;;set mcode=mcode_" X "
+	set mcode=mcode_"S "_expr_",$EC="",U1001,"""
+	;;;
+	;;; If the THROW occurs in a CATCH block, generate code that XECUTEs voZT
+	;;; (i.e. previous exception handler), else generate code that XECUTEs $ZT
+	;;for i=level:-1:0 if $P($G(level(i)),tab,1)="CATCH" quit
+	;;set mcode=mcode_$S($T:"vo",1:"$")_"ZT"
+	;;if $T do stackErr(i-1,.level)
 	quit
 	;
 	;-----------------------------------------------------------------------
@@ -2589,32 +3159,79 @@ DO	; M command ; Call a subroutine or block
 	quit
 	;
 	;-----------------------------------------------------------------------
-actual(expr,called,rclass)	;local String; Process actual parameters 
+actual(expr,called,rclass) ;package String; Process actual parameters
 	;-----------------------------------------------------------------------
+	; This function will only be called for
+	; - $$extfun()
+	; - do labelref()
+	; It will not be called to evaluate / deal with the actual parameters of
+	; a method, which are handled by valParams
 	;
-	new actual,atom,attrib,bpar,byref,cls,count,countmx,lblRec,lvl,lvn,ptr
+	; NOTES:
+	; . This function will also be called by delayCmt^UCRUNTIM to evaluate
+	;	the argument to Runtime.delayCommit().
+	; . the lvn lvl is used as follows:
+	;	lvl = 0 indicates that the method descriptor is found, and full
+	;		validation of actual and formal paramters is possible
+	;	lvl = 1 indicates that a class descriptor is present, but the
+	;		method descriptor is not found.
+	;	lvl = 2 indicates no checking possible due to indirection,
+	;		or no class descriptor.
+	; . In an earlier version lvl = 2 was also used to indicate a boot
+	;	restriction level. However, now that functions may return types
+	;	other than simple primitives, the method signature must be
+	;	accessed even during boot phases.
+	;
+	new actual,atom,attrib,bpar,byref,cls,count,countmx,lblRec,lvl,lvn,mtd,ptr
 	new res,return,tag,vars,vsig,z
 	;
-	if $E(expr)="@" set (return,vsig)=expr,expr=""
-	else  set (return,vsig)=$P(expr,"(",1),expr=$E(expr,$L(return)+1,$L(expr))
+	if $E(expr)="@" set (return,vsig)=expr,expr="",lvl=2
+	else  set (return,vsig)=$P(expr,"(",1),expr=$E(expr,$L(return)+1,$L(expr)),lvl=0
 	;
 	if "^"[return do ERROR("Label Expected: "_return_expr) quit ""
 	;
 	; If the call is to a routine, get its labels
 	if $E(vsig,1,2)="$$" set vsig=$E(vsig,3,$L(vsig))
 	if $E(vsig)="^" set $P(vsig,"^")=$P(vsig,"^",2)
-	set lvl=$$getLabels(.labels,vsig)
-	if lvl<2,'$d(labels(vsig)) do
-	.	if lvl=0 set lvl=1	; turn off class checking
+	set cls=$PIECE(vsig,"^",2)
+	if cls="" set cls=pslPrsr("moduleName")
+	else  if $E(cls)="@" set lvl=2,cls="?"
+	else  if lvl=0 do
+	.	do loadClass^PSLCC(.pslPrsr,cls)
+	.	if '$DATA(pslPrsr("pslCls",cls)) set lvl=2 do warnGroup("ACCESS","Routine "_cls_" not found") quit
+	set mtd=cls_"."_$PIECE(vsig,"^")
+	set:mtd["@" lvl=2	; if label indirection
+	;;if lvl<2,'$$hasSubr(vsig) do
+	;;.	if lvl=0 set lvl=1	; turn off class checking
+	;;.	;
+	;;.	; Don't complain about generated calls / callers
+	;;.	if $$isNamePSL(vsig) quit
+	;;.	if $$isNamePSL(subRou) quit
+	;;.	if return["^" do warnGroup("ACCESS","Subroutine "_return_" not found") quit
+	;;.	do ERROR("Label referenced but not defined: "_return)
+	if lvl=0 do  quit:ER ""
+	.	if $P(pslPrsr("pslCls",cls),tab,$$rowPos^PSLClass("classType"))>-1 do ERROR("ACCESS: method syntax required to access "_cls) quit
+	.	;
+	.	if $$getSetting^PSLCC(.pslPrsr,"PSL","Version",2.7)'<3,$P(pslPrsr("pslCls",cls),tab,$$rowPos^PSLClass("classType"))<-1,$e(cls)'="v" do warnGroup("ACCESS","call to non-PSL module "_cls)
 	.	;
 	.	; Don't complain about generated calls / callers
-	.	if $$isNamePSL(vsig) quit
-	.	if $$isNamePSL(subRou) quit
-	.	if return["^" do warnGroup("ACCESS","Subroutine "_return_" not found") quit
-	.	do ERROR("Label referenced but not defined: "_return)
-	set lblRec=$G(labels(vsig)),countmx=$$getFpCount^UCPSLLR(lblRec),rclass=$p(lblRec,tab,3)
-	if lvl=0,return["^",$P(lblRec,tab,2)'>0 do warnGroup("ACCESS","Subroutine "_return_" not accessible")
-	;;if lvl>0 do warnGroup("MISMATCH","Unable to validate parameters to "_return)
+	.	if '$DATA(pslPrsr("pslMtd",mtd)) do
+	.	.	set lvl=1
+	.	.	quit:$$isNamePSL(vsig)  quit:$$isNamePSL(subRou)
+	.	.	if return["^" do warnGroup("ACCESS","Subroutine "_return_" not found") quit
+	.	.	do ERROR("Label referenced but not defined: "_return)
+	if $DATA(pslPrsr("pslMtd",mtd)) do
+	.	set lblRec=pslPrsr("pslMtd",mtd)
+	.	set countmx=$$getFpCount^PSLMethod(lblRec)
+	.	set rclass=$P(lblRec,tab,$$rowPos^PSLMethod("RESULTCLASS"))
+	.	;
+	.	; if resultClass specified, check it with the return we are
+	.	; building
+	.	quit:rclass=""
+	.	if rclass="void" do:$E(return,1,2)="$$" ERROR("MISMATCH: "_vsig_" is a procedure") quit
+	.	do:$E(return,1,2)'="$$" ERROR("MISMATCH: $$"_vsig_" is a function")
+	else  set (lblRec,rclass)="",countmx=-1
+	if lvl=0,return["^",$P(lblRec,tab,$$rowPos^PSLMethod("ACCESSLEVEL"))'>0 do warnGroup("ACCESS","Subroutine "_return_" not accessible")
 	;
 	; No parameters are passed, so all local variables can be redefined by
 	; the called function, invalidate their values.
@@ -2645,7 +3262,7 @@ actual(expr,called,rclass)	;local String; Process actual parameters
 	.	;
 	.	if bpar do ERROR("comma expected") quit
 	.	set bpar=1
-	.	do procPar(count,$$getFp^UCPSLLR(lblRec,count),atom,.actual,.attrib)
+	.	do procPar(count,$$getFp^PSLMethod(lblRec,count),atom,.actual,.attrib)
 	.	if ER quit
 	.	;
 	.	if $D(attrib(count,1)) do	; call-by-name remapping
@@ -2663,7 +3280,7 @@ actual(expr,called,rclass)	;local String; Process actual parameters
 	.	if lvn'="" set vars(lvn)=byref
 	;
 	if ER quit ""
-	if lvl<2,count>countmx do warnGroup("MISMATCH","More actual parameters ("_count_") than formal parameters ("_countmx_"): "_$P($$toM^UCPSLLR(lblRec)," ;"))
+	if count>countmx,lvl<2 do warnGroup("MISMATCH","More actual parameters ("_count_") than formal parameters ("_countmx_"): "_$P($$getDecl4M^PSLMethod(lblRec,.pslPrsr)," ;"))
 	;
 	; Process missing parameters at the end of the list
 	; - Step 1: call procPar() to add the parameters
@@ -2671,7 +3288,7 @@ actual(expr,called,rclass)	;local String; Process actual parameters
 	; Note that both steps are needed, because the call to procPar() may add
 	; dummies for Reference descendants
 	if countmx>count for count=count+1:1:countmx do
-	.	do procPar(count,$$getFp^UCPSLLR(lblRec,count),"",.actual,.attrib)
+	.	do procPar(count,$$getFp^PSLMethod(lblRec,count),"",.actual,.attrib)
 	.	if count>1 set return=return_","
 	.	set return=return_actual(count)
 	.	set z=$g(attrib(count,0)),vsig=$P(z,tab),cls=$p(z,tab,2)
@@ -2681,6 +3298,7 @@ actual(expr,called,rclass)	;local String; Process actual parameters
 	..		do p1prepend(attrib(count,1))
 	..		set res=res_attrib(count,2)
 	set return=$$RTCHR^%ZFUNC(return,",")_")",tag=$$RTCHR^%ZFUNC(tag,",")_")"
+	;
 	if res'="" do p1append(res)
 	;
 	; FSCW CR13403: Invalidate values assigned to ALL Primitives.
@@ -2692,7 +3310,7 @@ actual(expr,called,rclass)	;local String; Process actual parameters
 	quit return
 	;
 	;-----------------------------------------------------------------------
-resetType(vars)	; Reset values assigned to Primitives 
+resetType(vars) ; Reset values assigned to Primitives
 	;-----------------------------------------------------------------------
 	; This subroutine resets the value of PSLIdentifier.InstExpr for all
 	; Primitives, except some passed in vars(), (see below)
@@ -2732,7 +3350,8 @@ resetType(vars)	; Reset values assigned to Primitives
 	.	if $G(vars(lvn))=-1 quit	; Seen this one before
 	.	if lvn[".",'$D(vars($P(lvn,".",1))) quit
 	.	set class=$$getClass(lvn,i)
-	.	if '(class=""),'$$primVar^UCPRIM(class) quit	; FSCW CR11445: prefer $$primDes
+	.	;;if '(class=""),'$$primVar^UCPRIM(class) quit	; FSCW CR11445: prefer $$primDes
+	.	if '(class=""),'$$primVal^UCPRIM(.pslPrsr,class) quit
 	.	set vars(lvn)=-1		; Protect higher scope (for LITERALS too!)
 	.	if $$getScope(lvn,i)="LITERAL" quit
 	.	do setInst(lvn,msrc+1,"",i)
@@ -2740,7 +3359,7 @@ resetType(vars)	; Reset values assigned to Primitives
 	quit
 	;
 	;-----------------------------------------------------------------------
-resetProps(var)	;private void; Reset values assigned to Properties of var 
+resetProps(var) ;package void; Reset values assigned to Properties of var
 	;-----------------------------------------------------------------------
 	; This subroutine resets the value of PSLIdentifier.InstExpr for all
 	; Primitive properties of var.
@@ -2766,13 +3385,14 @@ resetProps(var)	;private void; Reset values assigned to Properties of var
 	for  set lvn=$O(type(lvl,lvn)) quit:lvn=""!($P(lvn,".")'=var)  do
 	.	;
 	.	set class=$$getClass(lvn,lvl)
-	.	if '(class=""),'$$primVar^UCPRIM(class) quit	; FSCW CR11445: prefer $$primDes
+	.	;;if '(class=""),'$$primVar^UCPRIM(class) quit	; FSCW CR11445: prefer $$primDes
+	.	if '(class=""),'$$primVal^UCPRIM(.pslPrsr,class) quit
 	.	if $$getScope(lvn,lvl)="LITERAL" quit
 	.	do setInst(lvn,msrc+1,"",lvl)
 	quit
 	;
 	;-----------------------------------------------------------------------
-procPar(parnum,fpdef,expr,actual,attrib)	; Process a parameter 
+procPar(parnum,fpdef,expr,actual,attrib) ; Process a parameter
 	;-----------------------------------------------------------------------
 	; Process an actual parameter
 	;
@@ -2782,6 +3402,7 @@ procPar(parnum,fpdef,expr,actual,attrib)	; Process a parameter
 	; . String fpdef = formal parameter definition
 	;	If not empty it specifies the access, class, and name of the
 	;	formal parameter that maps to the supplied actual parameter
+	;	It expects a definition like: noret String fp(,,,)
 	; . PSLExpression expr = actual parameter
 	;	As found in the PSL source code
 	; . PSLExpression actual() = individual parameters	/MECH=REFARR:W
@@ -2805,15 +3426,14 @@ procPar(parnum,fpdef,expr,actual,attrib)	; Process a parameter
 	new apcls,apsig,apexp,byref,fpcls,fpscope,fpsig,newLevel,z
 	;
 	; Handle formal parameter specification
-	; Assume PUBLIC scope
-	set z=$$TRIM^%ZS(fpdef),fpscope="PUBLIC",fpcls="String"
+	; Assume not required, by return, and String
+	set z=$$TRIM^%ZS(fpdef),fpscope="RET",fpcls="String"
 	if $l(z," ")=3 set fpscope=$$UPCASE($p(z," ")),fpcls=$p(z," ",2),fpsig=$p(z," ",3)
 	else  do
 	.	if z[" " set fpcls=$P(z," ",1),z=$P(z," ",2)
 	.	if $$UPCASE(fpcls)="LITERAL" set fpscope="LITERAL",fpcls="String"
-	.	if $$UPCASE(fpcls)="LOCAL"   set fpscope="LOCAL",fpcls="String"
-	.	if $$UPCASE(fpcls)="PRIVATE" set fpscope="PRIVATE",fpcls="String"
-	.	if $$UPCASE(fpcls)="PUBLIC"  set fpscope="PUBLIC",fpcls="String"
+	.	if $$UPCASE(fpcls)="NORET"   set fpscope="NORET",fpcls="String"
+	.	if $$UPCASE(fpcls)="RET"     set fpscope="RET",fpcls="String"
 	.	set fpsig=$S(z="":"var",1:z)
 	;
 	; If expr.isNull(), see if this needs a dummy
@@ -2824,7 +3444,8 @@ procPar(parnum,fpdef,expr,actual,attrib)	; Process a parameter
 	; DECLARE and DISPOSE it on the same line as the call.
 	; Insert it as a PUBLIC declaration in type(,) to prevent SCOPE and
 	; MISMATCH warnings, but to suppress additional vobj() memory management
-	if expr="",'$$primVar^UCPRIM(fpcls),"PRIVATE,PUBLIC"[fpscope do
+	do initClass(fpcls)
+	if expr="",'$$primVar^UCPRIM(.pslPrsr,fpcls),fpscope="RET" do
 	.	do warnGroup("MISMATCH","Parameter "_count_": inserted dummy variable for Reference descendant "_fpcls_" "_fpsig)
 	.	set expr=$$nxtSym			; allocate symbol
 	.	;;set pslNew(subRou)=$$addList(pslNew(subRou),expr)
@@ -2841,16 +3462,42 @@ procPar(parnum,fpdef,expr,actual,attrib)	; Process a parameter
 	else  set byref=0
 	;
 	; Validate that byref is allowed, else reset byref
-	if byref,fpscope'="PUBLIC" set byref=0 do warnGroup("SCOPE","Reference parameter ."_expr_" not accepted for "_fpscope_" "_fpcls_" "_fpsig)
+	if byref,fpscope'="RET" set byref=0 do warnGroup("SCOPE","Return parameter ret "_expr_" not accepted for "_fpscope_" "_fpcls_" "_fpsig)
+	;
+	; formal expects array. Verify that dimensions match
+	if fpsig["(" do
+	.	if $piece(fpsig,"(",2)'=$piece(expr,"(",2) do warnGroup("MISMATCH","expected "_fpcls_" "_fpsig_"; found "_expr)
+	.	set apcls=$$getClass(expr)
+	.	if $$isSig(expr) do	; proper actual
+	..		set (apexp,expr)=$piece(expr,"(")	; apexp = name
+	..		if 'byref set apexp="."_apexp		; force dot
+	.	else  do	; apexp = expression (?*@!)
+	..		;
+	..		; This would be an error if the actual parameter is not
+	..		; pass-by-return, but there is v2.x code that
+	..		; uses it.
+	..		; Longer term we may want to force that byref=1 (and
+	..		; expr is a var)
+	..		set apexp=$$valExpr(expr,.apcls),byref=0
+	.	if apcls="" do
+	..		set apcls=$$getClass(apexp)	; try unsubscr.
+	..		if apcls="" set apcls="String" do setType(expr,apcls)
 	;
 	; Array syntax - e.g., a(), a(,)
 	; but filter lvn.func(), $func(), $$extref and $svn
-	;;if $P(expr,".")["(",$E(expr)'="$",$$objPtr($P(expr,"."))=expr do
-	if $TR(expr,"%","A")?1A.AN1"(".","1")" do
+	; The "else" reduces it to cases where the ap specifies an array, but
+	; the fp does not (e.g. fp in M routine or sloppy PSL coding).
+	; The former would be OK, the latter would be worth a warning. However
+	; in order to be able to do that, procPar() must be rewritten to know
+	; the PSLMethod instance of the called entry.
+	; Until that time: accept if expr matches a signature in the type array
+	;;if $P(expr,".")["(",$E(expr)'="$",$$leftSig($P(expr,"."))=expr do
+	else  if expr["(",$$isSig(expr) do
 	.	;
 	.	set apexp=$P(expr,"(",1)		; apexp = name
 	.	set apcls=$$getClass(expr)
 	.	if apcls="" do
+	..		do warnGroup("MISMATCH","expected "_fpcls_" "_fpsig_"; found "_expr)
 	..		set apcls=$$getClass(apexp)	; try unsubscr.
 	..		if apcls="" set apcls="String" do setType(expr,apcls)
 	.	;
@@ -2891,7 +3538,7 @@ procPar(parnum,fpdef,expr,actual,attrib)	; Process a parameter
 	..		;;if $$isVar(apexp),(instPtr!$$primVar^UCPRIM(apcls)) quit
 	..		set instPtr=$$getInst(expr)
 	..		;;if $$isVar(apexp),(instPtr!$$primVar^UCPRIM(apcls)) quit
-	..		if $$isVar(apexp) quit
+	..		if $$isVar(apexp) set apcls=$P(apcls,"(") quit
 	..		if postCond'="" do ERROR("Pass-by-name is not supported in post conditional expression: "_expr) quit
 	..		set z=apexp,apexp=$$nxtSym
 	..		set pslNew(subRou)=$$addList(pslNew(subRou),apexp)
@@ -2902,24 +3549,29 @@ procPar(parnum,fpdef,expr,actual,attrib)	; Process a parameter
 	else  do
 	.	set apexp=$$valExpr(expr,.apcls)
 	.	if apexp'="",'$$isLit(apexp) set apexp=$$toLit(apexp)
+	.	if $P(pslPrsr("pslCls",apcls),$C(9),$$rowPos^PSLClass("classType"))=1 do
+	.	.	;
+	.	.	; classTypePRIMITIVE passed by value; must be var
+	.	.	if '$$isVar(expr) do ERROR("MISMATCH: Invalid argument: "_expr)
+	.	.	set apexp="."_apexp
 	;
 	; apexp contains the value to pass as actual parameter (without the dot
 	; in case of pass-by-name).
 	; apcls contains the class of the actual parameter
 	;
 	; check if apcls and fpcls are compatible (except if fpdef.isNull())
-	set z=$$clsRel^UCCLASS(fpcls,apcls)
+	set z=$$clsRel^UCCLASS(.pslPrsr,fpcls,apcls)
 	if z=0,fpdef'="" do warnGroup("MISMATCH","Parameter type mismatch- parameter "_parnum_": actual "_apcls_" "_apexp_", formal "_fpcls_" "_fpsig)
 	;
 	; byref tells if the parameter is passed by value (0) or by name (1)
 	if byref set apexp="."_apexp
 	set actual(parnum)=apexp
-	set attrib(parnum,0)=$$objPtr(expr)_tab_apcls_tab_byref_tab_fpscope
+	set attrib(parnum,0)=$$leftSig(expr)_tab_apcls_tab_byref_tab_fpscope
 	;
 	; For Reference descendants, turn off optimize
 	; This is done for subscripted vars as well, even though these are
 	; never optimized
-	if $$isVar(expr)!$$isArr(expr),'$$primVar^UCPRIM(apcls) do
+	if $$isVar(expr)!$$isArr(expr),'$$primVar^UCPRIM(.pslPrsr,apcls) do
 	.	;
 	.	do setOpti(expr,$$getLevel(expr),1) ; Optimize off
 	.	;
@@ -2929,14 +3581,14 @@ procPar(parnum,fpdef,expr,actual,attrib)	; Process a parameter
 	.	;		empty instExpr (i.e. a "record reference")
 	.	;	else note as "instantiated" (setInst() has already been
 	.	;		called for byref=1)
-	.	;;if $$isRecord(class),'$$getInst(atom,newLevel) do setDb^UCCOLUMN(subRou,atom,,.newLevel)
-	.	if $$isRecord(apcls) do
-	..		if 'byref new dummy set dummy=$$insByOvs^UCREC4OP(subRou,$$objPtr(expr),"","U")
-	..		else  do setAssign^UCREC4OP(subRou,$$objPtr(expr),0)
+	.	;;if $$isRecord^PSLClass(class)>0,'$$getInst(atom,newLevel) do setDb^UCCOLUMN(subRou,atom,,.newLevel)
+	.	if $$isRecord^PSLClass(apcls)>0 do
+	..		if 'byref new dummy set dummy=$$insByOvs^UCREC4OP(subRou,$$leftSig(expr),"","U")
+	..		else  do setAssign^UCREC4OP(subRou,$$leftSig(expr),0)
 	quit
 	;
 	;-----------------------------------------------------------------------
-callStack(tag,subRou)	;local void; Build Call stack structure 
+callStack(tag,subRou) ;private void; Build Call stack structure
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
 	; . tag = called tag, with label and all actual typed parameters
@@ -2944,19 +3596,19 @@ callStack(tag,subRou)	;local void; Build Call stack structure
 	;
 	; INPUTS:
 	; . level = current line level
-	; . ifLevel = current IF level
+	; . inIF = current IF indicator
 	; . lptr = psl source line number
 	; . msrc = m source line number
 	; . tab = TAB character
 	; . ifStack, and doStack (only used if level>0)
 	;
 	; OUTPUTS:
-	; . called(tag,subRou,msrcLineNr) = level, ifLevel, ifStack, doStack, m2srcLineNr
-	; . calls(subRou,msrcLineNr,tag) = level, ifLevel, ifStack, doStack, m2srcLineNr
-	; . sysmap("C",subRou,msrcLineNr,tag) = parameters
+	; . called(tag,subRou,msrcLineNr) = level, inIF, ifStack, doStack, m2srcLineNr
+	; . calls(subRou,msrcLineNr,tag) = level, inIF, ifStack, doStack, m2srcLineNr
+	; . sysmap("C",subRou+offset,tag) = parameters
 	new params,tagrtn,z
-	set z=level_tab_ifLevel
-	if level set z=z_tab_ifStack_tab_$P(doStack,".",1,level)
+	set z=level_tab_inIF
+	if level set z=z_tab_ifStack_tab_$$getDo^UCPSLST(.pslSt)
 	;
 	set $p(z,tab,5)=lptr
 	set called(tag,subRou,msrc+1)=z
@@ -2965,41 +3617,40 @@ callStack(tag,subRou)	;local void; Build Call stack structure
 	set tagrtn=$P(tag,"(",1)
 	set params=$P(tag,"(",2)
 	set params=$E(params,1,$L(params)-1)
-	set sysmap("C",subRou,msrc+1,tagrtn)=params
+	do addXref("C",tagrtn,params)
 	quit
 	;
 	;-----------------------------------------------------------------------
 ELSE	; M command ; Process boolean else
 	;-----------------------------------------------------------------------
-	; The ELSE command is argumentless by definition.
+	; The ELSE statement is argumentless by definition.
 	; So whatever ended up in expr is wrong (our mistake).
 	; Complaining about the number of spaces here is MUMPSish.
 	;
 	;;if '(expr=""),$$isVar(expr),$$isNxtCmd(cmd,expr,.ptr) set expr=""
-	if '(expr="") set ptr=ptr-$L(expr),expr=""
+	if '(expr="") set ptr=$s(ptr:ptr,1:$l(rec))-$L(expr),expr=""
 	;
-	if ifLevel=0 do push^UCPSLST(.pslSt,$$getDcLnr,1,0)
-	set ifLevel=ifLevel+1,mcode=mcode_"E "		; Always argumentless
+	if inIF=0 set inIF=1 do push^UCPSLST(.pslSt,$$getDcLnr,1,0)
+	set mcode=mcode_"E "		; Always argumentless
 	quit
 	;
 	;-----------------------------------------------------------------------
-WHILE	; M++ command ; While expression
+WHILE	; PSL statement ; While expression
 	;-----------------------------------------------------------------------
 	;
 	new xptr
 	;
 	; Need to set iterative code indicators first, because all arguments
 	; operate under iterative scope.
-	if forLevel=0 do push^UCPSLST(.pslSt,$$getDcLnr,1,1)
-	set forLevel=forLevel+1
-	set ifLevel=ifLevel+1		; FSCW CR11660 - treat similar to IF
+	if inFOR=0 do push^UCPSLST(.pslSt,$$getDcLnr,1,1)
+	set inFOR=1,inIF=1		; FSCW CR11660 - treat similar to IF
 	;
 	set xptr=ptr
 	for  quit:$$nextExpr(str,.ptr,.tok,1)'=","  set expr=expr_"&("_$$nextExpr(str,.ptr,.tok,.1)_")",xptr=ptr
 	set ptr=xptr
 	;
 	set mcode=mcode_"F  "
-	set cmd="QUIT"
+	set cmd="quit"
 	set postCond=$$condRel("'("_expr_")")
 	set mcode=mcode_"Q:"_postCond_" "
 	quit
@@ -3010,9 +3661,8 @@ FOR	; M command ; For loop
 	;
 	if cmdDel="," set mcode=mcode_cmdDel_$$forRange(expr) quit
 	;
-	if forLevel=0 do push^UCPSLST(.pslSt,$$getDcLnr,1,1)
-	set forLevel=forLevel+1
-	set ifLevel=ifLevel+1		; FSCW CR11660 - treat similar to IF
+	if inFOR=0 do push^UCPSLST(.pslSt,$$getDcLnr,1,1)
+	set inFOR=1,inIF=1		; FSCW CR11660 - treat similar to IF
 	;
 	if '(expr=""),$$isVar(expr),$$isNxtCmd(cmd,expr,.ptr) set expr=""
 	;
@@ -3033,7 +3683,7 @@ FOR	; M command ; For loop
 	quit
 	;
 	;-----------------------------------------------------------------------
-forRange(expr)	;local String; for var=init:increment:end 
+forRange(expr) ;private String; for var=init:increment:end
 	;-----------------------------------------------------------------------
 	;
 	new atom,argNum,class,ptr,return
@@ -3045,7 +3695,8 @@ forRange(expr)	;local String; for var=init:increment:end
 	.	if atom=":" set return=return_atom,argNum=argNum+1 quit
 	.	if argNum=3 do ERROR("Space character expected") quit
 	.	set return=return_$$valExpr(atom,.class)
-	.	if '$$primDes^UCPRIM(class) do ERROR("Object invalid in FOR expression") quit
+	.	;;if '$$primDes^UCPRIM(class) do ERROR("Object invalid in FOR expression") quit
+	.	if '$$primVal^UCPRIM(.pslPrsr,class) do ERROR("Object invalid in FOR expression") quit
 	;
 	quit return
 	;
@@ -3057,16 +3708,17 @@ GO	; M command ; GO
 	;
 	new i,j,z
 	;
-	for i=level:-1:0 do  quit:ER
-	.	;
-	.	set j=""
-	.	for  set j=$O(type(i,j)) quit:j=""  do
-	..		;
-	..		set z=$$getClass(j,i)
-	..		if $$primDes^UCPRIM(z) quit
-	..		if '$G(commands("Options","AllowGOTO")) do ERROR("Goto command is invalid in object scope")
+	;;for i=level:-1:0 do  quit:ER
+	;;.	;
+	;;.	set j=""
+	;;.	for  set j=$O(type(i,j)) quit:j=""  do
+	;;..		;
+	;;..		set z=$$getClass(j,i)
+	;;..		;;if $$primDes^UCPRIM(z) quit
+	;;..		if $$primVal^UCPRIM(.pslPrsr,z) quit
+	;;..		if '$$getSetting^PSLCC(.pslPrsr,"Options","AllowGOTO",0) do ERROR("Goto command is invalid in object scope")
 	;
-	do warnGroup("DEPRECATED","GO command - use subroutine call")
+	do WARNDEP(2.6,2.7,"GO statement - use subroutine call")
 	set mcode=mcode_"G"_postCond_" "_expr
 	quit
 	;-----------------------------------------------------------------------
@@ -3079,14 +3731,13 @@ IF	; M command ; If
 	;mas 7/1/03
 	if '(expr="") set expr=$$condRel(expr) if expr=1 set struct(7,subRou)=lptr
 	set mcode=mcode_$S(expr="":" ",1:expr)
-	; FRS - 06/17/03			; Don't increment ifLevel if Literal
+	; FRS - 06/17/03			; Don't increment inIF if Literal
 	if '(expr=""),$$isLit(expr) do:'$$QSUB^%ZS(expr) deadCode quit
-	if ifLevel=0 do push^UCPSLST(.pslSt,$$getDcLnr,1,0)
-	set ifLevel=ifLevel+1
+	if inIF=0 set inIF=1 do push^UCPSLST(.pslSt,$$getDcLnr,1,0)
 	quit
 	;
 	;-----------------------------------------------------------------------
-deadCode	;local void; Logic test resolved & failed, remove rest of line & code block 
+deadCode ;private void; Logic test resolved & failed, remove rest of line & code block
 	;-----------------------------------------------------------------------
 	;
 	do INFO("DEAD","if argument always false; code block not translated")
@@ -3154,6 +3805,31 @@ KILL	; M command ; Kill a variable
 	.	if $E(expr)="@" set mcode=mcode_"K"_postCond_" @"_$$varExpr($E(expr,2,$L(expr)),0) quit
 	.	set mcode=mcode_"K"_postCond_" "_$$varExpr(expr,0) quit
 	;
+	; FSCW CR27800:
+	; Allow KILL of array property (entire array or individual element)
+	; The code below relies on the following behavior:
+	; - $$valObj() will report an error when expr is method
+	; - $$property() will report an error when expr does neither refer to
+	;	the entire array nor to a single element
+	if $$isObj(expr) do  quit
+	.	new expsig,ignore,mxpr,pid
+	.	set expsig=$$leftSig(expr)
+	.	set mxpr=$$valObj(expr,-1,.ignore,.class,.pid) quit:ER
+	.	set ignore=$P(pslPrsr("pslPrp",pid),$c(9),$$rowPos^PSLProperty("dimension"))
+	.	if ignore'["(" do ERROR("MISMATCH: Property reference not valid in KILL: "_expr) quit
+	.	if class["(" do
+	.	.	;
+	.	.	; Currently only arrays of PRIM0PROP or PRIM0NODE are allowed
+	.	.	; They do not require special destroy code.
+	.	.	; By the time PSL supports arrays of Reference descendants,
+	.	.	; additional destroy code is needed (and could be coded as a
+	.	.	; call to a vDestroyNNN^Class() subroutine that implements the
+	.	.	; destruction of that array property. Note that this does
+	.	.	; require the addition of a destructor (and adjustor) field to
+	.	.	; PSLProperty.
+	.	.	set mxpr=$e(mxpr,1,$l(mxpr)-$l($p(class,"(",2))-1)_")"
+	.	do scope("K",mxpr)
+	;
 	; FSCW CR21158:
 	; Calling $$varExpr(,-1,.class) will cause this function to take into
 	; consideration that expr may be an unsubscripted variable that is
@@ -3164,7 +3840,12 @@ KILL	; M command ; Kill a variable
 	; and expr() must be passed to killObj() to achieve this.
 	set expr=$$varExpr(expr,-1,.class,.newLevel)
 	;
-	if '$$primVar^UCPRIM(class) do
+	; expr will contain the kill-argument (translated to M), class will
+	; either contain the class of expr itself, or if expr is the name of an
+	; array, it will contain that class of the array, followed by the
+	; dimension. Ignore the dimension in the call to $$primVar^UCPRIM
+	;
+	if '$$primVar^UCPRIM(.pslPrsr,$P(class,"(")) do
 	.	new exprSig
 	.	set exprSig=expr
 	.	if $$isVar(expr) do
@@ -3175,29 +3856,29 @@ KILL	; M command ; Kill a variable
 	do scope("K",expr,.doExpr,.killExpr)
 	quit
 ZBREAK	;
+	do WARNDEP(3,0,"ZBREAK - statement not portable to Java")
 	set mcode=mcode_" ZBREAK "_$$UNTOK^%ZS(expr,.tok)
 	quit
 ZPRINT	;
 	set mcode=mcode_" ZPRINT "_$$UNTOK^%ZS(expr,.tok)
 	quit
 ZSHOW	;
-	set mcode=mcode_" zshow "_$$UNTOK^%ZS(expr,.tok)
+	set mcode=mcode_" ZSHOW "_$$UNTOK^%ZS(expr,.tok)
 	quit
 BREAK	;
 HANG	;
 HALT	;
 JOB	;
-VIEW	;
-ZWITHDRAW	; 
+ZWITHDRAW ;
 ZWRITE	;
-ZMESSAGE	; 
+ZMESSAGE ;
 	;
 	if expr'="" set expr=$$valExpr(expr) if ER quit
 	do buildExpr
 	quit
 	;
 	;-----------------------------------------------------------------------
-OPEN	; local ; M command: OPEN device:(par1=val1,par2):timeout
+OPEN	;private ; M command: OPEN device:(par1=val1,par2):timeout
 	;-----------------------------------------------------------------------
 	;
 	; no parameters or timeout
@@ -3226,9 +3907,9 @@ OPEN	; local ; M command: OPEN device:(par1=val1,par2):timeout
 	quit
 	;
 	;-----------------------------------------------------------------------
-USE	; local ; M command: USE device:(par1=val1:par2)
+USE	;private ; M command: USE device:(par1=val1:par2)
 	;-----------------------------------------------------------------------
-CLOSE	; local ; M command: CLOSE device:(par1=val1:par2)
+CLOSE	;private ; M command: CLOSE device:(par1=val1:par2)
 	;-----------------------------------------------------------------------
 	;
 	if expr'[":" set expr=$$valExpr(expr) do buildExpr quit
@@ -3251,7 +3932,7 @@ CLOSE	; local ; M command: CLOSE device:(par1=val1:par2)
 	.	set expr=$$valExpr(expr) quit:ER
 	.	do buildExpr
 	set ptr=0
-	set mcode=mcode_cmd_postCond_" "
+	set mcode=mcode_"C"_postCond_" "
 	;
 	if "!#?"[$E(expr) set mcode=mcode_expr quit
 	;
@@ -3282,7 +3963,7 @@ CLOSE	; local ; M command: CLOSE device:(par1=val1:par2)
 	quit
 	;
 	;-----------------------------------------------------------------------
-devPars(expr)	; local ; Parse device parameters: (par1=val1:par2) 
+devPars(expr) ;private ; Parse device parameters: (par1=val1:par2)
 	;-----------------------------------------------------------------------
 	;
 	new atom,par,ptr,return
@@ -3298,6 +3979,7 @@ devPars(expr)	; local ; Parse device parameters: (par1=val1:par2)
 	;-----------------------------------------------------------------------
 WRITE	; M command ; Write a String
 	;-----------------------------------------------------------------------
+	;
 	if expr["?" set expr=$P(expr,"?",1)_"?"_$$valExpr($P(expr,"?",2,$L(expr)))
 	else  if '(expr=""),'("!#?"[$E(expr)) set expr=$$valExpr(expr)
 	do buildExpr
@@ -3307,13 +3989,12 @@ WRITE	; M command ; Write a String
 READ	; M command ; Read A string
 	;-----------------------------------------------------------------------
 	;
-	do warnGroup("READ","Restricted command")
-	;
+	do warnGroup("READ","Restricted statement - use io.read() if possible")
 	new atom,newLevel,ptr,var
 	set ptr=0
 	;
 	if cmdDel'=" " set mcode=mcode_cmdDel
-	else  set mcode=mcode_cmd_postCond_" "
+	else  set mcode=mcode_"R"_postCond_" "
 	;
 	if "!#?"[$E(expr) set mcode=mcode_expr quit
 	;
@@ -3378,16 +4059,16 @@ XECUTE	; M command ; Execute a string
 	;
 	set expr=$$UNTOK^%ZS(nexpr,tok)
 	do buildExpr,resetType()
-	do warnGroup("XECUTE","Restricted command - runtime Xecute")
+	do warnGroup("XECUTE","Restricted statement may not port to Java - xecute")
 	quit
 	;
 	;-----------------------------------------------------------------------
-buildExpr	;local void; Build command expression 
+buildExpr ;private void; Build command expression
 	;-----------------------------------------------------------------------
 	;
 	if '(cmdDel=",") do
 	.	;;if $e(mcode,$l(mcode)-2,$L(mcode)-1)=(" "_$E(cmd)) set mcode=$E(mcode,1,$l(mcode)-2)
-	.	set mcode=mcode_cmd_postCond
+	.	set mcode=mcode_$$UPCASE(cmd)_postCond
 	set mcode=mcode_cmdDel_expr
 	quit
 	;
@@ -3395,7 +4076,7 @@ buildExpr	;local void; Build command expression
 TSTART	; M command ; Start a transaction
 	;-----------------------------------------------------------------------
 	;
-	do warnGroup("DEPRECATED","TSTART command - use Runtime.start")
+	do WARNDEP(2.7,0,"TSTART statement - use Runtime.start")
 	set expr=$$UNTOK^%ZS(expr,.tok)		; Take it like it is
 	new actual,data
 	set actual(1)=$p($p(expr,":",2),"=",2)
@@ -3403,25 +4084,25 @@ TSTART	; M command ; Start a transaction
 	set actual(2)=$P($P($p(expr,":",1),")",1),"(",2)
 	set actual(3)=""
 	set mcode=mcode_" D "
-	do start^UCRUNTIM
+	do start^UCRUNTIM()
 	set mcode=mcode_return
 	quit
 	;
-TCOMMIT	; 
-	do warnGroup("DEPRECATED","TCOMMIT command - use Runtime.commit")
+TCOMMIT ;
+	do WARNDEP(2.7,0,"TCOMMIT statement - use Runtime.commit")
 	new actual
 	set actual(1)=""
 	set mcode=mcode_" D "
-	do commit^UCRUNTIM
+	do commit^UCRUNTIM()
 	set mcode=mcode_return
 	quit
-TROLLBACK	; 
-	do warnGroup("DEPRECATED","TROLLBACK command - use Runtime.rollback")
+TROLLBACK ;
+	do WARNDEP(2.7,0,"TROLLBACK statement - use Runtime.rollback")
 	new actual
 	set actual(1)=""
 	set actual(2)=""
 	set mcode=mcode_" D "
-	do rollback^UCRUNTIM
+	do rollback^UCRUNTIM()
 	set mcode=mcode_return
 	quit
 	;
@@ -3431,50 +4112,144 @@ LOCK	; M command ; Lock a reference
 	;
 	new ptr
 	set ptr=0
-	set mcode=mcode_cmd_postCond_" "
+	set mcode=mcode_"L"_postCond_" "
 	if expr="" quit				; Argumentless Lock
 	if "+-"[$E(expr) set mcode=mcode_$E(expr),expr=$E(expr,2,$L(expr))
-	set mcode=mcode_$$varExpr($$ATOM^%ZS(expr,.ptr,":",tok),0)
-	if ptr set mcode=mcode_":"_$$valExpr($E(expr,ptr+2,$L(expr)))
+	set mcode=mcode_$$varExpr($$ATOM^%ZS(expr,.ptr,":",tok),-9)	; indicate LOCK
+	if ptr do
+	.	if $extract(expr,ptr+1)'=":" do ERROR("SYNTAX: ':' expected in LOCK") quit
+	.	set mcode=mcode_":"_$$valExpr($E(expr,ptr+2,$L(expr)))
 	quit
 	;
 	;-----------------------------------------------------------------------
 NEW	; M command ; Scope local variable
 	;-----------------------------------------------------------------------
 	;
-	if $E(expr)="(" do ERROR("Exclusive new's are not allowed: "_expr) quit
+	if $E(expr)="(" do ERROR("Exclusive new is not allowed: "_expr) quit
 	if $E(expr)="%",$D(keywords(expr)) set expr=$p(keywords(expr),"|",1)
 	;
 	if $$isVar(expr)
 	else  if $$UPCASE(expr)="$ZT"
 	else  do ERROR("Variable expected: "_expr) quit
 	;
-	if ifLevel do warnGroup("DEPRECATED",": NEW in conditional code cannot be upgraded to TYPE")
+	if inIF do
+	.	do WARNDEP(2.7,0,"new-statement in conditional code cannot be upgraded to type-statement")
+	else    do WARNDEP(3,0,"new-statement - use type-statement")
 	;
 	new class,doExpr,killExpr
 	;
 	set class=$$getClass(expr)
-	if '(class=""),'$$primVar^UCPRIM(class) do
+	if '(class=""),'$$primVar^UCPRIM(.pslPrsr,class) do
 	.	;
 	.	if $$getScope(expr,level)="NEW" do killObj(expr,.doExpr,.killExpr,.level)
 	.	kill type(level,expr)
 	;
 	;;do setScop(expr,level,msrc+1,"NEW")
-	do setScope(expr,"","","NEW","")
+	do setScope(expr,"","","NEW","String")
 	do scope("N",expr,.doExpr,.killExpr)
 	;
+	quit
+	;
+	;-----------------------------------------------------------------------
+RETURN	; M command ; Return from current block
+	;-----------------------------------------------------------------------
+	;
+	if inFOR do ERROR("Unexpected return statement in for loop") quit
+	;
+	new omd,rclass
+	;
+	if level>0 do ERROR("Unexpected return statement in block") quit
+	if ($P($G(level(1)),tab,1)="catch") do ERROR("Unexpected return statement in catch-block") quit
+	set omd=$G(pslPrsr("pslMtd",pslPrsr("moduleName")_"."_subRou))
+	set rclass=$P(omd,tab,$$rowPos^PSLMethod("resultClass"))
+	if rclass="void" do ERROR("SYNTAX: void method does not allow return value")
+	;
+	if $$isVar(expr)!($$isArr(expr)) do
+	.	;
+	.	new newLevel,newScope
+	.	set newScope=$$getScope(expr,.newLevel)
+	.	if newScope="",$$isNxtCmd(cmd,expr,.ptr) set expr="" quit
+	.	set expr=$$varExpr(expr,0,,.newLevel)
+	.	;
+	.	; turn off optimization
+	.	do setOpti(expr,newLevel,-1)
+	.	;
+	.	; If LITERAL, need to substitute here
+	.	if newScope="LITERAL" set expr=$$getExpr(expr,newLevel)
+	.	;
+	else  set expr=$$condRel(expr)
+	;
+	; to come: check that class of expr matches rclass.
+	;
+	if expr[oLvn!$$hasPatch^UCPATCH(expr)!$$hasWrap^UCREC4OP(expr) do	; Object in expr
+	.	set pslNew(subRou)=$$addList(pslNew(subRou),"vret")
+	.	set mcode=mcode_"S vret="_expr_" "
+	.	set expr="vret"
+	;
+	; if quit is extrinsic call and it has object in the call
+	; wait until after the call to kill the object.
+	; FSCW CR22719:
+	; The above is an underestimation of the potential cases: The
+	; extrinsic can be part of the epression (eg $$EXT(P1,P2)+V), or
+	; the object reference may be hidden in a nested value
+	; expression (eg. $$EXT(P1,$$VAL(O2))
+	; Also note that expr contains the generated M code, not the
+	; original PSL code. So quit $$fun(array()) will show up as
+	; $$fun(.array), and there will probably be a type descriptor
+	; for "array()" but not for "array".
+	if $$isExt(expr) do
+	.	new atom,class,params,ptr
+	.	set ptr=0,params=$P($E(expr,1,$L(expr)-1),"(",2,999) if params="" quit
+	.	for  set atom=$$ATOM^%ZS(params,.ptr,",",tok) do  if ptr<1 quit
+	..		if $e(atom)="." set atom=$e(atom,2,$L(atom))
+	..		if $$getScope(atom,level)'="NEW" quit
+	..		if $$isVar(atom),'$$primVar^UCPRIM(.pslPrsr,$$getClass(atom)) set ptr=-1
+	.       ;
+	.       if ptr=-1 set pslNew(subRou)=$$addList(pslNew(subRou),"vret"),mcode=mcode_"S vret="_expr_" ",expr="vret"
+	;
+	; If there is code to append to the command, make sure it occurs
+	; after the argument evaluation, but before the QUIT.
+	if pslP1Ap'="" do
+	.	if expr'="vret" set pslNew(subRou)=$$addList(pslNew(subRou),"vret"),mcode=mcode_"S vret="_expr_" ",expr="vret"
+	.	set mcode=$E(mcode,1,$L(mcode)-1)_pslP1Ap_" ",pslP1Ap=""
+	;
+	new doExpr,except,fpKill,killExpr,mask,scope,var
+	;
+	set (mask,var)=""
+	set except=$S($$isVar(expr):expr,$$isArr(expr):expr,1:"")
+	;
+	for  set var=$O(type(level,var)) quit:var=""  do
+	.	;
+	.	set scope=$$getScope(var,level)
+	.	if var["(",var'=$$leftSig(var) quit	; skip individual nodes
+	.	if var["." quit				; skip individual props
+	.	if (scope="NEW") do killObj(var,.doExpr,.killExpr,.level,.except,.mask,.scope) quit
+	;
+	if inIF=0,postCond="" do
+	.	;
+	.	;;kill type(level),errTrap(level),reset(level)
+	.	kill type(level),reset(level)
+	.	if level=0 set subRou=""
+	;
+	do scope("Q",expr,.doExpr,.killExpr)
 	quit
 	;
 	;-----------------------------------------------------------------------
 QUIT	; M command ; Quit from current block
 	;-----------------------------------------------------------------------
 	;
-	if forLevel do  quit
+	if inFOR do  quit
 	.	;
 	.	if expr'="" do ERROR("Unexpected return expression in for loop") quit
 	.	set mcode=mcode_"Q"_postCond_" "
 	;
+	new omd,rclass
 	if expr'="" do
+	.	if level>0 do ERROR("Unexpected return expression in block") quit
+	.	if ($P($G(level(1)),tab,1)="catch") do ERROR("Unexpected return expression in catch-block") quit
+	.	set omd=$G(pslPrsr("pslMtd",pslPrsr("moduleName")_"."_subRou))
+	.	set rclass=$P(omd,tab,$$rowPos^PSLMethod("resultClass"))
+	.	if rclass="void" do ERROR("SYNTAX: void method does not allow return value")
 	.	;
 	.	if $$isVar(expr)!($$isArr(expr)) do
 	..		;
@@ -3493,6 +4268,8 @@ QUIT	; M command ; Quit from current block
 	.	;
 	.	else  set expr=$$condRel(expr)
 	.	;
+	.	; to come: check that class of expr matches rclass.
+	.	;
 	.	if expr[oLvn!$$hasPatch^UCPATCH(expr)!$$hasWrap^UCREC4OP(expr) do	; Object in expr
 	..		set pslNew(subRou)=$$addList(pslNew(subRou),"vret")
 	..		set mcode=mcode_"S vret="_expr_" "
@@ -3505,13 +4282,17 @@ QUIT	; M command ; Quit from current block
 	.	; extrinsic can be part of the epression (eg $$EXT(P1,P2)+V), or
 	.	; the object reference may be hidden in a nested value
 	.	; expression (eg. $$EXT(P1,$$VAL(O2))
+	.	; Also note that expr contains the generated M code, not the
+	.	; original PSL code. So quit $$fun(array()) will show up as
+	.	; $$fun(.array), and there will probably be a type descriptor
+	.	; for "array()" but not for "array".
 	.	if $$isExt(expr) do
 	..              new atom,class,params,ptr
 	..		set ptr=0,params=$P($E(expr,1,$L(expr)-1),"(",2,999) if params="" quit
 	..		for  set atom=$$ATOM^%ZS(params,.ptr,",",tok) do  if ptr<1 quit
 	...			if $e(atom)="." set atom=$e(atom,2,$L(atom))
 	...			if $$getScope(atom,level)'="NEW" quit
-	...			if $$isVar(atom),'$$primVar^UCPRIM($$getClass(atom)) set ptr=-1
+	...			if $$isVar(atom),'$$primVar^UCPRIM(.pslPrsr,$$getClass(atom)) set ptr=-1
 	..              ;
 	..              if ptr=-1 set pslNew(subRou)=$$addList(pslNew(subRou),"vret"),mcode=mcode_"S vret="_expr_" ",expr="vret"
 	.	;
@@ -3520,50 +4301,39 @@ QUIT	; M command ; Quit from current block
 	.	if pslP1Ap'="" do
 	..		if expr'="vret" set pslNew(subRou)=$$addList(pslNew(subRou),"vret"),mcode=mcode_"S vret="_expr_" ",expr="vret"
 	..		set mcode=$E(mcode,1,$L(mcode)-1)_pslP1Ap_" ",pslP1Ap=""
+	else  if level=0 do
+	.	set omd=$G(pslPrsr("pslMtd",pslPrsr("moduleName")_"."_subRou))
+	.	set rclass=$P(omd,tab,$$rowPos^PSLMethod("resultClass"))
+	.	quit:rclass=""
+	.	if rclass'="void" do ERROR("SYNTAX: function return value required")
 	;
 	new doExpr,except,fpKill,killExpr,mask,scope,var
 	;
 	set (mask,var)=""
-	;
 	set except=$S($$isVar(expr):expr,$$isArr(expr):expr,1:"")
 	;
 	for  set var=$O(type(level,var)) quit:var=""  do
 	.	;
 	.	set scope=$$getScope(var,level)
-	.	if var["(",var'=$$objPtr(var) quit	; skip individual nodes
+	.	if var["(",var'=$$leftSig(var) quit	; skip individual nodes
 	.	if var["." quit				; skip individual props
 	.	if (scope="NEW") do killObj(var,.doExpr,.killExpr,.level,.except,.mask,.scope) quit
-	.	;
-	.	; FSCW CR20280: vosc scope no longer used
-	.	;;if (scope?1"vosc".N) do		; Logic for formal>actual
-	.	;;.	;
-	.	;;.	new xd,xk
-	.	;;.	do killObj(var,.xd,.xk,.level,.except,.mask,.scope)
-	.	;;.	if $D(xk) set fpKill("K",scope)=xk
-	.	;;.	else  if $D(xd) set fpKill("D",scope)=xd
 	;
-	if $D(fpKill) do			; Add formal parameter conditional kill
+	if inIF=0,postCond="" do
 	.	;
-	.	if '(postCond="") do mapPost	; FRS - 06/13/03
-	.	;
-	.	new cmd,var,expr
-	.	set (cmd,var)=""
-	.	for  set cmd=$O(fpKill(cmd)) quit:cmd=""  for  set var=$O(fpKill(cmd,var)) quit:var=""  do
-	..		;
-	..		if postCond="" set expr=cmd_":"_var
-	..		else   set expr=cmd_postCond_"&"_var
-	..		set mcode=mcode_expr_" "_fpKill(cmd,var)_" "
-	;
-	if ifLevel=0,postCond="" do
-	.	;
-	.	kill type(level),errTrap(level),reset(level)
+	.	;;kill type(level),errTrap(level),reset(level)
+	.	kill type(level),reset(level)
 	.	if level=0 set subRou=""
 	;
+	; if it is a "quit" from a catch block, make sure that the ZTPTRAP is executed
+	; before the quit.
+	;;if ($P($G(level(level)),tab,1)="catch") set doExpr=$$addList($GET(doExpr),"ZX^UCGMR(voPtr)")
+	if ($P($G(level(level)),tab,1)="catch") set doExpr=$$addList($GET(doExpr),"ZX^UCGMR(voxMrk)")
 	do scope("Q",expr,.doExpr,.killExpr)
 	quit
 	;
 	;-----------------------------------------------------------------------
-scope(cmd,expr,doExpr,killExpr)	; Add object scope management logic 
+scope(cmd,expr,doExpr,killExpr) ; Add object scope management logic
 	;-----------------------------------------------------------------------
 	;
 	if '$D(doExpr),'$D(killExpr) do buildExpr quit
@@ -3580,13 +4350,13 @@ scope(cmd,expr,doExpr,killExpr)	; Add object scope management logic
 	quit
 	;
 	;-----------------------------------------------------------------------
-impQuit(level)	;local void; Implied Quit at end of routine do stack reduction 
+impQuit(level) ;private void; Implied Quit at end of routine do stack reduction
 	;-----------------------------------------------------------------------
 	;
-	new cmd,cmdDel,expr,forLevel,ifLevel,mcode,postCond
+	new cmd,cmdDel,expr,inFOR,inIF,mcode,postCond
 	set cmd="",cmdDel="",expr="",mcode="",postCond=""
-	set forLevel=0,ifLevel=0
-	if level>0 do warnGroup("SYNTAX","Missing block terminator at end of: "_subRou)
+	set inFOR=0,inIF=0
+	if level>0 do ERROR("SYNTAX: Missing block terminator at end of: "_subRou)
 	if level=0 do warnGroup("SYNTAX","Added quit from "_subRou)
 	;
 	do QUIT
@@ -3615,7 +4385,7 @@ SET	; M command ; Process the set command
 	quit
 	;
 	;-----------------------------------------------------------------------
-SETandTYPE(atom,expr)	;local void ; generate code for assignment in SET / TYPE 
+SETandTYPE(atom,expr) ;private void ; generate code for assignment in SET / TYPE
 	;-----------------------------------------------------------------------
 	; The generated code will contain a separate SET command for each SET
 	; argument. This is essentially used to support property-assignment
@@ -3644,8 +4414,8 @@ SETandTYPE(atom,expr)	;local void ; generate code for assignment in SET / TYPE
 	; VARIABLES:
 	; . struct("setProperty") = property assignment procedure
 	;	When this variable is defined after returning from assign(), then
-	;	the assignent will be generated as a DO setProp(atom,expr)
-	;	instead of a SET atom=expr. No assumptions are made with repect
+	;	the assignment will be generated as a DO setProp(atom,expr)
+	;	instead of a SET atom=expr. No assumptions are made with respect
 	;	to the 'atom' that will occur as the first argument in the call.
 	;	In particular, object optimization shall be handled by the code
 	;	that created the struct("setProperty") node.
@@ -3655,7 +4425,7 @@ SETandTYPE(atom,expr)	;local void ; generate code for assignment in SET / TYPE
 	; NOTES:
 	; . The setProperty logic cannot be used in group sets.
 	;
-	new cmd set cmd="S"
+	new cmd set cmd="set"
 	set mcode=mcode_"S"_postCond_" "
 	kill struct("setProperty")
 	;
@@ -3704,8 +4474,9 @@ SETandTYPE(atom,expr)	;local void ; generate code for assignment in SET / TYPE
 	;
 	do assign(.atom,.expr,.xtype,postCond)
 	if atom[$C(31) set mcode=$$backup(mcode)_$P(atom,$C(31))_expr_$p(atom,$C(31),2) quit
+	if expr[$C(31) set mcode=$$backup(mcode)_$P(expr,$C(31))_atom_$p(expr,$C(31),2) quit
 	;
-	if $$getScope(atom)="LITERAL" set mcode=$$SetLit^UCGMC(mcode,atom,expr)
+	if $$getScope(atom)="LITERAL" set mcode=$$SetLit^UCGMC(mcode,atom,expr),cmdNum=cmdNum-1
 	else  if atom=expr do
 	.	set mcode=$$backup(mcode) do INFO("DEAD","no code generated for SET "_$$UNTOK^%ZS(atom_"="_expr,tok))
 	else  if $D(struct("setProperty")) do
@@ -3716,37 +4487,68 @@ SETandTYPE(atom,expr)	;local void ; generate code for assignment in SET / TYPE
 	quit
 	;
 	;-----------------------------------------------------------------------
-assign(var,expr,xtype,postCond)	;local void; Return M assignment expression 
+assign(var,expr,xtype,postCond) ;private void; Return M assignment expression
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
 	; . var = leftexpr (variable, property, or setpiece)	/REQ/MECH=REF:RW
 	; . expr = rightexpr (value to be assigned)		/REQ/MECH=REF:RW
-	; . xtype = ???
-	; . postCond = ???
+	; . xtype(,,) = multiple reference tracking array	/MECH=REFARR:W
+	;	xtype(declLevel,declVar,otherSideVar)=""
+	; . postCond = command postconditional
 	;
-	new class,eclass,i,ifFlag,newLevel,objVar,pslexpr,pslvar,scope
+	new class,eclass,i,ifFlag,mpid,newLevel,objVar,pslexpr,pslvar,scope
 	;
-	set pslexpr=expr,pslvar=var
+	set pslexpr=expr,pslvar=var,mpid=""
 	;
 	; If the assignment is to an object property of a Primitive class (or
 	; to the "object method" String.piece(sep,from,to)), then the value of
 	; the instantiation expression of that variable (setVar) must be cleared.
 	if $$isObj(var) do
-	.	set var=$$valObj(var,1,.objVar,.class)
-	.	if pslvar'=objVar,$$primDes^UCPRIM($$getClass(objVar)) do setInst(objVar,msrc+1,"")
+	.	set var=$$valObj(var,1,.objVar,.class,.mpid)
+	.	;;if pslvar'=objVar,$$primDes^UCPRIM($$getClass(objVar)) do setInst(objVar,msrc+1,"")
+	.	if pslvar'=objVar,$$primVal^UCPRIM(.pslPrsr,$$getClass(objVar)) do setInst(objVar,msrc+1,"")
 	.	set newLevel=$$getLevel(var)
 	.	do setType(pslvar,class)
 	;
 	else  if $$isFun(var) do
 	.	set var=$$valFun(var,1,.objVar,.class)
-	.	if var'=objVar,$$isVar(objVar)!$$isArr(objVar),$$primDes^UCPRIM(class) do setInst(objVar,msrc+1,"")
+	.	;;if var'=objVar,$$isVar(objVar)!$$isArr(objVar),$$primDes^UCPRIM(class) do setInst(objVar,msrc+1,"")
+	.	if var'=objVar,$$isVar(objVar)!$$isArr(objVar),$$primVal^UCPRIM(.pslPrsr,class) do setInst(objVar,msrc+1,"")
 	else  set var=$$varExpr(var,1,.class,.newLevel)
 	;
 	if ER quit
 	;
-	if expr["%EffectiveDate",$G(commands("Options","$GetEFD")) set expr=$$CVTEFD(expr)
+	; prevent assignment to void variable 
+	if class="void" do ERROR("MISMATCH: cannot assign to void "_var) quit
 	;
+	; prevent assignment to static variable
+	if $$isVar(var),$$getClass(var,.newLevel)="STATIC" do ERROR("MISMATCH: cannot assign to static "_var) quit
+	;
+	if expr["%EffectiveDate",$$getSetting^PSLCC(.pslPrsr,"Options","$GetEFD",0) set expr=$$CVTEFD(expr)
+	;
+	; If class contains parenthesis, the assignment is to a complete array.
+	; In that case, the rightExpr must be a leftExpr as well. It must have
+	; the same dimension as class, and its class must be equal to or be a
+	; descendant of the class of leftExpr.
+	if class["(" do  quit
+	.	set expr=$$leftExpr(expr,.eclass)
+	.	if $P(class,"(",2)'=$P(eclass,"(",2) do ERROR("MISMATCH: Incompatible array references "_class_" and "_eclass) quit
+	.	if class'=eclass,'$$isAncestor($P(class,"("),$P(eclass,"(")) do ERROR("MISMATCH: Incompatible array references "_class_" and "_eclass) quit
+	.	;
+	.	; Once Reference descendants can be defined by a CDM, the destroy
+	.	; code for the target array will be more complex ...
+	.	new tail
+	.	set tail=$L($P(class,"(",2))+1
+	.	set var=$E(var,1,$L(var)-tail) set:var["(" var=var_")"
+	.	set expr=$E(expr,1,$L(expr)-tail) set:expr["(" expr=expr_")"
+	.	set mcode=$$backup(mcode)_" K "_var_" M "
+	;
+	; Normal value assignment
 	set expr=$$valExpr(pslexpr,.eclass,var)
+	;
+	; prevent reference to void variable 
+	if eclass="void" do ERROR("MISMATCH: cannot make a reference to void "_expr) quit
+	;
 	if expr="" do setInst(pslvar,msrc+1,"") quit
 	;
 	if eclass="" do ERROR("Expression must return a class: "_pslexpr) quit
@@ -3756,17 +4558,34 @@ assign(var,expr,xtype,postCond)	;local void; Return M assignment expression
 	; var on the left will be a wrapped column assignment expression with
 	; $C(31) as placeholder for expr.
 	;
-	if var=expr quit			; Symmetrical: a=a or a={}a
+	if var=expr do  quit			; Symmetrical: a=a or a={}a
+	.	;
+	.	; If PSL Version < 3, need special treatment for
+	.	;	set var = {cast}var
+	.	quit:$$getSetting^PSLCC(.pslPrsr,"PSL","Version",2.7)'<3
+	.	;
+	.	quit:$E(pslexpr)'="{"  quit:'$$isVar(var)  quit:$$primVar^UCPRIM(.pslPrsr,class)
+	.	set scope=$$getScope(var,.newLevel)
+	.	quit:level=newLevel  quit:scope'="NEW"
+	.	;
+	.	; Assign cast type for remainder of scope and
+	.	; force PUBLIC scope to avoid kill
+	.	set type(level,var)=type(newLevel,var)
+	.	set $P(type(level,var),tab,3)="PUBLIC"
+	.	do setType(var,eclass)
 	;
-	if '$$primVar^UCPRIM(class) do
+	; Get the class descriptor for the assignment target (class)
+	new ocd set ocd=$$getPSLClass^PSLCC(.pslPrsr,class)
+	;
+	if '$$primVar^UCPRIM(.pslPrsr,class) do
 	.	;
 	.	set scope=$$getScope(pslvar,.newLevel)
-	.	if forLevel
-	.	else  if '(scope="NEW"!(scope="LITERAL"))
+	.	if inFOR
+	.	else  if (scope["FORMAL"!(scope="PUBLIC"))
 	.	else  if $$getInst(pslvar,.newLevel)
 	.	else  if newLevel<level,$E(forStack,newLevel,level)
 	.	;
-	.	if  do checkInst(pslvar,class,.newLevel)
+	.	if  do checkInst(pslvar,class,newLevel)
 	.	;
 	.	; FSCW CR22274: Warn if leftexpr has PUBLIC scope
 	.	if scope="PUBLIC" do warnGroup("SCOPE","Assignment to PUBLIC variable: "_pslvar)
@@ -3782,7 +4601,7 @@ assign(var,expr,xtype,postCond)	;local void; Return M assignment expression
 	.	; type for this (eg CAST).
 	.	; NB2: An additional requirement might be that the scope of the
 	.	; leftvar is "narrower" than the scope of the rightvar (assuming
-	.	; the order PUBLIC>FORMAL>NEW:0>NEW:lvl).
+	.	; the order PUBLIC>FORMAL*>NEW:0>NEW:lvl).
 	.	new expLevel
 	.	if $E(pslexpr)="{",scope="NEW" do
 	..		new cast set cast=$E(pslexpr,$f(pslexpr,"}"),$l(pslexpr))
@@ -3794,14 +4613,35 @@ assign(var,expr,xtype,postCond)	;local void; Return M assignment expression
 	.	;
 	.	if '$$isVar(expr),'$$isArr(expr) quit
 	.	;
-	.	; FSCW CR22274
+	.	; FSCW CR22274:
 	.	; If scope of rightvar is PUBLIC, then turn off optimization of
 	.	; leftvar.
+	.	; NOTE: It is probably better to turn off optimization of the
+	.	; leftvar and the rightvar under ALL circumstances.
+	.	; Also note that arrays are valid as source, but not as destination
 	.	if $$getScope(expr,.expLevel)="PUBLIC" do setOpti(pslvar,newLevel,1)
 	.	if $$getInst(expr,expLevel) do		; Multiple identifiers
 	..		;
-	..		if $$isArr(pslvar) do ERROR("Multiple identifier not supported: "_pslvar) quit
+	..		;;if $$isArr(pslvar) do ERROR("Multiple identifier not supported: "_pslvar) quit
+	..		if $$isArr(pslvar) do  quit
+	...			; allowed if target is Object and source is Prim
+	...			if class="Object",$$primVar^UCPRIM(.pslPrsr,eclass) quit
+	...			do ERROR("Multiple identifier not supported: "_pslvar) quit
 	..		set xtype(newLevel,pslvar,expr)="",xtype(expLevel,expr,pslvar)=""
+	else  do	; classTypePRIMITIVE, classTypePRIM0NODE, classTypePRIM0PROP
+	.	quit:$$getInst(pslvar)=""
+	.	new destroy
+	.	;
+	.	; check if there is destroy code (should occur iff classTypePRIMITIVE)
+	.	set destroy=$$classDestroy^PSLClass(ocd,postCond,var,2)
+	.	quit:destroy=""
+	.	;
+	.	; since assign() may also be called for more complex structures,
+	.	; use $$backup only to find the beginning of the command we are
+	.	; building now (in str). append 'destroy' to 'str', but be sure
+	.	; to copy the remainder of the original mcode
+	.	new str
+	.	set str=$$backup(mcode),mcode=str_destroy_$e(mcode,$l(str),$l(mcode))
 	;
 	if ER quit
 	;
@@ -3812,26 +4652,108 @@ assign(var,expr,xtype,postCond)	;local void; Return M assignment expression
 	;
 	if '(postCond="") set pslexpr=""
 	do setInst(pslvar,msrc+1,pslexpr,,expr)
-	if $$isArr(pslvar) do setInst($$objPtr(pslvar),msrc+1,"")
+	if $$isArr(pslvar) do setInst($$leftSig(pslvar),msrc+1,"")
 	;
 	if class=eclass quit
-	if $$primDes^UCPRIM(class),$$primDes^UCPRIM(eclass) quit	; Primitives are compatible for now
-	if $$isAncestor(class,eclass) quit		; Class is ancestor OK
-	if $$isAncestor(eclass,class) quit		; Needs error checking
+	;;if $$primDes^UCPRIM(class),$$primDes^UCPRIM(eclass) quit	; Primitives are compatible for now
+	if $$primRel^UCPRIM(class,eclass) quit	; Primitives are compatible for now
+	if $$isAncestor(class,eclass) quit	; Class is ancestor OK
+	if $$isAncestor(eclass,class) quit	; Needs error checking
 	;
 	; If types are different, try an implicit RightClass.toLeftClass() method
-	if $$isRecord(class) set class="Record"
+	if $$isRecord^PSLClass(class)>1 set class="Record"
 	new fset set fset=0
-	new mthd set mthd="to"_class_"()"
-	new des set des=$$omGet^UCXOBJ(.pslMtd,eclass,mthd,0)
-	if des="",$$primDes^UCPRIM(class) set mthd="toString()"
-	set class=eclass
-	set expr=$$method(expr,$$getLevel(expr),mthd,.type,.class,pslvar)
+	new mthd set mthd="to"_class
+	new des set des=$$findPSLMethod^PSLParser(.pslPrsr,.tknzr,eclass_"."_mthd,0)
+	;;if des="",$$primDes^UCPRIM(class) set mthd="toString()"
+	if des="",$$primVal^UCPRIM(.pslPrsr,class) set mthd="toString"
+	;;set class=eclass
+	;;set expr=$$method(expr,$$getLevel(expr),mthd,0,.class,pslvar)
+	set expr=$$method(expr,$$getLevel(expr),mthd_"()",0,eclass,pslvar)
 	do warnGroup("MISMATCH","Type: ."_mthd_" appended for assignment of "_eclass_" to "_class)
 	quit
 	;
 	;-----------------------------------------------------------------------
-autoERRM()	; private void;  simulate ER/RM declaration in type(,) 
+leftExpr(left,class) ;private void; Decode PSL leftExpression (e.g. for assignment)
+	;-----------------------------------------------------------------------
+	; ARGUMENTS:
+	; . String left
+	;	the leftexpr to decompose. Any of the following forms is
+	;	acceptable:
+	;	- variable (subscripted, unsubscripted, or $svn)
+	;	- property (object.property or object.property.property, etc.)
+	;	- arraysignature (varname(,) or object.property(,)
+	;	- setpiece (lvn.piece() or $Mintrinsic())
+	; . ret String class
+	;	The class-signature of left as derived from the decomposition
+	;
+	new mpid,newLevel,objVar,pslLeft
+	;
+	set pslLeft=left,mpid=""
+	;
+	; If the assignment is to an object property of a Primitive class (or
+	; to the "object method" String.piece(sep,from,to)), then the value of
+	; the instantiation expression of that variable (setVar) must be cleared.
+	if $$isObj(left) do
+	.	set left=$$valObj(left,1,.objVar,.class,.mpid)
+	.	if pslLeft'=objVar,$$primVal^UCPRIM(.pslPrsr,$$getClass(objVar)) do setInst(objVar,msrc+1,"")
+	.	set newLevel=$$getLevel(left)
+	.	if '$D(type(newLevel,$$leftSig(pslLeft))) do setType(pslLeft,class)
+	;
+	else  if $$isFun(left) do
+	.	set left=$$valFun(left,1,.objVar,.class)
+	.	if left'=objVar,$$isVar(objVar)!$$isArr(objVar),$$primVal^UCPRIM(.pslPrsr,class) do setInst(objVar,msrc+1,"")
+	else  set left=$$varExpr(left,1,.class,.newLevel)
+	;
+	quit left
+	;
+	;-----------------------------------------------------------------------
+leftSig(expr) ;package String; Return signature of leftexpr
+	;-----------------------------------------------------------------------
+	; ARGUMENTS:
+	; . expr = source expression
+	;	Because the function looks for parenthesis and comma, the
+	;	supplied value shall be tokenized.
+	;
+	; Examples:
+	; X			returns X
+	; X.Y			returns X.Y
+	; X(S1)			returns X()
+	; X(S1,S2)		returns X(,)
+	; X(S1,S2).Y		returns X(,).Y
+	; X(S1,S2).Y(S3,S4)	returns X(,).Y(,)
+	; X(S1,A(B),S3)		returns X(,,)
+	;
+	if expr["(" do			; subscripted
+	.	if $L(expr,"(")=2 do	; simple case: no nested subscripts
+	.	.	;
+	.	.	new levels,tail
+	.	.	set levels=$L($P(expr,"(",2),",")-1
+	.	.	set tail=$P(expr,")",2)
+	.	.	set expr=$P(expr,"(",1)_"("
+	.	.	if levels set expr=expr_$$ADDCHR(",",levels)
+	.	.	set expr=expr_")"_tail
+	.	else  do		; complex case: nested subscripts
+	.	.	new a,p,ptr,z
+	.	.	set z=expr,ptr=$F(z,"(")-1,expr=$E(z,1,ptr),p=0
+	.	.	;
+	.	.	; p<0 indicates that the closing parenthesis is found
+	.	.	for  set a=$$ATOM^%ZS(z,.ptr,"(,)",,1) do  quit:'ptr  quit:p<0
+	.	.	.	if a="(" set p=p+1 quit
+	.	.	.	if a=")" set p=p-1 quit
+	.	.	.	if p>0 quit	; inside nested parenthesis
+	.	.	.	if a="," set expr=expr_","
+	.	.	set expr=expr_")"
+	.	.	;
+	.	.	; if ptr>0, then expr is a property reference, and the
+	.	.	; property must be appended as well
+	.	.	quit:ptr=0
+	.	.	set z=$E(z,ptr+1,$L(z)),expr=expr_$S(z'["(":z,1:$$leftSig(z))
+	;
+	quit expr
+	;
+	;-----------------------------------------------------------------------
+autoERRM() ;package void;  simulate ER/RM declaration in type(,)
 	;-----------------------------------------------------------------------
 	;
 	; INPUTS:
@@ -3842,13 +4764,13 @@ autoERRM()	; private void;  simulate ER/RM declaration in type(,)
 	; - if type(,"ER") of type(,"RM") defined, the instExpr will have been
 	;	reset to ""
 	;
-	if '$GET(commands("Options","AutoPublicERRM")) quit
+	if '$$getSetting^PSLCC(.pslPrsr,"Options","AutoPublicERRM",0) quit
 	new j,lvn
 	for lvn="ER","RM" for j=level:-1:0 if $DATA(type(j,lvn)) do setInst(lvn,msrc+1,"",j) quit
 	quit
 	;
 	;-----------------------------------------------------------------------
-checkDead(code,ptr)	;local Boolean; check if code contains dead code 
+checkDead(code,ptr) ;private Boolean; check if code contains dead code
 	;-----------------------------------------------------------------------
 	; Check if code contains dead code to the left of ptr.
 	;
@@ -3863,7 +4785,7 @@ checkDead(code,ptr)	;local Boolean; check if code contains dead code
 	quit 0
 	;
 	;-----------------------------------------------------------------------
-checkInst(atom,class,newLevel)	;local void; Delete existing object if instantiated 
+checkInst(atom,class,newLevel) ;private void; Delete existing object if instantiated
 	;-----------------------------------------------------------------------
 	;
 	; INPUTS:
@@ -3899,20 +4821,33 @@ checkInst(atom,class,newLevel)	;local void; Delete existing object if instantiat
 	quit
 	;
 	;-----------------------------------------------------------------------
-setOpti(var,newLevel,integer)	;private void; Set the optimization of an object 
+pslNew(var) ;void; Add var to list of lvns that will be NEWed
 	;-----------------------------------------------------------------------
-	; Note that a non-zero value prevents optimization.
+	; Add var to the list of lvns that will be NEWed on entry of the current
+	; subRoutine
 	;
-	new vptr
-	set vptr=var if vptr["(" set vptr=$$objPtr(vptr)
+	; INPUTS:
+	; . pslNew(subRou) = current list
+	; . subRou = current subroutine
 	;
-	set $P(type(newLevel,vptr),tab,10)=integer
-	set patch(0,subRou,vptr,$$getNew(vptr))=type(newLevel,vptr)
-	if $$isRecord($P(type(newLevel,vptr),tab)) do setNeedVobj^UCREC4OP(subRou,vptr,''integer)
+	set pslNew(subRou)=$$addList(pslNew(subRou),var)
 	quit
 	;
 	;-----------------------------------------------------------------------
-setScope(var,decLvl,decPos,scope,class)	;private void; Declare an object 
+setOpti(var,newLevel,integer) ;package void; Set the optimization of an object
+	;-----------------------------------------------------------------------
+	; Note that a non-zero value prevents optimization.
+	;
+	new vptr,cls
+	set vptr=var if vptr["(" set vptr=$$leftSig(vptr)
+	;
+	set $piece(type(newLevel,vptr),tab,10)=integer,cls=$piece(type(newLevel,vptr),tab)
+	if cls="ResultSet" set patch(0,subRou,vptr,$$getNew(vptr))=type(newLevel,vptr)
+	else  if $$isRecord^PSLClass(cls)>0 set patch(0,subRou,vptr,$$getNew(vptr))=type(newLevel,vptr) do setNeedVobj^UCREC4OP(subRou,vptr,''integer)
+	quit
+	;
+	;-----------------------------------------------------------------------
+setScope(var,decLvl,decPos,scope,class) ;package void; Declare an object
 	;-----------------------------------------------------------------------
 	; Each declaration in the type(,) array requires a scope and a class.
 	; Both will be assigned once per declaration.
@@ -3937,10 +4872,11 @@ setScope(var,decLvl,decPos,scope,class)	;private void; Declare an object
 	;	position (as noted in the internal structures).
 	;	This subroutine supports non-integer values of decPos, although
 	;	only the integer part will currently be stored in type(,).
-	; . scope = variable's scope ("FORMAL", "LITERAL", "PUBLIC", or "NEW")
-	;	The supplied value is not validated
+	; . scope = variable's scope ("FORMAL", "FORMALRET", "LITERAL",
+	;	"PUBLIC", or "NEW"). The supplied value is not validated.
 	; . class = variable's datatype
-	;	The supplied value is not validated
+	;	The supplied value shall have the correct character case, and is
+	;	not validated
 	;
 	; OUTPUTS:
 	; . type(decLvl,var) = class TAB decPos TAB scope
@@ -3957,7 +4893,10 @@ setScope(var,decLvl,decPos,scope,class)	;private void; Declare an object
 	;	accessed at multiple subscript levels.
 	;
 	new lvl,pos
-	if $D(type(-1,var)) do warnGroup("MISMATCH","Modifying a PSL intrinsic variable: "_var)
+	;
+	; Ignore type static declarations for pre-allocated classes (such as Db)
+	; Allow non-static re-declarations, but provide a warning.
+	if $D(type(-1,var)) quit:scope="STATIC"  do warnGroup("MISMATCH","Modifying a PSL intrinsic variable: "_var)
 	;
 	if decLvl=0 set pos=0
 	else  if decPos="" set pos=$$getDcLnr()
@@ -3966,23 +4905,28 @@ setScope(var,decLvl,decPos,scope,class)	;private void; Declare an object
 	if decLvl="" set lvl=level
 	else  set lvl=decLvl if decLvl'=0 do warnGroup("INTERNAL:",$$getCaller(0)_" explicit DO level '"_decLvl_"' for declaration of "_class_" "_var)
 	;
+	; Check reserved words (discard subscripted vars: called recursively)
+	; Also discard level -1 assignments (true, false, super),
+	; and this in FORMALRET scope (the latter is dangerous, because it allows
+	; the programmer to use this as formal parameter in SCMs)
+	if $$CONTAIN($$getRsvd^PSLParser(),var),level>-1,'(var="this"&(scope="FORMALRET")) do WARNDEP(2.7,3.2,"variable name equals PSL reserved word: "_var)
+	;
+	; Ensure class descriptor is present (and correct case)
+	do initClass(.class)
+	;
 	; Use derived lvl and pos in assignments, but the original decLvl and
 	; decPos in the call to setScope() for the unsubscripted node
 	set type(lvl,var)=class_tab_(pos\1)_tab_scope
 	if var["(" do
-	.	new lvn,lvnScope
+	.	new lvn
 	.	set lvn=$P(var,"(",1)
 	.	if '$D(type(lvl,lvn)) do setScope(lvn,decLvl,decPos,scope,"") quit
 	.	if scope'=$$getScope(lvn,lvl) do ERROR("Scope mismatch between: "_var_" and: "_lvn)
-	;
-	if $$isRecord(class) do
-	.	new dummy
-	.	set dummy=$$decByOvs^UCREC4OP(subRou,var)
-	else  do initClass(class)
+	if $$isRecord^PSLClass(class)>0 new dummy set dummy=$$decByOvs^UCREC4OP(subRou,var)
 	quit
 	;
 	;-----------------------------------------------------------------------
-setType(var,class)	;private void; Set TYPE of object 
+setType(var,class) ;package void; Set TYPE of object
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
 	; . var = variable, possibly subscripted or property
@@ -4001,7 +4945,8 @@ setType(var,class)	;private void; Set TYPE of object
 	; . class = class to be assigned
 	;
 	new vsig,newLevel
-	set vsig=var if vsig["(" set vsig=$$objPtr(vsig)
+	set vsig=var if vsig["(" set vsig=$$leftSig(vsig)
+	if var'=vsig write:$D(ZUCTDBUG) "---> Ignored inproper call to setType() from "_$$getCaller(0)_" with var="_$$UNTOK^%ZS(var,.tok),! quit
 	;
 	set newLevel=$$getLevel($P(vsig,".",1))
 	;
@@ -4018,12 +4963,12 @@ setType(var,class)	;private void; Set TYPE of object
 	.	if $$isSys(vsig)!(vsig["vobj") quit
 	.	do warnGroup("SCOPE","Unscoped variable: "_vsig)
 	;
-	do initClass(class)
+	do initClass(.class)
 	set $P(type(newLevel,vsig),tab,1)=class
 	quit
 	;
 	;-----------------------------------------------------------------------
-setInst(var,line,expr,newLevel,call)	;private void; Set instantiation value of object 
+setInst(var,line,expr,newLevel,call) ;package void; Set instantiation value of object
 	;-----------------------------------------------------------------------
 	; expr is not tokenized
 	;
@@ -4031,16 +4976,17 @@ setInst(var,line,expr,newLevel,call)	;private void; Set instantiation value of o
 	; . level = M do-level of current target line
 	; . type() = type array
 	; . tok = tokenized literals
+	; . call = instantiating call
 	;
 	; OUTPUTS:
-	; . type(newLevel,var) = type record (as documented in subroutine main())
+	; . type(newLevel,var) = type record (as documented in subroutine cmp())
 	;
 	new class,noOpti,record,vptr
 	;
 	if line="" set line=msrc+1
 	if '$D(newLevel) set newLevel=$$getLevel(var)
 	;
-	set vptr=$S(var["(":$$objPtr(var),1:var)
+	set vptr=$S(var["(":$$leftSig(var),1:var)
 	;
 	; Prevent tokenized literals in type(,) if possible
 	; If on current line (line=(msrc+1)), then tok is likely to contain the
@@ -4074,7 +5020,7 @@ setInst(var,line,expr,newLevel,call)	;private void; Set instantiation value of o
 	else  do
 	.	set noOpti=0
 	.	if '$$isLit(expr) set expr=$$toLit(expr)
-	.	;;set noOpti='$g(commands("OPTIMIZE","OBJECTS")) quit:noOpti
+	.	;;set noOpti='$g(pslPrsr("OPTIMIZE","OBJECTS")) quit:noOpti
 	.	new icls,iexp,imet
 	.	set iexp=$p(expr,"("),icls=$p(iexp,"."),imet=$p(iexp,".",2)
 	.	quit:imet=""  quit:icls=""
@@ -4090,30 +5036,34 @@ setInst(var,line,expr,newLevel,call)	;private void; Set instantiation value of o
 	; E.g. if ARR(0)is stored with "ABC", and ARR(SUB) is passed with "DEF"
 	; it may "overwrite" ARR(0) depending on the value of SUB.
 	; However, if the entry has LITERAL scope, trust the programmer.
-	if var["(",'(class=""),$$primVar^UCPRIM(class),$p(record,tab,3)'="LITERAL" set expr="",noOpti=1
+	if var["(",'(class=""),$$primVar^UCPRIM(.pslPrsr,class),$p(record,tab,3)'="LITERAL" set expr="",noOpti=1
 	;
 	set $P(record,tab,4)=line
 	set $P(record,tab,5)=expr
 	set $P(record,tab,6)=level
-	set $P(record,tab,7)=ifLevel
+	set $P(record,tab,7)=inIF
 	set $P(record,tab,8)=ifStack
-	set $P(record,tab,9)=$P(doStack,".",1,level)
+	set $P(record,tab,9)=$$getDo^UCPSLST(.pslSt)
 	if $P(record,tab,10)'<0 set $P(record,tab,10)=noOpti
 	;
 	set type(newLevel,var)=record
 	;
-	if '(class=""),'$$primVar^UCPRIM(class) do
+	; FSCW CR27800: Only ResultSet and Record use patch() array
+	; DSR  CR35741: And DbSet
+	;;if '(class=""),'$$primVar^UCPRIM(class) do
+	if (class="ResultSet")!(class="DbSet") do
 	.	set patch(0,subRou,vptr,$P(record,tab,2))=type(newLevel,var)
-	.	if $$isRecord(class) do
-	.	.	;;do setDb^UCCOLUMN(subRou,var,,newLevel)
-	.	.	if line'=$$getDcLnr do warnGroup("INTERNAL","setInst("_var_") at line "_line_" of "_$$getDcLnr)
-	.	.	new insPos set insPos=$$insByOvs^UCREC4OP(subRou,var,expr,"") ; instMode = unknown
-	.	.	if $GET(call)'="" do setInsCall^UCREC4OP(subRou,var,insPos,call)
-	.	.	if noOpti<0 do setNeedVobj^UCREC4OP(subRou,var,1)
+	else  if $$isRecord^PSLClass(class)>0 do
+	.	set patch(0,subRou,vptr,$P(record,tab,2))=type(newLevel,var)
+	.	;;do setDb^UCCOLUMN(subRou,var,,newLevel)
+	.	if line'=$$getDcLnr do warnGroup("INTERNAL","setInst("_var_") at line "_line_" of "_$$getDcLnr)
+	.	new insPos set insPos=$$insByOvs^UCREC4OP(subRou,var,expr,"") ; instMode = unknown
+	.	if $GET(call)'="" do setInsCall^UCREC4OP(subRou,var,insPos,call)
+	.	if noOpti<0 do setNeedVobj^UCREC4OP(subRou,var,1)
 	quit
 	;
 	;-----------------------------------------------------------------------
-trackNam(var)	;local void; insert new entry in type() 
+trackNam(var) ;package void; insert new entry in type()
 	;-----------------------------------------------------------------------
 	; Track use of long names
 	; This subroutine will maintain the array pslLong() that tracks the
@@ -4135,10 +5085,10 @@ trackNam(var)	;local void; insert new entry in type()
 	;	declarations in UCOPTS when it is generated at boot
 	;	restrictionlevel = 3. Because UCOPTS may be unavailable at that
 	;	time, the subroutine quits in that case. Thus, the Framework
-	;	maintainers are responsible for the length of the naes of vars
+	;	maintainers are responsible for the length of the names of vars
 	;	declared in UCOPTS.
 	;
-	quit:$G(commands("boot","restrictionlevel"))'<3
+	quit:$$getSetting^PSLCC(.pslPrsr,"boot","restrictionlevel",0)'<3
 	new nam,mxl
 	set nam=$P(var,"("),mxl=$$getPslValue^UCOPTS("maxNameLength")
 	if $L(nam)<mxl quit
@@ -4154,7 +5104,7 @@ trackNam(var)	;local void; insert new entry in type()
 	quit
 	;
 	;-----------------------------------------------------------------------
-typeCrea(leftexpr,class,newPtr,scope,asgnPtr,val)	;private void; insert new entry in type() 
+typeCrea(leftexpr,class,newPtr,scope,asgnPtr,val) ;package void; insert new entry in type()
 	;-----------------------------------------------------------------------
 	; This subroutine creates a complete new variable in the type() array.
 	; It will be inserted at the current level.
@@ -4172,38 +5122,64 @@ typeCrea(leftexpr,class,newPtr,scope,asgnPtr,val)	;private void; insert new entr
 	; INPUTS:
 	; . level = current DO-level
 	;
-	;;do setScop(leftexpr,level,newPtr,scope)
-	;;do setType(leftexpr,class,level)
 	do setScope(leftexpr,"",newPtr,scope,class)
 	do setInst(leftexpr,asgnPtr,val,level)
 	if level<0,val'="" set $p(type(level,leftexpr),tab,5)=val	; force val for level<0
 	quit
 	;
 	;-----------------------------------------------------------------------
-typeDec(leftexpr,class,scope)	;private void; insert new entry in type() 
+typeDec(leftsig,class,scope) ;package void; insert new entry in type()
 	;-----------------------------------------------------------------------
 	; This subroutine creates a complete new decalaration in the type()
 	; array at the current level, using the current value of msrc as the
 	; declaration line (and empty instantiation line).
 	; This subroutine calls typeCrea(leftexpr,class,msrc+1,scope,msrc+1,"")
-	; and it calls decByOvs^UCREC4OP(subrou,$$objPtr(leftexpr))
+	; It does not call $$decByOvs^UCREC4OP(subrou,$$leftSig(leftexpr))
+	; because setScope() takes care of that.
 	;
 	; ARGUMENTS:
-	; . leftexpr = the leftexpr (variable / property) to be inserted
-	; . class = the class of the leftexpr
-	; . scope = scope of leftexpr
+	; . leftsig = the leftsig (variable, variable signature, or property) to
+	;	be inserted
+	; . class = the class of leftsig
+	; . scope = scope of leftsig
 	;
 	; INPUTS:
 	; . level = current DO-level
 	; . msrc = line number of last target M line
 	;
 	new tarPtr set tarPtr=msrc+1
-	do typeCrea(leftexpr,class,tarPtr,scope,tarPtr,"")
-	if $$isRecord(class) do decByOvs^UCREC4OP(subRou,$$objPtr(leftexpr))
+	do typeCrea(leftsig,class,tarPtr,scope,tarPtr,"")
+	;;if $$isRecord^PSLClass(class)>0 do decByOvs^UCREC4OP(subRou,$$leftSig(leftsig))
 	quit
 	;
 	;-----------------------------------------------------------------------
-typeFldSet(leftexpr,field,val)	;private void; set field in type() 
+typeDrop(leftsig) ;package void; remove type signature from type()
+	;-----------------------------------------------------------------------
+	; This subroutine unconditionally removes the declaration of leftsig
+	; from the type(,) array.
+	; All occurrences of leftsig.anything are also removed.
+	; If leftsig is subscripted, and there are no other subscripted entries
+	; for the name, then the name is removed as well.
+	; If leftsig is unsubscripted, all subscripted entries are removed as
+	; well.
+	;
+	; ARGUMENTS:
+	; . leftsig = the leftsig (variable, variable signature, or property) to
+	;	be removed
+	;
+	new hdr,lvl,nam,siz
+	set lvl=$$getLevel(leftsig),(hdr,nam)=$P(leftsig,"(")_".",siz=$L(hdr)
+	kill type(lvl,leftsig)
+	for  set nam=$o(type(lvl,nam)) quit:$e(nam,1,siz)'=hdr  kill type(lvl,nam)
+	set (hdr,nam)=$E(hdr,1,siz-1)_"("
+	if leftsig["(" do
+	.	set nam=$O(type(lvl,nam))
+	.	if $E(nam,1,siz)'=hdr kill type(lvl,$P(leftsig,"("))
+	else  for  set nam=$o(type(lvl,nam)) quit:$e(nam,1,siz)'=hdr  kill type(lvl,nam)
+	quit
+	;
+	;-----------------------------------------------------------------------
+typeFldSet(leftexpr,field,val) ;package void; set field in type()
 	;-----------------------------------------------------------------------
 	; This subroutine stores the speficied val in piece field of the current
 	; type entry of the leftexpr.
@@ -4216,13 +5192,44 @@ typeFldSet(leftexpr,field,val)	;private void; set field in type()
 	; INPUTS:
 	; . type(,leftexpr) exists
 	;
-	new lvl set lvl=$$getNew(leftexpr)
+	new lvl set lvl=$$getLevel(leftexpr)
 	if lvl="" do ERROR("INTERNAL: "_leftexpr_" not defined in type()") quit
 	set $P(type(lvl,leftexpr),tab,field)=val
 	quit
 	;
 	;-----------------------------------------------------------------------
-toLit(expr,tok,noLit,vars,mxInst)	;private void; try to make expr literal 
+typeSig(name,lvl) ;package String; get the declared signature for a name
+	;-----------------------------------------------------------------------
+	; This function returns the signature that occurs in type(,) for the
+	; supplied name.
+	; If type(lvl,name) exists, and its class is not "", then name
+	; itself is returned, else the first entry in the array that is a
+	; signature with the same name will be returned
+	;
+	; ARGUMENTS:
+	; . name = unsubscripted variable name
+	;
+	; INPUTS:
+	; . type(,name) exists
+	;
+	if $G(lvl)="" set lvl=$$getLevel(name)
+	if lvl="" do ERROR("INTERNAL: "_name_" not defined in type()") quit ""
+	;
+	; not subscripted
+	if $$getClass(name,lvl)'="" quit name
+	;
+	; FSCW CR27800:
+	; Currently, the type(,) array contains pure signatures and
+	; individual array nodes. So until this has been sorted out:
+	; iterate over same-name entries and stop at first subscripted
+	; signature.
+	new sig,sig2
+	set sig="",sig2=name
+	for  set sig2=$O(type(lvl,sig2)) quit:$p(sig2,"(")'=name  if sig2=$$leftSig(sig2) set sig=sig2 quit
+	quit sig
+	;
+	;-----------------------------------------------------------------------
+toLit(expr,tok,noLit,vars,mxInst) ;package void; try to make expr literal
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
 	; . expr = the expression to translate		/TYP=T/REQ/MECH=VAL
@@ -4321,6 +5328,7 @@ toLit(expr,tok,noLit,vars,mxInst)	;private void; try to make expr literal
 	..		if $E(atom,$L(atom))=")" do
 	...			;
 	...			; NOTE: x already tokenized so pass .tok to recursive call
+	...			new x
 	...			set x=$E(atom,2,$L(atom)-1)
 	...			if '$$isLit(x) set x=$$toLit(x,.tok,.noLit,.vars,mxInst) if noLit quit	; FSCW CR13403 added mxInst
 	...			if ptr=0 set expr=$E(expr,1,$L(expr)-$L(atom))_x quit
@@ -4332,29 +5340,29 @@ toLit(expr,tok,noLit,vars,mxInst)	;private void; try to make expr literal
 	.	if $D(vars(atom)) set noLit=1 quit	; Self reference
 	.	;if '$$isVar(atom) set noLit=2 quit	; Not a variable
 	.	;
-	.	new class,instLine,instStak,ifLevel,ifStack,doLevel,newLevel,x
+	.	new class,instLine,instStak,inIF,ifStack,doLevel,newLevel,x
 	.	;
 	.	set class=$$getClass(atom,.newLevel)
 	.	if class="" set noLit=2 quit
-	.	if '$$primVar^UCPRIM(class) set noLit=2 quit
+	.	if '$$primStr^UCPRIM(.pslPrsr,class) set noLit=2 quit
 	.	;
-	.	if $G(forLevel) set noLit=1 quit
+	.	if $G(inFOR) set noLit=1 quit
 	.	;
 	.	set instLine=$$getAtt(atom,newLevel,4)
 	.	set instStak=$$getAtt(atom,newLevel,6)
-	.	set ifLevel=$$getAtt(atom,newLevel,7)
+	.	set inIF=$$getAtt(atom,newLevel,7)
 	.	set ifStack=$$getAtt(atom,newLevel,8)
 	.	set doLevel=$$getAtt(atom,newLevel,9)
 	.	;
-	.	if ifLevel,instLine<(msrc+1)
+	.	if inIF,instLine<(msrc+1)
 	.	;else  if doLevel>level			; FRS 06/17/03
 	.	else  if level<instStak,$E(ifStack,level+1,instStak)
-	.	else  if ifStack!doLevel,'$$isDoScope(doLevel,doStack)
+	.	else  if ifStack!doLevel,'$$isDoScope^UCPSLST(.pslSt,doLevel)
 	.	else  if $E(forStack,instStak+1,level)
 	.	;
 	.	if  set noLit=1 quit			; a test failed
 	.	;
-	.	if instLine'<mxInst s noLit=1 quit	; FSCW CR13403
+	.	if instLine'<mxInst set noLit=1 quit	; FSCW CR13403
 	.	;
 	.	set x=$$getExpr(atom,newLevel)
 	.	if x="" set noLit=1 quit		; NULL expression
@@ -4389,11 +5397,11 @@ toLit(expr,tok,noLit,vars,mxInst)	;private void; try to make expr literal
 	; If too long to literalize, return the original expr
 	; The 1023 is more or less arbitrary. The correct way to deal with this
 	; is through PSLExpression.fitsLineLength(). Unfortunately there is no
-	; runtime entry to call this method from an M routine. So this wiull be
-	; postponed until UCVGM is converted to PSL.
+	; runtime entry to call this method from an M routine. So this will be
+	; postponed until UCGM is converted to PSL.
 	if $L(expr)>1023 set noLit=2 quit origExpr
 	;
-	new $ZTRAP set $ZTRAP="D XERROR^UCGMC(""Invalid expression: ""_expr) ZG "_($ZLEVEL-1)
+	new $ZTRAP set $ZTRAP="D ERROR(""invalid expression: ""_expr) ZG "_($ZLEVEL-1)
 	;
 	XECUTE "S expr="_expr
 	;
@@ -4401,46 +5409,52 @@ toLit(expr,tok,noLit,vars,mxInst)	;private void; try to make expr literal
 	quit expr
 	;
 	;-----------------------------------------------------------------------
-updScope(var,scope)	;void; Modify the scope of an object 
+updScope(var,scope) ;void; Modify the scope of an object
 	;-----------------------------------------------------------------------
 	; The scope will only be updated in the type(,) array, because scope
 	; changes only impact object clean-up.
 	;
 	new cls,newLevel
 	set newLevel=$$getLevel(var)
-	if var["(",$D(type(newLevel,var))#2=0 set var=$$objPtr(var)    ; FRS - 06/13/03
+	if var["(",$D(type(newLevel,var))#2=0 set var=$$leftSig(var)    ; FRS - 06/13/03
 	set $P(type(newLevel,var),tab,3)=scope
 	quit
 	;
 	;-----------------------------------------------------------------------
-varExpr(atom,fset,class,newLevel,scope)	; Return a variable expression 
+varExpr(atom,fset,class,newLevel,scope) ; Return a variable expression
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
-	; . String atom = subscripted or unsubscripted variable	/REQ/MECH=VAL
-	; . Number fset = atom occurs as leftexpr		/REQ/MECH=VAL
+	; . String atom = subscripted or unsubscripted variable, or signature
+	; . Number fset = atom occurs as leftexpr
 	;	If 0, atom occurs as rightexpr
 	;	If 1, atom occurs as leftexpr
-	;	If -1, meaning unknown. This value is passed by subroutine KILL,
-	;	when decomposing a KILL-argument.
+	;	If -1, atom occurs in KILL or as ret in actual parameter list.
+	;		For unsubscripted atoms that refer to an array,
+	;		return the class of the array instead of the class of
+	;		the unsubscripted variable.
+	;	If -9, atom is a LOCK argument (and all symbol table handling
+	;		can be suppressed)
 	; . String class = datatype of atom			/NOREQ/MECH=REF:W
 	;	Will receive the datatype of atom as stored in type()
-	; . Number newLevel = ???
+	; . Number newLevel = declaration level			/NOREQ/MECH=REF:W
+	;	 The static level where atom is declared
 	; . String scope = scope of atom			/NOREQ/MECH=REF:W
 	;	Will receive the scope of the variable.
-	;	Current values are: FORMAL, LITERAL, NEW, and PUBLIC
+	;	Current values are: FORMAL, FORMALRET, LITERAL, NEW, and PUBLIC
 	;
 	if $E(atom)="%" set z=$G(keywords(atom)) if '(z="") do  quit atom
 	.	;
 	.	set scope=$P(z,"|",2)
-	.	if fset=1,scope=1 do warnGroup("SYSVAR","Assigning system variable: "_atom)
-	.	if fset=1,scope=-1 do ERROR("Assigning a value to a read-only system variable: "_atom)
+	.	if fset=1,scope=1 do warnGroup("SYSVAR","assigning system variable: "_atom)
+	.	if fset=1,scope=-1 do ERROR("assigning a value to a read-only system variable: "_atom)
 	.	;
 	.	set atom=$p(z,"|",1),class=$P(z,"|",3)
 	.
-	.	if 'fset,atom="EFD",$G(commands("Options","$GetEFD")) set atom="$G(EFD)"
+	.	if 'fset,atom="EFD",$$getSetting^PSLCC(.pslPrsr,"Options","$GetEFD",0) set atom="$G(EFD)"
 	.	;
 	.	set scope="PUBLIC"
 	.	if class="" set class="String"
+	.	do initClass(class)
 	.	if $$isFun(atom) quit
 	.	;
 	.	set newLevel=0
@@ -4448,12 +5462,13 @@ varExpr(atom,fset,class,newLevel,scope)	; Return a variable expression
 	.	if $$getScope(atom)="" do setScope(atom,0,"",scope,class)
 	.	do addXref("V"_+$G(fset),$P(atom,"(",1),scope_$C(9)_class)
 	;
-	if $E(atom)="^" do  quit atom			; Global variable
+	if $E(atom)="^"!(fset=-9) do  quit atom			; Global variable or LOCK
 	.	;
-	.	set class="String",scope="PUBLIC"
-	.	do warnGroup("GLOBAL","M Global Reference: "_atom)
-	.	if atom["(" set atom=$$valArr(atom,fset)
-	.	do addXref("G"_+$G(fset),$P(atom,"(",1),scope_$C(9)_class)
+	.	new tail
+	.	set class="String",scope="PUBLIC",newLevel=0
+	.	if fset'=-9 do warnGroup("GLOBAL","M Global Reference: "_atom)
+	.	if atom["(" set atom=$$valArr(atom,.tail) if tail>0 do ERROR("SYNTAX: invalid subscripted Global: "_atom)
+	.	if fset'=-9 do addXref("G"_+$G(fset),$P(atom,"(",1),scope_$C(9)_class)
 	;
 	; FSCW CR18163: if atom is a subscripted variable the next statements
 	; will return "", because only the signature occurs in type(,).
@@ -4467,23 +5482,62 @@ varExpr(atom,fset,class,newLevel,scope)	; Return a variable expression
 	;;set scope=$$getScope(atom,.newLevel)
 	;;set class=$$getClass(atom,.newLevel)		; Default to String
 	;;if class="" set class="String" do setType(atom,class)
-	new atomSig set atomSig=$$objPtr(atom)
+	new atomSig set atomSig=$$leftSig(atom)
 	set scope=$$getScope(atomSig,.newLevel)
-	if fset=-1,$$isVar(atom) do
-	.	new sig2
-	.	set sig2=$O(type(newLevel,atom))
-	.	if $p(sig2,"(")=atom set atomSig=sig2
+	if scope="" do setType(atomSig,"String")
+	if fset=-1 do
+	.	;
+	.	; FSCW CR27800:
+	.	; Currently, the type(,) array contains pure signatures and
+	.	; individual array nodes. So until this has been sorted out:
+	.	; iterate over same-name entries and stop at first subscripted
+	.	; signature.
+	.	; No need for lookup if atomSig itself has a class
+	.	quit:$$getClass(atomSig,newLevel)'=""
+	.	new sig2 set sig2=$$typeSig($P(atomSig,"("))
+	.	if sig2'="" set atomSig=sig2
 	set class=$$getClass(atomSig,.newLevel)		; Default to String
-	if class="" set class="String" do setType(atomSig,class)
+	if class="" do
+	.	;
+	.	; Variable is in scope but the signature has no datatype.
+	.	; This must be a dimension mismatch. If the declared variant
+	.	; names a PRIM0PROP class, then the undeclared variant is
+	.	; assumed to be String, else the undeclared variant is will be
+	.	; of class Object (V3 and up) or String (2.x).
+	.	; Note that it could also be a variable that was declared by the
+	.	; deprecated new-statement
+	.	if $d(type(newLevel,atomSig))!$$getSetting^PSLCC(.pslPrsr,"PSL","Version",2.7)<3 set class="String" quit
+	.	new sig2 set sig2=$$typeSig($P(atomSig,"("))
+	.	new cls2 set cls2=$$getClass(sig2,.newLevel)
+	.	if cls2="" DO warnGroup("INTERNAL","no class for "_atomSig_" ==> "_sig2) set cls2="String"
+	.	if $P(pslPrsr("pslCls",cls2),tab,$$rowPos^PSLClass("classType"))=3 set class="String" quit
+	.	;
+	.	; to come: only accept if actual number of subsripts less than
+	.	; declared number of subscripts.
+	.	set class="Object"
 	;
 	; FSCW CR11445: 'fset' is /REQ
 	;;do addXref("V"_+$G(fset),$P(atom,"(",1),scope_$C(9)_class)
-	do addXref("V"_+fset,$P(atom,"(",1),scope_$C(9)_class)
+	do addXref("V"_+fset,$P(atom,"("),scope_$C(9)_class)
 	;
-	if $$isArr(atom) quit $$valArr(atom,fset)
+	if $$isArr(atom) do  quit atom
+	.	new tail
+	.	set atom=$$valArr(atom,.tail)
+	.	;
+	.	; If no tail, fset=-1, not an array of PRIM0PROPs, it must be an
+	.	; end-node (atomSig=$$leftSig(atom)
+	.	if 'tail quit:fset'=-1  quit:$$primVal^UCPRIM(.pslPrsr,class)  do:atomSig'=$$leftSig(atom) ERROR("MISMATCH: Subtree invalid in this context: "_atom) quit
+	.	if atom'=atomSig do ERROR("SYNTAX: Invalid subscripted variable: "_atom)
+	.	set class=class_"("_$P(atomSig,"(",2)
 	if $$isVar(atom) do  quit atom
 	.	;
+	.	; If referencing a NEW var that has not yet been instantiated
+	.	; provide a warning.
 	.	if 'fset,'$$getInst(atom,.newLevel),scope="NEW" do warnGroup("SCOPE","Undefined Variable: "_atom),setInst(atom,msrc,"")
+	.	;
+	.	; If atomSig not equal to atom, the unsubscripted var references
+	.	; an array. Update class to reflect this
+	.	if atomSig'=atom set class=class_"("_$P(atomSig,"(",2)
 	.	;
 	.	; FSCW CR20280: vosc scope no longer used
 	.	;;if fset=1,scope="FORMAL",'$$primVar^UCPRIM(class) do
@@ -4503,13 +5557,13 @@ varExpr(atom,fset,class,newLevel,scope)	; Return a variable expression
 	.	;;.	set code="N "_var_" S "_var_"='$D("_atom_")"
 	.	;;.	do newLine(code,line,0)
 	;
-	if $$isSys(atom) quit atom
+	if $$isPslSvn(atom) quit atom
 	;
 	do ERROR("Variable expected: "_atom)
 	quit ""
 	;
 	;-----------------------------------------------------------------------
-ADD(code,line)	;private void; Add a line of code to the output buffer 
+ADD(code,line) ;package void; Add a line of code to the output buffer
 	;-----------------------------------------------------------------------
 	;
 	if ER=2 quit
@@ -4521,25 +5575,53 @@ ADD(code,line)	;private void; Add a line of code to the output buffer
 	set msrc(line)=code
 	quit
 	;
-isArr(expr)	;private Boolean; is expr an array (subscripted local variable) 
+	;-----------------------------------------------------------------------
+isAsnDst(expr) ;package Boolean;
+	;-----------------------------------------------------------------------
+	; Helper function that returns if expr is a valid assignment destination
+	; The following values are considered assignment targets:
+	; . variable (including voN variable)
+	; . array
+	; . class.property
+	;
+	if $$isVar(expr) quit 1
+	if $$isArr(expr) quit 1
+	quit $$isObjPrp(expr)
+	;
+	;-----------------------------------------------------------------------
+isArr(expr) ;package Boolean; is expr an array (subscripted local variable)
 	if '$$isVar($P(expr,"(",1)) quit 0	; Not legal variable
 	new y
 	set y=$F(expr,"(") if y=0 quit 0		; No )
-	set y=y+1					; Reject ()
+	;;set y=y+1					; Reject ()
 	for  set y=$F(expr,")",y)  quit:y=0!($L($E(expr,1,y-1),"(")=$L($E(expr,1,y-1),")"))
 	quit $L(expr)+1=y
+	;
 	;-----------------------------------------------------------------------
-isVar(expr)	;private Boolean; is expr a variable 
+isVar(expr) ;package Boolean; is expr a variable
 	quit expr?1A.AN!(expr?1"%".AN)!($E(expr)="@"&$$isVar($E(expr,2,$l(expr))))
 	;-----------------------------------------------------------------------
-isObj(expr)	; Return is a valid object.method/property syntax 
+isObj(expr) ; Return is a valid object.method/property syntax
+	;-----------------------------------------------------------------------
 	;
 	new y set y=0
 	for  set y=$F(expr,".",y) quit:y=0  if $E(expr,y)'?1N,$L($E(expr,1,y-2),"(")=$L($E(expr,1,y-2),")") quit
 	quit (y>2)
 	;
 	;-----------------------------------------------------------------------
-isFun(expr)	;local Boolean; 
+isObjMtd(cls,nam) ; Return is a valid object.method (PSLParser.findPSLMethod()]"")
+	;-----------------------------------------------------------------------
+	;
+	quit $$findPSLMethod^PSLParser(.pslPrsr,.tknzr,cls_"."_$PIECE(nam,"("),1)]""
+	;
+	;-----------------------------------------------------------------------
+isObjPrp(cls,nam) ; Return is a valid object.property (PSLParser.findPSLProperty()]"")
+	;-----------------------------------------------------------------------
+	;
+	quit $$findPSLProperty^PSLParser(.pslPrsr,.tknzr,cls_"."_$PIECE(nam,"("),1)]""
+	;
+	;-----------------------------------------------------------------------
+isFun(expr) ;private Boolean;
 	quit expr?1"$"1A.AN1"(".E1")"!(expr?1"$$"1A.E)
 	;
 	; FSCW CR11441: replaced by single patterns for positive and negative values
@@ -4547,31 +5629,41 @@ isFun(expr)	;local Boolean;
 	;;isInt(expr)	quit expr?1N.N!(expr?1"-"1N.N)
 	;;isNum(expr)	quit expr=+expr!(expr?.N1".".1N.N)!(expr?1"-".N1".".1N.N)!$$isExp(expr)
 	;-----------------------------------------------------------------------
-isExp(expr)	;local Boolean; 
+isExp(expr) ;private Boolean;
 	quit $$isFrac($P(expr,"E"))&$$isInt($P(expr,"E",2,999))
 	;-----------------------------------------------------------------------
-isInt(expr)	quit expr?.1"-"1.N 
+isInt(expr) quit expr?.1"-"1.N
 	;-----------------------------------------------------------------------
-isNameDQ(name)	;private Boolean; Name is reserved for PSL source code generators 
+isNameDQ(name) ;package Boolean; Name is reserved for PSL source code generators
 	quit name?1"v"1.UN
 	;-----------------------------------------------------------------------
-isNameFW(name)	;private Boolean; Name is reserved for Framework (DQ + PSL) 
+isNameFW(name) ;package Boolean; Name is reserved for Framework (DQ + PSL)
 	quit name?1"v".AN
 	;-----------------------------------------------------------------------
-isNamePSL(name)	;private Boolean; Name is reserved for PSL compiler 
+isNamePSL(name) ;package Boolean; Name is reserved for PSL compiler
 	quit name?1"v".AN1L.AN
 	;-----------------------------------------------------------------------
-isNum(expr)	;private Boolean; 
+isNum(expr) ;package Boolean;
 	; Also called by parsecmp^UCCOLUMN
 	;
 	quit $$isFrac(expr)!$$isExp(expr)
 	;-----------------------------------------------------------------------
-isFrac(expr)	quit expr=+expr!(expr?.1"-".N.1"."1.N) 
+isFrac(expr) quit expr=+expr!(expr?.1"-".N.1"."1.N)
 	;-----------------------------------------------------------------------
-isExt(expr)	;local Boolean; 
+isExt(expr) ;private Boolean;
 	quit expr?1"$$"1E.E!(expr?1"$$^"1E.E)!(expr?1"$$"1E1"^"1E.E)
+	;
 	;-----------------------------------------------------------------------
-isSimple(expr)	;private Boolean; 
+isSig(expr) ;private Boolean;
+	;-----------------------------------------------------------------------
+	; Helper function that returns if expr represents a valid variable
+	; signature (name or name plus subscripts)
+	;
+	quit $TR(expr,"%","A")?1A.AN1"(".","1")"!($TR(expr,"%","A")?1A.AN)
+	;
+	;
+	;-----------------------------------------------------------------------
+isSimple(expr) ;package Boolean;
 	;-----------------------------------------------------------------------
 	; Helper function that returns if expr represents a "simple" expression
 	; that can be used multiple times in a single method return expression.
@@ -4585,19 +5677,54 @@ isSimple(expr)	;private Boolean;
 	;	be simple.
 	;
 	quit (expr'?1"vo"1.N&$$isVar(expr))!$$isArr(expr)!$$isSys(expr)!$$isLit(expr)
+	;
 	;-----------------------------------------------------------------------
-isSys(expr)	quit $$CONTAIN($$initSvns(),$$UPCASE(expr)) 
+isSingle(expr) ;Boolean;
 	;-----------------------------------------------------------------------
-isIdx(expr)	;local Boolean; 
+	; Helper function that returns if expr represents a "single" expression
+	; atom.
+	;
+	; NOTES:
+	; . $$leftSig() expects a tokenized value
+	;
+	new sig
+	set sig=$$leftSig^UCGM($$TOKEN^%ZS(expr))
+	quit sig=$tr(sig,"+-*/\#_'=><[]&!?")
+	;-----------------------------------------------------------------------
+isSys(expr) quit $$CONTAIN($$initSvns(),$$UPCASE(expr))
+	;-----------------------------------------------------------------------
+isPslSvn(expr) ;package boolean; is expr a suppored PSL System Variable
+	;-----------------------------------------------------------------------
+	; Support function that not only validates the SVN but also produces a
+	; %PSL-W-DEPRECATED warning if the SVN will not port to Java.
+	;
+	; NOTES:
+	; . The messages are based on "PSL to Java, Design and Remaining
+	;	Issues", "Appendix A", Special Variables table: a "no" will be
+	;	reported as "will not be portable", a "?" will be reported as
+	;	"may not be portable".
+	; . The only "yes" on the document occurs for $J/$JOB, which shall be
+	;	replaced by %ProcessID. So every call to this function will
+	;	trigger a deprecation warning.
+	;
+	new msg
+	set expr=$$UPCASE(expr)
+	if '$$isSys(expr) quit 0
+	if $$CONTAIN("$J,$JOB",expr) set msg="$JOB - use %ProcessID"
+	else  if $$CONTAIN("$REFERENCE,$T,$ZGBLDIR,$ZEOF,$ZJOB,$ZL,$ZLEVEL,$ZPOSITION,$ZS,$ZSTEP,$ZT,$ZVERSION",expr) set msg=expr_" - will not port to Java"
+	else  set msg=expr_" - may not port to Java"
+	do WARNDEP(3,0,msg)
+	quit 1
+	;-----------------------------------------------------------------------
+isIdx(expr) ;private Boolean;
 	quit $$isVar($P(expr,"{",1))&($P(expr,"{",2)?1e.e)&($E(expr,$L(expr))="}")
+	;
 	;-----------------------------------------------------------------------
-isRecord(expr)	;private Boolean; is expr the name of a Record class? 
-	quit ($E(expr,1,$L(reClass))=reClass)
-	;-----------------------------------------------------------------------
-isLit(expr)	;private Boolean; is expr a literal (numeric or string) 
+isLit(expr) ;package Boolean; is expr a literal (numeric or string)
 	quit $$isNum(expr)!$$isStr(expr)
+	;
 	;-----------------------------------------------------------------------
-isStr(expr)	;local Boolean; Returns whether this string is a literal 
+isStr(expr) ;package Boolean; Returns whether this string is a literal
 	;
 	if '(expr?1"""".E1"""") quit 0			; Must begin/end quote
 	if $L(expr,"""")=3 quit 1			; Two quotes are OK
@@ -4607,78 +5734,33 @@ isStr(expr)	;local Boolean; Returns whether this string is a literal
 	quit (y>$L(expr))
 	;
 	;-----------------------------------------------------------------------
-isClass(expr)	;private void; Return expr is a class 
+isClass(expr) ;private void; Return expr is a class
 	;-----------------------------------------------------------------------
-	; This function will also be called at runtime by $$clsIsAnc^UCGMR(),
-	; and $$clsIsClass^UCGMR().
+	; In addition to checking if the supplied expr is a valid className,
+	; this function causes the following side effects:
+	; - pslTbl(table) will be created for RecordXXX classes
+	; - initClass(class) will be called for all classes
 	;
-	; NOTES:
-	; . This function causes side effects that should be restricted to the
-	;	compiler itself:
-	;	* pslTbl(table) will be created for RecordXXX classes
-	;	* fsn(table) will be created for RecordXXX classes
-	;	* initClass(class) will be created for other classes
-	;	This function, shall not be called at runtime.
+	; If present as specified, return value immediately, based on .classType
+	if $DATA(pslPrsr("pslCls",expr)) quit $PIECE(pslPrsr("pslCls",expr),tab,$$rowPos^PSLClass("classType"))>-1
 	;
-	new ER,z
-	set z=$$ocClassName^UCXOBJ(expr) if z="" quit 0
+	; Initialize descriptor, and obtain correct spelling
+	new orig set orig=expr do initClass(.expr)
 	;
-	set expr=z
-	if $$isRecord(expr),'(expr=reClass) do
+	; if not found, or not a class, return false
+	if expr="" set expr=orig quit 0
+	if $PIECE(pslPrsr("pslCls",expr),tab,$$rowPos^PSLClass("classType"))<0 quit 0
+	;
+	if $$isRecord^PSLClass(expr)>1 do
 	.	;
 	.	; cache table descriptors
 	.	new table
-	.	set table=$$getReTable(expr)
+	.	set table=$$tableNameOf^PSLClass(expr)
 	.	if '$D(pslTbl(table)) set pslTbl(table)=$$getPslTbl^UCXDD(table,0)
-	.	if '$D(fsn(table)) do fsn^SQLDD(.fsn,table)
-	else  do initClass(expr)
 	quit 1
 	;
 	;-----------------------------------------------------------------------
-objPtr(expr)	; private String; Return object pointer 
-	;-----------------------------------------------------------------------
-	; ARGUMENTS:
-	; . expr = source expression
-	;	Because the function looks for parenthesis and comma, the
-	;	supplied value shall be tokenized.
-	;
-	; Examples:
-	; X		returns X
-	; X.Y		returns X.Y
-	; X(S1)		returns X()
-	; X(S1,S2)	returns X(,)
-	; X(S1,S2).Y	returns X(,).Y
-	; X(S1,A(B),S3)	returns X(,,)
-	;
-	if expr["(" do			; subscripted
-	.	if $L(expr,"(")=2 do	; simple case: no nested subscripts
-	.	.	;
-	.	.	new levels,tail
-	.	.	set levels=$L($P(expr,"(",2),",")-1
-	.	.	set tail=$P(expr,")",2)
-	.	.	set expr=$P(expr,"(",1)_"("
-	.	.	if levels set expr=expr_$$ADDCHR(",",levels)
-	.	.	set expr=expr_")"_tail
-	.	else  do		; complex case: nested subscripts
-	.	.	new a,p,ptr,z
-	.	.	set z=expr,ptr=$F(z,"(")-1,expr=$E(z,1,ptr),p=0
-	.	.	;
-	.	.	; p<0 indicates that the closing parenthesis is found
-	.	.	for  set a=$$ATOM^%ZS(z,.ptr,"(,)",,1) do  quit:'ptr  quit:p<0
-	.	.	.	if a="(" set p=p+1 quit
-	.	.	.	if a=")" set p=p-1 quit
-	.	.	.	if p>0 quit	; inside nested parenthesis
-	.	.	.	if a="," set expr=expr_","
-	.	.	set expr=expr_")"
-	.	.	;
-	.	.	; if ptr>0, then expr is a property reference, and the
-	.	.	; property must be appended as well
-	.	.	if ptr>0 set expr=expr_$E(z,ptr+1,$L(z))
-	;
-	quit expr
-	;
-	;-----------------------------------------------------------------------
-mapPost	; Map post conditional into a variable 
+mapPost ; Map post conditional into a variable
 	;-----------------------------------------------------------------------
 	; FRS - 06/13/03
 	new atom
@@ -4686,12 +5768,12 @@ mapPost	; Map post conditional into a variable
 	if $$isVar(atom)!$$isLit(atom) quit
 	;
 	set pslNew(subRou)=$$addList(pslNew(subRou),"vpc")
-	set mcode=mcode_"S vpc=("_$E(postCond,2,$L(postCond))_") "
+	set mcode=mcode_"S vpc="_$E(postCond,2,$L(postCond))_" "
 	set postCond=":vpc"
 	quit
 	;
 	;-----------------------------------------------------------------------
-killObj(expr,doExpr,killExpr,level,except,mask,scope)	; Kill an object 
+killObj(expr,doExpr,killExpr,level,except,mask,scope) ; Kill an object
 	;-----------------------------------------------------------------------
 	;
 	new atom,class,newPtr,optim
@@ -4700,39 +5782,39 @@ killObj(expr,doExpr,killExpr,level,except,mask,scope)	; Kill an object
 	.	;
 	.	if expr=$G(except) quit
 	.	set class=$$getClass(expr,level) if class="" quit
-	.	if $$primVar^UCPRIM(class) quit
+	.	if $$primVar^UCPRIM(.pslPrsr,class) quit
 	.	;
 	.	set optim='$$getOpti(expr,level)
 	.	set newPtr=$$getNew(expr,level)
 	.	;
-	.	if $D(xtype(level,expr)) do:ifLevel=0 remPtr(expr,.xtype) quit
+	.	if $D(xtype(level,expr)) do:inIF=0 remPtr(expr,.xtype) quit
 	.	;
-	.	if expr["(",$$objPtr(expr)=expr do killArray(expr,level) set mask=$$addList(.mask,expr) quit
+	.	if expr["(",$$leftSig(expr)=expr do killArray(expr,level) set mask=$$addList(.mask,expr) quit
 	.	;
 	.	set atom=oLvn_"(+$G("_expr_"))"
-	.	if expr["(",$$CONTAIN($G(mask),$$objPtr(expr)) quit
+	.	if expr["(",$$CONTAIN($G(mask),$$leftSig(expr)) quit
 	.	;
 	.	; FSCW CR14569: $$patch^UCPATCH() called independent of optim
 	.	;;if optim set atom=$$patch^UCPATCH(subRou,expr,level,atom)
 	.	set atom=$$patch^UCPATCH(subRou,expr,level,atom)
 	.	set killExpr=$$addList(.killExpr,atom)
 	.	do killCasc(expr,.doExpr,.killExpr,level,class)
-	.	if postCond="",ifLevel=0 do		; Delete symbol & properties
+	.	if postCond="",inIF=0 do		; Delete symbol & properties
 	..		;
 	..		kill type(level,expr)
 	..		set expr=expr_".",atom=expr
 	..		for  set atom=$order(type(level,atom)) quit:'($E(atom,1,$L(expr))=expr)  kill type(level,atom)
 	;
-	else  if ifLevel=0,postCond="",$E(expr)'="v" do
+	else  if inIF=0,postCond="",$E(expr)'="v" do
 	.	;
 	.	new z
 	.	set z=expr_"(",z=$O(type(level,z))
-	.	if $E(z,1,$L(expr))=expr,$$getInst(z,level)
+	.	if $E(z,1,$L(expr))=expr,$$getInst(z,level)!1	; FSCW CR27800 arrays could be referenced in many ways !!!!
 	.	else  do warnGroup("SCOPE","Unreferenced variable: "_expr)
 	quit
 	;
 	;-----------------------------------------------------------------------
-killArray(expr,level)	; Delete all objects in an array 
+killArray(expr,level) ; Delete all objects in an array
 	;-----------------------------------------------------------------------
 	;
 	; This can be optimized to deal with literal only (e.g., a(1))
@@ -4752,7 +5834,7 @@ killArray(expr,level)	; Delete all objects in an array
 	set label=$G(methods("Object","kill",expr))
 	if label="" do
 	.	;
-	.	set label=$$newLabel("Kill",.labels)
+	.	set label=$$findSubr("vKill","")	; comment will never match !
 	.	set methods("Object","kill",expr)=label
 	.	;
 	.	new code,level,var
@@ -4778,10 +5860,10 @@ killArray(expr,level)	; Delete all objects in an array
 	quit
 	;
 	;-----------------------------------------------------------------------
-killCasc(expr,doExpr,killExpr,level,class)	;local void; Kill cascading objects 
+killCasc(expr,doExpr,killExpr,level,class) ;private void; Kill cascading objects
 	;-----------------------------------------------------------------------
 	;
-	if $$isRecord(class) quit		; No Objects in Record
+	quit:$$isRecord^PSLClass(class)>0		; No Objects in Record
 	;
 	new code,idx,label,lvn,next,nod,pos,rclass,n,z
 	;
@@ -4795,19 +5877,22 @@ killCasc(expr,doExpr,killExpr,level,class)	;local void; Kill cascading objects
 	.	if expr'="" set label=$$patch^UCPATCH(subRou,expr,level,label)
 	.	set doExpr=$$addList(.doExpr,label) quit
 	;
-	; If object of this class contain properties that are not implemented as
+	; If objects of this class contain properties that are not implemented as
 	; primitives, code is needed to get rid of these objects as well. Include
 	; a vKill() procedure to do this.
-	set n=""
-	for  set n=$O(^OBJECT(class,0,n)) quit:n=""  do
+	set n=class_"."
+	for  set n=$O(pslPrsr("pslPrp",n)) quit:$p(n,".")'=class  do
 	.	;
-	.	set z=^(n)
-	.	set nod=$P(z,"|",1),pos=$P(z,"|",2),rclass=$P(z,"|",3),idx=$P(z,"|",6)
-	.	if rclass=""!$$primVar^UCPRIM(rclass) quit
+	.	set z=pslPrsr("pslPrp",n)
+	.	set nod=$P(z,"|",$$rowPos^PSLProperty("NODE"))
+	.	set pos=$P(z,"|",$$rowPos^PSLProperty("POSITION"))
+	.	set rclass=$P(z,"|",$$rowPos^PSLProperty("RESULTCLASS"))
+	.	set idx=$P(z,"|",$$rowPos^PSLProperty("DIMENSION"))
+	.	if rclass=""!$$primVar^UCPRIM(.pslPrsr,rclass) quit
 	.	;
 	.	if label="" do
 	..		;
-	..		set label=$$newLabel("Kill",.labels)
+	..		set label=$$findSubr("vKill","")	; comment will never match !
 	..		set methods("Object","killCasc",class)=label
 	..		do addSubr(label,"(n)","Delete nested objects "_class)
 	.	;
@@ -4820,6 +5905,8 @@ killCasc(expr,doExpr,killExpr,level,class)	;local void; Kill cascading objects
 	.	;
 	.	set lvn=oLvn_"(n",code=""
 	.	if nod'="" set lvn=lvn_","_$S(nod=+nod:nod,1:""""_nod_"""")
+	.	;
+	.	; FSCW CR 27800: This needs to be adapted for multi-level arrays
 	.	if idx="" set lvn=lvn_")"
 	.	else  set lvn=lvn_",m)",code="N m set m="""" for  set m=$O("_lvn_") quit:m=""""  "
 	.	;
@@ -4843,7 +5930,7 @@ killCasc(expr,doExpr,killExpr,level,class)	;local void; Kill cascading objects
 	quit
 	;
 	;-----------------------------------------------------------------------
-subRou(expr,subRou,labels,type)	; Set up a subroutine 
+subRou(mtddes,subRou,type) ; Set up a subroutine
 	;-----------------------------------------------------------------------
 	; This subroutine:
 	; . resets pslSt to the current source line number (lptr), no IF, no FOR
@@ -4853,29 +5940,22 @@ subRou(expr,subRou,labels,type)	; Set up a subroutine
 	;
 	set fline=0
 	;
-	new cls,cmdDel,fpn,lblRec,p,ptr,return,var
+	new cls,mtd,p,var
 	;
-	set ptr=0,cmdDel=" "
-	;
-	kill struct(7),pslLong		;7/11/03
+	kill struct(7)		;7/11/03
 	;
 	; Missing block terminator
 	; Note: The code that decrements level is carefully crafted to ensure
 	; that level=0 when the FOR-loop quits, but impQuit(0) will NOT have
 	; been called (may or may not be called later).
 	if level for  do impQuit(level) set level=level-1 if level=0 quit
+	set cls=pslPrsr("moduleName")
+	set mtd=$P(mtddes,tab,$$rowPos^PSLMethod("method"))
 	;
-	; Decompose and validate.
-	; The label may have been decomposed before, but labels that are sneaked
-	; in by method generating code will be seen here for the first time.
-	; Validation of parameters will be done here for the first time.
-	set lblRec=$$fromSubrou^UCPSLLR(expr,3,$G(commands("Options","ResultClass"),0))
-	set return=$p(lblRec,tab,4)
-	if '$d(labels(return)) set labels(return)=lblRec
-	;
-	if $P(labels(return),tab)'="" do ERROR("Label already exists: "_return) quit ""
-	set $P(labels(return),tab,1)=msrc+1
-	set level(level)=""
+	set p=$$rowPos^PSLMethod("codeLine")
+	;;if $P(mtddes,tab,p)>0 do ERROR("Label already exists: "_$P(mtd,".",2)) quit ""
+	set $P(mtddes,tab,p)=msrc+1
+	set level(0)=""
 	;
 	; If the previous subroutine has not been terminated by an explicit
 	; quit, then this is treated as an implicit GOTO from the previous
@@ -4884,150 +5964,43 @@ subRou(expr,subRou,labels,type)	; Set up a subroutine
 	; GOTO is not allowed.
 	; If GOTO is allowed, resetTyp() will be called to invalidate all
 	; previous assignements to Primitives.
-	; If this is just a label inside a subroutine, quit here
-	if " "'[subRou do  quit:return=expr return
+	if " "'[subRou do
 	.	;
-	.	if $P(labels(return),tab,5)'="" do impQuit(0) quit	; has params, so new subroutine
+	.	if $P(mtddes,tab,$$rowPos^PSLMethod("methodType"))<3 do impQuit(0) quit	; has params, so new subroutine
 	.	;
 	.	; No parameters, so "continuation" (=implicit GOTO)
 	.	; Later: If no declarations have been made yet, be forgiving ...
 	.	; Now: just give a warning ...
-	.	;;if '$G(commands("Options","AllowGOTO")),$O(type(-1))'="" do ERROR("Missing quit from: "_subRou) quit
-	.	do warnGroup("DEPRECATED","Label inside subroutine - use single entrypoint: "_subRou_" or "_return)
+	.	;;if '$G(pslPrsr("Options","AllowGOTO")),$O(type(-1))'="" do ERROR("Missing quit from: "_subRou) quit
+	.	do WARNDEP(2.7,0,"Label inside subroutine - use single entrypoint: "_subRou_" or "_return)
 	.	do resetType()
+	.	set $P(mtddes,tab,$$rowPos^PSLMethod("methodType"))=4
 	;
 	; new subroutine, initialize subroutine related structures (in order!)
 	; - new value of pslSt
 	; - implied declarations of all Record class instances with global
 	;   scope in type(-1,)
-	set subRou=return
-	set pslNew(subRou)=""
-	do set^UCPSLST(.pslSt,$$getDcLnr,0,0)
-	set var=""
-	for  set var=$o(type(-1,var)) quit:var=""  if $$isRecord($$getClass(var,-1)) set ptr=$$decByOvs^UCREC4OP(subRou,var)
-	;
-	; add formal parameters to type(,)
-	for fpn=1:1:$$getFpCount^UCPSLLR(lblRec) do
-	.	set cls=$$getFpClass^UCPSLLR(lblRec,fpn)
-	.	set var=$$getFpVsig^UCPSLLR(lblRec,fpn)
-	.	if $D(p($P(var,"("))) do ERROR("Parameter "_var_" is multiply defined") quit
+	if $P(mtddes,tab,$$rowPos^PSLMethod("methodType"))<4 do
+	.	kill pslLong
+	.	set subRou=mtd,$piece(pslPrsr,"|",2)=subRou
+	.	set pslNew(subRou)=""
+	.	do set^UCPSLST(.pslSt,$$getDcLnr,0,0)
+	.	set var=""
+	.	for  set var=$o(type(-1,var)) quit:var=""  if $$isRecord^PSLClass($$getClass(var,-1))>0 set ptr=$$decByOvs^UCREC4OP(subRou,var)
 	.	;
-	.	do setScope(var,"","","FORMAL",cls),trackNam(var)
-	.	if $$isRecord(cls),$$getFpAccess^UCPSLLR(lblRec,fpn)=0 do setAssign^UCREC4OP(subRou,var,-1)
-	.	do setInst(var,$$getDcLnr,"")
-	.	if var["(" set var=$P(var,"(",1) do setScope(var,"","","FORMAL","")
-	.	set p(var)=""
+	.	; add formal parameters to type(,)
+	.	set p=$$typeDecl^PSLMethod(mtddes,pslPrsr("pslCls",pslPrsr("moduleName")))
 	;
-	; Return the M version of the declaration, but strip the comment
-	quit $P($$toM^UCPSLLR(lblRec)," ;")
+	; Store (updated) version of method descriptor.
+	; For PSLBuffers this will be a new occurrence. It must be added as long
+	; as the .codeline property is used to insert the pslNew() values.
+	set pslPrsr("pslMtd",cls_"."_mtd)=mtddes
 	;
-	; ======== OLD CODE BELOW ========
-	set public=$$UPCASE(expr)
-	if $$CONTAIN("PUBLIC,PRIVATE",public) set public=1,expr=$$ATOM^%ZS(rec,.ptr,"",tok)
-	else  if public="LOCAL" set public=0,expr=$$ATOM^%ZS(rec,.ptr,"",tok)
-	else  set public=""
-	;
-	;;if expr="" set expr=$$getPars(.m2src,.lptr,public'="")	; Multiple lines
-	;
-	set return=$P(expr,"(",1)
-	;
-	if return="" do ERROR("Missing label name") quit ""
-	if $D(labels(return)),$P(labels(return),tab)'="" do ERROR("Label already exists: "_return) quit ""
-	;
-	new class,fArray,p,ptr,tag,var
-	;
-	set ptr=0,cmdDel=" "
-	;
-	if level do				; Missing block terminator
-	.	;
-	.	do warnGroup("SYNTAX","Missing block terminator and quit from: "_subRou)
-	.	new expr,postCond
-	.	for  do endBlock if level=0 quit
-	.	set (expr,postCond)=""
-	.	do QUIT,ADD(tab_"Q")
-	;
-	set $P(labels(return),tab,1,2)=(msrc+1)_tab_public
-	set level(level)=""
-	;
-	; If the previous subroutine has not been terminated by an explicit
-	; quit, then this is treated of an implicit GOTO from the previous
-	; subroutine to this subroutine. This version of the compiler will just
-	; supply a deprecation warning. Future versions shall throw an error if
-	; GOTO is not allowed.
-	; If GOTO is allowed, resetTyp() will be called to invalidate all
-	; previous assignements to Primitives.
-	; If this is just a label inside a subroutine, quit here
-	;;if '($O(type(-1))="")&(" "[subRou) do		; Missing quit
-	if " "'[subRou do  quit:return=expr return
-	.	;
-	.	if return'=expr do  quit	; has params, so new subroutine
-	..		do warnGroup("SYNTAX","Added and quit from: "_subRou)
-	..		new expr,postCond
-	..		set (expr,postCond)=""
-	..		do QUIT,ADD(tab_"Q")
-	.	;
-	.	; No parameters, so "continuation" (=implicit GOTO)
-	.	; Later: If no declarations have been made yet, be forgiving ...
-	.	; Now: just give a warning ...
-	.	;;if '$G(commands("Options","AllowGOTO")),$O(type(-1))'="" do ERROR("Missing quit from: "_subRou) quit
-	.	do warnGroup("DEPRECATED","Label inside subroutine - use single entrypoint: "_subRou_" or "_return)
-	.	do resetType()
-	;
-	; new subroutine, initialize subroutine related structures (in order!)
-	; - new value of pslSt
-	; - implied declarations of all Record class instances with global
-	;   scope in type(-1,)
-	set subRou=return
-	set pslNew(subRou)=""
-	do set^UCPSLST(.pslSt,$$getDcLnr,0,0)
-	set var=""
-	for  set var=$o(type(-1,var)) quit:var=""  if $$isRecord($$getClass(var,-1)) set ptr=$$decByOvs^UCREC4OP(subRou,var)
-	;
-	; done if no formal parameters
-	if return=expr quit return
-	;
-	set subRou=return,expr=$P($E(expr,1,$L(expr)-1),"(",2,999),subLine=line,ptr=0
-	;
-	set return=return_"(",tag=""
-	;
-	if '(expr="") for  set var=$$ATOM^%ZS(expr,.ptr,",",tok) do  if ptr=0!ER quit
-	.	;
-	.	if var=",",'(","[$E(tag,$L(tag))) set return=return_",",tag=tag_"," quit
-	.	;
-	.	set fArray=0
-	.	;
-	.	if ptr,$E(expr,ptr+1)=" " do  quit:ER
-	..		;
-	..		set class=var
-	..		if '$$isClass(.class) do ERROR("Undefined class: "_class) quit
-	..		set var=$$ATOM^%ZS(expr,.ptr,",",tok)
-	..		if var?.e1"(".",".1")" set fArray=1	; var()
-	..		else  if '$$isVar(var) do ERROR("Variable expected: "_var) quit
-	.	;
-	.	else  set class="String"
-	.	;
-	.	set tag=tag_class_" "_var
-	.	;
-	.	;;do setScop(var,level,msrc+1,"FORMAL")
-	.	;;do setType(var,class)
-	.	do setScope(var,"","","FORMAL",class)
-	.	do setInst(var,$$getDcLnr,"")
-	.	;
-	.	if fArray set var=$P(var,"(",1) do setScope(var,"","","FORMAL","")
-	.	;
-	.	if $D(p(var)) do ERROR("Parameter "_var_" is multiply defined") quit
-	.	;
-	.	;;if fArray,'$$getNew(var) do setScop(var,level,msrc+1,"FORMAL")
-	.	set return=return_$$varExpr(var,0),p(var)=""
-	;
-	set $P(labels(subRou),tab,3)=tag
-	set return=return_")"
-	;
-	quit return
-	; ======== OLD CODE ABOVE ========
+	; Return the M version of the declaration including the comment
+	quit $$getDecl4M^PSLMethod(mtddes,.pslPrsr)
 	;
 	;-----------------------------------------------------------------------
-getCaller(nOff)	;private String; return caller-of-caller 
+getCaller(nOff) ;package String; return caller-of-caller
 	;-----------------------------------------------------------------------
 	; Debug support function that returns the caller of the caller
 	;
@@ -5039,163 +6012,99 @@ getCaller(nOff)	;private String; return caller-of-caller
 	zshow "S":zshow
 	quit zshow("S",$g(nOff)+3)
 	;-----------------------------------------------------------------------
-getDcCod()	quit mcode ;private String; Destination code line 
+getDcCod() quit mcode ;package String; Destination code line
 	;-----------------------------------------------------------------------
 	;
 	;-----------------------------------------------------------------------
-getDcLnr()	quit msrc+1 ;private Number; Destination code 'linenumber' 
+getDcLnr() quit msrc+1 ;package Number; Destination code 'linenumber'
+	;-----------------------------------------------------------------------
+	;;;
+	;;;-----------------------------------------------------------------------
+	;;getLabels(lblRec,lblref) ;private Number; Add labels to lblRec()
+	;;;-----------------------------------------------------------------------
+	;;; Add the labels of the routine specified by lblref to lblRec() and
+	;;; return an error indicator.
+	;;;
+	;;; OUTPUT:
+	;;; . $$ = error level
+	;;;	0 = no error, labels are present.
+	;;;		This value will also be returned when lblref does not
+	;;;		specify a routinename.
+	;;;	1 = no source found
+	;;;		This value indicates that a routine with this name was
+	;;;		found, but that it was impossible to trace the routine
+	;;;		back to a PSL source.
+	;;;		lblRec() will contain the PSLLabelRecords, but the
+	;;;		declarations are based on the M routine.
+	;;;	2 = no routine found
+	;;;		This value will be returned when no M file could be
+	;;;		found.
+	;;;		lblRec() will not have been modified.
+	;;;		This value will also be returned when the (implied)
+	;;;		boot-restrictionlevel is greater than zero, or when
+	;;;		lblref contains indirection
+	;;;
+	;;if lblref["@" quit 2
+	;;if lblref'["^" quit 0
+	;;if $G(pslPrsr("boot","restrictionlevel"))>0 quit 2
+	;;new rtn set rtn=$P(lblref,"^",2)
+	;;;
+	;;; Routine exists, check if it is already present
+	;;if pslRtns[(","_rtn_":") quit +$P(pslRtns,","_rtn_":",2)
+	;;new ret
+	;;if '$$VALID^%ZRTNS(rtn) do
+	;;.	do warnGroup("MISMATCH","Routine "_rtn_" not found")
+	;;.	set ret=2
+	;;else  do
+	;;.	new src
+	;;.	set ret=$$getSrc^UCLABEL(rtn,.src)
+	;;.	do getLblRec^UCPSLLR(.src,rtn,0,.lblRec)
+	;;set pslRtns=pslRtns_","_rtn_":"_ret
+	;;quit ret
+	;
+	;-----------------------------------------------------------------------
+getScCod() quit m2src($$getScLnr) ;package String; Source code line
 	;-----------------------------------------------------------------------
 	;
 	;-----------------------------------------------------------------------
-getLabels(lblRec,lblref)	;local Number; Add labels to lblRec() 
-	;-----------------------------------------------------------------------
-	; Add the labels of the routine specified by lblref to lblRec() and
-	; return an error indicator.
-	;
-	; OUTPUT:
-	; . $$ = error level
-	;	0 = no error, labels are present.
-	;		This value will also be returned when lblref does not
-	;		specify a routinename.
-	;	1 = no source found
-	;		This value indicates that a routine with this name was
-	;		found, but that it was impossible to trace the routine
-	;		back to a PSL source.
-	;		lblRec() will contain the PSLLabelRecords, but the
-	;		declarations are based on the M routine.
-	;	2 = no routine found
-	;		This value will be returned when no M file could be
-	;		found.
-	;		lblRec() will not have been modified.
-	;		This value will also be returned when the (implied)
-	;		boot-restrictionlevel is greater than zero, or when
-	;		lblref contains indirection
-	;
-	if lblref["@" quit 2
-	if lblref'["^" quit 0
-	if $G(commands("boot","restrictionlevel"))>0 quit 2
-	new rtn set rtn=$P(lblref,"^",2)
-	;
-	; Routine exists, check if it is already present
-	if pslRtns[(","_rtn_":") quit +$P(pslRtns,","_rtn_":",2)
-	new ret
-	if '$$VALID^%ZRTNS(rtn) do
-	.	do warnGroup("MISMATCH","Routine "_rtn_" not found")
-	.	set ret=2
-	else  do
-	.	new src
-	.	set ret=$$getSrc^UCLABEL(rtn,.src)
-	.	do getLblRec^UCPSLLR(.src,rtn,0,.lblRec)
-	set pslRtns=pslRtns_","_rtn_":"_ret
-	quit ret
-	;
-	;-----------------------------------------------------------------------
-getScCod()	quit m2src($$getScLnr) ;private String; Source code line 
+getScLnr() quit +$G(lptr) ;package Number; Source code 'linenumber'
 	;-----------------------------------------------------------------------
 	;
-	;-----------------------------------------------------------------------
-getScLnr()	quit +$G(lptr) ;private Number; Source code 'linenumber' 
-	;-----------------------------------------------------------------------
-	;
-	;-----------------------------------------------------------------------
-joinFpl(lptr,tok)	;local String; Get subroutine parameters 
-	;-----------------------------------------------------------------------
-	;
-	new expr,rec
-	;
-	set expr=$$getLine(lptr)
-	;
-	; FSCW CR11441: $L("PUBLIC")=6, $L("PRIVATE")=7 !!
-	;;if public set expr=$$LTRIM^%ZS($E(expr,7,$L(expr)))
-	;;if public set expr=$$LTRIM^%ZS($E(expr,$F(expr," "),$L(expr)))
-	;
-	if '(expr[",") do ERROR("Invalid Subroutine name: "_expr) quit ""
-	;
-	if expr[";" set expr=$P(expr,";",1)
-	if expr["//" set expr=$P(expr,"//",1)
-	if expr["/*" set expr=$$joinFplC(.lptr,expr)	; FSCW CR11441: accept multiline comment
-	;
-	if '(expr[",") do ERROR("Comma (,) expected: "_expr) quit ""
-	set expr=$P(expr,",",1,$L(expr,",")-1)_","
-	;
-	for  set lptr=$O(m2src(lptr)) quit:lptr=""  do  quit:($L(expr,"(")=$L(expr,")"))!ER
-	.	;
-	.	set rec=$$getLine(lptr)
-	.	set rec=$$TOKEN^%ZS(rec,.tok,"")
-	.	;
-	.	; FSCW CR11441: handle comment BEFORE quit on ")"
-	.	if rec[";" set rec=$P(rec,";",1)
-	.	if rec["/*" set rec=$$joinFplC(.lptr,rec)
-	.	if rec["//" set rec=$P(rec,"//",1)
-	.	;
-	.	; FSCW CR20280: statement below only works if M code following
-	.	; the close-parenthesis does not contain parenthesis.
-	.	;;if $L(rec,")")>$L(rec,"(") set expr=expr_$P(rec,")",1,$L(rec,")")-1)_")" quit
-	.	if $L(rec,")")>$L(rec,"(") set expr=expr_$$RTCHR^%ZFUNC(rec," ") quit
-	.	;
-	.	if '(rec[",") do ERROR("Comma (,) expected: "_rec) quit
-	.	set expr=expr_$P(rec,",",1,$L(rec,",")-1)_","
-	.	;
-	.	if $L(expr)>1024 do ERROR("Parameter list is too long: "_expr) quit
-	;
-	quit:ER ""
-	;
-	quit expr
-	;
-	; FSCW CR11441: accept multiline comment
-	;-----------------------------------------------------------------------
-joinFplC(lptr,str)	;local String; Strip blockcomment from formal parameter list 
-	;-----------------------------------------------------------------------
-	;
-	; ARGUMENTS:
-	; . Number lptr		line pointer		/REQ/MECH=REF:RW
-	; . String str		line containing "/*"	/REQ/MECH=VAL
-	;
-	; INPUTS:
-	; . String m2src()	source code (used by blockC)
-	;
-	new ptr
-	set ptr=$find(str,"/*")
-	do blockC
-	quit str
-	;
-	; FSCW CR11441: (runtime) function that returns value of reClass
-getReClass()	;private String; 
+	; Support function that returns value of PSLClass.recordPREFIX
+getReClass() ;private String;
 	quit "Record"
 	;
 	;-----------------------------------------------------------------------
-getReTable(class)	;private String; return table name of Record class 
-	;-----------------------------------------------------------------------
-	; NOTE: assumes that table name does not contain the sequence "Record".
-	;
-	quit $P(class,"Record",2)
-	;
-getClass(var,newLevel)	;private String; 
-	quit $$getAtt(.var,.newLevel,1)
-getNew(var,newLevel)	;private Number; 
-	quit $$getAtt(.var,.newLevel,2)
-getScope(var,newLevel)	;private Number; 
-	quit $$getAtt(.var,.newLevel,3)
-getInst(var,newLevel)	;private Number; 
-	quit $$getAtt(.var,.newLevel,4)
-getExpr(var,newLevel)	;private String; 
-	quit $$getAtt(.var,.newLevel,5)
-getIf(var,newLevel)	;local Number; NOT CALLED 
-	quit $$getAtt(.var,.newLevel,7)
-getOpti(var,newLevel)	;private Number; 
-	quit $$getAtt(.var,.newLevel,10)
+getClass(var,newLevel) ;package String;
+	quit $$getAtt(var,.newLevel,1)
+getNew(var,newLevel) ;package Number;
+	new val set val=$$getAtt(var,.newLevel,2)
+	if val="",var["(" quit $$getAtt($P(var,"("),newLevel,2)
+	quit val
+getScope(var,newLevel) ;package Number;
+	new val set val=$$getAtt(var,.newLevel,3)
+	if val="",var["(" quit $$getAtt($P(var,"("),newLevel,3)
+	quit val
+getInst(var,newLevel) ;package Number;
+	quit $$getAtt(var,.newLevel,4)
+getExpr(var,newLevel) ;package String;
+	quit $$getAtt(var,.newLevel,5)
+getIf(var,newLevel) ;private Number; NOT CALLED
+	quit $$getAtt(var,.newLevel,7)
+getOpti(var,newLevel) ;package Number;
+	quit $$getAtt(var,.newLevel,10)
 	;
 	;-----------------------------------------------------------------------
-getAtt(var,newLevel,field)	;private String; Return object attributes 
+getAtt(var,newLevel,field) ;package String; Return object attributes
 	;-----------------------------------------------------------------------
 	;
 	if '$D(newLevel) set newLevel=$$getLevel(var)
-	if var["(",$D(type(newLevel,var))#2=0 set var=$$objPtr(var)    ; FRS - 06/13/03
+	if var["(",$D(type(newLevel,var))#2=0 set var=$$leftSig(var)    ; FRS - 06/13/03
 	;
 	quit $P($G(type(newLevel,var)),tab,field)
 	;
 	;-----------------------------------------------------------------------
-getLevel(var)	;private Number; Return the level that var was scoped at 
+getLevel(var) ;package Number; Return the level that var was scoped at
 	;-----------------------------------------------------------------------
 	new return
 	for return=level:-1:0 if $D(type(return,$P(var,"(",1))) quit
@@ -5203,7 +6112,7 @@ getLevel(var)	;private Number; Return the level that var was scoped at
 	quit return
 	;
 	;-----------------------------------------------------------------------
-remPtr(ref,xtype)	; Test and remove multiple reference pointers 
+remPtr(ref,xtype) ; Test and remove multiple reference pointers
 	;-----------------------------------------------------------------------
 	;
 	new n set n=""
@@ -5212,17 +6121,18 @@ remPtr(ref,xtype)	; Test and remove multiple reference pointers
 	quit
 	;
 	;-----------------------------------------------------------------------
-isNxtCmd(cmd,expr,ptr)	; Function to repair white space syntax ambiguity 
+isNxtCmd(cmd,expr,ptr) ; Function to repair white space syntax ambiguity
 	;-----------------------------------------------------------------------
 	; if expr is a command, move ptr back and warn about whitespace
 	;
-	if $$getCommand(.cmmds,$$UPCASE(expr))="" quit 0
-	do warnGroup("SYNTAX","Two spaces expected after command: "_cmd)
+	;;if $$getCommand(.cmmds,$$UPCASE(expr))="" quit 0
+	if '$D(cmmds(expr)) quit 0
+	do warnGroup("SYNTAX","Two spaces expected after statement: "_cmd)
 	set ptr=ptr-$L(expr)
 	quit 1
 	;
 	;-----------------------------------------------------------------------
-addComment	;local void; Add a comment line if prior isn't a comment 
+addComment ;private void; Add a comment line if prior isn't a comment
 	;-----------------------------------------------------------------------
 	;
 	set mcode=$$initLine(level)_";"
@@ -5231,7 +6141,7 @@ addComment	;local void; Add a comment line if prior isn't a comment
 	quit
 	;
 	;-----------------------------------------------------------------------
-lblPstfx(num)	; Return the lable postfix associated with the supplied number 
+lblPstfx(num) ; Return the label postfix associated with the supplied number
 	;-----------------------------------------------------------------------
 	;
 	if num<100 quit num
@@ -5241,15 +6151,7 @@ lblPstfx(num)	; Return the lable postfix associated with the supplied number
 	quit num
 	;
 	;-----------------------------------------------------------------------
-newLabel(name,labels,ref)	; Return a new tag 
-	;-----------------------------------------------------------------------
-	;
-	new i,z
-	f i=1:1 set z="v"_$G(name)_$$lblPstfx(i) if '$D(labels(z)) set labels(z)=$G(ref) quit
-	quit z
-	;
-	;-----------------------------------------------------------------------
-newLine(code,line,level)	; Insert a line at the current block level 
+newLine(code,line,level) ;private void; Insert a line at the current block level
 	;-----------------------------------------------------------------------
 	;
 	; Move past comment lines before insert
@@ -5264,14 +6166,14 @@ newLine(code,line,level)	; Insert a line at the current block level
 	quit
 	;
 	;-----------------------------------------------------------------------
-nxtSym()	;private String; Generate a new variable 
+nxtSym() ;package String; Generate a new variable
 	;-----------------------------------------------------------------------
 	;
 	set pslVarNr=pslVarNr+1
 	quit "vo"_pslVarNr
 	;
 	;-----------------------------------------------------------------------
-addList(list,item)	;local List; Add item to list 
+addList(list,item) ;private List; Add item to list
 	;-----------------------------------------------------------------------
 	;
 	if $G(list)="" quit item
@@ -5279,19 +6181,31 @@ addList(list,item)	;local List; Add item to list
 	quit list_","_item
 	;
 	;-----------------------------------------------------------------------
-addSubr(label,params,comment)	;private void; Add a subroutine 
+addSubr(label,params,comment) ;package void; Add a subroutine
 	;-----------------------------------------------------------------------
+	; NOTES:
+	; . method^UCGM() will call incrLabel() for every value returned by
+	;	generators. So the count must be initiated at zero here.
 	;
-	do append(tab_";",label)
-	do append(label_params_tab_"; "_comment,.label)
-	do append(tab_";",label)
-	set $P(labels(label),tab,4)=label
-	set $P(labels(label),tab,6)=comment
-	set labels(label)=$$setFormalList^UCPSLLR(labels(label),params,0)
+	set append(label)=0_tab_comment
+	do addCode^UCPSLSR(label," ;")
+	do addCode^UCPSLSR(label,label_params_" ; "_comment)
+	do addCode^UCPSLSR(label," ;")
+	;;set $P(labels(label),tab,4)=label
+	;;set $P(labels(label),tab,6)=comment
+	;;set labels(label)=$$setFormalList^UCPSLLR(labels(label),params,0)
 	quit
 	;
 	;-----------------------------------------------------------------------
-findSubr(label,comment)	;public String; Find a subroutine 
+hasSubr(name) ;package Boolean; Does module use the requested subroutine name
+	;-----------------------------------------------------------------------
+	; All occurences of $D(labels(name)) shall be replaced by calls to this
+	; function.
+	;
+	quit ''$DATA(append(name))
+	;
+	;-----------------------------------------------------------------------
+findSubr(label,comment) ;package String; Find a subroutine
 	;-----------------------------------------------------------------------
 	; Find a subroutine in append() that matches label followed by 1.N,
 	; and a comment as specified
@@ -5301,7 +6215,7 @@ findSubr(label,comment)	;public String; Find a subroutine
 	;	The function fill try label1, label2, etc until labelN either
 	;	matches or is undefined.
 	; . comment = comment string
-	;	The comment is looked for in labels(label).comment
+	;	The comment is looked for in $P(append(label),tab,2)
 	;	Only an exact match will pass
 	;
 	; OUTPUTS:
@@ -5310,15 +6224,21 @@ findSubr(label,comment)	;public String; Find a subroutine
 	;	available label in append() that satisfies the pattern.
 	;
 	new i,z
-	for i=1:1 set z=label_$$lblPstfx(i) quit:'$DATA(labels(z))  quit:$PIECE(labels(z),tab,6)=comment
+	for i=1:1 set z=label_$$lblPstfx(i) quit:'$DATA(append(z))  quit:$PIECE(append(z),tab,2)=comment
 	quit z
 	;
 	;-----------------------------------------------------------------------
-append(code,label)	do addCode^UCPSLSR(label,code) quit ;deprecated private void; Add code to append() 
+	; TEMPORARY UNTIL ALL PSL.addSubrou() OCCURRENCES HAVE BEEN RECOMPILED,
+	; AND ALL OTHER CALLS IN UCDB, UCHTML, UCRECORD, AND UCTS HAVE BEEN UPDATED
+newLabel(name,labels,cmt) set:$E(name)'="v" name="v"_name quit $$findSubr(name,"")
 	;-----------------------------------------------------------------------
 	;
 	;-----------------------------------------------------------------------
-move(label,record,msrc)	;local void; Move codeblock out of inline code into label 
+append(code,label) do addCode^UCPSLSR(label,code) quit ;package void deprecated; Add code to append()
+	;-----------------------------------------------------------------------
+	;
+	;-----------------------------------------------------------------------
+move(label,record,msrc) ;private void; Move codeblock out of inline code into label
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
 	; . label = name of destination subroutine
@@ -5357,7 +6277,7 @@ move(label,record,msrc)	;local void; Move codeblock out of inline code into labe
 	quit
 	;
 	;-----------------------------------------------------------------------
-endBlock	;local void; End a code block } 
+endBlock ;private void; End a code block }
 	;-----------------------------------------------------------------------
 	;
 	if level=0 do ERROR("Invalid block termination") quit
@@ -5366,22 +6286,25 @@ endBlock	;local void; End a code block }
 	;
 	set z=level(level) kill level(level)
 	;
-	new xcmd,xmsrc,xrec
-	set xcmd=$P(z,tab,1),xmsrc=$P(z,tab,2),xrec=$P(z,tab,4),forLevel=$P(z,tab,5)
+	new xcmd,xmsrc,xrec,label
+	set xcmd=$P(z,tab,1),xmsrc=$P(z,tab,2),xrec=$P(z,tab,4),label=$P(z,tab,6)
 	;
-	; pop pslSt: discard doVal, use ifLevel and forLevel
-	do pop^UCPSLST(.pslSt,,.ifLevel,.forLevel)
+	; pop pslSt: discard doVal, use inIF and inFOR
+	do pop^UCPSLST(.pslSt,,.inIF,.inFOR)
 	;
-	set ifLevel=$E(ifStack,level)
-	set forLevel=$E(forStack,level)
+	set inIF=$E(ifStack,level)
+	set inFOR=$E(forStack,level)
 	set level=level-1
 	;
-	if level=0 set doStack="",ifStack="",forStack=""
+	if level=0 set ifStack="",forStack=""
 	else  set ifStack=$E(ifStack,1,level),forStack=$E(forStack,1,level)
 	;
 	if ptr=0 S:$TR(mcode,tab_".")="" mcode=$$initLine(level)_";"
 	;
-	if xcmd="CATCH" do  if ER quit
+	; isCatch is a flag to indicate the continuation of a CATCH block
+	new isCatch
+	set isCatch=0
+	if xcmd="catch" do  if ER!isCatch quit
 	.	;
 	.	; FSCW CR9792 changed line below
 	.	;if xrec'="" do ERROR("Unexpected expression after catch block: "_xrec) quit
@@ -5389,16 +6312,33 @@ endBlock	;local void; End a code block }
 	.	do ADD(mcode)
 	.	set mcode=""
 	.	;
-	.	new label,record
-	.	set label=$G(errTrap(level))
+	.	new record,xptr,nexpr
+	.	if $P($G(xcatch(level)),tab,5)'="" set label=$P(xcatch(level),tab,5)
 	.	set record=$G(append(label))
 	.	set $P(record,tab,2)=level
 	.	set $P(record,tab,3)=xmsrc+1
 	.	set $P(record,tab,4)=msrc
 	.	set append(label)=record
+	.	if ($G(xcatch(level))="") quit
+	.	;
+	.	; if ptr=0, it reaches the end of the string
+	.	; no need to check for ":", just called fappend to do
+	.	; the clean up
+	.	if ptr'=0 do  quit
+	..		set ptr=ptr+1
+	..		set nexpr=$$getOpand(str,.ptr)
+	..		if $E(nexpr)=":" do  quit
+	...	              ;the endblock of a filter exception
+	...	              set $P(xcatch(level),tab,3)=1
+	...	              set isCatch=1,cmd="catch",expr=nexpr
+	...	              set mcode=$$initLine(level)
+	...	              do CATCHC
+	.	;
+	.	do fappend
 	;
 	; Code following the '}' will be dead
-	if $$checkDead(rec,.ptr) do warnGroup("DEAD","code following '}' will never execute")
+	if $G(xcatch(level))="" do
+	. if $$checkDead(rec,.ptr) do warnGroup("DEAD","code following '}' will never execute")
 	;
 	if '(xrec="") do				; There is trailer code
 	.	;
@@ -5413,14 +6353,37 @@ endBlock	;local void; End a code block }
 	quit
 	;
 	;-----------------------------------------------------------------------
-initBlock	;local void; start a block level { 
+fappend ;private void; change the goto vCatchxx to Q in the append array.
+	;-----------------------------------------------------------------------
+	; The last catch block is not a catch-all block. Therefore the goto to
+	; the pre-allocated next label is not valid and need to replace by a "Q"
+	; in the append array.
+	;
+	new clabel,fix,i,nlabel,str
+	;
+	set nlabel=$P(xcatch(level),tab,4)	; set next label
+	set clabel=$P(xcatch(level),tab,5)	; set current label
+	;
+	set i=0,fix=0
+	for  set i=$O(append(clabel,i)) quit:i=""!fix  do
+	.	set str=append(clabel,i)
+	.	if str'[" G "_nlabel quit
+	.	set len=$L(" G "_nlabel)
+	.	set str=$E(str,1,$L(str)-len)_" Q"
+	.	set append(clabel,i)=str
+	.	set fix=1
+	kill xcatch(level),append(nlabel)
+	quit
+	;
+	;-----------------------------------------------------------------------
+initBlock ;private void; start a block level {
 	;-----------------------------------------------------------------------
 	;
 	set level=level+1
 	do push^UCPSLST(.pslSt,$$getDcLnr,0,0)
 	;
-	if level=1 set doStack=(msrc\1+1),ifStack=ifLevel,forStack=forLevel
-	else  set $P(doStack,".",level)=$P(doStack,".",level)+1,ifStack=ifStack_ifLevel,forStack=forStack_forLevel
+	if level=1 set ifStack=inIF,forStack=inFOR
+	else  set ifStack=ifStack_inIF,forStack=forStack_inFOR
 	;
 	set level(level)=cmd_tab_(msrc+1)
 	;
@@ -5433,77 +6396,81 @@ initBlock	;local void; start a block level {
 	quit
 	;
 	;-----------------------------------------------------------------------
-initClass(class)	;local void; Cache class, classmethods, and classproperties 
+initClass(class) ;package void; Cache class, classmethods, and classproperties
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
-	; . String class = class name
-	;	character case as used in OBJECT* tables.
+	; . ret String class = class name
+	;	character case is not significant. On return, it will contain
+	;	the name with the correct case, as returned by loadClass^PSLCC().
 	;
-	quit:class=""  if $$isRecord(class),class'=reClass quit
-	new rwCls
-	set rwCls=$$ocGet^UCXOBJ(.pslCls,class,1),class=$P(rwCls,"|")
-	if $O(pslMtd(class,""))="" do omAll^UCXOBJ(.pslMtd,class,.pslCls)
-	if $O(pslPrp(class,""))="" do opAll^UCXOBJ(.pslPrp,class)
-	;;;
-	;;; TEMP until methods() no longer used externally:
-	;;if $O(methods(class,""))="" do omAll^UCXOBJ(.methods,class,.pslCls)
+	; NOTES:
+	; . Even though this procedure will deal with case mismatches, supplying
+	;	the correct case is preferred, because a case mismatch will
+	;	cause a full search for the classname-as-supplied, even if the
+	;	nanme with the correct case already occurs in the cache.
+	;
+	quit:class=""  ;;if $$isRecord^PSLClass(class)>1 quit
+	quit:$DATA(pslPrsr("pslCls",class))
+	;
+	; new version uses PSLParser.findPSLClass()
+	set class=$$findPSLClass^PSLParser(.pslPrsr,.tknzr,class)
 	quit
 	;
 	;-----------------------------------------------------------------------
-initCmds(cmds)	;private void; Initialize array of commands supported by PSL 
+initCmds(cmds) ;package void; Initialize array of statements supported by PSL
 	;-----------------------------------------------------------------------
 	; cmds(cmd)=Abbrv.|Argumentless|noPostCond
 	;
-	set cmds("BREAK")="B|1"
-	set cmds("CATCH")="|1|1"
-	set cmds("CLOSE")="C"
-	set cmds("DO")="D"
-	set cmds("ELSE")="E|1|1"
-	set cmds("FOR")="F|1|1"
-	set cmds("GO")="G"
-	set cmds("HANG")="H|1"
-	set cmds("HALT")="H|1"
-	set cmds("IF")="I|1|1"
-	set cmds("JOB")="J"
-	set cmds("KILL")="K|1"
-	set cmds("LOCK")="L|1"
-	set cmds("NEW")="N||1"
-	set cmds("OPEN")="O"
-	set cmds("QUIT")="Q|1"
-	set cmds("READ")="R"
-	set cmds("SET")="S"
-	;;set cmds("TABBORT")="TA|1"
-	set cmds("TCOMMIT")="TC|1"
-	set cmds("THROW")="||1"
-	set cmds("TROLLBACK")="TR|1"
-	set cmds("TSTART")="TS|1"
-	set cmds("TYPE")="||1"
-	set cmds("USE")="U"
-	set cmds("VIEW")="V"
-	set cmds("WHILE")="||1"
-	set cmds("WRITE")="W"
-	set cmds("XECUTE")="X"
-	set cmds("ZBREAK")="ZB|1"
-	set cmds("ZMESSAGE")="ZME|1"
-	set cmds("ZPRINT")="ZPR|1"
-	set cmds("ZSHOW")="ZSH|1"
-	set cmds("ZWITHDRAW")="ZWI|1"
-	set cmds("ZWRITE")="ZWR|1"
+	set cmds("break")="b|1|0"
+	set cmds("catch")="|0|1"
+	set cmds("close")="c|0|0"
+	set cmds("do")="d|0|0"
+	set cmds("else")="e|1|1"
+	set cmds("for")="f|1|1"
+	set cmds("go")="g|0|0"	; FSCW: Note that PSL statement differs from M command
+	set cmds("hang")="h|1|0"
+	set cmds("halt")="h|1|0"
+	set cmds("if")="i|1|1"
+	set cmds("job")="j|0|0"
+	set cmds("kill")="k|1|0"
+	set cmds("lock")="l|1|0"
+	set cmds("new")="n|0|1"
+	set cmds("open")="o|0|0"
+	set cmds("quit")="q|1|0"
+	set cmds("read")="r|0|0"
+	set cmds("return")="|0|0"
+	set cmds("set")="s|0|0"
+	set cmds("tcommit")="tc|1|0"
+	set cmds("throw")="|0|1"
+	set cmds("trollback")="tr|1|0"
+	set cmds("tstart")="ts|1|0"
+	set cmds("type")="|0|1"
+	set cmds("use")="u|0|0"
+	;;set cmds("VIEW")="V"
+	set cmds("while")="|0|1"
+	set cmds("write")="w|0|0"
+	set cmds("xecute")="x|0|0"
+	set cmds("zbreak")="zb|1|0"
+	set cmds("zmessage")="zme|1|0"
+	set cmds("zprint")="zpr|1|0"
+	set cmds("zshow")="zsh|1|0"
+	set cmds("zwithdraw")="zwi|1|0"
+	set cmds("zwrite")="zwr|1|0"
 	quit
 	;
 	;-----------------------------------------------------------------------
-initFcts()	;private List; Return list of M functions that are still valid 
+initFcts() ;package List; Return list of M functions that are still valid
 	;-----------------------------------------------------------------------
 	;
 	quit "$ASCII,$CHAR,$DATA,$EXTRACT,$FIND,$FNUMBER,$GET,$JUSTIFY,$LENGTH,$ORDER,$PIECE,$QUERY,$TRANSLATE,$RANDOM,$SELECT,$ZDATE,$ZININTERRUPT,$ZINTERRUPT,$ZJOBEXAM"
 	;
 	;-----------------------------------------------------------------------
-initSvns()	;private List; Return list of M svns that are still valid 
+initSvns() ;package List; Return list of M svns that are still valid
 	;-----------------------------------------------------------------------
 	;
-	quit "$H,$I,$J,$P,$REFERENCE,$T,$X,$Y,$TL,$TLEVEL,$TR,$TRESTART,$ZA,$ZB,$ZGBLDIR,$ZEOF,$ZININTERRUPT,$ZINTERRUPT,$ZJOB,$ZJOBEXAM,$ZL,$ZLEVEL,$ZPOSITION,$ZS,$ZSTEP,$ZT,$ZTEXIT,$ZVERSION"
+	quit "$H,$I,$J,$P,$REFERENCE,$T,$X,$Y,$TL,$TLEVEL,$TR,$TRESTART,$ZB,$ZGBLDIR,$ZEOF,$ZININTERRUPT,$ZINTERRUPT,$ZJOB,$ZJOBEXAM,$ZL,$ZLEVEL,$ZPOSITION,$ZS,$ZSTEP,$ZT,$ZVERSION"
 	;-----------------------------------------------------------------------
-initLine(level)	;private String; Initialize a line at this block level 
+initLine(level) ;package String; Initialize a line at this block level
 	;-----------------------------------------------------------------------
 	; All compiler subroutines that insert M code directly into the target
 	; stream shall call this function to ensure that the correct number of
@@ -5515,77 +6482,21 @@ initLine(level)	;private String; Initialize a line at this block level
 	quit return
 	;
 	;-----------------------------------------------------------------------
-errTrap(level)	;local String; Add method error trapping code 
-	;-----------------------------------------------------------------------
-	;
-	new i,label,return
-	;
-	; If an error trap exists and the catch statement was processed, add
-	; a new trap and link the old one and this error to it.
-	;
-	set label=$G(errTrap(level))
-	if label'="",$O(append(label,""),-1)>errTrap(level,1) do addLink(level)
-	;
-	if '$D(errTrap(level)) do addTrap(level)	; Create an error trap
-	;
-	quit errTrap(level)
-	;
-	;-----------------------------------------------------------------------
-addLink(level)	;local void; Add an error trap and link to it 
-	;-----------------------------------------------------------------------
-	;
-	new label,trapExpr,xlabel,xline
-	set xlabel=errTrap(level)
-	set xline=errTrap(level,1)
-	;
-	set trapExpr=$G(append(xlabel,xline+1))		; Get the trap list
-	;
-	do addTrap(level)
-	;
-	if trapExpr="" quit
-	;
-	new label
-	set label=errTrap(level)
-	;
-	set trapExpr=trapExpr_" G "_label
-	set append(xlabel,xline+1)=trapExpr
-	quit
-	;
-	;-----------------------------------------------------------------------
-addTrap(level)	;local void; Add another error trap subr at this level 
+addTrap(fpl) ;private void; Add another error trap subr at this level
 	;-----------------------------------------------------------------------
 	;
 	new label
-	set label=$$newLabel("trap",.labels)
-	do addSubr(label,"","Error trap")
-	set errTrap(level)=label
-	set errTrap(level,1)=$O(append(label,""),-1)
-	quit
+	set label=$$findSubr("vCatch","")	; comment will never match
+	do addSubr(label,fpl,"Error trap")
+	quit label
+	;;set errTrap(level)=label
+	;;set errTrap(level,1)=$O(append(label,""),-1)
+	;;quit
 	;
-	;-----------------------------------------------------------------------
-isDoScope(a,b)	;private Boolean; Is b in the scope of a 
-	;-----------------------------------------------------------------------
-	; ARGUMENTS:
-	; . String a = "outer" do block
-	; . String b = "inner" do block
-	;	If absent, doStack will be used
-	;
-	; OUTPUTS:
-	; . 1 if and only if a is a proper head of b
-	;
-	; NOTES:
-	; . This function is slightly dangerous because it uses $EXTRACT to pick
-	;	the head, whereas doStack is a dot-separated list. This could
-	;	lead to incorrect results for example if a=1 and b=10.
-	;	The alternative is: $PIECE(b,".",1,$LENGTH(a,"."))=a
-	;
-	if '$D(b) set b=doStack
-	quit ($E(b,1,$L(a))=a)
-	;
-CONTAIN(X,Y)	;local String; 
+CONTAIN(X,Y) ;private String;
 	quit ","_X_","[(","_Y_",")
 	;
-ADDCHR(chr,length)	;local String; 
+ADDCHR(chr,length) ;private String;
 	quit $TR($J("",length)," ",chr)
 	;
 	;-----------------------------------------------------------------------
@@ -5593,7 +6504,7 @@ ADDCHR(chr,length)	;local String;
 	;-----------------------------------------------------------------------
 	;
 	;-----------------------------------------------------------------------
-rtb(string,chr)	; Remove trailing characters 
+rtb(string,chr) ; Remove trailing characters
 	;-----------------------------------------------------------------------
 	;
 	if $G(chr)="" set chr=" "
@@ -5601,15 +6512,18 @@ rtb(string,chr)	; Remove trailing characters
 	for  quit:$E(string,$L(string))'=chr  set string=$E(string,1,$L(string)-1)
 	quit string
 	;
-UPCASE(string)	;private String; Translate to uppercase (simple ASCII only) 
+LOCASE(string) ;package String; Translate to lowercase (simple ASCII only)
+	quit $TR(string,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz")
+	;
+UPCASE(string) ;package String; Translate to uppercase (simple ASCII only)
 	quit $TR(string,"abcdefghijklmnopqrstuvwxyz","ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 	;
-subEnd(string,ofset)	; Return Subset from ofset 
+subEnd(string,ofset) ; Return Subset from ofset
 	;
 	quit $E(string,$L(string)-ofset,$L(string))
 	;
 	;-----------------------------------------------------------------------
-COMMENT(str,ptr,tok)	;local void; Rest of line is a comment 
+COMMENT(str,ptr,tok) ;private void; Rest of line is a comment
 	;-----------------------------------------------------------------------
 	;
 	new return
@@ -5618,7 +6532,7 @@ COMMENT(str,ptr,tok)	;local void; Rest of line is a comment
 	quit return
 	;
 	;-----------------------------------------------------------------------
-log(src,lnr,srn,lvl,msg,tsl)	;private void; Output message 
+log(src,lnr,srn,lvl,msg,tsl) ;package void; Output message
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
 	; . String src()
@@ -5647,32 +6561,37 @@ log(src,lnr,srn,lvl,msg,tsl)	;private void; Output message
 	; . cmperr(): warning text lines as printed added to cmperr()
 	;
 	;
-	use $P
 	new erline1,erline2,erline3,piece
 	;
 	if msg[$c(0) set msg=$$UNTOK^%ZS(msg,tsl)
-	;
-	set erline1=$TR($G(src(+lnr)),$C(9,10,12,13,1,2,3,4,5,6,7,8,11,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31),$J("",4))
-	set erline2="%PSL-"_$E("IWE",lvl)_"-"_msg
-	set erline3="At source code line: "_+lnr_" in subroutine: "_$P(srn,"(")
-	;
-	write !,erline1,!
-	write erline2,!
-	write erline3,!
-	;
-	set cmperr($O(cmperr(""),-1)+1)="++++++++++++++++++++++"
-	set cmperr($O(cmperr(""),-1)+1)=erline1
-	set cmperr($O(cmperr(""),-1)+1)=erline2
-	set cmperr($O(cmperr(""),-1)+1)=erline3
-	;
-	; Update info/warning/error counts
-	set piece=lvl+1			; info = 2, warning = 3, error = 4
-	set $P(cmperr,"|",piece)=$P($G(cmperr),"|",piece)+1
-	;
+	set piece=$P(msg,":")
+	if piece?1.U set msg=$E(msg,$L(piece)+2,$L(msg))
+	else  set piece="SYNTAX"
+	do log^PSLParser(.pslPrsr,.tknzr,+lnr,$P(srn,"("),lvl,piece,msg)
 	quit
+	;;;
+	;;set erline1=$TR($G(src(+lnr)),$C(9,10,12,13,1,2,3,4,5,6,7,8,11,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31),$J("",4))
+	;;set erline2="%PSL-"_$E("IWE",lvl)_"-"_msg
+	;;set erline3="At source code line: "_+lnr_" in subroutine: "_$P(srn,"(")
+	;;;
+	;;use $P
+	;;write !,erline1,!
+	;;write erline2,!
+	;;write erline3,!
+	;;;
+	;;set cmperr($O(cmperr(""),-1)+1)="++++++++++++++++++++++"
+	;;set cmperr($O(cmperr(""),-1)+1)=erline1
+	;;set cmperr($O(cmperr(""),-1)+1)=erline2
+	;;set cmperr($O(cmperr(""),-1)+1)=erline3
+	;;;
+	;;; Update info/warning/error counts
+	;;set piece=lvl+1			; info = 2, warning = 3, error = 4
+	;;set $P(cmperr,"|",piece)=$P($G(cmperr),"|",piece)+1
+	;;;
+	;;quit
 	;
 	;-----------------------------------------------------------------------
-WARN(message)	;private void; Output message - DEPRECATED: use warnGroup^UCGM() 
+WARN(message) ;package void; Output message - DEPRECATED: use warnGroup^UCGM()
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
 	; . String message		/REQ/MECH=VAL
@@ -5680,7 +6599,7 @@ WARN(message)	;private void; Output message - DEPRECATED: use warnGroup^UCGM()
 	;
 	; INPUTS:
 	; . cmperr() = accumulated warnings			/NOREQ/WRITE
-	; . commands("ACCEPT",lptr) to suppress warning		/NOREQ/READ
+	; . pslPrsr("ACCEPT",lptr) to suppress warning		/NOREQ/READ
 	; . ERRTYPE = error type				/NOREQ/READ
 	;	if defined and non-zero, the "warning" is reported as an "error"
 	;	if defined and zero, the "warning" is reported as "information"
@@ -5692,41 +6611,44 @@ WARN(message)	;private void; Output message - DEPRECATED: use warnGroup^UCGM()
 	; OUTPUTS:
 	; . cmperr(): warning text lines as printed added to cmperr()
 	;
-	if $G(lptr)'="",$D(commands("ACCEPT",lptr)),'$G(ER) quit
+	if $G(lptr)'="",$D(pslPrsr("ACCEPT",lptr)),'$G(ER) quit
 	;
 	do log(.m2src,+$G(lptr),$G(subRou),2,message,$G(tok))
 	quit
 	;
 	;-----------------------------------------------------------------------
-WARNDEP(feature)	;private void; give deprecation warning 
+WARNDEP(dep,dis,feature) ;void; give deprecation warning/error
 	;-----------------------------------------------------------------------
 	; ARGUMENTS:
+	; . Number dep
+	;	PSL Version where deprecated
+	; . Number dis
+	;	PSL Version where discontinued
 	; . String feature		/REQ/MECH=VAL
 	;	The deprecated feature that is detected.
 	;
 	; INPUTS:
-	; . commands("WARN","DEPRECATED")	/NOREQ/MECH=VAL
+	; . pslPrsr("WARN","DEPRECATED")	/NOREQ/MECH=VAL
 	;	If defined, and non-zero deprecation warnings are enabled
 	;
-	;;if $G(commands("WARN","DEPRECATED")) do WARN("Deprecated feature "_feature)
-	do warnGroup("DEPRECATED",feature)
+	do srcWarnDep^PSLParser(.pslPrsr,.tknzr,dep,dis,feature)
 	quit
 	;
 	;-----------------------------------------------------------------------
-warnGroup(grp,msg)	;private void; Provide warning 
+warnGroup(grp,msg) ;package void; Provide warning
 	;-----------------------------------------------------------------------
 	; Supply a warning, provided:
 	; - warnings for the specified group are enabled
 	; - warnings for the current line are not generally #ACCEPTED
 	; - warnings for the current line and specified group are not #ACCEPTed
 	;
-	if '$G(commands("WARN",grp)) quit
-	if $G(lptr)'="" quit:$D(commands("ACCEPT",lptr))#2  quit:$D(commands("ACCEPT",lptr,grp))
-	do log(.m2src,+$G(lptr),$G(subRou),2,grp_": "_msg,$G(tok))
+	if '$$getSetting^PSLCC(.pslPrsr,"WARN",grp,0) quit
+	if $G(lptr)'="" quit:$D(pslPrsr("ACCEPT",lptr))#2  quit:$D(pslPrsr("ACCEPT",lptr,grp))
+	do log(.m2src,+$G(lptr),$G(subRou),2,grp_":"_msg,$G(tok))
 	quit
 	;
 	;-----------------------------------------------------------------------
-ERROR(message)	;private void;Compiler Error 
+ERROR(message) ;package void;Compiler Error
 	;-----------------------------------------------------------------------
 	;
 	set $P(cmperr,"|",1)=1
@@ -5744,7 +6666,7 @@ ERROR(message)	;private void;Compiler Error
 	quit
 	;
 	;-----------------------------------------------------------------------
-INFO(grp,msg)	;private void;Informational compiler message 
+INFO(grp,msg) ;package void;Informational compiler message
 	;-----------------------------------------------------------------------
 	; Supply an informational message, provided:
 	; - info for the specified group is enabled
@@ -5755,18 +6677,18 @@ INFO(grp,msg)	;private void;Informational compiler message
 	; . The use of #ACCEPT assumes that INFO groups are a subset of the WARN
 	;	groups, because UCGMC will validate groups based on $$allWarn.
 	;
-	if '$G(commands("INFO",grp)) quit
-	if $G(lptr)'="" quit:$D(commands("ACCEPT",lptr))#2  quit:$D(commands("ACCEPT",lptr,grp))
+	if '$$getSetting^PSLCC(.pslPrsr,"INFO",grp,0) quit
+	if $G(lptr)'="" quit:$D(pslPrsr("ACCEPT",lptr))#2  quit:$D(pslPrsr("ACCEPT",lptr,grp))
 	;
 	do log(.m2src,+$G(lptr),$G(subRou),1,grp_": "_msg,$G(tok))
 	quit
 	;
 	;-----------------------------------------------------------------------
-getLine(lptr)	;local String; 
+getLine(lptr) ;private String;
 	quit $$RTCHR^%ZFUNC($TR(m2src(lptr),$C(9)," ")," ")
 	;
 	;-----------------------------------------------------------------------
-gtmLevel(lvl)	;private Boolean; Is GT.M version at least as requested 
+gtmLevel(lvl) ;package Boolean; Is GT.M version at least as requested
 	;-----------------------------------------------------------------------
 	; Validate supplied lvl against $ZVERSION (or its override).
 	;
@@ -5784,10 +6706,10 @@ gtmLevel(lvl)	;private Boolean; Is GT.M version at least as requested
 	;		determine the result (using the "follows" operator).
 	;
 	; INPUTS:
-	; . commands("boot","gtmlevel") = $ZVERSION override
+	; . pslPrsr("boot","gtmlevel") = $ZVERSION override
 	;	If this lvn is defined, it will be used instead of $ZVERSION to
 	;	compare against lvl.
-	;	The value in commands("boot","gtmlevel") has the same layout as
+	;	The value in pslPrsr("boot","gtmlevel") has the same layout as
 	;	the lvl argument.
 	;
 	; OUTPUTS:
@@ -5795,7 +6717,7 @@ gtmLevel(lvl)	;private Boolean; Is GT.M version at least as requested
 	;	supplied lvl.
 	;
 	new v
-	set v=$G(commands("boot","gtmlevel"),$P($P($ZVERSION,"GT.M V",2)," "))
+	set v=$$getSetting^PSLCC(.pslPrsr,"boot","gtmlevel",$P($P($ZVERSION,"GT.M V",2)," "))
 	if v>lvl quit 1
 	if v<lvl quit 0
 	;
@@ -5804,64 +6726,47 @@ gtmLevel(lvl)	;private Boolean; Is GT.M version at least as requested
 	quit $p(lvl,"-",2)']$p(v,"-",2)
 	;
 	;-----------------------------------------------------------------------
-addXref(topic,ref,data)	;private void; Add to sysmap 
+addXref(topic,ref,data) ;package void; Add to sysmap
 	;-----------------------------------------------------------------------
 	;
-	new c,z
-	set z=$P(subRou,"(",1)_"+"_(line-subLine)
-	set c=$O(sysmap(topic,z,ref,""),-1)+1
-	set sysmap(topic,z,ref,c)=data
+	new loc,subLine
+	set subLine=$P($G(pslPrsr("pslMtd",pslPrsr("moduleName")_"."_subRou)),$C(9),$$rowPos^PSLMethod("SOURCELINE"))
+	set loc=$P(subRou,"(")_"+"_($$getScLnr-subLine)
+	do addSysmap^PSLParser(.pslPrsr,topic,loc,ref,data)
 	quit
 	;
 	;-----------------------------------------------------------------------
-addM2src(data)	;private void; Add a line to the end of m2src 
+addM2src(data) ;package void; Add a line to the end of m2src
 	;-----------------------------------------------------------------------
 	;
 	new seq
 	set seq=$o(m2src(""),-1)+1
 	set m2src(seq)=data
+	;
+	; TEMP
+	new ca set ca(1)=data do appendSrc^PSLTokenizer(.tknzr,.ca)
 	quit
 	;
 	;-----------------------------------------------------------------------
-	; xxxPSLSetting
-	;	Compiler setting interface.
-	;	These functions and procedures are used to obtain values from
-	;	and assign values to commands(,). Having a separate interface
-	;	ensures that the implementation (currently the public array
-	;	commands(,)) can be hidden from the callers.
-	; COMMON ARGUMENTS:
-	; . sec = section
-	;	This value corresponds to the first subscript in commands(,)
-	; . id = identifier
-	;	This value corresponds to the second subscript in commands(,)
-	; . val = new value
-	;	This parameter is only used in addPSLSetting(,,). It provides
-	;	the (new) value for the setting.
+backup(expr) ;package String; Remove the last command or command delimiter
+	;-----------------------------------------------------------------------
+	; If expr does not end in a space, it is returned unmodified
+	; If expr ends with a comma, it is removed before expr is returned
+	; Else all trailing spaces and tabs are removed, and one space is
+	; appended.
 	;
-	;	The following getters / setters are available:
-	;-----------------------------------------------------------------------
-	; Assign (new) value
-addPSLSetting(sec,id,val)	set commands(sec,id)=val quit  ; public void; assign value 
-	;-----------------------------------------------------------------------
-	; Obtain setting or "" if setting does not exist
-getPSLSetting(sec,id)	quit $get(commands(sec,id)) ; public Primitive; obtain setting 
-	;-----------------------------------------------------------------------
-	; Does setting exist?
-hasPSLSetting(sec,id)	quit $data(commands(sec,id))#2 ; public Boolean; does it exist 
-	;
-	;-----------------------------------------------------------------------
-backup(expr)	;private String; Remove the last command or command delimiter 
-	;-----------------------------------------------------------------------
+	; Appending a space safeguards against the case that the last command in
+	; expr is an agrumentless command.
 	;
 	new i
 	for i=$L(expr):-1:0 if '($E(expr,i)=" ") quit
 	if $E(expr,i)="," quit $E(expr,1,i-1)		; command delimiter
 	;
 	for i=i-1:-1:0 quit:$c(9,32)[$E(expr,i)
-	quit $E(expr,1,i-1)
+	quit $E(expr,1,i-1)_" "
 	;
 	;-----------------------------------------------------------------------
-p1append(code)	;private void; Append code after the current command 
+p1append(code) ;package void; Append code after the current command
 	;-----------------------------------------------------------------------
 	; Append pass 1 code after the current command on the line that is being
 	; constructed.
@@ -5880,7 +6785,7 @@ p1append(code)	;private void; Append code after the current command
 	quit
 	;
 	;-----------------------------------------------------------------------
-p1prepend(code)	;private void; Prepend code before the last command 
+p1prepend(code) ;package void; Prepend code before the last command
 	;-----------------------------------------------------------------------
 	; Prepend pass 1 code to the current command on the line that is being
 	; constructed.
@@ -5909,7 +6814,7 @@ p1prepend(code)	;private void; Prepend code before the last command
 	; . The code that uses $REVERSE to locate the command at the end of
 	;	mcode is dangerous too:
 	;	- it works only for the M standard non-Z commands ($E(cmd)!)
-	;	- Constructs in whcih the command argument and the command word
+	;	- Constructs in which the command argument and the command word
 	;		are identical are likely to fail: The PSL construct
 	;			if I set X=3
 	;		will translate to
@@ -5930,7 +6835,7 @@ p1prepend(code)	;private void; Prepend code before the last command
 	new i			; iterator
 	;
 	; Easy way: try to locate command+postcond from the end
-	set i=$FIND($REVERSE($tr(mcode,$C(9)," "))," "_$REVERSE($EXTRACT(cmd)_postCond)_" ")
+	set i=$FIND($REVERSE($tr(mcode,$C(9)," "))," "_$REVERSE($$UPCASE($EXTRACT(cmd))_postCond)_" ")
 	if i>0 set i=$LENGTH(mcode)-i+2
 	else  do		; Need to try the hard way ...
 	.	;
@@ -5946,7 +6851,7 @@ p1prepend(code)	;private void; Prepend code before the last command
 	quit
 	;
 	;-----------------------------------------------------------------------
-CVTEFD(expr)	;local String; convert EffectiveDate to use $G 
+CVTEFD(expr) ;private String; convert EffectiveDate to use $G
 	;-----------------------------------------------------------------------
 	new string
 	if expr["%EffectiveDate"  f i=1:1:$l(expr,"%EffectiveDate")-1 do
@@ -5955,12 +6860,8 @@ CVTEFD(expr)	;local String; convert EffectiveDate to use $G
 	.	set expr=$P(expr,"%EffectiveDate",1,i)_"$G(%EffectiveDate)"_$P(expr,"%EffectiveDate",i+1,99)
 	quit expr
 	;
-ET	;
-	do ERROR($$ETLOC^%ZT)
-	quit
-	;
 	;-----------------------------------------------------------------------
-ZT(vGoto)	;private void; 
+ZT(vGoto) ;package void;
 	;-----------------------------------------------------------------------
 	; General exception handler of PSL compiler. Catches all unhandled
 	; exceptions. It calls ERROR() to simulate an ordinary compiler error.
@@ -5971,6 +6872,47 @@ ZT(vGoto)	;private void;
 	;
 	new $ZTRAP set $ZTRAP="W ""%PSL-E-FATAL: Unrecoverable fatal error in compiler - QUIT"",! ZGOTO "_(vGoto-1)
 	set ER=1
-	if $ZSTATUS["%PSL-E-" do ERROR($E($ZSTATUS,$F($ZSTATUS,"%PSL-E-"),$L($ZSTATUS))) if 1
-	else  do ERROR($ZSTATUS)
+	if $ZERROR["%PSL-E-" do ERROR($E($ZERROR,$F($ZERROR,"%PSL-E-"),$L($ZERROR))) if 1
+	else  do ERROR($ZERROR)
 	zgoto vGoto-1
+	;
+	;-----------------------------------------------------------------------
+chkAccess(vsig);check if the logger is accessible.
+	;-----------------------------------------------------------------------
+	; The method must be public static and the parameter must be
+	; pass-by-reference
+	;
+	; ARGUMENTS:
+	; . vsig = logger signature, one of:
+	; classname.methodname
+	; methodname^classname
+	;
+	; NOTES:
+	; . Either syntax is allowed for a static method in a CDM or a
+	; subroutine in a SCM.
+	;
+	new cls,count,countmx,lblRec,mtd,rclass
+	;
+	if $E(vsig)="^" set $P(vsig,"^")=$P(vsig,"^",2)
+	else  if vsig["." do
+	.	set cls=$P(vsig,"."),mtd=vsig
+	else  do
+	.	set cls=$P(vsig,"^",2)
+	.	if cls="" set cls=pslPrsr("moduleName")
+	.	set mtd=cls_"."_$P(vsig,"^")
+	do loadClass^PSLCC(.pslPrsr,cls)
+	if '$D(pslPrsr("pslCls",cls)) do ERROR("Routine "_cls_" not found") quit
+	if '$D(pslPrsr("pslMtd",mtd)) do ERROR("Label referenced but not defined: "_vsig) quit
+	set lblRec=pslPrsr("pslMtd",mtd)
+	;
+	if $P(lblRec,tab,$$rowPos^PSLMethod("ACCESSLEVEL"))'=2 do ERROR("Subroutine "_vsig_" not accessible") quit
+	if $P(lblRec,tab,$$rowPos^PSLMethod("METHODTYPE"))'=2 do ERROR("Subroutine "_vsig_" is not a static subroutine") quit
+	;
+	set rclass=$P(lblRec,tab,$$rowPos^PSLMethod("RESULTCLASS"))
+	if rclass'="void",rclass'="" do ERROR("Subroutine type is not void") quit
+	;
+	if $P($P($P(lblRec,tab,$$rowPos^PSLMethod("FORMALLIST")),";",1)," ",1,2)'["ret Error" do ERROR("Formal parameter shall be 'ret Error'") quit
+	set countmx=$$getFpCount^PSLMethod(lblRec)
+	if countmx>1 do ERROR("Error object must be only formal parameter") quit
+	;
+	quit

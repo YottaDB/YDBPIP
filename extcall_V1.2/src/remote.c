@@ -17,10 +17,12 @@
 *
 */
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <errno.h>
 #include <signal.h>
 #include <time.h>
-#include <extcall.h>
+#include "extcall.h"
 
 void
 stfstart(int count,char *fep,char *fep_name,SLONG *return_code)

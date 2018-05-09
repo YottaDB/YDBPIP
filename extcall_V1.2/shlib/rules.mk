@@ -28,10 +28,10 @@ SCA_LIB =	${SCA_REL_DIR}/lib
 MTM_LIB = 	${BUILD_DIR}/sca_gtm/mtm/lib
 
 # get SCA environment setup
-CC = /usr/bin/cc
+CC = /usr/bin/gcc
 MAKE = /usr/bin/make
-AR = /bin/ar
-LD = /usr/bin/cc
+AR = /usr/bin/ar
+LD = /usr/bin/gcc
 
 INCLUDES = -I. -I${SCA_INC}
 
@@ -43,5 +43,5 @@ LIBS = /lib/libc.a
 	${CC} ${INCLUDES} ${CFLAGS}  $<
 
 .m.o:
-	/usr/local/bin/dcm $< $*.o ${BUILD_DIR}
+	/usr/bin/dcm $< $*.o ${BUILD_DIR}
 

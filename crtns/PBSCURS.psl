@@ -17,38 +17,43 @@ PBSCURS
 		. STOP		Stop Cursor Pool processes
 
 	----- Revision History ------------------------------------------------
-	08/16/06 - GIRIDHARANB - CR22684
-		Added section LINK and made modification to the main loop
-		to link changes to the CP process. See associated changes in 
-		PBSUTL.proc.
 	
-	03/23/06 - GIRIDHARANB - CR20310
-		Modified section close to clean out expired cursors from 
-		the sqlcur0 table.
+	01/07/2009 - RussellDS - CR37511
+		* Modified to correctly close cursors to prevent open cursor
+		  leaks.
+	
+	11/14/08 - GIRIDHARANB - CR 36391
+	
+		Rolled up changes from FW v2.7
 		
-	02/10/06 - GIRIDHARANB - CR15976
-		Modified section EXEC to delete the entry from the sqlcur0 
-		table when a "CLOSE" command is received..
-	
-	02/04/06 - RussellDS - CR19390
-		Broke out start and stop code to allow to be called
-		externally.  This is initially used by MTMFUNCS but can also
-		be called from O/S level scripts.
+		11/14/08 - GIRIDHARANB - CR36678
+		Modified EXEC section to preserve %TOKEN as it is used by $$^SQL.
+		Removed old Revision History.
 		
-		Modified #IF statements to exclude GT.M environments versus
-		just including Oracle.
-		   
-		PSL clean-up.
+		11/01/2008 - RussellDS - CR 36492
+		Modified EXEC section to deal with specific in/out variables
+		instead of the entire symbol table.  The other approach was
+		resulted in excessive overhead based on benchmarking.
+		
+	09/30/08 - GIRIDHARANB - CR35828
 	
-	01/11/06 - GIRIDHARANB - CR18912
-  		Minor change to CHKTBL section to covert the hex pid value to decimal
-  		before the LIST lookup. Also removed all entries from sqlcur0 for the
-  		cursor process on a stop.
-  	
-	01/06/05 - GIRIDHARANB - CR18895
-  		Modified section MAIN to register the process and close
-  		it subsequently on a STOP. Also modified section CHKTBL to 
-  		correct check on the LIST array returned from the call to ^%ZPID.
+		Rolled up these changes from FW v2.7
+		
+		Modified section CLOSE to include the processID when clearing out
+		expired cursors, this was causing row lock contention in oracle.
+	
+		Modified section EXEC to use the cursor process ID as third key
+		to the SQLCUR0 table. This ensures that there is no contention between
+		two cursor processes when operating with the same cursor.
+		
+		Modified section STOPEXT to call deleteq. This prevents orphaned
+		queues on the system.
+		
+	11/30/07 - Pete Chenard - 30087
+		Modified to declare vzMSG as a ByteString data type.
+		
+	08/09/07 - GIRIDHARANB - CR28225
+		Cleaned up code to eliminate PSL compiler warnings.
 	-----------------------------------------------------------------------
 
 	*/
@@ -67,8 +72,9 @@ public MAIN(String QNAME,
 	     . CPID	Cursor Process ID	/REQ/MECH=VAL
 	*/
 
-	type String %INTRPT,%INTRPT(),vzCACHE,vzERMSG,vzEXIT,vzHDR,vzMSG,vzREPLY,vzSERVER
-
+	type String %INTRPT(),cpCACHE(,,),vzERMSG,vzEXIT,vzHDR,vzREPLY,vzSERVER
+	type ByteString vzMSG
+	
 	set vzEXIT=0
 
 	catch error {
@@ -107,13 +113,18 @@ public MAIN(String QNAME,
 	
 	// Register M process
 	do REGISTER^IPCMGR("CURSOR")
-	
 
 	// Process loop
 	for  do { quit:vzEXIT
+		
+		// Clean up symbol table between loops
+		#ACCEPT Date=11/06/2008; Pgm=RussellDS; CR=36492; Group=BYPASS
+		#BYPASS
+		KILL (%INTRPT,cpCACHE,CPID,QNAME,vzEXIT)
+		#ENDBYPASS
 
 		// Close expired cursors (those that exceed timeout)
-		do CLOSE(.vzCACHE,$$TIM^PBSUTL($H))
+		do CLOSE(cpCACHE(,,),$$TIM^PBSUTL($H))
 
 		// Check interrupt status
 		if %INTRPT.data()>1 do INTRPT^IPCMGR
@@ -134,7 +145,7 @@ public MAIN(String QNAME,
 		set vzMSG=vzMSG.extract(11,vzMSG.length())
 
 		// Execute SQL on behalf of the server process
-		do EXEC(vzMSG,.vzREPLY,.vzSERVER,.vzCACHE)
+		do EXEC(vzMSG,.vzREPLY,.vzSERVER,cpCACHE(,,))
 
 		// Prepend the header to reply message
 		set vzREPLY=vzHDR_vzREPLY
@@ -145,7 +156,7 @@ public MAIN(String QNAME,
 	}
 
 	// Close all cursors
-	do CLOSE(.vzCACHE,"")
+	do CLOSE(cpCACHE(,,),"")
 
 	// Remove cursor entries for the process.
 	do Db.delete("SQLCUR0","CPID=:%ProcessID")
@@ -164,115 +175,175 @@ public MAIN(String QNAME,
 	quit
 
 
-EXEC(String vzMSG,
-     String vzREPLY,
-     String vzSERVER,
-     String vzCACHE())
+EXEC(String MSG,
+     String REPLY,
+     String SERVERID,
+     String cpCACHE(,,))
 
 	/*
 	This function executes code on behalf of the server process.
 
 	ARGUMENTS:
-	     . vzMSG	Input Message (LV format)	/REQ/MECH=VAL
-
-			Field 1:  Executable string (i.e., "set ER=$$^SQL.." )
-			Field 2:  Server context (LengthValue format)
-			Field 3:  SQL command (OPEN/FETCH/CLOSE)
-			Field 4:  Client Token (%TOKEN)
-			Field 5:  Cursor Name (ID)
-			Field 6:  Server ID
+	     . MSG	Input Message (LV format)	/REQ/MECH=VAL
 	     
-	     . vzREPLY	Reply Message (LV format)	/REQ/MECH=REF:W
+	     		See section below that unpackages the input
+	     		message for field level details.
 	     
-	     . vzSERVER	Server ID to send reply		/REQ/MECH=REF:W
+	     . REPLY	Reply Message (LV format)	/REQ/MECH=REF:W
+	     
+	     . SERVERID	Server ID to send reply		/REQ/MECH=REF:W
 
-	     . vzCACHE	Cursor Cache			/REQ/MECH=REFARR:W
-	*/
+	     . cpCACHE	Cursor Cache			/REQ/MECH=REFARR:W
+	     
+	IMPORTANT NOTE:  Any change to the variables necessary to pass to and be
+			 returned by PBSCURS must be coordinated in this section
+			 as well as in MAIN^PBSMSQL.  Look for all uses of the
+			 arrays infld and outfld.
+        */
+        
+	type Number ptr
+	type String infld(), outfld()
+	
+	// Variables set based on PBSMSQL message
+	type String %CO, %CRCD, %IDENT, %MSKC, %MSKD, %MSKE, %MSKL, %MSKN
+	type String %STFHOST, %TOKEN, %UCLS, %UID, %VN, %VNC, clientToken, curName
+	type String oldCID, sqlcmd, SQLEXPR, SQLPAR(), SQLTOK, TJD, TLO, xexpr
+	
+	// Variables expected as part of return from execute SQL to return to PBSMSQL
+	type Number ER = 0
+	type String %ZTSEQ, RM, SQLCNT, SQLCOD, SQLDTA, SQLIND
 
+	catch error@"LOGERR^UTLERR" {
+		type public Number %ZTSEQ, RM
+		
+		type Number I
 
-	type Number ER
-	type String RM,vzCLTOKN,vzCURSOR,vzFLD(),vzSQLCMD,vzX
+		set outfld(1) = ER.get()
+		set outfld(2) = RM.get()
+		for I = 3:1:6 set outfld(I) = ""
+		set outfld(7) = %ZTSEQ.get()
 
-	catch error {
-		do ZE^UTLERR
+		set REPLY = $$V2LV^MSG(outfld())
 	}
 
-	// Protect all variables except those passed into EXEC
-
-	set vzX="%"
-	for  set vzX=$O(@vzX) quit:vzX.isNull()  if ",vzCACHE,vzMSG,vzREPLY,vzSERVER,vzX,"'[(","_vzX_",") new @vzX
-
 	// Parse LV input message into fields
-	set vzX=$$LV2V^MSG(vzMSG,.vzFLD)
-
-	// Load server process context
-	do VLOD^PBSUTL(vzFLD(2))
-
-	set vzSERVER=vzFLD(3)
-	set vzCLTOKN=vzFLD(4)
-	set vzCURSOR=vzFLD(5)
-	set vzSQLCMD=vzFLD(6)
-	set vzREPLY=""
+	set ptr = $$LV2V^MSG(MSG, infld())
+	
+	/* Unpack message and assign variables
+	   See comments above about changes to variables
+	*/
+	set xexpr = infld(1)		// Executable string (i.e., "set ER=$$^SQL.." )
+	set SERVERID = infld(2)		// Process ID of server
+	set clientToken = infld(3)	// Client Token (%TOKEN)
+	set %TOKEN = clientToken	// Used by $$^SQL
+	set curName = infld(4)		// Cursor Name (ID)
+	set sqlcmd = infld(5)		// SQL command (OPEN/FETCH/CLOSE)
+	
+	set SQLEXPR = infld(6)
+	if 'infld(7).isNull() do {
+	
+		type Number i
+		
+		for i = 1:2:infld(7).length(0.char()) set SQLPAR(infld(7).piece(0.char(), i)) = infld(7).piece(0.char(), i + 1)
+	}
+	set SQLTOK = infld(8)
+	set %CO = infld(9)
+	set %CRCD = infld(10)
+	set %IDENT = infld(11)
+	set %MSKC = infld(12)
+	set %MSKD = infld(13)
+	set %MSKE = infld(14)
+	set %MSKL = infld(15)
+	set %MSKN = infld(16)
+	set %STFHOST = infld(17)
+	set %UCLS = infld(18)
+	set %UID = infld(19)
+	set %VN = infld(20)
+	set %VNC = infld(21)
+	set TJD = infld(22)
+	set TLO = infld(23)
 
 	/*
-	Cache cursor information in vzCACHE array.  This information
+	Cache cursor information in cpCACHE array.  This information
 	is used to direct the reply to the appropriate server and to
 	close cursors that have timed out.
 
-	Format:  vzCACHE("CURSOR",%TOKEN,CURSOR)=ServerID|TimeStamp
+	Format:  cpCACHE("CURSOR",%TOKEN,CURSOR)=ServerID|TimeStamp|CPID
 	*/
 
-	if vzSQLCMD="OPEN" set vzCACHE("CURSOR",vzCLTOKN,vzCURSOR).piece("|",1)=vzSERVER
-	else  if vzCACHE("CURSOR",vzCLTOKN,vzCURSOR).get().isNull() set ER=1,RM="Cursor "_vzCURSOR_" is not OPEN" quit
+	set oldCID = ""
 
-	set vzCACHE("CURSOR",vzCLTOKN,vzCURSOR).piece("|",2)=$$TIM^PBSUTL($H)
-
-	// Execute SQL statement
-	do XSQL(vzFLD(1))
-
-	/*
-	If this is an OPEN, update SQLCUR with cursor pool process ID.
-	This is used by the server process to direct the subsequent
-	FETCH and CLOSE statements to the same cursor pool process.
-	*/
-
-	if vzSQLCMD="OPEN" do {
-		type RecordSQLCUR0 sqlcur0=Db.getRecord("SQLCUR0","TOKEN=:vzCLTOKN,CURSOR=:vzCURSOR",1)
-		if sqlcur0.getMode()=1,sqlcur0.cpid=%ProcessID quit
-		set sqlcur0.cpid=%ProcessID
-		do sqlcur0.bypassSave()
+	if sqlcmd = "OPEN" do {
+		
+		set oldCID = cpCACHE("CURSOR", clientToken, curName).get().piece("|", 3)
+		set cpCACHE("CURSOR", clientToken, curName).piece("|",1) = SERVERID
+	}
+	else  if cpCACHE("CURSOR", clientToken, curName).get().isNull() do {
+		
+		set ER = 1
+		set RM = "Cursor "_curName_" is not OPEN"
 	}
 
-	if vzSQLCMD="CLOSE" do {
-		do Db.fastDelete("SQLCUR0","TOKEN=:vzCLTOKN,CURSOR=:vzCURSOR")
-		kill vzCACHE("CURSOR",vzCLTOKN,vzCURSOR)
-	}
+	if 'ER do {
+		set cpCACHE("CURSOR", clientToken, curName).piece("|", 2) = $$TIM^PBSUTL($H)
 
-	do {
-		type String vzCACHE,vzCLTOKN,vzCURSOR,vzFLD(),vzMSG,vzSERVER,vzSQLCMD,vzX
-		set vzREPLY=$$VSAV^PBSUTL("*")
+		// Execute SQL statement
+		do {
+
+			// Protect variables we don't want touched
+			type String clientToken, cpCACHE(,,), curName
+
+			// Execute the call to $$SQL on behalf of the server process.
+			#ACCEPT PGM=Allan Mattson;DATE=05/13/05;CR=18181
+			xecute xexpr
+		}
+
+		/*
+		If this is an OPEN, update SQLCUR with cursor pool process ID.
+		This is used by the server process to direct the subsequent
+		FETCH and CLOSE statements to the same cursor pool process.
+		*/
+
+		if sqlcmd = "OPEN" do {
+			
+			type Boolean ER
+			type String exe(), vsql()
+			
+			// Need to restore to recover vsql("vCurID")
+			do RESTORE^SQLUTL(curName, vsql(), exe())
+			
+			if 'oldCID.isNull(), 'vsql("vCurID").get().isNull(), oldCID '= vsql("vCurID") set ER = $$CLOSECUR^%DBAPI("", oldCID)
+			
+			// Save RDB cursor ID to be able to close
+			set cpCACHE("CURSOR", clientToken, curName).piece("|", 3) = vsql("vCurID").get()
+				
+			do Db.fastDelete("SQLCUR0", "TOKEN=:clientToken,CURSOR=:curName")
+		
+			type RecordSQLCUR0 sqlcur0 = Class.new("RecordSQLCUR0", "TOKEN=:clientToken,CURSOR=:curName,CPID=%ProcessID")
+		
+			do sqlcur0.bypassSave()
+		}
+
+		if sqlcmd = "CLOSE" do {
+		
+			do Db.fastDelete("SQLCUR0", "TOKEN=:clientToken,CURSOR=:curName")
+			kill cpCACHE("CURSOR", clientToken, curName)
+		}
 	}
 	
-	quit
-
-
-XSQL(String XSQL)
-
-	/*
-	Execute call to $$^SQL
-
-	ARGUMENTS:
-	     . XSQL	Executable string	/REQ/MECH=VAL
-	     		(calls $$^SQL)
+	/* Pack up the return information to send back to PBSMSQL
+	   See comments above about changes to variables
 	*/
+	set outfld(1) = ER.get()
+	set outfld(2) = RM.get()
+	set outfld(3) = SQLCOD.get()
+	set outfld(4) = SQLDTA.get()
+	set outfld(5) = SQLCNT.get()
+	set outfld(6) = SQLIND.get()
+	set outfld(7) = %ZTSEQ.get()
 
-	// Protect vzCACHE and vzFLD arrays
-	type String vzCACHE(),vzFLD()
-
-	// Execute the call to $$SQL on behalf of the server process.
-	#ACCEPT PGM=Allan Mattson;DATE=05/13/05
-	xecute XSQL
-
+	set REPLY = $$V2LV^MSG(outfld())
+	
 	quit
 
 
@@ -487,6 +558,8 @@ public STOPEXT(String QNAME,	// Queue name
 		D SIGNAL^IPCMGR($$HEXDEC^%ZHEX(rs.getCol("PID")),"STOP")
 		set CPCNT = CPCNT - 1
 	}
+	
+	do DELETEQ		// delete queues
 
 	#ELSE
 	set ER = 1
@@ -515,28 +588,28 @@ CHKTBL(String QNAME)
 
 	quit	
 
-CLOSE(String CACHE(),
+CLOSE(String CACHE(,,),
       Number DATETIME)
 
-	type public Number ER
-
+	type Boolean ER
 	type Number LASTTIME
-	type String %TOKEN, CURSOR
+	type String %TOKEN, CURSOR, oldCID
 
 	set (%TOKEN, CURSOR) = ""
 	for  set %TOKEN = CACHE("CURSOR", %TOKEN).order() quit:%TOKEN.isNull()  do {
 		for  set CURSOR = CACHE("CURSOR", %TOKEN, CURSOR).order() quit:CURSOR.isNull()  do {
 			
 			set LASTTIME = CACHE("CURSOR", %TOKEN, CURSOR).piece("|",2)
+			set oldCID = CACHE("CURSOR", %TOKEN, CURSOR).piece("|",3)
 
 			// Cursor timeout has not been exceeded
 			if (DATETIME > 0), (DATETIME - LASTTIME < 300) quit
 
 			// Close expired cursor
-			set ER = $$^SQL("CLOSE "_CURSOR)
+			if 'oldCID.isNull() set ER = $$CLOSECUR^%DBAPI("", oldCID)
 
 			// Clean out the sqlcur0 table.
-			do Db.fastDelete("SQLCUR0","TOKEN=:%TOKEN,CURSOR=:CURSOR")
+			do Db.fastDelete("SQLCUR0","TOKEN=:%TOKEN,CURSOR=:CURSOR,CPID=:%ProcessID")
 
 			// Delete cursor entry in CACHE array
 			kill CACHE("CURSOR", %TOKEN, CURSOR)
@@ -580,4 +653,4 @@ ERRLOG(String ET)
 	
 	quit
  #OPTION ResultClass ON
-Public String vSIG()	quit "60499^39273^Badrinath Giridharan^12864"	// Signature - LTD^TIME^USER^SIZE
+public String vSIG()	quit "61380^47623^Badrinath Giridharan^15248"	// Signature - LTD^TIME^USER^SIZE

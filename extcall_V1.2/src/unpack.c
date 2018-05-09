@@ -47,16 +47,15 @@
 *
 */
 #include <stdio.h>
-#include <extcall.h>
+#include <stdlib.h>
+#include <string.h>
+#include "extcall.h"
 
-void unpack(int count,
-			STR_DESCRIPTOR *src,
-			SLONG length,
-			STR_DESCRIPTOR *dst)
+void unpack(int count, STR_DESCRIPTOR *src, SLONG length, STR_DESCRIPTOR *dst)
 {
-	int		  		i = 0;
-	int		  		x = 0;
-	int		  		left_nibble = 1;
+	int	 	i = 0;
+	int	 	x = 0;
+	int	  	left_nibble = 1;
 	char         	buf[10];
 	char         	result[256];
 	char         	*indx = result;

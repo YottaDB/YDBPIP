@@ -15,6 +15,11 @@ DBSSCR(SID,NOLINK)	; V 5.0 - Screen Compiler
 	;
 	; I18N=QUIT: Exculded from I18N standards. 
 	;---------- Revision History -------------------------------------------
+	; 12/18/2008 - RussellDS - CRs 36952/35741
+	;	* Modified test for linkage based on -1 to use not equal to null.
+	;	  Avoids issues with new RecordDBTBL2 save code creating null node
+	;	  values.
+	;
 	; 02/14/06 - RussellDS - CR19065
 	;	     Removed reference to obsolete routine DBSFRM.
 	;
@@ -58,7 +63,7 @@ DBSSCR(SID,NOLINK)	; V 5.0 - Screen Compiler
 	;
 	; Linked screen ?
 	;
-	I $D(^DBTBL(%LIBS,2,SID,-1)) D ^DBSDSMP Q
+	I $G(^DBTBL(%LIBS,2,SID,-1))'="" D ^DBSDSMP Q
 	;
 	D ^DBSSCR0
 	;

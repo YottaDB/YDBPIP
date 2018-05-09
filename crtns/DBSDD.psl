@@ -36,29 +36,17 @@ DBSDD
 		$$VER		- Verify dictionary element 
 
 	---- Revision History -------------------------------------------------
-	06/26/06 - Pete Chenard - 22003
-		   Modified DI section to only call fsn section if the 
-		   fsn array is not defined already.
-		   
-	05/04/06 - RussellDS - CR21340
-		   Fix incorrect comment syntax in LIST header.
-		   
-		   Add accept for PSLBOOT qualifier.
-		   
-	03/22/06 - RussellDS - CR20234
-		   Fix incorrect comment syntax in COLLIST header.
-	
-	02/14/06 - RussellDS - CR19065
-		   Change reference to delimiter to use DBTBL1, not the 
-		   obsoleted delimiter from DBTBL1D.
-		   
-		   Eliminate isDefined() and getRecord() methods around
-		   DBTBL1, DBTBL1D, and STBLSYSKEYWD to better support
-		   bootstrapping.
-		   
-	12/06/05 - RussellDS - CR18400
-		   Created.
-
+	01/21/2008 - RussellDS - CR30801
+		Modified fsn section to remove reference to SchemaTable.filerPGM
+		as name is now used directly when needed.
+		
+		Modified error handling around getTableInfo to allow return of
+		correct error message.
+		
+	01/10/2008 - RussellDS - CR27800
+		Eliminated numerous PSL warnings and did some code clean-up.
+		
+		Removed old revision history.
 	-----------------------------------------------------------------------
 	*/
 
@@ -105,7 +93,7 @@ public PARSE(String ddexpr,	// Dictionary Reference		/MECH=REF:RW
        		ZWR
 		ER=0
 		NS="$P(DEP(51),""|"",1)"
-		fsn("DEP")="DEP(|^ACN(CID|CID|10|0|^DEPFILE(%O)||||124|SYSDEV"
+		fsn("DEP")="DEP(|^ACN(CID|CID|10|0|vSave^RecordDEP||||124|SYSDEV"
 		fsn("DEP",51)="DEP(51)"
 		vdd("SYSDEV,DEP")="SYSDEV.DEP"
 		vdd("SYSDEV.DEP.BAL")="51|12||BALANCE|||||$|Ledger Balance||||2|0|||
@@ -188,8 +176,15 @@ public PARSE(String ddexpr,	// Dictionary Reference		/MECH=REF:RW
 
         // Apply MUMPS functions to array reference
 
-	if del set NS = "$P("_NS_","_$S(del<32:"$C("_del_")",1:""""_$C(del)_"""")_","_$S(fld:fld,1:1)_")"
-
+	if del do {
+		
+		set NS = "$P("_NS_","
+		if (del < 32) set NS = NS_ "$C("_ del_ ")"_ ","
+		else  set NS = NS_ """"_ del.char()_ """"_ ","
+		if fld set NS = NS_ fld_ ")"
+		else  set NS = NS_ 1_ ")"
+	}
+		
 	if 'sfd.isNull(), 'sfd.translate("~0").isNull() do {
 		
 		type String sft, sfd1, sfd2, sfp
@@ -205,8 +200,8 @@ public PARSE(String ddexpr,	// Dictionary Reference		/MECH=REF:RW
 		set NS = "$$GET^USUB("_NS_","""_sft_""","""_sfd1_""","""_sfd2_""","_+sfp_")"
 	}
 
-	if typ.beginsWith("B") set NS = "$A("_NS_")\"_$P("1/2/4/8/16/32/64/128","/",$E(typ,2))_"#2"
-
+	if typ.beginsWith("B") set NS = "$A("_ NS_ ")\"_ "1/2/4/8/16/32/64/128".piece("/", typ.extract(2))_ "#2"
+	
 	if NS.isNull() set NS=""""""
 	
 	quit
@@ -219,7 +214,7 @@ CMPUTED(String cmpin)	// Computed expression
 	*/
 	
 	type public Boolean ER
-	type public String cmp(,), di, file, frm, fsn(), lvn, RM, vdd(), vsub()
+	type public String cmp(,), di, file, frm, fsn(,), lvn, RM, vdd(), vsub()
 	
 	type Number ptr
 	type String atom, cmpinuc, cmputed, dels, NS, return, tok
@@ -231,7 +226,7 @@ CMPUTED(String cmpin)	// Computed expression
 	}
 
 	// Do not allow set or do in computed
-	set cmpinuc = $$UPPER^%ZFUNC(cmpin)
+	set cmpinuc = cmpin.upperCase()
 	if (cmpinuc.beginsWith("S ") ! cmpinuc.beginsWith("D ")) do { quit ""
 		
 		set ER=1
@@ -263,7 +258,7 @@ CMPUTED(String cmpin)	// Computed expression
 			if rs.next() set return = return_rs.getCol("DES")
 		}
 
-		if ($A(atom) = 0) set return = return_$$UNTOK^%ZS(atom, tok) quit
+		if (atom.ascii() = 0) set return = return_$$UNTOK^%ZS(atom, tok) quit
 		if atom.beginsWith("$") set return = return_atom quit
 		if atom.isNumber() set return = return_atom quit
 		
@@ -276,7 +271,7 @@ CMPUTED(String cmpin)	// Computed expression
 	
 		// Parse the column
 		set ddref = file_"."_atom
-		do PARSE(.ddref, "", .cmp(), .fsn(), .frm, .vdd(), .lvn, .vsub()) quit:ER
+		do PARSE(.ddref, "", .cmp(,), .fsn(,), .frm, .vdd(), .lvn, .vsub()) quit:ER
 		set return = return_NS
 		
 		if $$SIMPLFUN(NS) quit
@@ -526,12 +521,12 @@ public DI(String ddexpr,	// Dictionary reference		/MECH=REF:RW
 	
 	if vdd(ddexpr).exists() quit vdd(ddexpr)
 	
-	type SchemaTable tableinfo
+	type PSLTable tableinfo
 	
-	set ER = '$$getTableInfo(fid, .tableinfo)
+	set ER = '$$getTableInfo(fid, .tableinfo, .RM)
+	if ER quit ""
 	
-	if ER set delim = ""
-	else  set delim = tableinfo.columnDelimiter
+	set delim = tableinfo.columnDelimiter
 	
 	type SchemaColumn colinfo
 	
@@ -820,22 +815,30 @@ public fsn(String fsn(),	// File header array [*]	/MECH=REFARR:RW
 	This subroutine loads file information into a record (fsn) to be used
 	by compilers and other utilities that require included information.
 	
+	NOTE:  Over time, the use of this function should be eliminated and
+	       replaced by the direct use of PSLTable or SchemaTable.  Currently,
+	       because PSLTable does not provide all the needed data (fsn and
+	       netloc), and because SchemaTable is too expensive, simply use
+	       DBTBL1 directly to get data.  If we can eliminate the need for
+	       fsn and netloc, then use PSLTable.  (Function getTableInfo has
+	       been retained for use at that point.)
+	
 	KEYWORDS:	Data Dictionary
 	
 	ARGUMENT NOTES:
 		. fsn(file)	File Attributes Record	/NOREQ/MECH=REF:W
 	
-	  Local_Array|Global|Keys (nolits)|Record_Type|Location|Filer name|nolog|
-	     1          2          3           4          5       6     7
-	  Ref_TLD|Ref_UID|Delimiter|library|Existed indicator|Ref_TIM|system name
-	     8       9        10       11       12              13      14                                 
+	  Local_Array|Global|Keys (nolits)|Record_Type|Location||nolog|
+	     1          2          3           4          5       7    
+	  ||Delimiter|library|Existed indicator
+	       10       11       12                                            
 	
 	EXAMPLES:
 	
-		fsn("CUVAR")="A(|^CUVAR(||10|2|"
-		fsn("DBTBL1D")="fDBTBL1D(|^DBTBL(%LIBS,1,FID,9,DI|%LIBS,FID,DI|1|2|^DBSDFF(%O)"
-		fsn("DEP")="DEP(|^ACN(CID|CID|10|1|^DEPFILE(%O)"
-		fsn("HIST")="fHIST(|^HIST(CID,TSEQ|CID,TSEQ|1|1|"
+		fsn("CUVAR")="A(|^CUVAR(||10|2"
+		fsn("DBTBL1D")="fDBTBL1D(|^DBTBL(%LIBS,1,FID,9,DI|%LIBS,FID,DI|1|2"
+		fsn("DEP")="DEP(|^ACN(CID|CID|10|1"
+		fsn("HIST")="fHIST(|^HIST(CID,TSEQ|CID,TSEQ|1|1"
 	*/
 	
 	type public Boolean ER
@@ -851,13 +854,19 @@ public fsn(String fsn(),	// File header array [*]	/MECH=REFARR:RW
 		set RM = $$^MSG(8615)
 	}
 	
-	type SchemaTable tableinfo
+	// type PSLTable tableinfo
 	
-	set ER = '$$getTableInfo(file, .tableinfo)
+	// set ER = '$$getTableInfo(file, .tableinfo, .RM)
+	type RecordDBTBL1 dbtbl1 = Db.getRecord("DBTBL1", "%LIBS='SYSDEV',FID=:file", 1)
 	
-	if ER set RM = $$^MSG(1337,file) quit	// Invalid file name ~p1
-
-	set acckeys = tableinfo.primaryKeys
+	if '(dbtbl1.getMode() > 0) do { quit
+		
+		set ER = 1
+		// Invalid file name ~p1
+		if RM.get().isNull() set RM = $$^MSG(1337,file)
+	}
+	
+	set acckeys = dbtbl1.acckeys
 	set keys = ""
 	for I = 1:1:acckeys.length(",") do {
 		
@@ -867,19 +876,24 @@ public fsn(String fsn(),	// File header array [*]	/MECH=REFARR:RW
 	}
 	set keys = keys.extract(1, keys.length() - 1)
 	
+	/* The following code is used to allow fsn (top level) to provide a
+	   file shortname substitution.  SQL uses it to substitute vsql()
+	   for the shortname.  */
 	if fsn.get().isNull() do {
 		
-		set lvn = tableinfo.fileShortName
+		//set lvn = tableinfo.fileShortName
+		set lvn = dbtbl1.fsn
 		if 'lvn.isLike("%(%") set lvn = lvn_"("
 	}
 	else  set lvn = ""
 	
-	set glref = tableinfo.global
-	if (glref.piece("(", 2) = """*""") set glref = glref.piece("(", 1))_"("	// CUVAR
+	set glref = dbtbl1.glref
+	if glref.piece("(", 2) = """*""" set glref = glref.piece("(", 1)	// CUVAR
+	if 'glref.isLike("%(%") set glref = glref_ "("				// CUVAR
 		
-	set X = lvn_"|"_glref_"|"_keys_"|"_tableinfo.recordType_"|"_tableinfo.networkLocation
-	set X = X_"|"_tableinfo.filerPGM_"|"_tableinfo.isAutoLog_"|"_tableinfo.dateCreated_"|"_tableinfo.userCreated
-	set X = X_"|"_tableinfo.columnDelimiter_"|SYSDEV|"_tableinfo.existsNode_"|"_tableinfo.timeCreated_"|"_tableinfo.systemName
+	set X = lvn_"|"_glref_"|"_keys_"|"_dbtbl1.rectyp_"|"_dbtbl1.netloc
+	set X = X_"||"_dbtbl1.log_"||"
+	set X = X_"|"_dbtbl1.del_"|SYSDEV|"_dbtbl1.exist
 	
 	set fsn(file) = X
 	
@@ -1006,7 +1020,8 @@ public LIST(String file,	// Table Name
 	
 	
 getTableInfo(String table,		// Table name
-	     SchemaTable tableInfo)	// Schema column record
+	     PSLTable tableInfo,	// Schema column record
+	     String ermsg)		// Error message, if any
        
 	/*
 	Load SchemaTable record, with error handling.
@@ -1024,9 +1039,10 @@ getTableInfo(String table,		// Table name
 		catch error {
 			
 			set return = 0
+			set ermsg = error.description
 		}
 		
-		set tableInfo = Db.getSchemaTable(table)
+		set tableInfo = PSL.getPSLTable(table, 0)
 	}
 	
 	quit return
@@ -1081,11 +1097,11 @@ public COLLIST(String table,		// Table Name
 	
 	type Boolean ER
 	type Number I
-	type String acckeys, return
+	type String acckeys, return, RM
 	
 	type SchemaTable tableinfo
 	
-	set ER = '$$getTableInfo(table, .tableinfo)
+	set ER = '$$getTableInfo(table, .tableinfo, .RM)
 	
 	if ER quit ""
 	
@@ -1165,5 +1181,5 @@ FIELD(String ddexpr,	// Data item reference
 	if x.get().isNull() set x = $$DI(ddexpr, "", .vdd(), .fsn()) if x.isNull() quit ""
 	
 	quit x.piece("|", loc)
-
-vSIG()	quit "60442^53213^e0101489^32303"	// Signature - LTD^TIME^USER^SIZE
+ #OPTION ResultClass ON
+public String vSIG()	quit "61254^68547^Dan Russell^32779"	// Signature - LTD^TIME^USER^SIZE

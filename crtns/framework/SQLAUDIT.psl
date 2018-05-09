@@ -1,0 +1,581 @@
+	#PACKAGE framework
+	#OPTION ResultClass ON
+	
+	// **********************************************************************
+	// * IMPORTANT NOTE:                                                    *
+	// * According to the rules that apply to PSL compiler upgrades,        *
+	// * the generated M routine associated with this procedure must be     *
+	// * checked into StarTeam and released with the procedure whenever     *
+	// * changes are made to this procedure.                                *
+	// *                                                                    *
+	// * The mrtns version will be used during upgrades and will then be    *
+	// * removed from the mrtns directory.  Therefore, other than in a      *
+	// * development environment, or during an upgrade, an mrtns version of *
+	// * this routine should not exist.                                     *
+	// *                                                                    *
+	// * Keep these comments as single line to ensure they exist in the     *
+	// * generated M code.                                                  *
+	// **********************************************************************
+
+	/*
+	SQL AUDIT command and support functions for audit logging.
+	
+	Implementation of the SQL AUDIT command for PROFILE SQL.
+	
+	Function [buildSQL] to build SQL for PSL INSERT, UPDATE, and DELETE
+	operations to allow logging of SQL to audit log.
+	
+	Function [genAuditLog] to return whether any audit logging is used.
+	
+	Function [BIDATA] to support computed DBAUDITLOGD.BIDATA
+
+	---- Revision History -------------------------------------------------
+	05/27/2008 - RussellDS - CR30801
+		Created.
+
+	-----------------------------------------------------------------------
+	*/
+	
+	quit				// No access from top
+	
+public void AUDIT(String expr,		// AUDIT expression, without AUDIT keyword
+		  String tok,		// tokens, if called from ^SQL
+		  ret Number sqlcnt)	// Rows inserted or updated
+	     
+	/*
+	Maintain table audit configuration
+
+	GRANT <operations> ON [TABLE] <table> TO <userclasses> OPTION <option>
+	
+	Where	<operations> =	commalist of INSERT, UPDATE, DELETE, SELECT 
+				or ALL OPERATIONS
+
+		<table> = 	table name or * or partial_name*
+
+		<userclasses> = commalist of userclasses or keyword PUBLIC
+
+		<option> = 	OFF or LOG or LOGRECORDS or LOGDATA
+
+	Option OFF will set logging to off for the specified
+	operation(s)/table(s)/userclass(es).  If all options end up OFF
+	for a userclass, that userclass row will be removed from the table.
+
+	Option LOG will set logging on, using option 1, log statement only.
+	
+	Option LOGRECORDS will set logging on, using option 2, log with
+	individual record keys (UPDATE/DELETE only)
+	
+	Option LOGDATA will set logging on, using option 3, log with
+	individual record keys and data (UPDATE/DELETE only)
+
+	The command will only be valid for MDB tables.
+	
+	*/
+	
+	type public Boolean ER
+	
+	type List operations, TO
+	type Number I
+	type String funcs(), ON, OPTION, tblwhr, UCLS
+	
+	set sqlcnt = 0
+
+	if tok.get().isNull() set expr = $$SQL^%ZS(expr, .tok) quit:ER		// If called directly
+
+	set (ON, TO, OPTION) = ""
+	set operations = $$TOK^SQL(expr, "ON,TO,OPTION")
+	if operations.isNull() do ERROR^SQL("Operations required") quit
+	if operations.contains("ALL OPERATIONS") do {
+		
+		if (operations.count() = 1) set operations = {List}"INSERT,UPDATE,DELETE,SELECT"
+		else  do ERROR^SQL("ALL OPERATIONS must be the only operation, if used")
+	}
+	else  for I = 1:1:operations.count() if '(({List}"INSERT,UPDATE,DELETE,SELECT").contains(operations.elementAt(I))) do ERROR^SQL("Invalid operation "_ operations.elementAt(I)) quit
+	quit:ER
+
+	if ON.isNull() do ERROR^SQL("ON parameter required") quit
+	if ON.piece(" ", 1) = "TABLE" set ON = ON.piece(" ", 2) if ON.isNull() do ERROR^SQL("Table name required") quit
+	// Invalid table name - ~p1
+	if 'ON.endsWith("*"), 'Db.isDefined("DBTBL1", "%LIBS='SYSDEV',FID=:ON") do ERROR^SQL($$^MSG(1484, ON)) quit
+
+	if TO.isNull() do ERROR^SQL("TO parameter required") quit
+	
+	// Invalid userclass ~p1
+	for I = 1:1:TO.count() set UCLS = TO.elementAt(I) if 'UCLS.isNull(), 'Db.isDefined("SCAU0", "UCLS=:UCLS") do ERROR^SQL($$^MSG(6755, UCLS)) quit
+	quit:ER
+	
+	if OPTION.isNull() do ERROR^SQL("OPTION parameter required") quit
+	
+	if (OPTION = "OFF") set OPTION = 0
+	else  if (OPTION = "LOG") set OPTION = 1
+	else  if (OPTION = "LOGRECORDS") set OPTION = 2
+	else  if (OPTION = "LOGDATA") set OPTION = 3
+	else  do ERROR^SQL("Invalid OPTION value - must be OFF, LOG, LOGRECORDS, or LOGDATA") quit
+	
+	if ((OPTION = 2) or (OPTION = 3)), (operations.contains("INSERT") or operations.contains("SELECT")) do ERROR^SQL("OPTION LOGDATA not valid for INSERT or SELECT") quit
+
+	// Not valid for RDB Table
+	if 'ON.endsWith("*"), $$rdb^UCDBRT(ON) do ERROR^SQL($$^MSG(6762)) quit
+
+	for I = 1:1:operations.count() set funcs(operations.elementAt(I)) = ""
+	
+	if (ON = "*") set tblwhr = ""
+	else  if ON.endsWith("*") set tblwhr = "FID LIKE '"_ ON.extract(1, ON.length() - 1)_ "%'"
+	else  set tblwhr = "FID = '"_ ON_ "'"
+	
+	do Runtime.start("CS")
+	
+	#ACCEPT Date=01/20/2008; Pgm=RussellDS; CR=30801; Group=Dynamic
+	type ResultSet rs = Db.select("FID", "DBTBL1", tblwhr, "FID ASC")
+	
+	while rs.next() do {
+		
+		type String tbl = rs.getCol("FID")
+		
+		quit:$$rdb^UCDBRT(tbl)
+		
+		catch error {
+			
+			do ERROR^SQL(error.description)
+			
+			set sqlcnt = 0
+		}
+		
+		for I = 1:1:TO.count() set UCLS = TO.elementAt(I) if 'UCLS.isNull() do {
+		
+			type RecordDBAUDITDEF dbauditdef = Db.getRecord("DBAUDITDEF", "TABLENAME=:tbl,USERCLASS=:UCLS", 1)
+			
+			do dbauditdef.setAuditFlag(1)
+			
+			if funcs("INSERT").exists() set dbauditdef.insertlog = OPTION
+			if funcs("UPDATE").exists() set dbauditdef.updatelog = OPTION
+			if funcs("DELETE").exists() set dbauditdef.deletelog = OPTION
+			if funcs("SELECT").exists() set dbauditdef.selectlog = OPTION
+
+			// If all are now off, delete the row
+			if (dbauditdef.insertlog + dbauditdef.updatelog + dbauditdef.deletelog + dbauditdef.selectlog = 0) do dbauditdef.setMode(3)
+			
+			do dbauditdef.save()
+			
+			set sqlcnt = sqlcnt + 1
+		}
+	}
+	
+	if ER do Runtime.rollback() quit
+	
+	do Runtime.commit()
+	
+	quit
+	
+	
+public Boolean usingAuditLog()
+
+	/*
+	Should audit log code be generated?  If there are no entries
+	in DBAUDITDEF, then no.
+	*/
+	
+	/* restrictionlevel = -1 indicates that we're building an M copy
+	   of this procedure for distribution for bootstrap and upgrades.
+	   In that case, we ignore logging during the initial phase, until
+	   this procedure is recompiled on-site. */
+	
+	#IF (PSL.getSetting("boot","restrictionlevel") = -1)
+	// Ignore archive building when building the compiler
+	quit false
+	#ELSE
+	type ResultSet rs = Db.select("TABLENAME", "DBAUDITDEF")
+	
+	if rs.isEmpty() quit false
+	
+	quit true
+	#ENDIF
+	
+	
+Boolean shouldLog(String TABLE,			// Table name
+		  String operation,		// insert, update, delete, or select
+		  String option,		// log, detail, or detail+ (*2)
+		  ret List userclasses,		// Userclass list			 
+		  ret Boolean isPositive)	// Returned list is positive list
+			    
+	/*
+	Return whether or not logging is enabled for the table/operation/option
+	specified.  If so, return the list of userclasses to which the type of
+	logging applies, as either a positive or negative list.
+	
+	If not logging for the type requested, will return false.
+	
+	Otherwise, will return true and a list of userclasses.
+	
+	If PUBLIC is not enabled for the type requested, the list will be a
+	positive list, i.e., a list of those userclasses to which the type
+	applies and isPositive will be returned as true.
+	
+	If PUBLIC is enabled, the list will be a negative list, i.e., a list
+	of those userclasses to which the type does not apply, and isPositive
+	will be returned as false.
+	
+	Used by PSLRecordBuilder.
+	
+	ARGUMENT NOTES:
+		(*2)	log - logging options 1 (log), 2 (log, plus detail,
+			keys only), 3 (log, plus detail, including data)
+	*/
+	
+	set userclasses = ""
+	
+	/* restrictionlevel = -1 indicates that we're building an M copy
+	   of this procedure for distribution for bootstrap and upgrades.
+	   In that case, we ignore logging during the initial phase, until
+	   this procedure is recompiled on-site. */
+	
+	#IF (PSL.getSetting("boot","restrictionlevel") = -1)
+	// Ignore archive building when building the compiler
+	set isPositive = false
+	quit false
+	#ELSE
+	type Boolean isLogged
+	type Number check, publicOpt
+	
+	type RecordDBAUDITDEF publicLog = Db.getRecord("DBAUDITDEF", "TABLENAME=:TABLE,USERCLASS='PUBLIC'", 1)
+	
+	#ACCEPT Date=06/01/2008; Pgm=RussellDS; CR=30801; Group=DYNAMIC
+	type ResultSet rs = Db.select(operation.upperCase()_ "LOG,USERCLASS", "DBAUDITDEF", "TABLENAME=:TABLE AND USERCLASS<>'PUBLIC'")
+	
+	if ((publicLog.getMode() = 0) and rs.isEmpty()) quit false	// No logging for this table
+	
+	if (operation = "insert") set publicOpt = publicLog.insertlog
+	else  if (operation = "update") set publicOpt = publicLog.updatelog
+	else  if (operation = "delete") set publicOpt = publicLog.deletelog
+	else  set publicOpt = publicLog.selectLog
+	
+	if (option = "log") set check = 0
+	else  if (option = "detail") set check = 1
+	else  set check = 2
+	
+	// Build positive list - those userclasses who will log for this operation/option
+	if (publicOpt '> check) do {
+		
+		set isPositive = true
+		
+		while rs.next() if (rs.getCol(1) > check) set userclasses = userclasses.add(rs.getCol(2))
+		
+		// Neither public nor any userclasses log for this option
+		if (userclasses.count() = 0) set isLogged = false
+		else  set isLogged = true
+	}
+	// Otherwise, negative list - those userclasses who don't log
+	else  do {
+		
+		set isPositive = false
+		
+		while rs.next() if (rs.getCol(1) '> check) set userclasses = userclasses.add(rs.getCol(2))
+		
+		// At least public logs, even if no userclasses
+		set isLogged = true
+	}
+	
+	quit isLogged
+	#ENDIF
+	
+	
+public Number auditLog(String operation,	// INSERT, UPDATE, DELETE, SELECT or EXECUTE
+		       String opon,		// Table operated on
+		       String statement,	// SQL statement to log
+		       String using)		// Using clause
+
+	/*
+	Add an entry to DBAUDITLOG, unconditionally.
+	
+	Return DBAUDITLOG.SEQ for further use by caller to log detail entries
+	to DBAUDITLOGD.
+	
+	Because this function uses process ID as a primary key, and since it
+	should be called under the transaction of the caller, it does not do
+	its own TP.
+	*/
+		
+	type Number SEQ = Db.nextVal("DBAUDITLOG", "CDATE=:%CurrentDate,PID=:%ProcessID")
+	
+	type RecordDBAUDITLOG auditlog = Class.new("RecordDBAUDITLOG", "CDATE=:%CurrentDate,PID=:%ProcessID,SEQ=:SEQ")
+	
+	set auditlog.userid = %UserID
+	set auditlog.tlo = %UserStation
+	set auditlog.ctime = %CurrentTime
+	set auditlog.operation = operation
+	set auditlog.opon = opon
+	set auditlog.statement = statement
+	set auditlog.using = using
+	
+	do auditlog.save()
+	
+	quit SEQ
+	
+	
+public Number auditLogDetail(Number SEQ,	// DBAUDITLOG.SEQ
+			     String KEYS)	// key(s) as name-value pairs
+
+	/*
+	Add an entry to DBAUDITLOGD, unconditionally.
+	
+	Return DBAUDITLOGD.RECSEQ for further use by caller to before image data.
+	
+	Because this function uses process ID as a primary key, and since it
+	should be called under the transaction of the caller, it does not do
+	its own TP.
+	*/
+		
+	type Number RECSEQ = Db.nextVal("DBAUDITLOGD", "CDATE=:%CurrentDate,PID=:%ProcessID,SEQ=:SEQ")
+	
+	type RecordDBAUDITLOGD auditlogd = Class.new("RecordDBAUDITLOGD", "CDATE=:%CurrentDate,PID=:%ProcessID,SEQ=:SEQ,RECSEQ=:RECSEQ")
+	
+	set auditlogd.keys = KEYS
+	
+	do auditlogd.save()
+	
+	quit RECSEQ
+	
+	
+public void buildSQL(Record recobj,	// PSL Object
+		     String del,	// Table delimiter character
+		     String map(),	// Node/column map
+		     String origdata(),	// Original data for UPDATE
+		     String SQL())	// Corresponding SQL statement(s)
+	     
+	/*
+	Build a SQL statement (INSERT, UPDATE or DELETE) based on vobj(obj)
+	for use in updating DBAUDITLOG.
+	
+	This function is called from the RecordTABLE.save() methods.
+	
+	The "base" SQL statement will be in SQL(1).  If there are memos or
+	BLOBs as part of an INSERT or UPDATE, they will be in SQL(2-n) as
+	UPDATEs.
+	
+	The map that is passed in is constructed by the getColumnMap() method
+	of RecordTABLE and provides a node-by-node map of columns to allow
+	construction of the appropriate SQL statement(s).  Masterfields are
+	not included - sub-fields are and will be included, if appropriate, in
+	the resulting SQL.
+	
+	UPDATEs must compare the original values with the new values to
+	determine which columns have changed to be able to use them in
+	constructing the UPDATE statement.  origdata() contains the before
+	image, with the same node structure as map.  The only nodes that
+	need to be passed in origdata are keys and nodes that correspond to
+	data loaded in vobj (since that is all that would have changed).
+	*/
+	
+	type static PSLClass
+	
+	type public String vobj(,)
+	
+	type Boolean isDelete = false
+	type Boolean isUpdate = false
+	type Number i, obj
+	type String colInfo, inscols, insvals, n, origvalue, position
+	type String sfd, table, update, value, where
+
+	set obj = recobj.getPointer()
+	
+	set table = PSLClass.tableNameOf(vobj(obj, -1))
+	
+	if (vobj(obj, -2) = 1) set isUpdate = true
+	else  if (vobj(obj, -2) = 3) set isDelete = true
+	
+	set where = ""
+	
+	// Build WHERE clause
+	if (isUpdate or isDelete) do {
+		
+		set n = ""
+		for  set n = map(n).order() quit:(n.isNull() or (n '< -1))  do {
+		
+			if isUpdate set value = origdata(n)
+			else  set value = vobj(obj, n)
+			if 'value.isNumber() set value = value.addQuotes("'")
+			set where = map(n).piece(":", 1)_ "="_ value_ " AND "_ where
+		}
+		
+		if 'where.isNull() set where = " WHERE "_ where.extract(1, where.length() - 5)
+	}
+	
+	if isDelete set SQL(1) = "DELETE "_ table_ where quit
+	
+	set (inscols, insvals, update) = ""
+		
+	set n = ""
+	for  set n = map(n).order() quit:n.isNull()  do {
+	
+		type Boolean notChanged = false
+		type Boolean isBM = n.isLike("%,1")
+		type List mapinfo = {List}map(n)
+		
+		// Skip a node if it's not here
+		if (n = -1), 'vobj(obj).exists() quit
+		if (n '< 0), 'isBM, 'vobj(obj, n).exists() quit
+		
+		/* If BLOB or memo, only one column per node and need to treat
+		   as separate update.  These are added so as to leave SQL(1)
+		   the main statement, hence appear at sequence 2-n. */
+		if isBM do { quit
+			
+			type Number seq 
+			type String BMnode
+			
+			set BMnode = n.piece(",", 1)
+			
+			quit:'vobj(obj, BMnode, 1).exists()	// Skip if not here
+			
+			set value = vobj(obj, BMnode, 1)
+			
+			/* If UPDATE and no change in value, ignore.  However
+			   if we're doing an INSERT, need to include it. */
+			quit:(isUpdate and (value = origdata(n)))
+			
+			set seq = SQL("").order(-1) + 1
+			if (seq = 1) set seq = 2
+			
+			set colInfo = mapinfo.elementAt(1, ";")
+			
+			set SQL(seq) = "UPDATE "_ table_ " SET "_ colInfo.piece(":", 1)_ "="_ value.addQuotes("'")_ where
+		}
+		
+		// If UPDATE, skip node if it hasn't changed
+		if isUpdate do { quit:notChanged
+			
+			if (n = -1), vobj(obj) = origdata(n) set notChanged = true quit
+			if vobj(obj, n) = origdata(n) set notChanged = true
+		}
+		
+		for i = 1:1:mapinfo.count(";") do {
+		
+			set colInfo = mapinfo.elementAt(i, ";")
+			set position = colInfo.piece(":", 3)
+			if position.isNull() set position = 1
+			set sfd = colInfo.piece(":", 4)
+			
+			if (n < -1) set value = vobj(obj, n)		// Key
+			else  if 'sfd.piece("~", 3).isNull() do {	// Sub-field
+			
+				type String master
+				
+				if (n = -1) set master = vobj(obj).piece(del, position)
+				else  set master = vobj(obj, n).piece(del, position)
+				
+				set value = master.getSub(sfd.piece("~", 4), sfd.piece("~", 1), sfd.piece("~", 2), sfd.piece("~", 3))
+			}
+			else  if (n = -1) set value = vobj(obj).piece(del, position)	// Top node
+			else  set value = vobj(obj, n).piece(del, position)
+			
+			// If update, only care if value is different
+			if isUpdate do {
+				
+				set origvalue = origdata(n).piece(del, position)
+				
+				// Sub-field
+				if 'sfd.piece("~", 3).isNull() set origvalue = origvalue.getSub(sfd.piece("~", 4), sfd.piece("~", 1), sfd.piece("~", 2), sfd.piece("~", 3))
+
+				if (value '= origvalue) do {
+				
+					if 'value.isNumber() set value = value.addQuotes("'")
+					set update = update_ colInfo.piece(":", 1)_ "="_ value_ ","
+				}
+			}
+			
+			// If INSERT, ignore null values
+			else  if 'value.isNull() do {
+			
+				if 'value.isNumber() set value = value.addQuotes("'")
+			
+				set inscols = inscols_ colInfo.piece(":", 1)_ ","
+				set insvals = insvals_ value_ ","
+			}
+		}
+	}
+	
+	if isUpdate set SQL(1) = "UPDATE "_ table_ " SET "_ update.extract(1, update.length() - 1)_ where
+
+	else  set SQL(1) = "INSERT INTO "_ table_ " ("_ inscols.extract(1, inscols.length() - 1)_ ") VALUES ("_ insvals.extract(1, insvals.length() - 1))_ ")"
+
+
+	quit
+	
+	
+public List BIDATA(Date CDATE,	// DBAUDITLOGD.CDATE
+		   Number PID,	// DBAUDITLOGD.PID
+		   Number SEQ,	// DBAUDITLOGD.SEQ
+		   Number RECSEQ,	// DBAUDITLOGD.RECSEQ
+		   List KEYS)	// DBAUDITLOGD.KEYS
+       
+	/*
+	Computation for computed DBAUDITLOGD.BIDATA.
+	
+	Returns name-value pair list of before image columns and values
+	for a record in DBAUDITLOGD.
+	
+	This computed is only valid against MDB tables.  No others can
+	have entries in DBAUDITLOG or DBAUDITLOGD.
+	*/
+	
+	type List collist
+	type List return = KEYS
+	type Number i
+	type String column, data, datanodes(), node, table, value
+	
+	type RecordDBAUDITLOG auditlog = Db.getRecord("DBAUDITLOG", "CDATE=:CDATE,PID=:PID,SEQ=:SEQ", 1)
+	
+	set table = auditlog.opon
+	
+	quit:table.isNull() ""		// Invalid entry
+	
+	// Load the data
+	#ACCEPT Date=05/28/2008; Pgm=RussellDS; CR=30801; Group=BYPASS
+	#BYPASS
+	S data=$G(^DBAUDITLOG(CDATE,PID,SEQ,RECSEQ,"*"))
+	N n
+	S n=""
+	F  S n=$O(^DBAUDITLOG(CDATE,PID,SEQ,RECSEQ,"*",n)) Q:n=""  S datanodes(n)=^(n)
+	X "S collist=$$columnList^Record"_table
+	#ENDBYPASS
+	
+	// No before image data saved
+	if (datanodes.data() = 0) quit ""
+	
+	/* Build return column=value pair list.  Will not include memo or blob
+	   columns.  Will include both masterfield and sub-fields.  Skip keys
+	   since they are already here. */
+	for i = 1:1:collist.length() do {
+		
+		set column = collist.elementAt(i)
+		
+		type PSLColumn cd = PSL.getPSLColumn(table, column)
+		
+		set node = cd.getCurrentNode()
+		
+		quit:(node < 0)		// Key
+		
+		// Get sub-field value
+		if 'cd.subfieldPosition.isNull() do {
+		
+			type String master
+			
+			if node.isNull() set master = data.piece( cd.delimiter.char(), cd.position)
+			else  set master = datanodes(node).get().piece( cd.delimiter.char(), cd.position)
+			
+			set value = master.getSub(cd.subfieldTag, cd.subfieldMajor.char(), cd.subfieldMinor.char(), cd.subfieldPosition)
+		}
+		else  do {
+			
+			if node.isNull() set value = data.piece( cd.delimiter.char(), cd.position)
+			else  set value = datanodes(node).get().piece( cd.delimiter.char(), cd.position)
+		}
+		
+		if 'value.isNumber() set value = value.addQuotes("'")
+		
+		set return = return.add(column_ "="_ value)
+	}
+			
+	quit return	
+ #OPTION ResultClass ON
+public String vSIG()	quit "61216^57448^Dan Russell^18343"	// Signature - LTD^TIME^USER^SIZE

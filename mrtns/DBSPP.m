@@ -3,7 +3,7 @@ DBSPP	;DBSPP;DBS - U - V4.4 - SET UP DQ PRE/POST PROCESSOR LIBRARY
 	;     ORIG:  BOB CHIANG (8447) - 08/26/87
 	;     DESC:  PRE/POST PROCESSOR DEFINITIONS
 	;
-	; I18N=QUIT: Exculded from I18N standards. 
+        ; I18N=QUIT: Exculded from I18N standards.
 	;---- Revision History ------------------------------------------------
 	; 09/28/04 - RussellDS - CR12334
 	;	     Replaced obsoleted calls to ^DBSANS1 with new procedure
@@ -18,9 +18,9 @@ DBSPP	;DBSPP;DBS - U - V4.4 - SET UP DQ PRE/POST PROCESSOR LIBRARY
 CREATE	;
 	S PID=$$FIND^DBSGETID("DBTBL13",1) Q:PID=""
 	S %O=0 
-	N SID S SID="DBTBL13"   ; *** XUS 08/09/94 
-	D ^USID I PGM="" Q 
-	D ^@PGM I VFMQ="Q" G CREATE 
+        N SID S SID="DBTBL13"   ; *** XUS 08/09/94
+        D ^USID I PGM="" Q
+        D ^@PGM I VFMQ="Q" G CREATE
 	;  D ^DBSPP9 I VFMQ="Q" G CREATE
 	;
 	S DBOPT=13,DQFUN="A",ID=PID D ^DBSUTL3 ; Create index file
@@ -32,9 +32,9 @@ MODIFY	;
 	; Implicit to 
 	I $D(^DBTBL(%LIBS,13,PID,-3)) W !!,?20,"Implicit to ",^(-3) H 3 G MODIFY
 	S %O=1
-	N SID S SID="DBTBL13"   ; *** XUS 08/09/94 
-	D ^USID I PGM="" Q 
-	D ^@PGM I VFMQ="Q" G MODIFY 
+        N SID S SID="DBTBL13"   ; *** XUS 08/09/94
+        D ^USID I PGM="" Q
+        D ^@PGM I VFMQ="Q" G MODIFY
 	;
 	S DBOPT=13,DQFUN="D",ID=PID D ^DBSUTL3 ; Delete old index file
 	;
@@ -84,10 +84,10 @@ INIT	;
 	; PRE/POST PROCESSOR DEFINITION
 	; ^DBSPP9
 	S RN=$$^MSG("5182"),DBOPT=13
-	; 
-	N SID S SID="DBTBL13"   ; *** XUS 08/09/94 
-	D ^USID I PGM="" Q 
-	S DQSCR="^"_PGM 
+        ;
+        N SID S SID="DBTBL13"   ; *** XUS 08/09/94
+        D ^USID I PGM="" Q
+        S DQSCR="^"_PGM
 	Q
 INDEX	; INDEX REPORT
 	;

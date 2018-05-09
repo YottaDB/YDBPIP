@@ -1,0 +1,283 @@
+	#PACKAGE framework
+	#OPTION ResultClass ON
+
+	/*
+	SQL GRANT and REVOKE commands
+	
+	Implementation of the SQL GRANT and REVOKE commands for PROFILE SQL.
+
+	---- Revision History -------------------------------------------------
+	12/02/2008 - RussellDS - CRs 35741/36981
+		* Original code forgot to add support for PUBLIC as userclass (!).
+	
+	01/20/2008 - RussellDS - CR30801
+		Created.
+
+	-----------------------------------------------------------------------
+	*/
+	
+	quit				// No access from top
+	
+public void GRANT(String expr,		// GRANT expression, without GRANT keyword
+		  String tok,		// tokens, if called from ^SQL
+		  ret Number sqlcnt)	// Rows inserted or updated
+	     
+	/*
+	Grant access rights
+
+	GRANT <privileges> ON [TABLE] <table> TO <userclasses> 
+		[WITH GRANT OPTION]
+		[RESTRICT <whereclause>]
+	
+	  Where	<privileges> =	commalist of INSERT, UPDATE, DELETE, SELECT 
+				or ALL PRIVILEGES
+	
+		<table> = 	table name or * or partial_name*
+	
+		<userclasses> = commalist of userclasses or keyword PUBLIC
+		
+		<whereclause> = [FROM joinclause] standard WHERE clause
+				[FROM joinclause] included only if other tables
+				are used in the where clause
+	*/
+	
+	type public Boolean ER
+	
+	type List privileges, TO
+	type Number I
+	type String cols, funcs(), N, ON, privopt, RESTRICT, tblwhr, WITH, UCLS, vals
+	
+	set sqlcnt = 0
+
+	if tok.get().isNull() set expr = $$SQL^%ZS(expr, .tok) quit:ER		// If called directly
+
+	set (ON, RESTRICT, TO, WITH) = ""
+	set privileges = $$TOK^SQL(expr, "ON,TO,WITH,RESTRICT")
+	if privileges.isNull() do ERROR^SQL("Privileges required") quit
+	if privileges.contains("ALL PRIVILEGES") do {
+		
+		if (privileges.count() = 1) set privileges = {List}"INSERT,UPDATE,DELETE,SELECT"
+		else  do ERROR^SQL("ALL PRIVILEGES must be the only privilege, if used")
+	}
+	else  for I = 1:1:privileges.count() if '(({List}"INSERT,UPDATE,DELETE,SELECT").contains(privileges.elementAt(I))) do ERROR^SQL("Invalid privilege "_ privileges.elementAt(I)) quit
+	quit:ER
+
+	if ON.isNull() do ERROR^SQL("ON parameter required") quit
+	if ON.piece(" ", 1) = "TABLE" set ON = ON.piece(" ", 2) if ON.isNull() do ERROR^SQL("Table name required") quit
+	// Invalid table name - ~p1
+	if 'ON.endsWith("*"), 'Db.isDefined("DBTBL1", "%LIBS='SYSDEV',FID=:ON") do ERROR^SQL($$^MSG(1484, ON)) quit
+
+	if TO.isNull() do ERROR^SQL("TO parameter required") quit
+	
+	// Invalid userclass ~p1
+	if (TO '= "PUBLIC") for I = 1:1:TO.count() set UCLS = TO.elementAt(I) if 'UCLS.isNull(), 'Db.isDefined("SCAU0", "UCLS=:UCLS") do ERROR^SQL($$^MSG(6755, UCLS)) quit
+	quit:ER
+
+	if 'WITH.isNull(), (WITH '= "GRANT OPTION") do ERROR^SQL("Invalid WITH GRANT OPTION syntax") quit
+
+	// Not valid for RDB Table
+	if 'ON.endsWith("*"), $$rdb^UCDBRT(ON) do ERROR^SQL($$^MSG(6762)) quit
+
+	for I = 1:1:privileges.count() set funcs(privileges.elementAt(I)) = ""
+	
+	if WITH.isNull() set privopt = 1
+	else  set privopt = 2
+	
+	if (ON = "*") set tblwhr = ""
+	else  if ON.endsWith("*") set tblwhr = "FID LIKE '"_ ON.extract(1, ON.length() - 1)_ "%'"
+	else  set tblwhr = "FID = '"_ ON_ "'"
+	
+	do Runtime.start("CS")
+	
+	#ACCEPT Date=01/20/2008; Pgm=RussellDS; CR=30801; Group=Dynamic
+	type ResultSet rs = Db.select("FID", "DBTBL1", tblwhr, "FID ASC")
+	
+	while rs.next() do {
+		
+		type String tbl = rs.getCol("FID")
+		
+		quit:$$rdb^UCDBRT(tbl)
+		
+		catch error {
+			
+			do ERROR^SQL(error.description)
+			
+			set sqlcnt = 0
+		}
+		
+		for I = 1:1:TO.count() set UCLS = TO.elementAt(I) if 'UCLS.isNull() do {
+		
+			type RecordDBACCRTS dbaccrts = Db.getRecord("DBACCRTS", "TABLENAME=:tbl,USERCLASS=:UCLS", 1)
+			
+			do dbaccrts.setAuditFlag(1)
+			
+			if funcs("INSERT").exists() do {
+				
+				set dbaccrts.insertrts = privopt
+				set dbaccrts.insrestrict = RESTRICT
+			}
+			if funcs("UPDATE").exists() do {
+				
+				set dbaccrts.updaterts = privopt
+				set dbaccrts.updrestrict = RESTRICT
+			}
+			if funcs("DELETE").exists() do {
+				
+				set dbaccrts.deleterts = privopt
+				set dbaccrts.delrestrict = RESTRICT
+			}
+			if funcs("SELECT").exists() do {
+				
+				set dbaccrts.selectrts = privopt
+				set dbaccrts.selrestrict = RESTRICT
+			}
+			
+			do dbaccrts.save()
+			
+			set sqlcnt = sqlcnt + 1
+		}
+	}
+	
+	if ER do Runtime.rollback() quit
+	
+	do Runtime.commit()
+	
+	quit
+	
+
+public void REVOKE(String expr,		// REVOKE expression, without REVOKE keyword
+		   String tok,		// tokens, if called from ^SQL
+		   ret Number sqlcnt)	// Rows deleted
+	     
+	/*
+	Revoke access rights
+
+	REVOKE <privileges> ON <table> FROM <userclasses>
+	
+	REVOKE GRANT OPTION FOR <privileges> ON <table> FROM <userclasses>
+
+	See GRANT for values for <privileges>, <table> , and <userclasses>
+	*/
+	
+	type public Boolean ER
+	
+	type List privileges, FOR, FROM
+	type Boolean isGrantOpt
+	type Number I
+	type String funcs(), N, ON, tblwhr, UCLS
+	
+	set sqlcnt = 0
+
+	if tok.get().isNull() set expr = $$SQL^%ZS(expr, .tok) quit:ER		// If called directly
+	
+	if expr.beginsWith("GRANT OPTION FOR ") do {
+		
+		set isGrantOpt = true
+		set expr = expr.piece("GRANT OPTION FOR ", 2, expr.length())
+	}
+	else  set isGrantOpt = false
+
+	set (FOR, ON, FROM) = ""
+	set privileges = $$TOK^SQL(expr, "ON,FROM")
+	if privileges.isNull() do ERROR^SQL("Privileges required") quit
+	if privileges.contains("ALL PRIVILEGES") do {
+		
+		if (privileges.count() = 1) set privileges = {List}"INSERT,UPDATE,DELETE,SELECT"
+		else  do ERROR^SQL("ALL PRIVILEGES must be the only privilege, if used")
+	}
+	else  for I = 1:1:privileges.count() if '(({List}"INSERT,UPDATE,DELETE,SELECT").contains(privileges.elementAt(I))) do ERROR^SQL("Invalid privilege "_ privileges.elementAt(I)) quit
+	quit:ER
+
+	if ON.isNull() do ERROR^SQL("ON parameter required") quit
+	if ON.piece(" ", 1) = "TABLE" set ON = ON.piece(" ", 2) if ON.isNull() do ERROR^SQL("Table name required") quit
+	// Invalid table name - ~p1
+	if 'ON.endsWith("*"), 'Db.isDefined("DBTBL1", "%LIBS='SYSDEV',FID=:ON") do ERROR^SQL($$^MSG(1484, ON)) quit
+
+	if FROM.isNull() do ERROR^SQL("FROM parameter required") quit
+	
+	// Invalid userclass ~p1
+	if (FROM '= "PUBLIC") for I = 1:1:FROM.count() set UCLS = FROM.elementAt(I) if 'UCLS.isNull(), 'Db.isDefined("SCAU0", "UCLS=:UCLS") do ERROR^SQL($$^MSG(6755, UCLS)) quit
+	quit:ER
+
+	// Not valid for RDB Table
+	if 'ON.endsWith("*"), $$rdb^UCDBRT(ON) do ERROR^SQL($$^MSG(6762)) quit
+
+	for I = 1:1:privileges.count() set funcs(privileges.elementAt(I)) = ""
+	
+	if (ON = "*") set tblwhr = ""
+	else  if ON.endsWith("*") set tblwhr = "FID LIKE '"_ ON.extract(1, ON.length() - 1)_ "%'"
+	else  set tblwhr = "FID = '"_ ON_ "'"
+	
+	do Runtime.start("CS")
+	
+	#ACCEPT Date=01/20/2008; Pgm=RussellDS; CR=30801; Group=Dynamic
+	type ResultSet rs = Db.select("FID", "DBTBL1", tblwhr, "FID ASC")
+	
+	while rs.next() do {
+		
+		type String tbl = rs.getCol("FID")
+		
+		quit:$$rdb^UCDBRT(tbl)
+		
+		catch error {
+			
+			do ERROR^SQL(error.description)
+			
+			set sqlcnt = 0
+		}
+		
+		for I = 1:1:FROM.count() set UCLS = FROM.elementAt(I) if 'UCLS.isNull() do {
+		
+			type RecordDBACCRTS dbaccrts = Db.getRecord("DBACCRTS", "TABLENAME=:tbl,USERCLASS=:UCLS", 1)
+			
+			do dbaccrts.setAuditFlag(1)
+			
+			if funcs("INSERT").exists() do {
+				
+				// Revoke right
+				if 'isGrantOpt set dbaccrts.insertrts = 0
+				// Or, just revoke GRANT OPTION, if they had it
+				else  if (dbaccrts.insertrts = 2) set dbaccrts.insertrts = 1
+			}
+			if funcs("UPDATE").exists() do {
+				
+				// Revoke right
+				if 'isGrantOpt set dbaccrts.updaterts = 0
+				// Or, just revoke GRANT OPTION, if they had it
+				else  if (dbaccrts.updaterts = 2) set dbaccrts.updaterts = 1
+			}
+			if funcs("DELETE").exists() do {
+				
+				// Revoke right
+				if 'isGrantOpt set dbaccrts.deleterts = 0
+				// Or, just revoke GRANT OPTION, if they had it
+				else  if (dbaccrts.deleterts = 2) set dbaccrts.deleterts = 1
+			}
+			if funcs("SELECT").exists() do {
+				
+				// Revoke right
+				if 'isGrantOpt set dbaccrts.selectrts = 0
+				// Or, just revoke GRANT OPTION, if they had it
+				else  if (dbaccrts.selectrts = 2) set dbaccrts.selectrts = 1
+			}
+			
+			/* If all privileges are removed, just delete the record.
+			   This prevents problems if doing column updates in the event
+			   this is the last entry to DBACCRTS. */
+			if ((dbaccrts.insertrts = 0) and (dbaccrts.updaterts = 0) and (dbaccrts.deleterts = 0) and (dbaccrts.selectrts = 0)) do {
+				
+				do Db.delete("DBACCRTS", "TABLENAME=:tbl AND USERCLASS=:UCLS")
+			}
+			else  do dbaccrts.save()
+			
+			set sqlcnt = sqlcnt + 1
+		}
+	}
+	
+	if ER do Runtime.rollback() quit
+	
+	do Runtime.commit()
+	
+	quit
+ #OPTION ResultClass ON
+public String vSIG()	quit "61332^71489^Dan Russell^8199"	// Signature - LTD^TIME^USER^SIZE

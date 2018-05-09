@@ -50,7 +50,7 @@ default	; Default product defaults to a object
 	I ztbl="LN" D PRODDFTL Q		; loan table
 	S mcode=""				; Return expression
 	Q
-PRODDFTL;	loan defaults 
+PRODDFTL; loan defaults
 	;
 	S key=actual(1) I key["""" S key=$P(key,"""",2)
 	S zkey=key
@@ -66,7 +66,7 @@ PRODDFTL;	loan defaults
 	;
 	Q
 	;
-PRODDFTD;	deposit renewal 
+PRODDFTD; deposit renewal
 	;
 	S key=actual(1) I key["""" S key=$P(key,"""",2)
 	S zkey=key
@@ -82,7 +82,7 @@ PRODDFTD;	deposit renewal
 	;
 	Q
 	;
-PRODDFTC;	deposit renewal 
+PRODDFTC; deposit renewal
 	;
 	S key=actual(1) I key["""" S key=$P(key,"""",2)
 	S zkey=key
@@ -98,7 +98,7 @@ PRODDFTC;	deposit renewal
 	;
 	Q
 	;
-overlay	; Move overlay information from array into primary table object 
+overlay ; Move overlay information from array into primary table object
 	;
 	; INPUTS:
 	;
@@ -131,7 +131,7 @@ overlay	; Move overlay information from array into primary table object
 	.	I $P(^(di),"|",18)'="" Q			; Sub-fields can not be set
 	.	;
 	.	S cola=file_"."_di			; from table
-	.	S col=$$LOWER^%ZFUNC(di)		; Lower case item name
+	.	S col=$$LOWER^UCGMR(di)		; Lower case item name
 	.	S colb=objnam_"."_col			; to table
 	.	;I18N=OFF 
 	.	S mcode=$$initLine^UCGM(level)

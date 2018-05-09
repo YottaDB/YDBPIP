@@ -4,10 +4,10 @@ DBSEXE2C	;;DBS - U - V4.4 - /QB command peocessor
 	;     DESC:  /QB COMMAND PROCESSOR
 	;
 	;---------- Revision History -------------------------------------------
-	; 
-	; 10/17/96 - Bob Chiang - 20948 
-	;            Modified to replace node 1-7 references with node 16 
-	;            (file access keys). 
+        ;
+        ; 10/17/96 - Bob Chiang - 20948
+        ;            Modified to replace node 1-7 references with node 16
+        ;            (file access keys).
 	;
 	; 03/31/95  Bob Chiang - 253
 	;           Removed bad $$^MSG calls.
@@ -20,7 +20,7 @@ DBSEXE2C	;;DBS - U - V4.4 - /QB command peocessor
 	;           Added logic to set up correct @TOT function when using
 	;           OOE report QUICK_LAYOUT option.
 	;-----------------------------------------------------------------------
-	;  I18N=QUIT: Excluded from I18N standards 
+        ;  I18N=QUIT: Excluded from I18N standards
 	;
 START	;
 	;---------------------------------------------------------------------

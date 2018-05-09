@@ -12,7 +12,7 @@ DBSDDEXP	;;DBS - UTL - V5.0 - EXPORT/IMPORT DATA-QWIK Definition
 	;            Replaced calls to $$UPPER^%ZFUNC with $$UPPER^SCAUTL.
 	;
 	;	     Modified to allow calls to FILE^%ZOPEN to consider character
-	;	     set exceptions for Unicode.
+  	;	     set exceptions for Unicode.
 	;
 	;            Deleted pre-2004 revision history.
 	;

@@ -3,18 +3,21 @@ DBSRWQR	;;DBS - UTL - V5.0 - QWIK REPORT CONVERSION
 	;     ORIG:  CHIANG - 26 OCT 1992
 	;     DESC:  Convert QWIK report definition into RW format
 	;
-	; I18N=QUIT: Exculded from I18N standards. 
-	;---------- Revision History ------------------------------------------- 
-	; 05/17/06 - Allan Mattson - CR20048
-	;            Replaced calls to $$UPPER^%ZFUNC with $$UPPER^SCAUTL.
-	;
-	;	     Modified to allow call to FILE^%ZOPEN to consider character
-	;	     set exceptions for Unicode.
-	;
-	; 10/25/05 - RussellDS - CR17834 
-	;      Fix bug in RPTHDR section - %LIB should be %LIBS.
-	; 
-	;      Remove old revision history.
+        ; I18N=QUIT: Exculded from I18N standards.
+        ;---------- Revision History -------------------------------------------
+        ; 12/04/2008 - Russell DS - CRs 35741/36952
+        ;	* Modified calls to ^DBSITEM to function calls.
+        ;
+        ; 10/06/2008 - RussellDS - CRs 27817/35918
+        ;	Modified call to ^DBSITEM for new signature.
+        ;
+        ; 06/06/2008 - RussellDS - CR30801
+        ;	Fix RAW section to correct handling of di name. (v27 CR34006)
+        ;
+        ;	Modified section RAW to modify the data item list to a 
+        ;	PSL result set format.  (v27 CR32918)
+        ;
+        ;	Removed old revision history.
 	;
 	;-----------------------------------------------------------------------
 CONV	; Private ; Batch mode (input from keyboard)
@@ -130,7 +133,7 @@ EXEC(input,RID)	; Private ; Main conversion routine
 	S $P(HDR,"|",7)=2					; Protection on *** 10/13/95 BC
 	S $P(HDR,"|",10)=$G(^DBTBL)				; Version #
 	;S $P(HDR,"|",13)=""					; *** V5.0 only ***
-	S $P(HDR,"|",13)=$P(input(0),"|",13)                    ; MSQL syntax (V5.1)
+    	S $P(HDR,"|",13)=$P(input(0),"|",13)                    ; MSQL syntax (V5.1)
 	S $P(HDR,"|",15)=$$USERNAM^%ZFUNC			; User Name
 	I FMTOPT="REPORT" S $P(HDR,"|",16)=1			; Report Banner
 	E  S $P(HDR,"|",9)=1					; Disable Browser
@@ -156,13 +159,13 @@ EXEC(input,RID)	; Private ; Main conversion routine
 	S rwkey="["_%LIBS_","_fid_"]"_$P(lastkey,"/",1)		; on grp header
 	;
 	S grpkey="" I HDR'="" D
-	.       F I=1:1:7 D                                     ; *** 05/10/96
-	..              S z=$P(keys,",",I) I z'["[" S z="["_fid_"]"_z 
-	..              I z=BRK S grpkey=$P(keys,",",I+1) Q     ; *** match grp^ 
-	I grpkey'="" D 
-	.       I grpkey["[" S grpkey="["_%LIBS_","_$P(grpkey,"[",2) Q 
-	.       S grpkey="["_%LIBS_","_fid_"]"_grpkey 
-	E  S grpkey=rwkey 
+      	.       F I=1:1:7 D                                     ; *** 05/10/96
+        ..              S z=$P(keys,",",I) I z'["[" S z="["_fid_"]"_z
+        ..              I z=BRK S grpkey=$P(keys,",",I+1) Q     ; *** match grp^
+        I grpkey'="" D
+        .       I grpkey["[" S grpkey="["_%LIBS_","_$P(grpkey,"[",2) Q
+        .       S grpkey="["_%LIBS_","_fid_"]"_grpkey
+        E  S grpkey=rwkey
 	;-----------------------------------------------------------------------
 	; Report Queries
 	;-----------------------------------------------------------------------
@@ -208,30 +211,30 @@ EXEC(input,RID)	; Private ; Main conversion routine
 	;-----------------------------------------------------------------------
 	; @WPS(RMS) ; Mail/Merge Option
 	;-----------------------------------------------------------------------
-	I WPS D  Q 
-	.       N CHARSET,ET,PARAMS,RMS,X,dtl,pos,seq,size                     ; *** 02/29/96 
-	.       S RMS=$P($P(ITEMS,"(",2),")",1),RMS=$P(RMS,",",1) 
-	. S CHARSET=""
+        I WPS D  Q
+        .       N CHARSET,ET,PARAMS,RMS,X,dtl,pos,seq,size                     ; *** 02/29/96
+        .       S RMS=$P($P(ITEMS,"(",2),")",1),RMS=$P(RMS,",",1)
+        .	S CHARSET=""
 	.	I $$VALID^%ZRTNS("UCIOENCD") S CHARSET=$$^UCIOENCD("Routine","DBSRWQR","*","*")
 	.	I CHARSET="" S PARAMS="READ"
 	.	E  S PARAMS="READ/ICHSET="_CHARSET
-	.       S X=$$FILE^%ZOPEN(RMS,PARAMS,5) 
+        .       S X=$$FILE^%ZOPEN(RMS,PARAMS,5)
 	.	; File error
 	.	I 'X S ER=1,RM=$$^MSG(8071) Q
-	.       S pos=2001,seq=101 
-	.       F  S X=$$^%ZREAD(RMS,.ET) Q:ET  DO              ; End of File 
+        .       S pos=2001,seq=101
+        .       F  S X=$$^%ZREAD(RMS,.ET) Q:ET  DO              ; End of File
 	..		S X=$TR(X,$C(9)," ")			; Remove TABs
-	..              S pos=pos+1000,size=$L(X) 
-	..              ;                                       ; *** 10/20 BC 
-	..              I 'size Q                               ; Blank line 
-	..              S dtl=pos_"|@|"_size_"|T||@|"_X 
-	..              I X="" S X=" " 
-	..              S ^DBTBL(%LIBS,5,RID,rwkey,seq)=dtl,seq=seq+1 
-	.       C RMS                                           ; *** 02/29/96 
-	.       S size=pos\1000-2                               ; Region size 
-	.       S ^DBTBL(%LIBS,5,RID,rwkey,0)="1,"_size_",1"    ; 
-	.       I WPS=1 S $P(^DBTBL(%LIBS,5,RID,0),"|",6)=size  ; Form length 
-	;                                                       ; *** 
+        ..              S pos=pos+1000,size=$L(X)
+        ..              ;                                       ; *** 10/20 BC
+        ..              I 'size Q                               ; Blank line
+        ..              S dtl=pos_"|@|"_size_"|T||@|"_X
+        ..              I X="" S X=" "
+        ..              S ^DBTBL(%LIBS,5,RID,rwkey,seq)=dtl,seq=seq+1
+        .       C RMS                                           ; *** 02/29/96
+        .       S size=pos\1000-2                               ; Region size
+        .       S ^DBTBL(%LIBS,5,RID,rwkey,0)="1,"_size_",1"    ;
+        .       I WPS=1 S $P(^DBTBL(%LIBS,5,RID,0),"|",6)=size  ; Form length
+        ;                                                       ; ***
 	;----------------------------------------------------------------------
 	; Output Raw data
 	;-----------------------------------------------------------------------
@@ -245,7 +248,8 @@ EXEC(input,RID)	; Private ; Main conversion routine
 	;-----------------------------------------------------------------------
 	;
 	I '$D(input(101)),ITEMS'="" DO				; Build Default
-	.	D ^DBSITEM(FILES,ITEMS,.LAYOUT,0,FMTOPT)	; layout
+	.	N errmsg
+	.	S errmsg=$$^DBSITEM(FILES,ITEMS,.LAYOUT)	; layout
 	.	S X=0 F  S X=$O(LAYOUT(X)) Q:X=""  S input(100+X)=LAYOUT(X)
 	;
 	;-----------------------------------------------------------------------
@@ -269,7 +273,7 @@ EXEC(input,RID)	; Private ; Main conversion routine
 	.	S pos=ln+tab+tb,tab=tab+tb+size			; Position
 	.	I tab>scrsz S scrsz=tab				; Report width
 	.       ; Keep track total number of lines skipped      ; *** 12/13/95 BC
-	.       S tskip=tskip+skip                              ; Lines skipped 
+        .       S tskip=tskip+skip                              ; Lines skipped
 	.	I skip S ln=skip*1000+ln,tab=0,lnoff=1		; New line
 	.	;
 	.	I fmt="L" S size=1				; Logical
@@ -282,8 +286,8 @@ EXEC(input,RID)	; Private ; Main conversion routine
 	.	; --------- Key Break option (move keys to group header)
 	.	;
 	.	I DTL DO
-	..		S zzbrk=zbrk I zbrk'="",zbrk["[" S zzbrk=","_$P(zbrk,"]",2)
-	.. 	I zzbrk'="",zzbrk[(","_di_","),BRKOPT'["/DUP" D
+      	..		S zzbrk=zbrk I zbrk'="",zbrk["[" S zzbrk=","_$P(zbrk,"]",2)
+        ..		I zzbrk'="",zzbrk[(","_di_","),BRKOPT'["/DUP" D
 	...			S dtl=dtl-2000_"|"_$P(dtl,"|",2,99)
 	...			S n=$$SEQ(grpkey)
 	...			S ^DBTBL(%LIBS,5,RID,grpkey,n)=dtl
@@ -301,7 +305,7 @@ EXEC(input,RID)	; Private ; Main conversion routine
 	..		S ln3=ln3_$J("",pos1-$L(ln3))_$E(line,1,size)
 	;
 	; Reset report detail region *** 12/13/95 BC
-	S $P(^DBTBL(%LIBS,5,RID,rwkey,0),",",2)=tskip 
+        S $P(^DBTBL(%LIBS,5,RID,rwkey,0),",",2)=tskip
 	I FMTOPT="LABEL" S scrsz=LABOPT*42
 	;
 	; *** BC - Modified to convert 80/132 column QWIK report into same column width RW report 
@@ -341,27 +345,27 @@ GRPSUM	; Group Summary
 	.	; Copy report summary functions into group summary
 	.	;-------------------------------------------------
 	.       S seq=$$SEQ(grpkey)
-	.       F I=101:1 Q:'$D(^DBTBL(%LIBS,5,RID,"@RS",I))  D 
-	..              ; *** 12/13/95 BC 
-	..              S sum=(tskip-1*1000+^(I)+offset)_"|"_$P(^(I),"|",2,99) 
-	..              S ^DBTBL(%LIBS,5,RID,grpkey,seq)=sum,seq=seq+1 
-	; *** 12/13/95  BC 
-	s ln=ln-(tskip-1*1000)                          ; Region of subtotal line 
-	S ^DBTBL(%LIBS,5,RID,grpkey,0)="1,"_tskip_","_(offset\1000-1) 
+        .       F I=101:1 Q:'$D(^DBTBL(%LIBS,5,RID,"@RS",I))  D
+        ..              ; *** 12/13/95 BC
+        ..              S sum=(tskip-1*1000+^(I)+offset)_"|"_$P(^(I),"|",2,99)
+        ..              S ^DBTBL(%LIBS,5,RID,grpkey,seq)=sum,seq=seq+1
+        ; *** 12/13/95  BC
+        s ln=ln-(tskip-1*1000)                          ; Region of subtotal line
+        S ^DBTBL(%LIBS,5,RID,grpkey,0)="1,"_tskip_","_(offset\1000-1)
 	;
 	I BRKOPT["SKIP=" D				; /SKIP=n
 	.	S $P(^(0),",",3)=$P(^(0),",",3)+$P(BRKOPT,"SKIP=",2)-1
 	;
-	I 'QRDTL DO                                     ; Remove detail def 
-	.       S ZMIN=3000,ZMAX=$P(^(0),",",2)*1000+ZMIN 
-	.       K z 
-	.       F I=101:1 Q:'$D(^DBTBL(%LIBS,5,RID,rwkey,I))  D 
-	..              I ^(I)<ZMIN!(^(I)>ZMAX) Q 
-	..              K ^(I) I '$D(z) S z=I           ; *** 04/05/96 
-	.       S ^DBTBL(%LIBS,5,RID,rwkey,26)=3        ; Suppress blank line 
-	.       S ^(z)="3001|@|1|T||@|<<zzz>>||1"       ; 
-	.       S ^(z,1)=" S zzz="_""""""               ; Suppress line 
-	.       ;                                       ; *** End of changes 
+        I 'QRDTL DO                                     ; Remove detail def
+        .       S ZMIN=3000,ZMAX=$P(^(0),",",2)*1000+ZMIN
+        .       K z
+        .       F I=101:1 Q:'$D(^DBTBL(%LIBS,5,RID,rwkey,I))  D
+        ..              I ^(I)<ZMIN!(^(I)>ZMAX) Q
+        ..              K ^(I) I '$D(z) S z=I           ; *** 04/05/96
+        .       S ^DBTBL(%LIBS,5,RID,rwkey,26)=3        ; Suppress blank line
+        .       S ^(z)="3001|@|1|T||@|<<zzz>>||1"       ;
+        .       S ^(z,1)=" S zzz="_""""""               ; Suppress line
+        .       ;                                       ; *** End of changes
 	;
 	D PACKFLD(RID)			; Place items in line/column order
 	;				; Replace - with = for report summary line
@@ -379,29 +383,29 @@ RPTHDR	; Copy Standard Page Header SCA80 or SCA132
 	.	S z=^(x)				; Skip temp RID info
 	.	I RID?1"TMP"1N.N,z["<<RID>>" S z=$P(z,">>",1)_">>"
 	.	S ^DBTBL(%LIBS,5,RID,"@PH",x)=z,ln=x
-	;                                               ; *** 12/13/95 BC 
-	S maxhdr=$O(header(""),-1)                      ; Number of header lines 
-	S lncnt=^DBTBL(%LIBS,5,RID,"@PH",0)+maxhdr,$P(^(0),",",1)=lncnt+maxhdr 
+        ;                                               ; *** 12/13/95 BC
+        S maxhdr=$O(header(""),-1)                      ; Number of header lines
+        S lncnt=^DBTBL(%LIBS,5,RID,"@PH",0)+maxhdr,$P(^(0),",",1)=lncnt+maxhdr
 	;
 	S ln=ln+1,zln=lncnt*1000			; Column heading line 1
 	;                                               ; *** 12/13/95
-	F i=1:1:6 D COLHDR                              ; Create column heading 
+        F i=1:1:6 D COLHDR                              ; Create column heading
 	S tb="",z="" F  S tb=$O(unln(tb)) Q:tb=""  D
 	.	I z,z>tb Q
 	.	S ^(ln)=(zln+tb)_"|@|"_$L(unln(tb))_"|T||@|"_unln(tb)
 	.	S ln=ln+1,z=tb+$L(unln(tb))
 	;                                               ; *** 12/13/95
-	S $P(^DBTBL(%LIBS,5,RID,"@PH",0),",",1)=zln\1000 ; Size of header region 
+        S $P(^DBTBL(%LIBS,5,RID,"@PH",0),",",1)=zln\1000 ; Size of header region
 	Q
-COLHDR	; *** 12/13/95 BC 
-	; Create column heading definition 
-	; 
-	I '$D(header(i)) Q 
-	S tb="" F  S tb=$O(header(i,tb)) Q:tb=""  D 
-	.       S ^(ln)=(zln+tb)_"|@|"_$L(header(i,tb))_"|T||@|"_header(i,tb) 
-	.       S ln=ln+1 
-	S zln=zln+1000 
-	Q 
+COLHDR  ; *** 12/13/95 BC
+        ; Create column heading definition
+        ;
+        I '$D(header(i)) Q
+        S tb="" F  S tb=$O(header(i,tb)) Q:tb=""  D
+        .       S ^(ln)=(zln+tb)_"|@|"_$L(header(i,tb))_"|T||@|"_header(i,tb)
+        .       S ln=ln+1
+        S zln=zln+1000
+        Q
 	;-----------------------------------------------------------------------
 HEADING	; Private ; Format column headings
 	;-----------------------------------------------------------------------
@@ -421,8 +425,8 @@ HEADING	; Private ; Format column headings
 	;
 HDRSET(ln,loc,hdr)					; *** 12/13/95 BC
 	n z                                             ; Check overflow condition
-	F  S z=$O(header(ln,""),-1) Q:z=""  Q:loc'<(z+$L(header(ln,z)))  s ln=ln+1 
-	s header(ln,loc)=hdr 
+        F  S z=$O(header(ln,""),-1) Q:z=""  Q:loc'<(z+$L(header(ln,z)))  s ln=ln+1
+        s header(ln,loc)=hdr
 	Q
 	;-----------------------------------------------------------------------
 FULLREF(FILES,ITEMS)	; Private ; Convert data item name to full reference [fid]dinam
@@ -505,7 +509,7 @@ FUNCTION(def,fun)	; Private ; Column functions SUM or CNT
 	. S $P(x,"|",7)="@TOT("_dinam_",,"_$P(x,"|",4)_","_$P(x,"|",3)_")"
 	Q ""
 	;-----------------------------------------------------------------------
-LOC(def)	; Calculate field position based on the location of thhe last object 
+LOC(def) ; Calculate field position based on the location of thhe last object	
 	;-----------------------------------------------------------------------
 	N col,ln,pos,seq,x
 	S seq=$O(^DBTBL(%LIBS,5,RID,"@RS",""),-1)	; Last sequence
@@ -524,8 +528,16 @@ RAW(OPT,LIST)	; Private ; Raw data format
 	;  . LIST	Data items (di,di,...)		/TYP=T/REQ/MECH=VAL
 	;-----------------------------------------------------------------------
 	;
-	N n,x,di,post,I,P,zfld,Q,code,fmt,string,len,seq
-	N fs,rs,eof,chr,hdr,header,dfmt,lfmt,cfmt,zfmt
+	N n,x,cnt,di,post,I,P,zfld,Q,code,fmt,string,len,ndi,nfid
+	N nitem,nlist,seqfs,rs,eof,chr,hdr,header,dfmt,lfmt,cfmt,zfmt
+	;
+	I LIST["]" S cnt=$L(LIST,","),nfid="",ndi="",nitem="",nlist="" ; DQ FORMAT
+	F I=1:1:cnt DO
+	.	S nitem=$P(LIST,",",I)
+	.	S nfid=$P(nitem,"]",1),ndi=$P(nitem,"]",2)
+	.	S nfid=$E(nfid,2,$l(nfid))
+	.	S nlist=nlist_","_"rwrs.getCol("""_nfid_"."_ndi_""")" ; PSL result set
+	I nlist'="" S LIST=$E(nlist,2,$L(nlist))
 	;
 	;---------- Export definition
 	;
@@ -543,10 +555,13 @@ RAW(OPT,LIST)	; Private ; Raw data format
 	;
 	S n=$L(LIST,","),zfld="",string=" S zfld=",len=0
 	F I=1:1:n DO
+	.	N diname
 	.	S di=$P(LIST,",",I) I di="" Q
+	.	I di?1"rwrs.getCol".E S diname=$E(di,14,$L(di)-2)
+	.	E  S diname=di
 	.       S fmt=0,zfmt="T"
 	.	I $E(di)="""" S fmt=1,len=len+$L(di)+1
-	.	E  S len=len+$$LEN^DBSDD(di)+1,zfmt=$$TYP^DBSDD(di) I "TFU"[zfmt S fmt=1
+	.	E  S len=len+$$LEN^DBSDD(diname)+1,zfmt=$$TYP^DBSDD(diname) I "TFU"[zfmt S fmt=1
 	.	I di["*"!(di["/")!(di["+")!(di["-") s fmt=0
 	.       I fmt,Q'="" S code=" S f"_I_"="_Q_"_("_di_")_"_Q,len=len+2 ; "Text"
 	.	E  DO
@@ -558,8 +573,8 @@ RAW(OPT,LIST)	; Private ; Raw data format
 	.	S ^DBTBL(%LIBS,5,RID,rwkey,101,I-1/1000+1)=code	; Pre-Processor
 	.	S string=string_"f"_I_"_"_fs_"_"
 	.	I 'hdr Q
-	.	S x=$P(di,"]",2)
-	.	S x=""""_$S(hdr=1:x,1:$$DES^DBSDD(di))_""""	; Column Header
+	.	S x=$P(diname,".",2) ;S x=$P(di,"]",2)
+	.	S x=""""_$S(hdr=1:x,1:$$DES^DBSDD(diname))_""""	; Column Header
 	.	I $L(header(seq))+$L(x)<240 S header(seq)=header(seq)_x_"_"_fs_"_" Q	; *** 02/16/95
 	.	S seq=seq+1
 	.	S header(seq)=x_"_"_fs_"_"
@@ -634,37 +649,37 @@ pack	;
 	I ord k ^DBTBL(%LIBS,5,RID,key,27)	; Remove LF suppress option
 	Q
 	;-----------------------------------------------------------------------
-ORDERBY(ord)	; Remove [fid] references and dummy keys 
+ORDERBY(ord) ; Remove [fid] references and dummy keys
 	;----------------------------------------------------------------------
 	; Example:  [FEE]FEETYP,[FEE]CID,[FEE]75 returns 75,FEETYP,CID
 	;----------------------------------------------------------------------
-	N di,dinam,i,keys,lit,n,zfid
-	S n=$L(ord,","),keys="",lit=""                  ; *** 01/18/96 
-	F i=1:1:n D 
-	.       S dinam=$P(ord,",",i)                   ; *** 03/18/96 
-	.       S zfid=$E($P(dinam,"]",1),2,99)         ; File name 
-	.       I zfid'="",zfid'=fid S keys=keys_dinam_"," Q    ; Keep orig name 
-	.       S di=$P(dinam,"]",2)                    ; data item name 
-	.       I '((di?1A.AN)!($E(di)="%")) S lit=lit_di_"," Q  ; Save all dum 
-	.       S keys=keys_di_"," 
-	S keys=lit_keys                                 ; Place dummy keys first 
+    	N di,dinam,i,keys,lit,n,zfid
+        S n=$L(ord,","),keys="",lit=""                  ; *** 01/18/96
+        F i=1:1:n D
+        .       S dinam=$P(ord,",",i)                   ; *** 03/18/96
+        .       S zfid=$E($P(dinam,"]",1),2,99)         ; File name
+        .       I zfid'="",zfid'=fid S keys=keys_dinam_"," Q    ; Keep orig name
+        .       S di=$P(dinam,"]",2)                    ; data item name
+        .       I '((di?1A.AN)!($E(di)="%")) S lit=lit_di_"," Q  ; Save all dum
+        .       S keys=keys_di_","
+        S keys=lit_keys                                 ; Place dummy keys first
 	Q $E(keys,1,$L(keys)-1)
 	;-----------------------------------------------------------------------
 QA	; Private ; convert QWIK report into RW format (Batch Mode)
 	;-----------------------------------------------------------------------
 	I $G(%LIBS)="" S %LIBS="SYSDEV"
-	D ^SCAIO U IO
-	S QRID="" F  S QRID=$O(^DBTBL(%LIBS,6,QRID)) Q:QRID=""!(QRID]]"ZZZ")  D 
-	.       U 0 W !,QRID 
-	.       U IO W !,QRID,! 
-	.       K ^DBTBL(%LIBS,5,"Z")                           ; Delete old definition 
-	.       D EXT(QRID,"Z")                                 ; Convert to RW 
-	.       ZWR ^DBTBL(%LIBS,5,"Z",*)                       ; Global dump 
-	W !! 
-	C IO 
-	Q 
+  	D ^SCAIO U IO
+        S QRID="" F  S QRID=$O(^DBTBL(%LIBS,6,QRID)) Q:QRID=""!(QRID]]"ZZZ")  D
+        .       U 0 W !,QRID
+        .       U IO W !,QRID,!
+        .       K ^DBTBL(%LIBS,5,"Z")                           ; Delete old definition
+        .       D EXT(QRID,"Z")                                 ; Convert to RW
+        .       ZWR ^DBTBL(%LIBS,5,"Z",*)                       ; Global dump
+        W !!
+        C IO
+        Q
 	;----------------------------------------------------------------------
-SQLRW(sqlexpr,RID,rtype)	; 
+SQLRW(sqlexpr,RID,rtype) ;
 	;----------------------------------------------------------------------
 	; Convert MSQL SELECT command into a Report Writer report
 	;
@@ -722,7 +737,7 @@ SQLRW(sqlexpr,RID,rtype)	;
 	;
 	; ----- Create default column definitions
 	;
-	D ^DBSITEM(FROM,SELECT,.COLUMN,0)
+	S errmsg=$$^DBSITEM(FROM,SELECT,.COLUMN)
 	F i=1:1:20 I $G(COLUMN(i))'="" S rw(100+i)=COLUMN(i)
 	;
 	S rw="MSQL report"				; Build report
@@ -741,14 +756,14 @@ SQLRW(sqlexpr,RID,rtype)	;
 	D EXEC(.rw,RID)					; Create RW definition
 	Q
 	;----------------------------------------------------------------------
-CONVQ(x)	; Remove double quotes and replace single quotes with double quotes 
+CONVQ(x) ; Remove double quotes and replace single quotes with double quotes
 	;----------------------------------------------------------------------
 	S x=$$UNTOK^%ZS(x,.tok)
 	S x=$TR(x,$C(34),"")				; Remove double quotes
 	S x=$TR(x,$C(39),$C(34))			; Change ' to ""
 	Q x
 	;----------------------------------------------------------------------
-CONVDI(x)	; Convert FID.DI to [FID]DI 
+CONVDI(x) ; Convert FID.DI to [FID]DI
 	;----------------------------------------------------------------------
 	N di,i,v
 	I x'["." Q x
@@ -760,7 +775,7 @@ CONVDI(x)	; Convert FID.DI to [FID]DI
 	Q $E(v,2,999)
 	;
 	;----------------------------------------------------------------------
-QUERY(RID,type)	; Return report query syntax 
+QUERY(RID,type) ; Return report query syntax
 	;----------------------------------------------------------------------
 	N qry,i,MSQL,NI
 	S qry=""

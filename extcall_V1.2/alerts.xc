@@ -1,2 +1,2 @@
-/opt/pip_V01/extcall_V1.2/alerts.sl
+/home/pip/pip_V02/extcall_V1.2/alerts.sl
 geterrlos: void geterrlos(I:char *,I:char *,I:char *,I:long,I:long,IO:string *,O:long *)

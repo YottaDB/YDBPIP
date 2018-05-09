@@ -93,7 +93,7 @@ UX2SQL(sql,rev)	; Convert UX(fid,di) information into SQL statement
 	Q
 	;
 	;----------------------------------------------------------------------
-SETERR(fid,errtyp,errcode,par,col,cv,av)	; 
+SETERR(fid,errtyp,errcode,par,col,cv,av) ;
 	;----------------------------------------------------------------------
 	; Utility to set up verrors() array
 	;
@@ -135,11 +135,11 @@ SETERR(fid,errtyp,errcode,par,col,cv,av)	;
 	.	S RM=$P(stblxbad,"|",1)		; Error message
 	.	I $G(par)'="",$G(col)="" D
 	..		I RM'["~" Q
-	..		S RM=$P(RM,"~p1",1)_$p(par,"~",1)_$P(RM,"~p1",2,99)
-	..		I RM["~p2" S RM=$P(RM,"~p2",1)_$p(par,"~",2)_$P(RM,"~p2",2,99)
-	..		I RM["~p3" S RM=$P(RM,"~p3",1)_$p(par,"~",3)_$P(RM,"~p3",2,99)
-	..		S par=""
-	;
+  	..		S RM=$P(RM,"~p1",1)_$p(par,"~",1)_$P(RM,"~p1",2,99)
+  	..		I RM["~p2" S RM=$P(RM,"~p2",1)_$p(par,"~",2)_$P(RM,"~p2",2,99)
+  	..		I RM["~p3" S RM=$P(RM,"~p3",1)_$p(par,"~",3)_$P(RM,"~p3",2,99)
+  	..		S par=""
+ 	;
 	I errtyp="ER" D					; One or two line meg
 	.	N stbler
 	.	S stbler=$$STBLER^DBSDI(errcode)
@@ -162,7 +162,7 @@ SETERR(fid,errtyp,errcode,par,col,cv,av)	;
 	I fatal,$G(%O)'=2 S ER=1 K verrors		; Fatal error
 	Q
 	;----------------------------------------------------------------------
-DELERR(fid,errtyp,errcode)	; 
+DELERR(fid,errtyp,errcode) ;
 	;----------------------------------------------------------------------
 	; Utility to remove verrors() array entries
 	;
@@ -189,7 +189,7 @@ DELERR(fid,errtyp,errcode)	;
 	.	I '$O(verrors(seq,"")) K verrors(seq)	       ; delete header
 	Q
 	;----------------------------------------------------------------------
-XBAD(error)	; Create [XBAD] entries 
+XBAD(error) ; Create [XBAD] entries
 	;----------------------------------------------------------------------
 	; ARGUMENTS:
 	;
@@ -276,7 +276,7 @@ OVRERR(verrors)	; Override logic
 	X KVAR
 	Q
 	;----------------------------------------------------------------------
-dayendxb(ERROR,CID,tbl)	; Create dayend override log 
+dayendxb(ERROR,CID,tbl) ; Create dayend override log
 	;----------------------------------------------------------------------
 	S tbl=$G(tbl)
 	I $G(%LOGID) D STUB^PBSCLI("dayendxb^DBSEXECU(.ERROR,CID,tbl)") Q
@@ -287,7 +287,7 @@ dayendxb(ERROR,CID,tbl)	; Create dayend override log
 	.	S ^DAYEND(TJD,"XBAD",%UID,CID,SEQ,ET)=UID	; Override log
 	Q
 	;----------------------------------------------------------------------
-CASUPD(fid,ov,nv)	; Cascade update 
+CASUPD(fid,ov,nv) ; Cascade update
 	;----------------------------------------------------------------------
 	; ARGUMENTS:
 	;
@@ -313,7 +313,7 @@ CASUPD(fid,ov,nv)	; Cascade update
 	I '$D(^DBINDX(lib,"PARFID",supfid)) Q
 	D upd(supfid)						; Process supertype file
 	Q
-upd(fid)	; 
+upd(fid) ;
 	I '$D(^DBINDX(lib,"FKPTR",fid)) Q			; Not defined
 	; ---- check if new account already on file
 	;
@@ -344,7 +344,7 @@ cassql	; Build SQL UPDATE statement
 	S z=$$^SQL("UPDATE "_fkfl_sql,"/NOFKCHK=1")		; Execute
 	Q
 	;----------------------------------------------------------------------
-CASDEL(fid,kval)	; Cascade delete 
+CASDEL(fid,kval) ; Cascade delete
 	;----------------------------------------------------------------------
 	; ARGUMENTS:
 	;
@@ -373,7 +373,7 @@ CASDEL(fid,kval)	; Cascade delete
 	D del(supfid)						; Process supertype file
 	I ER K flist Q
 	Q
-del(fid)	; 
+del(fid) ;
 	N i
 	I '$D(^DBINDX(lib,"FKPTR",fid)) Q			; Not defined
 	;
@@ -399,14 +399,14 @@ delsql	;
 	;
 	;;W !,sql							; *** DEBUG
 	N fid,fkfl
-	;
+ 	;
 	; DELETE table WHERE key_column=key_val
 	;
 	I $G(par("CASDEL")) S z=$$^SQL(sql,"/CASDEL=1") Q
 	S z=$$^SQL(sql,"/NOFKCHK=1")				; Delete record
 	Q
 	;----------------------------------------------------------------------
-keyerr(file,keys)	; 
+keyerr(file,keys) ;
 	;----------------------------------------------------------------------
 	N fsn,i,key,pkeys,ER
 	S ER=0
@@ -432,7 +432,7 @@ exist(val)	; Verify if any record exist on file
 	S ER=1,RM=$$^MSG(906,fkfl_"."_key,fid_" "_val) Q  ; Restricted
 	Q
 	;----------------------------------------------------------------------
-VERDATA(UX)	; Private ; Compare between local buffer and database value 
+VERDATA(UX) ; Private ; Compare between local buffer and database value
 	;----------------------------------------------------------------------
 	; ARGUMENT:
 	;

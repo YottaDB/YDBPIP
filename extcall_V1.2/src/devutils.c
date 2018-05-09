@@ -22,17 +22,16 @@
 *
 */
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <errno.h>
-#include <extcall.h>
 #include <sys/statfs.h>
 #include <sys/vfs.h>
 #include <termio.h>
 #include <fcntl.h>
+#include "extcall.h"
 
-void
-getfreeblk(	int count,
-			char *device,
-			SLONG *return_code)
+void getfreeblk(int count, char *device, SLONG *return_code)
 {
 	RETURNSTATUS 	rc = SUCCESS;
 	struct statfs 	buf;
@@ -50,8 +49,7 @@ getfreeblk(	int count,
 	return;
 }
 
-void
-getcharset(int count,SLONG *return_code)
+void getcharset(int count,SLONG *return_code)
 {
 	RETURNSTATUS	rc = SUCCESS;
 	struct termio	tty_setting;

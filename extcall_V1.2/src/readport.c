@@ -35,23 +35,24 @@
 *
 */
 
-#include	<stdlib.h>
 #include 	<stdio.h>
+#include 	<stdlib.h>
+#include 	<string.h>
 #include 	<utmp.h>
 #include	<unistd.h>
 #include 	<memory.h>
-#include	<string.h>
 #include 	<netdb.h>
 #include 	<sys/socket.h>
 #include 	<sys/socketvar.h>
 #include 	<netinet/in.h>
 #include 	<arpa/inet.h>
-#include	<extcall.h>
+#include	"extcall.h"
+#include	"scatype.h"
+
 #define 	DELIMITER	"."
 
 char *gethostSN(char *);
 char *gethostIP(char *);
-
 
 /***************************************************************************
 *
@@ -66,16 +67,16 @@ char *gethostIP(char *);
 *
 ***************************************************************************/ 
 
-void
-readport(int count,STR_DESCRIPTOR *tty,SLONG *rc)
+void readport(int count,STR_DESCRIPTOR *tty,SLONG *rc)
 {
  	char *ptr,*pstr;
 	int i=0;
 	int ip=1;
  	struct utmp *myutmp, temp;
 	char *hostSN, *hostIP;
-	char hoststr[80];
-	char hstr[80];
+	char hoststr[256];
+	char hstr[256];
+	int ip_len=0;
 
 	/* get TTY environment variable */
 	ptr = getenv(TTY);
@@ -175,6 +176,7 @@ readport(int count,STR_DESCRIPTOR *tty,SLONG *rc)
 	else
 	{
 		/* got IP address, return it */
+		ip_len = strlen(hostIP);
 		tty->length=strlen(hostIP);
 		strncpy(tty->str,hostIP,tty->length);
 	}

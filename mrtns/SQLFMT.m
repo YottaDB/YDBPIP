@@ -1,4 +1,4 @@
-SQLFMT(exe)	
+SQLFMT(exe)
 	;;Copyright(c)2001 Sanchez Computer Associates, Inc.  All Rights Reserved - 02/21/01 13:05:45 - CHENARDP
 	; ORIG:	SPIER - 12/04/95
 	; DESC:	Format DI from results table of SQL select
@@ -10,6 +10,13 @@ SQLFMT(exe)
 	;	. exe	Procedural code		/TYP=T/REQ/MECH=REFARR:RW
 	;
 	;---------- Revision History ------------------------------------------
+	; 2009-22-06, Sha Mirza  CR 40255
+	;	     Modified  section bldhdg to call D CONAGGR^SQLODBC(...)			
+	;	     which calculate TYP, LEN, and DEC for aggregate or functions.
+	;
+	; 09/24/07 - Giridharanb - CR28353
+	;	     Modified section HEADING to call COLLIST^DBSDD to resolve "*"
+	;
 	; 07/10/06 - RussellDS - CR22121
 	;	     Modified maximum length checking to use byte string method
 	;	     by calling BSL^SQLUTL to make Unicode compliant.
@@ -66,21 +73,21 @@ fmt	; Retrieve format qualifiers from [STBLTFMT]
 	i lstring'="" s lstring="$C("_lstring_")"
 	S fdelim=$p(fmt,"|",3)  			; Column delimiter
 	S rdelim=$p(fmt,"|",4)  			; Row delimiter
-	; 
-	S msk=$P(fmt,"|",7,11)   		; Display edit mask
-	; 
-	I msk'="" F I=1:1:5 D 
-	.       ; 
-	.       S z=$P(msk,"|",I) 
-	.       I z="*" S z=$G(@$P("%MSKD,%MSKL,%MSKC,%MSKE,%MSKN",",",I)) I z="" S z=$P("MM/DD/YY,NY,12:60 AM,.",",",I) 
-	.       S $P(msk,"|",I)=z 
+        ;
+        S msk=$P(fmt,"|",7,11)  			; Display edit mask
+        ;
+        I msk'="" F I=1:1:5 D
+        .       ;
+        .       S z=$P(msk,"|",I)
+        .       I z="*" S z=$G(@$P("%MSKD,%MSKL,%MSKC,%MSKE,%MSKN",",",I)) I z="" S z=$P("MM/DD/YY,NY,12:60 AM,.",",",I)
+        .       S $P(msk,"|",I)=z
 	;
 	; *** 02/03/97
 	I $G(par("DATE"))'="" S $p(msk,"|",1)=par("DATE")
 	I $G(par("DEC"))'="" S $p(msk,"|",4)=par("DEC")
 	I $G(par("DEC"))'="" S $p(msk,"|",5)=par("DEC")
-	; 
-	Q
+        ;
+ 	Q
 	;----------------------------------------------------------------------
 colfmt	; Build executable commands to format the data based upon defined format
 	;
@@ -107,10 +114,10 @@ colfmt	; Build executable commands to format the data based upon defined format
 	I len=0 Q
 	I vsql("fmt")="IMAGE" D IMAGEBLD Q
 	i oexpr=expr Q				;formatting will not be changed
-	;
+  	;
 	I $g(exe(exe))="" S exe(exe)="S "_oexpr_"="_expr Q
 	I $L(exe(exe))<230 S exe(exe)=exe(exe)_","_oexpr_"="_expr Q
-	S exe=exe+1,exe(exe)="S "_oexpr_"="_expr
+ 	S exe=exe+1,exe(exe)="S "_oexpr_"="_expr
 	;
 	Q
 	;
@@ -179,7 +186,7 @@ IMAGEBLD	;Private;Create exe to build IMAGE mode output
 	.	I typ="D" S expr=expr_"_$S($l("_oexpr_")>0:"""",1:$J("""","_len_"))" Q
 	.	S expr=expr_"_$J("""","_len_"-$l("_oexpr_"))"
 	;
-	I $G(exe(exe))="" S exe(exe)="S vl="_expr Q
+ 	I $G(exe(exe))="" S exe(exe)="S vl="_expr Q
 	I $L(exe(exe))<230 S exe(exe)=exe(exe)_"_""  ""_"_expr Q
 	S exe=exe+1
 	S exe(exe)="S vl=vl_""  ""_"_expr
@@ -209,7 +216,7 @@ HEADING(frm,sel,fmt,col,xcol,tok,fsn,vdd)	;public;	Build Heading array
 	;	$$ 		Heading string
 	;	. ER		Error Flag
 	;	. RM		Error message
-	; I18N=OFF: Excluded from I18N standards. 
+        ; I18N=OFF: Excluded from I18N standards.
 	S ER=0
 	;
 	I '$D(tok) S sel=$$SQL^%ZS(sel,.tok) I ER Q ""
@@ -218,20 +225,20 @@ HEADING(frm,sel,fmt,col,xcol,tok,fsn,vdd)	;public;	Build Heading array
 	;
 	N I,X,cptr,dec,del,hdg,jus,len,opt,ptr,rhd,str,spa,typ,l,vsql,x,y,z
 	;
-	I $G(fmt)="" S fmt="|||||3"
+ 	I $G(fmt)="" S fmt="|||||3"
 	E  I $E(fmt)'="|" S fmt=$G(^STBL("TFMT",fmt))  	; *** 06/10/97
-	; 
+        ;
 	I $E(sel,1,9)="DISTINCT " S sel=$E(sel,10,$L(sel))
 	E  I $E(sel,1,4)="ALL " S sel=$E(sel,5,$L(sel))
-	;
-	I $E(sel)="*" S sel=$$LIST^SQLDD(frm) I ER Q ""
+ 	;
+	I $E(sel)="*" S sel=$$COLLIST^DBSDD(frm,0,1,0) I ER Q ""
 	;
 	S del=$P(fmt,"|",3),opt=$P(fmt,"|",6)
 	I del S del=$C(del)
 	;
 	S cptr=0,ptr=0
-	; 
-	F col=1:1 S str=$$GETCOL^SQLCOL(sel,.ptr) D bldhdg Q:ptr>$L(sel)!ER 
+        ;
+        F col=1:1 S str=$$GETCOL^SQLCOL(sel,.ptr) D bldhdg Q:ptr>$L(sel)!ER
 	;
 	I ER Q ""
 	;
@@ -248,8 +255,11 @@ bldhdg	;private; Build heading strings
 	;
 	N aggfun
 	S (len,typ,dec,aggfun)=""
-	I str["(" s aggfun=$p($p(str,"(",2),")",1)_"@"_$p(str,"(",1),str=$p($p(str,"(",2),")",1)
-	S str=$$MCOL^SQLCOL(str,frm,.len,.typ,.dec,.fsn,,,.tok,.vdd,1)
+	;
+	; Fix 40255 check for str for any aggregates and call CONAGGR to 
+	; set/calculate TYP, LEN, and DEC 
+	I str?1A.E1"("1E.E1")" s aggfun=$p($p(str,"(",2),")",1)_"@"_$p(str,"(",1) D CONAGGR^SQLODBC(str,frm,.typ,.len,.dec)
+	E  S str=$$MCOL^SQLCOL(str,frm,.len,.typ,.dec,.fsn,,,.tok,.vdd,1)
 	I ER Q
 	;
 	;
@@ -266,7 +276,7 @@ bldhdg	;private; Build heading strings
 	I aggfun'="" S rhd=aggfun
 	;
 	S z=$G(xcol(col))
-	;
+     	;
 	I $P(z,"|",1)'="" S len=$P(z,"|",1)
 	I $P(z,"|",2)'="" S typ=$P(z,"|",2)
 	I $P(z,"|",3)'="" S dec=$P(z,"|",3)
@@ -305,7 +315,7 @@ bldhdg	;private; Build heading strings
 	;
 TEST	;Test utility to verify changes.
 	;
-	; I18N=OFF: Excluded from I18N standards. 
+        ; I18N=OFF: Excluded from I18N standards.
 	N 
 	S MSG="SQL Format test Utility"
 	S z1=0,z2=1,z5="IMAGE"
@@ -318,7 +328,7 @@ TEST	;Test utility to verify changes.
 	S %READ="@MSG/CEN/REV,,,z1,z5,z2"
 	S %FRAME=2,%NOPRMT="F"
 	D ^UTLREAD I VFMQ="Q" Q
-	N (z1,z2,z5)
+  	N (z1,z2,z5)
 	;
 	S %UCLS="SCA"
 	S (sqlsta,sqldta,sqlcnt,sqlind,tok)=""
@@ -327,10 +337,10 @@ TEST	;Test utility to verify changes.
 	S mypar("ROWS")=3
 	S mypar("CACHE")=z1
 	S mypar("FORMAT")=z5
-	I z2=1 s from="DEP",select="CID,BAL,TLD,ODT,IPND,LNM,IPF",qry="CID<100" 
-	E  S from="UTBLBRCD",select="*",qry="" 
-	s format=z5 
-	D ^DBSRPT(from,select,qry,,format,"Sqlfmt test utility",3) 
-	W $$SCR80^%TRMVT() 
-	Q
-	; I18N=ON: Excluded from I18N standards. 
+        I z2=1 s from="DEP",select="CID,BAL,TLD,ODT,IPND,LNM,IPF",qry="CID<100"
+        E  S from="UTBLBRCD",select="*",qry=""
+        s format=z5
+        D ^DBSRPT(from,select,qry,,format,"Sqlfmt test utility",3)
+        W $$SCR80^%TRMVT()
+ 	Q
+        ; I18N=ON: Excluded from I18N standards.

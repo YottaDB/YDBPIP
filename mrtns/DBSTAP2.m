@@ -19,11 +19,11 @@ DBSTAP2	;; -  - V4.0 - Conversion Template Routine
 	; 05/17/06 - Allan Mattson - CR20048
 	;            Replaced calls to $$UPPER^%ZFUNC with $$UPPER^SCAUTL.
 	;
-	; 04/03/00 - TANY - 37915 
-	;            Optimized performance by modifying ^SCADAT1 calls 
-	;            to ^SCAJD. Also remove revision history older than 
-	;            one year. 
-	;---------------------------------------------------------------------- 
+        ; 04/03/00 - TANY - 37915
+        ;            Optimized performance by modifying ^SCADAT1 calls
+        ;            to ^SCAJD. Also remove revision history older than
+        ;            one year.
+        ;----------------------------------------------------------------------
 DOL	; Format data type $ (dollar)
 	S ZB=$E(DATA,$L(DATA)) I DATA["." S DATA=+DATA Q
 	I ZB?1N S DATA=+DATA D DOL2 Q  ; Not zone data

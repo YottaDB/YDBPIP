@@ -26,21 +26,24 @@
 *
 */
 #include <stdio.h>
-#include <extcall.h>
+#include <stdlib.h>
+#include <string.h>
+#include "extcall.h"
 
 void
 xor(int count,STR_DESCRIPTOR *src, SLONG *dst)
 {
-	int i=0;
+	int i=0,len;
 	char xor_char=0;
 
 	xor_char=0;
+	len = src->length;
 
-	if(src->length > 0)
+	if(len > 0)
 		xor_char=*src->str;
 
-	if(src->length > 1)
-		for(i=1;i<src->length;++i)
+	if(len > 1)
+		for(i=1;i<len;++i)
 			xor_char=xor_char ^ src->str[i];
 
 	*dst=(long)xor_char;

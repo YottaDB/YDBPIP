@@ -1,4 +1,4 @@
-#!/bin/ksh
+#!/bin/bash
 #
 #	sca_alert.sh 
 #

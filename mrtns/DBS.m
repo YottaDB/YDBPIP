@@ -3,7 +3,7 @@ DBS	;;DBS  - 12 DEC 1992 15:04:15 - MATTSON
 	;     ORIG:  CHIANG 1/1/85
 	;     DESC:  DBS DRIVER
 	;
-	; I18N=QUIT: Exculded from I18N standards.; 
+        ; I18N=QUIT: Exculded from I18N standards.;
 	;---- Revision History--------------------------------------------------
 	;
 	;-----------------------------------------------------------------------

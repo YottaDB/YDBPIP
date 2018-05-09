@@ -43,21 +43,10 @@ DBSPARS2(vfid,vin,vout,vdi,vspmsg,vnoux)	;Public; Data item parser for filer def
 	; I18N=QUIT: Exculded from I18N standards. 
 	;
 	;---- Revision History ------------------------------------------------
-	; 08/30/06 - RussellDS - CR22720
-	;	     Replaced call to $$UPPER^SCAUTL with $$UPPER^UCGMR to
-	;	     avoid bootstrap issues.
+	; 01/21/2008 - RussellDS - CR30801
+	;	Removed reference to DBTBL1.UDFILE
 	;
-	; 05/17/06 - Allan Mattson - CR20048
-	;            Replaced calls to $$UPPER^%ZFUNC with $$UPPER^SCAUTL.
-	;
-	; 10/31/05 - RussellDS - CR17834
-	;	     Removed reference to macro INSERTB, which is no longer
-	;	     used.  Eliminates calls to obsolete DBSINS.
-	;
-	; 05/24/05 - RussellDS - CR16071
-	;	     Added "CS" transaction ID to tstart.
-	;		   
-	;	     Removed old revision history.
+	;	Removed old revision history.
 	;----------------------------------------------------------------------
 	;
 	N arg,blk,btmkey,buff,cmd,cnt,code,com,def,dots,fid,file,fsn,ftype,gbl
@@ -101,10 +90,10 @@ CONV(x,vfid)	; Convert each input line
 	.	I 'ptr S blk=$J("",$L(x)-optr-$L(v))	; New pointer
 	.	E  S blk=$J("",ptr-optr-$L(v))		; Gaps between items
 	.	S optr=ptr				; Reset pointer
-	.       D                                       ; 09/29/99 
-	..              I $L(nv,"""")#2=0 Q             ; in quotes 
-	..              I v["^SQL" S v=$$sql(x) Q       ; SQL command 
-	..              S v=$$replace(v)                ; new value 
+        .       D                                       ; 09/29/99
+        ..              I $L(nv,"""")#2=0 Q             ; in quotes
+        ..              I v["^SQL" S v=$$sql(x) Q       ; SQL command
+        ..              S v=$$replace(v)                ; new value
 	.	I $E(v,1,2)=$c(1,1) D macro Q		; .MACRO. command
 	.	;
 	.	I $E(v,1,2)="S:" D  			; Remove , or S command
@@ -120,7 +109,7 @@ CONV(x,vfid)	; Convert each input line
 	;I nv["NJD^UFRE",nv'["ER" D error("Missing ER checking logic")
 	Q nv
 	;----------------------------------------------------------------------
-convtab(x)	; Replace tab with spaces 
+convtab(x) ; Replace tab with spaces
 	;----------------------------------------------------------------------
 	I x'[$C(9) Q x
 	N loc,p1,sp
@@ -315,12 +304,7 @@ macro	; &&macro(table) command   &&INSERT  &&UPDATE  &&VERIFY &&DELETE
 	S fsn=$P($P(fsn(file),"|",1),"(",1)		; File short name
 	S rectyp=$P(fsn(file),"|",4)			; Record type
 	S keys=$p(fsn(file),"|",3)			; Access keys
-	S routine=$p(fsn(file),"|",6)			; Filer name
 	S z=opt I $g(switch)'="" S z=z_","_q_switch_q
-	; 2/25/2000 (MAS) commented out next 2 lines and added code to always
-	; 	    call EXT^DBSFILER 
-	;I routine="" S code="D EXT^DBSFILER("_q_file_q_","_z_") Q:ER  " ; DQ filer
-	;E  S code="D ^"_routine_"("_z_") Q:ER  "	; Real filer
 	S code="D EXT^DBSFILER("_q_file_q_","_z_") Q:ER  " ; DQ filer
 	I opt'=2,keymap'="" S code=$C(0)_keymap_$C(0)_code	; key mapping logic
 	S def="I $D("_fsn_")"				; Check fsn first
@@ -467,7 +451,7 @@ seterr	; &&SetErrXBAD   &&SetErrSTBLER   &&SetErrMsg
 	.	I vfid="" D error("Missing file name - please check control page")
 	.	I $E(cmd,1,3)="SET" S nv=nv_"D SETERR^DBSEXECU("_q_vfid_q_","_q_"XBAD"_q_","
 	.	I  S nv=nv_$P(arg,",",1)_",,"_narg_")"
-	.       E  S nv=nv_"D DELERR^DBSEXECU("_q_vfid_q_","_q_"XBAD"_q_","_$P(arg,",",1)_")"
+     	.       E  S nv=nv_"D DELERR^DBSEXECU("_q_vfid_q_","_q_"XBAD"_q_","_$P(arg,",",1)_")"
 	.	S ptr=ptr+$L(arg)+2,optr=ptr
 	;
 	I cmd="SETERRSTBLER" D  Q			; *** 02/24/97 BC
@@ -543,7 +527,7 @@ macro1	;
 	;----------------------------------------------------------------------
 	I cmd="CHANGED" D  Q				; &&CHANGED("table.column")
 	.	I arg'[q D  Q				; &&CHANGED(var) 11/05/99
-	..       	S ptr=ptr+$L(arg)+2,optr=ptr 
+    	..       	S ptr=ptr+$L(arg)+2,optr=ptr 
 	..		S nv=nv_blk_"$D(UX($P("_arg_","_q_"."_q_",1),$P("_arg_","_q_"."_q_",2)))"
 	.	S p1=$P(arg,q,2),p2=$P(arg,q,4)
 	.	I p1="" D synerr(arg) Q  		; Missing quotes
@@ -753,8 +737,8 @@ charset	;Retrieve all upper and lower characters to build a collating array
 	I nv["," S var=$P(nv,",",$L(nv,","))	; S var1=...,var2=&&charset
 	E  S var=$P(nv," ",$L(nv," "))		; S var1=&&charset
 	S var=$P(var,"=",1)			; Get variable name
-	S v=$$LC^%CHARSET_$$UC^%CHARSET_"/0123456789@[\]^_`%!~$#&*()-+={}<>?:." 
-	F i=1:1:$L(v) S char($E(v,i))="" ; Sort it in order
+        S v=$$LC^%CHARSET_$$UC^%CHARSET_"/0123456789@[\]^_`%!~$#&*()-+={}<>?:."
+        F i=1:1:$L(v) S char($E(v,i))=""	; Sort it in order
 	S i="",v="",v1=""
 	F  S i=$O(char(i)) Q:i=""  S v=v_","_$A(i) I $L(v)>450 S v1=v,v=""
 	S ptr=999,optr=999
@@ -770,12 +754,12 @@ tstart	; Start transaction
 	S ptr=999,optr=999
 	Q
 	;----------------------------------------------------------------------
-tcommit	; Commit transaction 
+tcommit ; Commit transaction
 	;----------------------------------------------------------------------
 	S nv=nv_" Tcommit:vtp "
 	Q
 	;----------------------------------------------------------------------
-trollback	; Roll back transaction 
+trollback ; Roll back transaction
 	;----------------------------------------------------------------------
 	S nv=nv_" Trollback:vtp "
 	Q

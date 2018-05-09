@@ -5,7 +5,7 @@ DBSTEST2	;; -  - V5.0
 	;    CALLS:  ^%TRMVT,^DBSTBL,^UTLREAD
 	;     DESC:  Utility for DEMO/QA routine DBSTBL (look-up table)
 	;
-	; I18N=QUIT: Exculded from I18N standards. 
+        ; I18N=QUIT: Exculded from I18N standards.
 	;---------- Revision History -------------------------------------------
 	;
 	; 07/15/98 - Betty Ni - 29370
@@ -71,7 +71,7 @@ DBSTEST2	;; -  - V5.0
 	S DOC(48)="|                     |                    | ""[DEPCID/TBL=[DEP]CID,LNM"" |"
 	S DOC(49)="|                     |                    |I '%O S %READ=%READ_"":NOVAL""|"
 	S DOC(50)="+---------------------+--------------------+------------------------------+"
-	S DOC(51)="| DQ Query Syntax     |   :QUERY var       | S XYZ=""[DEP]BAL>1000""      |"   
+        S DOC(51)="| DQ Query Syntax     |   :QUERY var       | S XYZ=""[DEP]BAL>1000""      |"  
 	S DOC(52)="|                     |                    |                              |"
 	S DOC(53)="|                     |                    | [DEP]CID,BAL,BOO:QUERY XYZ   |"
 	S DOC(54)="|                     |                    |                              |"
@@ -245,13 +245,13 @@ A	;
 	; ---------- Partial CRTHLP listing ----------
 	;
 	S CLS="D",GRP="DDA"
-	S QRY(1)="[XTRN]CLS=D" 
-	S QRY(2)="[XTRN]GRP=DDA"  
+        S QRY(1)="[XTRN]CLS=D"
+        S QRY(2)="[XTRN]GRP=DDA" 
 	S QRY(3)="[XTRN]SGT=0"				
 	S QRY(4)="[XTRN]UCLS=1"
 	S QRY(5)="[XTRN]ETC'>ZZZZZZZZZ"
 	F I=1:1:5 S MSG(I)=" S QRY("_I_")="_""""_QRY(I)_""""
-	S SYNTAX="[XTRN]ETC/LEN=16,[TRN]DES:QUERY QRY(#)" 
+        S SYNTAX="[XTRN]ETC/LEN=16,[TRN]DES:QUERY QRY(#)"
 	Q:'$$DSP()
 	K QRY,CLS,GRP,MSG
 	;
@@ -276,7 +276,7 @@ A	;
 DSP()	;
 	N OLNTB
 	S %READ="@MS1/REV/CEN,"
-	I $D(MSG) S I="" F  S I=$O(MSG(I)) Q:I=""  DO
+   	I $D(MSG) S I="" F  S I=$O(MSG(I)) Q:I=""  DO
 	.	S MSG(I)=MSG(I)_$J("",80-$L(MSG(I)))	; 80 column message
 	.	S %READ=%READ_",@MSG("_I_")"
 	I $G(SYNTAX)'="" S %READ=%READ_",,@SYNTAX/INC/CEN"

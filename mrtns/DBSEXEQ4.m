@@ -16,7 +16,7 @@ DBSEXEQ4	;;DBS - U - V4.4 - DQ QUICK REPORT (OUTPUT SECTION)
 	;       FLGPROT(FILE,DI) = COMPUTED OPERATION PROTECTION FLAG
 	;
 	;
-	; I18N=QUIT: Excluded from I18N standards. 
+        ; I18N=QUIT: Excluded from I18N standards.
 	;---- Revision History ------------------------------------------------
 	; 09/28/04 - RussellDS - CR12334
 	;	     Replaced obsoleted calls to ^DBSANS with new procedure
@@ -39,6 +39,7 @@ DBSEXEQ4	;;DBS - U - V4.4 - DQ QUICK REPORT (OUTPUT SECTION)
 	;            ^DBCTL("SYS","stat") references.
 	;----------------------------------------------------------------------
 	;
+
 START	;
 	;
 	N I,HIT,T,Z,ZZ,ZZZ,%P,NV,OV,X,Q,FMT

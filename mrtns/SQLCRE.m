@@ -37,8 +37,8 @@ SQLCRE(expr,par,sqlsta,sqldta,tok)	;public;SQL Library of SQL Create Functions
 	;            Added tying of ^TMPCACHE(,,i), ^(i+.4), and ^(i+.5):
 	;            Modified procedure SPSEL() to call KILL^SQLCACHE().
 	;
-	;      Removed "PURGE" and "DELETE" sections.  
-	;      The table "DBTBL18" - 'DATA-QWIK SQL Stored Procedures'
+        ;	     Removed "PURGE" and "DELETE" sections.  
+        ;	     The table "DBTBL18" - 'DATA-QWIK SQL Stored Procedures'
 	;            and Function "DBSSPP" - 'Delete Stored Procedures" were
 	;	     obsoleted.
 	;
@@ -164,12 +164,12 @@ SPSEL(AS,spnam,par,args,nolink,sptype,sphk)	; Create a stored procedure
 	.	L +^DBTBL("SYSDEV",0,"P"):30
 	.	S c=$G(^DBTBL("SYSDEV",0,"P"))+1,^("P")=c	; next sequence
 	.	;					; 06/30/99
-	.       ; Don't release the lock if this process is under TP fence, 
-	.       ; otherwise identical run-time routines will be created by 
-	.       ; separate servers 
-	.       ; 
-	.       I '$Tlevel L -^DBTBL("SYSDEV",0,"P")       ; 
-	.       S c=$E(10000000+c,2,99)                 ; Procedure name S0000000 
+        .       ; Don't release the lock if this process is under TP fence,
+        .       ; otherwise identical run-time routines will be created by
+        .       ; separate servers
+        .       ;
+        .       I '$Tlevel L -^DBTBL("SYSDEV",0,"P")       ;
+        .       S c=$E(10000000+c,2,99)                 ; Procedure name S0000000
 	.	S rtn="S"_c				; Run-time SP_seq
 	.	I "*"[spnam S spnam=rtn			; Same as the SP name
 	;
@@ -183,7 +183,7 @@ SPSEL(AS,spnam,par,args,nolink,sptype,sphk)	; Create a stored procedure
 	S AS=$$UNTOK^%ZS(AS,.tok)
 	;
 	I $D(sphk) S hk=sphk
-	E  S hk=$$ELFHASH^%ZFUNC(AS_$$PARS^SQLCACHE(.par)) 
+        E  S hk=$$ELFHASH^%ZFUNC(AS_$$PARS^SQLCACHE(.par))
 	;
 	S args=$TR($G(args),":_ ","")
 	;
@@ -307,7 +307,7 @@ COMPILE(exe,vsql,par,src,spnam,expr,tags)	;public; Create program code from SELE
 	..		; If tag is greater than the colation pointer, then we should
 	..		; add a quit rather than a goto, because the Goto would result in
 	..		; collation logic being generated inside the FETCH label.  See
-	..		; documentation in CR ????? for details.
+	..		; documentation in CR 28171 for details.
 	..		I tag'>vsql("P") D
 	...			S mcode=$P(mcode,goto,1)_"G "_prefix_tag
 	...			I $D(tag(tag)) Q
@@ -478,11 +478,11 @@ BUILDSP	;
 	D SPSEL(spsql,spnam,.par,,1)  		; Compile but don't link
 	Q
 	;
-CREATRTN(rtn)	
+CREATRTN(rtn)
 	Q:$G(ER)
 	D ^%ZRTNCMP(rtn,"exe")                   ; Compile routine
-	; 
-	I $G(par("ODBC")) D LINK^PBSUTL("SCA$IBS",rtn)  ; Link it to the server 
+        ;
+        I $G(par("ODBC")) D LINK^PBSUTL("SCA$IBS",rtn)  ; Link it to the server
 	Q
 	;
 	;----------------------------------------------------------------------
@@ -509,7 +509,7 @@ SQLCODE(pid)	; Called by computed data item DBTBLSP.SQLSTMT
 	Q v
 	;
 	;----------------------------------------------------------------------
-SPINSERT(expr,spnam,code)	; 
+SPINSERT(expr,spnam,code) ;
 	;----------------------------------------------------------------------
 	N c,msrc,q,rtn,sql
 	S q=""""
@@ -518,34 +518,34 @@ SPINSERT(expr,spnam,code)	;
 	;I $P(expr," ",1)="INTO" S expr=$p(expr," ",2,999)	; Remove INTO
 	D INSERT^SQLCMP(expr,1,.code,1)			; compile
 	I ER,$G(RM)'="" Q				; Syntax error
-	I ER S RM=$$^MSG(8564,sql) Q 		; Invalid statement
+        I ER S RM=$$^MSG(8564,sql) Q			; Invalid statement
 	D RTNHDR
 	Q
 	;----------------------------------------------------------------------
-SPUPDATE(expr,spnam,code)	; 
+SPUPDATE(expr,spnam,code) ;
 	;----------------------------------------------------------------------
 	N c,msrc,q,rem,rtn,sql
 	S q=""""
 	I $G(tok)'="" S expr=$$UNTOK^%ZS(expr,.tok)
 	S sql="UPDATE "_expr
 	D UPDATE^SQLCMP(expr,1,.code,1)			; compile
-	I ER S RM=$$^MSG(8564,sql) Q 
+        I ER S RM=$$^MSG(8564,sql) Q
 	D RTNHDR
 	Q
 	;----------------------------------------------------------------------
-SPDELETE(expr,spnam,code)	; 
+SPDELETE(expr,spnam,code) ;
 	;----------------------------------------------------------------------
 	N c,msrc,rem,rtn,sql
 	I $g(tok)'="" S expr=$$UNTOK^%ZS(expr,.tok)
-	; 
+        ;
 	S sql=" DELETE "_expr
 	D DELETE^SQLCMP(expr,1,.code,1)
-	I ER S RM=$$^MSG(8564,sql) Q 
+        I ER S RM=$$^MSG(8564,sql) Q
 	D RTNHDR
 	Q
 RTNHDR	;
 	S rtn=spnam
-	D ^SCACOPYR(.c) 
+        D ^SCACOPYR(.c)
 	;
 	S code(0.1)=rtn_" ; "
 	S code(0.2)=c

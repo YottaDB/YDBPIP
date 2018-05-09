@@ -1,0 +1,349 @@
+	#PACKAGE framework
+SQLBUF(expr,par(),sqlsta,sqldta,sqlcnt,sqlind,tok())
+	/*
+	 ORIG: 04/08/2008
+	 DESC: Parse MSQL Buffer command
+
+	========================================================================
+	Because a separate project to migrate the SQL engine itself from a set
+	of "M routines" to "PSL	procedurer", is not expected to start in the near
+	future, but the growing complexity of the MDB/RDB support can be much
+	better handled by "PSL" than by "M", this PSL compiler element will be
+	migrated on a per-subroutine basis. The code that has not yet been
+	migrated is embedded in #BYPASS - #ENDBYPASS blocks. The only purpose
+	and justification for these unusally large chunks of #BYPASSed code is
+	this slow migration.
+	========================================================================
+
+	---- Revision History ------------------------------------------------
+	12/17/2008 - Joynergr - CR36959
+		* Modified COMMIT().  If restrictions existed and no authorizations
+		  were provided then the restrictions were ignored.  Split the line
+		  that call SPVOVR^PBSMSQL() to always check for restrictions
+		  even if no call to SPLOVR() taks place.
+		  
+	12/01/2008 - RussellDSR - CR36952
+		* Modified the approach to saving authorization, parameters,
+		  and expression in DBBUFCOM to use single memo field in
+		  LV-packed format.
+	
+	11/30/2008 - RussellDS - CR36725
+		* Modified top and COMMIT sections to add parameters to the
+		  expression.  This allows filing in memo field when parameters
+		  can be very long.
+		* Fixed revision history format to standardize.
+		* Added #PACKAGE to force use of 3.0 compiler
+		* Corrected PSL warnings
+	
+	10/30/08 - Gordon Joyner - CR36410
+		* Changed signature for vfkey back to previous version.
+		* Labeled the method vfkey as public, while this is not the desired
+		  approach it does accurately reflect its current use.
+	
+	10/23/08 - Gordon Joyner - CR36117
+		* Added support for Buffered SQL Restriction Authorizations.
+		* Cleaned up code to fix some of the PSL warnings.
+		* Modified method SQLBUF, Suffix SPV_AUTH onto statement before
+		  adding it to DBBUFCOM.
+		* Modified method COMMIT to build vsupv() from the SPV_AUTH suffix
+		  added earlier. To roll verrors() into vrflg() after each statement
+		  is executed. To use vrflg() instead of verrors() to SPVOVR^PBSMSQL.
+	
+	09/30/08 - GIRIDHARANB - CR35828
+		* Rolled up these changes from v2.7
+		* Modified to change the mode on DBBUF object after the call to 
+		  clearBuffer.
+	
+	04/08/2008 - giridharab - CR33302 / 33342
+		* Retrofitted from Framework version v27.
+		* Inital revision. Converted to PSL with #BYPASS to bypass the
+		  PSL compiler for portions of the routine unchanged by this conversion.
+	
+	*/
+	
+	type public Boolean ER
+	type public String vsupv(,), RM, %TOKEN
+	type Number arg, i, rec
+	type String name
+
+	set ER = 0
+	set rec = 0
+	
+	if %TOKEN.get().isNull() set %TOKEN = %ProcessID
+	set arg = expr.piece(" ",1)		// Buffer keyword
+
+	// Default to ADD if not included
+	if $$CONTAIN("NEW,ADD,COMMIT,DELETE,ROLLBACK",arg) set name=expr.piece(" ",2),expr=expr.piece(" ",3,9999)
+	else  set name=arg,arg="ADD",expr=expr.piece(" ",2,9999)
+	
+	//Convert back to raw input
+	if name.contains(1.char()) set name=$$UNTOK^%ZS(name,tok())
+
+	if name.isNull() set ER=1,RM=$$^MSG(8552) quit	// Missing buffer name
+
+	// Buffer existed status
+	type RecordDBBUF dbbuf = Db.getRecord("DBBUF","TOKEN=:%TOKEN,BUFFER=:name",1)
+	set rec = dbbuf.bufstat
+	
+	// BUFFER ROLLBACK
+	if arg = "ROLLBACK" do clearBuffer(%TOKEN, name)
+
+   	if rec=0,arg="DELETE" quit  			// Buffer not on file
+   	if rec=0,(arg="COMMIT") set ER=1,RM=$$^MSG(8555,name) quit	// Buffer empty
+
+	if arg="COMMIT" do COMMIT(name,tok(),par(),.sqldta) quit	// Process buffer
+
+	if $$CONTAIN("DELETE,NEW",arg) do {		// Clear buffer on new / delete
+		
+		do clearBuffer(%TOKEN, name)
+		do dbbuf.setMode(0)					// Reset mode on dbbuf object
+ 		set rec=0							// to trigger an insert on new.
+        }
+        
+	if $$CONTAIN("ADD,NEW",arg) do {
+		type String auth, rest, savexpr()
+		
+		set rec=rec+1
+		set expr=$$UNTOK^%ZS(expr,tok())
+		
+		if expr="" quit					// NEW without SQL statement
+		
+		set dbbuf.bufstat = rec
+		
+		if 'par("EFD").get().isNull() set dbbuf.befd = $$FDAT^%ZM(par("EFD"))
+		
+		do dbbuf.save()
+		
+		set (auth,rest) = ""
+		for  set rest=vsupv(1,rest).order() quit:rest.isNull()  do {
+			if 'auth.isNull() set auth=auth_"##"
+			set auth=auth_rest_"|"_vsupv(1,rest)
+		}
+		set savexpr(1) = auth
+		set savexpr(2) = $$PARLIST(par())		// Qualifiers
+		set savexpr(3) = expr
+		
+		type RecordDBBUFCOM dbbufcom = Class.new("RecordDBBUFCOM")
+		set dbbufcom.token = %TOKEN
+		set dbbufcom.buffer = name
+		set dbbufcom.bufrec = rec
+		set dbbufcom.bufexpr = $$V2LV^MSG(savexpr())
+		
+		do dbbufcom.save()
+	}
+
+	// BUFFER ~p1 Contains ~p2 Records
+	set sqldta = $$^MSG(8554,name,rec)		// Return message
+	set sqlcnt = 1
+	quit
+	
+public COMMIT( String name, 
+		String tok(),
+		String par(),
+		ret String sqldta)	 // Process a buffer for commit
+	
+	type public Boolean ER, vER
+	type public String RM, %STFHOST, %TOKEN, vrflg(,), vRM
+	type public Date EFD, TJD
+	type Number bufcount, efd, i, vseq
+	type String sql(), vcurval, vfkey(), vsupv(,), zpar
+	type Boolean rdb
+
+	// RDB flag
+	set rdb = $$rdb^UCDBRT()
+	
+	// kill override array
+	kill vrflg
+	
+	set ER = 0
+	
+	if par("EFD").exists() do {
+		type Number EFD
+		set EFD = $$FDAT^%ZM(par("EFD")) quit:ER
+	}
+	
+	if TJD.get().isNull() do {			//Instantiate cuvar		
+		type Number TJD
+		type RecordCUVAR cuvar = Db.getRecord("CUVAR")
+		set TJD = cuvar.tjd
+	}
+	if par("EFD").exists(),EFD = TJD kill EFD
+	
+	type RecordDBBUF dbbuf = Db.getRecord("DBBUF","TOKEN=:%TOKEN,BUFFER=:name")
+	
+	set bufcount = dbbuf.bufstat
+	if 'dbbuf.befd.isNull() set EFD = dbbuf.befd
+	
+	for vseq = 1:1:bufcount do {
+		
+		type Number ptr
+		type String savedexpr()
+		
+		set zpar(vseq) = ""
+		
+		type RecordDBBUFCOM dbbufcom = Db.getRecord("DBBUFCOM","TOKEN=:%TOKEN,BUFFER=:name,BUFREC=:vseq")
+		
+		set ptr = $$LV2V^MSG(dbbufcom.bufexpr, savedexpr())
+		
+		if 'savedexpr(1).isNull() do {
+			
+			type String auth = savedexpr(1)
+			
+			for i=1:1:auth.length("##") do {
+				
+				type String tmp = auth.piece("##",i)
+				set vsupv(vseq,tmp.piece("|",1))=tmp.piece("|",2)
+			}
+		}
+		
+		set zpar(vseq) = savedexpr(2)_ "/NOFKCHK=1"	// Qualifiers
+		set sql(vseq) = savedexpr(3)			// Expression
+	}
+	
+	if 'sql.data() quit				// empty buffer	
+	
+	set efd=0 if EFD.get() > TJD set efd=1		// Effective Dated?
+	if efd do ^SQLEFD(EFD,sql()) do clearBuffer(%TOKEN, name) quit		// Save it in EFD file
+	
+	do Runtime.start("CS")
+
+	catch error@"LOGERR" {			// Define error trap
+		set ER = 1
+	 }
+	
+	type String flist, spec
+	set vseq="" 					// Process SQL buffer
+	for  set vseq=sql(vseq).order() quit:vseq=""  do { quit:ER
+		type String s1,s2,verrors(,)
+		
+		if %STFHOST.get(),'$$VALID^PBSMSQL(sql(vseq),"",.spec) set ER=1,RM=$$^MSG(7912) quit
+		if spec.get()=1 do {
+			type Number TJD
+			set TJD = $$TTL^RCHK()+1
+			set ER=$$^SQL(sql(vseq),zpar(vseq))
+		}
+		else  set ER=$$^SQL(sql(vseq),zpar(vseq))
+		kill flist
+		
+		set (s1,s2)=""
+		for  set s1=verrors(s1).order() quit:s1.isNull()  do {
+			set vrflg(vseq,s1)=verrors(s1)
+			for  set s2=verrors(s1,s2).order() quit:s2.isNull()  do {
+				set vrflg(vseq,s1,s2)=verrors(s1,s2)
+			}
+		}
+	}
+
+	if rdb,vER.get()<0 set ER=vER,RM=vRM
+	
+	if ER do ERROR quit					// Exit
+
+	do vfkey							// Verify foreign keys
+	
+	if ER do ERROR quit					// Exit
+				
+	//Apply override logic
+	if vrflg.data(),vsupv.data() do SPVOVR^PBSMSQL(vrflg(,,),vsupv(,))
+	if vrflg.data() do ERROR quit
+	
+	#ACCEPT Date=11/30/2008; Pgm=RussellDS; CR=36725; Group=BYPASS
+	#BYPASS
+	if '$Tlevel set ER=1 do ERROR quit	 		; TP error
+	#ENDBYPASS
+	
+	do Runtime.commit()					// Commit transaction
+		
+	do clearBuffer(%TOKEN, name)				// clear buffer
+	
+	set sqldta=$$^MSG(8553,name)				// Return message
+	
+	quit
+	
+clearBuffer( String tkn, String bufName)
+
+	do Db.fastDelete("DBBUF","TOKEN=:tkn,BUFFER=:bufName")
+
+	do Db.fastDelete("DBBUFCOM","TOKEN=:tkn,BUFFER=:bufName")
+	
+	quit
+	
+ERROR	;
+	type public Boolean ER
+	type public String %TOKEN, ET, RM, name, sqldta
+	
+	do Runtime.rollback()				// Rollback transactions
+	
+	do clearBuffer(%TOKEN, name)		// Clear buffer on error
+	
+	if 'RM.get().isNull() set sqldta = RM quit
+	if 'ET.get().isNull() set sqldta = ET quit
+	
+	set sqldta = $$^MSG(646,name)
+	
+	quit
+
+CONTAIN(String A,String B) // Return status 1 if string A contains string B
+
+	quit (","_A_",").contains(","_B_",")
+
+public vfkey	// Referential integrity check (missing foreign key record)
+	type public Boolean ER
+	type public String RM, vfkey()
+	type String desc1, desc2, msg, v, v1
+	set v=""
+	 
+	for  set v=vfkey(v).order() quit:v.isNull()  if @v.data()#10=0 do { quit
+		
+		set v1=vfkey(v),desc1=v1.piece("(",1),desc2=v1.piece("-> ",2)
+		
+		if 'desc1.isNull() do {					// table description
+		
+			type RecordDBTBL1 dbtbl1 = Db.getRecord("DBTBL1","%LIBS='SYSDEV',FID=:desc1")		
+			set desc1 = dbtbl1.des
+			
+		}
+		if 'desc2.isNull() do {					// table description
+			
+			type RecordDBTBL1 dbtbl2 = Db.getRecord("DBTBL1","%LIBS='SYSDEV',FID=:desc2")
+			set desc2 = dbtbl2.des				
+		}
+		
+		set msg=desc1_" -> "_desc2_" "_v.piece("(",2).piece(")",1) // foreign key
+		
+		set ER=1,RM=$$^MSG(8563,msg) quit
+		
+	}
+	
+	quit
+
+PARLIST(String par())  //Pack qualifiers into a single string
+
+	/* Example:  par("DQMODE")=1,par("USING")="CID=1,BOO=2"
+	            $$PARLIST(.par) returns /DQMODE=1/USING=(CID=1,BOO=2)
+	*/	
+	
+	type String p,str,val
+	
+	if 'par.get().isNull() quit par				// No need to convert
+	if par("").order().isNull() quit ""			// Qualifier not defined
+	
+	set p="",str=""
+	
+	for  set p=par(p).order() quit:p.isNull()  do {
+		
+		set val=par(p)
+		if val.contains("/"),'val.contains("'") set val="'"_val_"'"	// 'DD/DD/YEAR' format
+		
+		if 'val.contains("=") set str=str_"/"_p_"="_val quit
+		set str=str_"/"_p_"=("_val_")"			// USING qualifier
+	}
+	
+	quit str
+
+public LOGERR(Error err)      // Error handler
+        
+        do LOGERR^UTLERR(err)
+        
+        quit
+ #OPTION ResultClass ON
+public String vSIG()	quit "61347^84830^Gordon Joyner^9677"	// Signature - LTD^TIME^USER^SIZE

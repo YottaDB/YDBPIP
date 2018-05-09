@@ -24,18 +24,17 @@
 *
 */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include <signal.h>
 #include <time.h>
 #include <sys/stat.h>
-#include <extcall.h>
-#include <stdlib.h>
-
 #include <unistd.h>
 #include <locale.h>
 #include <libgen.h>
 #include <sys/time.h>
+#include "extcall.h"
 
 #define BLOCKSIZE	512
 #define MAX_STR 	256
@@ -70,9 +69,9 @@ void
 prunning(int count,char *process_name,SLONG *return_code)
 {
 	RETURNSTATUS 	rc = SUCCESS;
-	FILE 			*fd = (FILE *)NULL;
-	char 			cmd[MAX_CMD_LEN];
-	char			*rtnsdir = (char *)NULL;
+	FILE 		*fd = (FILE *)NULL;
+	char 		cmd[MAX_CMD_LEN];
+	char		*rtnsdir = (char *)NULL;
 
 	rtnsdir=(char *)getenv("SCA_RTNS");
 	/*
@@ -127,12 +126,12 @@ prunning(int count,char *process_name,SLONG *return_code)
 }
 
 void
-pgtm(int count,long pid,SLONG *return_code)
+pgtm(int count,SLONG pid,SLONG *return_code)
 {
 	RETURNSTATUS 	rc = SUCCESS;
-	FILE 			*fd = (FILE *)NULL;
-	char 			cmd[MAX_CMD_LEN];
-	char			*rtnsdir = (char *)NULL;
+	FILE 		*fd = (FILE *)NULL;
+	char 		cmd[MAX_CMD_LEN];
+	char		*rtnsdir = (char *)NULL;
 
 	rtnsdir=(char *)getenv("SCA_RTNS");
 #ifdef DEBUG
@@ -682,9 +681,7 @@ geterrlos(int count,
 		SLONG noalert,
 		STR_DESCRIPTOR *desc,
 		SLONG *return_code)
- 
 {
-
 	char buf[MAX_STR];
 	char str[MAX_STR];
 	char fmtstr[MAX_STR];
@@ -744,8 +741,9 @@ geterrlos(int count,
 	}
 
 
-	/* if ((fp = sca_fopen(error_table, "r")) == NULL) {  */
-	if ((fp = fopen(error_table, "r")) == NULL) { 
+	/* if ((fp = sca_fopen(error_table, "r")) == NULL)  */
+	if ((fp = fopen(error_table, "r")) == NULL) 
+	{ 
 		printf("Can't open file %s \n",error_table);
 		return;
 	}
@@ -821,8 +819,8 @@ geterrlos(int count,
 		}
 		*return_code = 0;
 	}
+	fflush(fp);
 	fclose(fp);
-
 }
 
 
