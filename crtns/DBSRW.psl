@@ -1,0 +1,1229 @@
+public DBSRW(String RID,	// Report ID
+	     Number NOMSG,	// Skip Compiler Message	/NOREQ
+	     String PGM)	// Generated program name	/NOREQ/MECH=REFNAM:W
+	     
+	/*
+	ORIG: CHIANG
+	DESC: DATA-QWIK Report Compiler
+	
+	---- Comments --------------------------------------------------------
+	OUTPUT:
+		. ER		Error flag		/TYP=T
+				0 if no errors
+				1 if compile errors
+				W if compile warnings only
+		. RM		Error description	/TYP=T
+
+	EXAMPLE:
+		do ^DBSRW("SCA123")			Compile report SCA123
+							(OOE mode)
+							
+		do ^DBSRW("SCA123",1)			Compile source but not
+							.OBJ file (BATCH mode)
+							
+		do ^DBSRW("SCA123,0,1)			Skip Compiler Messages
+							(QWIK report mode)
+
+	Creates run time M routine named RxxSnnnn where:
+
+		  xx = library number (SYSDEV = 01)
+		nnnn = report number
+
+	Builds PSL code into PSLCODE array.
+
+	Components are DBSRW, DBSRW2, DBSRW3, and DBSRWUTL.  DBSRWUTL contains
+	common library code used by the main compilers.  These three compiler
+	procedures do the followins:
+
+	DBSRW:
+		Calls DBSRWQRY to get prompt/query and where clause info
+		Loads report pre/post-processor code
+		Builds beginning section (prompts, UTLREAD)
+		Builds entry point section (V0)
+		Builds banner and alignment sections
+		> Calls DBSRW2
+		> Calls DBSRW3
+		Builds run-time code (call to UCGM)
+
+	DBSRW2:
+		Loads column information and formatting
+		Loads statistics information
+		Generates print formatting
+		Builds data access sections (selects)
+		Adds user report pre/post-processor code
+		Builds exit section
+		Builds print section
+
+	DBSRW3:
+		Builds key break logic and each section detail
+		Builds report summary and statistics collection
+		Builds page trailer
+		Builds page header
+		Builds column pre/post-processor code
+
+	Two main arrays are used to pass loaded data between functions:
+
+	ddmap contains a map of all columns needed for the select and newing of
+	variables.
+
+		ddmap=list of files
+		ddmap(TABLE.COLUMN)=variable number
+		ddmap(variable number)=TABLE.COLUMN
+
+	RPTINFO contains various sets of data about the report definition as
+	well as formatting code, loaded pre/post-processors, etc.  This is used
+	to avoid constantly reloading or recalculating this type of information.
+
+		RPTINFO("CUVAR",	- CUVAR info needed for compiling
+		RPTINFO("DISTKEY")	- from DBTBL5H
+		RPTINFO("DSP",		- column-level formatting code
+		RPTINFO("DYNORDERBY")	- flag to indicate if dynamic order by
+		RPTINFO("DYNWHERE")	- flag to indicate user defined where
+		RPTINFO("FIXLEN")	- from DBTBL5H
+		RPTINFO("FMT",		- column-level formatting data
+		RPTINFO("INCOMING",	- public variables coming into the report
+		RPTINFO("LASTLVL")	- last active sequence-by level
+		RPTINFO("LINECNT")	- from DBTBL5H
+		RPTINFO("MAINEXLUDE")	- variables to exclude from MAINVAR typing
+		RPTINFO("MAINVARS",	- variables to new in main section
+		RPTINFO("ORDERBY")	- order by clause
+		RPTINFO("PAGESIZE")	- from DBTBL5H
+		RPTINFO("PPLIBS",	- pre/post-processor library code
+		RPTINFO("QUERIES")	- 0 if no queries, 1 if any
+		RPTINFO("REPEATCNT")	- from DBTBL5H
+		RPTINFO("REPEATSIZE")	- from DBTBL5H
+		RPTINFO("RESFLG")	- from DBTBL5H
+		RPTINFO("RID")		- from DBTBL5H
+		RPTINFO("RSIZE")	- from DBTBL5H
+		RPTINFO("SELECT")	- SELECT list
+		RPTINFO("SEQBY",	- DBTBL5H sequence-by data
+		RPTINFO("STAT",		- DBTBL5H statistics data
+		RPTINFO("SYSKEYWORDS",	- List of system keywords
+		RPTINFO("SUBS",		- report pre/post-processor code
+		RPTINFO("TABLES")	- from DBTBL5H
+		RPTINFO("VMAP")		- line number for VMAP code
+		RPTINFO("V0EXCLUDE")	- variables to exclude from typing in V0
+		RPTINFO("V0TYPE",	- variables to new in V0 section
+		RPTINFO("VPTYPE",	- vp (protection indicator) variables
+		RPTINFO("VPSUBS",	- column pre/post-processor code
+		RPTINFO("WHERE")	- where clause
+
+	------ Revision History ------------------------------------------------
+	02/17/07 - RussellDS - CR25356
+		   Modified variable scoping for generated report to avoid PSL
+		   warnings on multiple declarations for same variables.
+	
+	07/16/06 - RussellDS - CR22121
+		   Added new VRWOPT option to allow specification or override
+		   of IOPAR for call to OPEN^SCAIO.  Allows specification of
+		   any IOPAR values, but in particular Unicode character sets.
+		   All parameters must be specified if any are.
+		   
+		   Added call to ^UCIOENCD for character set exceptions.
+	
+	04/25/06 - RussellDS - CR20967
+		   Added VPN to V0EXCLUDE list in BLDV0 to avoid warning.
+	
+	02/16/06 - RussellDS - CR19065
+		   Fix error in checking for "type Public" variables - need to
+		   consider both upper and lower case version of "P" in public.
+		   
+		   Change all type Public references to type public.
+		   
+		   Modifed generated call in reports to WHERE^SQLCONV to eliminate
+		   passing the files.  This makes the conversion using DBSQRY
+		   consistent the the handling by EXT^DBSQRY in the prompts.
+		   Because the Q array contains the table references, FILES isn't
+		   necessary, and, if passed, will interpret possible literals as
+		   column references if the names match.  (See, for example,
+		   report SCA018 and the prompt for ACN.GRP, which does not work
+		   correctly if COM is entered.)
+		   
+		   Modify top section to return PGM.
+		   
+		   Removed old revision history.
+	
+	12/05/05 - RussellDS - CR18400
+		   Added declaration of VHIT to V0 section if have fetch post-
+		   processor.
+		   
+		   Add coding in BLDBEGIN section to deal with %TAB min and max
+		   values that may be variable insertion.
+	
+	11/23/05 - RussellDS - CR18065
+		   Modified use of table DBTBL0 to deal with the possibility
+		   it might not exist and to use default library number of 1
+		   if it doesn't.
+	
+	11/14/05 - RussellDS - CR18193
+		   Remove deprecated .data() methods.  Prevents warnings in
+		   generated code, as well as when compiling this procedure.
+		   
+	10/27/05 - RussellDS - CR17834
+		   Fix problem with error in GETRPPS section not being reported.
+	
+	10/04/05 - RussellDS - CR17401
+		   Added trim() method to parsing of //Incoming variables
+	
+	09/04/05 - RussellDS - CR17021
+		   Fix scoping issues in generated report code if variables used
+		   by report writer are typed in before query pre-processor.
+		   They were getting typed twice.
+	
+	07/16/05 - RussellDS - CR16608
+		   Modified PPCODE section to correctly format line that calls
+		   VLIBn by adding tab.  Added public typing of variables used
+		   for rwrs.getCol() references.
+		   
+		   In BLDV0 section, correct setting of page size for non-
+		   interactive reports.
+	
+	05/24/05 - RussellDS - CR16071
+		   Change use of "BA" to "CS" for TP.
+		   
+	05/03/05 - RussellDS - CR15379
+		   Replace call to main^UCGM with call to cmpA2F^UCGM to
+		   standardize the interface.
+	
+	04/26/05 - RussellDS - CR15661
+		   Modified section GETRPPS to fix additional error related to
+		   gathering public typed variables.
+		   
+	03/17/05 - RussellDS - CR14987
+		   Modified section GETRPPS to fix description for pre-processor
+		   (was saying post-processor).
+		   
+		   Modified scoping and initialization of variables in generated
+		   code to break very long lines into multiple lines to avoid
+		   GT.M maxargcnt error.
+		   
+		   Fixed problem in GETRPPS section where only looking for
+		   "Public" versus "public" when gathering variables to manage.
+	
+	01/19/05 - RussellDS - CR13817
+		   Fix data item protection handling to disable, even if report
+		   is set for it, if not protection routine exists.  This matches
+		   PSL handling of protection logic.
+		   
+		   Clean up PSL warnings.
+
+	------------------------------------------------------------------------
+
+	I18N=QUIT Excluded from I18N standards
+	*/
+
+	type public Number ER=0
+	type public String RM
+	type Number N,SORTFLG
+	type String CODE,CMPERR(),ddmap(),PQINFO(),PSLCODE(),RPTINFO(),VARLIST(),WHERE
+
+	do INIT^%ZM()
+
+	if 'Db.isDefined("DBTBL5H","LIBS=""SYSDEV"",RID=:RID") do { quit
+		set ER=1
+		// Invalid report ~p1
+		set RM=$$^MSG(8074,RID)
+	}
+
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+	set RPTINFO("CUVAR","FLDOVF")=cuvar.fldovf
+
+	type RecordDBTBL5H dbtbl5h=Db.getRecord("DBTBL5H","LIBS=""SYSDEV"",RID=:RID")
+	
+	if 'NOMSG.get() write !,RID,?15,dbtbl5h.desc,!
+
+	// Get run-time program name, update report header if necessary
+	set PGM=dbtbl5h.pgm
+	if PGM="" do {				// Need to assign name
+
+		type Number LIBNO,NEXTRPT
+
+		do Runtime.start("CS")
+
+		type RecordDBTBL0 libno=Db.getRecord("DBTBL0","%LIBT=""SYSDEV"",TYP='L'", 1)
+		if (libno.getMode() = 0) set LIBNO = 101
+		else  set LIBNO=100+libno.desc
+
+		type RecordDBTBL0 dbtbl0=Db.getRecord("DBTBL0","%LIBT=""SYSDEV"",TYP='R'",1)
+		do dbtbl0.setAuditFlag(1)
+
+		type RecordDBTBL5H dbtbl5h=Db.getRecord("DBTBL5H","LIBS=""SYSDEV"",RID=:RID")
+		do dbtbl5h.setAuditFlag(1)
+
+		if dbtbl0.desc="" set dbtbl0.desc=1
+		set NEXTRPT=dbtbl0.desc,dbtbl0.desc=NEXTRPT+1
+		set PGM="R"_{String}LIBNO.extract(2,3)_"S"
+		if NEXTRPT<1000 set PGM=PGM_({String}(1000+NEXTRPT)).extract(2,4)
+		else  set PGM=PGM_NEXTRPT
+		set dbtbl5h.pgm=PGM
+		do dbtbl5h.save()
+		do dbtbl0.save()
+
+		do Runtime.commit()
+	}
+
+	// Re-load record after potential updates above
+	set dbtbl5h=Db.getRecord("DBTBL5H","LIBS=""SYSDEV"",RID=:RID")
+
+	set RPTINFO("DISTKEY")=dbtbl5h.distkey	// Distribution key, if any
+	set RPTINFO("FIXLEN")=dbtbl5h.fixlen	// Tape format - fixed length
+	set RPTINFO("RESFLG")=dbtbl5h.resflg	// Data item protection logic option
+	set RPTINFO("RSIZE")=dbtbl5h.rsize	// Width
+	set RPTINFO("DYNORDERBY")=0		// Dynamic order by flag
+	set RPTINFO("DYNWHERE")=0		// User defined where flag
+
+	// Get prompt/query info
+	set RM=$$^DBSRWQRY(.dbtbl5h,.PQINFO,.WHERE)
+	if RM'="" set ER=1 quit			// Query syntax error
+	set RPTINFO("WHERE")=WHERE
+	set RPTINFO("QUERIES")=PQINFO		// Are there any queries
+
+	set RPTINFO("TABLES")=dbtbl5h.pfid
+
+	// Turn off RESFLG if the files aren't set up for protection
+	if RPTINFO("RESFLG") do {
+		type Boolean HIT = 0
+		type Number I
+		type String FID, PGM
+		
+		for I = 1:1 set FID = RPTINFO("TABLES").piece(",", I) quit:FID.isNull()  do {
+			
+			set PGM = $$PGM^UPID(FID)
+			if $$VALID^%ZRTNS(PGM) set HIT = 1
+		}
+
+		if 'HIT set RPTINFO("RESFLG") = 0
+	}			
+			
+
+	// Construct the report code in sections
+	do GETSEQBY(.dbtbl5h,.RPTINFO)			// Get sequence by info
+	do GETRPPS(RID,.RPTINFO,.ddmap) quit:ER		// Get report pre/post-processors
+	
+	// Initialization, report pre-process (before query), prompts
+	// and UTLREAD call
+	do BLDBEGIN(.dbtbl5h,.PQINFO,.RPTINFO,.ddmap,.VARLIST)
+	do BLDV0(.dbtbl5h,.RPTINFO,.ddmap,.VARLIST)			// V0 section
+
+	// If requires dynamic queries, add code to set them up
+	if RPTINFO("WHERE")="",RPTINFO("QUERIES") do BLDDYNWH(RPTINFO("TABLES"),.PQINFO)
+
+	if dbtbl5h.banner do BLDBANNR(.PQINFO,.RPTINFO,.dbtbl5h)	// Banner
+	if dbtbl5h.align do BLDALIGN(RID,.RPTINFO)			// Alignment
+	do ^DBSRW2(.dbtbl5h,.ddmap,.RPTINFO,.PQINFO) quit:ER		// Part 2 of construction
+	do ^DBSRW3(.dbtbl5h,.ddmap,.RPTINFO)				// Part 3 of construction
+
+	if RPTINFO("DISTKEY")'="" do BLDVMAP(.RPTINFO)			// Build VMAP code
+
+	// Add typing for collected variables - make sure number of variables per line
+	// is not too great or get MAXARGCNT error
+	set CODE=$$newlist^DBSRWUTL("V0",.RPTINFO,.ddmap,"CONAM,RID,RN,%TIM,vCOL,vHDG,VL,VLOF,VRF(),vrundate,VSTATS(),vsysdate", "VFMQ,VPN,"_$$newlist^DBSRWUTL("MAINVARS",.RPTINFO,.ddmap))
+	set N = RPTINFO("V0TYPE")
+	for  do { quit:CODE.isNull()
+		do addcode^DBSRWUTL(1,"type String "_CODE.piece(",", 1, 100), N)
+		set CODE = CODE.piece(",", 101, CODE.length())
+		set N = N + .01
+	}
+
+	// Build routine header
+	set CODE=PGM_$C(9)_"// "_RID_" - "_dbtbl5h.desc
+	do addcode^DBSRWUTL(0,CODE,0)
+	do ^SCACOPYR(.CODE)
+	if CODE?1" ;;".E set CODE="// "_CODE.extract(4,999)
+	do addcode^DBSRWUTL(1,CODE,0.1)
+
+	// Call PSL compiler
+	do cmpA2F^UCGM(.PSLCODE,PGM,,,,,.CMPERR,RID_"~Report")
+
+	if +CMPERR.get() set ER=1		// Hard compile errors
+		
+	quit
+
+
+BLDBEGIN(RecordDBTBL5H dbtbl5h,		// Private - Report part 1
+	 String PQINFO,
+	 String RPTINFO(),
+	 String ddmap(),
+	 String VARLIST())
+
+	/* Build initializations, pre-processor (before query), prompts,
+	   UTLREAD call.
+
+	   Make use of the information in PQINFO (from DBSRWQRY) to build prompts
+	*/
+
+	type Number MAXPRMPT
+	type String CODE,READ,SEQ,SUPP(),TAB(),TYPE(),X
+
+	set (READ,SEQ)="",MAXPRMPT=0
+
+	// IO info
+	set TAB("IO")="$$IO^SCATAB"
+
+	for  set SEQ=PQINFO(SEQ).order() quit:SEQ=""  do {
+		type String DT,PQTYPE,PROMPT,REQ,TABINFO,TYPNAM,VAR
+
+		set VAR=PQINFO(SEQ).piece("|",1)
+		quit:VAR=""
+
+		set PQTYPE=PQINFO(SEQ).piece("|",2)
+		set TABINFO=PQINFO(SEQ,1).get()
+
+		// Build typing and default info
+		set DT=TABINFO.piece("|",9)
+		if DT="" set DT="T"
+		if "N$L"[DT set TYPNAM="Number"
+		else  if DT="D" set TYPNAM="Date"
+		else   set TYPNAM="String"
+		set TYPE(VAR)="type "_TYPNAM_" "_VAR
+		set VARLIST(TYPNAM)=VARLIST(TYPNAM).get()_VAR_","
+		// Add to variables to exclude from V0 list
+		do addvars^DBSRWUTL("V0EXCLUDE",VAR,.RPTINFO)
+		// Set default, if there is one
+		if TABINFO.piece("|",3)'="" do {
+			type String DEFAULT
+
+			set DEFAULT=TABINFO.piece("|",3)
+			set TYPE(VAR)=TYPE(VAR)_"="_DEFAULT
+			// If variable, not literal, add .get() and treat as an incoming variable
+			if DEFAULT?1A.AN do {
+				set TYPE(VAR)=TYPE(VAR)_".get()"
+				do addvars^DBSRWUTL("INCOMING",DEFAULT,.RPTINFO)
+				}
+			}
+
+		// Build %READ
+		set READ=READ_VAR_"#"
+		set REQ=+TABINFO.piece("|",11)			// 1 = required
+		set READ=READ_REQ_","
+
+		// Pull code to suppress prompts -- only valid for user variables
+		if TABINFO.piece("|",15)'="",PQTYPE="UV" set SUPP(VAR)=REQ_"|"_TABINFO.piece("|",15)
+
+		// Update tab info
+		set TABINFO.piece("|",3)=""			// Remove default
+		set TABINFO.piece("|",11)=""			// Remove required
+		set TABINFO.piece("|",15)=""			// Suppress code
+		set PROMPT=TABINFO.piece("|",10)
+		if PROMPT.length()>37 do {
+			set TABINFO.piece("|",10)=PROMPT.extract(1,37)
+			set MAXPRMPT=37
+			}
+		else  if PROMPT.length()>MAXPRMPT set MAXPRMPT=PROMPT.length()
+
+		// Save %TAB info - add quotes
+		set TAB(VAR)=TABINFO.addQuotes()
+		}
+
+	do addcode^DBSRWUTL(0,"")
+
+	// Type standard report variables
+	do addcode^DBSRWUTL(1,"type public Number ER=0")
+	do addcode^DBSRWUTL(1,"type public Number vbatchq")
+	set CODE="type public String IO,RM,VRWOPT()"
+	if RPTINFO("DISTKEY")'="" set CODE=CODE_",VTBLNAM"
+	do addcode^DBSRWUTL(1,CODE)
+
+	/* Add typing for variables from pre-processors before and after queries.
+	   Those that are expected to be input to the report are typed as public.
+	   These are identified in the report pre-processor (before query) in the
+	   //Incoming=list.  Others are typed local.
+	   
+	   Exclude variables that are typed by report writer.
+	*/
+	set RPTINFO("MAINEXCLUDE") = "%READ,%TAB,ER,OLNTB,IO,RID,RN,RM,vbatchq,VFMQ,VRWOPT"
+	set CODE=$$newlist^DBSRWUTL("INCOMING",.RPTINFO,.ddmap)
+	if CODE'="" do addcode^DBSRWUTL(1,"type public String "_CODE)
+	set CODE=$$newlist^DBSRWUTL("MAINVARS",.RPTINFO,.ddmap,"",RPTINFO("MAINEXCLUDE")_","_VARLIST("String").get())
+	if CODE'="" do addcode^DBSRWUTL(1,"type String "_CODE)
+
+	do addcode^DBSRWUTL(1,"type Number OLNTB")
+	do addcode^DBSRWUTL(1,"type String %READ,RID,RN,%TAB,VFMQ")
+
+	// Add typing and initialization data
+	set SEQ=""
+	for  set SEQ=TYPE(SEQ).order() quit:SEQ=""  do addcode^DBSRWUTL(1,TYPE(SEQ))
+
+	do addcode^DBSRWUTL(0,"")
+
+	// Define standard variables
+	do addcode^DBSRWUTL(1,"set RID="""_dbtbl5h.rid_"""")
+	do addcode^DBSRWUTL(1,"set RN="""_dbtbl5h.desc_"""")
+	do addcode^DBSRWUTL(1,"if IO.get()="""" set IO=$I")
+
+	do addcode^DBSRWUTL(0,"")
+
+	do addcode^DBSRWUTL(1,"do INIT^%ZM()")
+
+	do addcode^DBSRWUTL(0,"")
+
+	// If pre-processor (before query) insert call
+	if 'RPTINFO("SUBS","PREBQ","").order().isNull() do {
+		do addcode^DBSRWUTL(1,"do VPREBQ quit:VFMQ.get()"_$C(9)_"// Pre-processor (before query)")
+		do addcode^DBSRWUTL(0,"")
+		}
+
+	// Add %TAB sets
+	for  set SEQ=TAB(SEQ).order() quit:SEQ=""  do {
+		
+		type String tabcode
+		
+		// Handle possibility of MIN or MAX being variable insertion
+		set tabcode = TAB(SEQ)
+		
+		if tabcode.piece("|", 12).beginsWith("<<") do {
+			
+			type String min = tabcode.piece("|", 12)
+			
+			set min = min.extract(3, min.length() - 2)	// Strip << >>
+			
+			set tabcode = tabcode.piece("|", 1, 11)_"|""_("_min_")_""|"_tabcode.piece("|", 13, 999)
+		}
+		
+		if tabcode.piece("|", 13).beginsWith("<<") do {
+			
+			type String max = tabcode.piece("|", 13)
+			
+			set max = max.extract(3, max.length() - 2)	// Strip << >>
+			
+			set tabcode = tabcode.piece("|", 1, 12)_"|""_("_max_")_""|"_tabcode.piece("|", 14, 999)
+		}
+		
+		do addcode^DBSRWUTL(1,"set %TAB("""_SEQ_""")="_tabcode)
+	}
+
+	do addcode^DBSRWUTL(0,"")
+
+	// Set up %READ
+	do addcode^DBSRWUTL(1,"set %READ=""IO/REQ,"_READ_"""")
+	do addcode^DBSRWUTL(0,"")
+	do addcode^DBSRWUTL(1,"// Skip device prompt option")
+	do addcode^DBSRWUTL(1,"if VRWOPT(""NOOPEN"").get() set %READ=%READ.piece("","",2,99)")
+
+	do addcode^DBSRWUTL(0,"")
+
+	// Add code to conditionally suppress prompts
+	for  set SEQ=SUPP(SEQ).order() quit:SEQ=""  do {
+		new CODE,FIND,REQ
+		set REQ=SUPP(SEQ).piece("|",1)
+		set CODE=SUPP(SEQ).piece("|",2,999)
+		set FIND=","_SEQ_"#"_REQ_","
+		do addcode^DBSRWUTL(1,"// Conditionally suppress prompt for "_SEQ)
+		do addcode^DBSRWUTL(1,CODE_" do {")
+		do addcode^DBSRWUTL(2,"set %READ="",""_%READ")
+		do addcode^DBSRWUTL(2,"set %READ=%READ.piece("""_FIND_""",1)_"",""_%READ.piece("""_FIND_""",2)")
+		do addcode^DBSRWUTL(2,"set %READ=%READ.piece("","",2,99)")
+		do addcode^DBSRWUTL(2,"}")
+		do addcode^DBSRWUTL(0,"")
+		}
+
+	// Set up call to UTLREAD
+	if MAXPRMPT<27 set MAXPRMPT=30
+	else  set MAXPRMPT=MAXPRMPT+3
+
+	// Add report name to %READ at runtime if any prompts remain
+	do addcode^DBSRWUTL(1,"set VFMQ=""""")
+	do addcode^DBSRWUTL(1,"if %READ'="""" do { quit:VFMQ.get()=""Q""")
+	do addcode^DBSRWUTL(2,"set OLNTB="_MAXPRMPT)
+	do addcode^DBSRWUTL(2,"set %READ=""@RN/CEN#1,,""_%READ")
+	do addcode^DBSRWUTL(2,"do ^UTLREAD")
+	do addcode^DBSRWUTL(2,"}")
+
+	do addcode^DBSRWUTL(0,"")
+
+	// If batch mode query prompts, don't continue
+	do addcode^DBSRWUTL(1,"if 'vbatchq.get() do V0")
+	do addcode^DBSRWUTL(1,"quit")
+	do addcode^DBSRWUTL(0,"")
+
+	quit
+
+BLDV0(RecordDBTBL5H dbtbl5h,		// Private - Build V0 section
+	String RPTINFO(),
+	String ddmap(),
+	String VARLIST())
+
+	// Build V0 section, which is external entry point
+
+	type Number I
+	type String CODE,DT,NONZRID,X
+	type String TABCHR=$C(9)
+
+	// Access report through job queue at V0 entry point
+	do addcode^DBSRWUTL(0,"V0"_TABCHR_"// External report entry point")       ; job queue
+	do addcode^DBSRWUTL(0,"")
+
+	// Keep list of public and internal variables to avoid typing them as part of V0TYPE
+	for I=1:1 do { quit:X=""
+		set X="AUXPTR,ER,VTBLNAM,IO,IOPAR,IOSL,IOTYP,%MSDK,RM,VDISTKEY,VPN,VRWOPT".piece(",",I)
+		if X'="" do addvars^DBSRWUTL("V0EXCLUDE",X,.RPTINFO)
+		}
+		
+	if 'RPTINFO("SUBS","FPOST","").order().isNull() do addcode^DBSRWUTL(1,"type Boolean VHIT")
+
+	do addcode^DBSRWUTL(1,"type public Number AUXPTR,ER,VTBLNAM")
+	do addcode^DBSRWUTL(1,"type public String IO,IOPAR,IOSL,IOTYP,%MSKD,RM,VDISTKEY,VRWOPT()")
+
+	// Public typing for variables from report pre-processor (before query)
+	set CODE=$$newlist^DBSRWUTL("INCOMING",.RPTINFO,.ddmap)
+	if CODE'="" do addcode^DBSRWUTL(1,"type public String "_CODE)
+	set CODE=$$newlist^DBSRWUTL("MAINVARS",.RPTINFO,.ddmap,"",RPTINFO("MAINEXCLUDE")_","_VARLIST("String").get())
+	if CODE'="" do addcode^DBSRWUTL(1,"type public String "_CODE)
+
+	// Add public typing for other variables defined in UTLREAD section
+	set DT=""
+	for  set DT=VARLIST(DT).order() quit:DT=""  do {
+		type String CODE
+		set CODE="type public "_DT_" "_VARLIST(DT)
+		set CODE=CODE.extract(1,CODE.length()-1)
+		do addcode^DBSRWUTL(1,CODE)
+		}
+
+	// Add typing for other variables used
+	do addcode^DBSRWUTL(1,"type Number vcrt,VD(),VFMQ,vh(),vI,vlc,VLC,VNEWHDR,VOFFLG,VPN,VR,VRG,vs(),VSEQ,VT()")
+	
+	if (RPTINFO("WHERE")="")!RPTINFO("DYNORDERBY")!RPTINFO("DYNWHERE") do addcode^DBSRWUTL(1,"type String VWHERE")
+	if (RPTINFO("WHERE")="")!RPTINFO("DYNORDERBY")!RPTINFO("DYNWHERE") do addcode^DBSRWUTL(1,"type Literal String VSELECT")
+
+	do {
+		type Number LINENO=""
+		do addcode^DBSRWUTL(1,"// Placeholder for other variable typing",.LINENO)
+		set RPTINFO("V0TYPE")=LINENO
+	}
+
+	// Remove leading z, if any, from report ID
+	set NONZRID=dbtbl5h.rid
+	if NONZRID.extract(1)="z" set NONZRID=NONZRID.extract(2,99)
+
+	do addcode^DBSRWUTL(0,"")
+	
+	// Only need to instantiate CUVAR if using run-time info from it for banner
+	// or alignment
+	if dbtbl5h.banner!dbtbl5h.align do {
+		do addcode^DBSRWUTL(1,"type RecordCUVAR cuvar=Db.getRecord(""CUVAR"")")
+		do addcode^DBSRWUTL(0,"")
+		}
+
+	do addcode^DBSRWUTL(1,"set CONAM=CUVAR.conam")
+	do addcode^DBSRWUTL(1,"set ER=0,RID="""_NONZRID_""",RN="""_dbtbl5h.desc_"""")
+	do addcode^DBSRWUTL(1,"set VL=""""")
+	do addcode^DBSRWUTL(0,"")
+	
+	/* If VRWOPT("IOPAR") specified, it overrides all IOPAR,
+	   otherwise, if character set is specified by user input, it is used,
+	   otherwise, check for character set exceptions.
+	*/
+	do addcode^DBSRWUTL(1,"use 0 if 'VRWOPT(""NOOPEN"").get() do { quit:ER")
+	do addcode^DBSRWUTL(2,"if 'VRWOPT(""IOPAR"").get().isNull() set IOPAR = VRWOPT(""IOPAR"")")
+	do addcode^DBSRWUTL(2,"else  if ((IOTYP.get()=""RMS"")!(IOTYP.get()=""PNTQ"")),('IOPAR.get().isLike(""%/OCHSET=%"")),$$VALID^%ZRTNS(""UCIOENCD"") do {")
+	do addcode^DBSRWUTL(3,"// Accept warning if ^UCIOENCD does not exist")
+	do addcode^DBSRWUTL(3,"#ACCEPT Date=07/26/06; Pgm=RussellDS; CR=22121; Group=MISMATCH")
+	do addcode^DBSRWUTL(3,"type String CHRSET=$$^UCIOENCD(""Report"","""_NONZRID_""",""V0"",""*"")")
+	do addcode^DBSRWUTL(3,"if 'CHRSET.isNull() set IOPAR = IOPAR_""/OCHSET=""_CHRSET")
+	do addcode^DBSRWUTL(2,"}")
+	do addcode^DBSRWUTL(2,"do OPEN^SCAIO")
+	do addcode^DBSRWUTL(1,"}")
+	
+	do addcode^DBSRWUTL(1,"set vcrt=(IOTYP=""TRM"")")
+	do addcode^DBSRWUTL(1,"if 'vcrt set IOSL="_dbtbl5h.psize_TABCHR_"// Non-interactive")
+	do addcode^DBSRWUTL(1,"else  do {"_TABCHR_"// Interactive")
+	do addcode^DBSRWUTL(2,"do TERM^%ZUSE(IO,""WIDTH="_(RPTINFO("RSIZE")+1)_""")")
+	do addcode^DBSRWUTL(2,"write $$CLEARXY^%TRMVT")
+	if RPTINFO("RSIZE")>80 do addcode^DBSRWUTL(2,"write $$SCR132^%TRMVT"_TABCHR_"// Switch to 132 col mode")
+	do addcode^DBSRWUTL(2,"}")
+
+	do addcode^DBSRWUTL(0,"")
+
+	do addcode^DBSRWUTL(1,"do INIT^%ZM()")
+
+	do addcode^DBSRWUTL(0,"")
+
+	// Define columns for report browser capabilities
+	set X=$$coldefs^DBSRWUTL(.dbtbl5h,.RPTINFO)
+	if X'="" do addcode^DBSRWUTL(1,"set vCOL="""_X_"""")
+	do addcode^DBSRWUTL(0,"")
+
+	quit
+
+
+BLDDYNWH(String TABLES,		// Private - Build code for dynamic where clause
+	String PQINFO())
+	
+	type Number N,SEQ
+
+	do addcode^DBSRWUTL(1,"// Build WHERE clause to use for dynamic query")
+	do addcode^DBSRWUTL(1,"do {")
+	do addcode^DBSRWUTL(2,"type Number SEQ=1")
+	do addcode^DBSRWUTL(2,"type String DQQRY(),FROM")
+
+	// Build query array to pass to SQLCONV
+
+	set N=""
+	for  set N=PQINFO(N).order() quit:N=""  do {
+		type String QTYPE
+
+		set QTYPE=PQINFO(N).piece("|",2)
+		// If fixed query, use as is
+		if QTYPE="F" do {
+			do addcode^DBSRWUTL(2,"set DQQRY(SEQ)="_PQINFO(N,2).addQuotes()_",SEQ=SEQ+1")
+			}
+		// Single wild card
+		else  if QTYPE="WC1" do {
+			type String VAR,X
+			set X=PQINFO(N).piece("|",3)_" "		// DI
+			set X=X_PQINFO(N,2)_" ""_"			// Operator
+			set VAR=PQINFO(N).piece("|",1)			// Variable
+			set X=X_"$$addqts^DBSRWUTL("_VAR_")"
+			do addcode^DBSRWUTL(2,"set DQQRY(SEQ)="""_X_",SEQ=SEQ+1")
+			}
+		// Double wild card
+		else  if QTYPE="WC2" do {
+			type String VAR,X
+			set X=PQINFO(N).piece("|",3)_" "		// DI
+			set VAR=PQINFO(N).piece("|",1)			// Variable input
+			// If not defined, i.e., report called at V0, default to "ALL"
+			do addcode^DBSRWUTL(2,"if "_VAR_".get()="""" set "_VAR_"=""ALL""")
+			set X=""""_X_"""_"_VAR
+			do addcode^DBSRWUTL(2,"if "_VAR_"'=""ALL"" set DQQRY(SEQ)="_X_",SEQ=SEQ+1")
+			}
+		}
+
+
+	do addcode^DBSRWUTL(2,"set FROM=$$DQJOIN^SQLCONV("""_TABLES_""") quit:ER")
+	do addcode^DBSRWUTL(2,"set VWHERE=$$WHERE^SQLCONV(.DQQRY,"""")")
+
+	do addcode^DBSRWUTL(2,"}")
+	do addcode^DBSRWUTL(0,"")
+
+	quit
+
+
+BLDBANNR(String PQINFO(),		// Private - Build banner section
+	 String RPTINFO(),
+	 RecordDBTBL5H dbtbl5h)
+	/*
+	Banner will be printed by DBSRWBNR, showing report info, including
+	variables prompted for and their input, plus the constructed
+	where clause.
+	*/
+
+	type Number AREVARS,SEQ
+	type String CODE,PROMPT,VALUE,VAR,X
+
+	do addcode^DBSRWUTL(1,"// Print Report Banner Page")
+
+	// Run-time suppress banner page option (AUXPTR=slave printer)
+	do addcode^DBSRWUTL(1,"if cuvar.banner,'VRWOPT(""NOBANNER"").get(),IOTYP'=""TRM"",'AUXPTR.get() do {")
+
+	set CODE="type String VBNRINFO()"
+	if RPTINFO("WHERE")'="" set CODE=CODE_",VWHERE"
+	do addcode^DBSRWUTL(2,CODE)
+	do addcode^DBSRWUTL(0,"")
+
+	set AREVARS=0,SEQ=""
+	for  set SEQ=PQINFO(SEQ).order() quit:SEQ=""  do {
+		type String PTYP=PQINFO(SEQ).piece("|",2)
+
+		// Only care about wild-cards since they have run-time input
+		quit:PTYP'?1"WC"1N
+
+		// Save prompt to VBNRINFO("PROMPTS",SEQ) and get value at run-time
+		set PROMPT=PQINFO(SEQ,1).piece("|",10).extract(1,37)
+		set VAR=PQINFO(SEQ).piece("|",1)
+		set VALUE=VAR_".get()"
+		set AREVARS=1
+		// If date data type, format date
+		if PQINFO(SEQ,1).piece("|",9)="D" set VALUE="$$DAT^%ZM("_VALUE_",%MSKD)"
+		set CODE="set VBNRINFO(""PROMPTS"","_SEQ_")="""_PTYP_"|""_"
+		set CODE=CODE_PROMPT.addQuotes()_"_""|"
+		set CODE=CODE_VAR_"|""_"_VALUE
+		do addcode^DBSRWUTL(2,CODE)
+		}
+
+	do addcode^DBSRWUTL(0,"")
+
+	// Save WHERE clause for printing on banner page.  If dynamic SQL,
+	// VWHERE will already be around
+	if RPTINFO("WHERE")'="" do {
+		type String WHERE=RPTINFO("WHERE")
+
+		if WHERE.length()'>50 do addcode^DBSRWUTL(2,"set VWHERE="""_WHERE_"""")
+		else  do {
+			do addcode^DBSRWUTL(2,"set VWHERE=""""")
+			for  do { quit:WHERE=""
+				do addcode^DBSRWUTL(2,"set VWHERE=VWHERE_"""_WHERE.extract(1,50)_"""")
+				set WHERE=WHERE.extract(51,WHERE.length())
+				}
+			}
+		}
+
+	// Substitute user-defined where clause, if defined
+	if RPTINFO("DYNWHERE") do addcode^DBSRWUTL(2,"if vudwhere.exists() set VWHERE=vudwhere")
+
+	// Substitute variable values into WHERE clause for banner display
+
+	if AREVARS do {
+		do addcode^DBSRWUTL(0,"")
+		do addcode^DBSRWUTL(2,"do {")
+		do addcode^DBSRWUTL(3,"type Number SEQ")
+		do addcode^DBSRWUTL(3,"type String VALUE,VAR,X")
+		do addcode^DBSRWUTL(3,"set X=VWHERE")
+		do addcode^DBSRWUTL(3,"set SEQ=""""")
+		do addcode^DBSRWUTL(3,"for  set SEQ=VBNRINFO(""PROMPTS"",SEQ).order() quit:SEQ=""""  do {")
+		do addcode^DBSRWUTL(4,"set VAR=VBNRINFO(""PROMPTS"",SEQ).piece(""|"",3))")
+		do addcode^DBSRWUTL(4,"set VALUE=VBNRINFO(""PROMPTS"",SEQ).piece(""|"",4,99)")
+		do addcode^DBSRWUTL(4,"set X=$$replace^DBSRWUTL(X,"":""_VAR,""'""_VALUE_""'"")")
+		do addcode^DBSRWUTL(4,"}")
+		do addcode^DBSRWUTL(3,"set VBNRINFO(""WHERE"")=X")
+		do addcode^DBSRWUTL(3,"}")
+		}
+	else  if RPTINFO("WHERE")'="" do addcode^DBSRWUTL(2,"set VBNRINFO(""WHERE"")=VWHERE")
+
+	do addcode^DBSRWUTL(0,"")
+
+	// Save other information for banner printing
+	do addcode^DBSRWUTL(2,"set VBNRINFO(""DESC"")="_dbtbl5h.desc.addQuotes())
+	do addcode^DBSRWUTL(2,"set VBNRINFO(""PGM"")="""_dbtbl5h.pgm_"""")
+	do addcode^DBSRWUTL(2,"set VBNRINFO(""RID"")="""_dbtbl5h.rid_"""")
+	do addcode^DBSRWUTL(2,"set VBNRINFO(""TABLES"")="""_dbtbl5h.pfid_"""")
+	do addcode^DBSRWUTL(0,"")
+
+	for SEQ=1:1:10 do { quit:X=""
+		set X=RPTINFO("SEQBY",SEQ,"COL")
+		if X'="" do addcode^DBSRWUTL(2,"set VBNRINFO(""ORDERBY"","_SEQ_")="_X.addQuotes())
+		}
+
+	do addcode^DBSRWUTL(0,"")
+
+	type ResultSet docrs=Db.select("DATA","DBTBL5PR","LIBS='SYSDEV' AND RID=:dbtbl5h.rid AND SEQ>90.999 AND SEQ<111","SEQ ASC")
+	set SEQ=1
+	while docrs.next() do {
+		do addcode^DBSRWUTL(2,"set VBNRINFO(""DOC"","_SEQ_")="_docrs.getCol("DATA").addQuotes())
+		set SEQ=SEQ+1
+		}		
+	
+	do addcode^DBSRWUTL(0,"")
+
+	do addcode^DBSRWUTL(2,"do ^DBSRWBNR(IO,.VBNRINFO)"_$C(9)_"// Print banner")
+
+	do addcode^DBSRWUTL(2,"}")
+	do addcode^DBSRWUTL(0,"")
+
+	quit
+
+
+BLDALIGN(String RID,		// Private - Build alignment section
+	 String RPTINFO())
+
+	do addcode^DBSRWUTL(0,"")
+	do addcode^DBSRWUTL(1,"// Alignment pattern")
+	do addcode^DBSRWUTL(1,"if cuvar.alcount,IOTYP'=""TRM"",'VRWOPT(""NOALIGN"").get() do ^DBSRWALN(RID,IO,cuvar.alcount)")
+	do addcode^DBSRWUTL(0,"")
+	quit
+
+
+BLDVMAP(String RPTINFO())	// Private - Build VMAP code for distribution
+
+	type Number I
+	type String CODE,SELECT
+
+	do addcode^DBSRWUTL(0,"")
+	do addcode^DBSRWUTL(0,"VMAP()"_$C(9)_"// Private - Return SELECT list to DBSRWDST")
+	do addcode^DBSRWUTL(1,"type String MAP=")
+
+
+	set SELECT=RPTINFO("SELECT")
+	for I=1:1 do { quit:SELECT=""
+		if I=1 set CODE="set MAP="""
+		else  set CODE="set MAP=MAP_"""
+		set CODE=CODE_SELECT.extract(1,50)_""""
+		set SELECT=SELECT.extract(51,SELECT.length())
+		do addcode^DBSRWUTL(1,CODE)
+		}
+	do addcode^DBSRWUTL(1,"quit MAP")
+	do addcode^DBSRWUTL(0,"")
+
+	quit
+
+
+EXT	/* External compiler interface
+
+	   External RW compiler entry point
+	   Select reports to be compiled by setting up the report names
+	   in global ^TEMP($J,RID) then call this line tag.
+
+	   EXAMPLE:
+
+	    ----- Recompile SCA production reports
+	
+	    K ^TEMP($J) S X="SCA"
+	    F  S X=$O(^DBTBL(%LIBS,5,X)) Q:X=""!(X]]"SCA999")  S ^TEMP($J,X)=""
+	    D EXT^DBSRW
+	    Q
+
+	    ----- Mass recompile and resequence all reports
+
+	    Delete routines first --- $DELETE SCAU$CRTNS:R01S*.M;*
+
+	    S ^DBTBL(%LIBS,0,"R")=1
+	    K ^TEMP($J)
+	    S X="" F  S X=$O(^DBTBL(%LIBS,5,X)) Q:X=""  S ^TEMP($J,X)=""
+	    D EXT^DBSRW
+	    Q
+	*/
+
+	type Number STOP=0
+	type String PID,RID
+	
+	set PID=%ProcessID
+
+	type ResultSet tmpdqrs=Db.select("ELEMENT","TMPDQ","PID=:PID")
+
+        while tmpdqrs.next() do { quit:STOP
+		// If error, keep going, unless interrupt
+		catch error {
+			type String ET
+			do ET^%ZT(.ET)
+			if ET="INTERRUPT" set STOP=1
+			else  use 0 write !!,RID,?15,error.thrownAt,",",error.type,",",error.description,!
+		}
+		set RID=tmpdqrs.getCol("ELEMENT")
+		do DBSRW(RID,1)
+	}
+
+	quit
+
+
+CMPALL	// Private - Mass compile client/server reports
+
+	type String RID
+
+	do Db.delete("TMPDQ","PID=:PID")
+
+	type ResultSet rptrs=Db.select("RID","DBTBL5H","LIBS='SYSDEV' AND RID NOT LIKE 'Z%' AND RID NOT LIKE 'z%'")
+
+	while rptrs.next() do {
+		type String RID
+		set RID=rptrs.getCol("RID")
+		type RecordTMPDQ tmpdq = Class.new("RecordTMPDQ", "PID=:%ProcessID, ELEMENT=:RID")
+			
+		do tmpdq.save()
+	}
+
+	do EXT
+	quit
+
+
+GETSEQBY(RecordDBTBL5H dbtbl5h,		// Private - Get sequence by info
+	 String RPTINFO())
+
+	/* SEQBY = Sequence by
+	   PGBK  = New page at key breaks
+	   PHDR  = Print header after page breaks indicator
+	   PRNG  = Minimum print region (may be *)
+	   SORTORD = Sort order (A)scending or (D)escending
+	*/
+
+	type Number I,PGBK(),PHDR()
+	type String PRNG(),SEQBY(),SORTORD()
+
+	set SEQBY(1)=dbtbl5h.seq,PGBK(1)=dbtbl5h.pgbk,PHDR(1)=dbtbl5h.phdr
+	set PRNG(1)=dbtbl5h.prng,SORTORD(1)=dbtbl5h.sortord
+	set SEQBY(2)=dbtbl5h.seq2,PGBK(2)=dbtbl5h.pgbk2,PHDR(2)=dbtbl5h.phdr2
+	set PRNG(2)=dbtbl5h.prng2,SORTORD(2)=dbtbl5h.sortord2
+	set SEQBY(3)=dbtbl5h.seq3,PGBK(3)=dbtbl5h.pgbk3,PHDR(3)=dbtbl5h.phdr3
+	set PRNG(3)=dbtbl5h.prng3,SORTORD(3)=dbtbl5h.sortord3
+	set SEQBY(4)=dbtbl5h.seq4,PGBK(4)=dbtbl5h.pgbk4,PHDR(4)=dbtbl5h.phdr4
+	set PRNG(4)=dbtbl5h.prng4,SORTORD(4)=dbtbl5h.sortord4
+	set SEQBY(5)=dbtbl5h.seq5,PGBK(5)=dbtbl5h.pgbk5,PHDR(5)=dbtbl5h.phdr5
+	set PRNG(5)=dbtbl5h.prng5,SORTORD(5)=dbtbl5h.sortord5
+	set SEQBY(6)=dbtbl5h.seq6,PGBK(6)=dbtbl5h.pgbk6,PHDR(6)=dbtbl5h.phdr6
+	set PRNG(6)=dbtbl5h.prng6,SORTORD(6)=dbtbl5h.sortord6
+	set SEQBY(7)=dbtbl5h.seq7,PGBK(7)=dbtbl5h.pgbk7,PHDR(7)=dbtbl5h.phdr7
+	set PRNG(7)=dbtbl5h.prng7,SORTORD(7)=dbtbl5h.sortord7
+	set SEQBY(8)=dbtbl5h.seq8,PGBK(8)=dbtbl5h.pgbk8,PHDR(8)=dbtbl5h.phdr8
+	set PRNG(8)=dbtbl5h.prng8,SORTORD(8)=dbtbl5h.sortord8
+	set SEQBY(9)=dbtbl5h.seq9,PGBK(9)=dbtbl5h.pgbk9,PHDR(9)=dbtbl5h.phdr9
+	set PRNG(9)=dbtbl5h.prng9,SORTORD(9)=dbtbl5h.sortord9
+	set SEQBY(10)=dbtbl5h.seq10,PGBK(10)=dbtbl5h.pgbk10,PHDR(10)=dbtbl5h.phdr10
+	set PRNG(10)=dbtbl5h.prng10,SORTORD(10)=dbtbl5h.sortord10
+
+	for I=1:1:10 do {
+		set RPTINFO("SEQBY",I,"COL")=SEQBY(I)
+		set RPTINFO("SEQBY",I,"PAGEBRK")=PGBK(I)
+		set RPTINFO("SEQBY",I,"PNTHDR")=PHDR(I)
+		set RPTINFO("SEQBY",I,"MINPNT")=PRNG(I)
+		set RPTINFO("SEQBY",I,"SORTORD")=SORTORD(I)
+		}
+
+	quit
+
+
+GETRPPS(String RID,		// Private - Get report pre/post-processor code
+	String RPTINFO(),
+	String ddmap())
+
+	/*
+	For any of the possible report pre and post processors, determine if
+	they exist and if so, build code into RPTINFO("SUBS",pptype,seq)=code.
+
+	Note that code must be PSL, including any code pulled in from pre/post
+	processor libraries.
+
+	Variables used that live outside of the processor code should be typed
+	as Public.  These will be pulled to be typed in the V0 section, and those
+	defined in the pre-query section will also be typed in the main	section.
+
+	For any variables that are expected to come into the report writer, they
+	should be entered on a line in the report pre-processor (before query)
+	in the form //Incoming=var1,var2,var3  These variables will be typed
+	as public in the main section.  Note that they may also be typed in
+	the pre-processor code as public if going to be used in that code.
+
+	See below for keys used to store each type of pre/post processor.  Key
+	PPLIB is used to store user library code (DQ pre/post-processor library).
+	*/
+
+	type public Number ER=0
+
+	type Number SEQ
+
+	for SEQ=51,71,111,201:20:281 do { quit:ER
+		type Number CNT,END,N,START
+		type String DESC,KEY,PPIN(),PPOUT()
+
+		set START=SEQ-.001,END=SEQ+20
+		set CNT=1
+
+		type ResultSet rs=Db.select("DATA","DBTBL5PR","LIBS='SYSDEV' AND RID=:RID AND SEQ>:START AND SEQ<:END","SEQ ASC")
+
+		quit:rs.isEmpty()
+
+		while rs.next() do {
+			type Number I
+			type String DATA,VAR
+			set DATA=rs.getCol("DATA")
+			set PPIN(CNT)=DATA
+			set CNT=CNT+1
+
+			// Get variables public to the report
+			if SEQ=111, DATA.isLike("%//Incoming=%") do {
+				set DATA = DATA.piece("Incoming=", 2)
+				if DATA'="" for I=1:1:DATA.length(",") do {
+					set VAR=DATA.piece(",",I).trim()
+					do addvars^DBSRWUTL("INCOMING",VAR,.RPTINFO)
+					do addvars^DBSRWUTL("MAINVARS",VAR,.RPTINFO,1)	// Kill from MAINVARS list
+				}
+			}
+
+			// Get other variables to type
+			else  if DATA.isLike("%type public %", 1) do {
+				set DATA = DATA.replace($C(9), " ")
+				set DATA = DATA.trim(0)			// Remove trailing and leading spaces
+				set DATA = DATA.piece(" ", 4, 9999)	// Variable list
+				set DATA = DATA.replace(" ", "")	// Remove spaces
+				if DATA'="" for I=1:1:DATA.length(",")  do {
+					set VAR=DATA.piece(",",I)
+					if SEQ=111 do {
+						if 'RPTINFO("INCOMING",VAR).exists() do addvars^DBSRWUTL("MAINVARS",VAR,.RPTINFO)
+						}
+					else  do addvars^DBSRWUTL("V0TYPE",VAR,.RPTINFO)
+					}
+				}
+			}
+
+		// Translate, if necessary, pre/post-processor code
+		do PPCODE(.PPIN,.PPOUT,SEQ,.ddmap,.RPTINFO) quit:ER
+
+		if SEQ=51 set KEY="PREAQ",DESC="Pre-processor (after query)"
+		else  if SEQ=71 set KEY="RPOST",DESC="Report post-processor"
+		else  if SEQ=111 set KEY="PREBQ",DESC="Pre-processor (before query)"
+		else  if SEQ=201 set KEY="OPRE",DESC="OPEN pre-processor"
+		else  if SEQ=221 set KEY="OPOST",DESC="OPEN post-processor"
+		else  if SEQ=241 set KEY="FPRE",DESC="FETCH pre-processor"
+		else  if SEQ=261 set KEY="FPOST",DESC="FETCH post-processor"
+		else  if SEQ=281 set KEY="PRNT",DESC="PRINT pre-processor"
+
+		set RPTINFO("SUBS",KEY,1)="// "_DESC
+		set RPTINFO("SUBS",KEY,2)=""
+		set CNT=3,N=""
+		for  set N=PPOUT(N).order() quit:N=""  do {
+			set RPTINFO("SUBS",KEY,CNT)=PPOUT(N)
+			set CNT=CNT+1
+			}
+		}
+
+	quit
+
+
+private PPCODE( String IN(),		// Translate pre/post-processor code
+	String OUT,
+	Number SEQ,
+	String ddmap(),
+	String RPTINFO())
+	
+	/*
+	Translate code in IN array to deal with use of DQ pre/post-processor
+	library inclusion or use of .RWOPT. options.
+
+	Change references to rwrs.getCol("TABLE.COLUMN") to variable names and
+	create variable name map (ddmap).
+	*/
+
+	type public Number ER=0
+	type public String RM
+	type Number INSEQ,OUTSEQ
+	type String NEWLIST=""
+
+	set INSEQ="",OUTSEQ=2
+
+	for  set INSEQ=IN(INSEQ).order() quit:INSEQ=""  do { quit:ER
+		type String X
+		set X=IN(INSEQ)
+		// Pre/post-processor library
+		if X.extract(2,999)?1"do @["1A.ANP1"]".E do { quit
+			type String DATA,PPID
+
+			set PPID=X.piece("[",2).piece("]",1)
+			quit:PPID=""			// Ignore null lib reference
+
+			// If library not yet used, assign number and set it up
+			if RPTINFO("PPLIBS",PPID,"").order().isNull() do { quit:ER
+				type Number NUM,LIBSEQ
+				set NUM=RPTINFO("PPLIBS").get()+1
+				set RPTINFO("PPLIBS")=NUM
+				set RPTINFO("PPLIBS",PPID)=NUM
+				set RPTINFO("PPLIBS",PPID,1)="VLIB"_NUM_$C(9)_"// User library - "_PPID
+				set LIBSEQ=3
+
+				type ResultSet rs=Db.select("DATA","DBTBL13D","LIBS='SYSDEV' AND PID=:PPID","SEQ ASC")
+				if rs.isEmpty() do { quit
+					set ER=1
+					// Invalid pre/post-processor library name - ~p1
+					set RM=$$^MSG(1425,PPID)
+				}
+
+				while rs.next() do { quit:ER
+					type Number I
+					set DATA=rs.getCol("DATA")
+					if DATA["rwrs.getCol(" do { quit:ER
+						if (SEQ=0)!(SEQ=261)!(SEQ=281) set DATA=$$GETRWRS(DATA,.NEWLIST,.ddmap)
+						else  do RWRSER(SEQ)
+					}
+					set RPTINFO("PPLIBS",PPID,LIBSEQ)=DATA
+					set LIBSEQ=LIBSEQ+1
+					if DATA.isLike("%type public%", 1) do {
+						set DATA=DATA.piece("ublic ",2, 999).piece(" ",2)
+						for I=1:1:DATA.length(",") do addvars^DBSRWUTL("V0TYPE",DATA.piece(",",I),.RPTINFO)
+					}
+				}
+				
+				if 'NEWLIST.isNull() set RPTINFO("PPLIBS",PPID,2)="type public String "_NEWLIST
+			}
+
+			// Add call to pre/post-processor library code
+			set DATA=$C(9)_"do VLIB"_RPTINFO("PPLIBS",PPID)
+			set DATA=DATA_$C(9)_"// User library - "_PPID
+			set OUT(OUTSEQ)=DATA
+			set OUTSEQ=OUTSEQ+1
+		}
+
+		// Substitute RW option call for .RWOPT.
+		if X[".RWOPT." do {
+			type String DATA,OPT,VALUE
+
+			set OPT=X.piece(".RWOPT.",2)
+			set OPT=OPT.trim(0)
+			set VALUE=OPT.piece("=",2),OPT=OPT.piece("=",1)
+			set DATA="do rwopt^DBSRWUTL("""_OPT_""","""_VALUE_""")"
+			set X=X.piece(".RWOPT.",1)_DATA
+		}
+
+		if X["rwrs.getCol(" do { quit:ER
+			if (SEQ=0)!(SEQ=261)!(SEQ=281) set X=$$GETRWRS(X,.NEWLIST,.ddmap)
+			else  do RWRSER(SEQ)
+		}
+
+		/* Allow for dynamic order by or user defined where clause.
+		   Restrictions are that format must be "set vorder=" or
+		   "set vudwhere" in either report pre-processor or in OPEN
+		   pre-processor.  This will cause a dynamic select to be built
+		   at run-time using either vorder if defined (even if null),
+		   otherwise, will use report's standard order by; and similarly
+		   for where clause.
+		*/
+		if X["set vorder=",SEQ=51!(SEQ=111)!(SEQ=201) set RPTINFO("DYNORDERBY")=1
+		if X["set vudwhere=",SEQ=51!(SEQ=111)!(SEQ=201) set RPTINFO("DYNWHERE")=1
+
+		set OUT(OUTSEQ)=X
+		set OUTSEQ=OUTSEQ+1
+	}
+
+	if NEWLIST'="" set OUT(1)=$C(9)_"type public String "_NEWLIST
+
+	quit
+
+
+RWRSER(Number SEQ)	// Private - Error in use of rwrs.getCol syntax
+
+	type public Number ER
+	type public String RM
+
+	type String DESC
+
+	set ER=1
+	set RM="rwrs.getCol syntax only valid for Fetch post-processor, Print pre-processor, or column processors"
+
+	if SEQ=51 set DESC="Pre-processor (after query)"
+	else  if SEQ=71 set DESC="Report post-processor"
+	else  if SEQ=111 set DESC="Post-processor (before query)"
+	else  if SEQ=201 set DESC="OPEN pre-processor"
+	else  if SEQ=221 set DESC="OPEN post-processor"
+	else  if SEQ=241 set DESC="FETCH pre-processor"
+	else  set DESC=""
+
+	if DESC'="" set RM=RM_" - not in "_DESC
+
+	quit
+
+
+GETRWRS(String INPUT,			// Private - Substitute variable names
+	String VARS,
+	String ddmap())
+
+	/*
+	For all rwrs.getCol("TABLE.COLUMN") entries in INPUT, substitute a
+	variable name (vcnn) and create variable name to data reference in
+	ddmap.
+
+	Return list of new variables in VARS
+	*/
+
+	type public Number ER
+	type public String RM
+	type Number VNUM
+	type String P1,P2,TC
+	
+	if VARS'="" set VARS=VARS_","
+
+	for  quit:INPUT'["rwrs.getCol("  do { quit:ER
+		set P1=INPUT.piece("rwrs.getCol(""",1)
+		set P2=INPUT.piece("rwrs.getCol(""",2,999)
+		set TC=P2.piece(""")",1)
+		set P2=P2.piece(""")",2,999)
+		do addtomap^DBSRWUTL(TC,.ddmap)
+		if 'ddmap(TC).exists() do {
+			set ER=1
+			set RM="Invalid rwrs.getCol(""TABLE.COLUMN"") reference - rwrs.getcol("""_TC_""")"
+			}
+		else  do {
+			set INPUT=P1_ddmap(TC)_P2
+			if (","_VARS)'[(","_ddmap(TC)_",") set VARS=VARS_ddmap(TC)_","
+			}
+		}
+
+	set VARS=VARS.extract(1,VARS.length()-1)
+
+	quit INPUT
+
+vSIG()	quit "60680^48228^Dan Russell^39031"	// Signature - LTD^TIME^USER^SIZE

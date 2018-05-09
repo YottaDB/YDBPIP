@@ -1,0 +1,874 @@
+PBSTST	//Private;Test PROFILE Server
+	/*
+	ORIG:  MATTSON -  1 JUL 1993
+	DESC:  This routine provides a means to test PROFILE servers.
+
+	NOTE:  This is not a production routine and is used for internal
+	       testing purposes only.
+
+	----- Revision History -----------------------------------------------
+	08/23/06 - chhabris - CR22508
+		   Retrofit from P01DEV1 view as mentioned below.
+		   Modified ztrap section to remove global reference from lookup
+		   for SVTYP to [SVCTRLT].
+
+		03/21/06 - Ed Sigda - CR 20278
+	          o Modified section ztrap to display last trapped user
+	            and time so a user can determine whether another resource
+	            is using ztrap.
+	          o Modified section ztrap to show an example of the 
+	            Evaluation routine.
+	          o Modified section ztrap to change location of second
+	            break in section LOOP to match new (and old) version
+	            of PBSSRV.
+	          o Modified ztrapm, ztrapr to add ability to log
+	            network management sign-on messages.
+	          o Added section zchknmsp to check if network management
+	            messages should be logged.
+	          o Added section Replay to allow for messages to be replayed
+	            from the GT.M prompt.
+
+	03/08/06 - RussellDS - CR19962
+		   Removed use of %ZTRAP.
+		   
+		   Removed old revision history.
+	  
+	I18N=QUIT
+
+	*/
+	
+	type Public Number ER
+	type Public String %CSID
+	
+	type Boolean quit
+	type String et,IO
+	
+	do ^SCAIO
+	do OPEN^SCAIO quit:ER
+
+	write $$SCR132^%TRMVT
+	do signon
+
+	use 0:wid=132
+	set quit=0
+
+	for  do { quit:quit
+		
+		type Number i
+		type String %JRNL,reply,svcls,x,vzmsg
+		
+		use IO read x
+		set quit=$ZEOF use 0 quit:quit
+
+		set svcls=$E(x)
+		set vzmsg=$$cntrl($E(x,2,$L(x)))
+		write !!,"svclass: ",svcls,!,"message: ",vzmsg
+
+		if svcls=2 do {
+			set %JRNL(1)=$P(vzmsg,$C(28),2)
+			set reply=$$FSSP^PBSCLI($P(vzmsg,$C(28),1))
+		}
+
+		if svcls=3 do {
+			for i=1:1:6 set x(i)=$P(vzmsg,$C(28),i)
+			set reply=$$MRPC^PBSCLI(x(1),x(2),x(3),x(4),x(5),x(6))
+		}
+
+		for  set x=$F(reply,$c(28)) quit:'x  do {
+			set reply=$E(reply,1,x-2)_"<fs>"_$E(reply,x,$L(reply))
+
+		}
+
+		write !,"  reply: ",reply
+		write !,"   quit: ",x read x
+		if x="Y" set quit=1
+	}
+
+	set et=$$CLDSCNCT^%MTAPI(%CSID) if et'="" write !,et
+
+	write $$SCR80^%TRMVT
+
+	close IO
+
+	quit
+	
+
+cntrl(vzmsg)	//
+
+	type Number l
+	type String x
+
+	set l=$L(vzmsg)
+
+	for  set x=$F(vzmsg,"<fs>") quit:'x  do {
+		set vzmsg=$E(vzmsg,1,x-5)_$c(28)_$E(vzmsg,x,1)
+	}
+
+	for  set x=$F(vzmsg,"<gs>") quit:'x  do {
+		set vzmsg=$E(vzmsg,1,x-5)_$C(29)_$E(vzmsg,x,l)
+	}
+
+	for  set x=$F(vzmsg,"<rs>") quit:'x  do {
+		set vzmsg=$E(vzmsg,1,x-5)_$C(30)_$E(vzmsg,x,l)
+	}
+
+	for  set x=$F(vzmsg,"<us>") quit:'x  do {
+		set vzmsg=$E(vzmsg,1,x-5)_$C(31)_$E(vzmsg,x,l)
+	}
+
+	quit vzmsg
+
+
+svr	// Start server in direct mode
+	
+	type String debug,X
+
+	#ACCEPT Date=03/08/06; Pgm=RussellDS; CR=19962
+	#BYPASS
+	kill
+	#ENDBYPASS
+
+	// get address of line after call to $$PROC in LOOP section
+	set debug=$$nxtline("LOOP^PBSSRV","$$PROC(")
+
+	if debug="" write !,"Cannot Locate call to PROC^PBSSRV, ABORTING." quit
+
+	set debug="zb "_debug_":""u 0 w !! zwr vzpkt,vzreply zc"""
+
+	type ResultSet rs=Db.select("SVID","SVCTRLT","SVTYP='SCA$IBS'","SVID DESC")
+	if rs.next() set X=rs.getCol("SVID")+1
+	else  set X=1
+
+	do SVCNCT^PBSSRV("SCA$IBS",X,debug)
+
+	quit
+
+
+cmd	// Issue command to server
+
+	type Number %FRAME,SVID
+	type String %NOPRMT,%READ,CMD,SVTYP,%TAB(),VFMQ
+
+	set %TAB("SVTYP")="/DES=SVTYP/TYP=T/LEN=12/TBL=[CTBLSVTYP]"
+	set %TAB("SVID")="/DES=SVID/TYP=N/LEN=2" set SVID=1
+	set %TAB("CMD")="/DES=CMD/TYP=T/LEN=40"
+	set %READ="SVTYP/REQ,SVID/REQ,CMD/REQ"
+	set SVTYP="SCA$IBS"
+
+	set %FRAME=1 
+	set %NOPRMT="F"
+	do ^UTLREAD 
+	if VFMQ="Q" quit
+
+	do EXEC^PBSUTL(SVTYP,SVID,CMD)
+
+	quit
+
+
+signon	// Client sign-on
+
+	// Terminal Parameters
+	do TERMSET^SCADRV
+
+	// Define Driver Context
+	do UID 
+	if %UserID.get().isNull() quit
+
+	// Client connect API
+	do CLCNCT^SCADRV
+
+	quit
+
+
+UID	// Prompt for User ID in direct mode
+
+	type Public Number ER,%NET
+	type Public String %LOGID,%UID,RM
+	
+	type Number %FRAME
+	type String %,%NOPRMT,%READ,%TAB(),drvlist,HDR,KVAR
+	type String PGM,PWD,UTLO,VFMQ
+	
+	set ER=0
+
+	set drvlist="%InputTimeOut|300,CONAM,%ET"
+
+	do LIST^CUVAR(drvlist)
+	do INIT^%ZM(.drvlist)
+
+	set %LOGID=$$LOGID^SCADRV
+	do ^UTLO 
+	set %UserStation=UTLO
+
+	type RecordDDPSTS ddpsts=Db.getRecord("DDPSTS")
+	set %NET=ddpsts.status
+	if %NET="" set %NET=1
+	set %="|"
+
+	set %TAB("%UID")=".UID1"
+	set %TAB("PWD")=".PWD1"
+	set %READ="%UID/REQ,PWD/SEC"
+
+	set %FRAME=1 
+	set %NOPRMT="F"
+	do ^UTLREAD 
+	if VFMQ="Q" set ER=1 quit
+
+	// Invalid password
+	if '$$VALIDATE^SCADRV1(PWD,%UID) set ER=1 set RM=$$^MSG(1419) quit
+
+	type RecordSCAU scau=Db.getRecord("SCAU","UID=%UserID")
+	set %UserClass=scau.%ucls
+
+	quit
+
+
+nmsp	//Private;Test Public MRPCs
+
+	type Public Number ER = 0
+	
+	type String VFMQ
+	
+	do signon 
+	if ER quit
+
+	for  do { if VFMQ="Q" quit
+		
+		type Number %FRAME
+		type String %NOPRMT,%READ,%TAB(),FUNC,PAR,PARAM,PTR,RETURN,RPCID,VERSN
+
+		set %TAB("FUNC")="/DES=FUNNAM/TYP=T/LEN=20"
+		set %TAB("PARAM")="/DES=PARAM/TYP=T/LEN=40"
+		set %READ="FUNC/REQ,PARAM"
+
+		set %FRAME=1 
+		set %NOPRMT="F"
+		do ^UTLREAD 
+		if VFMQ="Q" quit
+
+		set PTR=$$COLUMN^MSG(PARAM,44,.PAR)
+		set ER=$$NMSP^PBSCLI(3,.RETURN,FUNC,.PAR)
+
+	 	zwrite ER,RETURN
+		write $$MSG^%TRMVT("",0,1)
+	}
+
+	do CLDSCNCT^SCADRV
+
+	quit
+
+
+fssp	//Private;Test FSSP service class
+
+	type Public Number ER = 0
+	
+	type String VFMQ
+	
+	do signon 
+	if ER quit
+
+	for  do { if VFMQ="Q" quit
+		
+		type Number %FRAME
+		type String %NOPRMT,%READ,%TAB(),FUNCT,PAR,PARAM,PTR,RETURN
+
+		set %TAB("FUNCT")=".FN2"
+		set %TAB("PARAM")="/DES=PARAM/TYP=T/LEN=40"
+		set %READ="FUNCT/REQ,PARAM/REQ"
+
+		set %FRAME=1
+		set %NOPRMT="F"
+		do ^UTLREAD 
+		if VFMQ="Q" quit
+
+		set RETURN=""
+		set PTR=$$COLUMN^MSG(PARAM,44,.PAR)
+		set ER=$$FSSP^PBSCLI(FUNCT,.PAR,.RETURN)
+
+	 	zwrite ER,RETURN
+		write $$MSG^%TRMVT("",0,1)
+	}
+
+	do CLDSCNCT^SCADRV
+
+	quit
+
+
+mrpc	//Private;Test Public MRPCs
+
+	type Public Number ER = 0
+	type Public String RM
+	
+	type String VFMQ
+	
+	do signon
+	if ER quit
+
+	for  do { if VFMQ="Q" quit
+		
+		type Number %FRAME,VERSN
+		type String %NOPRMT,%READ,%TAB(),PAR,PARAM,PTR,RETURN,RPCID,VFMQ
+
+		set %TAB("RPCID")="/DES=RPCID/TYP=T/LEN=20"
+		set %TAB("VERSN")="/DES=VERSN/TYP=N/LEN=6"
+		set %TAB("PARAM")="/DES=PARAM/TYP=T/LEN=40"
+		set %READ="RPCID/REQ,VERSN/REQ,PARAM/REQ"
+
+		set %FRAME=1 
+		set %NOPRMT="F"
+		do ^UTLREAD
+		if VFMQ="Q" quit
+
+		set PTR=$$COLUMN^MSG(PARAM,44,.PAR)
+		set RETURN=$$MRPC^PBSCLI(RPCID,VERSN,.PAR)
+
+	 	zwrite ER,RETURN,RM
+		write $$MSG^%TRMVT("",0,1)
+	}
+
+	do CLDSCNCT^SCADRV
+
+	quit
+
+
+Public csis(RecordSIGNONT signont)	//Private;Test CSIS service class
+
+	type Public Number ER = 0
+	type Public String %LOGID
+	
+	type String token,VFMQ
+	
+	do signon
+	if ER quit
+
+	set token=$P(%LOGID,"|",6)
+	// type RecordSIGNONT signont=Db.getRecord("SIGNONT","UID='*',TOKEN=:token")
+	// set signont.="/HTML"
+
+	for  do { if VFMQ="Q" quit
+		
+		type Number %FRAME
+		type String %NOPRMT,%READ,%TAB(),FUNCT,PAR,PARAM,PTR,RETURN
+
+		set %TAB("FUNCT")=".FN2"
+		set %TAB("PARAM")="/DES=PARAM/TYP=T/LEN=40"
+		set %READ="FUNCT/REQ,PARAM/REQ"
+
+		set %FRAME=1 
+		set %NOPRMT="F"
+		do ^UTLREAD
+		if VFMQ="Q" quit
+
+		set RETURN=""
+		set PTR=$$COLUMN^MSG(PARAM,44,.PAR)
+
+	 	zwrite ER,RETURN
+		write $$MSG^%TRMVT("",0,1)
+	}
+
+	do CLDSCNCT^SCADRV
+
+	quit
+
+
+msql	//Private;Test MSQL service class
+
+	type Public Number ER = 0
+	
+	type String MSG,VFMQ
+	
+	do signon
+	if ER quit
+
+	for  do { if VFMQ="Q" quit
+		
+		type Number %FRAME
+		type String %NOPRMT,%READ,%TAB(),FLD(),RETURN,SUB()
+
+		set %TAB("FLD(1)")="/DES=SQL Command/TYP=T/LEN=255"
+		set %TAB("FLD(2)")="/DES=SQL Cmd Rec/TYP=T/LEN=255"
+		set %TAB("FLD(3)")="/DES=Parameters/TYP=T/LEN=255"
+		set %READ="FLD(1)/NOREQ,FLD(2)/NOREQ,FLD(3)/NOREQ"
+
+		set %FRAME=1 
+		set %NOPRMT="F"
+		do ^UTLREAD
+		if VFMQ="Q" quit
+
+		if FLD(1)'="" do {
+			type Number I
+			
+			for I=1:1:$L(FLD(2)," ") set SUB(I)=$P(FLD(2)," ",I)
+			set FLD(2)=$$V2LV^MSG(.SUB)
+		}
+
+		set MSG=$$V2LV^MSG(.FLD)
+
+		set RETURN=""
+		set ER=$$^PBSMSQL(.RETURN,0,MSG,1)
+
+	 	zwrite ER,MSG,RETURN
+		write $$MSG^%TRMVT("",0,1)
+	}
+
+	do CLDSCNCT^SCADRV
+
+	quit
+
+
+nxtline(routine,text)	//Private;Return tag of next line containing argument
+
+	/*
+	   ARGUMENTS:
+	   	. routine Routine Name 		/TYP=T/REQ/MECH=VAL
+
+	   	. text 	  text to search for 	/TYP=T/REQ/MECH=VAL
+
+	   RETURNS:
+	   	. $$ 	  Address of next line 	/TYP=T
+	    		  Null if line w/text cannot be found
+
+	*/
+	
+	type Number i,lv,lv2,off,off2
+	type String t,tag,x
+
+	if routine'["^" set routine="^"_routine
+	set tag=$P(routine,"^",1) set routine="^"_$P(routine,"^",2)
+
+	// find "text" in "tag" section of "routine"
+	set t="" 
+	for off=1:1:200 do { if t[text quit
+		set x="S t=$P($T("_tag_"+"_off_routine_"),"";"",1)"
+		#ACCEPT DATE=12/17/03;PGM=John Carroll
+		xecute x
+	}
+
+	if t'[text quit ""
+
+	// remove tabs and spaces from source text and find nesting level
+	set t=$TR(t,$C(9)_" ","") set lv=0
+	for i=1:1:$L(t) set x=$E(t,i) quit:x'="."  set lv=lv+1
+
+	// locate next non-comment line on same or less nesting level
+	for off2=off+1:1:200 do { quit:lv2'>lv
+		set t=""
+		set x="S t=$P($T("_tag_"+"_off2_routine_"),"";"",1)"
+		#ACCEPT DATE=12/17/03;PGM=John Carroll
+		xecute x
+		set t=$TR(t,$C(9)_" ","")
+		set lv2=0
+		for i=1:1:$L(t) set x=$E(t,i) quit:x'="."  set lv2=lv2+1
+		if $E(t,lv2+1)="" set lv2=99
+	}
+
+	quit tag_"+"_off2_routine
+
+
+ztrap	//Private;Setup PBSSRV to trap all messages to ZTRAP global
+	/*
+
+	   If ^ZTRAP1("UID") contains a user id, only messages from that
+	   user id will be trapped.
+
+	   If ^ZTRAP1("PGM") contains a program name or line of code which
+	   sets variable quit=1 the message will not be trapped.
+
+	   Example 1: ^ZTRAP1("PGM")="s quit=$$FILTER^ZMSG(vzpkt)" will
+	   allow function FILTER^ZMSG to determine whether to trap the message.
+
+	   Example 2: ^ZTRAP1("PGM")="I vzpkt'[""IVRXFR"" s quit=1" will
+	   only trap messages that contain "IVRXFR".
+
+	   If ^ZTRAP("NMS") equals one sign-on messages will be logged.
+
+	   locate break points
+	*/
+
+	type Public Number SVID
+	type Public String OPER,SVTYP
+
+	type Number %FRAME
+	type String %READ,%TAB(),after,before,DTS,EXAMPLE,K1,K2,NMS,PGM,SVPGM,T1,T2,VFMQ,UID
+
+	set (UID,SVPGM)=""
+
+	set before=$$nxtline("LOOP^PBSSRV","$$GETMSG^%MTAPI")
+	set after=$$nxtline("LOOP^PBSSRV","STATS^PBSUTL")
+	if before=""!(after="") write !,"Unable to locate break points, Aborting" quit
+
+	type RecordTRAP1 trap1u
+	type RecordTRAP1 trap1p
+
+	if Db.isDefined("TRAP1","TRAPTYP='UID'") do {
+		set trap1u=Db.getRecord("TRAP1","TRAPTYP='UID'")
+		set UID=trap1u.trapinfo
+	}
+
+	if Db.isDefined("TRAP1","TRAPTYP='PGM'") do {
+		set trap1p=Db.getRecord("TRAP1","TRAPTYP='PGM'")
+		set SVPGM=trap1p.trapinfo
+	}
+
+	type RecordTRAP1 trap1n=Db.getRecord("TRAP1","TRAPTYP='NMS'",1)
+	set NMS=trap1n.trapinfo
+
+	type RecordTRAP1 trap1d=Db.getRecord("TRAP1","TRAPTYP='DTS'",1)
+	set DTS=trap1d.trapinfo
+
+	if OPER.get().isNull() set OPER="ENABLE"
+	if SVTYP.get().isNull() set SVTYP="SCA$IBS"
+	if SVID.get().isNull() set SVID="*"
+
+	set %TAB("OPER")="/DES=Operation/TYP=T/LEN=12/TBL=,ENABLE,DISABLE"
+	set %TAB("SVTYP")="/DES=SVTYP/TYP=T/LEN=12/TBL=[SVCTRLT]SVTYP:DISTINCT:NOVAL"
+	set %TAB("SVTYP")=%TAB("SVTYP")_"/XPP=D zpp1^PBSTST"
+	set %TAB("UID")="[SCAU]UID"
+	set %TAB("SVPGM")="/DES=Evaluation routine/LEN=40/TYP=T"
+	set %TAB("NMS")="/DES=Log sign-on messages/TYP=L"
+
+	set T1="Enable Logging of all Messages and Replies to ^TRAP"
+
+	if UID.isNull() do {
+		set T2="Last User: "_"   "_$$DAT^%ZM(DTS)_" "_$$TIM^%ZM(DTS.piece(",",2))
+		}
+	else  do {
+		type RecordSCAU scau=Db.getRecord("SCAU","UID=:UID",1)
+		set T2="Last User: "_scau.%ufn_"   "_$$DAT^%ZM(DTS)_" "_$$TIM^%ZM(DTS.piece(",",2))
+		}
+		
+	set EXAMPLE=$J("",20)_"Example: if vzpkt'[""IVRXFR"" set quit=1"
+
+	set %READ="@T1/CEN,,OPER/REQ,SVTYP/REQ,UID/NOREQ,SVPGM/NOREQ"
+	set %READ="@T1/CEN,@T2/CEN,,OPER/REQ,SVTYP/REQ,UID/NOREQ,SVPGM/NOREQ,@EXAMPLE,NMS/NOREQ"
+
+	set SVTYP="SCA$IBS"
+
+	set %FRAME=1
+	do ^UTLREAD quit:VFMQ="Q"
+	if (SVTYP.isNull())!(SVID.isNull()) quit
+
+	set trap1u=Db.getRecord("TRAP1","TRAPTYP='UID'",1)
+	set trap1u.trapinfo=UID
+	do trap1u.bypassSave()
+
+	set trap1p=Db.getRecord("TRAP1","TRAPTYP='PGM'",1)
+	set trap1p.trapinfo=SVPGM
+	do trap1p.bypassSave()
+
+	set trap1n.trapinfo=NMS
+	do trap1n.bypassSave()
+
+	set trap1d.trapinfo=%CurrentDate_","_%CurrentTime
+	do trap1d.bypassSave()
+
+	type ResultSet rs
+	if SVTYP = "*" set rs= Db.select("SVTYP,SVID","SVCTRLT",,"SVTYP,SVID")
+	else  set rs=Db.select("SVTYP,SVID","SVCTRLT","SVTYP =:SVTYP","SVTYP,SVID")
+	while rs.next() do {
+		set SVTYP=rs.getCol(1)
+		set SVID=rs.getCol(2)
+		
+		type RecordSVCTRL svctrl=Class.new("RecordSVCTRL")
+		set svctrl.svtyp=SVTYP
+		set svctrl.svid=SVID
+		set svctrl.svseq=Db.nextVal("SVCTRL","SVTYP=:SVTYP,SVID=:SVID")
+		set svctrl.svexpr="TRAP=0"
+		do svctrl.bypassSave()
+		
+		if OPER="ENABLE" do {
+			do EXEC^PBSUTL(SVTYP,SVID,"ZB "_before_":""d ztrapm^PBSTST""")
+			do EXEC^PBSUTL(SVTYP,SVID,"ZB "_after_":""d ztrapr^PBSTST""")
+		}
+		else  do EXEC^PBSUTL(SVTYP,SVID,"ZB -*")
+	 	// zwrite ^SVCTRL(SVTYP,SVID,*)
+	}
+
+	quit
+	
+
+zpp1	//
+
+	type Public Number ER,SVID
+	type Public String RM,SVTYP,X
+	
+	type String LSVTYP
+
+
+	// Invalid table value ~p1
+	if X="" set ER=1 set RM=$$^MSG(1485) quit
+
+	// Invalid table value ~p1
+	type ResultSet rs=Db.select("SVTYP,SVID","SVCTRLT","SVTYP=:X","SVID")
+	if X'="*",rs.isEmpty() set ER=1 set RM=$$^MSG(1485,X) quit
+
+	set ER=0 
+	set RM="" 
+	set LSVTYP=SVTYP 
+	set SVTYP=X
+
+	if SVTYP="*" do { quit
+		set SVID="*"
+		do DISPLAY^DBSMACRO("@SVID",SVID)
+		do PROTECT^DBSMACRO("@SVID")
+	}
+
+	if LSVTYP="*" do UNPROT^DBSMACRO("@SVID")
+
+	if (SVID="")!((SVID'="")&(SVID'="*")&('Db.isDefined("SVCTRLT","SVTYP=:SVTYP,SVID=:SVID"))) do {		
+		set SVID=rs.getCol(2)
+		do DISPLAY^DBSMACRO("@SVID",SVID)
+	}
+	quit
+	
+
+zpp2	//
+
+	type Public Number ER,SVID
+	type Public String RM,SVTYP,X
+
+	// Invalid table value ~p1
+	if X="" set ER=1 set RM=$$^MSG(1485) quit
+
+	// Invalid table value ~p1
+	if X'="*",'Db.isDefined("SVCTRLT","SVTYP=:SVTYP,SVID=:X") set ER=1 set RM=$$^MSG(1485,X) quit
+	set ER=0 
+	set RM="" 
+	set SVID=X
+	quit
+	
+
+ztrapm	//
+
+	type Public String vzermsg,vzpkt
+	
+	type Number quit,seq
+
+	catch vError {
+		do ZE^UTLERR
+		write !,"Problem in ztrapm^PBSTST",!!
+	}
+
+	if vzpkt="",vzermsg="CS_TIMEOUT" quit
+
+	do Db.fastDelete("SVTRAP","JOB=:%ProcessID")
+
+	set quit=0
+	do { if quit quit 
+
+		type String ar(),bdy(),hdr(),x,ZPGM
+		
+		set x=$$LV2V^MSG(vzpkt.get(),.ar)
+		set x=$$LV2V^MSG(ar(1).get(),.hdr)
+		set x=$$LV2V^MSG(ar(2).get(),.bdy)
+
+		if ('hdr(2).get().isNull()),($$zchkuid(hdr(2))) do { quit
+			set quit=1
+			type RecordSVTRAP svtrap=Db.getRecord("SVTRAP","JOB=:%ProcessID",1)
+			set svtrap.errormsg=1
+			do svtrap.bypassSave()
+		}
+
+		if hdr(1).get()=0,$$zchknmsp(bdy(1).get()) do { quit
+ 			set quit=1
+			type RecordSVTRAP svtrap=Db.getRecord("SVTRAP","JOB=:%ProcessID",1)
+			set svtrap.errormsg=1
+			do svtrap.bypassSave()
+		}
+
+		type RecordTRAP1 trap1=Db.getRecord("TRAP1","TRAPTYP='PGM'",1)
+		if trap1.trapinfo="" quit
+		set ZPGM=trap1.trapinfo
+		#ACCEPT DATE=12/17/03;PGM=John Carroll
+		xecute ZPGM
+	}
+
+	type RecordTRAP0 trap0=Db.getRecord("TRAP0","PID=:%ProcessID,SEQ=0",1)
+	set seq=trap0.data+1
+	if seq>50 set seq=1
+	
+	set trap0.data=seq_" PBSSRV"
+	do trap0.bypassSave()
+
+	do Db.delete("TRAP0","PID=:%ProcessID AND SEQ=:seq")
+
+	type RecordTRAP0 trap0s=Class.new("RecordTRAP0")
+	set trap0s.pid=%ProcessID
+	set trap0s.SEQ=seq
+	set trap0s.data="M:"_$$DAT^%ZM(%CurrentDate_","_%CurrentTime,"MM/DD/YY 24:60:SS")_"|"_vzermsg
+	set trap0s.message=vzpkt
+	do trap0s.bypassSave()
+
+	quit
+	
+
+ztrapr	//
+
+	type Public String vzpkt,vzcltokn,vzermsg,vzrecord(),vzreply,vzsrvcls,x
+	
+	type Number quit,seq
+	
+	set quit=0
+
+	catch vError {
+		do ZE^UTLERR
+		write !,"Problem in ztrapr^PBSTST",!!
+	}
+
+	type RecordSVTRAP svtrap=Db.getRecord("SVTRAP","JOB=:%ProcessID",1)
+
+	// Ignore if ztrapm said to ignore
+	if svtrap.errormsg quit
+
+	// Ignore network management reply
+	if vzsrvcls.get()=0 do { quit:quit
+		
+		type String ar(),x
+		
+		set x=$$LV2V^MSG(vzrecord(2).get(),.ar)
+		if $$zchknmsp(ar(1).get()) set quit=1
+	}
+
+	if $$zchkuid(vzcltokn.get()) quit
+
+	type RecordTRAP0 trap0=Db.getRecord("TRAP0","PID=:%ProcessID,SEQ=0",1)
+	set seq=trap0.data+1
+	if seq>51 set seq=1
+	
+	set trap0.data=seq_" PBSSRV"
+	do trap0.bypassSave()
+
+	do Db.delete("TRAP0","PID=:%ProcessID AND SEQ=:seq")
+
+	type RecordTRAP0 trap0s=Class.new("RecordTRAP0")
+	set trap0s.pid=%ProcessID
+	set trap0s.SEQ=seq
+	set trap0s.data="R:"_$$DAT^%ZM(%CurrentDate_","_%CurrentTime,"MM/DD/YY 24:60:SS")_"|"_vzermsg
+	set trap0s.message=vzreply
+	do trap0s.bypassSave()
+
+	do Db.delete("SVTRAP","JOB=:%ProcessID")
+
+	quit
+	
+
+zchknmsp(mprc)
+	// mrpc - process code
+	// Skip sign-on messages (by default all nmsp messages are not logged)
+
+	type RecordTRAP1 trap1n=Db.getRecord("TRAP1","TRAPTYP='NMS'",1)
+	if trap1n.trapinfo'=1 quit 1
+
+	// Skip sign-off messages
+	if mprc=0 quit 1
+
+	// Skip heartbeat messages
+	if mprc=2 quit 1
+
+	// Skip change context messages
+	if mprc=3 quit 1
+
+	quit 0
+
+
+zchkuid(mtok)	//
+
+	type String muid
+
+	if mtok.get().isNull() quit 1
+	
+	type RecordTOKEN token=Db.getRecord("TOKEN","TOKEN=:mtok",1)
+	if token.getMode()=0 quit 1
+
+	type RecordTRAP1 trap1=Db.getRecord("TRAP1","TRAPTYP='UID'",1)
+	if trap1.trapinfo'="" set muid=token.uid if muid'=trap1.trapinfo quit 1
+
+	quit 0
+
+
+xtrap	// Index ^ZTRAP entries into XTRAP
+
+	type Public String XTRAP()
+
+	type ResultSet rs=Db.select("PID,SEQ","TRAP0","SEQ>0")
+	
+	if 'rs.isEmpty() while rs.next() do {
+	
+		type Date date
+		type Number i,time
+		type String seq,x,y
+	
+		set x=rs.getCol(1)
+		set y=rs.getCol(2)
+		type RecordTRAP0 trap0=Db.getRecord("TRAP0","PID=:x,SEQ=:y")
+
+		set date=$E(trap0.data,3,10)
+		set time=$E(trap0.data,12,19)
+		
+		set seq=x_"_"_y
+		set XTRAP(date,time,seq)=trap0.data
+		for i=1:400:$L(trap0.message) do {
+			set XTRAP(date,time,seq,(i\400)+1)=$E(trap0.message,i,i+399)
+		}
+	}
+
+	quit
+	
+	
+        //----------------------------------------------------------------------
+REPLAY(SERVER,SEQ)
+	/*
+
+	// Play ZTRAP message via server
+      
+	EXAMPLE:
+        
+        First trap your message:
+        
+        ^ZTRAP(540225842,1)="M:08/14/02 19:18:45|"
+        ^ZTRAP(540225842,1,1)=$C(14,2)_"5"_$C(4)_"3PI"_$C(4)_"102"_$C(2)_"0"_
+                               $C(1)_"D"_$C(29)_"EXECUTE S0016554-58980-58399&
+                               /USING=(CID=800019084,CLS='D')/ROWS=1"_$C(0,0)
+        
+        Then replay the message:
+        
+        GTM>d REPLAY^PBSTST(540225842,1)
+        3PI10206.300-015001!800019084   401     D       DDA     SIGDA,ED        USD
+        
+        ----------------------------------------------------------------------
+        */
+
+	type String FLD,HDR,MSG,P,X
+	
+        // Build message
+	set (MSG,X)=""
+
+	type ResultSet rs=Db.select("MESSAGE","TRAP0","PID=:SERVER and SEQ=:SEQ")
+	if rs.next() set MSG=rs.getCol("MESSAGE")
+
+	// Unwrap message header
+	set P=$$LV2V^MSG(MSG,.FLD)
+	set P=$$LV2V^MSG(FLD(1),.HDR)
+
+	// Make sure Token is signed on
+	type RecordTOKEN token=Db.getRecord("TOKEN","TOKEN=:HDR(2)",1)
+	if token.getMode() do {
+		set token.stat=1
+		do token.bypassSave()
+		}
+
+	// Remove entry from ^MSGLOG
+	do Db.delete("MSGLOG","TOKEN=:HDR(2) and MSGID=:HDR(3)")
+
+	write !
+	ZWR MSG
+	write !,!,!
+
+	// Process message
+	S X=$$PROC^PBSSRV(MSG,"","","","")
+	ZWR X
+
+	quit
+	
+
+vSIG()	quit "60529^23568^Sanjay Chhabria^18402"	// Signature - LTD^TIME^USER^SIZE

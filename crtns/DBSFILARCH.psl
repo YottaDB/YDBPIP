@@ -1,0 +1,562 @@
+private DBSFILARCH( String TBL,		// Table the filer is being generated for
+		    String ARCHTBL,	// Archive Table name
+		    String PSLCODE())	// Filer code to return		/MECH=REFARR:W
+		 
+	/*
+	Filer Archive Code Generator
+	
+	This procedure is part of the filer generator code.  It generates code
+	to be included in filers for tables that are archive enabled, specifically,
+	functions ARCHIVE and ARCHFILE, as documented in the code below.
+	
+	It also provides the function getCHECK to return code to DBSFILB to
+	add the check that a row is not being inserted, updated, or deleted if
+	in an archive file.
+	
+	If this procedure is called the table is archive enabled, either as a
+	primary table or a sub-table.  If a sub-table, the code for section
+	ARCHIVE will not be generated, since all archiving is handled by the
+	primary table.  ARCHFILE will be generated in all cases since it is
+	used to access archived data for both primary and sub-tables.
+	
+	---- Revision History -------------------------------------------------
+	03/01/07 - RussellDS - CR26386
+		   Created.
+
+	-----------------------------------------------------------------------
+	*/
+	
+	type public Number ER		// Typed as Number by DBSFILB
+	type public String RM
+	
+	type List acckeys
+	type Number delim, i, keycnt
+	type String archkey, file, keycode, keys(), keyvals
+	
+	type SchemaTable tblDes = Db.getSchemaTable(ARCHTBL)
+	
+	set delim = tblDes.columnDelimiter
+	set acckeys = tblDes.primaryKeys
+	set keycnt = tblDes.getArchiveKey()
+	set archkey = acckeys.elementAt(keycnt).upperCase()
+	
+	for i = 1:1:keycnt do {
+		
+		type PSLColumn colrec = Db.getSchemaColumn(ARCHTBL, acckeys.elementAt(i))
+		
+		set keys(i) = colrec.column.upperCase()_"|"_colrec.getClass()
+	}
+	
+	set keycode = ""			// Formal parameters
+	set keyvals = ""			// Code to concatenate keys
+	for i = 1:1:keycnt - 1 do {
+		
+		set keycode = keycode_keys(i).piece("|", 2)_" "_keys(i).piece("|", 1)_", "
+		set keyvals = keyvals_keys(i).piece("|", 1)_"_"_delim_".char()_"
+	}
+	
+	set keycode = keycode.extract(1, keycode.length() - 2)
+	set keyvals = keyvals.extract(1, keyvals.length() - (delim.toString().length() + 9))
+	
+	if keyvals.isNull() set keyvals = "0"
+	
+	// Generate code for ARCHIVE^filerPgm if a primary archive table
+	if (TBL = ARCHTBL) do { quit:ER
+		
+		set RM = $$genARCHIVE(.PSLCODE(), tblDes, .keys(), keycnt, keycode, keyvals, archkey)
+		if 'RM.isNull() set ER = 1
+	}
+	
+	do genARCHFILE(.PSLCODE(), tblDes, .keys(), keycnt, keycode, keyvals, archkey)
+	
+	quit
+	
+
+genARCHIVE( String PSLCODE(),	// Filer code to return		/MECH=REFARR:W
+	    PSLTable tblDes,	// Descriptor for archive table
+	    String keys(),	// Key info
+	    Number keycnt,	// Number of keys, through archive key
+	    String keycode,	// Code for key references
+	    String keyvals,	// Code for key values
+	    String archkey)	// Archive key name
+	
+	/*
+	Generate code for ARCHIVE^filerPgm - Archive Data
+	
+	Only generate this code for primary tables.
+	
+	The purpose of this function is to archive selected data
+	from the table associated with the filer program.  The tasks that
+	this function will perform are:
+	
+		- Obtain current archive file, pointed to by environment
+		  variable SCAU_ARCHIVE_CURRENT, to use as target to write
+		  the selected data records
+		    
+		- Write selected records to the archive database, including
+		  the primary table, sub-tables, and related tables.  Because
+		  archiving is only provided for GT.M databases, M commands
+		  will be used to move the data as global nodes, under
+		  #BYPASS directives.  (At least one record will be retained
+		  in the primary database for the main table and related tables.
+		  This is necessary to support collation above the archive key.)
+		    
+		- Delete archived records from the primary database
+		  
+		- Update DBARCHIVEIDX to reflect the archive index information
+		  for both primary and related tables.  (Sub-tables make use of
+		  the primary table index).
+		  
+		- Return count of number of records archived
+	
+	For efficiency, transactions will be committed and the index updated
+	every 100 primary records, unless the table is archived at the top
+	key (keycnt = 1), in which case will do it every archive key level
+	since it's likely a big table.
+	
+	Note that if keycnt = 1, then keycode and keyvals will be 0.  This will
+	occur for tables that are archived on the first key.
+	
+	Interrupt handling for tables with keycnt = 1 is included since these
+	tables do not return to ARCHIVE^DBARCHIVE except when done, since there
+	is no primary record selection.
+	
+	Returns:
+	
+		$$	Error message, if any
+	*/
+	
+	type Boolean ERR
+	type List included
+	type Number acckeycnt, i, maxrecs, nonlits
+	type String acckeys, akeys(), ARCHTBL, code, ERMSG, globkeys, globref
+	type String inclref(), incltbl, lvpm(), tok, WHERE
+	
+	set ARCHTBL = tblDes.table
+	
+	set ERR = false
+	
+	// If archive key is date, use it, otherwise find serial value column
+	if keys(keycnt).piece("|", 2) = "Date" set WHERE = archkey
+	else  do {
+		
+		// If serial column specified, use that, otherwise, use first one
+		type RecordDBUTARCHIVE dbutarch = Db.getRecord("DBUTARCHIVE", "ARCHTBL=:ARCHTBL")
+		
+		set WHERE = dbutarch.srlcol
+		
+		if WHERE.isNull() do {
+		
+			type ResultSet rs = Db.select("DI", "DBTBL1D", "%LIBS='SYSDEV' AND FID=:ARCHTBL AND SRL=1")
+		
+			if rs.next() set WHERE = rs.getCol("DI")
+			else  do {
+			
+				set ERR = true
+				// Archivable tables must have bottom date key or a serial column and cannot be a sub-table of another archivable table
+				set ERMSG = $$^MSG(6891, ARCHTBL)
+			}
+		}
+	}
+	
+	if ERR quit ERMSG
+	
+	// Maximum records to process between commits and index updates
+	if (keycnt = 1) set maxrecs = 1
+	else  set maxrecs = 100
+	
+	/* For tables that are archived on the first key, e.g., the first key is a date, 
+	   the second key of DBARCHIVEIDX is not used.  However, it cannot be null,
+	   therefore it will be set to 0.
+	*/
+	
+	set WHERE = WHERE_" <= :vARCHDATE"
+	
+	if (keycnt > 1) do {
+		
+		type String topwhere
+		
+		set topwhere = ""
+		for i = 1:1:keycnt - 1 do {
+		
+			type String key
+		
+			set key = keys(i).piece("|", 1)
+			if (i > 1) set topwhere = topwhere_" AND "
+			set topwhere = topwhere_key_"=:"_key
+		}
+		
+		set WHERE = topwhere_" AND "_WHERE
+	}
+	
+	// Save at least last record
+	set WHERE = WHERE_" AND "_archkey_"<:vMAX"
+	
+	/* Build the global reference up to the archive key.
+	   Need to deal with possible literals in the global, and, although
+	   highly unlikely, may be comma in a literal so need to tokenize.
+	*/
+
+	for i=1:1:keycnt set lvpm(i_"*") = tblDes.primaryKeys.elementAt(i)
+	set globref = $$getGbl^UCXDD(tblDes, "", .lvpm())
+
+	// Strip leading ^, trailing comma, and add closing parenthesis
+	set globref = globref.extract(2, globref.length() - 1)_")"
+	set globkeys = "("_globref.piece("(", 2, globref.length())
+	
+	// Get tables included to be archived with this table (excluding sub-tables)
+	type RecordDBUTARCHIVE dbutarchive = Db.getRecord("DBUTARCHIVE", "ARCHTBL=:ARCHTBL")
+	
+	set included = {List}(dbutarchive.included)
+	
+	for i = 1:1:included.count() do {
+	
+		type String ref
+		
+		set incltbl = included.elementAt(i)
+			
+		type PSLTable inclDes = PSL.getPSLTable(incltbl)
+		
+		set ref = inclDes.global
+		set ref = ref.extract(2, ref.length()).piece("(", 1)_globkeys
+		
+		set inclref(i) = ref
+	}
+	
+	set code = "public ARCHIVE(String vARCHDIR, Number vARCHNUM, Date vARCHDATE"
+	if (keycnt > 1) set code = code_", "_keycode
+	set code = code_")"
+	
+	do TAG^DBSFILB(.PSLCODE(), code)
+
+	if (keycnt = 1) DO {
+		
+		do ADD^DBSFILB(.PSLCODE(), " type public String %INTRPT()", "", "")
+		do ADD^DBSFILB(.PSLCODE(), "", "", "")
+	}
+
+	do ADD^DBSFILB(.PSLCODE(), " type Boolean vISDONE", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " type Number vI, vN, vRECCNT", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " type "_keys(keycnt).piece("|", 2)_" "_archkey, "", "")
+	
+	set code = " type "_keys(keycnt).piece("|", 2)_" vMAX"
+	for i = 1:1:included.count() set code = code_",vMAX"_included.elementAt(i)
+	do ADD^DBSFILB(.PSLCODE(), code, "", "")
+	for i = 1:1:included.count() do ADD^DBSFILB(.PSLCODE(), " type "_keys(keycnt).piece("|", 2)_" vLAST"_included.elementAt(i)_" = """"", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " set "_archkey_" = """"", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "", "", "")
+	
+	// Get maximum values for main and included tables to ensure keep at least one record
+	do ADD^DBSFILB(.PSLCODE(), " #ACCEPT Date=03/01/07; Pgm=RussellDS; CR=25675; Group=Bypass", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " #BYPASS", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " set vMAX=$O(^"_globref_",-1)", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " if vMAX="""" quit 0", "", "")
+	for i = 1:1:included.count() do ADD^DBSFILB(.PSLCODE(), " set vMAX"_included.elementAt(i)_"=$O(^"_inclref(i)_",-1)", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " #ENDBYPASS", "", "")
+	
+	do ADD^DBSFILB(.PSLCODE(), "", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " type ResultSet rs = Db.select("""_archkey_""", """_ARCHTBL_""", """_WHERE_""", """_archkey_" ASC"")", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " if rs.isEmpty() quit 0", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " set vRECCNT = 0", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " set vISDONE = false", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " for  do { quit:vISDONE", "", "")
+        do ADD^DBSFILB(.PSLCODE(), "", "", "")
+        do ADD^DBSFILB(.PSLCODE(), "  type String vRECS()", "", "")
+        do ADD^DBSFILB(.PSLCODE(), "", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "  for vI = 1:1:"_maxrecs_" do { quit:vISDONE", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "   if rs.next() set vRECS(vI) = rs.getCol("""_archkey_""")", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "   else  set vISDONE = true", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "  }", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "  quit:'vRECS(1).exists()", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "", "", "")	
+	do ADD^DBSFILB(.PSLCODE(), "  do Runtime.start(""BA"")", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "  set vI = """"", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "  for  set vI = vRECS(vI).order() quit:vI.isNull()  do {", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "   set vRECCNT = vRECCNT + 1", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "   set "_archkey_" = vRECS(vI)", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "   // Archive main record and sub-tables. Save index", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "   #ACCEPT Date=03/01/07; Pgm=RussellDS; CR=25675; Group=Bypass", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "   #BYPASS", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "   merge ^|vARCHDIR|"_globref_"=^"_globref, "", "")
+	do ADD^DBSFILB(.PSLCODE(), "   kill ^"_globref, "", "")
+	
+	// Deal with included tables
+	for i = 1:1:included.count() do {
+		
+		set incltbl = included.elementAt(i)
+		
+		do ADD^DBSFILB(.PSLCODE(), "   ;", "", "")
+		do ADD^DBSFILB(.PSLCODE(), "   ; Related table "_incltbl, "", "")
+		do ADD^DBSFILB(.PSLCODE(), "   if "_archkey_"<vMAX"_incltbl_" do", "", "")
+		do ADD^DBSFILB(.PSLCODE(), "   . merge ^|vARCHDIR|"_incltbl_"=^"_inclref(i), "", "")
+		do ADD^DBSFILB(.PSLCODE(), "   . kill ^"_inclref(i), "", "")
+		do ADD^DBSFILB(.PSLCODE(), "   . set vLAST"_incltbl_"="_archkey)
+	}
+	
+	do ADD^DBSFILB(.PSLCODE(), "   #ENDBYPASS", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "  }", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "", "", "")
+
+	do ADD^DBSFILB(.PSLCODE(), "  // Update index for current archive number with last "_archkey, "", "")
+	do ADD^DBSFILB(.PSLCODE(), "  #ACCEPT Date=03/01/07; Pgm=RussellDS; CR=25675; Group=Bypass", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "  #BYPASS", "", "")
+	
+	// Update index for primary table, then included tables
+	do ADD^DBSFILB(.PSLCODE(), "  set vN=$O(^DBARCHX("""_ARCHTBL_""","_keyvals_",""""),-1)", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "  if vN'="""",^(vN)=vARCHNUM kill ^(vN)", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "  set ^DBARCHX("""_ARCHTBL_""","_keyvals_","_archkey_")=vARCHNUM", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "  ;", "", "")
+	
+	for i=1:1:included.count() do {
+		
+		set incltbl = included.elementAt(i)
+		
+		do ADD^DBSFILB(.PSLCODE(), "  if vLAST"_incltbl_"'="""" do", "", "")
+		do ADD^DBSFILB(.PSLCODE(), "   . set vN=$O(^DBARCHX("""_incltbl_""","_keyvals_",""""),-1)", "", "")
+		do ADD^DBSFILB(.PSLCODE(), "   . if vN'="""",^(vN)=vARCHNUM kill ^(vN)", "", "")
+		do ADD^DBSFILB(.PSLCODE(), "   . set ^DBARCHX("""_incltbl_""","_keyvals_","_archkey_")=vARCHNUM", "", "")
+		do ADD^DBSFILB(.PSLCODE(), "   . if "_archkey_"'<vLAST"_incltbl_" set vLAST"_incltbl_"=""""", "", "")
+		do ADD^DBSFILB(.PSLCODE(), "  ;", "", "")
+	}
+	
+	do ADD^DBSFILB(.PSLCODE(), "  #ENDBYPASS", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "  do Runtime.commit()", "", "")
+	
+	
+	/* For tables archived at the top key, need to deal with interrupt handling
+	   here.  Check Interrupt status for stop.  Don't clear %INTRPT if it is a
+	   STOP, since it needs to be carried back to ARCHIVE^DBARCHIVE so that it
+	   knows we were interrupted.
+	*/
+	if (keycnt = 1) do {
+		
+		do ADD^DBSFILB(.PSLCODE(), "", "", "")
+		do ADD^DBSFILB(.PSLCODE(), "  if %INTRPT.data() > 1 do INTRPT^IPCMGR", "", "")
+		do ADD^DBSFILB(.PSLCODE(), "  if '%INTRPT.get().isNull() do {", "", "")
+		do ADD^DBSFILB(.PSLCODE(), "", "", "")
+		do ADD^DBSFILB(.PSLCODE(), "   if %INTRPT = ""STOP"" set vISDONE = true", "", "")
+		do ADD^DBSFILB(.PSLCODE(), "   else  set %INTRPT = """"", "", "")
+		do ADD^DBSFILB(.PSLCODE(), "  }", "", "")
+	}
+
+	do ADD^DBSFILB(.PSLCODE(), " }", "", "")
+	
+	do ADD^DBSFILB(.PSLCODE(), "", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " quit vRECCNT", "", "")
+
+	quit ""
+	
+	
+genARCHFILE( String PSLCODE(),	// Filer code to return		/MECH=REFARR:W
+	     PSLTable tblDes,	// Descriptor for archive table
+	     String keys(),	// Key info
+	     Number keycnt,	// Number of keys
+	     String keycode,	// Code for key references
+	     String keyvals,	// Code for key values
+	     String archkey)	// Archive key name
+	
+	/*
+	Generate code for ARCHFILE^filerPgm - Get Archive File
+	
+	The purpose of this extrinsic function is to return the specific or
+	next/previous archive file based on input.
+	
+	Generated code requires input of table name (varchtbl) since a primary
+	table filer is also responsible for archiving sub-tables, related table
+	(DBUTARCHIVE.INCLUDED), and sub-tables of related tables.
+	
+	Options: 0 -  return archive file the record would be in (null indicates
+		      primary file).  A null value passed in for the archive key
+		      will return the first archive file, if the main keys are
+		      archived, otherwise a null, for the primary file.
+		 1 -  collate forward from given record to find next archive
+		      file.  I.e., what is the next archive file after the file
+		      that this record is/would be in.  Null indicates end of 
+		      archives and now in primary.
+		 -1 - collate backward from given record to find prior archive
+		      file.  I.e., what is the prior archive file before the file
+		      that this record is/would be in.  Null indicates end of 
+		      archives.
+	
+	Returns:
+	
+		Archive file name, or null
+		
+		Expanded file name for the archive global directory to be
+		able to be used in extended references.  E.g. if index value for
+		next archive file is 19, translates environment variable
+		SCAU_ARCHIVE_19, and returns that value.
+		
+		Null if there are no further archives.  If direction is forward,
+		this indicates end of list, primary and then all archives.  If
+		direction is reverse, this indicates done with archives and now
+		in primary file.
+		
+	Note that if keycnt = 1, then keycode and keyvals will be 0.  This will
+	occur for tables that are archived on the first key.
+	*/
+	
+	type Boolean oneTbl
+	type List archincl, archsubs
+	type String ARCHTBL, code, idxtbl, throwcode
+	
+	set ARCHTBL = tblDes.table
+	set archincl = tblDes.getArchiveIncluded()
+	set archsubs = tblDes.getArchiveSubs()
+	
+	if (archsubs.isNull() & archincl.isNull()) set oneTbl = true
+	else  set oneTbl = false
+	
+	set code = "public ARCHFILE(String vARCHTBL, Number vOPTION"
+	if (keycnt > 1) set code = code_", "_keycode
+	set code = code_", "_keys(keycnt).piece("|", 2)_" "_archkey_")"
+	
+	do TAG^DBSFILB(.PSLCODE(), code)
+	
+	do ADD^DBSFILB(.PSLCODE(), " type Number vARCHNUM", "", "")
+	set code = " type String "
+	if 'oneTbl set code = code_"vIDXTBL, "
+	set code = code_"vARCHFILE, vKEYVALS"
+	do ADD^DBSFILB(.PSLCODE(), code, "", "")
+	do ADD^DBSFILB(.PSLCODE(), "", "", "")
+	
+	/* Determine which table's index to use.  Sub-tables of primary use the
+	   primary index.  Related tables use their own.  Sub-tables of related
+	   tables use the related table index.
+	*/
+	
+	set throwcode = "throw Class.new(""Error"", ""%DQ-E-DBFILER,""_$$^MSG(6901, vARCHTBL).replace("","",""~""))" 
+	
+	// Just the primary
+	if oneTbl do {
+		
+		set idxtbl = """"_ARCHTBL_""""
+		
+		set code = " if (vARCHTBL '= """_ARCHTBL_""") "_throwcode
+		do ADD^DBSFILB(.PSLCODE(), code, "", "")
+	}
+	
+	// Check sub-tables, related tables, and subs-tables of related tables
+	else  do {
+		
+		set idxtbl = "vIDXTBL"
+	
+		do ADD^DBSFILB(.PSLCODE(), " // Primary", "", "")
+		do ADD^DBSFILB(.PSLCODE(), " if (vARCHTBL = """_ARCHTBL_""") set vIDXTBL = """_ARCHTBL_"""", "", "")
+
+		if 'archsubs.isNull() do {
+		
+			do ADD^DBSFILB(.PSLCODE(), " // Sub-table of primary", "", "")
+	
+			if (archsubs.count() = 1) set code = " else  if """_archsubs_""" = vARCHTBL set vIDXTBL = """_ARCHTBL_""""
+			else  set code = " else  if {List}"""_archsubs_""".contains(vARCHTBL) set vIDXTBL = """_ARCHTBL_""""
+			do ADD^DBSFILB(.PSLCODE(), code, "", "")
+		}
+		if 'archincl.isNull() do {
+		
+			type Boolean addCmt
+			type Number i
+		
+			do ADD^DBSFILB(.PSLCODE(), " // Included With (related) table", "", "")
+		
+			if (archincl.count() = 1) set code = " else  if """_archincl_""" = vARCHTBL set vIDXTBL = vARCHTBL"
+			else  set code = " else  if {List}"""_archincl_""".contains(vARCHTBL) set vIDXTBL = vARCHTBL"
+			do ADD^DBSFILB(.PSLCODE(), code, "", "")
+			
+			set addCmt = true
+			for i = 1:1:archincl.count() do {
+		
+				type List inclsubs
+				type String incltbl
+				
+				set incltbl = tblDes.getArchiveIncluded().elementAt(i)
+				
+				type PSLTable inclDes = PSL.getPSLTable(incltbl)
+	
+				set inclsubs = inclDes.getArchiveSubs()
+		
+				if 'inclsubs.isNull() do {
+	
+					if addCmt do ADD^DBSFILB(.PSLCODE(), " // Sub-tables of related tables", "", "")
+					set addCmt = false
+					if (inclsubs.count() = 1) set code = " else  if """_inclsubs_""" = vARCHTBL set vIDXTBL = """_incltbl_""""
+					else  set code = " else  if {List}"""_inclsubs_""".contains(vARCHTBL) set vIDXTBL = """_incltbl_""""
+					do ADD^DBSFILB(.PSLCODE(), code, "", "")
+				}
+			}
+		}
+		
+		do ADD^DBSFILB(.PSLCODE(), " // ~p1 is not an archived table", "", "")
+		do ADD^DBSFILB(.PSLCODE(), " else  "_throwcode, "", "")
+	}
+
+	do ADD^DBSFILB(.PSLCODE(), "", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " set vKEYVALS = "_keyvals, "", "")
+	do ADD^DBSFILB(.PSLCODE(), "", "", "")
+	
+	do ADD^DBSFILB(.PSLCODE(), " // Find archive this record would be in", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " if (vOPTION = 0) do { quit vARCHFILE", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " type Number vN", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " #ACCEPT Date=03/01/07; Pgm=RussellDS; CR=25675; Group=Bypass", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " #BYPASS", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " set vN=$O(^DBARCHX("_idxtbl_",vKEYVALS,"_archkey_"-1E-10))", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " if vN="""" set vARCHFILE=""""", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " else  do", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " .  set vARCHNUM=^DBARCHX("_idxtbl_",vKEYVALS,vN)", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " .  set vARCHFILE=$ZTRNLNM(""SCAU_ARCHIVE_""_vARCHNUM)", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " #ENDBYPASS", "", "")
+        do ADD^DBSFILB(.PSLCODE(), " }", "", "")
+        do ADD^DBSFILB(.PSLCODE(), "", "", "")
+	
+	do ADD^DBSFILB(.PSLCODE(), " // Find next/previous archive", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " #ACCEPT Date=03/01/07; Pgm=RussellDS; CR=25675; Group=Bypass", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " #BYPASS", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " if vOPTION=1,"_archkey_"'="""",'$D(^DBARCHX("_idxtbl_",vKEYVALS,"_archkey_")) set "_archkey_"=$O(^DBARCHX("_idxtbl_",vKEYVALS,"_archkey_"))", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " set "_archkey_"=$O(^DBARCHX("_idxtbl_",vKEYVALS,"_archkey_"),vOPTION)", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " if "_archkey_"="""" set vARCHFILE=""""", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " else  do", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " .  set vARCHNUM=^DBARCHX("_idxtbl_",vKEYVALS,"_archkey_")", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " .  set vARCHFILE=$ZTRNLNM(""SCAU_ARCHIVE_""_vARCHNUM)", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " #ENDBYPASS", "", "")
+	do ADD^DBSFILB(.PSLCODE(), "", "", "")
+	do ADD^DBSFILB(.PSLCODE(), " quit vARCHFILE", "", "")
+	
+	quit
+	
+	
+private getCHECK( String TBL,		// Table the filer is being generated for
+		  String ARCHTBL,	// Archive Table name
+		  String RECNAME)	// Name of record object
+		  
+	/*
+	Return code to DBSFILB that will check to make sure that an insert,
+	update, or delete is not occuring to a record in an archive file.
+	*/
+	
+	type List acckeys
+	type Number i, keycnt
+	type String code, archkey
+		  
+	type SchemaTable tblDes = Db.getSchemaTable(ARCHTBL)
+	
+	set acckeys = tblDes.primaryKeys
+	set keycnt = tblDes.getArchiveKey()
+	set archkey = acckeys.elementAt(keycnt).upperCase()
+	
+	set code = "$$ARCHFILE^"_tblDes.filerPGM_"("""_TBL_""",0,"
+	
+	for i = 1:1:keycnt - 1 set code = code_RECNAME_"."_acckeys.elementAt(i).lowerCase()_","
+	set code = code_RECNAME_"."_archkey_")"
+	
+	quit code
+
+vSIG()	quit "60750^67304^Dan Russell^21144"	// Signature - LTD^TIME^USER^SIZE

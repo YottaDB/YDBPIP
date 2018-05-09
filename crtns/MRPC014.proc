@@ -1,0 +1,441 @@
+MRPC014(return,versn,CID,enddate,maxrec,data,header)	
+	
+	/*
+	   ORIG: GORMAN / CANFIELDS - 02/14/97
+
+	   Processor returns a list of projected transactions for a loan
+	   
+	   Projected transactions - disbursements, payments, fees,
+	   etc. anticipated into the future based on current
+	   known processing characteristics.
+
+	   Loan - Either an existing account in the loan portfolio, or
+	   a non-existent loan modeled with processing
+	   characteristics of a existing product.
+
+	   If an existing loan, the function may or may not
+	   permit updates to any number of processing
+	   characteristics before the amoritzation schedule is
+	   prepared.  This capability enables the bank to answer
+	   questions such as, "How will the amortization of my
+	   loan be affected by a $50 increase in the amount I
+	   pay each month."
+
+	   KEYWORDS: Client/Server, Loan Utilities
+
+	   ARGUMENTS:
+
+	   . return	 Activity detail
+
+	   . versn	 ^MRPC014 version number  	/TYP=N/REQ
+	   		 Current version = 1  		/MECH=VAL
+
+	   . CID 	 Account number   		/TYP=N/REQ
+	         					/MECH=VAL
+
+	   . maxrec	 Maximum number of records  	/TYP=N/NOREQ
+	    		 to return                	/MECH=VAL
+					       		/DFT=999
+
+	   . enddate	 Calculate through date  	/TYP=D/NOREQ
+	         					/MECH=VAL
+	    		 A value of -1 indicates that
+	    		 the utility should not
+	    		 return the list of projected
+	    		 transactions.  It is instead
+	    		 used, for example, for new
+	    		 account "preview" purposes.
+
+	   . data 	 Non-existent accounts:
+
+	    		 SQL insert statements 		/TYP=T/MECH=VAL
+	    		 for tables:
+
+	    		 ln and relcif 			/REQ
+	    		 lnps1 and lnds1 		/NOREQ
+
+	    		 Existing accounts:
+
+	    		 SQL update statements 		/TYP=T/MECH=VAL
+	    		 for tables:
+
+	    		 ln  				/REQ
+	    		 lnps1 and lnds1 		/NOREQ
+
+	   RETURNS:
+	  	 . $$	 Error message   		/TYP=T
+	   		 Null = No error
+
+	   RELATED:
+	  	 . $$^PBSMRPC - MRPC Service Class Driver
+
+	   EXAMPLE:
+	  	 Text of example (line one)
+
+	---- Revision History ------------------------------------------------
+	
+	08/16/06 - Ravindra Rathi - CR 22093
+	           Modified the variable SID to %SessionID in section BLDRPLY
+	           as the session was getting expired.Also modified the SQL query 
+	           to select records >=TSEQ while setting 'more' variable in section 
+	           BLDRPLY.The variable 'more' was wrongly set to 1 indicating there 
+	           were more records to be returned. 
+	           
+	07/10/06 - RussellDS - CR22121
+		   Modified length checking against 31000 to consider bytes,
+		   not characters to be Unicode compliant.
+
+	03/21/06 - S.Krishnan - CR 20122
+		   Replaced TMPRPT2 with TMPRPT3 table.
+
+	03/09/06 - S.Krishnan - CR 19711
+		 . Modified the Catch Block in the MRPC014 section to
+		   RollBack Database changes for PSL errors.
+		 . The section PROJTRAN is removed and the code of the 
+		   PROJTRAN section is moved to the section MRPC014^MRPC014
+		   where the section is actually called from.
+		 . Modified to use the TMPRPT4 table instead of TMPRPT3.
+		 . Instantiated the ln record to avoid undefined error
+		   for the New Loan Account Projections.
+		 		 		   
+	02/02/06 - S.Krishnan - CR16885
+	         . Replaced TMPRPC14 and TMPRPC14D with TMPRPT1 and TMPRPT2
+		   table usage respectively.
+		 . Made BLDRPLY section as private.
+		 . Modified to always use the TMPRPT3 table instead of TMP(,,).
+  	         . Replaced the ^UFRE call with .nextFreqDate() method in
+  	           the PROJTRAN section.
+		 . Removed the quit following the Runtime.rollback() calls 
+		   from the section MRPC014^MRPC014 and the PROJTRAN^MRPC014.
+		 . Initialized the variable 'more' with 0 to avoid undefined error
+		   if the record does not exist.
+		 . Modified the section MRPC014, by passing an additional parameter
+		   enddate while calling LOAD^LNCAL21.	    
+		  
+	05/24/05 - RussellDS - CR16071
+		   Converted M TP commands to PSL Runtime methods.
+		   
+		   Removed old revision history.
+
+	-----------------------------------------------------------------------
+	*/
+
+	new cnt,hdrdata,orgcid,quit,unlock
+	type public Boolean ER
+	
+	catch vERROR { 
+        	new ET,RM 
+	        set ET=vERROR.type 
+
+		if ET["%GTM-" do ZE^UTLERR quit 
+
+		set ET=ET_"-"_vERROR.thrownAt 
+		set RM=vERROR.description 
+
+		do Runtime.rollback()
+		do ^UTLERR
+		}
+
+
+	set hdrdata=""
+	set enddate=enddate.get()
+
+	// Version number of client message is not compatible with server
+	if $G(versn)'=1 quit $$ERRMSG^PBSUTL($$^MSG(2951))
+
+	// Default number of return records to 999 (unlimited)
+	if $G(maxrec)<1 set maxrec=999
+
+	/* End TP session initiated by server.  If not done, ^TMPRPT1(%TOKEN)
+	   is only deleted (next instruction) until TROLLBACK done in this
+	   routine.
+        */
+	if $TLEVEL do Runtime.rollback()
+
+	// Ensure that temporary reporting file is empty
+	set SID=%SessionID
+	do Db.delete("TMPRPT1","PID=:%ProcessID AND KEY1=:SID")
+	do Db.delete("TMPRPT3","PID=:%ProcessID AND KEY1=:SID")
+
+	type RecordLN ln
+	
+	// Ensure that account is not locked by another user
+	if CID'=999999999999 lock +ACN(CID):0 else  set ET="RECLOC" quit $$ERROR
+
+	// Ensure that account is valid
+	if CID'=999999999999 do { if ER set ET="INVLDACN" quit $$ERROR
+
+		/*  
+		following only occurs if not coming here from PFW account
+		create.  The -1 value is only sent from PFW create account
+		to indicate account preview only (no amort schedule).
+		*/
+	
+		if enddate'=-1 do { quit:ER
+		        set ln=Db.getRecord("LN","CID=:CID",1)
+		        if ln.cls'="L" set ER=1 quit:ER			
+			}
+		}
+
+	/*			
+	If modeling a non-existent account, client will send account
+	number 999999999999.  If already locked, because function
+	is in use elsewhere, change to available account number.
+	*/
+	new cnt
+	set orgcid=CID 
+	set quit=""
+	if CID=999999999999 for CID=CID:-1 do { Q:quit
+		lock +ACN(CID):0 else  quit
+
+		// Use this account number
+		set quit=1
+
+		// SQL does not have to change if account number has not changed.
+		if CID'=999999999999 do {
+			set data=$$CONVSQL(data)
+			set header=$$CONVSQL(header)
+			}
+		}
+
+	
+	/* 
+	Account will be "created" temporarily for the purpose of this
+	analysis.  TP fence earmarks these updates for later rollback.
+	*/
+	
+	do Runtime.start("CS")
+
+	/* System is busy.  Cannot produce this schedule.  Try again later.
+	   Cannot produce this schedule. System is busy. Try again later.
+        */
+	if $TRESTART>3 set RM=$$^MSG(1600) quit $$ERROR
+
+	// Parse client insert commands and pass to SQL input utility
+	set ER=$$SQLDATA(CID,data,header) if ER quit $$ERROR
+	
+	
+	// Account now "exists", or has been "updated".
+	set ln=Db.getRecord("LN","CID=:CID",1)
+	
+	/* 
+	Build transaction file
+	Errors encountered when anticipating transaction activity.  Report the following error: ~p1
+	*/
+	
+	do { if ER set RM=$$^MSG(999,RM) set ET="" quit $$ERROR
+		// Build file of projected transactions
+
+		new A,data,DATE,ETC,header,maxrec,SEQ,TMP,TMP1,TMP2,TMPSEQ
+		type public Boolean ER
+		/* 
+		If through date is not passed, default to either maturity date
+		(closed end loans) or one year from current date (open end loans)
+		*/
+	
+		if 'enddate do { quit:ER
+			set enddate=ln.mdt
+			if enddate="" set enddate=%SystemDate.nextFreqDate("1YA") quit:ER
+			}
+
+		// Build projected transaction array
+		if enddate'=-1 do LOAD^LNCAL21(.ln,.enddate)
+
+		// Exit if transaction builder returned error
+		if $G(ER) quit
+
+		// Store transaction file in temporary global
+		set (DATE,SEQ,ETC,TMPSEQ)=""
+	
+		type DbSet ds=Db.selectDbSet("TMPRPT4","PID=:%ProcessID","KEY2")
+
+		while ds.next() do {
+        		type RecordTMPRPT4 tmprpt4=ds.getRecord("TMPRPT4")
+	
+			type String TMPRC
+			set CID=tmprpt4.key1
+	                set DATE=tmprpt4.key2
+	                set SEQ=tmprpt4.key3
+	                set ETC=tmprpt4.key4
+	                set TMPRC=tmprpt4.data
+	        	set TMP1=TMPRC
+	        	
+			// Replace null values with zeroes
+			for I=1:1:5 do {
+				set TMP1.piece("|",I)=+TMP1.piece("|",I)
+				}
+			// Replace "|" delimiter with TAB
+			set TMP1=TMP1.translate("|",$C(9))
+		
+			type String TRNDT,TRDESC,TAMT,TXNINT,TXNPRN,TXNBAL,SUBSIDY,TXNREC
+		
+			// Re-format into reply message structure
+			type RecordTRN trn=Db.getRecord("TRN","ETC=:ETC",1)
+			set TMP=$$TRDESC^LNCAL20(.trn,ETC)
+			set TMPSEQ=TMPSEQ+1
+
+			set TRNDT=DATE
+			set TRDESC=TMP
+			set TAMT=TMP1.piece($C(9),1)
+			set TXNINT=TMP1.piece($C(9),2)
+			set TXNPRN=TMP1.piece($C(9),3)
+			set TXNBAL=TMP1.piece($C(9),4)
+			set SUBSIDY=TMP1.piece($C(9),5)	
+			set TXNREC=TRNDT_$C(9)_SEQ_$C(9)_TRDESC_$C(9)_TAMT_$C(9)_TXNINT_$C(9)_TXNPRN_$C(9)_TXNBAL_$C(9)_SUBSIDY
+		
+			type RecordTMPRPT3 tmprpt3=Class.new("RecordTMPRPT3")
+			set tmprpt3.PID=%ProcessID
+			set tmprpt3.KEY1=%SessionID
+			set tmprpt3.KEY2=TMPSEQ
+			set tmprpt3.KEY3=TRNDT
+			set tmprpt3.data=TXNREC
+			do tmprpt3.bypassSave()
+			}
+		}
+		
+	// Build reply message
+	do BLDRPLY(maxrec,hdrdata,enddate)
+
+	// Reverse account filing
+	if $TLEVEL do Runtime.rollback()
+
+	// Unlock temporary account number used for modeling
+	lock -ACN(CID)
+
+	quit ""
+
+
+SQLDATA(CID,data,header)	// Private; Manage SQL statements
+
+	new buf,maxrec,quit
+	type public Boolean ER
+	
+	set (ER,quit,buf)=""
+
+	if $G(data)'="" do { quit:ER 1
+
+		set quit="" for sqlstmt=1:1 do { quit:quit!(ER)
+	
+			// SQL statements are delimited with "|^|" characters
+			set stmt=$P(data,"|^|",sqlstmt)
+			if stmt="" set quit=1 quit
+
+			/* 
+			Buffer SQL stmts to ensure referential integrity,
+			and submit statement received from client
+			*/
+			//I18N=OFF
+	
+			set buf="BUFFER "_$S(sqlstmt>1:"ADD ",1:"NEW ")_"MRPC014"
+			set ER=$$^SQL(buf_" "_stmt) quit:ER
+			//I18N=ON
+	
+			}
+
+		if ER quit
+
+		set ER=$$^SQL("BUFFER COMMIT MRPC014")
+
+		}
+	
+	// Contruct report header data
+	if $G(header)'="" set ER=$$^SQL(header,,,.hdrdata)
+
+	quit ER
+
+
+SQL(stmt)	// Private ; Submit SQL statements
+
+	type public Boolean ER
+	
+	set ER=0
+	set X=$$^SQL(stmt)
+	quit ER
+
+
+CONVSQL(sql)	// Private ;Convert 999999999999 to new acid in SQL statements
+
+	new part1,part2
+	for  quit:'$F(sql,orgcid)  do {
+
+		set part1=$P(sql,orgcid,1)
+		set part2=$P(sql,orgcid,2,99)
+		set sql=part1_CID_part2
+
+		}
+
+	quit sql
+
+private BLDRPLY(count,hdrdata,enddate)	//Private;Build reply message
+
+	/*
+
+	Called by above and companion routine MRPC040 which is used to
+	return additional records.
+
+	   count = maximum number of records to return
+
+	*/
+	new fld,last,more,mxlength,record,string,TSEQ
+	
+	// Maximum string length, allowing buffer for extraneous information
+	set mxlength=31000-hdrdata.get().toByteString().length()
+
+	set (string,return)=""
+	
+	// Find sequence number of last transaction reported
+	type RecordTMPRPT1 tmprpt1=Db.getRecord("TMPRPT1","PID=:%ProcessID,KEY1=:%SessionID",1)
+	set (last,TSEQ)=+tmprpt1.data
+
+	type ResultSet rs=Db.select("KEY2,KEY3","TMPRPT3","PID=:%ProcessID AND KEY1=:%SessionID AND KEY2>:TSEQ","KEY3")
+
+	while rs.next() do { quit:count<1
+		set TSEQ=rs.getCol("KEY2")
+		set TRNDT=rs.getCol("KEY3")
+		type RecordTMPRPT3 tmprpt3=Db.getRecord("TMPRPT3","PID=:%ProcessID,KEY1=:%SessionID,KEY2=:TSEQ, KEY3=:TRNDT",1)
+		set record=tmprpt3.data
+
+		set mxlength=mxlength-record.toByteString().length()
+		if mxlength<0 set count=-1 quit
+
+		set string=string_record_$C(13)_$C(10)
+		set count=count-1
+		set last=TSEQ
+		}
+
+	// Are there records which have not been returned (0=no, 1=yes)
+	set more=0
+	type ResultSet rs1=Db.select("KEY2","TMPRPT3","PID=:%ProcessID AND KEY1=:%SessionID AND KEY2>=:TSEQ","KEY2")
+	if rs1.next() set more=last'=rs1.getCol("KEY2")
+	
+	// Store the last sequence processed
+	set tmprpt1=Db.getRecord("TMPRPT1","PID=:%ProcessID,KEY1=:%SessionID",1)
+	set tmprpt1.data=last
+	do tmprpt1.bypassSave()
+
+	// Header data reflecting user changes
+	set fld(1)=hdrdata.get()
+
+	// Through date - may have been computed here
+	set fld(2)=enddate.get()
+
+	// Transaction detail
+	set fld(3)=string
+
+	// Indicator of whether or not more transactions
+	set fld(4)=more
+
+	set return=$$V2LV^MSG(.fld,"",0)
+
+	quit
+
+
+ERROR()	//Private;Error handling
+
+	if $TLEVEL do Runtime.rollback()
+
+	if $G(unlock),$G(CID) lock -ACN(CID)
+
+	quit $$ERRMSG^PBSUTL($G(RM),$G(ET))
+
+vSIG()	quit "60499^28844^Ravindra Rathi^11578"	// Signature - LTD^TIME^USER^SIZE

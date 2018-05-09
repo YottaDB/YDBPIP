@@ -1,0 +1,361 @@
+BCHYIELD //Batch BCHLNNETYIEL - Periodic Recalc Of Net Investment Yield
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 01/31/2007 12:46 - shetyes
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHLNNETYIEL Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ set vBCHSTS=$$STATUS^BCHUTL("BCHLNNETYIEL")
+ if vBCHSTS=1 set ER=1,RM=$$^MSG(3410) quit
+ if vBCHSTS=2 set ER=1,RM=$$^MSG(3414) quit
+ if vBCHSTS=0 set %BatchRestart=1
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit do EXIT^BCHUTL("BCHLNNETYIEL") quit
+ do JOBMGR^BCHUTL(%FN,"BCHLNNETYIEL",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ do EXIT^BCHUTL("BCHLNNETYIEL")
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(CID,TYP) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHLNNETYIEL","*","",CID.get()_","_TYP.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ if %BatchRestart,$$CHKLOG^BCHUTL(%SystemDate,%FN,"BCHLNNETYIEL",CID.get()_","_TYP.get()) do { quit
+ do LOG^BCHUTL(%SystemDate,%FN,"BCHLNNETYIEL",CID.get()_","_TYP.get(),"Record already processed")
+ }
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,CID,TYP)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHLNNETYIEL","*","",CID.get()_","_TYP.get(),"",et)
+ }
+ do UPDLOG^BCHUTL(%SystemDate,%FN,"BCHLNNETYIEL",CID.get()_","_TYP.get(),vCONTEXT)
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,CID,TYP) //
+	do PROCESS
+	
+	quit
+	
+
+PROCESS
+	// Reset next net investment yield for non-P+I loans which
+	// use the interest method
+	type public Number CID
+	type public String ET
+
+	type Number CF(), BAL
+
+	type RecordLN ln = Db.getRecord("LN", "CID = :CID")
+
+	// No Capitalized Points, Unable To Process
+	if 'ln.ptsp set ET = $$^MSG(8452) do EXC quit
+
+	do MODELLN(.ln)
+	
+	quit
+	
+
+MODELLN(RecordLN ln)	// Entry point from both modeling and batch
+
+	type public Date SCHLD
+	type public Number ACR, AMBAS, BAL, BASE, CALBAL, CID, DIST1AF, ER, IRN, IRR
+	type public Number NSIP, SCALBAL, SING
+	type public String %PR(), CF(), DIST1FRE, ET, PCMP(), RM
+	
+	type Boolean AMOPT, KILLCF
+
+	set DIST1FRE = ln.dist1fre
+	set ER = 0
+	set IRR = 0
+	
+	if (ln.stat = 4) do {
+		
+		// Account Closed, Unable To Process
+		set ET = $$^MSG(8449)
+		
+		do EXC
+		}
+	
+	set BAL = +ln.bal
+	if ln.aruf set BAL = BAL - ln.udbal
+	
+ 	type RecordLNCYCPTS lncycpts = Db.getRecord("LNCYCPTS", "CID = :CID, TYP = 'PTS'")
+	
+ 	// If the fee balance is zero, there's no reason to continue
+	if ((lncycpts.amt - lncycpts.caltd) = 0) do { quit
+		
+		// Net deferred fees fully amortized. No further calculations necessary.
+		set ET = $$^MSG(4520)
+		
+		do EXC
+		}
+	
+	if 'BAL do { quit
+	
+		// No Ledger Balance, Unable To Process
+		set ET = $$^MSG(8450)
+		
+		do EXC
+		
+		if (SING '= 2) do UPDATE(.lncycpts)
+		}
+	
+	set AMBAS = +ln.ambas	
+	set ACR = +ln.acr
+	set IRN = +ln.irn 
+
+	// Zero int/div rate. No recalculation.	
+	if 'IRN set ET = $$^MSG(4021) do EXC quit
+	
+	set SCHLD = +ln.schld
+	set DIST1AF = +ln.dist1af
+	
+	// Pmt Calc Method Parameter array
+ 	if 'PCMP(ln.pcm).exists() do {
+ 		
+		type RecordSTBLPCM stblpcm = Db.getRecord("STBLPCM", "KEY = :ln.pcm")
+		
+		set PCMP(ln.pcm) = stblpcm.pcmp
+		}
+
+	set SCALBAL = BAL + ACR
+	
+	if ln.iam set SCALBAL = (SCALBAL - ln.iun) + ln.ipl
+	
+	// Set up %PR data needed by LNCFB* procedures
+	set %PR(1) = "I|1|1"
+	set %PR(2) = "P|1|1"
+	
+	// Build updated CF array
+	set BASE = SCALBAL
+	
+	// This flag is used by LNCFB* procedures
+	set KILLCF = 1
+	
+	// P+I Loans
+	if PCMP(ln.pcm).extract() do PCH^LNCFBLD(.ln, %EffectiveDate) if 1
+	
+	// Payment Schedule Loans
+	else  if (DIST1FRE = "*") do NEW^LNCFBLDP(.ln) if 1
+	
+	// Rev Credit Loans
+	else  if (PCMP(ln.pcm).extract(3) = 4) do PCH^LNCFBLDR(.ln) if 1
+	
+	// Other Loans
+	else  do PCH^LNCFBLDI(.ln)
+
+	// Unable to Recalculate Net Investment Yield
+	if ER set ET = $$^MSG(4020) do EXC quit
+	
+	// Calculate new net investment yield
+	set CALBAL = SCALBAL
+	
+ 	set CF(0) = "-"_(CALBAL - (lncycpts.amt - lncycpts.caltd))
+ 	
+	// No Cash Flow Created, Unable To Process
+	if 'CF(1).exists() set ET = $$^MSG(8451) do EXC quit
+
+	set IRR = $$^UIRR(.CF, DIST1FRE, ln.piacm, ln.iacm, SCHLD)
+
+	// Unable to Recalculate Net Investment Yield
+	if ER set ET = $$^MSG(4020) do EXC quit
+	
+	// Convert payment schedule to annual
+	if (DIST1FRE = "*"), IRR set IRR = $$^DEPCALC("F7", 365, (IRR / 36500), 100, 0, "", 5) - 100
+	
+ 	set lncycpts.rate = IRR
+	
+	set ER = 0
+	
+	if (NSIP.get() = 1) do {
+		
+		type Date JD
+		type Number C, N, AF
+		
+ 		// Calculate Annual Factor
+ 		set JD = lncycpts.nxadt.nextFreqDate(lncycpts.freq,.AF) quit:ER
+		
+		set (C,N) = 0
+		for  set C = CF(C).order() quit:C.isNull()  set N = N + CF(C).piece("|",2)
+		
+		set N = ((N / DIST1AF) * AF).roundDec(0)
+		
+		if AMBAS, (N > AMBAS) quit
+		
+ 		set lncycpts.term = N
+		}
+
+	// Next Recalc Date Not Set, Frequency Error
+	if ER set ET = $$^MSG(8247) do EXC quit
+	
+	if (SING '= 2) do UPDATE(.lncycpts)
+	
+	quit
+	
+	
+UPDATE(RecordLNCYCPTS lncycpts)
+
+	type public Number ER
+	type public String ET
+	
+	type Date NJD
+
+ 	set NJD = lncycpts.rynd.nextFreqDate(lncycpts.ryfre)
+
+	// Next Recalc Date Not Set, Frequency Error
+	if ER set ET = $$^MSG(8247) do EXC quit
+
+  	set lncycpts.ryld = lncycpts.rynd
+  	set lncycpts.rynd = NJD
+	
+	do lncycpts.bypassSave()
+	
+	quit
+
+	
+EXC	// File Dayend exceptions
+
+	type public Number BAL, CID, SING
+	type public String ET, ZE
+	
+	type String DESC
+
+	if (SING.get() = 2) quit
+
+	set ET = ET.get()
+	set ZE = $$ETLOC^%ZT
+	
+	// Error In Calculation - Account Not Reset
+	if ET.isNull() set ET = $$^MSG(4012)
+
+	// Recalculate Loan Net Investment Yield Processing
+	set DESC = $$^MSG(7122)_"|1"
+	
+	do LOG^UTLEXC($T(+0), "*", DESC, CID.get(), ZE, ET, +BAL.get())
+	
+	quit
+	
+	
+public SING	// Calculate new rate for one account
+
+	type Number BAL, SING
+	type String ERRM
+	
+	set BAL = 0
+	set SING = 1
+	
+	if %EffectiveDate.get().isNull() set %EffectiveDate = %SystemDate
+	
+	do PROCESS
+	
+	quit	
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,CID,TYP
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set CID=vRECORD.piece($C(9),1)
+ set TYP=vRECORD.piece($C(9),2)
+ do vPROC(CID,TYP)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,CID,TYP
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>32767 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+22>32767 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("CID,TYP","LNCYCPTS","RYND=:TJD and (AMT-CALTD)<>0")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	type public Number SING = 0
+
+	set %EffectiveDate = %SystemDate
+	
+	quit
+	
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

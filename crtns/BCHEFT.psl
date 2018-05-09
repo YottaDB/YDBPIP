@@ -1,0 +1,1839 @@
+BCHEFT //Batch BCHEFT - Electronic Funds Transfer
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 08/30/2007 15:07 - joynerd
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHEFT Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit quit
+ do JOBMGR^BCHUTL(%FN,"BCHEFT",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(CID,SEQ) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHEFT","*","",CID.get()_","_SEQ.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,CID,SEQ)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHEFT","*","",CID.get()_","_SEQ.get(),"",et)
+ }
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,CID,SEQ) //
+	/*
+	 Variables being passed to this section are CID,SEQ.
+	 Variable EFTTYPE will need to be defined in SCHEXEC.
+	*/
+
+	/*
+	 TRollback TP logic at batch level.  Place TP around each individual
+	 transaction.
+	*/
+
+	if $TLevel do Runtime.rollback()
+
+	new BAL,TTXPTR
+	set EFTDAT=%SystemDate
+
+	if 'Db.isDefined("ACN","CID"),'Db.isDefined("GLAD","CID") do { quit
+		// Invalid account ~p1
+		set ER=1,RM=$$^MSG(1259)
+		do EXC
+		}
+
+	catch error {
+		new ER,FROM
+		set ER=1,RM=error.type_", "_error.description
+		if error.type["%GTM-" do ZE^UTLERR
+		set FROM=error.thrownAt
+		do EXC
+	}
+
+	set PSEQ=""
+	type ResultSet rs=Db.select("SEQ","EFTPAY","CID=:CID and PROCDT=:EFTDAT and EFTTYPE=:EFTTYPE and STATUS NOT LIKE '%C%'")
+	if rs.isEmpty() quit
+	while rs.next() do {
+		set PSEQ=rs.getCol(1)
+		// new EFT Type for this thread and Set up CTBLEFTTYPE variables
+		if '$D(types(EFTTYPE,"ONTHEM")) do ptyp(EFTTYPE)
+		do Runtime.start("BA")
+		do PROC(%SystemDate,EFTTYPE,CID,PSEQ,0,0)
+		if ER,$TLevel do Runtime.rollback() quit
+		do Runtime.commit()
+		}
+
+	if ER quit
+
+	quit
+
+
+PROC(Date EFTDAT,	//Process Date
+	String EFTTYPE,	//EFT Payment Type
+	Number CID,	//Account Number			
+	Number PSEQ,	//EFTPAY Order Sequence
+	Boolean EFTMODE,	//ONLINE event flag	
+	Number CTLPRJ,	//Cash flow mode for interest projections
+	RecordTTX ttxeft)	//Transaction Array 
+
+	/*
+	 Process payment system record
+
+	 ARGUMENTS
+		. EFTDAT	Process Date
+		. EFTTYPE	EFT Payment Type
+		. CID		Account Number
+		. PSEQ		EFTPAY Order Sequence
+		. EFTMODE	Specify if this is an ONLINE
+				event.   0=BATCH, 1=ONLINE
+		. CTLPRJ	Cash flow mode for interest projections
+	*/
+
+	new efttype,fACN,onus,reg,tcmtcr,tcmtdr
+	new %FILE,BCRCD,CUSTCD,DSEQ,EFTOUT,MULT,OCC,PBK
+	new RATE,RETFL,RJ,SPR,SPV,SUPSCO,TAMT,TR,TRESREF,TSO,TSPV,VDT,X,XAMT
+
+	catch error2 {
+		new ER,FROM
+		set ER=1,RM=error2.type_", "_error2.description
+		if error2.type["%GTM-" do ZE^UTLERR
+		set FROM=error2.thrownAt
+		do EXC
+	}
+
+
+	set (BCRCD,CUSTCD,EFTOUT,MULT,RATE,SPR,TRESREF,XAMT)=""
+	set (ER,SUPSCO)=0
+
+	if 'Db.isDefined("EFTPAY","CID,PSEQ") set ER=1,RM="RECNOF" do EXC set ER=0 quit
+
+	type RecordEFTPAY eftpay
+	set eftpay=Db.getRecord("EFTPAY","CID,PSEQ")
+
+	// Do not process if record is already completed, deleted or suppressed.
+	if eftpay.status'="A",eftpay.status'="Y",eftpay.status'="PR",eftpay.status'="PP",eftpay.status'="RFE",eftpay.status'="RIF" quit
+
+	/*
+	 ASSERT: Only the following Status values will be processed:
+
+		 A	- Added
+		 Y	- Retry
+		 PR	- Pending Review
+		 PP	- Partial Payment
+		 RFE	- Reject Formal Error
+		 RIF	- Reject Insufficient Funds
+	*/
+
+	do eftpay.setAuditFlag(1)
+
+	// Repost from EFTPAY - AFT_UPD_PARTAMT trigger
+	if $G(REVIEW)=1,eftpay.status="PR",eftpay.repost=1 do {
+		set eftpay.status="A"
+		set eftpay.repost=""
+	}
+
+	// Protect CTBLEFTTYPE values that can be reset by section setup
+	set X=fincl new fincl set fincl=X
+	set X=rev new rev set rev=X
+	set X=preauth new preauth set preauth=X
+
+	// Set up variables
+	do setup(.eftpay,.fincl,.onus,.reg,.rev,.preauth)
+
+	Type RecordEFTOUT eftout
+	set eftout=Class.new("RecordEFTOUT")
+
+	if ER do EXC,STAT(.eftpay,.eftout) quit			// Log error
+
+ 	// Partial Payments.
+	if (eftpay.status="PR")!(eftpay.status="PP") do PARTPMT(.eftpay) quit
+
+	set tcid=eftpay.recacct
+
+	/*
+	 $$DEBCHECK may set the following 3 variables from table DEBAUT:
+	 bgtseq,bgtbill,bgtcid
+	*/
+	new bgtseq,bgtbill,bgtcid
+	set bgtseq=eftpay.bgtseq
+	set bgtbill=eftpay.blaccnbr
+
+	/*
+	 Perform a debit authorization check.  If a debit authorization
+	 is required and no debit authorization exists, or it is
+	 insufficient, quit.
+	*/
+	if $$DEBCHECK^EFTFUNCS(.eftpay,onus,.bgtseq,.bgtbill,.bgtcid) do EXC,STAT(.eftpay,.eftout) quit
+
+	/*
+	 Suppress SCO (standing collection order) ?
+
+	 First, check EFTPAY.OVSTOP.  If the value is "Y" then
+	 the system will bypass the Collection Order Stop Type
+	 functionality and process the collection order as normal.
+	*/
+	if eftpay.ttype<2,eftpay.ovstop'=1,(STBLEFT="SCO")!(STBLEFT="CO") set SUPSCO=$$SUPSCO(.eftpay)
+	if SUPSCO do { quit
+		set ER=1
+		do eftpay.setAuditFlag(1)
+		set eftpay.status="SUP"
+		do STAT(.eftpay,.eftout) quit
+	}
+
+	if ER set TAMT="" do EXC,STAT(.eftpay,.eftout) quit
+
+	set TSO=$$settso(.eftpay)
+
+	do TRANS(.eftpay,TSO,.XAMT,.eftout,.ttxeft)
+
+	// fromtran indicates a Standard Exception entry has been logged
+	if ER,$G(fromtran)'=1 do EXC
+
+	do STAT(.eftpay,.eftout)
+
+	if $L(XAMT,"|")>1 do XCO(.eftpay)
+
+	quit
+
+
+XCO(RecordEFTPAY eftpay)
+
+	/*
+	 Set up a collection order for each additional bill
+
+	 For each additional outstanding bill create a collection order.
+	 The additional orders for each outstanding bill record will be 
+	 one-time standing collection orders that are copies of the 
+	 original order, using an Amount Type of 1 (Fixed) and an 
+	 Expiration Date equal to the original order's Process Date 
+	 (today's System Date).
+	*/
+
+	new I
+	set eftpay.amttyp=1
+	set eftpay.expdt=%SystemDate
+
+	for I=2:1:$L(XAMT,"|") do {
+		set eftpay.amount=$P(XAMT,"|",I)
+		new I	// Protect I
+		do create(.eftpay,eftpay.efttype,eftpay.efd,eftpay.procdt)
+		}
+	quit
+
+
+TRANS(RecordEFTPAY eftpay,	//Electronic Payment record
+	String TSO,		//Transaction Source
+	Number XAMT,		//Amount
+	RecordEFTOUT eftout,	//Outgoing Clearing Items record
+	RecordTTX ttxeft)		//Transaction Array
+	
+	/*
+	 Process the Transaction
+	*/
+
+	new ETCCR,ETCDR,FCRCD,RMHLD,TRB,TSOCR,TSODR,TTXPTR,TYPE,XTAMT
+
+	type RecordTTX ttx()
+
+	do eftpay.setAuditFlag(1)
+
+	// Originator
+	if eftpay.ttype<2 do {
+		type RecordACN acn
+
+		// Invalid account ~p1
+		if 'Db.isDefined("ACN","CID") set ER=1,RM=$$^MSG(1259,CID) quit
+
+		set acn=Db.getRecord("ACN","CID")
+
+		// Account ~p1 is closed
+		if acn.stat=4 S ER=1,RM=$$^MSG(6050,CID) quit
+
+		set TRB=acn.trb
+		set FCRCD=acn.crcd
+		set TYPE=acn.type
+
+	}
+	else  do {
+		set TRB=0
+		set FCRCD=eftpay.crcd
+		set TYPE="G/L"
+	}
+	if ER do EXC,STAT(.eftpay,.eftout) quit
+	
+	// Determine originator side tran codes
+	do DRSETUP(TYPE,offset,.ETCDR)
+	if ER do EXC,STAT(.eftpay,.eftout) quit
+
+	// Determine recipient side tran codes, plus teller comments
+	if onus do ONUS(.eftpay,offset,.ETCCR,.tcid,.tcmtcr,.tcmtdr) if 1
+	else  do ONTHEM(eftpay.efttype,.ETCCR,.tcid,.tcmtcr,.tcmtdr)
+
+	// EFTPAY Debit Transaction Code
+	if eftpay.etc'="" do {
+		if 'TRB set ETCDR=eftpay.etc
+		else  set ETCCR=eftpay.etc
+	}
+
+	// Determine amounts
+	set XAMT=$$ORDAMT^EFTFUNCS(eftpay.amttyp,eftpay.amount,CID,eftpay.frequency,eftpay.crcd,.XTAMT,eftpay.efttype,tcid)
+	if ER quit
+
+	set TAMT=$P(XTAMT,"|",1)
+
+	/*
+	 If transaction is for zero dollar amount, then stop processing
+	 but do not flag an error, e.g. standing collection orders with
+	 no amount due.  This allows STAT section to update status
+	 and create next payment record, if needed.
+	*/
+	if 'TAMT quit
+
+	if eftpay.amttyp>1 set eftpay.amount=$P(XAMT,"|",1)
+
+	/*
+	 ASSERT: TAMT and XTAMT will contain amounts in the account's
+	 currency, while eftpay.amount and XAMT will contain the amounts
+	 in the order's currency.
+	*/
+
+	if fintras=1 set EFD=%SystemDate+ftod
+	else  set EFD=eftpay.efd
+
+ 	// Reversal?
+	if rev do rev(CID,eftpay.tseq,.ETCDR,.TAMT,.TSO,.tcmtdr,TYPE,eftpay.ttype) quit:ER
+
+	// Suppress segment information
+	if 'TRB,TSO["SEG" do {
+		set TSODR=TSO
+		set TSOCR=$$SUPSEG(TSO)
+	}
+	else  set (TSOCR,TSODR)=TSO
+
+	// Set up budget information only on debit side of trx
+	if bgtseq'="" do {
+		new UTSO
+		set UTSO("BGT")=bgtseq
+		if bgtbill'=0 set UTSO("BGTBILL")=bgtbill
+		do IN^UTSO(.UTSO,.TSODR)
+	}
+
+	// Build debit transaction - account
+	if fincl!preauth do tran(.ttx(),.eftpay,CID,ETCDR,TAMT,EFD,TSODR,tcmtdr,FCRCD,eftpay.brcd,rev,.eftout,.ttxeft)
+	if ER quit
+
+	// Do not create offset for interest projections
+	if CTLPRJ=1 quit
+
+	// If reversal, substitute credit tran code with reversal tran code
+	if rev set ETCCR="EFTREV"
+
+	// Build credit transaction - offset
+	do tran(.ttx(),.eftpay,tcid,ETCCR,eftpay.amount,EFD,TSOCR,tcmtcr,eftpay.crcd,BRCD,rev,.eftout)
+	if ER quit
+
+	/*
+	 Pre-authorize onus financial transactions
+
+	 Non-financial transactions will only be pre-auth'ed.
+
+	 Financial transaction with lead days will first be preauth'ed. and
+	 then posted using the correct effective date.
+
+	 Financial transactions without lead days will not be preauth'ed,
+	 just posted. (preauth will equal zero for these transactions.)
+	*/
+	if preauth do PREAUTH(.ttx(),.eftpay,preauth)
+	if ER quit
+
+	if 'fincl quit
+
+	// Teller external transfer
+	if eftpay.exttrf=1 quit
+
+	// Remove EFT Holds?
+	if (eftpay.hldauto!(preauth=2)),(STBLEFT="PO"!(STBLEFT="SPO")) set RMHLD=1
+	else  set RMHLD=0
+
+	do POST(.ttx(),RMHLD)
+
+	quit
+
+
+POST(RecordTTX ttx(),RMHLD)
+
+	/*
+	 Post financial transactions
+	*/
+
+	new CTLPRJ,EFTMODE,X
+	type String RJ()
+
+	// Use ITC13 to remove holds during posting for payment orders
+	if RMHLD set ttx(1).itc=$$ITC^TTXEXT(ttx(1).itc,13,1) 
+
+	// Build a transaction set object from the set of transactions in ttx
+	do TRNSET^TRNDRV(.ttx(),EFD,BRCD,4,,.RJ)
+
+	/*
+	 If error occurs because of a rejected transaction in TTXP2, then
+	 log an exception error.  Otherwise, assume that TTXP2 has logged
+	 an entry in the Rejected Transaction Report.
+	*/
+	if $D(RJ)>1 set ER=1,fromtran=1
+
+	// If RM not defined  use: Error Posting Transactions.
+	if ER,$G(RM)="" set RM=$$^MSG(3764)
+
+	quit
+
+
+PREAUTH(RecordTTX ttx(),RecordEFTPAY eftpay,PREAUTH)
+
+	/*
+	 Preauthorize transaction
+
+	 Preauthorizations will use the Process Date for the Effective Date.
+	*/
+
+	new level,CTLPRJ,EFD,EFTMODE,SAVEFD,X
+	type String RJ(),SPV()
+
+	 // Wrap preauthorization in TP
+	do Runtime.start("BA",,"SAVPTR")	
+
+	catch error3 {
+		new ER,FROM
+		set ER=1,RM=error3.type_", "_error3.description
+		if error3.type["%GTM-" do ZE^UTLERR
+		set FROM=error3.thrownAt
+		do EXC
+	}
+
+	set SAVEFD=ttx(1).efd
+	set %EffectiveDate=%SystemDate
+
+	// Use ITC13 to remove holds during posting for payment orders
+	// The incremental TRollback after posting will restore the holds.
+	if eftpay.hldauto,(STBLEFT="PO"!(STBLEFT="SPO")) set ttx(1).itc=$$ITC^TTXEXT(ttx(1).itc,13,1) 
+
+	do TRNSET^TRNDRV(.ttx(),%EffectiveDate,BRCD,4,.RJ,.SPV)
+
+	// Check for override errors
+	if $D(RJ)>1 do {
+		new OM
+		set ER=1
+		if $D(SPV) do {
+			set (OM,X)=""
+			for  set X=$O(SPV(1,CID,"OVR",X)) q:X=""  if $P(SPV(1,CID,"OVR",X),"|",1)="*" set OM=OM_X_","
+			// Overrides required: ~p1
+			if OM'="" set RM=$$^MSG(5154,$E(OM,1,$L(OM)-1))
+		}
+		// If RM not defined try RJ, otherwise use: Error Posting Transactions.
+		if $G(RM)="" set RM=$S($D(RJ(1)):$P(RJ(1),"|",2),$D(RJ(2)):$P(RJ(2),"|",2),1:$$^MSG(3764))
+	}
+
+	 // Perform an incremental rollback
+	do Runtime.rollback("SAVPTR")
+
+	if ER quit
+
+	/*
+	 Restore the transaction's effective date if the transactions
+	 are financial and future dated.
+	*/
+	if fincl,SAVEFD>%SystemDate do {
+		set seq=1
+		while ttx(seq).exists() do {
+			set ttx(seq).efd=SAVEFD
+			set seq=seq+1
+		}
+	}
+
+	/*
+	 If the preauthorization is successful and the Pre-authorization Option
+	 for the EFT Type is set to 2, the funds will be reserved by holds
+	 against the account and/or associated overdraft accounts.  If the
+	 order's Hold Automatically Placed field is set to true, no further
+	 holds will be placed.
+	*/
+	if PREAUTH=2,eftpay.hldauto=0 do {
+		new HSEQ
+		set HSEQ=$$PLHLDS^EFTFUNCS(.eftpay)
+		// Could not place hold
+		if HSEQ=0 set ER=1,RM=$$^MSG(630) quit
+		do eftpay.setAuditFlag(1)
+		set eftpay.hldseq=HSEQ
+	}
+
+	quit
+
+
+tran(	RecordTTX ttx(),	//Record transaction array
+	RecordEFTPAY eftpay,	//Electronic Payment record
+	Number CID,		//Account Number
+	String ETC,		//Transaction Code
+	Number TAMT,		//Transaction amount
+	Date EFD,		//Effective Date
+	String TSO,		//Transaction Source
+	String TCMT,		//Transaction Comment
+	String CRCD,		//Currency Code
+	Number BRCD,		//Branch code
+	Boolean rev,		//Reversal Flag
+	RecordEFTOUT eftout,	//Outgoing Clearing Items record
+	RecordTTX ttxeft)	//Record transaction array
+
+	// Build Transaction
+
+	type public Boolean ER = 0
+	type Number BSEAMT, EXCAMT, MULTIPLY, OCC, RATE, seq, TRNTYP
+	type String BSECRCD, CCODE
+
+	type RecordTRN trn=Db.getRecord("TRN","ETC",1)
+	// Invalid transaction code ~p1
+	if 'trn.getMode() do Runtime.setErrMSG("TRN",1498,ETC) quit:ER
+
+	// Determine Cost Center
+	if trn.itc.extract() do {
+		set OCC=eftpay.crcc
+		if OCC="" set OCC=eftpay.cc
+		}
+	else  set OCC=eftpay.cc
+
+	// Default currency exchange transaction values
+	set (CCODE,MULTIPLY,RATE)=""
+	set BSEAMT=TAMT
+	set BSECRCD=CRCD
+
+	// Profile account transactions must be in the account currency
+	if trn.cls'="M" do {
+		type RecordACN acn=Db.getRecord("ACN","CID",1)
+		// Invalid account
+ 		if 'acn.getMode() do Runtime.setErrMSG("ACN",1259,CID) quit:ER
+ 		
+		// Conversion not needed
+		if acn.crcd=CRCD quit
+ 
+		// Convert amount to account currency (margins, non-cash,mid-rate)
+		set CCODE=acn.ccode
+		set TRNTYP=$S(trn.itc.extract():0,1:1)
+		do EXC^CRCDUTL(CRCD,acn.crcd,TAMT,1,TRNTYP,"00",CCODE,EFD,1)
+		if ER quit
+		set TAMT=EXCAMT.roundCur(acn.crcd)
+		set CRCD=acn.crcd
+ 
+		// Add TCUR to TSO
+		set TSO=$$FIELDIN^UTSO(TSO,"TCUR",BSEAMT_BSECRCD)
+	}
+	if ER quit
+	
+	if 'eftpay.tcmt.isNull() set TCMT = TCMT_" - "_eftpay.tcmt
+
+	set seq=1
+	while ttx(seq).exists() set seq=seq+1
+
+	set ttx(seq)=Class.new("RecordTTX")
+	set ttx(seq).cid=CID				// Account Number
+	set ttx(seq).etc=ETC				// External Transaction Code
+	set ttx(seq).tamt=TAMT			// Transaction Amount
+	set ttx(seq).efd=EFD				// Effective Date
+	set ttx(seq).tlo=%UserStation		// Transaction Location
+	set ttx(seq).tso=TSO				// Transaction Source of Funds
+	set ttx(seq).tcmt=TCMT			// Transaction Amount
+	set ttx(seq).crcd=CRCD			// Currency Code
+	set ttx(seq).brcd=BRCD			// Branch Code
+	set ttx(seq).cc=OCC				// Cost Center
+
+	if %MCP do {
+		set ttx(seq).crcd=CRCD
+		set ttx(seq).bseamt=BSEAMT
+		set ttx(seq).bcrcd=BSECRCD
+		set ttx(seq).rate=RATE
+		set ttx(seq).mult=MULTIPLY
+		set ttx(seq).custcd=CCODE
+		}
+	
+	if '(ttx(seq).efd>TJD) set ttx(seq).itc=$$ITC^TTXEXT(trn.itc,7,2)
+	if rev set ttx(seq).itc=$$ITC^TTXEXT(ttx(seq).itc,12,1)
+
+	if CTLPRJ=1 set ttxeft=ttx(seq).copy() quit
+	/*
+	 Transactions will be two sided, i.e. debit and credit,
+	 unless one is external, in which case setup EFTOUT.
+
+	 The next line of code and STAT will now be responsible for creating
+	 all EFTOUT records.  Monitor should no longer be used to create
+	 EFTOUT records.
+	*/
+	if 'onus,trn.cls="M" set eftout=ttx(seq).copy()
+
+	if rev,eftpay.tseq'="",CID.exists() do {
+		set TSEQ=eftpay.tseq
+		do Db.delete("HISTR","CID=:CID AND TSEQ=:TSEQ")
+		}
+
+	quit
+
+
+DRSETUP(TYPE,OFFSET,ETCDR)
+
+	/*
+	 Set up debit side
+
+	 ARGUMENTS:
+		. TYPE		Account Type
+	*/
+
+	if '$D(types(EFTTYPE,TYPE)) do types(EFTTYPE,TYPE)
+
+	// if nostro
+	if $P(types(EFTTYPE,TYPE),"|",3) set ETCDR=$P(types(EFTTYPE,TYPE),"|",2) quit
+
+	// Use offset tran code's ITC to determine the type of transaction
+	if 'OFFSET set ETCDR=$P(types(EFTTYPE,TYPE),"|",2)
+	else  set ETCDR=$P(types(EFTTYPE,TYPE),"|",1)
+
+	quit
+
+
+ONUS(RecordEFTPAY eftpay,OFFSET,ETCCR,TCID,TCMTCR,TCMTDR)
+
+	/*
+	 Recipient side -- Account is "on-us"
+	*/
+
+	new NOSTRO,TYPE
+
+	/*
+	 If the payment is a direct debit from a manual list or a diskette,
+	 then do the onthem section to get the proper TCID account, rather
+	 than use the recipient account as the TCID, which happens normally
+	 for on-us transactions.
+	*/
+
+	if STBLEFT="DD",((eftpay.eftsrcdd=1)!(eftpay.eftsrcdd=2)) do ONTHEM(eftpay.efttype,.ETCCR,.TCID,.TCMTCR,.TCMTDR) quit
+
+	// CR to customer
+	if '(eftpay.ttype#2) do {  quit:ER
+		type RecordACN acn
+
+		// Invalid account ~p1
+		if 'Db.isDefined("ACN","TCID") set ER=1,RM=$$^MSG(1259) quit
+		set acn=Db.getRecord("ACN","TCID")
+
+		// Account ~p1 is closed
+		if acn.stat=4 S ER=1,RM=$$^MSG(6050,TCID) quit
+
+		set TYPE=acn.type
+	}
+
+	// CR to G/L
+	else  set TYPE="G/L"
+
+	if '$D(types(EFTTYPE,TYPE)) do types(EFTTYPE,TYPE)
+	set NOSTRO=$P(types(EFTTYPE,TYPE),"|",3)
+
+	if 'OFFSET do {					// CO
+		if 'NOSTRO set ETCCR=$P(types(EFTTYPE,TYPE),"|",1)
+		else  set ETCCR=$P(types(EFTTYPE,TYPE),"|",2)
+
+		// EFTTYPE From ~p1
+		set TCMTDR=EFTTYPE_$$^MSG(8225,TCID)
+		// EFTTYPE To ~p1
+		set TCMTCR=EFTTYPE_$$^MSG(4030,CID)
+	}
+
+	else  do {
+		if 'NOSTRO set ETCCR=$P(types(EFTTYPE,TYPE),"|",2)
+		else  set ETCCR=$P(types(EFTTYPE,TYPE),"|",1)
+
+		// EFTTYPE To ~p1
+		set TCMTDR=EFTTYPE_$$^MSG(4030,TCID)
+		// EFTTYPE From ~p1
+		set TCMTCR=EFTTYPE_$$^MSG(8225,CID)
+	}
+
+	quit
+
+
+ONTHEM(EFTTYPE,ETCCR,TCID,TCMTCR,TCMTDR)
+
+	/*
+	 Recipient side -- External transaction
+	*/
+
+	set ETCCR=$P(types(EFTTYPE,"ONTHEM"),"|",4)
+	set TCID=$P(types(EFTTYPE,"ONTHEM"),"|",5)
+	set (TCMTCR,TCMTDR)=EFTTYPE
+
+	quit
+
+
+SUPSEG(TSO)
+
+	/*
+	 Suppress segment information
+
+	 Remove all segment fields, these fields begin with "SEG".
+	*/
+
+	new X,XTSO
+
+	do OUT^UTSO(.XTSO,TSO)
+
+	set X=""
+	for  set X=$O(XTSO(X)) quit:X=""  do {
+		if $E(X,1,3)="SEG" kill XTSO(X)
+	}
+
+	do IN^UTSO(.XTSO,.TSO)
+
+	quit TSO
+
+
+TRANSTAT(TranSet ts,TTXPTR)  // Check Transaction Rejection Status
+
+	/*
+	 There is a string in transaction rejection status field:
+
+		ts.status=X|X|X|...
+
+			VALUE:
+				X = 0   successful posted transaction
+				X = 1   rejected transaction
+
+			POSITION:
+
+				1 --    batch rejection status
+
+
+	 which created in the transaction set object once a transaction
+	 set has been submitted for posting.
+	*/
+
+	new tsseq
+	set tsseq=""
+	for  set tsseq=$O(TTXPTR(tsseq)) quit:tsseq=""  do {
+		type RecordTTX tsx
+		set tsx=ts.getTran(TTXPTR(tsseq))
+		set rty=tsx.rty
+		if REJMET>0 set stat=ts.status 		// Reject Transaction
+		else  set stat=$P(ts.status,"|",tsseq)
+		}
+
+	quit
+
+
+STAT(RecordEFTPAY eftpay,RecordEFTOUT eftout)
+
+	/*
+	 Update EFT record and create next standing order and/or an
+	 EFTOUT if required.
+	*/
+
+	// Called from Cash Flow
+	quit:CTLPRJ
+
+	new error
+
+	/*
+	 This section should not generate an error.  If an error does
+	 occur an exception should be logged.  During Batch mode ER and
+	 RM will be reset.
+	*/
+	set error=ER
+	if 'EFTMODE do {
+		set ER=0
+		set RM=""
+	}
+	new ER,RM
+ 
+	set ER=0
+	set RM=""
+
+	do update(error,.eftpay)
+
+	// Insert EFTOUT record if one has been setup
+	if EFTOUT'="",'error do {
+		set eftout.tjd=%SystemDate
+		set eftout.tseq=Db.nextVal("EFTOUT","TJD")
+		do eftout.save()
+		}
+
+	if ER do EXC
+	quit
+
+
+create(RecordEFTPAY eftpay,SRC,EFTEFD,PROCDT)
+
+	/*
+	 Generate new EFT record.
+	*/
+
+	new CID,ER
+
+	catch ERROR1 {
+		new ER,FROM
+		set ER=1,RM=ERROR1.type_", "_ERROR1.description
+		if ERROR1.type["%GTM-" do ZE^UTLERR
+		set FROM=ERROR1.thrownAt
+		do EXC
+		}
+
+	set ER=0
+
+	/*
+	 Standing orders created via PROFILE teller applications
+	 need to have the EFT Type changed to switch the financial
+	 transaction flag for the recurring orders.
+	*/
+	if tlrstd=1 set SRC=SRC_"A"
+
+	type RecordEFTPAY eftpay2=eftpay.copy()
+	do eftpay2.setMode(0)
+
+	set CID=eftpay.cid
+	set eftpay2.seq=Db.nextVal("EFTPAY","CID")
+
+	set eftpay2.efd=EFTEFD
+	set eftpay2.procdt=PROCDT
+
+	set eftpay2.status="A"			// Status
+	set eftpay2.tries=tries			// Times To Try
+	set eftpay2.actamt=""			// Actual Amount
+
+	set eftpay2.efttype=SRC			// Electronic Payment Type
+	set eftpay2.nxtpmt=""			// Next Payment Created Flag
+	set eftpay2.exttrf=0
+	set eftpay2.creatseq=""
+	set eftpay2.hldseq=""
+	if eftpay2.amttyp>2 set eftpay2.amount=""
+
+	do eftpay2.save("/NOTRIGBEF")		// Call DQ filer routine
+	if '$D(CRT),ER do EXC			// Batch mode, log an error in exception file  12/23/97 mas
+
+	/*
+	 If required place a hold. Previously this logic was performed by
+	 the Before Insert trigger, which is no longer used in a effort
+	 to increase performance.
+	*/
+	if eftpay2.hldauto do {
+		new HSEQ
+		set HSEQ=$$PLHLDS^EFTFUNCS(.eftpay2)
+		// Could not place hold
+		if HSEQ=0 set ER=1,RM=$$^MSG(630) quit
+		set eftpay2.hldseq=HSEQ
+		do eftpay2.bypassSave()
+	}
+	if ER do EXC
+
+	quit
+
+
+gloff(PRI)	//Return clearing center G/L number for offset, based on priority
+
+	if 'PRI quit $G(glout)			// Outgoing offset, non-priority
+	quit $G(gloutp)				// Outgoing offset, priority
+
+
+init(flag)
+
+	/*
+	 Initialize variables for processing
+	*/
+
+	set ER=0
+	do SYSVAR^SCADRV0()
+
+	type RecordCUVAR cuvar
+
+	set cuvar=Db.getRecord("CUVAR")
+	set MINPAY=cuvar.minpay
+	set MAXPAY=cuvar.maxpay
+	set MINCOL=cuvar.mincol
+	set MAXCOL=cuvar.maxcol
+	set EFTRICO=cuvar.eftrico
+
+	set EFTDAT=%SystemDate
+	set (CANCEL,DELETE)=0
+	set (EFD,TPD)=TJD
+
+	// Go to the "SRC","BOFF","EFT" user table to get the teller ID, BRCD.
+	do SOURCE^BCHSOURC("BOFF","EFT",.%UserID,.BRCD,.%UserClass,.TSDR,.TSCR)
+
+	// Invalid teller ID
+	if %UserID="" set ER=1,ET=$$^MSG(3533) do EXC quit
+
+	// Invalid userclass for teller ~p1
+	if %UserClass="" set ER=1,ET=$$^MSG(3535,%UserID) do EXC quit
+
+	set susp(0)=TSDR				// DR suspense
+	set susp(1)=TSCR				// CR suspense
+	if REJMET="" set REJMET=1			// Default reject meth
+	set %UserStation=$$TLO^UTLO			// Terminal location
+	quit
+
+
+itc(X)	// Modify $$ITC^TTXEXITC for error corrects or reversals
+
+	// Note that these will ALWAYS be reversals (P=12)
+	quit $$ITC^TTXEXT($P(X,"|",2),12,1)
+
+
+ptyp(EFTTYPE)
+
+	/*
+	 Set up efttype array
+
+	 RETURNS:
+		. efttype	- EFT Type
+		. fincl		- Financial Transaction
+		. fintras	- Fin. Trans. Assessment Option
+		. ftod		- Fin. Trans. Offset Days
+		. glout		- General Ledger Account Outgoing
+		. gloutp	- Priority G/L offset account
+		. offset	- Offset DR/CR indicator
+		. preauth	- Pre-authorize onus financials
+		. retrej	- Auto Retry Rejected Orders
+		. rev		- Reversal Transaction
+		. tlrstd	- Standing order initiated on Teller
+		. tries		- Times to Retry
+		. types		- On-them tran code types array entry
+		. %ODP		- Invoke Overdraft Protection
+	*/
+
+	new OFFSET,TCID
+
+	type RecordCTBLEFTTYPE efttype
+	type RecordTRN trn
+
+	set efttype=Db.getRecord("CTBLEFTTYPE","EFTTYPE")
+	set STBLEFT=efttype.stbleft
+
+	set fincl=efttype.fincl			// Financial Transaction Type
+
+	set rev=efttype.rev			// Reversal Transaction
+	set %ODP=efttype.odp			// Invoke Overdraft Protection
+	set fintras=efttype.fintras		// Fin. Trans. Assessment Option
+	set ftod=efttype.ftod			// Fin. Trans. Offset Days
+	set retrej=efttype.retrej		// Auto Retry Rejected Orders
+	set tries=efttype.tries			// Times to Retry
+	set preauth=efttype.preauth		// Pre-authorize onus financials
+
+	set glout=efttype.glout
+	set gloutp=efttype.gloutp		// Priority G/L offset account
+
+	// Use offset tran code to determine the type of transaction
+	set OFFSET=efttype.etc
+
+	// External transaction code not defined
+	if OFFSET="" set ER=1,RM=$$^MSG(6655) quit
+
+	// Invalid transaction code
+	if 'Db.isDefined("TRN","OFFSET") set ER=1,RM=$$^MSG(1498) quit
+	set trn=Db.getRecord("TRN","OFFSET")
+
+	set offset=$E(trn.itc,1)
+
+	// Define on-them offset account number
+	if trn.acn'="" set TCID=trn.acn		// Default Account Number
+	else  set TCID=susp(1)			// CR suspense
+
+	// Set up types array entry for On-them tran code
+	set types(EFTTYPE,"ONTHEM")="|||"_efttype.etc_"|"_TCID
+
+	/*
+	 Standing orders created via PROFILE teller applications
+	 need to have the EFT Type changed to switch the financial
+	 transaction flag for the recurring orders.
+	*/
+	if EFTTYPE'="POF",EFTTYPE'="COF" set tlrstd=0 quit
+	else  set tlrstd=1
+
+	quit
+
+
+retry(RecordEFTPAY eftpay,tries)
+
+	/*
+	 Modify values for efd, procdt, and tries for this record to
+	 be retried on next business date
+	*/
+
+	do eftpay.setAuditFlag(1)
+
+	new efd,ER,PROCDT
+
+	set ER=0
+
+	// Get next procdt and efd MJZ - 41435
+	set efd=$$DATES^EFTFUNCS(%SystemDate,"1DA",onus,1,STBLEFT,eftpay.crcd,.PROCDT)
+
+	set eftpay.efd=efd				// Next effective date
+	set eftpay.procdt=PROCDT			// Next process date
+	set eftpay.tries=tries				// Update retries
+
+	quit
+
+
+rev(CID,HSEQ,ETC,TAMT,TSO,TCMT,TYPE,TTYPE)	// Create the reversal transaction
+
+	new tamt,EFDCMP
+
+	type RecordHIST hist
+
+	/*
+	 If this is a G/L account, we can't look at the history -- just set
+	 the amount to be negative, set up TSO, ETC, and TCMT and quit.
+	*/
+
+	if TTYPE=2 do { quit
+		set ETC="MCR"
+		set TAMT=-TAMT
+		// REVERSAL: G/L
+		set TCMT=$$^MSG(3539)
+		set TSO=$$FIELDIN^UTSO(.TSO,"REV")
+		}
+
+	if HSEQ="",TTYPE<2 do { quit:ER
+		new h
+		set ETC=$P(types(EFTTYPE,TYPE),"|",2)    // General purpose CR
+		set h(3)=ETC
+		set h(4)=TAMT
+		set HSEQ=$$^UTLHIST(CID,.h)
+		// Invalid History Sequence ~p1
+		if HSEQ="" set ER=1,RM=$$^MSG(3532) quit
+		}
+
+	// No need to call UHFETCH if HISTR exists -- quit with ER
+	if Db.isDefined("HISTR","CID,HSEQ") set ER=1,RM=$$^MSG(3544) quit
+
+	// Invalid History Sequence ~p1
+	if 'Db.isDefined("HIST","CID,HSEQ") set ER=1,RM=$$^MSG(3532,HSEQ) quit
+	set hist=Db.getRecord("HIST","CID,HSEQ")
+
+	set ETC=hist.etc			// External Transaction Code
+
+	set tamt=hist.tamt
+	for I=1:1:$L(tamt,"#") set $P(tamt,"#",I)=-$P(tamt,"#",I)
+
+	// REVERSAL: Incorrect amount
+	if TAMT-tamt set ER=1,RM=$$^MSG(3540) quit
+
+	set TAMT=tamt
+
+	// REVERSAL: Transaction previously error corrected
+	if $E(hist.itc,6) set ER=1,RM=$$^MSG(3542) quit
+
+	// REVERSAL
+	if $E(hist.itc,7) set ER=1,RM=$$^MSG(3538) quit
+
+	// Transaction previously reversed
+	if $E(hist.itc,12) set ER=1,RM=$$^MSG(3544) quit
+
+	// Error Correct
+	if hist.tjd=%SystemDate,hist.brcd=BRCD,hist.uid=%UserID do {
+		// (EC) SEQ # ~p1
+		set TCMT=$$^MSG(7651,hist.trc)
+		set TSO=$$FIELDIN^UTSO(.TSO,"EC",hist.trc)
+		}
+
+	// Reversal
+	else  do {
+		set EFDCMP=hist.efdcmp
+		// REVERSE ~p1 ~p2
+		set TCMT=$$^MSG(3543,EFTCMP.toString("MM/DD/YEAR"),ETC)
+		set TSO=$$FIELDIN^UTSO(.TSO,"REV",HSEQ)
+		}
+	quit
+
+
+settso(RecordEFTPAY eftpay)	// Set up TSO field
+
+	new x,TSO
+
+	set TSO=""
+
+	set x("RINS")=eftpay.recinst			// Recipient institution
+	set x("RCID")=eftpay.recacct			// Recipient account
+	set x("EFT")=eftpay.efttype			// Payment type
+	set x("SEQ")=PSEQ				// EFT file Sequence
+	set x("BENAD")=eftpay.benad1
+
+	if 'onus,$S(eftpay.ttype>1:1,1:0) set x("FCID")=eftpay.cc_"-"_CID
+	else  set x("FCID")=CID				// "From" account
+
+	if eftpay.lnm'="" set x("LNM")=eftpay.lnm		// Short name
+	if eftpay.constant'="" set x("CON")=eftpay.constant	// Constant field
+	if eftpay.variable'="" set x("VAR")=eftpay.variable	// Variable field
+	if eftpay.specific'="" set x("SPEC")=eftpay.specific	// Specific field
+	if eftpay.met'="" set x("MET")=eftpay.met		// Payment method
+	if eftpay.pri'="" set x("PRI")=eftpay.pri		// Bank to bank?
+	if reg'="" set x("REG")=reg				// Bank region
+	if eftpay.msg103dt'="" set x("CPA")=eftpay.msg103dt	// CPA code
+	if eftpay.source'="" set x("TSO")=eftpay.source		// TSO field
+
+	// Misc source info for agencies (originated as custom for IPB)
+	if eftpay.msg1'="" set x("70-1")=eftpay.msg1		// Payment message 1
+	if eftpay.msg2'="" set x("70-2")=eftpay.msg2		// Payment message 2
+	if eftpay.msg3'="" set x("70-3")=eftpay.msg3		// Payment message 3
+	if eftpay.msg4'="" set x("70-4")=eftpay.msg4		// Payment message 4
+
+	if eftpay.origmtyp'="" set x("ORIGMTYP")=eftpay.origmtyp
+
+	// Merge UNIQTSO into TSO
+	if eftpay.uniqtso'="" do OUT^UTSO(.x,eftpay.uniqtso)
+
+	do IN^UTSO(.x,.TSO)
+
+	quit TSO
+
+
+setup(RecordEFTPAY eftpay,fincl,onus,reg,rev,preauth)
+
+	/*
+	 Initialize variables based on EFTPAY record
+
+	  INPUTS:
+		. fincl		- Financial Transaction (ctblefttype.fincl)
+
+	 RETURNS:
+		. fincl		- BCHEFT needs to schedule financial transactions
+		. onus		- On-us transaction indicator
+		. reg		- Bank region
+		. rev		- Reverse
+		. preauth	- Pre-authorize onus financials
+	*/
+
+	new RECINST
+
+	type RecordUTBLEFTINST eftinst
+
+	set (onus,reg)=""
+	set RECINST=eftpay.recinst
+
+	// Recipient Institution is missing
+	if RECINST="" set ER=1,RM=$$^MSG(7798) quit
+
+	// Invalid institution # ~p1
+	if 'Db.isDefined("UTBLEFTINST","RECINST") set ER=1,RM=$$^MSG(3406,RECINST) quit
+	set eftinst=Db.getRecord("UTBLEFTINST","RECINST")
+
+	set onus=eftinst.onus				// Onus Institution Flag
+	set reg=+eftinst.region				// Bank Region
+
+	if onus,STBLEFT="POC" set rev=1			// Treat on-us POC like reversals
+
+	/*
+	 If this is an order that was created on a teller screen, we
+	 don't want to do a financial transaction because another teller
+	 transaction has already debited/credited the originating account.
+	*/
+	if eftpay.exttrf=1 set fincl=0
+
+	// On-us transactions will always be financial
+	if onus set fincl=1
+
+	// No need to pre-auth G/L accounts
+	if eftpay.ttype>1 set preauth=0
+
+	// No need to pre-auth today's financials
+	if preauth,eftpay.efd=eftpay.procdt,fincl set preauth=0
+
+	quit
+
+
+status(error,PRTPMT,TRIES,EXTTRF)
+
+	/*
+	 Determine status
+
+	 If status will be updated to "R", Rejected, a HIST entry will also
+	 be generated.
+
+	 RETURNS:
+ 		. status
+			"C"     - Completed
+			"PR"    - Pending Review
+			"R"     - Rejected
+			"S"     - Submitted
+			"Y"     - Retry
+	*/
+
+	new status,%MSGID
+
+	// Processed OK
+	if 'error do { quit status
+		if 'fincl,EXTTRF'=1 set status="S"
+		else  set status="C"
+		}
+
+	// Error occurred reduce tries
+	set TRIES=TRIES-1
+
+	// Retry
+	if TRIES>0 quit "Y"
+
+	/*
+	 Pending Review - For onus COs or onus/onthem POs, and if
+	 the CUVAR.EFTRICO flag is set, set status to PR instead of R.
+	 (But don't do this for payments that are already partials.)
+	*/
+	if EFTRICO=1,PRTPMT'=1,(onus=1&(STBLEFT="CO")!(STBLEFT="PO")) do { quit "PR"
+		// Set retries for first time processed
+		if TRIES=-1 set TRIES=3
+		}
+
+	// Rejected - File rejected transaction to account History
+	type RecordHIST hist=Class.new("RecordHIST")
+	set hist.cid=CID
+	set hist.tseq=Db.nextVal("HIST","CID") 
+	set hist.tjd=%SystemDate			// System Processing Date
+	set hist.brcd=BRCD				// Branch Code
+	set hist.trc=$G(TRC)				// Transaction Trace Number
+	set hist.uid=%UserID				// User ID
+	// Overrides required.  See Rejected Transaction Report (@REP220)
+	if $G(fromtran) set hist.tcmt=$$^MSG(7696)	// Teller Comment
+	// ~p1 errors encountered.  Run standard exception report.
+	else  set hist.tcmt=$$^MSG(3035,1)		//cds 3/2/00
+	kill fromtran					//cds 3/2/00
+	do hist.bypassSave()
+
+	quit "R"
+
+
+types(EFTTYPE,TYPE)
+
+	/*
+	 Set up type array
+	*/
+
+	if TYPE="G/L" set types(EFTTYPE,TYPE)="MDR|MCR" quit
+
+	type RecordCTBLEFTPROD eftprod
+	type RecordPRODCTL prodctl 
+
+	// EFT Product Payment Types
+	if Db.isDefined("CTBLEFTPROD","EFTTYPE,TYPE") do {
+		set eftprod=Db.getRecord("CTBLEFTPROD","EFTTYPE,TYPE")
+
+		// Use offset tran code's ITC to determine the type of transaction
+		if 'offset do {					// CO
+			set $P(types(EFTTYPE,TYPE),"|",1)=eftprod.idtc	// incoming debit
+			set $P(types(EFTTYPE,TYPE),"|",2)=eftprod.octc	// outgoing credit
+		}
+		else  do {
+			set $P(types(EFTTYPE,TYPE),"|",1)=eftprod.odtc	// outgoing debit
+			set $P(types(EFTTYPE,TYPE),"|",2)=eftprod.ictc  // incoming credit
+		}
+	}
+
+	// Product defaults
+	set prodctl=Db.getRecord("PRODCTL","TYPE")
+	if '$D(types(EFTTYPE,TYPE)) set types(EFTTYPE,TYPE)=""
+	if $P(types(EFTTYPE,TYPE),"|",1)="" set $P(types(EFTTYPE,TYPE),"|",1)=prodctl.drtrgp
+	if $P(types(EFTTYPE,TYPE),"|",2)="" set $P(types(EFTTYPE,TYPE),"|",2)=prodctl.crtrgp
+
+	// Nostro Account Flag
+	set $P(types(EFTTYPE,TYPE),"|",3)=prodctl.nostro
+
+	quit
+
+
+update(error,RecordEFTPAY eftpay)
+
+	/*
+	 Update EFT record with status, actual amount, etc.
+
+	 If the record is a standing order, and it's not expired, the next
+	 order will be created.
+
+	 If the record is setup for retry, it may also update eftpay.efd,
+	 eftpay.procdt, and eftpay.tries if section retry() is called.
+
+	 For partial payment orders, it may also update information on the
+	 original order, such as eftpay.status, eftpay.tpaawcmp,
+	 eftpay.rempay, eftpay.totpaid, and eftpay.lppdate.
+	*/
+
+	new CREATE,EFTEFD,PROCDT,TRIES
+
+	set CREATE=0
+
+	do eftpay.setAuditFlag(1)
+
+	/*
+	 If it's a standing order, determine whether a new order
+	 needs to be created.
+	*/
+	if 'eftpay.nxtpmt,eftpay.frequency'="",eftpay.creatseq'=1 do {
+		new EXPIRED
+
+		if eftpay.status'="A",eftpay.status'="SUP" quit
+
+		/*
+		 Determine if this payment order is expired.  Expiration date
+		 will only be defined if this is a standing order.  The exp
+		 variable will be determined by calculating what the next date
+		 (NJD) would be based on the frequency of the order.  If the
+		 NJD is greater than the expiration date, then we process THIS
+		 order but DO NOT resubmit this order to be processed again on
+		 NJD.
+		*/
+
+		set EFTEFD=$$DATES^EFTFUNCS(eftpay.efd,eftpay.frequency,onus,1,STBLEFT,eftpay.crcd,.PROCDT)
+
+		if eftpay.expdt'="" set EXPIRED=$S(EFTEFD>eftpay.expdt:1,1:0)
+		else  set EXPIRED=0
+
+		if EXPIRED quit
+
+		set eftpay.creatseq=1
+		set CREATE=1
+	}
+
+	if eftpay.status'="SUP" do {
+		set TRIES=eftpay.tries
+
+		// Determine status
+		set eftpay.status=$$status(error,eftpay.prtpmt,.TRIES,eftpay.exttrf)
+
+		// Retry - update eftpay.efd, eftpay.procdt, eftpay.tries
+		if error,TRIES>0 do retry(.eftpay,TRIES)
+	}
+
+	if eftpay.status'="Y",fincl set eftpay.actamt=eftpay.amount
+
+	// Update EFTPAY record
+	do eftpay.save("/NOTRIGBEF")
+
+	// This section should not return an error
+	if ER do {
+		do EXC
+		set ER=0
+		set RM=""
+	}
+
+	// Create next standing order if required
+	if CREATE do create(.eftpay,EFTTYPE,EFTEFD,PROCDT)
+
+	// This section should not return an error
+	if ER do {
+		do EXC
+		set ER=0
+		set RM=""
+	}
+
+	// Partial Payment - update original order
+	if eftpay.prtpmt=1 do {
+		new ORIGSEQ
+		set ORIGSEQ=eftpay.origseq
+		type RecordEFTPAY eftpay2
+		set eftpay2=Db.getRecord("EFTPAY","CID,ORIGSEQ")
+
+		if 'error do {
+			// Last Partial Payment Date
+			set eftpay2.lppdate=%SystemDate
+
+			// Set Remaining to Pay
+			if +eftpay2.rempay=0 set eftpay2.rempay=eftpay2.amount
+			set eftpay2.rempay=eftpay2.rempay-eftpay.amount
+			if eftpay2.rempay=0 set eftpay2.status="C"
+			else  set eftpay2.status="PP"
+
+			set eftpay2.repost=""
+
+			// Set Total Paid to Date.
+			set eftpay2.totpaid=eftpay2.totpaid+eftpay.amount
+			}
+		else  do {
+			if eftpay.tries>1 set eftpay2.tpaawcmp=eftpay2.tpaawcmp+eftpay.amount
+			set eftpay2.status="PP"
+			}
+		do eftpay2.bypassSave()
+		}
+
+	// No need to accumulate offsets if both sides are "on us"
+	quit:error!('fincl)
+
+	/*
+	 Accumulate amount to put into a TTX batch on the next day
+
+	 If the payment is a direct debit submitted via hard-copy
+	 list or diskette, then perform secondary accumulation.
+	 otherwise, perform normal accumulation.
+	*/
+
+	if STBLEFT="DD",((eftpay.eftsrcdd=1)!(eftpay.eftsrcdd=2)) do DDACUM(.eftpay)
+
+	/*
+	 Don't create additional entries if G/L suspense and offset
+	 accounts are the same.  SPG
+	*/
+
+	else  if tcid'=$$gloff(eftpay.pri) do ACUM(.eftpay)
+
+	quit
+
+
+ACUM(RecordEFTPAY eftpay)
+	quit:onus
+
+	new BCHID,JOB,cc,crcd
+	if TAMT<0 set TAMT=-TAMT
+	set BCHID="BCHEFT"
+	set JOB=%ProcessID
+	set efttype=eftpay.efttype
+	set cc=eftpay.cc
+	set crcd=eftpay.crcd
+
+	// offset is the ITC of the offset transaction of the customer account.
+	// This is needed to identify whether the funds will move from the EFT
+	// clearing G/L to the supsense G/L or visa-versa. -CAJ 12/12/00
+
+	if 'Db.isDefined("TMPBCHOFF","TJD,BCHID,JOB,""off"",crcd,EFTTYPE,""*"",cc") do {
+		if offset do BDOFFSET^BCHSOURC("BCHEFT","off",crcd,efttype,"*",cc,tcid,$$gloff(eftpay.pri),"MDR","MCR",tcmtcr)
+		if 'offset do BDOFFSET^BCHSOURC("BCHEFT","off",crcd,efttype,"*",cc,$$gloff(eftpay.pri),tcid,"MDR","MCR",tcmtcr)
+		}
+
+	do UPOFFSET^BCHSOURC("BCHEFT","off",crcd,efttype,"*",cc,0,TAMT)
+	do UPOFFSET^BCHSOURC("BCHEFT","off",crcd,efttype,"*",cc,1,TAMT)
+
+	quit
+
+
+DDACUM(RecordEFTPAY eftpay)
+
+	new x,CC,CRCD,RECACCT,RECINST
+	if TAMT<0 set TAMT=-TAMT
+
+	set CC=eftpay.cc
+	set CRCD=eftpay.crcd
+	set RECACCT=eftpay.recacct
+	set RECINST=eftpay.recinst
+
+	// Add the retry offset to the date.
+	set EFTDAT=EFTDAT+eftpay.tries
+
+	type RecordEFTSUM2 eftsum2
+	set x=Db.isDefined("EFTSUM2","EFTDAT,RECINST,RECACCT,CRCD,CC")
+
+	// Accumulate
+	if x=1!(x=10) do {
+		set eftsum2=Db.getRecord("EFTSUM2","EFTDAT,RECINST,RECACCT,CRCD,CC")
+		set eftsum2.amount=eftsum2.amount+TAMT
+	}
+
+	// Create new entry
+	else  do {
+		set eftsum2=Class.new("RecordEFTSUM2")
+		set eftsum2.eftdat=EFTDAT
+		set eftsum2.inst=RECINST
+		set eftsum2.recacct=RECACCT
+		set eftsum2.crcd=CRCD
+		set eftsum2.cc=CC
+		set eftsum2.tcid=tcid
+		set eftsum2.amount=TAMT
+ 	}
+
+	do eftsum2.bypassSave()
+
+	quit
+
+
+EXC	// Private;Log error in exception file
+
+	new DESC,XCID,XSEQ,%MSGID
+
+	// Called from Cash Flow
+	quit:$G(CTLPRJ)
+
+	// Electronic Funds Transfer Process
+	set DESC=$$^MSG(3529)
+	if $G(RM)="" set RM=$G(ET)
+	if $G(FROM)="" set FROM=$G(%ZTSEQ)
+	set XSEQ=$G(PSEQ)
+	if XSEQ="" set XSEQ=$G(SEQ)
+	//set XCID=$G(TJD)_","_$G(SRC)_","_$G(CID)_","_$G(PTYSTAT)_","_XSEQ
+	set XCID=$G(CID)_","_XSEQ
+
+	do LOG^UTLEXC($T(+0),%ProcessID,DESC,XCID,FROM,RM,$S($G(CID):$G(BAL),1:""))
+	kill ET,%ZTSEQ
+
+	quit
+
+
+Public public(Number CID,		//Account Number
+	Number PSEQ,		//EFTPAY Order Sequence	
+	String CPA,		//
+	String TTXPAR,		//Override Parameters
+	Boolean REVIEW,		//Reset Status
+	Boolean EFTMODE,		//ONLINE event flag
+	RecordTTX ttxeft,		//Transaction Array
+	Boolean CTLPRJ)		//Cash flow mode for interest projections
+
+	/*
+	 Immediate; on-line posting of individual payment record.
+
+	 ARGUMENTS
+		. CPA		No longer used.
+		. TTXPAR	Override Parameters for call to EXT^TTXP2.
+				See TTXP2 for options.
+		. REVIEW	Reset Status
+				If 1, reset status to "A"dded and turn off
+				the repost flag.
+		. EFTMODE	Specify if this is an ONLINE
+				event.   0=BATCH, 1=ONLINE
+		. CTLPRJ	Cash flow mode for interest projections
+
+	*/
+
+	new fincl,fintras,ftod,glout,gloutp,offset,preauth,retrej
+	new rev,tlrstd,tries
+	new EFD,EFTRICO,MAXCOL,MAXPAY,MINCOL,MINPAY
+	new SAVUID,SAVBRCD,SAVDATE,SAVUSTA,STBLEFT
+
+	set EFTMODE=+$G(EFTMODE)
+	set CTLPRJ=+$G(CTLPRJ)
+
+	// Reload payment record
+	type RecordEFTPAY eftpay
+	set eftpay=Db.getRecord("EFTPAY","CID,PSEQ")
+
+	/*
+	 Initialize variables for processing, save user ID and branch,
+	 otherwise the payment system batch teller will be used
+	*/
+
+	set SAVUID=$G(%UserID)
+	set SAVUSTA=$G(%UserStation)
+	set SAVBRCD=$G(BRCD)
+	set SAVDATE=$G(EFTDAT)
+
+	new %UserID					// DP 05/05/00
+	do init(1) quit:ER
+
+	set %UserID=SAVUID
+	set %UserStation=SAVUSTA
+	if SAVBRCD'="" set BRCD=SAVBRCD
+	if SAVDATE'="" set EFTDAT=SAVDATE
+
+	// Set up CTBLEFTTYPE variables
+	do ptyp(eftpay.efttype) quit:ER
+
+	// Always create transaction for interest projections
+	if CTLPRJ=1 set fincl=1
+
+	// Post the transactions
+	set EJD=%SystemDate
+	do PROC(EFTDAT,eftpay.efttype,CID,PSEQ,EFTMODE,CTLPRJ,.ttxeft)
+
+	quit
+
+
+PARTPMT(RecordEFTPAY eftpay)
+
+	/*
+	 This section will process payment records with status of
+	 "PR" (Pending Review) or "PP" (Partial Paid).
+
+	 The following fields will be updated: eftpay.daysoutstndg,
+	 eftpay.efd, eftpay.procdt, and eftpay.tries.
+
+	 If auto-retry processing is set for the EFT Type and the
+	 account's balance is greater than zero, eftpay.partamt will
+	 be updated. A partial order will be processed via the
+	 EFTPAY trigger AFT_UPD_PARTAMT.
+	*/
+
+	// Called from Cash Flow
+	quit:CTLPRJ
+
+	do eftpay.setAuditFlag(1)
+
+	type RecordACN acn
+
+	// If the auto-retry rejects flag is set, do the following section.
+	if retrej=1 do {
+		new AVAILBAL,PARTAMT
+
+		/*
+		 Set partial amount to amount of original payment,
+		 Minus the total paid to date, minus the amount made in
+		 payments not yet completed (retrying).
+		*/
+		set PARTAMT=eftpay.amount-eftpay.totpaid-eftpay.tpaawcmp
+
+		// Determine what account needs to be checked
+		if STBLEFT="CO" set ACCT=eftpay.recacct
+		else  set ACCT=CID
+
+		if STBLEFT="CO",'onus set AVAILBAL=PARTAMT
+		else  do {
+			// Invalid account ~p1
+			if 'Db.isDefined("ACN","ACCT") set ER=1,RM=$$^MSG(1259,ACCT) quit
+			set acn=Db.getRecord("ACN","ACCT")
+			set AVAILBAL=acn.bal
+		}
+
+		if AVAILBAL'>0 quit
+
+		/*
+		 Set partial payment amount to trigger creation of new order
+
+		 If the calculated amount to pay is greater than the
+		 available balance, use the available balance.
+		*/
+		if eftpay.partamt>AVAILBAL set eftpay.partamt=AVAILBAL
+		else  set eftpay.partamt=PARTAMT
+	}
+
+	// Recalculate days outstanding.
+	set eftpay.daysoutstndg=%SystemDate-eftpay.datecre
+
+	new tries
+	set tries=eftpay.tries-1
+	if tries'>0 set tries=3
+
+	do retry(.eftpay,tries)
+
+	do eftpay.save()
+
+	if ER do EXC
+
+	quit
+
+
+SUPSCO(RecordEFTPAY eftpay)
+
+	//  Suppress SCO (standing collection order)
+
+	type Number COSTYP,SUPSCO
+
+	type RecordLN ln = Db.getRecord("LN","CID=:CID",1)
+	if 'ln.getMode() quit 0
+	
+	set COSTYP = ""
+
+	// If a process code is specified, attempt to retrieve the
+	// stop type that may be defined for the process code.  
+	if eftpay.pcode do {
+		type RecordEFTEXTP eftextp = Db.getRecord("EFTEXTP","CID=:CID,PCODE=:eftpay.pcode",1)
+		if eftextp.getMode() set COSTYP = eftextp.costyp
+		}
+	
+	// If stop type not defined at EFTEXTP level, use loan level instead
+	if COSTYP.isNull() set COSTYP = ln.costyp
+
+	// If LN.COSTYP null, process the collection order as normal.
+	if COSTYP.isNull() quit 0
+
+	type RecordUTBLECOSTOP ecostop = Db.getRecord("UTBLECOSTOP","COSTYP=:COSTYP")
+
+	// If stop rule will take effect, suppress SCO.
+	if ecostop.ddel'="",ln.daysdelq>ecostop.ddel quit 1
+	if ecostop.pdel'="",ln.pmtdel>ecostop.pdel quit 1
+
+	set SUPSCO=0
+
+	// Set up a command to call delinquency queries.
+	if ecostop.delqry'="" do {
+		new DELQRY,QRYCHK,QRYCMD
+		set DELQRY=ecostop.delqry
+		set QRYCMD="set QRYCHK=$$"_DELQRY_"^DELQRY1"
+		#ACCEPT DATE=12/30/03;PGM=John Carroll
+		X QRYCMD
+		if QRYCHK=1 set SUPSCO=1
+		}
+
+	quit SUPSCO
+
+
+NOISO
+	/*
+	 Place EFTPAY indexes under no isolation to avoid TP collisions
+
+	 This label is used to specify global names that do not require [TP]
+	 isolation.  It provides GT.M information that can be used to reduce
+	 the number of TP restarts, thereby improving performance.
+
+	 Note that the list of global names specified are not process
+	 specific and, at a data level, could be influenced by other 
+	 processes, but since they are all driven by the creation of a 
+	 single EFTPAY record they will be protected since the EFTPAY
+	 global could detect conflicts.
+	*/
+
+	new gbl,x
+	set gbl="^EFTX,^EFTX1,^EFTX2,^EFTX4,^EFTINDX"
+	#BYPASS
+	if $P($ZVERSION,"GT.M V",2)'<4.2 set x="VIEW ""NOISOLATION"":""+"_gbl_"""" xecute x
+	#ENDBYPASS
+	quit
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+        for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+		set CID=vRECORD.piece($C(9),3)
+		set EFTTYPE=vRECORD.piece($C(9),2)
+		do vPROC(CID,"")
+		}
+
+	
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+	type Public String vBUFOVFL
+	type String vRECORD,vrow,CID
+	type Number vcur,vlen
+
+	set vINPUT=vBUFOVFL.get()
+	set vBUFOVFL="",vlen=0
+	set vcur=1
+	
+	type Public ResultSet rstyp
+
+	for  do {  quit:'vcur
+		set vcur=rstyp.next() if 'vcur quit
+		set EFTTYPE=rstyp.getCol(2)
+		set CID=rstyp.getCol(1)
+		
+		set vrow=XTJD_$C(9)_EFTTYPE_$C(9)_CID_"|"
+		set vlen=vlen+vrow.length()
+		if vlen>32767 set vBUFOVFL=vrow,vcur=0 quit
+		set vINPUT=vINPUT_vrow if vlen+13>32767 set vcur=0 quit
+		}
+	set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+
+	quit
+
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+	set XTJD=%SystemDate
+	
+	// Go to the "SRC","BOFF","EFT" user table to get the teller ID, BRCD.
+	do SOURCE^BCHSOURC("BOFF","EFT",.%UserID,.BRCD,.%UserClass,.TSDR,.TSCR)
+
+	if $G(ER) set ET=$G(RM) do EXC set %BatchExit=1 quit
+
+	// Invalid teller ID
+	if %UserID="" set ER=1,ET=$$^MSG(3533) do EXC set %BatchExit=1 quit
+	
+	// Invalid userclass for teller ~p1
+	if %UserClass="" set ER=1,ET=$$^MSG(3535,%UserID) do EXC set %BatchExit=1 quit
+
+	type Public ResultSet rstyp=Db.select("DISTINCT CID,EFTTYPE","EFTPAY","PROCDT=:%SystemDate and EFTTYPE NOT LIKE '%NDPO%'","EFTTYPE ASC")
+        if rstyp.isEmpty() set vcur=0 quit
+
+
+        quit
+
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("CID,SEQ","EFTPAY","EFTPAY.PROCDT=:XTJD and EFTTYPE NOT LIKE '%NDPO%'")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	set efttype=""
+	do init(0)
+
+
+	// Place EFTPAY indexes under no isolation to avoid TP collisions
+	do NOISO
+
+	quit
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+	set vINPUT=""
+
+	// Place EFTPAY indexes under no isolation to avoid TP collisions
+	do NOISO
+
+	quit
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+	/*
+	 Post offsets into the next business date's TTX file.  Offsets will
+	 be posted in TTX under the branch code and teller specified in the
+	 source table FUTURE from information previously accumulated by
+	 the threads. 
+	*/
+	
+	do OFFSET^TTXBLD(%SystemDate+1,BRCD,%UserID,"BCHEFT")
+	set ER=0
+
+	quit
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

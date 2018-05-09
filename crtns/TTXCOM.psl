@@ -1,0 +1,866 @@
+TTXCOM		/*
+	   ORIG: ARPAV - 07/20/98
+	   DESC: Commission Processing -Transaction
+
+	   This routine will check all commission plans linked to the account
+	   to see if any of the plans should be assessed during a transaction.
+	   If so, then call out to the single account commission routine
+	   COMCID to get the amount of the commission.
+
+	   Generating transactions will depend on the commission payment method
+	   CMTH.
+
+	    CMTH=0 - Debit Expense Account
+
+	    Credit the interum settlement account and debit the
+	    Expense G/L account
+
+	    CMTH=1 - Debit Account Balance
+
+	    Credit the interum settlement account and debit the
+	    account balance.
+
+	    CMTH=2 - Net From Transaction
+
+	    No transactions are generated.  Commissions are
+	    calculated and CAMT is returned to the calling
+	    program.  The payment of the commissions will be
+	    handled through linked transactions.
+
+	   KEYWORDS:
+
+	   INPUT:	ttx - Transaction object
+
+	   OUTPUT:	ER - Processing error indicator
+				0 = Post , 1 = No post
+			CAMT - Commission Amount
+
+	   EXAMPLE:
+	   D START^TTXCOM(.acn,.ttx)
+
+	---- Revision History ------------------------------------------------
+	
+	03/15/07 - PUTTASWH - CR 25885
+		   Modified START section to invoke TRANS^CTFCALC section for
+		   processing Commission/Tax/Fee Plans attached to the account 
+		   before processing Commission Plan.  This is done since 
+		   Commission/Tax/Fee Plans defined in CTFPLNCID has to be 
+		   processed even if Commission Plan is not defined in 
+		   COMPLNCID.		   .
+	
+	07/19/06 - DESHPANDE SK - CR 20748
+		   Remove transaction variable %TRNHSEQ.
+		   	
+	04/19/06 - RussellDS - CR20209
+		   Remove call to SECCTF^CTFCALC since mutual fund processing
+		   has been obsoleted.
+	
+	03/31/06 - KELLYP - CR 20515
+		   Modified COMCOR section to prevent RDBSAVEFAIL record
+		   when COMCOR record already exists for the specified date
+		   and history sequence.  This is similar to how the same
+		   processing works in Profile01 and prevents both the 
+		   RDBSAVEFAIL error and unnecessary collation through AGENTCOM.
+	
+	11/03/05 - SPR - CR 17008
+		   Misspelled key TRNGRP modified from TRGRP in CPLAN section
+		   and the Db.prevVal function is replaced with Db.select 
+		   function. 
+	
+	----------------------------------------------------------------------
+	*/
+
+	quit
+
+
+public START(RecordACN acn,RecordTTX ttx)
+
+	new AGENT,AGTCID,AGTCRCD,AGTETC,AGTTYPE,CC,CID,CPLAN,DATE,PRIN,TAMT,TYPE
+
+	set CID=acn.cid
+	set AGENT=acn.boo
+	set TYPE=acn.type
+
+	// Commission/Tax/Fee Plan attached to the account.
+	type ResultSet rs1=Db.select("CTFPLN","CTFPLNCID","CID=:CID")
+	if rs1.next() do TRANS^CTFCALC(.ttx)
+	
+	type ResultSet rs=Db.select("CPLAN","COMPLNCID","CID=:CID")
+	// if there are no plans, quit
+	if rs.isEmpty() quit
+
+	type RecordAGENT agent=Db.getRecord("AGENT","AGENT")
+	type RecordUTBLBRCD utblbrcd=Db.getRecord("UTBLBRCD","AGENT")
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE")
+
+	set CC=utblbrcd.ccdef
+	set AGTCID=agent.intrm
+
+	type RecordACN agtacn=Db.getRecord("ACN","AGTCID")
+
+	set AGTTYPE=agtacn.type
+	set AGTCRCD=agtacn.crcd
+
+	type RecordPRODCTL prodctl2=Db.getRecord("PRODCTL","AGTTYPE")
+
+	set AGTETC=prodctl2.crtrgp	
+
+	if $G(TRNFLG)="" new TRNFLG,COMTOT,AGCYTOT
+	if $G(TRNFLG)="" do {
+		set TRNFLG=0
+		set COMTOT=0
+		set AGCYTOT=0
+		}
+
+	set DATE=$S(%EffectiveDate:%EffectiveDate,1:%SystemDate)
+
+	// Set the principle amount for calculations later
+	set TAMT=ttx.tamt
+	set PRIN=$P(TAMT,"#",2)+$P(TAMT,"#",5)
+	set TAMT=+TAMT
+
+	while rs.next() do { if ER quit
+
+		set CPLAN=rs.getCol(1)
+
+		do CPLAN(.acn,.ttx,.agent,.prodctl,CPLAN)
+		}
+
+	quit
+
+
+CPLAN(RecordACN acn,RecordTTX ttx,RecordAGENT agent,RecordPRODCTL prodctl,CPLAN)	// Process one Commission Plan
+
+	new AGNCYAMT,AI,AR,CAMT,DATA,I,INQUERY,R
+
+	type RecordAGENTCOM agentcom=Db.getRecord("AGENTCOM","AGENT,CPLAN")
+
+	// If plan is not applied, quit
+	if 'agentcom.app quit
+
+	type RecordUTBLCOMPLN ucompln=Db.getRecord("UTBLCOMPLN","CPLAN")
+
+	// Assessment method must be a transaction
+	if ucompln.amth'=2 quit
+
+	// If called from transaction routine, must be 2
+	if TRNFLG,ucompln.cmth'=2 quit
+
+	// Check the commission plan in the query
+	if ucompln.query'="",'$$^COMQRY1(ucompln.query) quit
+
+	// Must have a transaction code group
+	if ucompln.trgrp="" quit
+
+	// Initialize rates and indexes
+	set (AI,AR,I,R)=""
+
+	new TRNCD,TRNGRP,TRNGRPDT
+
+	set TRNCD=ttx.etc
+	set TRNGRP=ucompln.trgrp
+	set TRNGRPDT=DATE+.001
+	
+	type ResultSet rs=Db.select("TRNGRPDT","UTBLTRNGRPT","TRNGRP=:TRNGRP AND TRNGRPDT<:TRNGRPDT" ,"TRNGRPDT DESC") 
+	if rs.next() set TRNGRPDT=rs.getCol("TRNGRPDT")   
+
+	if TRNGRPDT="" quit
+
+	if 'Db.isDefined("UTBLTRNGRP","TRNGRP,TRNGRPDT,TRNCD") quit
+
+	// At this point, the plan is OK to process, so call the routine
+	set DATA=$$EXT^COMCID(CPLAN,acn.cid,acn.boo,DATE,.I,.R,.AI,.AR)
+	if ER quit
+
+	set CAMT=$P(DATA,"|",1)
+	set AGNCYAMT=$P(DATA,"|",2)
+
+	// Check the agent skip payment option.  If the option is set, then
+	// add everything that is in the agent's commission to the agency
+	if agent.skppmt set AGNCYAMT=AGNCYAMT+CAMT
+
+	set COMTOT=COMTOT+CAMT
+	set AGCYTOT=AGCYTOT+AGNCYAMT
+
+	// File the agent's transactions
+	if CAMT,ucompln.cmth=1,'agent.skppmt do TFRDR(.acn,.prodctl,CAMT)
+	if CAMT,ucompln.cmth=0,'agent.skppmt do DREXP(.acn,.ucompln,CAMT,acn.boo)
+	do CRINT(.acn,.ucompln,CAMT,acn.boo,I,R,0,AGNCYAMT,agent.skppmt)
+
+	// File the agency's transactions
+	if AGNCYAMT,ucompln.cmth=1 do TFRDR(.acn,.prodctl,AGNCYAMT)
+	if AGNCYAMT,ucompln.cmth=0 do DREXP(.acn,.ucompln,AGNCYAMT,agent.agnum)
+	if AGNCYAMT do CRINT(.acn,.ucompln,AGNCYAMT,agent.agnum,AI,AR,acn.boo,0,0)
+
+	/*
+	 If all transactions filed correctly, and the commission amount was
+	 paid collected from the account balance, then update the commissions
+	 paid buckets on the account.
+	*/
+	if ucompln.cmth=1 do {
+		new FINB
+
+		set FINB=$$BOFY^SCADAT(%SystemDate,1)
+
+		if CUVAR.YEOFF,%EffectiveDate<FINB,%SystemDate'>(FINB+CUVAR.YEOFF) do {
+
+			// Commissions Paid Prior Financial Year
+			if acn.cls="D" do UPDDEP(.acn,CAMT+AGNCYAMT,1)
+			if acn.cls="L" do {
+				do UPDLN(.acn,CAMT+AGNCYAMT,1)
+				do FISCAL(.acn,CAMT,AGNCYAMT)
+				}
+			}
+
+		else  do {
+
+			// Commissions Paid Financial YTD
+			if acn.cls="D" do UPDDEP(.acn,CAMT+AGNCYAMT,2)
+			if acn.cls="L" do UPDLN(.acn,CAMT+AGNCYAMT,2)
+			}
+		}
+
+	quit
+
+
+DREXP(RecordACN acn,RecordUTBLCOMPLN ucompln,TAMT,AGENT)
+	// Debit commission amount from Commission Plan expense account
+
+	new PCID,TSO
+
+	// If the deferred expense G/L is valued, then use it and file an
+	// entry to the COMDEF file
+	if ucompln.deferexpgl'="" set PCID=ucompln.deferexpgl
+	else  set PCID=ucompln.expgl
+
+	set TSO=""
+	set TSO=$$FIELDIN^UTSO(TSO,"COMPST")
+
+	// Commission Posting
+	if TAMT do FILE(.acn,PCID,"MDR",TAMT,TSO,"G/L",acn.crcd,CC)
+
+	// Call subroutine for deferred expense if necessary
+	if 'ER,ucompln.deferexpgl'="" do DEFER(.ucompln,CPLAN,acn.cid,TAMT,acn.crcd,AGENT)
+
+	quit
+
+
+TFRDR(RecordACN acn,RecordPRODCTL prodctl,TAMT)
+
+	new TSO
+
+	set TSO=""
+	set TSO=$$FIELDIN^UTSO(TSO,"COMPST")
+
+	// Commission Posting
+	do FILE(.acn,acn.cid,prodctl.drtrgp,TAMT,TSO,acn.type,acn.crcd,"")
+
+	quit
+
+
+CRINT(RecordACN acn,RecordUTBLCOMPLN ucompln,TAMT,AGENT,INDEX,RATE,OAGENT,AGNCYAMT,SKPPMT)
+
+	new CID,PSTDT,TSO
+
+	set CID=acn.cid
+	set TSO=""
+	set TSO=$$FIELDIN^UTSO(TSO,"COMPST",CPLAN_":"_AGENT)
+
+	// Do not file if netted from transaction, Commission Posting
+	if TAMT,ucompln.cmth'=2,'SKPPMT do FILE(.acn,AGTCID,AGTETC,TAMT,TSO,AGTTYPE,AGTCRCD,"")
+
+	if 'OAGENT set OAGENT=""
+	set PSTDT=%SystemDate
+
+	// Now create an entry in the DAYENDCOMPST file
+	type RecordDAYENDCOMPST decompst=Class.new("RecordDAYENDCOMPST")
+
+	set decompst.pstdt=PSTDT
+	set decompst.agent=AGENT
+	set decompst.cplan=CPLAN
+	set decompst.cid=CID
+	set decompst.seq=Db.nextVal("DAYENDCOMPST","PSTDT,AGENT,CPLAN,CID")
+	set decompst.amt=TAMT
+	set decompst.crcd=acn.crcd
+	set decompst.rate=RATE
+	set decompst.index=INDEX
+	set decompst.posted=1
+	set decompst.orgagent=OAGENT
+	set decompst.agncyamt=AGNCYAMT
+
+	do decompst.bypassSave()
+
+	quit
+
+
+FILE(RecordACN acn,PCID,ETC,TAMT,TSO,TYPE,NCRCD,CC)
+
+	type Public Cache %CACHE()
+
+	type RecordTRN trn=%CACHE("TRN").getRecord("TRN","ETC")
+	type RecordTTX ttx=Class.new("RecordTTX")
+
+	set ttx.cid=PCID
+	// allows reversals
+	set ttx.itc=$$ITC^TTXEXT(trn.itc,7,1)
+	set ttx.etc=ETC
+	set ttx.efd=%EffectiveDate
+	set ttx.tlo=%UserStation
+	set ttx.tso=TSO
+	set ttx.tcmt=$$^MSG(3379)
+	set ttx.cc=CC
+	set ttx.crcd=acn.crcd
+
+	// Check for different currency codes in the TAMT and the account
+	if acn.crcd'=NCRCD,TYPE'="G/L" do {
+		set TAMT=$$MC(TAMT,acn.crcd,NCRCD,PCID)
+		set ttx.crcd=NCRCD
+		}
+
+	set ttx.tamt=TAMT
+
+	if PCID=acn.cid do TRNSINGL^TRNDRV(.ttx,.acn,TPD,BRCD,5)
+	else  do TRNSINGL^TRNDRV(.ttx,,TPD,BRCD,5)
+
+	if ER,'$G(NOEXC) do LOG
+
+	// Set secondary transactions into history under primary transaction
+	// for deposits only
+	if acn.cls="D" do {
+		new CID,HISTSEQ
+
+		set CID=acn.cid
+		set HISTSEQ=Db.currVal("HIST","CID")
+
+		type RecordHISTDST histdst=Class.new("RecordHISTDST")
+
+		set histdst.cid=acn.cid
+		set histdst.tseq=HISTSEQ
+		set histdst.dstseq=Db.currVal("HISTDST","CID,HISTSEQ")+.01
+		set histdst.acct=ttx.cid
+		set histdst.itc=ttx.itc
+		set histdst.etc=ttx.etc
+		set histdst.tamt=ttx.tamt
+		set histdst.efd=ttx.efd
+		set histdst.tso=ttx.tso
+		set histdst.tcmt=ttx.tcmt
+		set histdst.crcd=ttx.crcd
+		set histdst.cc=ttx.cc
+
+		do histdst.bypassSave()
+		}
+
+	quit
+
+
+DEFER(RecordUTBLCOMPLN ucompln,CPLAN,CID,TAMT,CRCD,AGENT)	// Generate entry to the defered expense file COMDEF
+
+	type RecordCOMDEF comdef=Class.new("RecordCOMDEF")
+
+	set comdef.cplan=CPLAN
+	set comdef.cid=CID
+	set comdef.seq=Db.nextVal("COMDEF","CPLAN,CID")
+	set comdef.amtot=ucompln.noc
+	set comdef.deforg=TAMT
+	set comdef.defcyc=$$^SCARND(TAMT/ucompln.noc,0,,CRCD)
+	set comdef.deftot=0
+	set comdef.crcd=CRCD
+	set comdef.amrem=ucompln.noc
+	set comdef.agent=AGENT
+
+	do comdef.bypassSave()
+
+	quit
+
+
+public CLAWBACK(RecordACN acn,RecordTTX ttx,AGENT)
+	/*
+	This process will be called by closeout processing to
+	recalculate commissions for an account that is closed before
+	the commission refund period.  This routine will automatically
+	post the difference to the interum settlement account of
+	the agent
+
+	Arguments:
+	    acn : Account object
+	    ttx : Transaction object
+	    AGENT : Agent number or branch of ownership
+
+	Example:
+	    D CLAWBACK^COMCALC(.acn,.ttx,BOO)
+	*/
+
+	new AGTCID,AGTCRCD,AGTETC,AGTTYPE
+
+	type RecordAGENT agent=Db.getRecord("AGENT","AGENT",1)
+
+	// Check for a valid agent before continuing
+	if agent.getMode()=0 quit
+
+	set AGTCID=agent.intrm
+
+	type RecordACN agtacn=Db.getRecord("ACN","AGTCID",1)
+
+	if agtacn.getMode()=0 quit
+
+	set AGTTYPE=agtacn.type
+	set AGTCRCD=agtacn.crcd
+
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","AGTTYPE")
+
+	set AGTETC=prodctl.drtrgp
+
+	type ResultSet rs=Db.select("CPLAN","AGENTCOM","AGENT=:AGENT")
+
+	if rs.isEmpty() quit
+
+	new CID,CPLAN
+
+	set CID=acn.cid
+
+	while rs.next() do {
+
+		set CPLAN=rs.getCol(1)
+
+		type RecordUTBLCOMPLN ucompln=Db.getRecord("UTBLCOMPLN","CPLAN")
+
+		if ucompln.comrp'="" do CLAWPROC(.acn,.ttx,.ucompln)
+		}
+
+	quit
+
+
+CLAWPROC(RecordACN acn,RecordTTX ttx,RecordUTBLCOMPLN ucompln)	// Process one commission plan clawback
+
+
+	// Get all amounts from the dayendcompst file and total the amount paid
+	type ResultSet rs=Db.select("AMT","DAYENDCOMPST","AGENT=:AGENT AND CPLAN=:CPLAN AND CID=:CID")
+
+	if rs.isEmpty() quit
+
+	new DIFF,ER,NODCP,NODO,PRAMT,TOTAMT
+
+	set TOTAMT=0
+
+	while rs.next() set TOTAMT=TOTAMT+rs.getCol(1)
+
+	/*
+	 Once we have the total amount paid to the agent for this plan,
+	 then we need to prorate the amount due to the agent.  Use ODT for
+	 deposits and DTNT for loans.
+	*/
+	if acn.cls="D" do {
+		new DAT
+
+		set DAT=$$EXT^UMDT(ucompln.comrp,acn.odt)
+		// Number of days in clawback period
+		set NODCP=DAT-acn.odt
+		// Number of days actually opened
+		set NODO=%SystemDate-acn.odt
+		}
+
+	if acn.cls="L" do {
+		new DAT,DTNT
+
+		set DTNT=$$GETLN(.acn,1)
+		set DAT=$$EXT^UMDT(ucompln.comrp,DTNT)
+		// Number of days in clawback period
+		set NODCP=DAT-DTNT
+		// Number of days actually opened
+		set NODO=%SystemDate-DTNT
+		}
+
+	// If opened longer than clawback period, quit
+	if NODO'<NODCP quit
+
+	set PRAMT=TOTAMT*(NODO/NODCP)
+	set DIFF=$$^SCARND(TOTAMT-PRAMT,0,CID)
+
+	// Debit the settlement account with the difference
+	do DRINT(.acn,DIFF,AGENT)
+	if ER quit
+
+	// Credit the expense G/L account with the difference
+	do CREXP(.acn,ucompln.expgl,DIFF)
+
+	quit
+
+
+DRINT(RecordACN acn,TAMT,AGENT)
+
+	new PSTDT,TSO
+
+	set TSO=""
+	set TSO=$$FIELDIN^UTSO(TSO,"COMPST")
+
+	// Commission Posting
+	do FILE(.acn,AGTCID,AGTETC,TAMT,TSO,AGTTYPE,AGTCRCD,"")
+
+	// Now create an entry in the DAYENDCOMPST file
+	type RecordDAYENDCOMPST decompst=Class.new("RecordDAYENDCOMPST")
+
+	set PSTDT=%SystemDate
+	set decompst.pstdt=PSTDT
+	set decompst.agent=AGENT
+	set decompst.cplan=CPLAN
+	set decompst.cid=acn.cid
+	set decompst.seq=Db.nextVal("DAYENDCOMPST","PSTDT,AGENT,CPLAN,CID")
+	set decompst.amt=-TAMT
+	set decompst.crcd=acn.crcd
+	set decompst.posted=1
+
+	do decompst.bypassSave()
+
+	quit
+
+
+CREXP(RecordACN acn,PCID,TAMT)
+	// Credit clawback amount to Commission Plan expense account
+
+	new TSO
+
+	set TSO=""
+	set TSO=$$FIELDIN^UTSO(TSO,"COMPST")
+
+	// Commission Posting
+	do FILE(.acn,PCID,"MCR",TAMT,TSO,"G/L",acn.crcd,"")
+
+	quit
+
+
+MC(AMT,BCRCD,CRCD,CID)	// Multicurrency Exchange
+
+	// Calculate secondary currency exchange amount
+	do EXC^CRCDUTL(BCRCD,CRCD,AMT,1,1,"00")
+
+	set AMT=$$^SCARND(EXCAMT,0,CID)
+
+	quit EXCAMT
+
+
+LOG	// Log exceptions
+
+	new DESC
+
+	// Processing Error
+	set DESC=$$^MSG(2241)
+
+	do LOG^UTLEXC($T(+0),"*",DESC,CID,"",$G(RM))
+
+	quit
+
+
+public COMCOR(RecordACN acn,Date TEFD)
+	/*
+	   Check for any change over a month end balance which would result
+	   result in a commission correction needed for a portfolio based
+	   commission plan
+	*/
+	
+	type Date EOMJD
+
+	set EOMJD=$$EOMJD^SCADAT(TEFD,1)
+
+	if EOMJD<%SystemDate do {
+
+		type Boolean QUIT = 0
+		type Number HSEQ
+		type String CPLAN
+		
+		set HSEQ=Db.nextVal("HIST","CID=:acn.cid")
+		
+		// If there is already a correction record for this history
+		// entry then we don't need to add another.
+		if Db.isDefined("COMCOR","CID=:acn.cid,SEQ=:HSEQ") quit
+
+		type ResultSet rs=Db.select("CPLAN","AGENTCOM","AGENT=:acn.boo")
+		while rs.next() do { quit:QUIT=1
+
+			// If the calculations are based on portfolio amounts, then file to the commission correction file
+			set CPLAN=rs.getCol("CPLAN")
+
+			type RecordUTBLCOMPLN ucompln=Db.getRecord("UTBLCOMPLN","CPLAN")
+
+			if ucompln.alc,ucompln.comcalc.isNull() quit
+
+			type RecordCOMCOR comcor=Class.new("RecordCOMCOR","CID=:acn.cid,SEQ=:HSEQ")
+			set comcor.efd=TEFD
+			set comcor.trd=%SystemDate
+			do comcor.bypassSave()
+
+			// We only need to file correction once for all plans
+			set QUIT=1
+			}
+		}
+
+	quit
+
+
+public REVCOM(RecordTTX ttx) // Commission Reversal
+	/*
+	This code will be called from the transaction processing reversal
+	process.  If a transaction generated commission posting is being
+	reversed, then we need to update the DAYENDCOMPST file with
+	a reversal as well.
+	*/
+
+	new AMT,AGENT,CPLAN,CID,ORGAGENT,PSTDT,UTSO
+
+	// check TSO for valid commission posting
+	do OUT^UTSO(.UTSO,ttx.tso)
+
+	if $G(UTSO("COMPST"))="" quit
+
+	// get commission data needed to post to dayendcompst
+	set CPLAN=$P(UTSO("COMPST"),":",1)
+	set AGENT=$P(UTSO("COMPST"),":",2)
+	set PSTDT=%SystemDate
+	set AMT=ttx.tamt
+	set CID=ttx.cid
+
+	type RecordACN acn=Db.getRecord("ACN","CID")
+
+	if acn.boo'=AGENT set ORGAGENT=acn.boo
+	else  set ORGAGENT=""
+
+	type RecordDAYENDCOMPST decompst=Class.new("RecordDAYENDCOMPST")
+
+	set decompst.pstdt=PSTDT
+	set decompst.agent=AGENT
+	set decompst.cplan=CPLAN
+	set decompst.cid=CID
+	set decompst.seq=Db.nextVal("DAYENDCOMPST","PSTDT,AGENT,CPLAN,CID")
+	set decompst.amt=AMT
+	set decompst.crcd=acn.crcd
+	set decompst.posted=1
+	set decompst.orgagent=ORGAGENT
+
+	do decompst.bypassSave()
+
+	/*
+	 If the commission plan has a collection method of 1, debit account
+	 balance, then we need to adjust the commissions paid field.  This
+	 may be either the current year fields or the prior year fields
+	 depending on the effective date.
+	*/
+	type RecordUTBLCOMPLN ucompln=Db.getRecord("UTBLCOMPLN","CPLAN")
+
+	if ucompln.cmth=1 do {
+
+		new FINB
+
+		set FINB=$$BOFY^SCADAT(%SystemDate,1)
+
+		// check for prior financial year and update
+		if %EffectiveDate,CUVAR.YEOFF,%EffectiveDate<FINB,%SystemDate'>(FINB+CUVAR.YEOFF) do {
+			// Commissions Paid Financial YTD
+			if acn.cls="D" do UPDDEP(.acn,AMT,1)
+			if acn.cls="L" do UPDLN(.acn,AMT,1)
+			}
+
+		else  do {
+			// Commissions Paid Financial YTD
+			if acn.cls="D" do UPDDEP(.acn,AMT,2)
+			if acn.cls="L" do UPDLN(.acn,AMT,2)
+			}
+		}
+
+	quit
+
+
+FISCAL(RecordLN ln,CAMT,AGNCYAMT)
+	/*
+	   If the fiscal field data items are defined in the user table UTBLFISINT,
+	   then update the fiscal interest fields on the account and the year
+	   files.
+	*/
+
+	new CID,COL,TYPE,YEAR
+
+	set YEAR=$$YEAR^SCADAT(%EffectiveDate,1)
+	set CID=ln.cid
+	set TYPE=ln.type
+	set COL="LN.COMPPY"
+
+	if Db.isDefined("UTBLFISINT","TYPE,COL") do {
+
+		set ln.fisint=ln.fisint+CAMT+AGNCYAMT
+
+		type RecordLNYR lnyr=Db.getRecord("LNYR","CID,YEAR",1)
+
+		set lnyr.fisint=lnyr.fisint+CAMT+AGNCYAMT
+
+		do lnyr.bypassSave()
+		}
+
+	quit
+
+
+UPDDEP(RecordDEP dep,AMT,FLG)
+
+	if FLG=1 set dep.comppy=dep.comppy+AMT quit
+	if FLG=2 set dep.compytd=dep.compytd+AMT quit
+
+	quit
+
+
+UPDLN(RecordLN ln,AMT,FLG)
+
+	if FLG=1 set ln.comppy=ln.comppy+AMT quit
+	if FLG=2 set ln.compytd=ln.compytd+AMT quit
+
+	quit
+
+
+GETLN(RecordLN ln,FLG)
+
+	if FLG=1 quit ln.dtnt
+
+	quit ""
+
+
+public INTRM(RecordACN acn,RecordTTX ttx)
+	/*
+	   This function will return the settlement account for the agent
+	   linked to an account.
+
+	   Example:
+	     $$INTRM^TTXCOM(.acn,.ttx)
+	   Inputs:
+	     acn = account object, must be account for first transaction in set
+	     ttx = transaction object, must be first transaction in set
+	*/
+
+	new AGENT
+
+	set AGENT=acn.boo
+	if AGENT="" quit ""
+
+	type ResultSet rs=Db.select("INTRM","AGENT","AGENT=:AGENT")
+
+	if rs.isEmpty() quit ""
+
+	if rs.next()
+
+	quit rs.getCol(1)
+
+
+public AGCINTRM(RecordACN acn,RecordTTX ttx)
+	/*
+	   This function will return the settlement account for the agency
+	   linked to an account.
+
+	   Example:
+	     $$AGCINTRM^TTXCOM()
+	   Inputs:
+	     ttx = transaction object, must be first transaction in set
+	     acn = account object, must be account for first transaction in set
+	*/
+
+	new AGENT
+
+	set AGENT=acn.boo
+
+	if AGENT="" quit ""
+
+	type ResultSet rs=Db.select("AGNUM,INTRM","AGENT","AGENT=:AGENT")
+
+	if rs.isEmpty() quit ""
+
+	if rs.next()
+
+	if rs.getCol(1)="" quit ""
+
+	quit rs.getCol(2)
+
+
+public TRNAMT(RecordTTX ttx)
+	/*
+	   This function will process commission plans for all plan that are
+	   transaction based and have a payment method of net from transaction.
+	   the function will set a flag and call the normal commission
+	   calculation process.  All dayend entries will be set but no
+	   transactions will be generated.  Totals will be returned to the
+	   calling routine.  These totals will be used by transaction sets to
+	   generate the commission credits.
+
+	   Example:
+	     $$TRNAMT^TTXCOM(.ttx)
+	   Inputs:
+	     ttx = transaction object, must be first transaction in set
+	*/
+
+	new AGCYTOT,CID,COMTOT,SEQ,TRNFLG
+
+	set CID=ttx.cid
+	set TRNFLG=1
+	set COMTOT=0
+	set AGCYTOT=0
+
+	type RecordACN acn=Db.getRecord("ACN","CID")
+
+	do START(.acn,.ttx)
+
+	quit COMTOT
+
+
+public AGCAMT(RecordTTX ttx)
+	/*
+	   This function will process commission plans for all plan that have
+	   funds going directly to the agency.  The only plans that will return
+	   a value are transaction based plans and have collection methods
+	   of 2 - net from transaction.
+
+	   Example:
+	     $$AGCAMT^TTXCOM(.ttx)
+	   Inputs:
+	     ttx = transaction object, must be first transaction in set
+	*/
+
+	new AGCYTOT,CID,COMTOT,SEQ,TRNFLG
+
+	set CID=ttx.cid
+	set TRNFLG=1
+	set COMTOT=0
+	set AGCYTOT=0
+
+	type RecordACN acn=Db.getRecord("ACN","CID")
+
+	do START(.acn,.ttx)
+
+	quit AGCYTOT
+
+
+public TRNCD(RecordTTX ttx,OPT)
+	/*
+	   This function will return the general credit transaction code of the
+	   product type for the account being passed in by the transaction array.
+	   This function will be called from transaction set processing.
+
+	   Example:
+	   $$TRNCD^TTXCOM(.ttx,OPT)
+	   Inputs:
+	     ttx = transaction object, must be first transaction in set
+	     OPT
+	       1 - Return tran code for agent settlement account type
+	       2 - Return tran code for agency settlement account type
+	*/
+
+	new CID,INTRM,TYPE
+
+	set CID=ttx.cid
+
+	type RecordACN acn=Db.getRecord("ACN","CID")
+
+	if OPT=1 set INTRM=$$INTRM(.acn,.ttx)
+	if OPT=2 set INTRM=$$AGCINTRM(.acn,.ttx)
+
+	if INTRM="" quit ""
+
+	set TYPE=acn.type
+
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE")
+
+	quit prodctl.crtrgp
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60705^6006^Hema Puttaswamy^19929"	// Signature - LTD^TIME^USER^SIZE

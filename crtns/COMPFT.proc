@@ -1,0 +1,660 @@
+COMPFT
+	/*
+
+	Procedure ID: COMPFT
+	Orig:	Vince Arpa
+
+	Description:
+
+        The purpose of this routine is to calculate the commission amount
+        a given agent and the commission plan.  The commissions will
+        be calculated based on the commission plan setup
+        in the user table UTBLCOMPLN.  All commission amounts will be
+        calculated and returned in the currency of the account being
+        evaluated.
+        
+        
+        EXAMPLE:
+              D EXT^COMPFT(CPLAN,AGENT)
+        */
+
+	/*---- Revision History ----------------------------------------------
+
+	07/28/06 - KELLYP - CR 22048
+		   Modified INCR section to eliminate PRECEDENCE warning.
+
+	12/02/03 - CARROLLJ - CR7239
+		   Removed PROC linetag since LOAD sectino just dropped into 
+		   it and nothing else calls it.
+
+	05/21/01 - MALHOTRAV - 40339
+		   Modified PROC section to set PGM to utblcompln.fcall 
+ 		   instead of undefined FCALL.  Moved the call to PGM to below 
+		   setting of CRATE. Modified section EXPGR() to accept an 
+		   expected growth %age to calculate the expected growth amount.
+
+	10/16/00 - ARPAV - 42321
+		   Modified code to check the currency code on the commission
+		   plan against the currency code on the agent.  If different,
+		   then the amount will be converted to the agent's amount
+		   while accumulating.
+
+	08/18/99 - ARPAV - 34487
+		   Added check on agency before processing the skip payment
+		   option in the FILE section.
+
+	08/12/99 - ARPAV - 34061
+		   Adding changes to EXPGR section to support extra-growth
+		   commission enhancements.
+
+	07/14/99 - HAYMANP - 33649
+		   Modified section INCR to calculate comission amounts
+		   for incremental indexes using fixed amounts.
+
+	07/08/99 - HAYMANP - 33649
+		   Modified section INDEX to properly process an incremental
+		   index.  Added section INCR.
+
+	07/02/99 - ARPAV - 33581
+		   Adding code to process skip commission payments on agents
+		   and agencys even if there is no commission difference 
+		   between the two.
+
+	05/28/99 - ARPAV - 33325
+		   Changed references from COMAMT to CAMT to fix undefined
+		   error when using a commission calculation method.  Each
+		   section of the processing will set COMAMT.  After getting
+		   the individual commissions, COMAMT will be added to the
+		   total commission CAMT.
+
+	04/09/99 - ARPAV - 32577
+		   Added code to support quarter end balances for extra
+		   growth table.  Month end balances will also consider the
+		   previous high balance to determine balance tier.
+
+	12/09/98 - ARPAV - 28590
+		   Removed references to Pay Services Margin data item.
+
+	10/30/98 - ARPAV - 28590
+		   Moved setting of agency currency code in LOAD section to
+		   fix undefined error.
+
+	---------------------------------------------------------------------*/ 
+
+	quit
+
+        //----------------------------------------------------------------------
+PUBLIC EXT(CPLAN,AGENT,file,INDEX,CRATE)     //External Line Tag
+        //----------------------------------------------------------------------
+        
+        /* Arguments:
+        
+                 . CPLAN - Commission Plan               /TYP=T/REQ/MECH=VAL
+        
+                        This variable defines the commission plan being used
+                        in the  calculations.  The details of the plan will be
+                        loaded in from the table UTBLCOMPLN.
+        
+        
+                . AGENT - Agent                         /TYP=N/REQ/MECH=VAL
+          
+                        This variable is the number which defines the agent.
+                        This will be used to determine the settlement
+                        account which the commission amount will be posted.
+ 
+		. file - File flag
+
+			This is a logical variable which will be used to
+			indicate whether ot not the amounts calculated
+			will be filed to the dayendcompst file or not.
+			
+                . INDEX - Commission Index              /TYP=T/NOREQ/MECH=REF
+         
+                        The commission index which will actually be
+                        used to calculate the commissions.
+         
+                . CRATE  - Commission Rate               /TYP=N/NOREQ/MECH=REF
+         
+                        The commission rate which was used to calculate
+                        commissions
+         
+          Returns:
+         
+                . COMAMT  - Calculated Commission Amount
+         
+                        The amount of the commission that was calculated.
+         
+        */
+ 
+        new XBAL,CBAL,agnt,agncy,compln,agntcom,agntpft,CAMT,COMAMT
+        new POSTOFF,CRCD,AGENCY,SKPPMT,AGNCYAMT
+        new agncycm,AGNCYRT,AGNCYIND,ACRCD,TPD,CID,RTN,AGNCYCAL
+	new GTBL,EOPBAL
+
+	set TPD=%SystemDate
+        
+        //----------------------------------------------------------------------
+LOAD    // Load Data
+        //----------------------------------------------------------------------
+
+	// Load Commission Plan Data
+        type RecordUTBLCOMPLN compln
+        set compln=Db.getRecord("UTBLCOMPLN","CPLAN")
+        
+        // Load Commission Plan - Agent Level Data
+	If 'Db.isDefined("AGENTCOM","AGENT,CPLAN") Quit 0  // Plan not tied
+        type RecordAGENTCOM agntcom
+        set agntcom=Db.getRecord("AGENTCOM","AGENT,CPLAN")
+        
+        // Load Agent Data
+        type RecordAGENT agnt
+        set agnt=Db.getRecord("AGENT","AGENT")
+
+	// Load Agency Data
+	set AGENCY=agnt.agnum
+	set AGNCYCAL=0
+
+	If AGENCY'="" do {
+            type RecordAGENT agncy
+            set agncy=Db.getRecord("AGENT","AGENCY")        
+
+            set ACRCD=agncy.crcd
+            if ACRCD="" set ACRCD=%SystemCurrency
+
+	    if Db.isDefined("AGENTCOM","AGENCY,CPLAN") do {
+	    	type RecordAGENTCOM agncycm
+	    	set agncycm=Db.getRecord("AGENTCOM","AGENCY,CPLAN")
+	    	set AGNCYRT=agncycm.agcyrate
+	    	set AGNCYIND=agncycm.agyindex
+		set AGNCYCAL=1
+		}
+	    }
+
+        // Load Agent/Portfolio Detail
+        set PFT=compln.pft
+
+	// Check to see if there is a table value in the agent/pft table
+        If 'Db.isDefined("AGENTPFT","AGENT,PFT") Quit 0
+
+        type RecordAGENTPFT agntpft
+        set agntpft=Db.getRecord("AGENTPFT","AGENT,PFT")
+        
+        // Set up the currency codes
+        
+	set SKPPMT=agnt.skppmt			// VCA 7/2/99 
+        set CRCD=agnt.crcd
+        if CRCD="" set CRCD=%SystemCurrency
+       
+	set CID="*"	// For portfolios, CID is always *
+
+
+	// Process Agent Commission
+
+
+        set CBAL=0
+	set CAMT=0					// vca 5/28/99        
+
+        // If a commission amount is already defined, use that amount.
+        if compln.camt'="" set CAMT=compln.camt
+	
+	// Convert the amount from the plan's currency to the agent's currency
+	// if necessary		VCA 10/16/00
+	if (CAMT),(compln.crcd'=CRCD) do {
+		new EXCAMT
+		do EXC^CRCDUTL(compln.crcd,CRCD,CAMT,1,1,00)
+		set CAMT=$$^SCARND(EXCAMT,0,,CRCD)
+        }
+
+	// Determine Balance Type
+	do BALTYP(compln.baltyp,.agntpft)
+
+	if compln.gtbl'="" set CBAL=$$EXPGR(XBAL,.compln,.agntpft,.agntcom)
+	else  S CBAL=XBAL
+
+	// Check for a predefined Commission Calculation formula
+	If compln.comcalc'="" do COMCALC  set CAMT=CAMT+$G(COMAMT)	// vca 5/28/99
+        
+	// Get Rate or Commission Amount
+	do CRATE(.agntcom,.compln)
+	set CAMT=CAMT+$G(COMAMT)				// vca 5/28/99
+        
+	// Add the services margins to the Rate
+	set CRATE=CRATE+compln.cmarg+agntcom.margin+agntcom.smargin
+
+	// Calculate commission based on rate and balance
+	If $G(CRATE) set CAMT=CAMT+(CRATE*CBAL*.01)		// vca 5/28/99
+	set CAMT=$$^SCARND(CAMT,0,,CRCD)
+
+	/* If a commission routine is defined, then call the routine to
+	   get the commission amount.  The routine should set COMAMT as the
+	   commission amount. 
+	*/
+	If compln.fcall'="" do {  
+		set PGM=compln.fcall
+		If PGM'["^" set PGM="^"_PGM
+		do @PGM
+		set CAMT=CAMT+$G(COMAMT)		// vca 5/28/99
+		}
+
+        // Calculate the agency commission amount if one exists for the agent
+        If AGNCYCAL do {
+		do AGNCYCAL(.agntcom)
+		set AGNCYAMT=$$^SCARND(AGNCYAMT,0,,ACRCD)
+		}
+
+	// Check the file flag.  If false, then just return the amounts
+	set RTN=$G(CAMT)_"|"_$G(AGNCYAMT)			// vca 5/28/99
+	If 'file quit RTN
+
+        // File the commission amount to the DAYENDCOMPST file
+        If (CAMT>0)!($G(AGNCYAMT)>0) do FILE(.agntcom,.compln)	// vca 5/28/99	
+              
+        Quit RTN
+         
+        //----------------------------------------------------------------------
+FILE(RecordAGENTCOM agntcom,RecordUTBLCOMPLN compln)    // File the Commission Amount to the DAYNEDCOMPST file
+        //----------------------------------------------------------------------
+        new PSTDT,SEQ,POSTED,compst,compsta
+
+        // First file the agent's amount
+        
+	// if the agent has a skip commission payment set, then add everything
+	// to the agency's total.
+	if (SKPPMT),($G(AGENCY))'="" set AGNCYAMT=$G(AGNCYAMT)+CAMT	// VCA 8/18/99
+	
+	if $G(AGENCY)="" set POSTED=0
+        else  set POSTED=SKPPMT
+ 
+        TYPE RecordDAYENDCOMPST compst
+        set compst=Class.new("RecordDAYENDCOMPST")
+ 
+        set PSTDT=TPD+compln.postoff
+        set SEQ=Db.nextVal("DAYENDCOMPST","PSTDT,AGENT,CPLAN,CID")
+ 
+        set compst.pstdt=PSTDT          // next commission posting date
+        set compst.agent=AGENT          // Set the agent
+        set compst.cplan=CPLAN          // Set the Commission Plan
+        set compst.seq=SEQ              // Set the sequenct to the next value
+        set compst.amt=CAMT           // Set the Commission Amount
+        set compst.cid="*"               // Set the account
+        set compst.crcd=CRCD            // Set the currency code
+        set compst.rate=$G(CRATE)        // Set the rate
+        set compst.index=$G(INDEX)      // Set the index
+        set compst.posted=POSTED        // Posted=false
+ 	set compst.orgagent=""		// Set originating agent 
+
+        do compst.bypassSave()          // New Dayend for the agent
+        
+        // Next file the agency's amount
+
+        If $G(AGNCYAMT) do {
+
+            TYPE RecordDAYENDCOMPST compsta
+            set compsta=Class.new("RecordDAYENDCOMPST")
+ 
+            set SEQ=Db.nextVal("DAYENDCOMPST","PSTDT,AGENCY,CPLAN,CID")
+ 
+            set compsta.pstdt=PSTDT          // next commission posting date
+            set compsta.agent=AGENCY         // Set the agent
+            set compsta.cplan=CPLAN          // Set the Commission Plan
+            set compsta.seq=SEQ              // Set the sequence to the next value
+            set compsta.amt=AGNCYAMT         // Set the Commission Amount
+            set compsta.cid="*"              // Set the account
+            set compsta.crcd=ACRCD           // Set the currency code
+            set compsta.rate=$G(AGNCYRT)     // Set the rate
+            set compsta.index=$G(AGNCYIND)   // Set the index
+            set compsta.posted=0             // Posted=false
+ 	    set compsta.orgagent=AGENT	     // Set originating agent
+
+            do compsta.bypassSave()          // New Dayend for the agent
+	    }
+	            
+        Quit
+	
+        //----------------------------------------------------------------------
+EXPGR(XBAL,RecordUTBLCOMPLN compln,RecordAGENTPFT agntpft,RecordAGENTCOM agntcom)
+	// Load commission balance from expected growth table
+        //----------------------------------------------------------------------
+        
+	/*
+         Description:
+        
+                This routine will look up the balance passed in as XBAL and
+                return the corresponding expected growth balance as defined
+                in the expected growth table.
+        
+          Arguments:
+         
+                XBAL : Temporary balance used to determine the
+                       commission calculation balance CBAL.
+         
+                GTBL : Expected Growth Table
+         
+		BALTYP : Balance Type
+
+			Only a balance type of 3 (month end balance) or
+			4 (quarter end balance) is valid for expected growth
+			processing since we need to utilize high balances.
+
+          Returns:
+         
+                TBAL : Commission Calculation Balance
+        */
+
+	new EXPGRTH,TBAL,expgrth,expgrtht,HBAL,HBALP,TIERBAL
+
+	// get high balance and check XBAL against the high balance
+	if (compln.baltyp'=3),(compln.baltyp'=4) quit 0	
+
+	set GTBL=compln.gtbl
+	set TIERBAL=agntcom.grthbal	// always set to old growth balance
+
+	if compln.grthchnd'>%SystemDate do {        //VCA 8/12/99
+		// reset the high growth balance on the agent level	
+		new FRE
+		set agntcom.grthbal=XBAL	
+		set agntcom.grthdt=%SystemDate
+		do agntcom.bypassSave()
+		}
+
+	if compln.baltyp=3 set HBAL=agntpft.hbal,HBALP=agntpft.hmballm
+	if compln.baltyp=4 set HBAL=agntpft.hqbal,HBALP=agntpft.hqballq
+	
+	if XBAL<HBAL quit 0
+
+        type RecordUTBLEXPGRTHT expgrtht
+        set expgrtht=Db.getRecord("UTBLEXPGRTHT","GTBL")
+
+	// Check for multicurrency before evaluating
+ 	If CRCD'=expgrtht.crcd do {
+		set XBAL=$$MC(XBAL,CRCD,expgrtht.crcd)
+		set TIERBAL=$$MC(HBALP,CRCD,expgrtht.crcd)
+		}
+
+	set EOPBAL=Db.prevVal("UTBLEXPGRTH","GTBL,TIERBAL+.00001")
+	If EOPBAL="" Quit 0
+
+        type RecordUTBLEXPGRTH expgrth
+        set expgrth=Db.getRecord("UTBLEXPGRTH","GTBL,EOPBAL")
+        
+	/* If Expected Growth %age is defined in the growth table
+	   than the Expected Portfolio Growth amount will be calculated
+	   using the Expected Growth %age and prior years portfolio
+ 	   balance. */
+	if expgrth.exgrpct'="" set TBAL=agntpft.yebally*(expgrth.exgrpct/100)
+	
+	// Growth amount is current balance minus last high balance
+	else  set TBAL=XBAL-HBALP-expgrth.expgrth		//VCA 8/12/99	
+	if TBAL<0 quit 0
+
+	// Now set the currency back if necessary
+	If CRCD'=expgrtht.crcd set TBAL=$$MC(TBAL,expgrtht.crcd,CRCD)
+        Quit TBAL
+        
+        //----------------------------------------------------------------------
+CRATE(RecordAGENTCOM agntcom,RecordUTBLCOMPLN compln)    // Determine rate or index to use
+        //----------------------------------------------------------------------
+        
+        // First check to see if the rate is already valued.
+        If $G(CRATE) Q
+        
+        // Check for to see which level the rate or index is defined on.
+        // Check the agent level first and plan last.
+        
+        set CRATE=0
+        set COMAMT=0
+        
+        // If the index is already valued, use that index.
+        
+        If $G(INDEX)'="" do INDEX(INDEX,CBAL,TJD) Quit
+        If agntcom.ovrrate'="" set CRATE=agntcom.ovrrate Quit
+        If agntcom.ovrindex'="" do INDEX(agntcom.ovrindex,CBAL,TJD) set INDEX=agntcom.ovrindex Quit
+        If compln.cindex'="" do INDEX(compln.cindex,CBAL,TJD) set INDEX=compln.cindex Quit
+        set CRATE=compln.rate
+        
+	Quit
+
+        //----------------------------------------------------------------------
+INDEX(IND,CBAL,EFD)   // Given the index and the balance, return the rate
+        //----------------------------------------------------------------------
+        /*
+	  Description:
+        
+                Given the commission index and the balance, this routine will
+                return the rate associated with the tiered balance in the
+                commission index.
+         
+          Arguments:
+         
+                IND : Commission Index
+         
+                CBAL : Commission Balance
+         
+                EFD : Effective Date
+         
+          Returns:
+         
+                CRATE : The rate associated with the tier level.
+         
+                COMAMT : The predefined commission amount
+        */
+
+        new BCRCD,SEQ,XEFD,MTIER,XRATE,COMTYPE,TBAL,comindx,comindx1
+        
+        set (CRATE,COMAMT)=0
+
+        type RecordUTBLCOMINDX comindx
+        set comindx=Db.getRecord("UTBLCOMINDX","IND")
+
+	// If the currency in the index is different than the agent, convert
+	set BCRCD=comindx.crcd
+	If CRCD'=BCRCD set TBAL=$$MC(CBAL,CRCD,comindx.crcd)
+	Else  set TBAL=CBAL
+
+        set XEFD=Db.prevVal("UTBLCOMINDX1","IND,EFD+.1") Quit:XEFD=""
+	set MTIER=Db.prevVal("UTBLCOMINDX1","IND,XEFD,TBAL+.00001") Quit:MTIER=""
+
+        type RecordUTBLCOMINDX1 comindx1
+        set comindx1=Db.getRecord("UTBLCOMINDX1","IND,XEFD,MTIER")        
+        
+	// Fixed amount
+        If comindx.comtype do { quit
+	   if comindx.indtyp="I" set COMAMT=$$INCR(IND,XEFD,TBAL,1) if 1
+	   else  set COMAMT=comindx1.amt	// Get amount from Index
+
+	   // If the currencies are different, then exchange the amount
+	   if CRCD'=comindx.crcd set COMAMT=$$MC(COMAMT,comindx.crcd,CRCD)
+	   }
+        
+	// Rate
+	if comindx.indtyp="I" set CRATE=$$INCR(IND,XEFD,TBAL) quit
+	set CRATE=comindx1.rate
+        
+        Quit
+
+	//----------------------------------------------------------------------
+INCR(IND,XEFD,XBAL,FXD) // Calculate incremental rate or amount
+	//----------------------------------------------------------------------
+
+	/* Description:
+
+		Given the commission index and the balance, this extrinsic
+		routine will return either the blended rate associated with
+		the tiered balance in the commission index, or the accumulation
+		of the fixed amount values.
+
+	Arguments:
+
+		IND : Commission Index
+
+		XEFD : Effective Date
+
+		XBAL : Commission Balance
+
+		FXD : Fixed amount flag
+
+	$$Returns:
+
+		The blended rate caluclated for the amount
+
+			-OR-
+
+		The accumulated commission amount
+	*/
+
+	new CUMAMT,XTIER,XCAMT,AMT,XRATE,CURDEC,DECMIN,BASE,PTIER,COMAMT
+
+	set FXD=$G(FXD)
+	set CURDEC=$$curdec^CRCDUTL(BCRCD)
+	set BASE=1
+	for  quit:'CURDEC  set BASE=BASE*10 set CURDEC=CURDEC-1
+	set DECMIN=1/BASE
+
+	set CUMAMT=0
+	set XCAMT=0
+	set COMAMT=0
+
+	new rs
+	type ResultSet rs=Db.select("MTIER,RATE,AMT","UTBLCOMINDX1","CINDEX=:IND AND EFD=:XEFD")
+
+	quit:'rs.next() 0
+
+	set XTIER=rs.getCol(1) set PTIER=XTIER
+	set XRATE=rs.getCol(2)
+	if FXD set COMAMT=rs.getCol(3)
+
+	for  quit:'rs.next()  quit:(CUMAMT=XBAL)  do {
+		set XTIER=rs.getCol(1)
+		if XBAL'<XTIER set AMT=XTIER-PTIER-DECMIN
+		else  set AMT=XBAL-CUMAMT if FXD set CUMAMT=XBAL quit
+		set CUMAMT=CUMAMT+AMT
+		set PTIER=XTIER
+		if FXD set COMAMT=COMAMT+rs.getCol(3) quit
+		set XCAMT=XCAMT+(AMT*XRATE)
+		set XRATE=rs.getCol(2)
+	}
+
+	// quit with the commission amount if using fixed amounts
+	if FXD quit COMAMT
+
+	// apply the remaining amount at the last rate
+	if (CUMAMT-XBAL) set XCAMT=XCAMT+((XBAL-CUMAMT)*XRATE)
+
+	// return the rate
+	quit:'XCAMT!('XBAL) 0
+	quit $$^SCARND(XCAMT/XBAL,,,,5)
+
+        //----------------------------------------------------------------------
+COMCALC // Calculate Commission based on predefined formula.
+        //----------------------------------------------------------------------
+        
+        /*  All of the commission calculations have been compiled into the
+          routine ^COMRTN1.M.  The line tag to call is the same as the
+          commission plan being evaluated.  This subprogram calls that
+          routine and sets the variable camt to the computed amount.
+        */
+
+        new PGM
+        
+        set PGM=CPLAN_"^COMRTN1"
+        do @PGM
+        Quit
+        
+        //----------------------------------------------------------------------
+AGNCYCAL(RecordAGENTCOM agntcom)  //Agency Calculation Routine
+        //----------------------------------------------------------------------
+        
+        // First get the rate at the agency level.
+
+	set AGNCYAMT=0
+	        
+        If AGNCYRT'="" set AGNCYAMT=AGNCYRT*CBAL*.01
+        Else  If AGNCYIND'="" do {
+            new SAVRATE
+            ;
+            set SAVRATE=CRATE
+            do INDEX(AGNCYIND,CBAL,TJD)
+            set AGNCYRT=CRATE
+            set AGNCYAMT=AGNCYRT*CBAL*.01
+            set CRATE=SAVRATE
+	    }
+        
+        // Now check the skip payment flag.  If it is true, then pay the
+        // fill amount to the agency.  If not, calculate the difference
+        // and pay only the difference to the agency.
+        
+        If 'SKPPMT do {
+           new DIFF
+           set DIFF=AGNCYAMT-COMAMT
+           If DIFF<0 set DIFF=0
+           set AGNCYAMT=DIFF
+	   }
+
+        Quit
+
+        //----------------------------------------------------------------------
+BALTYP(BALTYP,RecordAGENTPFT agntpft)  // Balance Type Routine
+        //----------------------------------------------------------------------
+
+	/* Set XBAL based on the balance type
+	
+		0)=Average Balance - Last Month
+        	1)=Average Balance - Last Quarter
+        	2)=Average Balance - Last Year
+        	3)=Month End Balance - Last Month
+        	4)=Quarter End Balance - Last Quarter
+        	5)=Year End Balance - Last Year
+        	6)=Monthly Growth
+        	7)=Quarterly Growth
+        	8)=High Balance - Life
+        	9)=Transaction Amount
+
+	*/
+
+	
+	IF BALTYP=0 set XBAL=agntpft.avblm  quit
+	IF BALTYP=1 set XBAL=agntpft.avblq  quit
+	IF BALTYP=2 set XBAL=agntpft.avbly  quit
+	IF BALTYP=3 set XBAL=agntpft.meballm  quit
+	IF BALTYP=4 set XBAL=agntpft.qeballq  quit
+	IF BALTYP=5 set XBAL=agntpft.yebally  quit
+	IF BALTYP=6 set XBAL=agntpft.meballm-agntpft.mebalpm  quit
+	IF BALTYP=7 set XBAL=agntpft.qeballq-agntpft.qebalpq  quit
+	IF BALTYP=8 set XBAL=agntpft.hbal  quit
+
+	set XBAL=0
+
+	quit
+
+       
+	//----------------------------------------------------------------------
+MC(AMT,BCRCD,CRCD) // Multicurrency Calculation
+        //----------------------------------------------------------------------
+
+	/* This routine will convert the given amount in the given currency
+	   code (BCRCD) to an amount in another given currency code (CRCD).  
+	   The routine will return the new amount.
+	
+	Arguments:
+	
+		AMT : The amount to be exchanged.
+
+		BCRCD : The currency that the amount is currently in.
+	
+		CRCD: The currency code that the amount will be converted to.
+
+	Returns:
+
+		NAMT : The converted amount.
+
+	*/
+
+	new NAMT
+
+	If BCRCD=CRCD Quit AMT  	// Already the same
+	Do EXC^CRCDUTL(BCRCD,CRCD,AMT,1,1,00)
+	set NAMT=$$^SCARND(EXCAMT,0,,CRCD)
+	
+	Quit NAMT
+
+vSIG()	quit "60477^65443^Pat Kelly^21063"	// Signature - LTD^TIME^USER^SIZE

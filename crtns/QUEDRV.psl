@@ -1,0 +1,281 @@
+QUEDRV
+	/*
+ 	PROCEDURE ID:	QUEDRV
+ 	    Original:	CHENARDP
+		Date:	08/14/89
+ 	        Desc:	Queue Event Driver
+ 
+ 	---- Comments ---------------------------------------------------------
+ 
+	This routine is the driver that controls the execution of any queued
+	jobs.  This routine will be called from any event (function) that is
+	set up in the user table UTBLEVENT.
+
+	This will submit to the queuing system any batches defined in the user
+	table for the event that is selected.
+
+	------ Revision History -----------------------------------------------
+	
+	11/24/06 - DHANALAKSHMI R - CR24213
+		   Modified to declare and pass EJD as reference argument in
+		   the call to MAIN^QUEINT.
+
+	12/11/04 - RussellDS - CR13642
+		   Changed call to ^QUEINT.  Cleaned up scoping.  Other
+		   miscellaneous PSL related clean-up, short of a rewrite.
+		   Removed variables that weren't used.
+		   
+		   Modified calls to SBMTBCH^%OSSCRPT to pass new parameters
+		   to indicate DBI version handling.
+
+	12/18/03 - CARROLLJ - CR7239
+		   Added #ACCEPT prior to setting %SystemDate.
+
+	03/18/02 - Vitaliy Antonov - 43583
+		   Converted To PSL. N[ewed] variables in SUBMIT section and top 
+		   level.
+
+	-----------------------------------------------------------------------
+	*/
+	
+	type public Number ER
+	type public String %FN, RM
+	
+	type Boolean CONT
+	type String %NOPRMT, %READ, %TAB(), EVENT, VFMQ
+	type Date EJD
+	
+	set CONT=0
+
+	set %TAB("EVENT")=".EVENT1/HLP=[UTBLEVENT]EVENT/TBL=[UTBLEVENT]/XPP=S %OSAVE=1 D QUE^QUERSTRT(X)"
+	set %READ="@@%FN,,,EVENT/REQ" set %NOPRMT="F"
+	do ^UTLREAD 
+	if VFMQ="Q" do END quit
+
+	// Logical SCA$BATCH must be defined
+	if '$$SCABATCH^%ZFUNC set ER=1,RM=$$^MSG(1658) do END quit
+
+	set ER=$$MAIN^QUEINT(EVENT,.EJD,.RM) quit:ER
+	
+	kill VFMQ
+
+	type RecordUTBLEVENT uevent=Db.getRecord("UTBLEVENT","EVENT=:EVENT",1)
+	if uevent.pgm'="" do @uevent.pgm if $G(VFMQ)="Q"!($G(ER)) do END quit
+
+	kill %TAB,%READ
+	set CONT=0
+	set %TAB("CONT")=".CONT2"
+	set %READ=",,CONT/REQ"
+	do ^UTLREAD
+	if '$G(CONT) set VFMQ="Q"
+	if VFMQ="Q" do END quit
+	
+	do EXT
+	quit
+
+
+public EXT
+
+	/*
+	Variable EVENT must be defined coming in to this point
+	External entry - Called from RESUB^RCHK.
+	*/
+
+	type public String EVENT
+	
+	type Number BCHNUM
+
+	do Runtime.start("CS")
+
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+
+	#ACCEPT DATE=12/18/03;PGM=John Carroll
+	set %SystemDate=cuvar.tjd
+
+	// Clear the QUEUE submission table and control table
+	do Db.delete("QUETBLEB","EVENT=:EVENT")
+	do Db.delete("QUECTRLD","EVENT=:EVENT")
+	do Db.delete("QUECTRL","EVENT=:EVENT")
+
+	//Initialize QUEUEB and QUETBL
+	do INITTBL(EVENT)
+
+	do Runtime.commit()
+
+	// Submit all batches for this event
+	type ResultSet qtblrs=Db.select("BCHNUM","QUETBLEB","EVENT=:EVENT")
+	
+	while qtblrs.next() do SUBMIT(qtblrs.getCol("BCHNUM"),EVENT)
+
+	write !!!
+	
+	do END
+	
+	quit
+
+
+INITTBL(String EVENT)	// Initialize the ^QUETBL for all batches to be run in the event
+
+	type ResultSet rs=Db.select("BATCH","UTBLEBCH","EVENT=:EVENT")
+
+	while rs.next() do BCHINIT(rs.getCol("BATCH"),EVENT)
+
+	quit
+
+
+BCHINIT(Number BCHNUM,String EVENT)	// INIT
+	
+	do DEP(BCHNUM,0)
+
+	type RecordQUEUEB queueb=Db.getRecord("QUEUEB","BCHNUM",1)
+
+	quit:'queueb.getMode()
+	
+	//Don't submit if not scheduled to run today
+	if queueb.nrd'=%SystemDate do {
+		set queueb.subm=0
+		do DEP(BCHNUM,1)
+		}
+	else  do {
+		do CLEAR(BCHNUM)
+		set queueb.subm=1
+		set queueb.lstat=""	//Mark the queue as submitted today
+		
+		type RecordQUETBLEB quetbleb=Db.getRecord("QUETBLEB","EVENT=:EVENT,BCHNUM=:BCHNUM",1)
+		set quetbleb.subm=""
+		do quetbleb.bypassSave()
+		}
+
+	do queueb.bypassSave()
+
+	quit
+
+
+SUBMIT(Number BCHNUM,String EVENT)	//Submit the batch to run on platform specific facility
+
+	type public Number ER
+
+	type Boolean QUEDEL, QUEIDT
+	type Date QUEDAT
+	type Number QUETIM
+	type String QUEDCL
+
+	do Runtime.start("CS")
+
+	type RecordQUEUEB queueb=Db.getRecord("QUEUEB","BCHNUM")
+
+	set QUEDAT=%CurrentDate
+	set QUETIM=(queueb.strt*60)+%CurrentTime		//Delta time
+	if QUETIM>86399 set QUEDAT=QUEDAT+1 set QUETIM=QUETIM-86400
+	set QUEDCL="Q"_BCHNUM_"_"_%CurrentDate_%CurrentTime
+	set queueb.vmstag=QUEDCL 
+	set QUEDCL=QUEDCL_".COM" 
+	hang 1
+	set queueb.stop=0		// Set batch to run
+	do queueb.bypassSave()
+
+	set QUEDEL=1			// Used by VMS interface
+	set QUEIDT=0			// Used by VMS interface
+
+	/*
+	The following statement will create an entry in the submission table
+	for each queue submitted through the queueing system.  This table
+	will be maintained each time a queue finishes it processing.  When
+	all queues have finished their processing, the event will be complete.
+	*/
+	type RecordQUETBLEB quetbleb=Db.getRecord("QUETBLEB","EVENT=:EVENT,BCHNUM=:BCHNUM",1)
+	set quetbleb.subm=0
+	do quetbleb.bypassSave()
+		
+	do Runtime.commit()
+
+	set ER=$$SBMTBCH^%OSSCRPT(BCHNUM,0,EVENT,QUEDCL,0,queueb.fre,queueb.strt)
+	if ER do EVNTLOG^%ZFUNC("QUEBCHSBMT","STBLER",BCHNUM) quit
+
+	// Batch ~p1  submitted
+	write !,$$^MSG(4543,BCHNUM)
+	//Post the event
+	do EVNTLOG^%ZFUNC(4543,"STBLMSG",BCHNUM)
+
+	quit
+
+
+CLEAR(Number BCHNUM)
+	
+	/*
+	Clear previous job start and end times.  This is necessary for
+	event restarts to work properly.
+	*/
+
+	type DbSet dbs=Db.selectDbSet("QUEUEJ","BCHNUM=:BCHNUM")
+
+	while dbs.next() do {
+		
+		type RecordQUEUEJ queuej=dbs.getRecord("QUEUEJ")
+
+		set queuej.stim=""
+		set queuej.ctim=""
+		set queuej.cstat=""
+		set queuej.lstat=""
+
+		do queuej.bypassSave()
+		}
+	quit
+
+
+DEP(Number BCHNUM, Boolean OPT)
+
+	/*
+	Check if any jobs are dependent on this batch.  This batch is
+	not scheduled to run today but if any other job is dependent upon it,
+	it must be flagged as having met this dependency.
+	
+		If OPT=0, clear the dependency level
+		If OPT=1, set dependency equal to %CurrentDate
+	*/
+	
+	type DbSet dbs=Db.selectDbSet("QUEUEC","BCHNUM=:BCHNUM")
+
+	while dbs.next() do {
+		
+		type Number DBATCH, DJOB, JOBNUM
+		new DBATCH,DJOB,JOB
+
+		// Primary batch
+		type RecordQUEUEC queuec=dbs.getRecord("QUEUEC")
+
+		set JOBNUM=queuec.jobnum
+		set DBATCH=queuec.batch
+		set DJOB=queuec.job
+
+		// Dependent batch
+		type RecordQUEUED queued=Db.getRecord("QUEUED","BCHNUM=:DBATCH,JOBNUM=:DJOB,BATCH=:BCHNUM,JOB=:JOBNUM")
+
+		if 'OPT set queued.cdate="",queued.ctime=""
+		else  set queued.cdate=%CurrentDate,queued.ctime=%CurrentTime
+
+		do queued.bypassSave()
+		}
+
+	quit
+
+
+END	// Exit
+
+	type public String ER, EVENT, RM, VFMQ
+	
+	type String %MSGID
+
+	quit:$G(ER)=1
+
+	// Event ~p1 not submitted
+	if $G(VFMQ)="Q" set RM=$$^MSG(1031,$G(EVENT))
+
+	// Event ~p1 submitted
+	else  set RM=$$^MSG(1033,$G(EVENT))
+	set ER="W"
+
+	do EVNTLOG^%ZFUNC(+%MSGID,"STBLMSG",$G(EVENT))
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60593^25328^Dhanalakshmi R^6290"	// Signature - LTD^TIME^USER^SIZE

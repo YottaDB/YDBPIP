@@ -1,0 +1,707 @@
+RCHK
+	/*
+	Accrual Processing
+	
+	This is the startup program and main driver for the accrual process.
+
+	---- Revision History ------------------------------------------------
+	
+	05/14/07 - VanithaK  - CR26860
+		   Modified select on TTXUID in TTX section to use the date
+		   selected from the TTX table (today or greater) instead of 
+		   yesterday's date. Fixes a problem where the unposted 
+		   transaction warning appeared and should not have.
+
+	06/16/06 - SmithCD - CR 21665
+		   . Corrected code in GLXFR section that was attempting to 
+		     reverse GL (authorized) Negative Balance and GL 
+		     Unauthorized Negative Balance from the Previous Day
+		   . Replaced class.new() for "RecordTTXTJD" with 
+		     Db.getRecord(), passing the classNew parameter to prevent 
+		     the batch from aborting when running a full dayend after 
+		     running the accruals batch standalone and de-bumping the 
+		     system date
+		   . Modified to conform to current PSL standards
+
+	  04/25/06 - KELLYP - CR 20900
+	  	     Modified SUM section to set proper TGL columns for G/L
+	  	     transfers.  Previously, the code was only setting the
+	  	     TGL.DRCNT field and was even doing that incorrectly.
+
+	  03/29/06 - KELLYP - CR 20437
+	  	     Removed code that called BCHXFR from the GLXFR section. The
+	  	     BCHXFR definition is already called by QUE044 and is 
+	  	     processed in the BOD segment of the dayend for TJD-1.  This 
+	  	     corrects an OOB where loan cost center changes would get 
+	  	     double-posted to the TROUT and TRIN buckets of TTL.  Also 
+	  	     removed pre-2003 revision history.
+
+	  02/14/06 - SmithCD - CR 19579
+		     Modified CLOSE section to call ensure ER is 0 after 
+		     calling ^TTXXFR to prevent potential poblems with ER being 
+		     set between this call and the BTTDRV call.
+
+	  01/11/06 - RussellDS - CR18971
+	  	     Modify RESUB to save TTRPA.
+
+	  11/22/05 - KELLYP - CR 18344
+	  	     Modified GLXFR section to use a select statement instead of
+	  	     a Db.isDefined statement whn determining whether to call 
+	  	     DRV^UBCHID for the BCHXFR batch definition.  This prevents
+	  	     the accruals process from terminating abnormally because
+	  	     the literal key ("XFR") to DAYENDXFR was referenced in the
+	  	     Db.isDefined check.
+
+	  08/18/05 - S.Krishnan - CR 16724
+	  	     Converted the Extrinsic function $$DAT^%ZM to PSL.
+
+	  05/18/05 - KELLYP - CR 13662
+		     Added the TTL label to return the top-level of TTLPA.
+
+	  03/24/05 - Hillanbrand - CR 15145
+	  	     Modified GLXFR subsection to update ^TTL with transfer 
+	  	     information due to type/GLSC/cost center changes.
+	  
+	  03/02/05 - RussellDS - CR13817
+	  	     Add save to ttlpa in DRV section.
+	  	     
+	  	     Cleaned up additional code to prevent PSL compile problems,
+	  	     leaving only scope warnings.
+
+    	*/
+    	
+    	type Number %PAGE, %PG, %ProcessMode
+    	type String VFMQ
+
+	set %PG = 1
+	set %PAGE = 1
+	set %ProcessMode = 0
+
+	do VPG
+
+	if (%ProcessMode = 2) ! (%ProcessMode = 4) ! (VFMQ = "Q") do END quit
+
+	do ENT
+
+	quit
+
+
+VPG	// Page control
+
+	type public String VFMQ
+	type public Number %PG
+
+	type Date SJD
+	type String TXT
+
+	for  do { quit:"DFQ".isLike("%"_VFMQ_"%")
+		if %PG=1 do {
+			do VPG01
+			// Update page counters
+			quit:"DFQ".isLike("%"_VFMQ_"%")
+			set %PG = %PG + 1
+		}
+	}
+	
+	quit
+	
+
+VPG01	// Page set up
+
+	type public Date EJD, SJD
+	type public String VFMQ
+	
+	type Number OLNTB
+	type String %NOPRMT, %READ, %TAB(), MMDD, TXT()
+	type Date datevar
+	type Boolean CONT
+	type RecordCUVAR cuvar = Db.getRecord("CUVAR")
+	
+	set SJD = cuvar.tjd
+	if EJD.get().isNull() set EJD = cuvar.tjd + 1
+
+      	// Today's system date:  ~p1
+	set datevar = cuvar.tjd
+	set MMDD = datevar.toString()
+	set TXT(1) = $$^MSG(6810, MMDD)
+	set TXT(2) = ""
+
+	set %TAB("EJD") = ".EJD4/XPP=D EJDPP^RCHK(.cuvar)"
+	set %READ = "@@%FN,,,@TXT(1),@TXT(2),,EJD/REQ"
+
+	set %NOPRMT = "F" 
+	set OLNTB = 35
+	
+	do ^UTLREAD
+	if VFMQ = "Q" quit
+
+	// Check posting file
+	do TTX(.cuvar)
+
+	set %TAB("CONT") = ".CONT2" 
+	set CONT = 0
+	set %READ = %READ_",,CONT/REQ"
+	
+	do ^UTLREAD
+	if VFMQ = "Q" quit
+	
+	if 'CONT set VFMQ = "Q"
+
+	quit
+	
+
+EJDPP(RecordCUVAR cuvar)	// Customer variables			/REF:R
+
+	// "RUN THROUGH" date post processor
+	
+	type public Date X
+
+	// Date must be in the future
+	if X < (cuvar.tjd + 1) do Runtime.setErrMSG("CUVAR", 752)
+
+	quit
+	
+
+public ENT
+
+	type public Date EJD
+	type public String ER, IO, RM, X
+
+	// External entry linetag Sets up TTLPA for queueing system
+
+	type RecordTTRPA ttrpa = Db.getRecord("TTRPA", "PA='PA'", 1)
+	
+	// Accruals have already been submitted to run
+	if ttrpa.getMode() = 1 do Runtime.setErrMSG("TTRPA", 203) do END quit
+
+	type RecordTTLPA ttlpa = Db.getRecord("TTLPA", "PA='PA'", 1)
+	if ttlpa.cdate.isNull() do {
+		set ttlpa.cdate = %SystemDate - 1
+		do ttlpa.bypassSave()
+		}
+		
+	// Invalid date in TTLPA
+	if %SystemDate - ttlpa.cdate - 1 do Runtime.setErrMSG("TTLPA", 203) do END quit
+
+	// Update Times To Run file		
+	set ttrpa.qntty = EJD - %SystemDate
+	do ttrpa.bypassSave()
+
+	// Accruals set to begin at ~p1
+	set ER = "W"
+	set RM = $$^MSG(205, $$TIM^%ZM)
+	set X = RM
+
+	// Update top level of TTL to current system date and time
+	set ttlpa.cdate = %SystemDate
+	set ttlpa.stime = %CurrentTime
+	set ttlpa.iofile = IO.get()
+	
+	do ttlpa.bypassSave()
+     
+	quit
+
+
+TTX(RecordCUVAR cuvar)		// Customer variables			/REF:R
+
+	// Check for unposted transactions
+	
+	type public String %READ, TXT()
+
+	type Date DATE
+	type Number BRCD, LINE = 1, TSEQ, UID
+	type String DATESTR
+	
+	set (BRCD, UID, %READ) = ""
+	set DATE = cuvar.tjd - 1
+	
+	type ResultSet rs = Db.select("DISTINCT TJD,BRCD,UID", "TTX", "TJD>:DATE AND TJD<:EJD")
+	while rs.next() do {
+		type Date DATE1 = rs.getCol("TJD")
+		set DATESTR = DATE1.toString()
+		
+		type ResultSet rs1=Db.select("BRCD,UID,LPSEQ","TTXUID","TJD=:DATE1")
+		while rs1.next() do { 
+			set BRCD = rs1.getCol("BRCD")
+			set UID = rs1.getCol("UID")
+			set TSEQ = (rs1.getCol("LPSEQ") + 1) * 1000
+			
+			type ResultSet rs2 = Db.select("TSEQ", "TTX", "TJD=:TJD AND BRCD=:BRCD AND UID=:UID AND TSEQ>:TSEQ")
+			if 'rs2.isEmpty() do {
+				// Warning - unposted transactions for date 
+				// ~p1, branch ~p2, user ~p3
+				set TXT(LINE) = $$^MSG(2973, DATESTR, BRCD, UID)
+				set %READ = %READ_",@TXT("_LINE_")"
+				set LINE = LINE + 1
+				}
+			}
+		} 
+
+	quit	
+	
+
+END
+	// Exit
+
+	type public Number VFMQ
+	type String ER, RM
+
+	if VFMQ = 2 ! (VFMQ = 4) quit
+
+	// Accruals not run
+      	if VFMQ = "Q" do {
+      		set ER = "W" 
+      		set RM = $$^MSG(204)
+		}
+
+	quit
+	
+
+public CLOSE
+
+	// Entry point for function QUE039 (ACCRUALS) from Queuing System
+
+	type public String ER, IO
+
+	do COMPILE^DBSBCH("BTTDRV")
+	do COMPILE^DBSPROC("ZBTTPP")
+
+	type RecordTTLPA ttlpa = Db.getRecord("TTLPA", "PA='PA'", 1)
+
+	set ttlpa.cdate = %SystemDate
+	set ttlpa.stime = %CurrentTime
+	set ttlpa.iofile = IO.get()
+
+	do ttlpa.bypassSave()
+
+	do Db.fastDelete("SIGNON")
+
+	type ResultSet rs = Db.select("SEQ", "DAYENDXFR", "TJD=:%SystemDate")
+	if 'rs.isEmpty() do {
+		/*
+		Procedure to Create Dayend XFR posting file handles it's own 
+		error logging - continue with accruals regardless of any errors
+		in G/ L transfer (users must handle G/L transfers manually in 
+		that case)
+		*/
+		do ^TTXXFR 
+		set ER = 0
+		}
+
+	type RecordTTXTJD ttxtjd = Db.getRecord("TTXTJD", "TPD=:%SystemDate", 1)
+	set ttxtjd.tfstat = "*"
+	do ttxtjd.bypassSave()
+
+	do PMEND
+	do DRV quit:ER.get()
+	do GLXFR
+
+	quit
+	
+
+PMEND
+
+	// Catch-all for setting [TPCTRL]lstseq
+
+	type RecordTPCTRL tpctrl
+
+	type DbSet ds = Db.selectDbSet("TPCTRL", "TPD=:%SystemDate")
+	while ds.next() do {
+		set tpctrl = ds.getRecord("TPCTRL")
+ 		if tpctrl.pmdate, tpctrl.lstseq.isNull() do {
+ 			
+ 			type Number lastseq
+ 			
+ 			type ResultSet rs = Db.select("MAX(TSEQ)", "TTX", "TJD=:tpctrl.pmdate AND BRCD=:tpctrl.brcd AND UID=:tpctrl.uid")
+ 			if rs.next() set lastseq = rs.getCol(1)
+ 			else  set lastseq = ""
+			set tpctrl.lstseq = lastseq
+ 			do tpctrl.bypassSave()
+			}
+		}
+			
+	quit
+	
+
+DRV
+
+	type public String ER
+
+	// Call accrual driver
+
+	do TTLINI^TGLMON(%SystemDate, 0)
+	set ER = 0
+
+	do ^BTTDRV
+	if ER.get() quit
+
+	type Date XJD = %SystemDate - 5
+	type String TOKEN
+	type RecordTOKEN token
+
+	type DbSet ds = Db.selectDbSet("TOKEN")
+	while ds.next() do {
+		set token = ds.getRecord("TOKEN")
+		set TOKEN = token.token
+
+		// Delete outdated tokens; expire remaining tokens
+		if token.tjd < XJD do {
+			do Db.fastDelete("MSGLOG", "TOKEN") 
+			do Db.fastDelete("TOKEN", "TOKEN")
+			}
+		else  do {
+			set token.stat = 0
+			do token.bypassSave()
+			}
+		}
+
+    	// Process complete time stamp
+	type RecordTTLPA ttlpa = Db.getRecord("TTLPA", "PA='PA'")
+	set ttlpa.etime = %CurrentTime
+	do ttlpa.save()
+ 
+ 	// Increment system date
+	type RecordCUVAR cuvar = Db.getRecord("CUVAR")
+	set cuvar.tjd = %SystemDate + 1
+	do cuvar.bypassSave()
+
+	// Open tomorrow's TTX
+	type RecordTTXTJD ttxtjd = Db.getRecord("TTXTJD", "TPD=:(%SystemDate+1)", 1)
+	set ttxtjd.tfstat = ""
+	do ttxtjd.bypassSave()
+
+	quit
+	
+
+GLXFR
+
+	// Transfer accruals to a G/L posting file
+
+	type Number DRCR, TYPE
+	type String CC, CLS, CRCD, GLSC, GLTS, GRP
+	type Number AI(), GL(), NA(), NAU(), NB(), NU(), UN()
+	
+	do Db.fastDelete("TGL1", "TDT=:%SystemDate,SRC=4")
+
+	type RecordTGL1 tgl1 = Class.new("RecordTGL1", "TDT=:%SystemDate,SRC=4")
+	do tgl1.bypassSave()
+
+	type RecordCUVAR cuvar = Db.getRecord("CUVAR")
+	set GLTS = cuvar.glts
+
+   	type ResultSet rs = Db.select("CRCD,CLS,GRP,TYPE,GLSC,CC", "TTL", "TJD=:%SystemDate")
+	while rs.next() do {
+		set CRCD = rs.getCol("CRCD")
+		set CLS = rs.getCol("CLS")
+		set GRP = rs.getCol("GRP")
+		set TYPE = rs.getCol("TYPE")
+		set GLSC = rs.getCol("GLSC")
+		set CC = rs.getCol("CC")
+
+		type RecordUTBLGLSC utblglsc = Db.getRecord("UTBLGLSC", "GLSC=:GLSC")
+		
+		if CLS = "D" do DEP(.utblglsc, GLSC, GLTS)
+		if CLS = "L" do LN(.utblglsc, GLSC, GLTS)
+					
+		for DRCR = 0, 1 do {
+			if 'GL(DRCR) set GL(DRCR) = GLTS
+			if 'NB(DRCR) set NB(DRCR) = GLTS
+			if 'NA(DRCR) set NA(DRCR) = GLTS
+			if CLS = "D" do {
+				if 'NU(DRCR) set NU(DRCR) = GLTS
+				if 'NAU(DRCR) set NAU(DRCR) = GLTS
+				if 'AI(DRCR) set AI(DRCR) = GLTS
+				if 'UN(DRCR) set UN(DRCR) = GLTS
+				}
+			}
+
+		type RecordTTL ttl = Db.getRecord("TTL", "TJD=:%SystemDate,CRCD=:CRCD,CLS=:CLS,GRP=:GRP,TYPE=:TYPE,GLSC=:GLSC,CC=:CC", 1)
+		if (ttl.getMode() = 0)  do ttl.bypassSave()
+
+		type RecordTTL yesttl = Db.getRecord("TTL", "TJD=:(%SystemDate-1),CRCD=:CRCD,CLS=:CLS,GRP=:GRP,TYPE=:TYPE,GLSC=:GLSC,CC=:CC", 1)
+		if (yesttl.getMode() = 0)  do yesttl.bypassSave()
+
+		// Update Interest Accrual and Offset Interest Income/Expense
+		if ttl.acr for DRCR = 0, 1 do {
+			type RecordTGL tgl = Db.getRecord("TGL", "TJD=:%SystemDate,SRC=4,CRCD=:CRCD,EFD=:%SystemDate,ACN=:GL(DRCR),CC=:CC", 1)
+			do SUM(DRCR, .tgl, ttl.acr)
+			}
+
+		// Update Accrued Interest Month to Date
+		if %SystemDate.dayOfMonth() > 1 set ttl.acrmtd = ttl.acr + yesttl.acrmtd
+		else  set ttl.acrmtd = ttl.acr
+
+		do ttl.bypassSave()
+
+		// Update Negative Interest Accrual and Offset Income/Expense
+		if ttl.negdaa for DRCR = 0, 1 do {
+			type RecordTGL tgl = Db.getRecord("TGL", "TJD=:%SystemDate,SRC=4,CRCD=:CRCD,EFD=:%SystemDate,ACN=:NA(DRCR),CC=:CC", 1)
+			do SUM(DRCR, .tgl, ttl.negdaa)
+			do tgl.bypassSave()
+			}
+
+		// Update Unauthorized Neg Interest Accrual And Offset Income/
+		// Expense
+		if ttl.negundaa for DRCR = 0, 1 do {
+			type RecordTGL tgl = Db.getRecord("TGL", "TJD=:%SystemDate,SRC=4,CRCD=:CRCD,EFD=:%SystemDate,ACN=:NAU(DRCR),CC=:CC", 1)
+			do SUM(DRCR, .tgl, ttl.negundaa)
+			do tgl.bypassSave()
+			}
+
+		// Update Uncollected Interest Accrual and Offset Income/Expense
+		if ttl.uncacr for DRCR = 0, 1 do {
+			type RecordTGL tgl = Db.getRecord("TGL", "TJD=:%SystemDate,SRC=4,CRCD=:CRCD,EFD=:%SystemDate,ACN=:UN(DRCR),CC=:CC", 1)
+			do SUM(DRCR, .tgl, ttl.uncacr)
+			do tgl.bypassSave()
+			}
+
+		// Update Accrual on Available Interest and Offset Income/Expense
+		if ttl.aiacr for DRCR = 0, 1 do {
+			type RecordTGL tgl = Db.getRecord("TGL", "TJD=:%SystemDate,SRC=4,CRCD=:CRCD,EFD=:%SystemDate,ACN=:AI(DRCR),CC=:CC", 1)
+			do SUM(DRCR, .tgl, ttl.aiacr)
+			do tgl.bypassSave()
+			}
+
+		// Update GL (authorized) Negative Balance and Offset Principle 
+		// Balance
+		if ttl.balneg for DRCR = 0, 1 do {
+			type RecordTGL tgl = Db.getRecord("TGL", "TJD=:%SystemDate,SRC=4,CRCD=:CRCD,EFD=:%SystemDate,ACN=:NB(DRCR),CC=:CC", 1)
+			do SUM(DRCR, .tgl, ttl.balneg)
+			do tgl.bypassSave()
+			}
+
+		// Reverse GL (authorized) Negative Balance from Previous Day
+		if yesttl.balneg for DRCR = 0, 1 do {
+			type RecordTGL tgl = Db.getRecord("TGL", "TJD=:%SystemDate,SRC=4,CRCD=:CRCD,EFD=:%SystemDate,ACN=:NB(DRCR),CC=:CC", 1)
+			do SUM('DRCR, .tgl, yesttl.balneg)
+			do tgl.bypassSave()
+			}
+
+		// Update GL Unauthorized Negative Balance and Offset Principle 
+		// Balance
+		if ttl.balnegua for DRCR = 0, 1 do {
+			type RecordTGL tgl = Db.getRecord("TGL", "TJD=:%SystemDate,SRC=4,CRCD=:CRCD,EFD=:%SystemDate,ACN=:NU(DRCR),CC=:CC", 1)
+			do SUM(DRCR, .tgl, ttl.balnegua)
+			do tgl.bypassSave()
+			}
+
+		// Reverse GL Unauthorized Negative Balance from Previous Day
+		if yesttl.balnegua for DRCR = 0, 1 do {
+			type RecordTGL tgl = Db.getRecord("TGL", "TJD=:%SystemDate,SRC=4,CRCD=:CRCD,EFD=:%SystemDate,ACN=:NU(DRCR),CC=:CC", 1)
+			do SUM('DRCR, .tgl, yesttl.balnegua)
+			do tgl.bypassSave()
+			}
+		}
+
+	quit
+	
+
+DEP(RecordUTBLGLSC utblglsc,	// G/L set codes			/REF:R
+    String GLSC,		// G/L set code
+    Number GLTS)		// G/L Transaction Suspense
+	
+	// Deposit Processing
+	
+	type public Number AI(), GL(), NA(), NAU(), NB(), NU(), TYPE, UN()
+
+	type Boolean TRB
+
+	type RecordPRODDFTD proddftd = Db.getRecord("PRODDFTD", "TYPE=:TYPE")
+
+	set TRB = +proddftd.trb
+
+	if GLSC = "*" do { quit
+		type Number DRCR
+		
+		for DRCR = 0, 1 do {
+			set GL(DRCR) = GLTS
+			set NB(DRCR) = GLTS
+			set NA(DRCR) = GLTS
+			set NAU(DRCR) = GLTS
+			set NU(DRCR) = GLTS
+			set AI(DRCR) = GLTS
+			set UN(DRCR) = GLTS
+			}
+		}
+
+	// Accrued Interest
+	set GL('TRB) = utblglsc.dgl2
+	
+	// Interest Expense
+	set GL(TRB) = utblglsc.dgli 
+	
+	// Negative Principal
+	set NB(TRB) = utblglsc.dglnb 
+	
+	// Deposit Principal
+	set NB('TRB) = utblglsc.dgl1
+
+	// Negative Accrued
+	set NA(TRB) = utblglsc.dglni
+	
+	// Interest Income
+	set NA('TRB) = utblglsc.dglii
+	
+	// Unauthorized Neg Accrued
+	set NAU(TRB) = utblglsc.dglunani
+		
+	// Interest Income
+	set NAU('TRB) = utblglsc.dglii
+	
+	// Unauthorized Neg Principal
+	set NU(TRB) = utblglsc.dglunanb
+	
+	// Deposit Principal
+	set NU('TRB) = utblglsc.dgl1
+	
+	// Interest Expense
+	set AI(TRB) = utblglsc.dgli
+	
+	// Accrued Int on Available Int
+	set AI('TRB) = utblglsc.dglai
+	
+	// Uncollected Accrued   
+	set UN(TRB) = utblglsc.dglunc
+			
+	// Interest Income  
+	set UN('TRB) = utblglsc.dglii
+
+	quit
+
+
+LN(RecordUTBLGLSC utblglsc,	// G/L set codes			/REF:R
+   String GLSC,			// G/L set code
+   Number GLTS)			// G/L Transaction Suspense
+
+	// Loan Processing
+	
+	type public Number AI(), GL(), NA(), NAU(), NB(), NU(), TYPE, UN()
+
+	type Boolean TRB
+
+	type RecordPRODDFTL proddftl = Db.getRecord("PRODDFTL", "TYPE=:TYPE")
+
+	set TRB = +proddftl.trb
+
+	if GLSC = "*" do { quit
+		type Number DRCR
+		
+		for DRCR = 0, 1 do {
+			set GL(DRCR) = GLTS
+			set NB(DRCR) = GLTS
+			set NA(DRCR) = GLTS
+			set NAU(DRCR) = GLTS
+			set NU(DRCR) = GLTS
+			set AI(DRCR) = GLTS
+			set UN(DRCR) = GLTS
+			}
+		}
+
+	// Accrued Interest
+	set GL('TRB) = utblglsc.lgl2 
+	
+	// Interest Income
+	set GL(TRB) = utblglsc.lgli
+	
+	// Negative Balance
+	set NB(TRB) = utblglsc.lglnb
+	
+	// Loan Principal
+	set NB('TRB) = utblglsc.lgl1
+	
+	// Negative Accrued
+	set NA('TRB) = utblglsc.dglni
+	
+	// Interest Income
+	set NA(TRB) = utblglsc.dglii
+
+	quit
+
+
+SUM(Number DRCR,		// Debit / credit indicator
+    RecordTGL tgl,		// G/L Transaction Summary		/REF:R
+    Number AMT)			// Amount
+
+	if 'DRCR do {
+		set tgl.drcnt = tgl.drcnt+1
+		set tgl.dramt = tgl.dramt+AMT
+		}
+	else  do {
+		set tgl.crcnt = tgl.crcnt+1
+		set tgl.cramt = tgl.cramt+AMT
+		}
+
+   	quit
+
+BCHCK
+
+	/*
+	Resubmit event if TTRPA is > 1
+
+	Once the Event is complete, check to see if the TIMES TO RUN
+	file is greater than 1, and if so resubmit the event.
+	
+	NOTE:  This is called from the post-processor associated with
+	       the DAYEND event in UTBLEVENT.
+	*/
+	
+	type RecordCUVAR cuvar = Db.getRecord("CUVAR")
+	type RecordTTRPA ttrpa = Db.getRecord("TTRPA", "PA='PA'", 1)
+	type RecordTTLPA ttlpa = Db.getRecord("TTLPA", "PA='PA'", 1)
+
+	if ttrpa.qntty > 1 do RESUB(.cuvar, .ttrpa, .ttlpa) quit
+
+	set cuvar.hang = 0
+	do cuvar.save()
+
+	do Db.fastDelete("TTRPA", "'PA'")
+
+	quit
+	
+
+RESUB(RecordCUVAR cuvar,	// Customer variables			/REF:R
+      RecordTTRPA ttrpa,	// P/A Event Control			/REF:RW
+      RecordTTLPA ttlpa)	// Header Level of TTL			/REF:RW
+
+	/* 
+	Resubmit all the "accruals" batches 	
+	
+	   This line tag will resubmit all the "accruals" batches if they
+	   were intended to run more than once.
+  
+	*/
+	
+	type public String IO
+	
+	type String EVENT
+
+	set ttrpa.qntty = ttrpa.qntty - 1
+	if 'ttrpa.qntty do { quit
+		set cuvar.hang = 0
+		do cuvar.bypassSave()
+		do Db.fastDelete("TTRPA", "'PA'")
+		}
+	
+	do ttrpa.bypassSave()
+
+	set ttlpa.cdate = cuvar.tjd
+	set ttlpa.stime = %CurrentTime
+	set ttlpa.iofile = IO.get()
+
+	do ttlpa.bypassSave()
+       
+	set EVENT = "DAYEND"
+	do EXT^QUEDRV
+
+	quit
+
+
+public TTL()
+
+	// Return current posting date
+
+	type RecordTTLPA ttlpa = Db.getRecord("TTLPA", "PA='PA'")
+	
+	quit ttlpa.cdate
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60764^41059^Vanitha Krishnasamy^16669"	// Signature - LTD^TIME^USER^SIZE

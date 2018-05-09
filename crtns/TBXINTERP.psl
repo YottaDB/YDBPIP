@@ -1,0 +1,217 @@
+TBXINTERP
+	/*
+	 ORIG: Frank Sanchez
+	 DESC: Interperter for PSL and SQL
+
+	---- Comments --------------------------------------------------------
+
+	---- Revision History ------------------------------------------------
+	11/5/2007 - Jim Joyce
+	Moved code from UCGMINTERP to TBXITERP. Implemented the followinf changes.
+		- seperated SELECT call to not be invoked via zshell switch
+
+	*/
+
+
+	quit
+
+PSL(String vinput(),			// PSL input
+	String voutput(),			// Procedure output
+	String vmsrc(),			// Generated M source
+	String vcmperr())			// PSL Compiler errors
+
+	/*  PSL Interactive Interpreter
+
+	This procedure is PSL source code interpreter.  It is designd to be
+	called from an MRPC network interface to execute a block of PSL code.
+
+	The code block is comprised of individual PSL code lines, though it also
+	supports the PSL nested block syntax '{}'.
+
+	Under certain conditions (e.g., reference objects, code blocks) this
+	procedure will generate an compile a temporary program which it will
+	immediately execute.
+
+	This shell does not accept local 'labels', just as the GTM shell doesn't,
+	though it does support local blocks.
+
+	Parameters:
+
+	vinput()  -  array of PSL source code lines, representing a PSL local procedure.
+	voutput() -  output from executed code (result of PSL WRITE).
+	vmsrc()   -  M source code generated from PSL.
+        vcmperr() -  PSL compiler errors.
+
+	This procedure may generate two temporary files:
+		("zpslwr" _ $J) contains WRITE output, which is copied voutput()
+		("zpsl" _ $J) contains temporary runtines
+
+	It may make sense to change the naming convention, and or to delete these files
+	at the end of the procedure.
+
+	*FRS I didn't add any code to deal with cleaning up local variables
+
+	*/
+
+	type Number vstart			// Sart time of code execution, set below
+	type String vopts()			// Shell options
+	set vopts(0) = 1			// Language is PSL(1) or M(0) or SQLm(2) [default PSL]
+	set vopts(1) = 0			// Return M source code [default False]
+
+	// Open a local file as a write buffer to accept the M WRITE output
+	type String vwrfile = "zpslwr" _ $J
+	open vwrfile:newv
+	use vwrfile
+
+	// Call SHELL if ZSHELL switch detected
+	type Number vn = ""
+	for  set vn = vinput(vn).order() quit:vn.isNull()  do {
+		if vinput(vn).piece(" ",1).upperCase() = "ZSHELL" do SHELL(.vinput(),.vn,.voutput(),.vopts(), vwrfile) set vinput(vn)=" ; " _ vinput(vn) quit
+	}
+
+	set vn=""
+	type boolean isDone = false
+
+	// SQL
+	if vopts(0)=2 set isDone=true
+
+	for  set vn = vinput(vn).order(-1) quit:vn.isNull()  if isDone = false do {
+
+		// Make sure the code ends with a quit, if not, add one
+		if vinput(vn).replace($c(9)," ").trim() = "" quit
+		if vinput(vn).replace($c(9)," ").trim().beginsWith("q",true) set isDone = true quit
+		else  set isDone = true,vinput(vn+1)=" quit"
+	}
+
+	// Call the PSL code generation utility
+	if (vopts(0) = 1) do main^UCGM(.vinput(),.vmsrc(),,,,,.vcmperr())
+
+	// if shell command switches mode to GTM, copy input to source array
+	if (vopts(0) = 0) for  set vn = vinput(vn).order() quit:vn.isNull()  set vmsrc(vn) = vinput(vn)
+
+	// If there were compile errors quit
+	if $$hasErrors(.vcmperr()) quit
+
+	/*
+	Collate through the M source and look for local procedure references, which
+	will require a temporary program to be generated.
+	*/
+
+	type Boolean isTemp = false
+	for  set vn = vmsrc(vn).order() quit:vn.isNull()  quit:isTemp=true  do {
+		// Find first non-whitespace character, if it's the first
+		// character or a '.', must generate a temporary procedure
+		// or a scope command 'new,quit'
+
+		type Number i
+		for i=1:1:vmsrc(vn).length() quit:'($C(9,32) [ vmsrc(vn).extract(i))
+		// If it's a Linelabel or New or Quit command or '.' block - Build temporary program
+		if ((i = 1) ! ("NnQq." [ vmsrc(vn).extract(i))) set isTemp = true quit
+	}
+
+
+	// Execute the code, first compile if it contains local subroutines
+	// **FRS - Need to deal with local variables, clean up scope
+
+	// Capture execution error and return (use existing compiler error array)
+	catch error {
+
+		type Public String vwrfile, voutput()
+
+		do copyOut(vwrfile,.voutput())
+
+		set voutput = voutput("").order() + 1
+		set voutput(voutput) = $ZS
+	}
+
+	// Compile and call temporary program
+	if isTemp = 1 do {
+
+		type String outfile = "zpsl" _ $J
+		do ^%ZRTNCMP(outfile,"vmsrc")
+		use vwrfile
+		set vstart = $$GETTIM^%ZFUNC
+		xecute "do ^" _ outfile
+	}
+
+
+	// xecute the M source code (remove leading space)
+	else  do {
+		set vn = ""
+		use vwrfile
+		set vstart = $$GETTIM^%ZFUNC
+		for  set vn = vmsrc(vn).order() quit:vn.isNull()  xecute vmsrc(vn).extract(2,9999)
+	}
+
+	// Return execution time in microseconds
+	set voutput(1) = "%PSL-Runtime: " _ (($$GETTIM^%ZFUNC - vstart)/1000000) _ " Seconds"
+
+	do copyOut(vwrfile,.voutput())		// Copy Write buffer to output
+	if vopts(1) = 0 kill vmsrc		// Don't return M code (delete it)
+	quit
+
+
+copyOut(String vwrfile, String voutput())	// Copy file into output buffer to return to client
+
+	type String x
+	type Number n
+
+	close vwrfile open vwrfile:read use vwrfile
+	for n = 2:1 quit:$ZEOF  read x set voutput(n) = x
+	close vwrfile
+
+	quit
+
+
+hasErrors(String vcmperr())
+
+
+	// No warnings or errors
+	if vcmperr("").order().isNull() quit false
+
+	type Boolean hasErrors = false
+
+	type Number i = ""
+	for  set i=vcmperr(i).order() quit:hasErrors = true  quit:i'=""  do {
+		if vcmperr(i).beginsWith("PSL-E") set hasErrors = true
+	}
+	quit hasErrors
+
+
+SHELL(String vinput(), Number vn, String voutput(), String vopts(), String vwrfile)	// Process shell script
+
+	type String x = vinput(vn).extract("ZSHELL ".length() + 1,9999).trim().upperCase()
+
+	if {List}"M,MUMPS".contains(x) set vopts(0) = 0 quit
+	if x = "SHOW CODE" set vopts(1) = 1 quit
+	
+	if x.trim().piece(" ",1) '= "SELECT" quit 
+	
+	set vopts(0) = 2  
+	use vwrfile 
+	write $$SELECT^MRPC155(vinput(vn).extract("ZSHELL ".length() + 1,9999).trim())
+
+	quit
+
+	/*
+	 * Run Interactive SQL
+	 * Legacy entry point. Use $$^MRPC155 instead.
+	 *
+	 */
+SQL(String vinput(),			// SELECT statement
+	String voutput())		// output
+
+	type Number vstart		// Sart time of code execution, set below
+	type String expr = ""
+
+	type Number vn = ""
+	for  set vn = vinput(vn).order() quit:vn.isNull()  set expr=expr_" "_vinput(vn)
+	
+	set vstart = $$GETTIM^%ZFUNC
+	set voutput(2)=$$SELECT^MRPC155(expr)
+	// Return execution time in microseconds
+	set voutput(1) = "%SQL-Runtime: " _ (($$GETTIM^%ZFUNC - vstart)/1000000) _ " Seconds"
+
+	quit
+
+vSIG()	quit "61003^41614^e0101711^6169"	// Signature - LTD^TIME^USER^SIZE

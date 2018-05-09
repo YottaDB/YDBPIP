@@ -1,0 +1,1395 @@
+private	INDEXMC(String IDX(),		// Index data			/REF:RW
+		String INDEX)		// Index name
+
+	/*
+	ORIG:  LOCKE - 08/10/89
+	DESC: Mass Index Change Utility
+								
+	During a back dated mass change, this procedure will drive 
+	processing that re-computes interest and posts interest 
+	adjustments on accounts associated with the index that has 
+	been changed.
+	
+	EXAMPLE:
+		   do ^INDEXMC(.IDX(), INDEX)
+	
+	---- Revision History ------------------------------------------------
+	
+	04/23/07 - KUMARB / SmithCD - CR 26550
+		   Modified section LN to add check for Anticipated mode for
+		   segmented accounts and also moved the RecordDAYENDIX2 save
+		   part and Interest offset (INTOFF) call to non segmented
+		   accounts.
+		   Modified section CIDSEG to use ACN and ACNSEG instead of
+		   DEP and DEPSEG respectively in Db.select (and to use 
+		   DISTINCT so each account is processed only once, even if 
+		   multiple segments contain the same index).
+	
+	04/13/07 - VANITHAK - CR 26579
+		   Modified FILE section to call the setAuditFlag() flag 
+		   for the index1 records it creates to ensure that the proper
+		   ^LOG records are created when modifying (IND002) an
+		   existing EFD'd index rate in anticipated mode or
+		   when no accounts are linked to the index.
+	
+	01/05/07 - KUMARB - CR24680
+		   Modified section LN to set appropriate PAR() parameters and
+		   to call EXTERN^LNPTSRV to perform unwind / reapply to
+		   produce accrual adjustments on loans with Segments Allowed
+		   (LN.SEGMENTS) selected.
+	
+	01/12/07 - KELLYP - CR 24830
+		   Modified the LOGERR and LN sections so that error msg's 
+		   generated during anticipated runs are logged to DAYENDEXC
+		   with an "(Anticipated)" message at the end of the error msg
+		   text.  These types of messages were being lost due to the
+		   rollback performed during anticipated runs.
+	
+	05/03/06 - SmithCD - CR 21007
+		   Modified RESTART section to initalize IXEFD to avoid 
+		   undefined in DEP section.
+	
+	04/01/06 - SmithCD - CR 20532
+		   Modified EXF and EXECDRS sections to delete index0 and 
+		   index1 entries early when in delete mode so LOADIX^UINDX 
+		   will not pick it up. Allows for the possiblity of 
+		   adjustments to accounts when an index tier / effective date 
+		   is deleted.
+	
+	03/17/06 - SmithCD - CR 20124
+		   Modified EXEC section to accept %EffectiveDate to protect 
+		   it from the reset of it by EXEC.
+	
+	03/07/06 - Srinivar - CR 19948
+		   Modified the file section while setting the MCF flag
+		   with 0 instead of "" inorder to avoid the message
+		   "Mass change pending for 'index definition name".  
+	
+	03/06/06 - Sreeram P CR 19872
+		   Added one parameter MCEFD to VER^RECALC call.
+		   
+	02/23/06 - SmithCD - CR 19168
+	   	   . Removed code to file through TTXP1 (not feasible due to 
+	   	     p04 architecture, and simplifies the code)
+	   	   . Added runtime transaction fence to LN and EXECDRS sections
+	   	     to rollback database changes if in anticipated mode 
+	   	   . Corrected some of the values stord in the DATA string in 
+	   	     EXECDRS and POSADJ sections
+	   	   . Backed out "Moved Db.fastDelete of INDEX1 to OLD section 
+	   	     from FILE^INDEX1" change from CR 15305, which was causing 
+	   	     updated tiers to be permanently deleted
+	   	   . Moved account status check into account select statements 
+	   	     for better efficiency
+	   	   . Combined SETDE / SETDE2 sections, and renamed to FILE
+	  
+	   01/23/06 - Hillanbrand - CR 19168
+	              Corrected undefined on IXEFD in RECALC.  Change setting
+	              of XEFD to setting of IXEFD since RECALC is expecting to
+	              use IXEFD.
+	   
+	   10/12/06 - Hillanbrand - CR 18964 
+	              Modified LOADIX^INDEXMC to quit if there are no records 
+	              selected from INDEX0 to correct error 
+	              vOpen10+6^INDEXMC,%PSL-E-SQLFAIL.
+	              Also initialized JD to zero insteal of null in IXSORT
+	              subsection to correct %PSL-E-SQLFAIL,vOpen15+6^INDEXMC.
+	*/
+	
+	type public String ER
+	type public Boolean ANT
+	
+	type Number BRCD, INDXSEQ
+	type String NEW(), OLD()
+	type Date DESYSDT, IXEFD, TPD
+	
+	set IXEFD = %EffectiveDate
+		
+	do Db.fastDelete("INTIND", "JOB=:%ProcessID")
+
+	// Dayend system date same as system date when processing from top
+	set DESYSDT = %SystemDate
+	
+   	set INDXSEQ = Db.nextVal("DAYENDIX", "TJD=:DESYSDT,INDEX=:INDEX")
+
+	do PROC(0)
+
+	quit
+
+
+PROC(Boolean RESTART)	// Process index change
+
+	type public String %UserID, ER, INDEX, NEW(), OLD(), RM
+	type public Boolean ANT
+	type public Number BRCD, INDXSEQ
+	type public Date DESYSDT, TPD
+
+	type String IND, IX, IXSORT()
+	type Date JD
+	type Number XSEQ
+	
+	// Mass Index Change (Anticipated)
+	if ANT set RM = $$^MSG(5639)	    
+	
+	// Mass Index Change (Live)
+	else  set RM = $$^MSG(5640)	   
+	
+	type Number XTSEQ = ""
+		
+	// Get teller ID
+	type RecordUTBLSRC utblsrc = Db.getRecord("UTBLSRC", "SRCTYP='BOFF',KEY='INDEX'", 1)
+		
+	set BRCD = utblsrc.brcd
+	set %UserID = utblsrc.uid
+		
+	// Mass index change teller not set up
+	if %UserID.isNull() do Runtime.setErrMSG("UTBLSRC", 1677) quit
+		
+	// Invalid user ~p1
+	if 'Db.isDefined("SCAU", "UID=:%UserID") do Runtime.setErrMSG("SCAU", 7591, %UserID) quit
+
+	// Branch code does not exist in the branch code table
+	if 'Db.isDefined("UTBLBRCD", "BRCD=:BRCD") do Runtime.setErrMSG("UTBLBRCD", 8678, BRCD) quit
+				
+	// Teller Posting Date
+	type RecordTPCTRL tpctrl = Db.getRecord("TPCTRL", "BRCD=:BRCD,UID=:%UserID,TPD=:%SystemDate", 1)
+
+	set TPD = tpctrl.pmdate
+	if TPD.isNull() set TPD = %SystemDate
+
+	/* 
+	   Find other indexes linked to this one. Store in IXSORT(IX)="".
+	   Processing must start from one day after the prior index entry
+	   and collate forward.
+	*/
+
+	set IX = INDEX
+
+	do IXSORT(IX)
+
+	// Set [INDEX]MCF to 1 for all linked indexes
+
+	set IND = ""
+	for  set IND = IXSORT(IND).order() quit:IND.isNull()  do { quit:ER
+		
+		type RecordINDEX index = Db.getRecord("INDEX", "INDEX=:IND")
+
+		// Mass change pending for ~p1
+		if 'RESTART, index.mcf do Runtime.setErrMSG("INDEX", 1676, IND) quit
+
+		set IX(IND).piece("|", 5) = 1
+		}
+		
+	if ER quit
+	
+	if 'ANT do {
+		set IND = ""
+		for  set IND = IXSORT(IND).order() quit:IND.isNull()  do {
+			type RecordINDEX index = Db.getRecord("INDEX", "INDEX=:IND")
+			set index.mcf = 1
+			do index.bypassSave()
+			}
+		}
+
+	if 'RESTART do {
+		// Journal general index change data into the Mass Index 
+		// Changes table
+		set IND = ""
+		for  set IND = IXSORT(IND).order() quit:IND.isNull()  do {
+			set XSEQ = Db.nextVal("DAYENDIX", "TJD=:DESYSDT,INDEX=:IND")
+	
+			type RecordDAYENDIX dayendix = Class.new("RecordDAYENDIX", "TJD=:DESYSDT,INDEX=:IND,INDXSEQ=:XSEQ")
+
+			// Index change in progress (2=Posting in progress) - same
+			set dayendix.status = 1
+
+			set dayendix.ant = ANT
+			set dayendix.uid = %UserID
+			set dayendix.efd = %EffectiveDate
+
+			do dayendix.bypassSave()
+			}
+		}
+		
+	do OLD(.OLD())
+	
+	// File new index information only if not deleting
+	if %ProcessMode '= 3 do NEW(.NEW())
+	
+	// Process consequences of index change to accounts
+	do PROCCID(ANT)
+	
+	quit
+
+
+OLD(String OLD())		// Old index data			/REF:R
+
+	// File old (current) index information
+
+	type public Number INDXSEQ
+	type public String IX, IXSORT
+	type public Date DESYSDT
+	
+	type String RMIN
+
+	type DbSet ds = Db.selectDbSet("INDEX1", "INDEX=:IX AND EFD=:%EffectiveDate")
+
+	while ds.next() do {
+		/*
+		   OLD contains the values in the index prior to filing.
+		   OLD(Balance Tier)=Index/Rate_"|"_SEQ_"|"_Tier Type
+		*/
+		
+		type RecordINDEX1 index1 = ds.getRecord()
+		
+		set RMIN = index1.rmin
+		
+		do index1.toArray("OLD(RMIN")
+		
+		// Store old interest rate data into EFD Index Changes table
+		type RecordDAYENDIX1 dayendix1 = Db.getRecord("DAYENDIX1", "TJD=:DESYSDT,INDEX=:IX,INDXSEQ=:INDXSEQ,TRSEQ=:index1.seq", 1)
+		if dayendix1.getMode() = 1 quit
+		
+		set dayendix1.bal1 = RMIN
+		set dayendix1.rate1 = index1.rate
+		set dayendix1.tiertyp1 = index1.tiertyp
+		set dayendix1.expdate1 = index1.expdate
+
+		do dayendix1.bypassSave()
+		}
+	
+	quit
+
+
+NEW(String NEW())		// New index data			/REF:W
+
+	// Process and file new index information
+
+	type public String IDX(), IX, IX()
+	type public Number INDXSEQ
+	type public Date DESYSDT
+	
+	type Number SEQ = ""
+	type String RMIN
+	
+	for  set SEQ = IDX(SEQ).order() quit:SEQ.isNull()  do { 
+		// Ignore entries with no levels set up
+		if IDX(SEQ).piece("|", 2).isNull()  quit   
+		
+		// If RMIN is NULL then set RMIN to the sequence of the rate
+		set RMIN = IDX(SEQ).piece("|", 1)
+		if RMIN.isNull() set RMIN = IDX(SEQ).piece("|", 3)
+	
+		if IX(IX).piece("|", 3) = 2 set RMIN = SEQ
+		
+		set NEW(RMIN) = IDX(SEQ).piece("|", 2, 99)
+
+		// Store new interest rate data into EFD Index Changes table
+		type RecordDAYENDIX1 dayendix1 = Db.getRecord("DAYENDIX1", "TJD=:DESYSDT,INDEX=:IX,INDXSEQ=:INDXSEQ,TRSEQ=:SEQ", 1)
+	
+		set dayendix1.bal2 = RMIN
+		set dayendix1.rate2 = NEW(RMIN).piece("|", 1)
+		set dayendix1.tiertyp2 = NEW(RMIN).piece("|", 3)
+		set dayendix1.expdate2 = NEW(RMIN).piece("|", 4)
+
+		do dayendix1.bypassSave()
+		}
+
+	quit	
+
+
+PROCCID(Boolean ANT)		// Actual / Anticipate mode
+
+	// Process consequences of index change to accounts
+
+	type public String INDEX, IX, IXSORT(), NEW(), WARN()
+
+	type String %IND, IND, RERUN(), TIER
+	type Date NID = %SystemDate
+
+	set WARN(1) = "|EFDINDX2"
+       	
+	/*
+	   Find the next date in the index table. We need to know what date 
+	   range this index change is in effect for %EffectiveDate through 
+	   NID, inclusive.
+	*/
+	
+	type ResultSet rs = Db.select("EFD", "INDEX0", "INDEX=:IX AND EFD>:%EffectiveDate", "EFD ASC")
+	if rs.next() set NID = rs.getCol("EFD")
+	
+	// Find all offset dates within this date range. Offset processing
+	// might need re-running for some or all of these dates.
+	type ResultSet rs1 = Db.select("DISTINCT INTOFFDT", "LN", "INTOFFDT>=:%EffectiveDate AND INTOFFDT<=:NID")
+	while rs1.next() set RERUN(rs1.getCol("INTOFFDT")) = ""
+	
+	if IX(IX).piece("|", 3) < 2 ! (IX(IX).piece("|", 3) > 3) do {
+		set TIER = NEW("").order()
+		if TIER set NEW(-1E15) = NEW(TIER)
+		}
+	
+	set (IND, %IND) = INDEX
+	
+	/*
+	   Processing will occur a maximum of once per account, no matter how
+	   many indexes are linked to an index or how many primary indexes are
+	   specified (regular index, available interest or segment indexes) on
+	   an account.
+	*/
+	
+	// Regular indexes
+      	do CIDIND
+      	
+	// Segmented account indexes
+	do CIDSEG
+
+	// Interest on available interest indexes
+	do CIDAI
+	
+	// Linked indexes
+	do INDEX
+	
+	do Db.fastDelete("INTIND", "JOB=:%ProcessID")
+	
+	// File index changes if in Actual mode
+	if 'ANT do FILE(.IXSORT(), .NEW())
+
+	quit
+
+
+INDEX	// Process all linked (to current) indexes for attached accounts
+	
+	type public String %IND, IXSORT()
+	
+	type String IND
+	
+	set IND = ""
+	for  set IND = IXSORT(IND).order() quit:IND.isNull()  do {
+		if IND = %IND quit
+
+		do CIDIND 
+		do CIDSEG 
+		do CIDAI
+		}
+
+	quit
+
+
+CIDIND	// Collate regular indexes
+
+	type Number CID
+
+	type ResultSet rs = Db.select("CID", "ACN", "INDEX=:IND AND STAT<4")
+
+	while rs.next() do {
+		set CID = rs.getCol("CID")
+		
+		// Account processed previously
+		if Db.isDefined("INTIND", "JOB=:%ProcessID,CID=:CID") quit
+
+		// Process account
+		do EXEC(CID, %EffectiveDate)
+	
+		type RecordINTIND intind = Class.new("RecordINTIND", "JOB=:%ProcessID,CID=:CID")
+
+		// Mark as processed
+		set intind.procfl = 1
+
+		do intind.bypassSave()
+		}
+
+	quit 
+
+
+CIDSEG	// Collate Segment indexes
+
+	type Number CID
+
+	type ResultSet rs = Db.select("DISTINCT CID", "ACNSEG,ACN", "ACNSEG.CID=ACN.CID AND ACNSEG.INDEX=:IND AND ACN.STAT<4")
+
+	while rs.next() do {
+		set CID = rs.getCol("CID")
+		
+		// Account processed previously
+		if Db.isDefined("INTIND", "JOB=:%ProcessID,CID=:CID") quit
+	
+		// Process account
+		do EXEC(CID, %EffectiveDate)
+	
+		type RecordINTIND intind = Class.new("RecordINTIND", "JOB=:%ProcessID,CID=:CID")
+
+		// Mark as processed
+		set intind.procfl = 1
+
+		do intind.bypassSave()
+		}
+
+	quit 	
+
+
+CIDAI	// Collate Available Interest indexes (deposits only)
+
+	type Number CID
+
+	type ResultSet rs = Db.select("CID", "DEP", "INDEX=:IND AND STAT<4")
+
+	while rs.next() do {
+		set CID = rs.getCol("CID")
+		
+		// Account processed previously
+		if Db.isDefined("INTIND", "JOB=:%ProcessID,CID=:CID") quit
+	
+		// Process account
+		do EXEC(CID, %EffectiveDate)
+	
+		type RecordINTIND intind = Class.new("RecordINTIND", "JOB=:%ProcessID,CID=:CID")
+
+		// Mark as processed
+		set intind.procfl = 1
+
+		do intind.bypassSave()
+		}
+
+	quit
+
+
+EXEC(Number CID,		// Account number
+     Date %EffectiveDate)	// Effective date
+
+	// Process adjustments for a single account
+
+	type public Boolean ANT, RESTART
+	type public Date DESYSDT
+	type public String IX
+	type public Number INDXSEQ
+
+	type String ET, ER, FROM, RM
+
+	// If RESTART mode, and account index change data already exists in 
+	// Mass Index Change Report table for this sequence, do not re-process
+	if RESTART, Db.isDefined("DAYENDIX2", "TJD=:DESYSDT,INDEX=:IX,INDXSEQ=:INDXSEQ,CID=:CID") quit
+ 
+	catch error {
+		type Boolean %ZTHALT = 0
+		
+		set ET = error.type
+		set RM = error.description
+		
+		// Log MUMPS error
+		do ZE^UTLERR
+	
+		// Error in account, not processed
+		set ET = $$^MSG(3511)
+		do LOGERR
+		}
+       	set ER = 0
+
+	type RecordACN acn = Db.getRecord("ACN", "CID=:CID")
+ 	
+	// Make sure effective date is not less than opening or disbursement date
+	if acn.cls = "L" do {
+		type Date ODD
+		type RecordLN ln = {RecordLN}acn
+		set ODD = ln.odd
+		if %EffectiveDate < ODD set %EffectiveDate = ODD
+		}
+	else  if %EffectiveDate < acn.odt set %EffectiveDate = acn.odt
+	
+	// History Cut-Off Date
+	if %EffectiveDate '> acn.hisctf set %EffectiveDate = acn.hisctf + 1
+	
+	if acn.cls = "D" do {
+		do DEP(.acn, ANT)
+		do CLEANDI  
+		}
+	else  do LN(.acn, ANT)
+
+	quit
+
+
+LN(RecordLN ln,			// Loan account				/REF:RW
+   Boolean ANT)			// Actual / Anticipate mode
+
+	// Process a loan account
+
+	type public Boolean ER
+	type public Cache %CACHE()
+	type public Number INDXSEQ, RATE
+	type public String %IND, IX(,), OLD(), NEW(), RM
+
+	type Number AVGIRN(), ACR, COL, IRN, N, OACR, TAMT
+	type String PAR(), RMIN, UAVB(), WIRN()
+
+	set RM = ""
+	
+	#IF ('CUVAR.NOSEGMENTS!(CUVAR.NOSEGMENTS=3))!($$SEGUSE^BTTOPTMZ("L"))
+		if ln.segments do {
+			do Runtime.start("BA", "", "CIDSTART")
+			
+			type Number ADJACR, NEWIRN, ORIGACR = ln.acr
+			
+			// External Process Type: Mass Interest Index Change
+			set PAR("PRCTYP") = 1
+			set PAR("INDNAM") = %IND
+			
+			do EXTERN^LNPTSRV(.ln, .PAR(), .NEW())
+			if ER do { quit
+				do Runtime.rollback("CIDSTART")
+				do LOGERR
+				}
+			
+			// Use sum total adjustment
+			set ADJACR = ln.acr - ORIGACR
+			
+			// Get interest rate from first segment with this index
+			type ResultSet rs = Db.select("IRN", "LNSEG", "CID=:ln.cid AND INDEX=:%IND", "SEGMENT ASC")
+			if rs.next() set NEWIRN = rs.getCol("IRN")
+			else  set NEWIRN = ""
+			
+			// Save loan account changes only if in Actual mode (vs. Anticipated)
+			if ANT do Runtime.rollback("CIDSTART")
+			else  do Runtime.commit()
+			
+			// Save loan account index change data to Mass Index Change 
+			// Report table
+			type RecordDAYENDIX2 dayendix2 = Class.new("RecordDAYENDIX2", "TJD=:%SystemDate,INDEX=:IX,INDXSEQ=:INDXSEQ,CID=:ln.cid")
+			set dayendix2.tamt = ADJACR.roundCur(ln.crcd)
+			set dayendix2.nirn = NEWIRN
+			do dayendix2.bypassSave()
+			}
+	#ENDIF
+	
+	// Find average rate using old (current) index information
+	kill IX(%IND, %EffectiveDate)
+	
+	set RMIN = ""
+	for  set RMIN = OLD(RMIN).order() quit:RMIN.isNull()  set IX(%IND, %EffectiveDate, RMIN) = OLD(RMIN)
+	
+	if 'ln.segments do {
+	
+		// Interest offset
+		do INTOFF(.ln) quit:ER
+		
+		do Runtime.start("BA", "", "CIDSTART")
+		
+		do EXB(.ln)
+		if ER do { quit
+			do Runtime.rollback("CIDSTART")
+			do LOGERR
+			}
+	
+		do EXF(.ln)
+		if ER do { quit
+			do Runtime.rollback("CIDSTART")
+			do LOGERR
+			}
+	
+		// Save loan account changes only if in Actual mode (vs. Anticipated)
+		if ANT do Runtime.rollback("CIDSTART")
+		else  do Runtime.commit()
+		
+		// Save loan account index change data to Mass Index Change 
+		// Report table
+		type RecordDAYENDIX2 dayendix2 = Class.new("RecordDAYENDIX2", "TJD=:%SystemDate,INDEX=:IX,INDXSEQ=:INDXSEQ,CID=:ln.cid")
+	
+		set dayendix2.tamt = TAMT
+		set dayendix2.avgbal = +UAVB(1)
+		set dayendix2.avgirn1 = AVGIRN(0)
+		set dayendix2.avgirn2 = AVGIRN(1)
+		set dayendix2.nirn = IRN
+		
+		do dayendix2.bypassSave()
+		}
+		
+	// Catches RM's set when ER not set in anticipated mode.  These types
+	// of errors are initially logged but are lost due to the rollback
+	if ANT,'RM.isNull() do LOGERR
+	
+	quit
+
+
+EXB(RecordLN ln)	// Calculate old accrual, set IX Array	
+
+	type public String %IND, ER, IX(,), NEW()
+	type public Number ACR, OACR
+	
+	type String RMIN
+
+	do BACK(.ln, %EffectiveDate) quit:ER
+	
+	// Expected from call in LNPTS2B called in BACK section
+	if 'ACR.exists() set ACR = +ln.acr	
+	
+	set OACR = ACR
+	
+	// Load new changes into interest index array
+	kill IX(%IND, %EffectiveDate)
+	
+	set RMIN = ""
+	for  set RMIN = NEW(RMIN).order() quit:RMIN.isNull()  set IX(%IND, %EffectiveDate, RMIN) = NEW(RMIN)
+	
+	quit
+
+
+EXF(RecordLN ln)		// Loan account				/REF:RW
+
+	/*
+	Calculate the accrual as of today using new values
+	
+	   Find the new rate based on the new information and use it
+	   for processing.
+	*/
+	type public Cache %CACHE()
+	type public Number ACR, OACR, TAMT
+	type public String ER, ETC, IND, IX, RM, TCMT, TSO, UAVB()
+	type public Boolean ANT
+	type public Date DESYSDT, TPD
+	
+	type String PAR()
+	type Date JD
+	type Number RATE, RRATE, SRATE, URATE
+	
+	// Interest Review Offset Date
+	set JD = $$INTOFFDT^LNCDI(ln.ichld, ln.intoff, ln.intoffcl)
+
+	// Effective date may not be greater than ~p1
+	if JD < %EffectiveDate do Runtime.setErrMSG("LN", 875, JD.toString()) quit
+	
+	if %ProcessMode = 3 do {
+		/*
+		In delete process mode, delete index entries earlier 
+		(temporarily if in anticipated mode) so LOADIX^UINDX doesn't 
+		pick it up
+		*/
+		do Db.fastDelete("INDEX0", "INDEX=:IND,EFD=:%EffectiveDate")
+		do Db.fastDelete("INDEX1", "INDEX=:IND,EFD=:%EffectiveDate")
+		}
+
+	set PAR("IXLOAD") = 1
+	set PAR("LIMIT") = 1
+	set PAR("ROUND") = 1
+   
+   	do CTL^UINDX(.ln, JD, ln.balint, .PAR()) quit:ER
+	
+	// Nominal Int/Div Rate
+	set ln.irn = RATE
+	
+	do FORW(.ln) quit:ER
+	
+	set TAMT = (OACR - ACR).roundCur()
+
+	// No adjustment.  New accrual balance equals previous accrual.
+	if 'TAMT set RM = $$^MSG(7370) do LOGERR quit    
+	
+	type RecordPRODCTL prodctl = %CACHE("PRODCTL").getRecord("PRODCTL", "TYPE=:ln.type")
+	
+	// Find tran code and absolute value of tran amount
+	if TAMT > 0 set ETC = prodctl.dradin
+	else  set ETC = prodctl.cradin
+	
+	// External transaction code not defined
+	if ETC.isNull() do Runtime.setErrMSG("PRODCTL", 6655) quit
+
+	set TCMT = $$TCMT(IND, %EffectiveDate.toString())
+	
+	set TAMT = $select(TAMT < 0:-TAMT, 1:TAMT)
+
+        // Insert system generated accrual adjustment indicator
+        set TSO = $$FIELDIN^UTSO("SYS#", "SGAA", 1)
+
+        do POST^LNTRB(, ln.cid, ETC, TAMT, TPD, %UserStation, TSO, TCMT, ln.crcd) quit:ER
+
+	type RecordTRN trn = %CACHE("TRN").getRecord("TRN", "ETC=:ETC")
+	        
+        if 'trn.dc set ETC = "MCR"
+        else  set ETC = "MDR"
+        
+	type RecordUTBLGLSC utblglsc = %CACHE("UTBLGLSC").getRecord("UTBLGLSC", "GLSC=:ln.glsc")
+	
+        do POST^LNTRB(, utblglsc.lgli, ETC, TAMT, TPD, %UserStation, TSO, TCMT, ln.crcd, ln.cc) quit:ER
+
+	quit 
+
+
+DEP(RecordDEP dep,		// Deposit account			/REF:RW
+    Boolean ANT)		// Actual / Anticipate mode
+
+	//  Process a deposit account
+
+	type public String %IND, IND, IX, ER, NEW()
+	type public Number INDXSEQ
+	type public Date DESYSDT,IXEFD
+
+	type String RPTDATA, TCMT
+	
+	set ER = ER.get()
+	
+	do EXECDRS(.dep, 1, %IND, .NEW(), .RPTDATA, IXEFD)
+		
+	if ER do LOGERR quit 
+	if 'RPTDATA.exists() quit 
+
+	// Save deposit account index change data to Mass Index Change Report 
+	// table
+	type RecordDAYENDIX2 dayendix2 = Class.new("RecordDAYENDIX2", "TJD=:DESYSDT,INDEX=:IX,INDXSEQ=:INDXSEQ,CID=:dep.cid")
+
+	set dayendix2.dacradj = RPTDATA.piece("|", 7)
+	set dayendix2.dintadj = RPTDATA.piece("|", 8)
+	set dayendix2.dacraft = RPTDATA.piece("|", 9)
+	set dayendix2.dacrbef = RPTDATA.piece("|", 10)
+	set dayendix2.dintaft = RPTDATA.piece("|", 11)
+	set dayendix2.dintbef = RPTDATA.piece("|", 12)
+	set dayendix2.nacradj = RPTDATA.piece("|", 13)
+	set dayendix2.nacrbef = RPTDATA.piece("|", 14)
+	set dayendix2.nacraft = RPTDATA.piece("|", 15)
+	set dayendix2.nacruadj = RPTDATA.piece("|", 16)
+	set dayendix2.nacrubef = RPTDATA.piece("|", 17)
+	set dayendix2.nacruaft = RPTDATA.piece("|", 18)
+	set dayendix2.nintadj = RPTDATA.piece("|", 19)
+	set dayendix2.nintbef = RPTDATA.piece("|", 20)
+	set dayendix2.nintaft = RPTDATA.piece("|", 21)
+	set dayendix2.rintadj = RPTDATA.piece("|", 22)
+	set dayendix2.rintbef = RPTDATA.piece("|", 23)
+	set dayendix2.rintaft = RPTDATA.piece("|", 24)
+	set dayendix2.aiacradj = RPTDATA.piece("|", 25)
+	set dayendix2.aiacrbef = RPTDATA.piece("|", 26)
+	set dayendix2.aiacraft = RPTDATA.piece("|", 27)
+
+	do dayendix2.bypassSave() 
+	
+	// Save deposit account changes only if in Actual mode (vs. Anticipated)
+	if ANT quit 
+	
+	// Save Account updates in case they weren't save already
+	do dep.bypassSave()
+
+	quit
+	
+
+public	TCMT(String IND, String EFDSTR)
+
+	// Use appropriate teller comment
+
+	type String TCMT
+	
+	// Index ~p1 added for ~p2
+	if %ProcessMode = 0 set TCMT = $$^MSG(7367, IND, EFDSTR)
+
+	// Index ~p1 deleted for ~p2
+	else  if %ProcessMode = 3 set TCMT = $$^MSG(7368, IND, EFDSTR)
+
+	// Index ~p1 modified for ~p2
+	else  set TCMT = $$^MSG(7369, IND, EFDSTR)
+
+	quit TCMT
+
+
+BACK(RecordLN ln, Date %EffectiveDate)
+
+	/*
+	Calculate average rate through UAVB when IX array preloaded
+	
+	  EFD is the effective date of the interest index change.  This
+	  is also used as the effective date for individual account
+	  calculations.  The only exception is if the loan was opened
+	  or disbursed after EFD.  If this is the case, EFD will not be
+	  the same value.  In all cases, EFD for account transactions
+	  will be the first entry in WIRN.
+	*/
+	
+	type public Number AVGIRN()
+	type public String ER, UAVB(), WIRN()	
+	
+	type Date ODD
+
+	set ODD = ln.odd
+
+	// Date Account Opened
+	if ln.revf, ln.odt < ODD set ODD = ln.odt
+	if %EffectiveDate < ODD set %EffectiveDate = ODD
+	
+	// Effective date must be less than current system date
+	if %EffectiveDate '< %SystemDate do Runtime.setErrMSG("INDEX1", 3210) quit 
+
+	do EXT^LNPTS2B(.ln, "10") quit:ER
+
+	set AVGIRN(0) = +UAVB(2)
+
+	quit 
+
+
+FORW(RecordLN ln)
+
+	// Calculate average rate through UAVB when IX array is loaded
+
+	type public Number AVGIRN(), IRN
+	type public String ER, UAVB, WIRN()
+
+	type Date %EffectiveDate
+
+	set %EffectiveDate = WIRN("").order()
+	
+	do EXT^LNPTS2B(.ln, "11") quit:ER
+	
+	set IRN = +WIRN(WIRN(%SystemDate).order(-1))
+	set AVGIRN(1) = +UAVB(2)
+	
+	quit 
+
+
+public LOADIX(String IND,	// Index name				/REF:R
+	      Date BEGDT,	// Beginning date			/NOREQ
+	      Date ENDDT)	// End date				/NOREQ
+
+	/*
+	
+	Pre-load IX array (index data)
+
+	Pre-load IX array for the range BEGDT-ENDDT.  
+	Include the date prior to BEGDT.
+
+	EXAMPLE:
+		do LOADIX^INDEXMC(INDEX, %EffectiveDate, %SystemDate)
+	*/
+	
+	type public String IX()
+	
+	type Date PRDT = ""
+	
+	if BEGDT.get().isNull() set BEGDT = %EffectiveDate
+	if ENDDT.get().isNull() set ENDDT = %SystemDate
+	
+	type RecordINDEX index = Db.getRecord("INDEX", "INDEX=:IND", 1)
+	if 'index.getMode() quit
+	
+	// Combine int index data from INDEX tbl to a string and put in IX()
+	set IX(IND) = $$IND2STR^UINDX(.index)
+
+	type ResultSet rs = Db.select("EFD", "INDEX0", "INDEX=:IND AND EFD<:BEGDT", "EFD DESC")
+	
+	if rs.next() set PRDT = rs.getCol("EFD")
+	else  quit
+
+	type DbSet ds = Db.selectDbSet("INDEX1", "INDEX=:IND AND EFD>=:PRDT AND EFD<=:ENDDT")
+	if 'ds.isEmpty() while ds.next() do {
+		type RecordINDEX1 index1 = ds.getRecord()
+
+		// Combine tier data to a string and put in IX()
+		set IX(index1.index, index1.efd, index1.rmin) = $$INDT2STR^UINDX(.index1)
+		}
+
+ 	quit 
+
+
+INTOFF(RecordLN ln) // Check if interest offset warning should be generated
+
+	type public String ER, RERUN(), WARN()
+	type public Date NID
+	
+	type Date INTOFFDT, NJD
+
+	if 'RERUN.data() quit 
+
+	// Int/Div Change - Next Date
+	set NJD = ln.ichnd 
+	if NJD.isNull() quit
+
+	// Int/Div Check Frequency
+	if ln.intfre.isNull() quit
+
+	if ln.intoff.isNull() quit
+	
+	for  set INTOFFDT = $$INTOFFDT^LNCDI(NJD, ln.intoff, ln.intoffcl) quit:INTOFFDT '< %EffectiveDate  set NJD = NJD.nextFreqDate(ln.intfre) quit:ER
+	
+	// If EFD is within current offset period, give warning to rerun
+	// offset processing, but still update account
+	if INTOFFDT '> NID, RERUN(INTOFFDT).exists() do { 	
+		kill RERUN(INTOFFDT)
+		do WARN(1)
+		if 'RERUN.data() set WARN(1).piece("|", 1) = 1
+		}
+
+	quit
+
+
+FILE(String IXSORT(),		// Index and linked indexes		/REF:R
+     String NEW())		// New rate structure			/REF:R
+
+	// Delete index for effective date and rebuild; mark status complete
+
+	type public String %IND
+
+	type String IND, RMIN
+	
+	do Db.fastDelete("INDEX0", "INDEX=:%IND,EFD=:%EffectiveDate")
+	do Db.fastDelete("INDEX1", "INDEX=:%IND,EFD=:%EffectiveDate")
+	
+	set RMIN = ""
+	for  set RMIN = NEW(RMIN).order() quit:RMIN.isNull()  do {
+		if RMIN = -1E15 quit
+		
+		type RecordINDEX0 index0 = Db.getRecord("INDEX0", "INDEX=:%IND,EFD=:%EffectiveDate", 1)
+ 		if index0.getMode() = 0 do index0.save()
+
+		type RecordINDEX1 index1 = Class.new("RecordINDEX1", "INDEX=:%IND,EFD=:%EffectiveDate,RMIN=:RMIN")
+		
+		do index1.setAuditFlag(1)
+
+		set index1.rate = NEW(RMIN).piece("|", 1)
+		set index1.seq = NEW(RMIN).piece("|", 2)
+		set index1.tiertyp = NEW(RMIN).piece("|", 3)
+		set index1.expdate = NEW(RMIN).piece("|", 4)
+		set index1.dlyrate = NEW(RMIN).piece("|", 5)
+		set index1.yld7d = NEW(RMIN).piece("|", 6)
+		set index1.yld30d = NEW(RMIN).piece("|", 7)
+
+		do index1.bypassSave()
+		}
+	
+	set IND = ""
+	for  set IND = IXSORT(IND).order() quit:IND.isNull()  do {
+
+		// Mass change flag
+		type RecordINDEX index = Db.getRecord("INDEX", "INDEX=:IND")
+		set index.mcf = 0
+		do index.bypassSave()
+
+		/*
+		Update general index change data in the Mass Index Changes 
+		table to indicate posting is complete for both the primary 
+		index and any linked index entries
+		*/
+		type DbSet ds = Db.selectDbSet("DAYENDIX", "TJD=:DESYSDT AND INDEX=:IND AND INDXSEQ<1E15", "INDXSEQ DESC")
+	
+		if ds.next() do {
+			// Posting completed
+			type RecordDAYENDIX dayendix = ds.getRecord()
+			set dayendix.status = "*"
+			do dayendix.bypassSave() 
+			}
+		}
+
+	quit 	
+
+
+WARN(Number WARNUM)	// Give warning to rerun offset processing
+
+	type public String ET, WARN()
+
+	set ET = WARN(WARNUM).piece("|", 2)
+
+	do ^UTLERR
+	do LOGERR
+	
+	quit
+
+
+LOGERR	// Log error in exception file
+
+	type public Boolean ANT, ER
+	type public Number CID
+	type public String ET, IND, RM, SORT
+	
+	type String RMSAV = ""
+
+	set SORT = IND_" "_%EffectiveDate.toString()
+
+	// Save off value of RM for later
+	if 'RM.get().isNull() set RMSAV = RM
+
+	// Log to exception file with (Anticipated) message
+	if ANT.get() do {
+		// ~p1 (Anticipated)
+		if 'ET.get().isNull() set ET = $$^MSG(4536,ET)
+		if 'RM.get().isNull() set RM = $$^MSG(4536,RM)
+		}
+
+	if ET.get().isNull() set ET = RM, RM = ""
+
+	// Make sure error descriptions will fit into exception file
+	set ET = ET.get().extract(1, 320)
+	set RM = RM.get().extract(1, 60)
+
+	do LOG^UTLEXC(%RoutineName, SORT, RM, CID.get(), RM, ET)
+
+	// Move on to next account with clean slate
+	set (ET, ER) = ""
+	
+	if 'RMSAV.isNull() set RM = RMSAV
+
+	quit
+
+
+private	IXSORT(String INDEX)
+
+	/*
+	Find and load all linked indexes
+
+	ARGUMENTS:
+		. INDEX Index name			/TYP=T/REQ/MECH=VAL
+
+	INPUTS:
+		. %EffectiveDate 	Effective date of index change
+							/TYP=D/REQ
+		. %SystemDate		System date	/TYP=D/REQ
+
+	RETURNS:
+		. IXSORT  Index array			/TYP=REFARR
+		  Array contains all linked indexes to the INDEX
+
+	*/
+	
+	type public String ER, IXSORT()
+	
+	type Date JD
+	type String IND
+	
+	set IXSORT(INDEX) = ""
+
+	do LOADIX(INDEX)	
+
+	type ResultSet rs = Db.select("INDEX", "INDEX", "INDEX<>:INDEX")
+
+	while rs.next() do { quit:ER
+		set IND = rs.getCol("INDEX")
+		set JD = 0
+		
+		type ResultSet rs1 = Db.select("EFD", "INDEX1", "INDEX=:IND AND EFD<:%EffectiveDate", "EFD ASC")
+		if rs1.next() set JD = rs1.getCol("EFD")
+		
+		type DbSet ds = Db.selectDbSet("INDEX1", "INDEX=:IND AND EFD>=:JD") 
+		
+		while ds.next() do { quit:ER
+		
+			type RecordINDEX1 index1 = ds.getRecord()
+
+	    		if index1.rate.piece(" ", 1) '= INDEX quit
+	    		if IXSORT(IND).data() quit
+
+			// Load linked index
+	    		do IXSORT(IND)
+	       		}
+		}
+
+	quit
+
+
+CLEANDI	// Clean up data item tiers
+
+	type public String IND
+	type public String IX(,)
+
+	type Date XEFD
+	
+	set XEFD = ""
+	for  set XEFD = IX(IND, XEFD).order() quit:XEFD.isNull()  do CLEANDI^UINDX(IND,XEFD)
+	
+	quit 
+
+
+public EXECDRS(RecordDEP dep,		// Deposit account
+	       Number PRCTYP,		// Process type
+	       String INDMAT,		// Index / matrix name
+	       String NEWIM(),		// New data			/REF:R
+	       String DATA,		// Report data			/REF:RW
+	       Date MCEFD)		// Mass change effective date
+	       
+
+	/*
+	   Execute deposit account recalculation for indexes / matrices
+	
+	   Executes interest accrual and posting adjustments for deposit
+	   accounts resulting from either interest index or matrix changes.
+	   Also returns report data for use in reports SCA616 and SCA031
+	   (to be stored in respective dayend file for index or matrix).
+	
+	   Note that all indexes/matrixes and indexes/matrixes on segments for
+	   segmented accounts will be processed with 1 call to RECALSEG.
+	   Extraneous index or matrix cross-reference entries for the same
+	   account will be skipped (via INTIND).
+	
+	   Additional notes on ARGUMENTS:
+	   . PRCTYP
+	      1 - Index change
+	      2 - Matrix change
+    
+    	   EXAMPLE:
+	   do EXECDRS^INDEXMC(.dep, 2, %MAT, .NEWAX(), .DATA)
+	
+	*/
+	
+	type public String ER, RM
+	type public Boolean ANT
+	
+	
+	type Number ADJACR, ADJINT, ADJRES, DTL, IPL, NEGACR, NEGACRUN
+	type Number NEGADJ, NEGIPL, NEGPST, NEGUNA, POSACR, RESINT
+	
+	set DTL = $select(PRCTYP = 2:9, 1:3)
+	set POSACR = dep.posacr
+	set IPL = dep.ipl
+
+	do Runtime.start("BA", "", "CIDSTART")
+	
+	if %ProcessMode = 3, PRCTYP = 1 do {
+		/*
+		In delete process mode, delete index entries earlier 
+		(temporarily if in anticipated mode) so LOADIX^UINDX doesn't 
+		pick it up
+		*/
+		do Db.fastDelete("INDEX0", "INDEX=:INDMAT,EFD=:%EffectiveDate")
+		do Db.fastDelete("INDEX1", "INDEX=:INDMAT,EFD=:%EffectiveDate")
+		}
+	
+	// Process segmented account
+	if dep.segflg do {
+		type Number ADJAIACR ,AIACR
+		type String RSPAR()
+		
+		// Available Interest Accrued
+		set AIACR = dep.aiacr
+	
+		set RSPAR("PRCTYP") = PRCTYP
+		if PRCTYP = 1 set RSPAR("INDNAM") = INDMAT
+		else  set RSPAR("MATNAM") = INDMAT
+		
+		type RecordTTX ttx = Class.new("RecordTTX")
+		
+		do EXTERN^RECALSEG(.dep, .ttx, .RSPAR(), .NEWIM())
+		
+		// Error in recalculation of account accrual or interest
+		if ER do { quit 
+			type String SAVERM = RM
+			do Runtime.setErrSTBLER("DEP", "EFDINDX1")
+			set RM = SAVERM
+			}
+	
+		// Subtract old values from updated values to get adjustments
+		set ADJACR = dep.posacr - POSACR
+		set ADJINT = dep.ipl - IPL
+		set ADJAIACR = dep.aiacr - AIACR
+	
+		// Accrual adjustment not generated
+		// (Perhaps IRCB=0 or IACM=Null)
+		if dep.isChanged("IRN"), 'ADJACR, 'ADJINT, 'ADJAIACR do Runtime.setErrMSG("DEP", 196) quit:ER
+	
+		// Update return DATA
+		do ADJPOS(.dep, ADJACR, ADJINT, POSACR, IPL)
+
+		// Net accrual on avail int adj
+		set DATA.piece("|", 25) = ADJAIACR
+
+		// Accrual on avail int after
+		set DATA.piece("|", 26) = dep.aiacr
+
+		// Accrual on avail int before
+		set DATA.piece("|", 27) = AIACR
+		}
+	else  do {	
+		// Regular (non-segmented) account
+	
+		// Negative Accrued
+		set NEGACR = dep.negacr
+
+		// Residual Interest
+		set RESINT = dep.resint
+
+		// Negative Accrued Interest Unauthorized
+		set NEGACRUN = dep.negacrun
+
+		// Negative interest Life
+		set NEGIPL = dep.negipl
+	
+		do VER^RECALC(.dep, DTL, MCEFD)
+
+		// Error in recalculation of account accrual or interest
+		if ER do { quit 
+			type String SAVERM = RM
+			do Runtime.setErrSTBLER("DEP", "EFDINDX1")
+			set RM = SAVERM
+			}
+	
+		//  Variables returned from RECALC
+		set ADJACR = ADJACR.get()
+		set ADJINT = ADJINT.get()
+		set NEGADJ = NEGADJ.get()
+		set NEGPST = NEGPST.get()
+		set NEGUNA = NEGUNA.get()
+		set ADJRES = ADJRES.get()
+	
+		// Accrual adjustment not generated - (Perhaps IRCB=0 or IACM=Null)
+		if dep.isChanged("IRN"), 'ADJACR, 'ADJINT, 'NEGADJ, 'NEGPST, 'NEGUNA, 'ADJRES do Runtime.setErrMSG("DEP", 196) quit
+
+		// Update return DATA	
+		do ADJPOS(.dep, ADJACR, ADJINT, POSACR, IPL)
+	
+		// Net Neg accrual auth adj
+		set DATA.piece("|", 13) = NEGADJ
+
+		// Neg accrual auth before change
+		set DATA.piece("|", 14) = NEGACR
+
+		// Neg accrual auth after change
+		set DATA.piece("|", 15) = dep.negacr
+
+		// Net Neg accrual unauth adj
+		set DATA.piece("|", 16) = NEGUNA
+
+		// Neg accr unauth before change
+		set DATA.piece("|", 17) = NEGACRUN
+
+		// Neg accr unauth after change
+		set DATA.piece("|", 18) = dep.negacrun
+
+		// Net Neg interest adjustment
+		set DATA.piece("|", 19) = NEGPST
+
+		// Neg interest before change
+		set DATA.piece("|", 20) = NEGIPL
+
+		// Neg interest after change
+		set DATA.piece("|", 21) = dep.negipl
+
+		// Net Residual interest adj
+		set DATA.piece("|", 22) = ADJRES
+
+		// Residual int before change
+		set DATA.piece("|", 23) = RESINT
+
+		// Residual int after change
+		set DATA.piece("|", 24) = dep.resint
+		}
+
+	// Anticipating, not posting
+	if (ANT ! (ER)) do Runtime.rollback("CIDSTART") quit
+	
+	do Runtime.commit()
+		
+	quit 
+	
+
+ADJPOS(RecordDEP dep, Number ADJACR, Number ADJINT, Number POSACR, Number IPL)
+
+	/*
+	Set standard deposit account (those that are consistent between 
+	segmented and non-segmented) positive interest amounts into DATA
+	variable
+	*/
+	
+	type public String DATA
+
+	// Net accrual adjustment
+	set DATA.piece("|", 7) = ADJACR
+
+	// Net interest adjustment
+	set DATA.piece("|", 8) = ADJINT
+
+	// Accrual after change
+	set DATA.piece("|", 9) = dep.posacr
+
+	// Accrual before change
+	set DATA.piece("|", 10) = POSACR
+
+	// Int paid after change
+	set DATA.piece("|", 11) = dep.ipl
+
+	// Int paid before change
+	set DATA.piece("|", 12) = IPL
+
+	quit
+
+
+private	RESTART
+
+	/*
+	Prompt for index to restart mass change for - called by function 
+	IND005 (code formerly in INDEXMC2)
+	*/
+	
+	type public String ER, INDEX, RM
+	
+	type Boolean ANT
+	type Number BRCD, CNT, OLNTB, SEQ
+	type String %READ, %TAB(), IDX(), INDXSEQ, LOOKUP, NEW(), OLD()
+	type String RMIN, TBL(), VFMQ
+	type Date DEFD, DESYSDT, DTJD, IXEFD, JD, TPD
+	
+	// Create look-up table (Note will only use latest entry for each index)
+       	type DbSet deixds = Db.selectDbSet("DAYENDIX", "STATUS<>'*' AND ANT<>1", "TJD ASC")
+	
+	while deixds.next() do {
+		type RecordDAYENDIX dayendix = deixds.getRecord()
+		
+		set DTJD = dayendix.tjd
+		set DEFD = dayendix.efd
+
+		set TBL(dayendix.index) = DTJD_"|"_DEFD_"|"_dayendix.indxseq
+		
+		// ~p1 modified effective ~p2
+		set LOOKUP(dayendix.index) = $$^MSG(6781, DTJD.toString(), DEFD.toString())
+		}
+
+	// No incomplete mass changes to re-run
+        if 'TBL.data() do Runtime.setErrMSG("INDEX", 1950) quit
+
+	// Build prompt screen
+	set %TAB("INDEX") = ".INDEX1/TBL=LOOKUP("
+	set %READ = "@@%FN,,,INDEX/REQ"
+	set OLNTB = "00038"
+	
+	do ^UTLREAD
+	if VFMQ = "Q" set ER = 1 quit
+
+	// Dayend system date set to date in DAYENDIX that is incomplete
+	set DESYSDT = TBL(INDEX).piece("|", 1)
+	set IXEFD = TBL(INDEX).piece("|", 2)
+	set INDXSEQ = TBL(INDEX).piece("|", 3)
+	
+	type DbSet deix1ds = Db.selectDbSet("DAYENDIX1", "TJD=:DESYSDT AND INDEX=:INDEX AND INDXSEQ=:INDXSEQ")
+
+	// Create IDX array
+	while deix1ds.next() do {
+		type RecordDAYENDIX1 dayendix1 = deix1ds.getRecord()
+		
+		// Build IDX array (which will later be used to build NEW 
+		// array) using saved (after) DAYENDIX1 data
+		set SEQ = dayendix1.trseq
+		if SEQ do {
+			set IDX(SEQ) = dayendix1.bal2
+			set IDX(SEQ).piece("|", 2) = dayendix1.rate2
+			set IDX(SEQ).piece("|", 3) = SEQ
+			set IDX(SEQ).piece("|", 4) = dayendix1.tiertyp2
+			set IDX(SEQ).piece("|", 5) = dayendix1.expdate2
+			}
+
+		/*
+		Build OLD array using saved (before) DAYENDIX1 data
+		NOTE: If old index data still exists in INDEX1, that will 
+		take precedence over the OLD array built here (in OLD section)
+		*/
+		
+		set RMIN = dayendix1.bal1
+		if RMIN do {
+			set OLD(RMIN) = dayendix1.rate1
+			set OLD(RMIN).piece("|", 2) = SEQ
+			set OLD(RMIN).piece("|", 3) = dayendix1.tiertyp1
+			set OLD(RMIN).piece("|", 4) = dayendix1.expdate1
+			}
+		}
+	
+	type RecordDAYENDIX dayendix = Db.getRecord("DAYENDIX", "TJD=:DESYSDT,INDEX=:INDEX,INDXSEQ=:INDXSEQ")
+       
+	set ANT = dayendix.ant
+	set %EffectiveDate = dayendix.efd
+     		
+	do PROC(1)
+
+	set ER = "W"
+	
+	// Index ~p1 not modified
+	if VFMQ = "Q" set RM = $$^MSG(1227, INDEX)
+	// Index ~p1 modified
+	else  set RM = $$^MSG(1224, INDEX)
+
+        quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60743^70605^Chad Smith^35380"	// Signature - LTD^TIME^USER^SIZE

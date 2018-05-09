@@ -1,0 +1,176 @@
+ZRPCWM02(String RETURN,Number VERSN,Date PDATE,Number XBRCD,Number XUID,Number XTSEQ,Number LPFLG)
+	/*
+	 ORIG: SHANKK - 02/16/2007
+	 DESC: Custom MRPC for Receipts
+	
+	 ---- Comments ------------------------------------------------------
+	This procedure returns fee amounts required on loan payment receipts.
+	
+	 ---- Revision History ------------------------------------------------
+	08/08/07 - APPLEYARDM - CR 28655
+		Re-name procedure to ZRPCWM02 per customization "standards".
+		Modified error trapping in conformance with coding standards. 
+
+	06/19/07 - SHANKK - CR27694
+		Removed VAT on Collections and VAT on Other Fees. Added VAT
+		on Fee Amount (TAMT piece 16).  Removed "EPPEN" from Early Payoff
+		Fees.
+	
+	05/30/07 - SHANKK - CR27395
+		Added version check and formatted return string using 
+		$$V2LV^MSG(.RETURN).
+	
+	05/22/2007 - SHANKK - CR27312
+		Initial release.
+	
+	 ****** Consider using setAuditFlag for all objects in this procedure
+	   example :do dep.setAuditFlag(1)
+	   
+	   ARGUMENTS:
+
+		 . RETURN   “|” delimited string returning the following data in this order:
+		 
+		 		Late Fees
+		 		Late IVA MN
+				Collection Fees MN
+                              	VAT on Fee Amount
+                              	Other Fees
+                             	Interest MN
+                             	Interest IVA MN
+                               	Principle MN
+                              	Total MN
+                               	Early Payoff Fees MN (For loan payment with early payoff fees only)
+				Early Payoff IVA MN (For loan payment with early payoff fees only)
+
+                        
+		.VERSN    ^ZMRPCRCT version number         /TYP=N/REQ
+                                  Current version = 1         
+   		. TJD         Date of Transaction in Julian Format     /TYP=N/REQ/
+		. BRCD      Branch Code                                    /TYP=N/REQ/
+              	.UID           User ID                                            /TYP=N/REQ/
+		.TSEQ        Transaction Sequence Number          /TYP=N/REQ/
+          	.LPFLG     Loan Payment Flag                            /TYP=N/NOREQ
+
+                                	If 0 or NULL standard loan payment
+                                      	If 1 loan payment with early payoff fees
+
+   	RETURNS:
+
+            	. $$      Error Message                 /TYP=T
+              	Null= No Error
+
+       	EXAMPLE:
+              	S RM=$$^ZRPCWM02(.ret,1,60752,520001,1820,1001,0)
+	
+	*/
+	
+	type public Boolean ER
+	type Boolean ERV
+	type public String ET,RM
+ 	type String ERRMSG
+ 
+	set (ER,ERV)=0
+	set (ERRMSG,RM)=""
+	set RETURN=""
+ 
+	do PROC(VERSN.get(),PDATE.get(),XBRCD.get(),XUID.get(),XTSEQ.get(),LPFLG.get())
+ 
+	if ERV set ER=1,RM=ERRMSG
+ 
+	if ER quit $$ERRMSG^PBSUTL(RM)
+ 
+	// Build return value
+	set RETURN=$$V2LV^MSG(.RETURN)
+ 
+	quit ""
+	
+public PROC(Number VERSN,Date PDATE,Number XBRCD,Number XUID,Number XTSEQ,Number LPFLG)	
+	
+	catch vERROR {
+		// Log GTM system errors
+		
+		type String ET,RM
+		set ET=vERROR.type
+		if vERROR.type["%GTM-" do {
+			do ZE^UTLERR
+			set RM=vERROR.type_","_vERROR.description
+		}
+		// Build error message for thrown errors
+		else  do {
+			set RM=$S($G(RM)="":vERROR.description,1:RM)
+			set RM=$S(ET="":RM,RM="":ET,1:ET_","_RM)
+		}
+		
+	}
+	type Public String RETURN
+	type String LNFEE,RM,TAMT,XFEEPLN,ZTSO
+	type Boolean ER
+	type Number CLFEE,EPOF,EPOFIVA,FEETOT(),I,INTRST,INTRSTVA
+	type Number LTCHG,LTCHGIVA,OTHF,OTHFIVA,PRINC,TOT,VATFEE,XLEN
+	
+	set RETURN=""
+	//CR27395
+	if VERSN.get()'=1 quit $$ERRMSG^PBSUTL($$^MSG(2951))  
+	if PDATE.get()="" do Runtime.setErrMSG("TTX",739,"TTX.TJD") quit:ER RM
+	if XBRCD.get()="" do Runtime.setErrMSG("TTX",739,"TTX.BRCD") quit:ER RM
+	if XUID.get()="" do Runtime.setErrMSG("TTX",739,"TTX.UID") quit:ER RM
+	if XTSEQ.get()="" do Runtime.setErrMSG("TTX",739,"TTX.TSEQ") quit:ER RM
+
+	type RecordTTX ttx=Db.getRecord("TTX","TJD=:PDATE,BRCD=:XBRCD,UID=:XUID,TSEQ=:XTSEQ",1)
+	if ttx.getMode()=0 do Runtime.setErrMSG("TTX",2728,) quit:ER RM
+	
+	set TAMT=ttx.tamt
+	do OUT^UTSO(.ZTSO,ttx.tso)
+	set LNFEE=ZTSO("LNFEE").get()
+	if 'LNFEE.isNull() do {
+		set XLEN=LNFEE.length(",")
+		for I=1:1:XLEN do {
+			set XFEEPLN=LNFEE.piece(",",I)
+			do ADDFEE(XFEEPLN,.FEETOT)
+		}
+	}
+	set CLFEE=+FEETOT(1).get()   //Collection Fees
+	set VATFEE=+TAMT.piece("#",16)  // CR27694, Vat on Fee Amount
+	set OTHF=+FEETOT(2).get()     //  Other Fees
+	set LTCHG=+TAMT.piece("#",4)  // Late Charge
+	set LTCHGIVA=+TAMT.piece("#",17)   //Late Charge IVA
+	set INTRST=+TAMT.piece("#",3)   // Interest
+	set INTRSTVA=+TAMT.piece("#",15)  // Interest IVA
+	set PRINC=+TAMT.piece("#",2)  // Principal
+	set TOT=+TAMT  // Total Amount
+		
+	set RETURN=LTCHG_"|"_LTCHGIVA_"|"_CLFEE_"|"_VATFEE_"|"_OTHF_"|"
+	set RETURN=RETURN_INTRST_"|"_INTRSTVA_"|"_PRINC_"|"_TOT
+	
+	// Loan Payment with Early Payoff fees
+	if LPFLG.get() do {
+		//CR27694
+		set EPOF=+FEETOT(3).get()  // Early Payoff Fees
+		set EPOFIVA=+FEETOT(4).get()  // Early Payoff IVA
+		set RETURN=RETURN_"|"_EPOF_"|"_EPOFIVA
+	}
+	quit
+	
+public ADDFEE(String XFEEPLN,Number FEETOT)
+	
+	/* If fee plan is required on the receipt, amount is
+	totaled and will be returned to teller.
+	*/
+	
+	type RecordLNFEEP lnfeep
+	type Number RECCAT
+	type String FEEPLN
+	
+	if XFEEPLN="" quit
+	set FEEPLN=XFEEPLN.piece(":",1)
+	set lnfeep=Db.getRecord("LNFEEP","FEETYP=:FEEPLN",1)
+	if lnfeep.getMode()=0 quit  // No entry in LNFEEP
+	set RECCAT=lnfeep.zrcptcat  // Receipt Category
+	// Early Payoff Fees
+	//if FEEPLN="EPPEN" set FEETOT("EPPEN")=XFEEPLN.piece(":",2)
+	if (RECCAT="")!(RECCAT=0) quit  // No receipt category
+	set FEETOT(RECCAT)=FEETOT(RECCAT).get()+XFEEPLN.piece(":",2)
+	quit
+	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60850^54323^Mike Appleyard^5344"	// Signature - LTD^TIME^USER^SIZE

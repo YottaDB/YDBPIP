@@ -1,0 +1,364 @@
+UBAL02	
+	/*
+	G/L Summary Balancing Utility
+	
+	ORIG:  Marty Ronky (3623) - 08/02/89
+
+	This utility should be used when the G/L Summary is
+	out of balance and incorrect secondary transactions
+	are suspect.  This program will re-build each teller
+	screen into a temporary file, and make sure the
+	screen balances.
+
+	Example : A teller enters an effective dated deposit
+	          of $50 dollars, and takes $50 cash in.
+	          The interest accrued is increased by $2
+	          but the offset is $1.  The teller would
+	          still be in balance, nothing would show
+	          in RECONDF, but the GL summary would be
+	          out $1.
+ 
+	What this does is creates a TTX-like file, except
+	it also includes the secondary transactions.
+
+	---- Revision History ------------------------------------------------
+	
+	10/17/06 - SmithCD - CR 23395
+		   Modified to use temporary "!" delimiter to replace "~" for 
+		   TSO subfields internally to prevent loss of data due to "~" 
+		   being used as both a TSO subfield delimiter and a TMPRPT4 
+		   table delimiter. Fixes a problem where the TSO field was 
+		   getting cut off for display purposes, and invalid OOBs were 
+		   occurring when loan fee identifiers within TSO were missing.
+	
+	09/06/06 - KELLYP - CR 22890
+		   Changed all "set $P" references to "set VAR.piece".  This
+		   resolves a problem where the PSL compiler was not detecting
+		   the sets and was therefore just passing null ("") instead of
+		   the DATA variable to the TMPRPT4 section.
+	
+	06/28/06 - RussellDS - CR21755
+		   Modified code in CHK section to correctly check TTX in order
+		   to turn on BATCH flag.
+
+	09/27/05 - KELLYP - CR 17272
+		   Modified TMPRPT4 section to add 1 billion (1000000000) to
+		   the SEQ variable, and then to add either the decimal
+		   increment or TSEQ to it.  This is done as the TMPRPT4 keys
+		   are all text, so a 0 will evaluate as more than a ".01" due
+		   to the ASCII values for each character.  This prevents 
+		   RSBSAVEFAIL errors from occuring because the Db.select was
+		   not determining the correct value for SEQ.  Also modified
+		   the CHK section to subtract 1 billion from SEQ prior to it
+		   being used in that section and ultimately saved in the
+		   UBAL02 table and also to protect the TTXUID getRecord call 
+		   in case the TTXUID record doesn't exist.
+
+	08/01/05 - KELLYP - CR 16550
+		   Modified EXT section to delete UBAL02 and UBAL02A tables
+		   so that the same process can run the UBAL02 function more
+		   than once on the same day.  If this were to happen, errors
+		   would occur in the LOG section if there were differences
+		   due to RDBSAVEFAIL issues caused by the Class.new method
+		   calls in that section.  Also modified TMPRPT4 section to 
+		   prevent an RDBSAVEFAIL error.  Also scoped all variables.
+
+	01/15/05 - RussellDS - CR13817
+		   Correct logic in CHK section.  Correct error in LOG.
+		   Correct error in PIECE, to pass CID to DC^RGLSUM.
+		   
+		   Remove old revision history.
+	----------------------------------------------------------------------
+	*/
+
+	quit
+
+
+private EXT	// External call from report SCA424
+
+	type public Date EFD
+	type public Number PID
+
+	set PID=%ProcessID	// Needed for SCA424 Report
+
+	do Db.fastDelete("TMPRPT4","PID=:%ProcessID")
+	do Db.fastDelete("UBAL02","PID=:%ProcessID")
+	do Db.fastDelete("UBAL02A","PID=:%ProcessID")
+
+	do DMJ(EFD)		// Sort miscellaneous transactions by screen
+	do DTJ(EFD)		// Sort customer transactions by screen
+	do CHK(EFD)		// Verify screen balances
+	quit
+
+
+DMJ(EFD)	// Miscellaneous transactions
+
+	type Number BRCD,TRC,UID
+	type Date TPD
+
+	type DbSet dmjds=Db.selectDbSet("DMJ","TJD=:EFD")
+
+	while dmjds.next() do {
+		type RecordDMJ dmj=dmjds.getRecord("DMJ")
+
+		set TPD=EFD+dmj.itc8
+		set BRCD=dmj.brcd
+		set UID=dmj.uid
+		set TRC=+dmj.trc
+	
+		type String DATA
+		set DATA=""
+		set DATA.piece("|",1)=dmj.cid
+		set DATA.piece("|",2)=dmj.itc
+		set DATA.piece("|",3)=dmj.etc
+		set DATA.piece("|",4)=dmj.tamt
+		set DATA.piece("|",5)=dmj.tso.translate("~","!")
+		set DATA.piece("|",6)=dmj.crcd
+
+		do TMPRPT4(TPD,BRCD,UID,TRC,DATA)
+		}
+
+	quit
+
+
+DTJ(EFD)	// Deposit/Loan transactions
+	type Number BRCD,TRC,UID
+	type Date TPD
+
+	type DbSet dtjds=Db.selectDbSet("DTJ","TJD=:EFD")
+
+	while dtjds.next() do {
+		type RecordDTJ dtj=dtjds.getRecord("DTJ")
+
+		set TPD=EFD+dtj.itc8
+		set BRCD=dtj.brcd
+		set UID=dtj.uid
+		set TRC=+dtj.trc
+	
+		type String DATA
+		set DATA=""
+		set DATA.piece("|",1)=dtj.cid
+		set DATA.piece("|",2)=dtj.itc
+		set DATA.piece("|",3)=dtj.etc
+		set DATA.piece("|",4)=dtj.tamt
+		set DATA.piece("|",5)=dtj.tso.translate("~","!")
+		set DATA.piece("|",6)=dtj.crcd
+
+		do TMPRPT4(TPD,BRCD,UID,TRC,DATA)
+		}
+
+	quit
+
+
+TMPRPT4(TPD,BRCD,UID,TRC,DATA)	// Update temporary report table TMPRPT4
+	
+	type Number SEQ,TMPNUM1,TMPNUM2
+	
+	set SEQ=1000000000
+	set TMPNUM1=SEQ+TRC
+	set TMPNUM2=SEQ+TRC+1
+	
+	type ResultSet rs=Db.select("KEY4","TMPRPT4","PID=:%ProcessID AND KEY1=:TPD AND KEY2=:BRCD AND KEY3=:UID AND KEY4>=:TMPNUM1 AND KEY4<:TMPNUM2", "KEY4 DESC")
+
+	/*
+	 SEQ here is used when an entry already exists in TMPRPT4 for the
+	 specified keys.  When this occurs, we increment SEQ to prevent
+	 an RDBSAVEFAIL, thereby storing it as a "sub-trace" number.
+	*/
+
+	if rs.next() set SEQ=rs.getCol("KEY4")+.0000001
+	else  set SEQ=SEQ+TRC
+
+	type RecordTMPRPT4 tmprpt4=Class.new("RecordTMPRPT4")
+
+	set tmprpt4.pid=%ProcessID
+	set tmprpt4.key1=TPD
+	set tmprpt4.key2=BRCD
+	set tmprpt4.key3=UID
+	set tmprpt4.key4=SEQ
+	set tmprpt4.data=DATA
+
+	do tmprpt4.bypassSave()
+
+ 	quit
+
+
+CHK(EFD)	// Collate through TMPRPT4 and verify that each screen balances.
+
+	/*
+	If there is a batch start/stop time, assume this is a batch teller
+	(BATCH=1).  Because screens won't necessarily balance in batch mode,
+	the utility will balance the whole batch as one "screen".
+	*/
+
+	type Number BATCH,BRCD,CID,ECTF,RESET,SAVSEQ,SEQ,TECF,TRC,UID
+	type String AMT,CLS,CRCD,DTL,ETC,ITC,TC,TOT,TSO
+	type Date TPD
+
+	type DbSet tmpds=Db.selectDbSet("TMPRPT4", "PID=:%ProcessID", "KEY1,KEY2,KEY3,KEY4 ASC")
+
+	set (TPD,BRCD,UID)=""
+	while tmpds.next() do {
+		type RecordTMPRPT4 tmprpt4=tmpds.getRecord("TMPRPT4")
+
+		if TPD'=tmprpt4.key1 set RESET=1
+		else  if BRCD'=tmprpt4.key2 set RESET=1
+		else  if UID'=tmprpt4.key3 set RESET=1
+		else  set RESET=0
+
+		set SEQ=tmprpt4.key4
+		set SEQ=SEQ-1000000000
+
+		if RESET do {
+			if UID'="" do CHECK
+
+			set TPD=tmprpt4.key1
+			set BRCD=tmprpt4.key2
+			set UID=tmprpt4.key3
+
+			type RecordTTXUID ttxuid=Db.getRecord("TTXUID","TJD=:TPD,BRCD=:BRCD,UID=:UID",1)
+			
+			type ResultSet rs = Db.select("TSEQ", "TTX", "TJD=:TPD AND BRCD=:BRCD AND UID=:UID")
+			
+			if ('ttxuid.time.isNull() ! rs.isEmpty()) set BATCH=1,SAVSEQ=0,DTL(1)=""
+			else  set BATCH=0,SAVSEQ=SEQ\1000
+			}
+
+		if 'BATCH do {
+			if SEQ\1000'=SAVSEQ D CHECK set SAVSEQ=SEQ\1000
+			set DTL(SEQ)=tmprpt4.data
+			}
+
+		set CID=tmprpt4.data.piece("|",1)
+		set ITC=tmprpt4.data.piece("|",2)
+		set ETC=tmprpt4.data.piece("|",3)
+		set AMT=tmprpt4.data.piece("|",4)
+		set TSO=tmprpt4.data.piece("|",5).translate("!","~")
+		set CRCD=tmprpt4.data.piece("|",6)
+
+		if AMT'["#" set AMT.piece("#",2)=AMT
+		if CRCD="" set CRCD=%SystemCurrency
+
+		if '$D(TC(ETC)) do {
+			type RecordTRN trn=Db.getRecord("TRN","ETC=:ETC")
+			set TC(ETC)=trn.cls
+			}
+
+		set (ECTF,TECF)=""
+		set CLS=TC(ETC)
+
+		// If a batch teller, set error correct flags
+		if BATCH,ITC.extract(6) do {
+			if AMT<0 set ECTF=1	// Error correct transaction flag
+			else  set TECF=1	// Transaction error corrected
+			}
+
+		do PIECE
+		}
+		
+	do CHECK
+	
+	quit
+
+
+PIECE	// Piece apart amount to update total debits (TOT(0)) & credits (TOT(1))
+
+	type public Number AMT,CID,ECTF,TECF
+	type public String CLS,CRCD,ITC,TOT(),TSO
+
+	type Number A,I,P,Y
+	type String FEE,REC
+
+        for I=2:1:$L(AMT,"#") if $P(AMT,"#",I) do {
+
+		// If loan fee transaction, use amounts from TSO field
+		if CLS="L",(I=6!(I=13)) do {
+
+			set A=0,FEE=$$FIELD^UTSO(TSO,"LNFEE")
+			for P=1:1 set REC=$P(FEE,",",P) quit:REC=""  set A=A+$P(REC,":",2)
+			}
+
+		// Otherwise, just use amount from TAMT
+		else  set A=$P(AMT,"#",I)
+
+		set Y=$$DC^RGLSUM(CLS,ITC,I,CID)
+		set TOT(CRCD,Y).piece("|",1)=$P($G(TOT(CRCD,Y)),"|",1)+A
+		if ECTF set TOT(CRCD,Y).piece("|",2)=$P(TOT(CRCD,Y),"|",2)-A
+		if TECF set TOT(CRCD,Y).piece("|",3)=$P(TOT(CRCD,Y),"|",3)+A
+		}
+	quit
+
+
+CHECK	// Check debit, credit totals
+
+	type public String DTL(),TOT()
+
+	type String A,CRCD
+	type Number DIF
+
+	set CRCD=""
+	for  set CRCD=$O(TOT(CRCD)) quit:CRCD=""  set DIF="" do { if DIF do LOG
+		set TOT(CRCD,0)=$G(TOT(CRCD,0))
+		set TOT(CRCD,1)=$G(TOT(CRCD,1))
+
+		if TOT(CRCD,0).piece("|",1)-$P(TOT(CRCD,1),"|",1) set DIF=1 quit
+		if TOT(CRCD,0).piece("|",2)-$P(TOT(CRCD,1),"|",2) set DIF=1 quit
+		if TOT(CRCD,0).piece("|",3)-$P(TOT(CRCD,1),"|",3) set DIF=1 quit
+		}
+
+	kill DTL,TOT
+	quit
+
+
+LOG	// Set temporary report table
+
+	type public Date TPD
+	type public Number SAVSEQ
+	type public String BRCD,CRCD,DTL(),TOT(),UID
+
+	type Number I,N
+
+	type RecordUBAL02 ubal02=Class.new("RecordUBAL02")
+	set ubal02.pid=%ProcessID
+	set ubal02.tpd=TPD
+	set ubal02.brcd=BRCD
+	set ubal02.uid=UID
+	set ubal02.scn=SAVSEQ
+	set ubal02.crcd=CRCD
+
+	set ubal02.tdr=$P(TOT(CRCD,0),"|",1)		// Total Debits
+	set ubal02.tdr=$P(TOT(CRCD,1),"|",1)		// Total Credits
+	set ubal02.drlcr=$P(TOT(CRCD,0),"|",1)-$P(TOT(CRCD,1),"|",1)
+
+	set ubal02.tdrect=$P(TOT(CRCD,0),"|",2)		// Total Debit E/C
+	set ubal02.tdrtec=$P(TOT(CRCD,0),"|",3)		// Total Corrected DRs
+	set ubal02.drecnet=$P(TOT(CRCD,0),"|",2)-$P(TOT(CRCD,0),"|",3)
+
+	set ubal02.tcrect=$P(TOT(CRCD,1),"|",2)		// Total Credit E/C
+	set ubal02.tcrtec=$P(TOT(CRCD,1),"|",3)		// Total Corrected CRs
+	set ubal02.crecnet=$P(TOT(CRCD,1),"|",2)-$P(TOT(CRCD,1),"|",3)
+
+	do ubal02.bypassSave()
+
+	set N = ""
+	for I=1:1 set N=$O(DTL(N)) quit:N=""  do {
+		type RecordUBAL02A ubal02a=Class.new("RecordUBAL02A")
+		set ubal02a.pid=%ProcessID
+		set ubal02a.tpd=TPD
+		set ubal02a.brcd=BRCD
+		set ubal02a.uid=UID
+		set ubal02a.scn=SAVSEQ
+		set ubal02a.crcd=CRCD
+		set ubal02a.key=I
+
+		set ubal02a.cid=$P(DTL(N),"|",1)
+		set ubal02a.itc=$P(DTL(N),"|",2)
+		set ubal02a.etc=$P(DTL(N),"|",3)
+		set ubal02a.tamt=$P(DTL(N),"|",4)
+		set ubal02a.tso=$P(DTL(N),"|",5).translate("!","~")
+		do ubal02a.bypassSave()
+		}
+
+	quit
+
+vSIG()	quit "60555^40588^Chad Smith^9849"	// Signature - LTD^TIME^USER^SIZE

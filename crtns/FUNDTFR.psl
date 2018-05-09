@@ -1,0 +1,221 @@
+FUNDTFR		/*
+	ORIG: AHMEDS - 04/30/2001
+	PROCEDURE ID - FUNDTRANSFER
+	DESC: Automatic fund transfer from an existing account into a new
+	account at the time of filing.
+	This procedure compiles into run-time program FUNDTFR.
+	It is called from the AFTER_INSERT trigger.
+
+	---- Comments --------------------------------------------------------
+
+	---- Revision History ------------------------------------------------
+
+        07/27/05 - SkariahV- CR16679
+	           Removed #WARN and #OPTIMIZE directives.
+	
+	06/11/03 - Erik Scheetz - 51349
+		   Removed section EXTERN since it is no longer called.
+		   Removed the use of TR array and replaced with ttx() 
+		   object to pass into EXCH^CRCDUTL.  Added #warn and 
+		   #optimize compiler switches.
+		   
+	01/4/02 - AHMEDS - 48821 (44335 - Retrofit from V6.3 for Metlife)
+		  Added the new EXTERN section to convert the DEP array into 
+		  object before calling into EXEC section.
+
+	06/14/01 - AHMEDS - 44335:001
+		   Modified the TFRDR and TFRCR sections to assign values to
+		   TSO and TCMT. This is necessary for displaying information
+		   corresponding to automatic fund transfer transaction in 
+		   account history.
+ 	*/
+
+	
+	quit // Not called from top
+
+
+Public EXEC(RecordDEP deptrgt) // Automatic transfer of fund between accounts.
+
+	/*
+	ARGUMENTS:
+  
+		. deptrgt  New account record	/TYPE=N/NOREQ/MECH=VAL
+			   Fund is credited to this new account.
+
+	*/
+
+	type Public Number ER
+	type Date EFD	
+	type Number CIDSRC,SEQ,TAMT,TSCRCID,TSDRCID,tsseq
+	
+	set CIDSRC=deptrgt.fundact	//Existing account number (source)
+	set TAMT=deptrgt.org
+
+	/*
+	Retrieving the original amount of the target account, this amount is
+	debited from the source into the target account.
+	*/ 
+        
+	//Call INIT to initialize variables
+	do INIT
+	if ER quit
+
+	//Retrieve the source record.
+	type RecordDEP depsrc=Db.getRecord("DEP","CID=:CIDSRC")
+
+	//Retrieve the source and target product types
+	type RecordPRODCTL dtypesc=Db.getRecord("PRODCTL","TYPE=:depsrc.type")
+	type RecordPRODCTL dtypetg=Db.getRecord("PRODCTL","TYPE=:deptrgt.type")
+
+	type RecordTTX ttx()
+	
+	//Debit from the source account
+	do TFRDR(TAMT,.depsrc,.dtypesc,.dtypetg,.deptrgt,.ttx()) quit:ER
+
+	//Credit to the target account
+	do TFRCR(TAMT,.deptrgt,.dtypetg,.dtypesc,.ttx()) quit:ER
+
+	#IF CUVAR.%MCP
+	//Handles multi-currency when the CRCD of two accounts differ
+	if deptrgt.crcd'=depsrc.crcd do EXCH^CRCDUTL(.ttx())
+	#ENDIF
+
+	// define TranSet object
+	type TranSet ts=Class.new("TranSet")
+	
+	// Copies ttx() into TransSet class (ts)
+	set tsseq=""
+	for  set tsseq=$order(ttx(tsseq)) quit:tsseq=""  set SEQ=ts.copyTran(ttx(tsseq))
+
+	// Post the transaction set
+	do POST(.ts) quit:ER
+	
+	quit
+
+INIT	// Init variables needed for processing 
+
+	type Public Date EFD,TPD
+ 	type Public Number BRCD,ER=0,TSCRCID,TSDRCID
+ 	type Public String TCMT
+
+	//Retrieving branch code information
+	do SOURCE^BCHSOURC("FUNDTFR","FUNDTFR",.%UserID,.BRCD,.%UserClass,.TSDRCID,.TSCRCID)
+	if ER quit
+	 
+	set (EFD,TCMT)=""
+	set TPD=%SystemDate
+ 
+	quit  
+
+TFRDR(TAMT,RecordDEP depsrc,RecordPRODCTL dtypesc,RecordPRODCTL dtypetg,RecordDEP deptrgt,RecordTTX ttx())
+
+	/*
+	Transfer of fund debited from an existing account
+	into the new account.
+
+	Automatic transfer of fund: This will build and post financial 
+	transaction to debit from an existing account in order to credit 
+	another new PROFILE account immediately upon filing.
+	*/
+ 
+ 	type Public Number ER
+	type Number CIDTR,SEQ
+	type String CRCD,ETC,TSO,TYPE
+
+	//Retrieving the CRCD of the target account in order to do currency
+	//conversion correctly.
+	set CRCD=deptrgt.crcd
+
+	set TYPE=depsrc.type
+	set CIDTR=depsrc.cid
+	set TSO=$$FIELDIN^UTSO("","XFR",deptrgt.cid)
+
+	//Retrieving the external tran code for the source account product
+	set ETC=dtypesc.drtrgp
+	if dtypesc.drtrft'="",dtypetg.crtrft'="" set ETC=dtypesc.drtrft
+	
+	set SEQ=1
+	do TRN(TAMT,.ttx(),ETC,0) quit:ER
+
+	quit
+
+TFRCR(TAMT,RecordDEP deptrgt,RecordPRODCTL dtypetg,RecordPRODCTL dtypesc,RecordTTX ttx())
+
+        /*
+	Transfer of fund credited into a new Profile account from
+	an existing account.
+
+	Automatic transfer of fund: This will build and post financial
+	transaction to credit the new account with the fund debited from
+	an existing account immediately upon filing.
+	*/
+ 
+ 	type Public Number ER 	
+	type Number CIDTR,SEQ
+	type String CRCD,ETC,TSO,TYPE
+
+	set CRCD=deptrgt.crcd
+	set TYPE=deptrgt.type
+	set CIDTR=deptrgt.cid
+	set TSO=$$FIELDIN^UTSO("","XFR",deptrgt.fundact)
+ 
+	//Retrieving the external tran code for the target account product
+	set ETC=dtypetg.crtrgp
+	if dtypesc.drtrft'="",dtypetg.crtrft'="" set ETC=dtypetg.crtrft
+
+	set SEQ=2
+	do TRN(TAMT,.ttx(),ETC,1) quit:ER //ITC=1 for credit
+
+	quit
+
+TRN(TAMT,RecordTTX ttx(),ETC,ITC)      // Create transaction record
+ 
+ 	type Public Date EFD
+	type Public Number CIDTR,SEQ
+	type Public String CRCD,TCMT,TSO
+	
+	// Build ttx(SEQ) object
+	set ttx(SEQ)=Class.new("RecordTTX")
+	
+	set ttx(SEQ).bseamt=TAMT
+	set ttx(SEQ).cid=CIDTR
+	set ttx(SEQ).etc=ETC
+	set ttx(SEQ).itc=ITC
+	set ttx(SEQ).tamt=TAMT
+	set ttx(SEQ).efd=EFD
+	set ttx(SEQ).tso=TSO
+	set ttx(SEQ).tcmt=TCMT
+	set ttx(SEQ).crcd=CRCD
+	quit
+
+
+POST(TranSet ts)
+
+	//Posts the transaction set.
+
+	type Public Date TPD
+	type Public Number BRCD,ER
+	type Number par()
+	type String stat
+
+	set par("IPMODE")=3 	// System generated transaction
+	set par("OPTION")=2	// Process transactions, update database
+	
+	/*
+	Post transactions for this account. Quit if either the debit or the
+	credit transaction hits an override restriction that the user is
+	not authorized to override. Returns ER=1.
+	*/
+
+	do ts.postTSet(TPD,BRCD,.par) quit:ER
+
+	//Either one or both of the transactions are rejected because of 
+	//override restriction.
+	set stat=ts.status
+	
+	//Account not created
+	if stat.piece("|",1)!stat.piece("|",2) do Runtime.setErrMSG("DEP",129) quit:ER
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60212^84503^Panyaram, Sreeram^5628"	// Signature - LTD^TIME^USER^SIZE

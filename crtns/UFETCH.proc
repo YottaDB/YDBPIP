@@ -1,0 +1,482 @@
+UFETCH	//Library;Account/Customer number fetch utility
+	/*
+	All Rights Reserved - 09/06/94 09:24:20 - CHISARICKD
+	ORIG: CHISARICKD - 08/30/94
+	DESC: Account/Customer number fetch utility
+
+	KEYWORDS: SYSTEM UTILITIES
+
+	---- Revision History -------------------------------------------------
+	
+	10/17/06 - KELLYP - CR 22092
+		   Modified CIFSTART section to use the UTBLNXTCID.NCID value
+		   as the starting point when looping through the UTBLNCID 
+		   table to get the next customer number.  Also cleaned up the 
+		   CIFSTART section and modified to conform to current PSL 
+		   standards.
+	
+	05/22/06 - MBUIM - CR 21308
+		   Modified variable names for UTBLNXTCID, UTBLNCID and 
+		   UTBLNCIDT records to unxtcid, uncid and uncidt resp. to
+		   be less than 8 characters long. This was a problem because
+		   GT.M truncated after 8 characters and there was a second 
+		   variable that also started with utblnxtc.
+		   In CIFSTART section, Db.getRecord("UTBLNCID" to get the used
+		   column only if defined.
+		   Replaced column utblnxtcid.count with utblnxtcid.cnt as 
+		   count is a reserved word in oracle and was throwing errors
+		   when modifying the table UTBLNXTCID.
+
+	02/22/05 - KELLYP - CR 13662
+		   Modified CHKSUM section to prevent an undefined error and
+		   to conform to current PSL standards.  Also removed pre-2003
+		   revision history.
+
+	01/19/05 - MBUIM - CR 13086
+		   Modified ACNBLOCK and CIFBLOCK to pass in the literal 'ACN'
+		   and 'CIF' respectively as they were returning undefined
+		   errors.
+	  
+	12/16/03 - RussellDS - CR 7514
+	  	   Replace references to table UTBLCIDBLK (being obsoleted)
+	  	   with table UTBLNCID.
+	*/
+	
+	quit
+
+public CIF(BRCD,ER,RM,skipinp)		// Public, Must be called from driver (requires variables set up by driver)
+
+	/*
+
+	   ARGUEMENTS:
+	   . BRCD  - Branch code of branch making the request
+	       /TYPE=N/MECH=VALUE
+
+	   . ER  - Error code /TYPE=N/MECH=REFNAM:RW
+
+	   . EM  - Error message /TYPE=T/MECH=REFNAM:RW
+	   
+	   . skipinp - Deprecated, always set to 1
+
+	   RETURNS:
+	   . $$  - Next available number from a reserved block
+	       of numbers.  /TYPE=T/REQ/MECH=REFNAM:R
+	   EXAMPLE:
+	       s NACN=$$CIF^UFETCH(BRANCHCD,ER,EM)
+
+	   LOCAL VARS:
+	   TABLE    - Which table to use ("CIF" or "ACN" currently)
+	   PGM      - Program to execute to perform checksum
+	   STARTNUM - Unchecksumated number, used to find starting position and
+	        next number in list if current one is in use
+	   NEXTPTR  - If using TABLE method (#2), points to next avail. table entry
+	   X    - Checksumated STARTNUM
+	   CID    - Customer ID Number, Return val from method #1
+	   FOUND    - Flag, used to exit loop when searching for free numbers
+	   DBTEMP   - Reduce database access by using this as a temp. variable
+	   DBCOUNT  - Used to update how many numbers remain in the table
+	   FAILHOST - Set to 1 if a call to the host was made and failed
+
+	*/
+
+	new TABLE,PGM,STARTNUM,NEXTPTR,X,CID,FOUND,DBTEMP,DBCOUNT,FAILHOST
+
+	set skipinp=1 set BRCD=+$G(BRCD)
+	set TABLE="CIF" set ER=0 set FOUND=0 set FAILHOST=0
+	quit $$CIFSTART("CIF",.ufetch,skipinp)
+
+
+public ACN(BRCD,ER,RM,skipinp)	// Public; Return next available account number from a block of reserved numbers
+	/*
+	   Must be called by driver (requires variables set up by driver)
+
+
+	   ARGUEMENTS:
+	   . BRCD  - Branch code of branch making the request /TYPE=N/MECH=VALUE
+
+	   . ER  - Error code /TYPE=N/MECH=REFNAM:R
+
+	   . RM  - Error message /TYPE=T/MECH=REFNAM:R
+
+	   . skipinp - Deprecated, always set to 1
+	   
+	   RETURNS:
+	   . $$  - Next available number from a reserved block
+	       of numbers.  /TYPE=T/REQ/MECH=REFNAM:R
+	   EXAMPLE:
+	       s NACN=$$ACN^UFETCH(BRANCHCD,ER,EM)
+
+	   LOCAL VARS:
+	   TABLE    - Which table to use ("CIF" or "ACN" currently)
+	   PGM      - Program to execute to perform checksum
+	   STARTNUM - Unchecksumated number, used to find starting position and
+	        next number in list if current one is in use
+	   NEXTPTR  - If using TABLE method (#2), points to next avail. table entry
+	   X    - Checksumated STARTNUM
+	   CID    - Customer ID Number, Return val from method #1
+	   FOUND    - Flag, used to exit loop when searching for free numbers
+	   DBCOUNT  - Used to update how many numbers remain in the table
+	   FAILHOST - Set to 1 if a call to the host was made and failed
+
+	*/
+	new TABLE,PGM,STARTNUM,NEXTPTR,X,CID,FOUND,DBTEMP,DBCOUNT,FAILHOST
+
+	set skipinp=1 set BRCD=+$G(BRCD)
+	set TABLE="ACN" set ER=0 set FOUND=0 set FAILHOST=0 set skipinp=$G(skipinp)
+	quit $$ACNSTART("ACN",.ufetch,skipinp)
+
+
+public ACNSTART(tbl,number,skipinp)	// Method #1 - Custom code (W/Network Check)
+
+	set skipinp=1
+	set skipinp=$G(skipinp)
+	// Prevents error in case of fall-through to Method #2
+	quit $$CIFSTART(tbl,.number,skipinp)
+
+CIFSTART(String tbl,String number,Boolean skipinp)	// Method #2 - Retrieve next number from local table
+
+	type public Boolean FAILHOST,FOUND
+	type public Number BRCD,DBCOUNT,STARTNUM,%LOGID
+	type public String TABLE
+
+	type Number LOWLIMIT,pid,X
+	
+	set tbl=tbl.get()
+	set pid=$$PID()
+	set skipinp=1
+
+	type RecordUTBLNXTCID unxtcid = Db.getRecord("UTBLNXTCID","TYPE=:TABLE,BRCD=:BRCD",1)
+	if 'unxtcid.getMode() do {
+		set STARTNUM=1
+		set DBCOUNT=""
+		}
+	else  do {
+		set STARTNUM=unxtcid.ncid
+		set DBCOUNT=unxtcid.cnt
+		}
+
+	// Low limit trigger to get more numbers from host
+	#IF CUVAR.CIDLOWLM
+	set LOWLIMIT=CUVAR.CIDLOWLM
+	#ELSE
+	set LOWLIMIT=20
+	#ENDIF
+
+	for  quit:FOUND  set STARTNUM=Db.nextVal("UTBLNCID","TABLE,BRCD,STARTNUM")  do {
+		type Boolean STATUS,QUIT
+		set QUIT=0
+		set STATUS=0
+
+		// Get a host block (updates STARTNUM/DBCOUNT)
+		if DBCOUNT'>LOWLIMIT,'FAILHOST set FAILHOST=$$GETHOSTB
+
+		// Out of numbers AND host call failed
+		if STARTNUM.isNull() set FOUND=-1 quit
+
+		set DBCOUNT=DBCOUNT-1
+
+		type RecordUTBLNCID uncid=Db.getRecord("UTBLNCID","TYPE=:TABLE,BRCD=:BRCD,CID=:STARTNUM",1)
+		if uncid.getMode() set STATUS=uncid.used
+		if skipinp,STATUS quit
+		if STATUS,STATUS'=pid quit
+
+		set uncid.used=$$PID()
+		do uncid.bypassSave()
+
+		if tbl="ACN" do { quit:QUIT
+			set X=$$CHKSUM(STARTNUM)
+			// Fail if net down or # in use
+			if '$$NETOK(%LOGID.get()) set QUIT=1 quit
+			//  Check for existance of ^ACN
+			set QUIT=$$CHECKACN(X,BRCD,STARTNUM)
+			}
+	
+		if tbl="CIF",Db.isDefined("CIF","ACN=:STARTNUM") quit
+		if tbl="CIF" set X=STARTNUM 
+
+		//  used in filer's
+		set number=STARTNUM_"|"_BRCD
+		// Number is valid if it it makes it this far
+		set FOUND=1
+		}
+
+	// Return the account number
+	if FOUND=1 quit X
+
+	// This line is reached if all numbers are exhausted and the host is down
+	set unxtcid.cnt=0
+	do unxtcid.bypassSave()
+
+	// Unable to create new account number
+	do Runtime.setErrMSG("UTBLNXTCID","7761")
+
+	quit ""
+
+CHECKACN(CID,BRCD,NUMBER)	// private ;  Check for existance of ^ACN
+
+	if Db.isDefined("ACN","CID") do {
+		new XTABLE
+		set XTABLE="ACN" 	
+		type RecordUTBLNCID uncid=Db.getRecord("UTBLNCID","TYPE=:XTABLE,BRCD=:BRCD,CID=:NUMBER")
+		set uncid.used=1
+		do uncid.bypassSave()
+		quit 1
+		}
+
+	quit 0
+
+GETHOSTB()	// Get a block of numbers from the host & update STARTNUM & DBCOUNT
+
+	//
+	new LOW,HIGH,KILLFLAG set KILLFLAG=0
+
+	if TABLE="ACN" do { quit:ER 1
+		if $G(%LOGID) do STUB^PBSCLI("GETACN^UFETCH",,,,,"v")
+		else  do GETACN^UFETCH
+		}
+	else  do { quit:ER 1
+		if $G(%LOGID) do STUB^PBSCLI("GETCIF^UFETCH",,,,,"v")
+		else  do GETCIF^UFETCH
+		}
+
+	// Add to branch database ADDBLOCK^SCAUCID
+	do ADDBLOCK^SCAUCID(v,BRCD,TABLE,KILLFLAG)
+
+	set LOW=$P(v,"|",1) set:'LOW LOW=1
+	set HIGH=$P(v,"|",2)
+
+	set DBCOUNT=DBCOUNT+(HIGH-LOW+1)
+
+	// Update this way in case ADDBLOCK found an unused number before the
+	// "next number" pointer.
+
+	if KILLFLAG=1 do { quit:STARTNUM'="" 0
+		type RecordUTBLNXTCID unxtcid=Db.getRecord("UTBLNXTCID","TABLE,BRCD")
+		set STARTNUM=unxtcid.ncid  		
+		}
+	set STARTNUM=LOW
+	quit 0
+
+
+public AUTHRNG(RANGE,CHKTYPE)	// Public ; Authorization code for a range of numbers
+
+	// CHKTYPE: 1=ACN, 2=CIF
+	new HIRANGE,LORANGE,HICODE,LOCODE,AUTHCODE,HILENGTH,LOLENGTH,INDEX
+
+	set LORANGE=$P(RANGE,"|",1)
+	set HIRANGE=$P(RANGE,"|",2) 	
+	quit:LORANGE>HIRANGE 0
+
+	set HILENGTH=$L(HIRANGE) set HICODE=LORANGE set LOLENGTH=$L(LORANGE) set LOCODE=HIRANGE
+	for INDEX=1:1:HILENGTH set HICODE=HICODE+($E(HIRANGE,INDEX)*(177*INDEX*CHKTYPE))
+	for INDEX=1:1:LOLENGTH set LOCODE=LOCODE+($E(LORANGE,INDEX)*(301*INDEX*CHKTYPE))
+	set HICODE=(HICODE#10000) if HICODE<1000 set HICODE=HICODE+1277
+	set HICODE=HICODE*10000
+	set LOCODE=(LOCODE#10000) set AUTHCODE=HICODE+LOCODE
+	quit AUTHCODE
+
+
+NETOK(logid)	// Returns 1 if on HOST or if net is up on a REMOTE
+
+	//  FEP based, Network down
+	if logid,'%NET quit 0
+	quit '(+logid=2)
+
+	// Calls associated checksum routine (if any)
+
+
+public CHKSUM(String X,String CD)	// X is parameter passed to PGM routine
+	
+	type Public Number TYPE
+	type Public String CDM,CRCD
+	
+	if CRCD.get().isNull() set CRCD=%SystemCurrency
+	set CDM=CDM.get()
+	set TYPE=TYPE.get()
+
+	if CDM.isNull(),'TYPE.isNull() do {
+		
+		type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:TYPE",1)
+		set CDM=prodctl.cdm
+		}
+	
+	if 'CDM.isNull() do {
+		
+		type String PGM
+		type RecordUTBLCDM utblcdm=Db.getRecord("UTBLCDM","KEY=:CDM",1)
+		
+		set PGM=utblcdm.pgm
+		if PGM.isNull() quit
+		
+		do EXEC
+		}
+
+	// Assuming EXEC was called, X is now STARTNUM w/ Check Digit
+	set CD=CD.get()
+	
+	quit X
+
+
+public CHECKSUM(CDM,CID,METHOD)	// Used by DATA-QUIK Report to generate checksums
+
+	new TMPVAL
+	set TMPVAL=$$CHKSUM(CID,.CD)
+	// CD is Check Digit, a side-effect returned from CHKSUM
+	if $G(METHOD) quit CD
+	quit TMPVAL
+
+
+EXEC	// Runs a program w/error trapping enabled
+
+	new $ZT
+	set $ZT=$$SETZT^%ZT("ZT^UFETCH")
+	do @PGM
+	quit
+
+ZT	do ZE^UTLERR
+	set VFMQ="Q"
+	set ER=1
+	quit
+
+public ACNBLOCK(BLOCKSIZ)	// Retrieve next set of ACN numbers (BLOCKSIZ optional)
+	// DOES NOT update host pointers
+	type Number HIRANGE,RETBLOCK
+	
+	if $G(BLOCKSIZ)="" do {
+		type ResultSet rs
+		set rs=Db.select("CIDBLK","CUVAR")
+		if rs.isEmpty() quit		   
+		if rs.next() do {
+			set BLOCKSIZ=rs.getCol(1)
+			set:BLOCKSIZ="" BLOCKSIZ=25
+			}
+		}
+	// System-wide (all branches) pointer to next available account number
+	type RecordUTBLNCIDT uncidt=Db.getRecord("UTBLNCIDT","TYPE='ACN'")
+	set HIRANGE=uncidt.nnum
+	set RETBLOCK=HIRANGE_"|"_(BLOCKSIZ+HIRANGE-1)
+	
+	quit RETBLOCK
+
+
+public CIFBLOCK(BLOCKSIZ)	// Retrieve next set of CIF numbers (BLOCKSIZ optional)
+	// DOES NOT update host pointers
+	type Number HIRANGE,RETBLOCK
+	
+	if $G(BLOCKSIZ)="" do {
+		type ResultSet rs
+		set rs=Db.select("CIDBLK","CUVAR")
+		if rs.isEmpty() quit		   
+		if rs.next() do {
+			set BLOCKSIZ=rs.getCol(1)
+			set:BLOCKSIZ="" BLOCKSIZ=25
+			}
+		}
+	// System-wide (all branches) pointer to next available account number
+	type RecordUTBLNCIDT uncidt=Db.getRecord("UTBLNCIDT","TYPE='CIF'")
+	set HIRANGE=uncidt.nnum
+	set RETBLOCK=HIRANGE_"|"_(BLOCKSIZ+HIRANGE-1)
+	
+	quit RETBLOCK
+
+public GETCIF	// Server Stub - Get next block AND update host pointers
+
+	set v=$$CIFBLOCK()
+	// Update host to point to next available number
+	type RecordUTBLNCIDT uncidt=Db.getRecord("UTBLNCIDT","TYPE='CIF'")
+	set uncidt.nnum=$P(v,"|",2)+1
+	do uncidt.bypassSave()
+	quit
+
+public GETACN	// Server Stub - Get next block AND update host pointers
+
+	set v=$$ACNBLOCK()
+	// Update host to point to next available number
+	type RecordUTBLNCIDT uncidt=Db.getRecord("UTBLNCIDT","TYPE='ACN'")
+	set uncidt.nnum=$P(v,"|",2)+1
+	do uncidt.bypassSave()
+	quit
+
+MARKUSED(TABLE,BRCD,ACCOUNT,NEWCNT)	// Marked a number "used" in the branch table
+
+	/*
+	   NOTE: Will NOT update any other pointers (E.G. Host or Branch)
+
+	   . TABLE    - Table to affect, currently ACN or CIF
+	       /TYPE=N/MECH=VALUE
+	   . BRCD    - Branch code to affect
+	       /TYPE=N/MECH=VALUE
+	   . ACCOUNT    - Account number to mark as used
+	       /TYPE=N/MECH=VALUE
+	   . NEWCNT  - (Optional) The new count to be reflected by
+	       the branch of how many numbers remain.
+	       If omitted, subtracts 1 from the current count.
+	       /TYPE=N/MECH=VALUE
+
+	   MSG 7418 - Account number has already been used
+	   MSG 57   - Account does not exist
+	*/
+	new ZTEMP
+	set ER=0 set RM=""
+
+	// Account number ~p1 has already been used
+	type RecordUTBLNCID uncid=Db.getRecord("UTBLNCID","TYPE=:TABLE,BRCD=:BRCD,CID=:ACCOUNT")
+	set ZTEMP=uncid.used
+
+	// Account number already in use
+	if ZTEMP,ZTEMP'=$$PID() set ER=1 set RM=$$^MSG(7748) quit
+
+	// Account does not exist
+	if ZTEMP="" set ER=1 set RM=$$^MSG(57) quit
+
+	//  Mark account as used
+	set uncid.used=1
+	do uncid.bypassSave()
+
+	type RecordUTBLNXTCID unxtcid=Db.getRecord("UTBLNXTCID","TABLE,BRCD")
+	// Update # remaining
+	if $G(NEWCNT) set unxtcid.cnt=NEWCNT
+	else  set unxtcid.cnt=unxtcid.cnt-1
+	// Update pointer to next free account
+	set unxtcid.ncid=ACCOUNT
+	do unxtcid.bypassSave()
+	quit
+
+PID()	//  private ; Get PID number to let us know who owns the number
+
+	quit $$PID^%ZFUNC()
+
+REMAIN(TBLTYPE,BRCD)	//  Get number remaining for a given Branch Code
+
+	if $G(TBLTYPE)="" quit ""
+	if $G(BRCD)="" quit ""
+	type RecordUTBLNXTCID unxtcid=Db.getRecord("UTBLNXTCID","TBLTYPE,BRCD")
+
+	quit unxtcid.cnt
+
+public STFENABL(TBLTYPE)	//  Return True if STF / OFFLINE can continue
+
+	new tmpskl
+	set TBLTYPE=$G(TBLTYPE)
+
+	if TBLTYPE="CIF" do { if 'tmpskl quit 0
+		type ResultSet rs
+		set rs=Db.select("CIFALLOC","CUVAR")
+		if rs.isEmpty() quit		   
+		if rs.next() do {
+			set tmpskl=rs.getCol(1)
+			}
+		}
+
+	if TBLTYPE="ACN" do { if tmpskl'="" quit 0
+		type ResultSet rs
+		set rs=Db.select("UCID","CUVAR")
+		if rs.isEmpty() quit		   
+		if rs.next() do {
+			set tmpskl=rs.getCol(1)
+			}
+		}
+
+	quit 1
+
+vSIG()	quit "60555^41778^Pat Kelly^13008"	// Signature - LTD^TIME^USER^SIZE

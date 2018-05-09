@@ -1,0 +1,249 @@
+BCHMON	//Batch Monitor Functions/Utilities
+	/*
+	ORIG: SCHEETZE - 09/28/98
+	DESC: Batch Monitor Functions/Utilities
+
+	KEYWORDS: Batch Monitor, Recovery
+
+	RETURNS:
+		. Various results depending on which function was called
+
+	EXAMPLE:
+		set STAT=$$STATUS^BCHMON("DAYEND")
+
+
+	---- Revision History ------------------------------------------------
+	 
+	12/11/04 - RussellDS - CR13642
+		   Modify call to JOBNAM^%ZFUNC to include VERSION to indicate
+		   DBI.  This avoids old calls in JOBNAM^%ZFUNC that interact
+		   with globals.
+		   
+		   Fix PSL precedence warnings.
+
+	02/05/03 - GRAY - 51349
+		   Corrected problem with loading of QUEUEB info when the
+		   batch information does not exist in sections RUNSTAT and
+		   STATUS.
+
+	06/07/02 - Diana Shvachkina - 49794
+		   Converted to PSL.	 
+
+	*/
+
+	quit
+
+
+Public RUNCHK(BCHNUM,CSTAT)
+
+        /*
+        Running Job Check (QUEUEJ).
+ 
+        ARGUMENTS:
+		. BCHNUM	Batch Sequence Number	TYP=N/MECH=VAL/REQ
+		. CSTAT		Current Status		TYP=N/MECH=VAL/REQ
+ 
+        RETURNS:
+                . $$            Job Process Indicator	TYP=N
+        */
+
+	if CSTAT'=5 quit 0
+
+	new EVENT,JOBNAM
+	
+	type RecordQUEUEB queueb=Db.getRecord("QUEUEB","BCHNUM=:BCHNUM",1)
+
+	set EVENT=queueb.event
+	set JOBNAM=queueb.vmstag
+
+	// Check to see if process running job exists using %ZFUNC()
+	quit $$JOBNAM^%ZFUNC(JOBNAM,EVENT,BCHNUM,2)
+	
+
+DTS(DATE,TIME)	//Private
+        /*
+        Formatted Date-Time.
+ 
+        ARGUMENTS:
+                . DATE		Starting Date		TYP=D/MECH=VAL/REQ
+                . TIME		Starting Time		TYP=TIM/MECH=VAL/REQ
+ 
+        RETURNS:
+                . date time	Date Time stamp		TYP=T
+        */
+
+	new DS,TS
+	set (DS,TS)=""
+	// I18N=OFF
+	if TIME'="" set TS=$$TIM^%ZM(TIME,"12:60 AM")
+	if DATE'="" set DS=$$DAT^%ZM(DATE,"MM/DD/YY")
+	// I18N=ON
+
+	quit DS_" "_TS
+	
+
+ELAPSE(CDAT,CTIM,SDAT,STIM)	//Private
+        /*
+        Elapse Time of Job Execution HH:MM:SS.
+ 
+        ARGUMENTS:
+                . CDAT          Completion Date		TYP=D/MECH=VAL/REQ
+		. CTIM		Completion Time		TYP=TIM/MECH=VAL/REQ
+		. SDAT		Starting Date		TYP=D/MECH=VAL/REQ
+                . STIM		Starting Time           TYP=TIM/MECH=VAL/REQ
+ 
+        RETURNS:
+                . HH:MM:SS	Time of Job Execution	TYP=T
+        */
+
+	new ETIM,HH,MM,SS
+
+	// Job is running
+	if CTIM="" quit ""
+
+	if CDAT="" do {
+		set CDAT=SDAT 
+		set:CTIM<STIM CDAT=CDAT+1
+		}
+
+	set ETIM=(((CDAT-SDAT)*86400)+CTIM)-STIM
+
+	set HH=ETIM\3600 
+	if HH<10 set HH=0_HH
+
+	set MM=(ETIM#3600)\60 
+	if MM<10 set MM=0_MM
+
+	set SS=ETIM#60 
+	if SS<10 set SS=0_SS
+
+ 	quit HH_":"_MM_":"_SS
+ 	
+
+Public STATUS(EVENT)
+        /*
+        Event status.
+ 
+        ARGUMENTS:
+		. EVENT		Event Name		TYP=T/MECH=VAL/REQ
+ 
+        RETURNS:
+                . $$		Event Status         	TYP=N
+        */
+
+	new ER,JOBNAM,QUE,RUNNING,STATUS
+
+	set STATUS=""
+	
+	type ResultSet ebchrs
+	set ebchrs=Db.select("BATCH","UTBLEBCH","EVENT=:EVENT") 
+	if 'ebchrs.isEmpty() while ebchrs.next() do { quit:STATUS'=""
+		set QUE=ebchrs.getCol(1)
+		type RecordQUEUEB queueb=Db.getRecord("QUEUEB","BCHNUM=:QUE",1)
+		if queueb.subm=1 do { quit
+			set JOBNAM=queueb.vmstag
+			set RUNNING=$$JOBNAM^%ZFUNC(JOBNAM,EVENT,QUE,2)
+			// Event running
+			if RUNNING set STATUS=$$^MSG(3651)
+			// Event pending restart
+			else  set STATUS=$$^MSG(3653)
+			}
+		}
+
+	// Event not running
+	if STATUS="" set STATUS=$$^MSG(1021)
+
+	quit STATUS
+	
+
+CSDESC(CSTAT)	//Private
+	/*
+	Current Status Description.
+ 
+	ARGUMENTS:
+		. CSTAT		Current Status		        TYP=N/MECH=VAL/REQ
+ 
+	RETURNS:
+		. $$		Current Status Description	TYP=T
+        */
+
+	// Successful completion
+	if CSTAT=0 quit $$^MSG(4562)
+	// Aborted on error ~p1
+	if CSTAT=1 quit $$^MSG(5528)
+	// Resubmission pending~p1
+	if CSTAT=2 quit $$^MSG(4561)
+	// Skipped
+	if CSTAT=3 quit $$^MSG(5761)
+	// Aborted on resubmission failure ~p1
+	if CSTAT=4 quit $$^MSG(5753)
+	// Currently running
+	if CSTAT=5 quit $$^MSG(3658)
+	// Aborted on dependency error ~p1
+	if CSTAT=6 quit $$^MSG(5752)
+	// Manually stopped
+	if CSTAT=7 quit $$^MSG(4584)
+
+	quit ""
+	
+
+EVENT(EVENT,ACTION)	//Private
+        /*
+        Start/Stop/Restart an Event.
+ 
+        ARGUMENTS:
+		. EVENT         Event Name              TYP=T/MECH=VAL/REQ
+		. ACTION	Action Indicator	TYP=N/MECH=VAL/REQ
+ 
+        RETURNS:
+                . ER|RM		Error Flag|Return Message	TYP=T
+        */
+
+	new ER,RM
+
+	set ER=0 
+	set RM=""
+
+	//I18N=OFF
+	// Start event - Currently NOT supported
+	if ACTION=1 quit "1|Start Event not currently supported"
+
+	//I18N=ON
+	if ACTION=2 do { quit ER_"|"_RM
+		// Stop Event
+		new X
+		set X=EVENT
+		// Check if event is running
+		do SPOST^QUEUTIL
+		if ER quit
+
+		do STPBAT^QUEUTIL(EVENT)
+
+		// Event ~p1 has been set to stop
+		set RM=$$^MSG(1025,EVENT)
+		}
+
+	if ACTION=3 do { quit ER_"|"_RM
+		// Restart Event
+		new X,%OSAVE
+		set X=EVENT 
+		set %OSAVE=1
+		// Verify that event is restartable
+		do EVNTPP^QUERSTRT
+		if ER quit
+
+		do REFRESH^QUERSTRT(EVENT)
+		}
+
+	if ACTION=4 do { quit ER_"|"_RM
+		// Submit queues in the event
+		new X
+		set X=$$^%ZJOB("SUB^QUERSTRT")
+		// Event ~p1 restarted
+		set RM=$$^MSG(1032,EVENT)
+		}
+
+	// No action submitted
+	quit ER_"|"_RM
+ #OPTION ResultClass ON
+Public String vSIG()	quit "59899^63067^Dan Russell^4831"	// Signature - LTD^TIME^USER^SIZE

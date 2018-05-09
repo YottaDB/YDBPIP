@@ -1,0 +1,298 @@
+UACRIND	
+	/*
+	UACRIND
+	ORIG: GORDONT/SMITHC - 11/17/2000
+	DESC: Calculation of Cumulative Interest 
+
+	This procedure (public linetag CALC) calculates total amount of 
+	cumulative interest paid to the account for a specified number of 
+	scheduled deposits.  Additionally, it may (public linetag CURRACR) 
+	calculate the amount of cumulative interest if the account were 
+	closed on the current effective date.
+
+	---- Revision History ------------------------------------------------
+	
+	05/28/03 - CARROLLJ - 51349
+		   Modified procedure to remove the use of the %A array.
+
+
+	----------------------------------------------------------------------
+	*/
+
+	quit					// Do not call from top
+
+
+Public	CALC(SCHDEPF,ICF,IRN,SCHDEPA,ODT,SCHDEPN)
+
+	/*
+	 Calculate cumulative interest through the scheduled deposit period 
+	 (specified by scheduled deposit number passed in) from the account's 
+	 opening date regardless of how many scheduled deposits have been 
+	 satisfied.
+
+	 ARGUMENTS:
+	
+		SCHDEPF	        Scheduled Deposit Frequency	/TYP=T/REQ
+		ICF		Int/Div compounding frequency	/TYP=T/REQ
+		IRN		Rate of interest		/TYP=N/REQ
+		SCHDEPA	        Scheduled Deposit Amount	/TYP=$/REQ
+		ODT		Account opening date		/TYP=D/REQ
+		SCHDEPN	        Scheduled Deposit Number        /TYP=N/REQ
+	
+	 RETURNS:
+		.$$		Interest amount			/TYP=$
+
+	 EXAMPLE:
+		set CUMINT=$$CALC^UACRIND(dep.schdepf,dep.icf,dep.irn,
+				dep.schdepa,dep.odt,dep.schdepn) quit:ER
+	
+		Raw Formula for maturity value:
+		D*(1+(R/400))**(CF/12)*((((1+(R/400))**(CF/12))**T)Y-1)/
+		(((1+(R/400))**(CF/12))-1)
+	*/
+
+	new CMPAF,CF12,DENOM,JD,NUMER,R400,SCHAF
+
+	I IRN="" Q 0 
+	// Determine # of compounding frequency occurrences (usually 4)
+	set JD=$$NJD^UFRE(ODT,ICF,.CMPAF) quit:ER 0
+	// Determine # of scheduled frequency occurrences (usually 12)
+	set JD=$$NJD^UFRE(ODT,SCHDEPF,.SCHAF) quit:ER 0
+
+	set R400=IRN/(CMPAF*100)
+	set CF12=CMPAF/SCHAF
+	set NUMER=SCHDEPA*((1+R400)**CF12)*((((1+R400)**CF12)**SCHDEPN)-1)
+	set DENOM=((1+R400)**CF12)-1
+
+	// Difference of maturity amount and scheduled principal contributions
+	quit (NUMER/DENOM)-(SCHDEPA*SCHDEPN)
+
+
+Public	CURRACR(RecordDEP dep,CID,EFD,IRN)
+
+	/*
+	 Calculate the amount of cumulative interest if the account were
+	 closed on the effective date (passed in).
+
+	 ARGUMENTS:
+	
+		CID		Account number                  /TYP=N/REQ
+		EFD		Effective Date	                /TYP=D/REQ
+		IRN		Interest Rate			/TYP=N/REQ
+	
+	 RETURNS:
+		.$$		Closure interest amount		/TYP=$
+
+	 EXAMPLE:
+		S CUMINT=$$CURRACR^UACRIND(CID,EFD,IRN) Q:ER
+	*/
+
+	new ACR,ODT,NSCHDEPS
+
+	do INIT(.dep)
+
+	// Account closing after maturity date - use current rate
+	if EFD'<MDT do CLOSEINT(.dep,IRN) quit ACR
+
+	// Account closing before maturity date - use other rate
+	do PREMAT(.dep)
+
+	quit ACR
+
+
+Public	CURRPEN(RecordDEP dep,CID,EFD,PRATE)
+
+	/*
+	 Calculate the penalty amount for a cumulative account if the account 
+	 were closed on the effective date (passed in).
+
+	 ARGUMENTS:
+	
+		CID		Account number                  /TYP=N/REQ
+		EFD		Effective Date	                /TYP=D/REQ
+		PRATE		Penalty Rate			/TYP=N/REQ
+	
+	 RETURNS:
+		.$$		Closure interest amount		/TYP=$
+
+	 EXAMPLE:
+		S CUMINT=$$CURRPEN^UACRIND(CID,EFD,PRATE) Q:ER
+	*/
+
+	new ACR,ODT,NSCHDEPS
+
+	do INIT(.dep)
+
+	// Account closing after maturity date
+	if EFD'<MDT quit 0
+
+	// Account closing before maturity date
+	do MINNSREQ(.dep,PRATE) if ER quit 0
+
+	quit ACR
+
+
+INIT(RecordDEP dep)	// Initialize objects and variables
+
+	set NSCHDEPS=dep.nschdeps
+	set MDT=dep.mdt
+	set ODT=dep.odt
+	set ACR=0
+
+	if EFD="" set EFD=TJD
+
+	quit
+
+
+CLOSEINT(RecordDEP dep,IRN) // Calculate closeout interest / penalty interest
+
+	// Not all scheduled deposits are satisfied
+	if NSCHDEPS<dep.schdepn do MINNSREQ(.dep,IRN) quit
+
+	// All scheduled payments are satisfied
+	set ACR=$$CALC(dep.schdepf,dep.icf,IRN,dep.schdepa,ODT,NSCHDEPS)
+
+	quit
+
+
+MINNSREQ(RecordDEP dep,IRN)	// Evaluate mimimum # of required deposits
+
+	// Minimum # of required deposits were satisfied
+	if NSCHDEPS'<dep.minnsreq do { quit
+		new CALQDT,COMPPER,COMPQTRS,INITBAL
+
+		// Find date of last completed (satisfied) calendar quarter
+		set NJD=$$NJD^UFRE(dep.nscdepdd,"1QAE",,1) quit:ER
+		set CALQDT=NJD
+
+		// Find # of completed (satisfied) periods
+		set NJD=ODT
+		set COMPPER=1		// Opening date counts as one period
+		for  set NJD=$$NJD^UFRE(NJD,dep.schdepf) quit:NJD>CALQDT!(ER)  S COMPPER=COMPPER+1
+
+		// Formula through completed quarters plus simple interest
+
+		set ACR=$$CALC(dep.schdepf,dep.icf,IRN,dep.schdepa,ODT,COMPPER)
+		set ACR=$$^SCARND(ACR,0,CID)
+
+		set INITBAL=(dep.schdepa*COMPPER)+ACR
+		set ACR=ACR+$$COMPLEX(.dep,COMPPER,CALQDT+1,INITBAL)
+		}
+
+	// Minimum # of required deposits were not satisfied, calculate
+	// simple interest for entire period since opening date
+	set ACR=$$SIMPLE(.dep)
+
+	quit
+
+	
+PREMAT(RecordDEP dep)	// Account closing before maturity date
+
+	new IRN,JD,MODODT,NJD
+
+	// Invalid rate schedule ~p1
+	if dep.sch="" set ER=1,RM=$$^MSG(8476) quit
+
+	// Find calendar months that have ended since opening date
+	set JD=ODT
+	for  set NJD=$$NJD^UFRE(JD,"1MAE") quit:NJD>EFD!(ER)  set JD=NJD
+
+	/* Modified ODT should equal the end of the prior calendar month for 
+	   the purposes of determining rate from rate schedule */
+	if ODT=$$EOMJD^SCADAT(ODT) quit:ER  set MODODT=ODT
+	else  set MODODT=$$NJD^UFRE(ODT,"1MAE",,1) quit:ER
+
+	// Find new rate from rate schedule
+	set IRN=$$RSCH^URSCH(dep.sch,0,MODODT,JD) quit:ER
+
+	// Calculate interest as if closed after maturity, based on new IRN
+	do CLOSEINT(.dep,IRN)
+
+	quit
+
+
+COMPLEX(RecordDEP dep,SCHNUM,INITDT,BAL)
+
+	/*
+	 Calculate "complex" simple interest, ignoring excess partial payments 
+	 and interest compounding, for a specified portion of term (INITDT-EFD).
+	*/
+	new ACR,DEPDT,DEPSCH,SCHDT,SCHINFO,TOTAMTOV,TOTFEE,TOTFEEOV
+
+	set ACR=0
+	set (DEPDT,SCHDT)=INITDT
+
+	// Call SCHFEE to get SCHINFO array, ignoring other returned info
+	do FEE^SCHFEE(.dep,CID,EFD,.SCHINFO,.TOTFEE,.TOTFEEOV,.TOTAMTOV)
+
+	for  set SCHNUM=$O(SCHINFO(SCHNUM)) quit:SCHNUM=""  do {  quit:DEPDT=""
+		set SCHDT=$O(SCHINFO(SCHNUM,"")) quit:SCHDT=""
+		set DEPDT=$P(SCHINFO(SCHNUM,SCHDT),"|",1) quit:DEPDT=""
+
+		// If deposit date is prior to inital date, skip DEPSCH
+		if DEPDT'>INITDT set BAL=BAL+dep.schdepa quit
+		
+		// Build DEPSCH array for use in simple interest calculations.
+		set DEPSCH(DEPDT)=$G(DEPSCH(DEPDT))+dep.schdepa
+		}
+
+	// Use DEPSCH array to calculate simple interest for INITDT-EFD
+	set BEGDT=INITDT
+	set DEPDT=""
+	for  set DEPDT=$O(DEPSCH(DEPDT)) quit:DEPDT=""!(ER)  do {
+		set ACR=ACR+$$^UIC(BAL,BEGDT,DEPDT-1,dep.iacm,IRN,"",dep.intaf,dep.ipf,dep.icpf,dep.inp,dep.ipld)	
+
+		set BAL=BAL+DEPSCH(DEPDT)
+		set BEGDT=DEPDT
+		}
+	if ER quit ACR
+
+	// Calculate final period if before effective date *** - SUB 1 EFD
+	if BEGDT<EFD set ACR=ACR+$$^UIC(BAL,BEGDT,EFD-1,dep.iacm,IRN,"",dep.intaf,dep.ipf,dep.icpf,dep.inp,dep.ipld)	
+
+	quit ACR
+
+
+SIMPLE(RecordDEP dep)
+
+	/*
+	 Calculate simple interest, ignoring excess partial payments and 
+	 interest compounding, for entire term.
+	*/
+	new ACR,BAL,DEPAMT,DEPDT
+	new depsch,depschrs
+	type ResultSet depschrs
+
+	/* If beginning on the opening date, calculate simple interest for 
+	   initial deposit on opening date separately.
+	*/
+	set (ACR,BAL)=0
+	set depsch=Db.getOneRow("SCHDEPA","DEPSCH","CID,ODT")
+	set BAL=BAL+depsch
+
+	set ACR=ACR+$$^UIC(BAL,ODT,ODT,dep.iacm,IRN,"",dep.intaf,dep.ipf,dep.icpf,dep.inp,dep.ipld)	
+	set BEGDT=ODT+1
+
+	set depschrs=Db.select("DEPDT,SCHDEPA","DEPSCH","CID=:CID AND DEPDT>:ODT")
+	if depschrs.isEmpty() quit ACR
+
+	/* Calculate simple interest between each occurrence of DEPSCH entries
+	   (excluding initial deposit on opening date).
+	*/
+	while depschrs.next() do {
+		set DEPDT=depschrs.getCol(1)
+		set DEPAMT=depschrs.getCol(2)
+
+		set ACR=ACR+$$^UIC(BAL,BEGDT,DEPDT-1,dep.iacm,IRN,"",dep.intaf,dep.ipf,dep.icpf,dep.inp,dep.ipld)	
+
+		set BAL=BAL+DEPAMT
+		set BEGDT=DEPDT
+		}
+	if ER quit ACR
+
+	// Calculate final period if before effective date
+	if BEGDT<EFD set ACR=ACR+$$^UIC(BAL,BEGDT,EFD-1,dep.iacm,IRN,"",dep.intaf,dep.ipf,dep.icpf,dep.inp,dep.ipld)	
+
+	quit ACR
+
+vSIG()	quit "60122^61032^Chad Smith^7770"	// Signature - LTD^TIME^USER^SIZE

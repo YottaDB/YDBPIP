@@ -1,0 +1,786 @@
+INDX1	/*   
+	     DESC: Interest Rates by Effective Date
+
+	---- Revision History ------------------------------------------------
+	
+	10/19/06 - SmithCD - CR 23692
+		   Modified FILE section to delete INDEX0 and INDEX1 when 
+		   deleting not in anticipated mode and not backdated since 
+		   we will not delete in ^INDEXMC in that case.
+	
+	03/29/06 - SmithCD - CR 20396
+		   Moved POST1 section to INDEX_RATE.PPL.
+	
+	02/23/06 - SmithCD - CR 19168
+		   Set UX="" in LOADD section to trigger ^UTLREAD to allow 
+		   File option (otherwise it won't know the data has changed).
+	
+	02/22/06 - Hillanbrand - CR19708
+	           Corrected vDb9+9^INDX1,%PSL-E-RECNOFL.  Modified TYPE 
+	           section to get the TYPE from the 4th piece of the RATE
+	           array not the 3rd. RATE(z1).piece("|", 4)
+
+	02/09/06 - SmithCD - CR 19412
+		   Corrected .getMode() check on index0 so index0 levels are 
+		   saved in create mode, not update mode.
+	
+	01/19/06 - Hillanbrand - CR19030
+	           Modified TYPE2 subsection to use X instead of variable
+	           CID which is not passed.
+
+	12/12/05 - RussellDS - CR18400
+		   Removed reference to VER^DBSDI, which has been removed.
+		   
+		   Fixed syntax error.
+		   
+	08/12/05 - Srinivasan Rajesh - CR 16726
+		   . Modified the SCARNT section to insert the records in to
+		     the INDEX0 table only if the effective date is not less
+		     than system date and if it is not defined earlier.
+		   . Modified the FILE section to insert the records into INDEX0
+		     table only if it is not defined earlier.
+		   . Modified the SCARNT AND FILE sections to insert INDEX 
+		     and EFD values in to the INDEX0 tables. The above change
+		     will enable the fetch of EFD in "Interest Rates by 
+		     Effective Date Maintenance screen".
+		     
+	05/12/05 - JERUCHIMC - 14822
+	           . Modify section SCANRT to correctly set the pieces
+	             of the array for an effective dated tiered index.     
+		
+	04/22/05 - SmithCD - CR 15305
+		   . Fixed LOADD section to load RATE() for entire data set 
+		     by incrementing I (renamed to SEQ; prior code was not 
+		     managing the subscript)
+		   . Corrected table in Db.select() from "INDEX" to "ACN" in 
+		     LNKACCT section
+		   . Corrected column selection from "RMIN" to "RATE" from 
+		     "INDEX1" table in POST1 section
+		   . Added classNew (third) parameter to Db.getRecord for 
+		     "INDEX" table to prevent RECNOFL error if the index is 
+		     not defined in POSIDX section
+		   . Modified GETDATE section to get the correct date by 
+		     specifying EFD<:DATE in the where clause (old code was 
+		     always getting the oldest date)
+		   . Moved Db.fastDelete of INDEX1 from FILE section to 
+		     OLD^INDEXMC to fix pre-existing problem with old index 
+		     tier data not getting stored in DAYENDIX1 table
+		   . Added back line in section DFT that quit if DFT was not 
+		     set (the line was lost during conversion, and caused 
+		     "Default values exist from a previous anticipated run" 
+		     message to appear when it should not have
+		   . Added "Mass change pending for ~p1" error to POSIDX 
+		     section to catch the condition earlier in the process 
+		     for the primary index (^INDEXMC does a more comprehensive 
+		     check on this for all indexes involved)
+		   . Improved error checking on %UserID
+		   . Made several sections private (to the system area), b/c 
+		     they are called from several elements within the Interest 
+		     Rates
+		   . Removed INQ section, and all occurrences of %ProcessMode= 
+		     2 or 4, b/c this routine is never hit for inquiry mode 
+		   . Removed old revision history
+		   . Modified to comply with current PSL standards
+	
+	02/01/05 - SmithCD - CR13661
+		   Fixed query on the [INDEX1]EFD select table in section 
+		   VPGN1. Previously, the query would always have an empty 
+		   results set because the column being selected was the 
+		   same column specified in the query (EFD) instead of the 
+		   first key of the table (INDEX). Added error handling 
+		   on UTBLSRC usage to prevent RECNOFL error.
+	
+        ----------------------------------------------------------------------
+	*/
+	
+	quit
+
+
+private	NEW 	// Add Interest Rates by Effective Date
+
+	do INIT(0)
+
+	quit
+
+
+private	UPD	// Interest Rates by Effective Date Maintenanc
+
+	do INIT(1)
+
+        quit
+
+
+private	DEL	// Interest Rates by Effective Date Deletion
+
+	do INIT(3)
+
+        quit
+
+
+INIT(Number %ProcessMode)	// Initiate processing
+
+	type Number %PAGE, %PG, INDXSEQ, OLNTB
+	type Boolean ANT, DFT
+	type String RATE(), VFMQ
+
+	set %PG = -1 
+	set %PAGE = 1 
+	set (ANT, DFT) = 0
+
+	type RecordINDEX fINDEX
+
+	do VPG(.fINDEX)	
+
+	quit
+
+
+VPG(RecordINDEX fINDEX)	// Page control
+
+	type public Number %PG
+	type public String ER, VFMQ
+
+	type Boolean FINISH = 0
+
+	for  do { quit:FINISH ! (ER)
+		if %PG < 0 do VPGN1 if ER ! (VFMQ = "Q") set FINISH = 1 quit
+		
+                if %PG = 0 do VPG00 if ER ! (VFMQ = "Q") set FINISH = 1 quit
+                
+                if %PG > 0 do VPG01(.fINDEX) if ER ! (VFMQ = "Q") set FINISH = 1 quit
+
+                if "DFQ".isLike("%"_VFMQ_"%") do VER set FINISH = 1 quit
+
+                set %PG = %PG + 1
+                }
+
+        quit
+
+
+VPGN1	// Set up screen for index and effective date
+
+	type public String OLNTB, VFMQ
+
+	type String %NOPRMT, %READ, %TAB(), IO
+
+	set %TAB("INDEX") = ".INDEX1/HLP=[INDEX]INDEX/TBL=[INDEX]/XPP=D POSIDX^INDX1"
+	set %TAB("EFD") = ".EFD1/TBL=[INDEX1]EFD:DISTINCT:QU ""[INDEX1]INDEX=<<INDEX>>""/XPP=D POEFD^INDX1"
+	set OLNTB = "00038"
+
+	set %READ = "@@%FN,,,INDEX/REQ,EFD/REQ" set %NOPRMT="F"
+	
+	do ^UTLREAD 
+
+	if VFMQ = "Q" quit
+
+	quit
+
+
+VPG00	// Test and set up for anticipated run
+
+	type public String %NOPRMT, %READ, %TAB, INDEX, OLNTB, VFMQ
+	type public Boolean ANT
+
+	type String TXT()
+
+	if %EffectiveDate '< %SystemDate quit
+
+	// No linked accts
+	if '$$LNKACCT(INDEX) quit
+
+	set ANT = 1
+	
+	type RecordUTBLSRC utblsrc = Db.getRecord("UTBLSRC", "SRCTYP='BOFF',KEY='INDEX'", 1)
+	
+	set %UserID = utblsrc.uid
+
+	// Mass index change teller not set up
+	if %UserID.isNull() do { quit
+		do Runtime.setErrMSG("UTBLSRC", 1677)
+		set VFMQ = "Q"
+		}
+ 
+	// Invalid user ~p1
+	if 'Db.isDefined("SCAU", "UID=:%UserID") do { quit
+		do Runtime.setErrMSG("SCAU", 7591, %UserID)
+		set VFMQ = "Q"
+		}
+	
+	// For important information, press HELP and select Function_Doc
+	set TXT(1) = $$^MSG(5502)
+	set TXT(1) = $$CJ^%ZTEXT(TXT(1), 79)
+
+	set %TAB("ANT") = ".ANT1"
+	set OLNTB = 8038 
+	set %READ = "@TXT(1),,,ANT" 
+	set %NOPRMT = "N"
+	
+	if %ProcessMode < 2 do DFT
+
+	do ^UTLREAD
+
+	quit
+
+
+VPG01(RecordINDEX fINDEX)	// Screen Set Up for data entry
+
+	type public String INDEX, SID
+	
+	type Number %REPEAT, BASREL
+	type String DRFLG
+		
+	set fINDEX = Db.getRecord("INDEX", "INDEX=:INDEX", 1)
+	
+	set DRFLG = ""
+
+	// Index Type
+	set BASREL = fINDEX.basrel
+
+	// Daily Rate Option Flag
+	if fINDEX.dlyf = 1 set DRFLG = "A"
+
+	if BASREL = 0 set %REPEAT = 1
+	else  set %REPEAT = 13 - BASREL
+
+	// Load most current rates
+	do LOADR
+
+	type RecordINDEX1 index1 = Class.new("RecordINDEX1")
+	
+	set index1.index = INDEX
+	set index1.efd = %EffectiveDate
+
+	set SID = "INDEX"_+BASREL_DRFLG 
+
+	do DRV^USID(%ProcessMode, SID, .index1, .fINDEX)
+
+	quit
+
+
+DFT	// Test for existing info on dayend table
+
+	type public Boolean ANT, DFT
+	type public Number INDXSEQ
+	type public String %READ, %TAB(), TXT()
+	
+
+	/*
+	Only default from dayend global if there is match on the index 
+	effective date.
+	*/
+	
+	type ResultSet rs = Db.select("INDXSEQ", "DAYENDIX", "TJD=:%SystemDate AND INDEX=:INDEX AND ANT=1 AND EFD=:%EffectiveDate", "INDXSEQ DESC")
+	
+	if rs.next() set INDXSEQ = rs.getCol("INDXSEQ"), DFT = 1
+	else  set DFT = 0
+	
+	if 'DFT quit
+
+	// Default values exist from a previous anticipated run
+	set TXT(6) = $$^MSG(6768)
+
+	set %TAB("DFT") = ".DFT3"
+	set %READ = %READ_",,@TXT(6),,DFT"
+
+	quit
+
+
+LOADR	// Load Rate Array for screen - update, inquiry or delete
+
+	type public Boolean DFT
+	type public Number INDXSEQ
+	type public String INDEX, RATE()
+
+	type Number SEQ
+
+	if DFT do LOADD(INDEX, INDXSEQ)
+	if 'DFT do LOADI
+
+	for SEQ = RATE("").order(-1) + 1:1:12 set RATE(SEQ) = "||"_SEQ
+
+	quit
+
+
+LOADI	// Load from current most index
+
+	type public String NAME, RATE()
+
+	type Date DATE, TEXPDATE
+	type Number PRI
+
+	set DATE = %EffectiveDate + 1
+
+	do GETDATE
+
+	if DATE.isNull() quit
+	
+	type DbSet ds = Db.selectDbSet("INDEX1", "INDEX=:INDEX AND EFD=:DATE")
+	
+	while ds.next() do {
+		type RecordINDEX1 index1 = ds.getRecord()
+		
+		set PRI = index1.seq
+		set TEXPDATE = index1.expdate
+		
+		if PRI.isNull() set PRI = 1
+		
+		if TEXPDATE?5N set TEXPDATE = TEXPDATE.toString()
+		
+		set RATE(PRI).piece("|", 1) = index1.rmin
+
+		// Rate or linked index
+		set RATE(PRI).piece("|", 2) = index1.rate
+
+		// Sequence
+		set RATE(PRI).piece("|", 3) = PRI
+
+		// Index type [STBLTIERTYPE]
+		set RATE(PRI).piece("|", 4) = index1.tiertyp
+
+		// Expiration date
+		set RATE(PRI).piece("|", 5) = index1.expdate
+
+		// Daily rate DLYRATE
+		set RATE(PRI).piece("|", 6) = index1.dlyrate
+
+		// 7 Day Yield
+		set RATE(PRI).piece("|", 7) = index1.yld7d
+
+		// 30 Day Yield
+		set RATE(PRI).piece("|", 8) = index1.yld30d
+		}
+
+	quit
+
+
+LOADD(String INDEX, Number INDXSEQ)	// Load from dayend table
+
+	type public Number TRSEQ
+	type public String RATE(), UX
+	
+	type Date EXPDATE2
+	
+	type DbSet ds = Db.selectDbSet("DAYENDIX1", "TJD=:%SystemDate AND INDEX=:INDEX AND INDXSEQ=:INDXSEQ")
+	
+	while ds.next() do {
+		type RecordDAYENDIX1 dayendix1 = ds.getRecord()
+		
+		set EXPDATE2 = dayendix1.expdate2
+		if EXPDATE2?5N set EXPDATE2 = EXPDATE2.toString()
+		
+		set TRSEQ = dayendix1.trseq
+		
+		set RATE(TRSEQ).piece("|", 1) = dayendix1.bal2
+		set RATE(TRSEQ).piece("|", 2) = dayendix1.rate2
+		set RATE(TRSEQ).piece("|", 3) = TRSEQ
+		set RATE(TRSEQ).piece("|", 4) = dayendix1.tiertyp2
+		set RATE(TRSEQ).piece("|", 5) = EXPDATE2
+		}
+	
+	// Trigger ^UTLREAD to allow File option (otherwise it won't know the 
+	// data has changed)
+	set UX = ""
+
+	quit
+
+
+private	POSIDX	// Post processor for INDEX prompt
+
+	type public String X
+
+	if X.isNull() quit
+
+	type RecordINDEX index = Db.getRecord("INDEX", "INDEX=:X", 1)
+
+	// Invalid function for account-level comparative index
+	if index.basrel = 3 do Runtime.setErrMSG("INDEX", 1357) quit
+	
+	// Mass change pending for ~p1
+	if index.mcf do Runtime.setErrMSG("INDEX", 1676, X) quit
+
+	quit
+
+
+private	POEFD	// Post processor for create mode EFD
+
+	type public Date X
+	type public Number %OSAVE, I()
+	
+	if X.isNull() ! (%OSAVE) quit
+
+	type ResultSet rs = Db.select("INDEX", "INDEX1", "INDEX=:INDEX AND EFD=:X") 
+
+	if rs.next() do {
+		type String XSTR
+
+		set XSTR = X.toString()
+
+		// Index ~p1 already exists for ~p2
+		do Runtime.setErrMSG("INDEX1", 1219, "INDEX~XSTR") quit
+		}
+	
+	set I(3) = ""
+
+	quit
+
+
+ERR	// Log error 
+
+	type public String ER
+	type public String VFMQ
+	
+	set ER = 1 
+
+	do ^UTLERR
+
+	set VFMQ = "Q"
+
+	quit
+
+
+VER	// Process mass matrix change and file data
+
+	type public String VFMQ
+
+	if VFMQ = "Q" do END quit
+	
+	do FILE
+
+	do END
+
+	quit
+
+
+FILE	// File data
+
+	type public Boolean ANT
+	type public String ER, INDEX, RATE()
+	
+	type Number RMIN, SEQ
+	type String OLDARR(), SVRATE
+
+	if 'ANT, %ProcessMode '= 0 do {
+		// Save index1 tier data for subsequent restoration if 
+		// INDEXMC returns error
+		type DbSet ds = Db.selectDbSet("INDEX1", "INDEX=:INDEX AND EFD=:%EffectiveDate")
+			
+		while ds.next() do {
+			type RecordINDEX1 index1 = ds.getRecord()
+				
+			set RMIN = index1.rmin
+			do index1.toArray("OLDARR(RMIN")
+			}
+		}
+
+	// Deleting not in anticipated mode and not backdated - delete here
+	// since we will not delete in ^INDEXMC in that case
+	if 'ANT, (%ProcessMode = 3), (%EffectiveDate '< %SystemDate) do {
+		do Db.fastDelete("INDEX0", "INDEX=:INDEX,EFD=:%EffectiveDate")
+		do Db.fastDelete("INDEX1", "INDEX=:INDEX,EFD=:%EffectiveDate")
+		}
+
+	/*
+	Save SVRATE so ^INDEXMC won't harm it. Removing the pointer saves
+	the variable but not the array.
+	*/
+	
+	set SEQ = ""
+	for  set SEQ = RATE(SEQ).order() quit:SEQ.isNull()  set SVRATE(SEQ) = RATE(SEQ)
+
+	set SVRATE = RATE
+
+	if %EffectiveDate < %SystemDate do ^INDEXMC(.RATE, INDEX)
+	
+	if ER.get(), 'ANT, %ProcessMode '= 0  do { quit
+		
+				
+		// Restore index tier data
+		for  set RMIN = OLDARR(RMIN).order() quit:RMIN.isNull()  do {
+			
+			type RecordINDEX0 index0 = Db.getRecord("INDEX0", "INDEX=:INDEX,EFD=:%EffectiveDate",1)
+ 		
+ 			// Save only if not already created
+ 			if index0.getMode() = 0 do index0.save()
+									
+			type RecordINDEX1 index1 = Db.getRecord("INDEX1", "INDEX=:INDEX,EFD=:%EffectiveDate,RMIN=:RMIN", 1)
+
+			set index1.rate = OLDARR(RMIN).piece("|", 1)
+			set index1.seq = OLDARR(RMIN).piece("|", 2)
+			set index1.tiertyp = OLDARR(RMIN).piece("|", 3)
+			set index1.expdate = OLDARR(RMIN).piece("|", 4)
+			set index1.dlyrate = OLDARR(RMIN).piece("|", 5)
+			set index1.yld7d = OLDARR(RMIN).piece("|", 6)
+			set index1.yld30d = OLDARR(RMIN).piece("|", 7)
+			
+			do index1.bypassSave()
+			}
+		}
+
+	set SEQ = ""
+	for  set SEQ = SVRATE(SEQ).order() quit:SEQ.isNull()  set RATE(SEQ) = SVRATE(SEQ)
+	set RATE = SVRATE
+	
+	if %ProcessMode = 3 quit 
+		
+	if 'ANT do SCANRT
+
+	quit
+
+
+SCANRT	// Scan Rate Array For Filing
+
+	type public String INDEX, RATE()
+
+	type Number RMIN, SEQ = ""
+	
+	if (%EffectiveDate '< %SystemDate) do {
+	
+		type RecordINDEX0 index0 = Db.getRecord("INDEX0", "INDEX=:INDEX,EFD=:%EffectiveDate",1)
+ 		
+ 		// Save only if not already created		
+ 		if index0.getMode() = 0 do index0.save()
+ 	
+ 	}
+
+	for  set SEQ = RATE(SEQ).order() quit:SEQ.isNull()  do {
+
+		if RATE(SEQ).piece("|", 2).isNull() quit
+
+		if RATE(SEQ).piece("|", 1).isNull(), RATE(SEQ).piece("|", 3).isNull() quit
+
+		set RMIN = RATE(SEQ).piece("|", 1) 
+		if RMIN.isNull() set RMIN = RATE(SEQ).piece("|", 3)
+
+		if (%EffectiveDate '< %SystemDate) do {
+								
+			type RecordINDEX1 index1 = Db.getRecord("INDEX1", "INDEX=:INDEX,EFD=:%EffectiveDate,RMIN=:RMIN", 1)
+
+			set index1.rate = RATE(SEQ).piece("|", 2)
+	                set index1.seq = RATE(SEQ).piece("|", 3)
+			set index1.tiertyp = RATE(SEQ).piece("|", 4)
+			set index1.expdate = RATE(SEQ).piece("|", 5)
+			set index1.dlyrate = RATE(SEQ).piece("|", 6)
+			set index1.yld7d = RATE(SEQ).piece("|", 7)
+			set index1.yld30d = RATE(SEQ).piece("|", 8)
+
+	        	do index1.bypassSave()
+		        }
+		}
+
+	quit
+
+
+END	// End of processing
+
+	type public String ER, INDEX, IXSORT(), RM, VFMQ
+
+	type String COMMA
+	type Number CNT, IND
+	type String INDEXES
+
+	if ER.get() quit
+
+	set INDEX = INDEX.get()
+	set ER = "W"
+	if VFMQ = "Q" do {
+
+		// Rates for index ~p1 not created
+		if %ProcessMode = 0 set RM = $$^MSG(2315, INDEX) quit
+
+		if %ProcessMode = 1 do { quit
+			// If modify, multiple rates may be impacted
+			set (COMMA, INDEXES, IND) = ""
+			set CNT = 0
+	
+			for  set IND = IXSORT(IND).order() quit:IND.isNull() ! (INDEXES.length() > 45)  do {
+				set INDEXES = INDEXES_COMMA_IND
+				set COMMA = ","
+				set CNT = CNT + 1
+				}
+
+			// Rates for index ~p1 not modified
+			if CNT < 2 set RM = $$^MSG(2317, INDEX) quit
+
+			// Rates for indexes ~p1 not modified
+			else  set RM = $$^MSG(7405, INDEXES)
+			}
+
+		// Rates for index ~p1 not deleted
+		set RM = $$^MSG(2316, INDEX)
+		}
+	else  do {
+		// Rates for index ~p1 created
+		if %ProcessMode = 0 set RM = $$^MSG(2312, INDEX) quit
+		if %ProcessMode = 1 do { quit
+			// If modify, multiple rates may be impacted
+			set (COMMA, INDEXES, IND) = ""
+			set CNT = 0
+	
+			for  set IND = IXSORT(IND).order() quit:IND.isNull() ! (INDEXES.length() > 45)  do {
+				set INDEXES = INDEXES_COMMA_IND
+				set COMMA = ","
+				set CNT = CNT + 1
+				}
+
+			// Rates for index ~p1 modified
+			if CNT < 2 set RM = $$^MSG(2314, INDEX) quit
+
+			// Rates for indexes ~p1 modified
+			else  set RM = $$^MSG(7404, INDEXES)
+			}
+
+		// Rates for index ~p1 deleted
+		set RM = $$^MSG(2313, INDEX)
+		}
+
+	quit
+
+
+private	TYPE    //Post Procesor For Index Type
+
+	type public String %TAB(), RATE(), X
+	type public Number z1, %MAX, NI
+
+	type String TBL, TAB, TYP, TYPE, XPO
+	type Number DEC, MAX, MIN, SEQ
+
+	if X.isNull(), RATE(z1).piece("|", 4).isNull() quit
+	
+	set TYPE = $select('X.isNull():X, 1:RATE(z1).piece("|", 4))
+	set TYP = "T" 
+	set (TBL, XPO, MIN, MAX, DEC) = "" 
+
+	if 'TYPE do {
+		set TYP = "N"
+		set MIN = 0
+		set MAX = 99
+		set DEC = 5
+		}
+
+	if TYPE = 1 do {
+		set TBL = "[INDEX]"
+		set XPO = "D TYPE1^"_$T(+0)
+		}	
+
+	if TYPE = 2 do {
+		set TYP = "N" 
+		set XPO = "D TYPE2^"_$T(+0)
+		}
+
+	if TYPE = 3 set XPO = "D TYPE3^"_$T(+0) 
+
+	// Set entries into %TAB()
+
+	for SEQ = NI + 1:1:%MAX set TAB = $$TAB^DBSCRT8(SEQ) if TAB.piece("|", 1).isLike("%12402%") quit
+	else  quit
+
+	set TAB.piece("|", 4) = TBL
+	set TAB.piece("|", 6) = XPO
+	set TAB.piece("|", 8) = MIN
+	set TAB.piece("|", 9) = MAX
+	set TAB.piece("|", 10) = DEC
+	set TAB = TAB.extract(1, 5)_TYP_TAB.extract(7, 9999)
+
+	set %TAB(SEQ) = TAB
+
+	quit
+
+
+private	TYPE1	// Tier Post Processor for Valid Index Names
+
+	type public String ER, I(), RM, X
+
+	type String INDEX
+
+	if X.isNull() quit
+
+	set INDEX = X.piece(" ", 1) 
+	if INDEX.isNull() quit
+
+	// Invalid table value ~p1
+	if 'Db.isDefined("INDEX", "INDEX=:INDEX") do Runtime.setErrMSG("INDEX", 1485, INDEX) quit
+
+	set I(3) = ""
+
+	quit
+
+
+private	TYPE2   // Account Level Comparison/Tier Post Processor
+
+	type public Number X
+
+	if X?.E1A.E do {
+		type Number OLNTB
+		type String ZCLS, ZGRP
+
+		set ZCLS = "D"
+		set ZGRP = "WASH"
+		set OLNTB = 10000
+
+		do CID^UACN1
+		}
+
+	// Invalid account
+	if 'X.isNull(), 'Db.isDefined("DEP", "CID=:X") do Runtime.setErrMSG("DEP", 1259) quit
+
+	type RecordDEP dep = Db.getRecord("DEP", "CID=:X")
+
+	// Must be a wash product group
+	if dep.grp '= "WASH" do Runtime.setErrMSG("DEP", 1798) quit
+
+	quit
+
+
+private	TYPE3	// Data Dictionary Level Comparison
+
+	type public String ER, RM, X
+	
+	type String DI,FID
+
+	if X.isNull() quit
+	
+	if X.extract(1) = "[" do {
+		set X = X.translate("]", ".")
+		set X = X.extract(2, 999)
+		}
+	set FID = X.piece(".", 1)
+	set DI = X.piece(".", 2)
+
+	// File must be LN, ZLN, DEP, or ZDEP
+	if (FID '= "LN") & (FID '= "ZLN") & (FID '= "DEP") & (FID '= "ZDEP") do Runtime.setErrMSG("INDEX1", 8479) quit
+
+	// Invalid table value ~p1
+	if 'Db.isDefined("DBTBL1D", "%LIBS='SYSDEV' AND FID=:FID AND DI=:DI") do Runtime.setErrMSG("INDEX", 1485, X) quit
+
+	quit
+
+
+GETDATE	// Get next date from index table
+
+	type public String RATE()
+	type public Date DATE
+
+	if RATE.data() quit
+
+	type ResultSet rs = Db.select("EFD", "INDEX1", "INDEX=:INDEX AND EFD<:DATE", "EFD DESC")
+	if rs.next() set DATE = rs.getCol("EFD")
+
+	quit
+
+
+LNKACCT(String INDEX)	// Determine if there are any accounts linked to this index
+
+	type public String IXSORT()
+
+	type String IND = ""
+	type Boolean LINKED = 0
+	
+	do IXSORT^INDEXMC(INDEX)
+	
+	for  set IND = IXSORT(IND).order() quit:IND.isNull() ! (LINKED)  do {
+		type ResultSet rs = Db.select("CID", "ACN", "INDEX=:IND")
+		if rs.next() set LINKED = 1
+		}
+
+	quit LINKED
+
+vSIG()	quit "60557^64622^Chad Smith^18015"	// Signature - LTD^TIME^USER^SIZE

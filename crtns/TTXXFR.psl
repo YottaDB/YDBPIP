@@ -1,0 +1,395 @@
+public	TTXXFR
+
+	/*
+	Create Dayend XFR posting file
+
+	       ORIG:  Marty Ronky (3623) - 02/08/94
+	       DESC:
+	
+	     End of day routine to create a TTX batch for G/L transactions
+	     from [DAYENDXFR] (called from RCHK). This replaces program
+	     ^UCTYP filing of transactions at the time file maintenance
+	     occurred.
+	
+	---- Revision History ------------------------------------------------
+	
+	12/19/06 - KELLYP - CR 24585
+		   Modified EXEC section to pass the AOAMO keys correctly when
+		   there is a net-deferred fee balance on the account.  This
+		   prevents a RECNOFL error during the dayend when the cost 
+		   center is changed on a loan account using net-deferred fees.
+	
+	06/28/06 - KinI - CR 21254
+		   Modified EXEC section to transfer Accrued Interest on 
+		   Uncollected (UTBLGLSC.DGLUNC) instead of Negative Interest 
+		   Accrual Unauthorized; also added transfer for Accrual 
+		   Interest on Available Interest (UTBLGLSC.DGLAI) and modified 
+		   the logic on Loan Misc Receivable/Income transfer to not 
+		   transfer if the fee plan has LNFEEP.GLFR defined.		  	   		   
+	
+	05/18/06 - KinI - CR 21186
+		   Modified EXEC section to correctly set the error if CID does
+		   not exist. Modified TRNSFR section to fix "RECNOFL" error if 
+		   xfr.crcd is null when setting TAMT. 
+	
+	03/20/06 - RussellDS - CR16892
+		   Removed references to obsolete CUVAR.TRACROP.
+	  
+	02/14/06 - SmithCD - CR 19579
+		   . Modified TRNSFR section to ensure DC is not null to 
+		     prevent undefined error on GLETC()
+		   . Fixed typo on DC (s/be 'DC) when setting ttxn.itc in 
+		     TRNSFR section
+		   . Replaced old error trapping with catch block
+		   . Replaced code to retrieve BRCD and %UserID from UTBLSRC, 
+		     and error that set variable MSG=1470, with call to 
+		     standardized SOURCE^BCHSOURC call
+		   . Further cleaned up code
+	  
+	03/24/05 - HILLANBRAND
+		   Corrected several errors found in UT.  Rewrote
+		   for PSL standards.
+
+	*/
+
+	catch error {
+		// Trap PSL / GTM errors
+		do ZE^UTLERR
+		}
+
+	type public Number ER
+	
+	type Number %UserID, BRCD, LAST, PTRC, TRNSEQ
+	type String GLETC()
+	
+        do SOURCE^BCHSOURC("GLSC", "GLSC", .%UserID, .BRCD, .%UserClass) quit:ER
+
+	// GL transaction suspense
+	set GLETC(0)="MDR"
+	set GLETC(1)="MCR"
+	set ER=0
+
+	set LAST=Db.currVal("TTX","TJD=:%SystemDate,BRCD=:BRCD,UID=:%UserID")
+	set PTRC=((LAST/1000)+1)*1000
+	set TRNSEQ=PTRC
+
+	
+	/*
+	Collate through the dayend XFR file, selecting only
+	the "from" records (Transfer Flag = 0), since there is
+	duplicate information in the "to" record.
+	*/
+	
+	type DbSet xfrds=Db.selectDbSet("DAYENDXFR","TJD=:%SystemDate AND XFLG=0")
+	while xfrds.next() do {
+		type RecordDAYENDXFR xfr=xfrds.getRecord("DAYENDXFR")
+		do EXEC(.xfr)
+		}
+
+	quit 
+
+	
+EXEC(RecordDAYENDXFR xfr)
+
+	// Process GLSC/Cost Center Changes
+
+	type public Number ER
+	type public String ET
+	
+	type Number GLCID, NDBAL, NDREC, POSACR
+	type String FEETYP, PC21, PC22, TCMT, X
+
+	// First ensure that either the CC or GLSC has changed.
+	if xfr.cc=xfr.ccc, xfr.glsc=xfr.cglsc, xfr.crcd=xfr.ccrcd quit        
+
+	/* Use the account number to determine class, transaction
+	   to reduce balance flag, and currency. Use TYPE from the
+	   dayend record however, since the type may have changed.  
+	*/
+	type RecordACN acn=Db.getRecord("ACN","CID=:xfr.cid",1)
+	if acn.getMode() = 0 do { quit
+		set ER=1
+		set ET="RECNOF"
+		do ^UTLERR
+		}
+	
+	// ~p1, ~p2 changed from ~p3 to ~p4
+	if xfr.cc'=xfr.ccc set TCMT=$$^MSG(3105,xfr.cid,"CC",xfr.cc,xfr.ccc)     
+
+	//~p1, ~p2 changed from ~p3 to
+	if xfr.glsc'=xfr.cglsc set TCMT=$$^MSG(3105,xfr.cid,"GLSC",xfr.glsc,xfr.cglsc)
+
+	if xfr.crcd'=xfr.ccrcd set TCMT=$$^MSG(3105,xfr.cid,"CRCD",xfr.crcd,xfr.ccrcd)
+	
+	
+	if acn.cls="D" do { quit 
+	 
+		// Does not matter if balance is positive or negative
+		// Always use Principal Balance G/L #
+
+		// Positive/Negative Ledger Balance
+		do TRNSFR(.xfr,.acn,xfr.prn,acn.trb,4)                  
+
+		set POSACR=xfr.acr+xfr.negacr+xfr.negacrun+xfr.uncacr
+
+		// Negative Interest Accrual and Interest Income (Neg.)
+		do TRNSFR(.xfr,.acn,xfr.negacr,acn.trb,25)               
+		do TRNSFR(.xfr,.acn,xfr.negacr,acn.trb,29)
+		                
+		// Negative Interest Accrual Unauth and Interest Income (Neg.)
+		do TRNSFR(.xfr,.acn,xfr.negacrun,'acn.trb,31)		             
+		do TRNSFR(.xfr,.acn,xfr.negacrun,acn.trb,29)
+		              
+		// Uncollected Accrual and Interest Income (Neg.)		
+		do TRNSFR(.xfr,.acn,xfr.uncacr,'acn.trb,39)		             
+		do TRNSFR(.xfr,.acn,xfr.uncacr,acn.trb,29)
+		             
+		// Positive or Net Interest Accrual and Int Expense
+		do TRNSFR(.xfr,.acn,POSACR,acn.trb,5)
+		do TRNSFR(.xfr,.acn,POSACR,'acn.trb,10)
+		   
+		// Int. Avl. not Credited
+		do TRNSFR(.xfr,.acn,xfr.intavlncr,acn.trb,27)
+		             
+		// Residual Interest and Interest Income
+		do TRNSFR(.xfr,.acn,xfr.resint,'acn.trb,30)
+		do TRNSFR(.xfr,.acn,xfr.resint,acn.trb,29)
+		
+		// Accrued Int on Avail Int and Int Expense   
+		do TRNSFR(.xfr,.acn,xfr.aiacr,acn.trb,36)
+		do TRNSFR(.xfr,.acn,xfr.aiacr,'acn.trb,10)	           
+		}
+	
+	if acn.cls="L" do {
+		
+		// Negative Ledger Balance and Positive Ledger Balance
+		if xfr.prn<0 do TRNSFR(.xfr,.acn,xfr.prn,acn.trb,24)
+		if xfr.prn>0 do TRNSFR(.xfr,.acn,xfr.prn,acn.trb,12)  
+
+		// Interest Accrual and Int Income
+		do TRNSFR(.xfr,.acn,xfr.acr,acn.trb,13)     
+		do TRNSFR(.xfr,.acn,xfr.acr,'acn.trb,18)	
+
+		// Late Charge Due and Late Charge Income
+		do TRNSFR(.xfr,.acn,xfr.lchg,acn.trb,14)         
+		do TRNSFR(.xfr,.acn,xfr.lchg,'acn.trb,19)      
+
+		// Undisbursed Balance
+		do TRNSFR(.xfr,.acn,xfr.udbal,'acn.trb,15)     
+
+		// Charge Off Amount
+		do TRNSFR(.xfr,.acn,xfr.coa,'acn.trb,22)       
+
+		// Charged off Recovery Balance
+		do TRNSFR(.xfr,.acn,xfr.rec,acn.trb,23)               
+
+		// Uncollected Interest
+		do TRNSFR(.xfr,.acn,xfr.iunc,'acn.trb,20)               
+		
+		// Unapplied Funds
+		do TRNSFR(.xfr,.acn,xfr.unapf,acn.trb,21)               
+		
+		if (xfr.ndfbal) do {
+			type RecordLNAMOAO lnamoao = Db.getRecord("LNAMOAO","CID=:xfr.cid,TYP='PTS'",1)
+
+			if lnamoao.getMode() = 0 quit
+
+			// sets up local plan array		
+			type RecordAOAMO aoamo = Db.getRecord("AOAMO","TYP='PTS',PAYEE=:lnamoao.payee,PLAN=:lnamoao.plan",1)
+			
+			if aoamo.getMode() = 0 quit
+			
+			do TRNSFR(.xfr,.acn,xfr.ndfbal,'acn.trb,"",aoamo.dgl)
+			}
+		/*
+		 Pieces 21 and 22 hold fee balances, and fees receivable.
+		 The pieces are comprised of the total amount in piece 1,
+		 delimited by a "@", then a series of FEETYP#TAMT~,
+		 containing the fee plan to be used, followed by the amount.
+		*/
+
+		if 'xfr.deftot.isNull() do {
+			set PC21=xfr.deftot.piece("@",2)
+			for  quit:PC21.isNull()  do {
+				set X=PC21.piece("~",1) set PC21=PC21.piece("~",2,99)
+				set FEETYP=X.piece("#",1)
+
+				set NDBAL=+X.piece("#",2)
+				if 'NDBAL quit 
+
+				set GLCID=$$FEEPLN^LNU(FEETYP).piece("|",24)
+				if 'GLCID quit 
+	
+				do TRNSFR(.xfr,.acn,NDBAL,'acn.trb,"",GLCID,FEETYP)
+				}
+			}	
+	
+		/* Adjust Receivable (Asset):
+	
+		             Credit Receivable "from" account
+		             Debit Receivable "to" account
+		
+		  Adjust Income (Revenue):
+	
+		             Debit Income "from" account
+		             Credit Income "to" account    
+		*/
+	
+		if 'xfr.feerem.isNull() do {
+		
+			set PC22=xfr.feerem.piece("@",2)
+		
+			for  quit:PC22.isNull()  do {
+				
+				set X=PC22.piece("~",1)
+				set PC22=PC22.piece("~",2,99)
+				
+				set FEETYP=X.piece("#",1)
+				set NDREC=+X.piece("#",2)
+				
+				// If the fee plan has LNFEEP.GLFR defined,
+				// no need to transfer
+				set GLCID=$$FEEPLN^LNU(FEETYP).piece("|",24)
+				if 'GLCID.isNull() quit 
+				
+				// Receivable and Income
+				do TRNSFR(.xfr,.acn,NDREC,acn.trb,16,"",FEETYP)
+				do TRNSFR(.xfr,.acn,NDREC,'acn.trb,26,"",FEETYP)
+				}
+			}
+		}
+
+	quit 
+
+	
+TRNSFR(RecordDAYENDXFR xfr,	// G/L transfer				/REF:R
+       RecordACN acn,		// Account				/REF:R
+       Number TAMT,		// Transaction amount
+       Boolean DC,		// Debit/Credit indicator for source
+       Number PC,		// Piece in UTBLGLSC to find G/L account
+       Number GLCID,		// UTBLGLSC G/L account override
+       String FEETYP)		// Fee type for receivable/income fees
+
+	// Transfer between G/Ls
+       
+	type public Number BRCD, PTRC, TRNSEQ
+	type public String GLETC(), TCMT
+		
+	type Number EXCAMT, OCC, NCC, OCID, NCID
+	type String CRCD, OCRCD, OGLSC, NCRCD, NGLSC, X
+	
+	if xfr.crcd.isNull() set CRCD=acn.crcd
+	else  set CRCD=xfr.crcd
+	
+	set TAMT=TAMT.roundCur(CRCD)
+	if 'TAMT quit 
+	
+	set DC=+DC
+	
+	/*
+	 Use GLCID, if defined; otherwise use the G/L set code.  If the
+	 account number is null, use the system suspense account, GLTS.
+	*/
+
+	if GLCID.get() set (NCID,OCID)=GLCID
+	else  do {
+		if PC=16 do { quit 
+			// Adjust Receivable
+			set OCID=$$FEEREC^LNFEEU(xfr.cid,FEETYP,xfr.glsc)
+			set NCID=$$FEEREC^LNFEEU(xfr.cid,FEETYP,xfr.cglsc)
+	
+			}
+		if PC=26 do { quit 
+			// Adjust Income
+			set OCID=$$FEEINC^LNFEEU(xfr.cid,FEETYP,xfr.glsc)
+			set NCID=$$FEEINC^LNFEEU(xfr.cid,FEETYP,xfr.cglsc)
+			}
+
+		// get data item name from DBTBL
+
+		type ResultSet rs=Db.select("DI","DBTBL1D","POS=:PC AND FID='UTBLGLSC'")
+		if rs.isEmpty() quit
+		while rs.next() do {			
+			set OCID=$$GLSC((xfr.glsc),rs.getCol("DI"))
+			set NCID=$$GLSC((xfr.cglsc),rs.getCol("DI"))
+			}
+		}
+	
+	set OCC=xfr.cc
+	set NCC=xfr.ccc
+	set OCRCD=xfr.crcd
+	set NCRCD=xfr.ccrcd
+	set OGLSC=xfr.glsc
+	set NGLSC=xfr.cglsc
+	
+	if NCID.isNull() set NCID=CUVAR.GLTS
+	if OCID.isNull() set OCID=CUVAR.GLTS
+
+	// Only transfer if the cost center and/or G/L accounts differ	
+	if OCC=NCC,OCID=NCID,OCRCD=NCRCD quit 
+	
+	// Reverse transaction amount, debit/credit indicator if TAMT<0.
+	if TAMT<0 set TAMT=-TAMT set DC='DC
+	
+	if OCC.isNull() set OCC=acn.cc
+        if NCC.isNull() set NCC=acn.cc
+	if OGLSC.isNull() set OGLSC=acn.glsc
+	if NGLSC.isNull() set NGLSC=acn.glsc
+	if OCRCD.isNull() set OCRCD=acn.crcd
+	if NCRCD.isNull() set NCRCD=acn.crcd
+
+	set X=TCMT 
+
+	// Fee: ~p1
+	if 'FEETYP.get().isNull() set X=X_$$^MSG(15,FEETYP) 
+
+	type RecordTTX ttxo=Class.new("RecordTTX")
+
+        set ttxo.cid=OCID
+	set ttxo.itc=DC
+	set ttxo.etc=GLETC(DC)
+	set ttxo.tamt=TAMT
+	set ttxo.tso=""
+	set ttxo.tcmt=X
+	set ttxo.crcd=OCRCD
+	set ttxo.uid=%UserStation
+	set ttxo.cc=OCC
+	
+	set TRNSEQ=TRNSEQ+1
+	do TRNSINGL^TRNDRV(.ttxo,.acn,%SystemDate,BRCD,4,,,,PTRC,TRNSEQ)
+
+	if OCRCD'=NCRCD do {
+        	do EXC^CRCDUTL(OCRCD,NCRCD,TAMT,1,2,00)
+		set EXCAMT=EXCAMT.roundCur(NCRCD)
+		set TAMT=EXCAMT
+		}
+		
+	type RecordTTX ttxn=Class.new("RecordTTX")
+
+        set ttxn.cid=NCID
+	set ttxn.itc='DC
+	set ttxn.etc=GLETC('DC)
+	set ttxn.tamt=TAMT
+	set ttxn.tso=""
+	set ttxn.tcmt=X
+	set ttxn.crcd=NCRCD
+	set ttxn.uid=%UserStation
+	set ttxn.cc=NCC
+	
+	set TRNSEQ=TRNSEQ+1
+	do TRNSINGL^TRNDRV(.ttxn,.acn,%SystemDate,BRCD,4,,,,PTRC,TRNSEQ)
+
+	set PTRC=PTRC+1000
+
+	quit 
+
+	
+GLSC(String GLSC, String DI)
+
+	// Return G/L account #
+
+	type RecordUTBLGLSC glsc = Db.getRecord("UTBLGLSC", "GLSC=:GLSC")
+
+	quit glsc.@DI
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60618^38216^Pat Kelly^10517"	// Signature - LTD^TIME^USER^SIZE

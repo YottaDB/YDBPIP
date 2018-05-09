@@ -1,0 +1,228 @@
+LNPTS15(RecordLN ln,RecordTTX ttx)
+
+	/*
+
+	Loan interest debit and credit transactions
+
+
+	       ORIG:  David Caliendo (5527) - 06/27/86
+	       DESC:
+
+	
+	---- Revision History ------------------------------------------------
+
+	03/21/06 - NATRAJAH - 20094
+		   In START section, modified the getRecord' where clause for
+		   TRN table as ETC=:LTC.		   		   
+		   
+	05/06/05 - KinI - 15524
+		   Updated SUBPMT section to replace lnbil1.bp1 pieces with 
+		   direct lnbil1 sub-fields update per DBI standards.
+
+	03/20/03 - CARROLLJ - 51349
+		   Corrected undefined error on variable TRB.
+
+	11/14/02 - CARROLLJ - 43583
+		   Modified calls to LNPTSU to pass ttx.
+	
+	07/09/02 - CARROLLJ - 43583
+		   PSL conversion cleanup.	
+
+	02/01/02 - CARROLLJ - 43583
+		   Convert to PSL.
+
+	01/04/02 - KINI - 48738
+		   Removed REFINTTYTD and REFINTPTY from the processing since
+		   these fields were obsoleted.
+	
+	
+	----------------------------------------------------------------------
+	
+	
+	*/
+
+	do INIT(.ln,.ttx)
+	quit
+
+INIT(RecordLN ln,RecordTTX ttx)
+
+	new CTL 
+	set CTL=0
+	type Public Cache %CACHE()
+	type RecordTRN trn=%CACHE("TRN").getRecord("TRN","ETC=:ETC")
+	do START(.ln,.ttx,.trn)
+	quit
+
+public IRSC(RecordLN ln,RecordTTX ttx,RecordTRN trn)
+
+	/*
+	Arguments:
+	. ln	Loan Object			/TYP=RecordLN/REQ/REF:RW
+	. ttx	Original Transaction Object	/TYP=RecordTTX/REQ/REF:RW
+	*/
+
+	new CTL 
+	set CTL=1
+	do START(.ln,.ttx,.trn)
+	quit
+
+IRSP(RecordLN ln,RecordTTX ttx,RecordTRN trn)
+	new CTL 
+	set CTL=2
+	do START(.ln,.ttx,.trn)
+	quit
+
+	
+START(RecordLN ln,RecordTTX ttx,RecordTRN trn)
+	
+	new BAL,BALINT,DIC,DIU,IAM,IPL,IPY,IPTY,IYTD,ITYTD,NARL,PREFINT,REFINT,RPIDC
+	new TCODE	
+
+	// Acrrual Tran Codes Not Valid For This Account
+	if ln.ircb=0 set ER=1 set RM=$$^MSG(8218) quit
+
+	// Tran Code Not Valid For Commitments
+	if ln.cpf,trn.cls="L" set ER=1 set RM=$$^MSG(8219) quit
+	
+	set BALINT=ln.balint
+	set BAL=ln.bal
+	set IYTD=ln.iytd
+	set IPY=ln.ipy
+	set IPL=ln.ipl
+	set PREFINT=ln.prefint
+	set REFINT=ln.refint
+	set DIU=ln.diu
+	set DIC=ln.dic
+	set NARL=ln.narl
+	set RPIDC=ln.rpidc
+	set IPTY=ln.ipty
+	set ITYTD=ln.itytd
+	
+	/*
+	If add-on loan, the interest only payment plus the current interest
+	paid life can not be greater than the unearned original interest.
+	*/	
+	
+	//Interest Paid Life Greater than Interest Unearned Original
+
+	Type RecordTRN trn=Db.getRecord("TRN","ETC=:LTC")
+	set PCFL20=trn.pcfl20
+	set PCFL15=trn.pcfl15
+	if $E(ln.iam)=1,IPL+ZAMT>ln.iun,'PCFL20 set ER=1 set RM=$$^MSG(8433) quit:ER
+	
+	/*
+	If "pay interest to extent of accrual" then keep track of extra monies
+	with %ZAMT
+	*/
+	set X=$$^SCARND(ln.acr,0,CID)
+	set %ZAMT=0 
+	if PCFL15,(ZAMT>X) set %ZAMT=ZAMT-X set ZAMT=X
+	do GL^LNPTSU(.ttx,ZAMT,3)
+	
+	do %HSEQ^LNPTSU(.ttx,"*#I#"_ZAMT)
+	
+	/*
+	If ADD-ON loan, adjust principal balance
+	and uncollected interest.
+	*/
+
+	if $E(ln.iam)=1,'PCFL20 do {
+		do GL^LNPTSU(.ttx,-ZAMT,8)
+		do GL^LNPTSU(.ttx,ZAMT,2)
+		set BAL=BAL-ZAMT
+		}
+	
+	set ZAMT=$S(ln.trb-IDC:ZAMT,1:0-ZAMT)
+	set ACR=ln.acr+ZAMT
+	if '$$^SCARND(ACR,,CID) set ACR=0
+
+	new DATA,FIN1,TAX1,YEOFF,TAXYEOFF
+	set FIN1=$$BOFY^SCADAT(CUVAR2,1)
+	Type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+	set YEOFF=cuvar.yeoff
+	set TAX1=$$BOTY^SCADAT(CUVAR2,1)
+	set TAXYEOFF=cuvar.taxyeoff
+	
+	if CTL=0,'PCFL20 do {
+		if (YEOFF)&(%EffectiveDate<FIN1)&(CUVAR2'>(FIN1+YEOFF)) set IPY=IPY-ZAMT
+		else  set IYTD=IYTD-ZAMT
+		if (TAXYEOFF)&(%EffectiveDate<TAX1)&(CUVAR2'>(TAX1+TAXYEOFF)) set IPTY=IPTY-ZAMT
+		else  set ITYTD=ITYTD-ZAMT
+		}
+	if CTL=1 set REFINT=ln.refint+ZAMT
+	if CTL=2 set PREFINT=ln.prefint+ZAMT
+	//if '$E($P(ETC(LTC),"|",23),20) set IPL=IPL-ZAMT
+	if 'PCFL20 set IPL=IPL-ZAMT	
+	if $$FIELD^UTSO(ttx.tso,"SUBPMT")'="" do SUBPMT(.ttx,ZAMT) quit:ER
+	
+	if $E(E23,16),DIU do CAPIT(.ln)
+	
+	set ZAMT=%ZAMT kill %ZAMT
+	do FILE(.ln)
+	quit
+	
+
+FILE(RecordLN ln)
+
+	set ln.bal=BAL
+	set ln.balint=BALINT
+	set ln.acr=ACR
+	set ln.iytd=IYTD 
+	set ln.ipy=IPY
+	set ln.ipl=IPL 
+	set ln.prefint=PREFINT
+	set ln.refint=REFINT 
+	set ln.diu=DIU
+	set ln.dic=DIC
+	set ln.narl=NARL
+	set ln.ipty=IPTY
+	set ln.itytd=ITYTD
+	
+	quit 
+
+	
+CAPIT(RecordLN ln)
+
+	set DIU=DIU-$S(ZAMT<0:-ZAMT,1:ZAMT) if DIU<0 set DIU=0
+	if ln.rpidc do {
+		if (YEOFF)&(%EffectiveDate<FIN1)&(CUVAR2'>(FIN1+YEOFF)) set IPY=IPY+$S(ZAMT<0:-ZAMT,1:ZAMT)
+		else  set IYTD=IYTD+$S(ZAMT<0:-ZAMT,1:ZAMT)
+		set IPL=IPL+$S(ZAMT<0:-ZAMT,1:ZAMT)
+		set NARL=NARL+$S(ZAMT<0:-ZAMT,1:ZAMT)
+		if (TAXYEOFF)&(%EffectiveDate<TAX1)&(CUVAR2'>(TAX1+TAXYEOFF)) set IPTY=IPTY+$S(ZAMT<0:-ZAMT,1:ZAMT)
+		else  set ITYTD=ITYTD+$S(ZAMT<0:-ZAMT,1:ZAMT)
+		}
+	quit 
+	
+	
+public SUBPMT(RecordTTX ttx,
+	      Number AMT)	// Transaction Amount
+
+	type Date SUBDT
+
+	set SUBDT=$$FIELD^UTSO(ttx.tso,"SUBDT")
+	if SUBDT'="" set SUBDT=$$INT^%ZM(SUBDT,"D")
+	if SUBDT="" set SUBDT=%EffectiveDate
+	if SUBDT="" set SUBDT=%SystemDate
+	
+	set BLSEQ=$$SUBSEQ(SUBDT)
+	if BLSEQ do {
+		type RecordLNBIL1 lnbil1=Db.getRecord("LNBIL1","CID,BLSEQ")
+		set lnbil1.csubdue=lnbil1.csubdue+AMT
+
+		// Subsidy Payment Amount exceeds Subsidy Amount Remaining
+		if lnbil1.csubdue<0 set ER=1 set RM=$$^MSG(899) quit
+		do lnbil1.bypassSave()
+		}
+	else  set ER=1 set RM=$$^MSG(899) quit
+	
+	quit 
+
+	
+SUBSEQ(SUBDT)
+
+	type ResultSet rs=Db.select("SCHSEQ","LNBIL1","CDPD=:SUBDT AND CID=:CID","SCHSEQ DESC")
+	if rs.isEmpty() quit ""
+	if rs.next() quit rs.getCol(1)
+
+vSIG()	quit "60345^36868^Hari Natrajan^5018"	// Signature - LTD^TIME^USER^SIZE

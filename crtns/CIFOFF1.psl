@@ -1,0 +1,283 @@
+public CIFOFF1 //
+ /* 
+ 	  DESC: Procedure for CIFOFF1 ROUTINE
+  
+	
+	---- Revision History ------------------------------------------------
+	  
+	02/15/07 - RussellDS - CR25382
+		   Eliminated use of obsoleted routine DBSQRYA.  Fixed logic.
+		   
+		   Corrected some PSL warning issues
+		   
+		   Removed old revision history.
+
+	07/28/06 - KELLYP - CR 22048
+		   Modified VPG01 and LOAD1 section to eliminate PRECEDENCE
+	   	   warnings.
+
+	----------------------------------------------------------------------
+	*/
+
+	do INIT
+	
+	quit
+
+INIT 	//
+
+	new OLNTB,VFMQ
+	set %ProcessMode=1
+	set %PG=0
+	set %PAGE=1
+	set WHERE=""
+	do VPG
+	quit
+
+
+VPG	// Page control
+
+	new FINISH
+        set FINISH=0
+        for  do { quit:FINISH
+                if %PG=0 do VPG00 if VFMQ="Q" set FINISH=1 quit
+
+		if %PG=0,CNT=0 set CID="" set FINISH=1 do INIT quit
+
+                if %PG>0 do VPG01 if VFMQ="Q" set FINISH=1 quit
+                if "DFQ"[VFMQ do VER set FINISH=1 quit
+                set %PG=%PG+1
+                }
+        quit
+
+
+VPG00	// Set up
+
+	new OLNTB
+	set %TAB("OOFF")=".OOFF1/HLP=[CIF]CIFOFF/TBL=[UTBLOFF]"
+	set %TAB("FILACT")=".FILACT1"
+	set %TAB("QI(1)")=".ACN2/HLP=[SYSDEV,CIF]ACN/XPP=D EXT^DBSQRY"
+	set QI(1)="ALL"
+	set %READ="@@%FN,,,OOFF/REQ,FILACT/REQ,QI(1)"
+
+	do ^UTLREAD
+
+	if VFMQ="Q" quit 
+
+	if QI(1)["ALL" set WHERE=""
+	else  do {
+		
+		type String DQQRY()
+		
+		set DQQRY(1) = "[CIF]ACN "_QI(1)
+		set WHERE = $$WHERE^SQLCONV(.DQQRY(), "CIF")
+	}
+
+	do LOAD1
+
+	kill %TAB
+	quit 
+	
+
+VPG01	//
+
+	set %REPEAT=15
+	set %MODS=(((%PG-1)*15)+1)
+	if %REPEAT+%MODS>CNT set %REPEAT=CNT-%MODS+1
+
+	do DRV^USID(%ProcessMode,"CIFOFF1")
+
+	quit 
+	
+
+ERR	//
+
+	set ER=1
+
+	do ^UTLERR
+
+	set VFMQ="Q"
+	quit 
+
+
+VER	//
+
+	if VFMQ="Q" do END quit
+
+	S NX=""
+	for  set NX=$O(VAL(NX)) quit:NX=""  if OFFICER(NX)="" kill VAL(NX)
+
+	do FILE
+	quit
+	
+
+FILE	// File data
+
+        type Boolean FINISH
+        
+	set FINISH=0
+	set NX=""
+
+	for  set NX=$O(VAL(NX))  do { quit:FINISH=1
+		if NX="" do { quit
+			set FINISH=1
+			do END
+			}
+
+		set NOFF=OFFICER(NX)
+		set ACN=$P(VAL(NX),"|",3)
+
+		type RecordCIF cif = Db.getRecord("CIF","ACN=:ACN",1)
+		lock +CIF(ACN):2 else  set ET="RECLOC" do ERR quit
+
+		do cif.setAuditFlag(1)
+		set cif.cifoff=OFFICER(NX)
+
+		do cif.save()
+
+		lock -CIF(ACN)
+
+		// Check if wants to change accounts too
+ 		if FILACT do {
+			set CID=""
+			do FILEB(.cif)
+			}
+		} 
+
+	quit
+
+
+FILEB(RecordCIF CIF)	// If user says, file changes to accounts
+
+	type RecordACN acn
+	type RecordDEP dep
+	type RecordLN ln
+
+	type ResultSet rs=Db.select("CID","RELCIF","ACN=:ACN AND CID>:CID","CID")
+	while rs.next() do {
+		set CID=rs.getCol("CID")
+
+		lock +ACN(CID):2 else  set ET="RECLOC" do ERR quit
+
+		set acn=Db.getRecord("ACN","CID=:CID")
+
+	 	if acn.cls="D" do { quit
+			set dep=Db.getRecord("DEP","CID=:CID")
+			do DEP(.dep)
+			}
+
+		if acn.cls="L" do {
+			set ln=Db.getRecord("LN","CID=:CID")
+			do LN(.ln)
+			}
+		lock -ACN(CID):2
+		}
+	quit
+	
+
+DEP(RecordDEP dep)	//
+
+	do DEP2("OFF",.dep)
+	do DEP2("OFF2",.dep)
+
+	do dep.save()
+	quit 
+
+
+DEP2(E,RecordDEP dep) // Compare current DEP data to replacement data
+	// E = Element
+
+	do dep.setAuditFlag(1)
+
+	if dep.@E'=OOFF quit
+	set dep.@E=NOFF
+
+	quit 
+	
+
+LN(RecordLN ln)	//
+
+	do LN2("OFF",.ln)
+	do LN2("OFF2",.ln)
+	do LN2("OFF3",.ln)
+	do LN2("OFF4",.ln)
+	do LN2("OFF5",.ln)
+	do LN2("COLOFF",.ln)
+
+	do ln.save()
+	quit 
+	
+
+LN2(E,RecordLN ln) // Compare current LN data to replacement data
+
+	// E = Element
+
+	do ln.setAuditFlag(1)
+
+	if ln.@E'=OOFF quit
+	set ln.@E=NOFF
+
+	quit 
+	
+
+END	//
+
+	kill %TAB
+	if ER quit
+	
+	// Accounts not modified
+	if VFMQ="Q" set RM=$$^MSG(190)
+	
+	// Accounts modified
+	else  set RM=$$^MSG(188)
+	set ER="W"
+	
+	// Additional CIF records remain to review - begin with CIF # ~pl
+	if MORE.exists() do {
+		type ResultSet rs=Db.select("ACN","CIF","ACN>:NEXT")
+		if rs.next() set RM(1)=$$^MSG(227,rs.getCol("ACN"))
+		}
+	quit
+
+
+LOAD1	/* Load all accounts for officer
+	   Include count of included items and set %PAGE to define
+	   number of pages required to display all.
+	*/
+
+	new FINISH
+	kill MORE,LAST
+        set FINISH=0
+	set CNT=0
+	set ACN=""
+
+	// Loop to identify all accounts for Account officer
+	#ACCEPT DATE=10/10/02;PGM=CHHABRIAS;CR=unknown;Group=Dynamic
+	type ResultSet rs=Db.select("ACN","CIF",WHERE)
+	while rs.next() do { quit:FINISH=1
+
+		set ACN=rs.getCol("ACN")
+
+		type RecordCIF CIF=Db.getRecord("CIF","ACN=:ACN")
+		if CIF.cifoff'=OOFF quit
+
+		set NAM=CIF.nam
+		set CNT=CNT+1
+		set VAL(CNT)=OOFF_"||"_ACN_"|"_$E(NAM,1,35)
+		set OFFICER(CNT)=""
+
+		if CNT=25 do { quit
+			set MORE=""
+			set LAST=ACN
+			set FINISH=1
+			}
+		}
+
+	// Set %PAGE after all entries have been reviewed
+
+	// No CIF accounts associated with officer ~p1
+	if CNT=0 set ER=1,RM=$$^MSG(1916,OOFF) quit
+
+	set %PAGE=('(CNT#15=0))+(CNT\15)
+	quit 
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60712^46292^Dan Russell^4455"	// Signature - LTD^TIME^USER^SIZE

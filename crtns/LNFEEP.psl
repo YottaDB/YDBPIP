@@ -1,0 +1,441 @@
+LNFEEP	// Loan Fee Plan Maintenance
+	/*
+
+	---- Revision History ------------------------------------------------
+
+	05/24/07 - SHANKK - CR27312
+		    Modified section FILE not to select current fee plan when 
+		    finding multiple linked plans.
+	
+	01/11/06 - TITOVE - CR 18932
+		   Cleaned up as part of DBI3 project. Replaced CPYLNFEEP
+		   section with copy() method. Restored original logic for
+		   update of linked fees.
+
+	09/29/02 - TELIV - 49451
+		   Converted to PSL.
+	---------------------------------------------------------------------
+	*/
+
+public	NEW	//  
+	do INIT(0)
+	quit
+
+
+public	UPD	// 
+	do INIT(1)
+	quit
+
+
+public	INQ	// 
+	do INIT(2)
+	quit
+	
+
+public	DEL	//
+	do INIT(3)
+	quit
+
+
+public	COPY	//
+	do INIT(5)
+        quit
+
+
+INIT(Number %ProcessMode)	//
+
+	type Number %PAGE, %PG
+	type String %READ, %TAB, OLNTB, VFMQ
+
+	type RecordLNFEEP fLNFEEP
+
+	set %PG = 0 
+	set %PAGE = $select(%ProcessMode=5:0,1:1)
+
+	do VPG(.fLNFEEP)
+
+	quit
+
+
+VPG(RecordLNFEEP fLNFEEP)	// Page control
+
+	type public Number %PG, ER
+	type public String VFMQ
+
+	type Boolean FINISH = 0
+
+	for  do { quit:FINISH
+
+		if (%PG = 0) do VPG00 if ER set FINISH = 1 quit
+
+		if (%PG > 0) do VPG01(.fLNFEEP) if ER set FINISH = 1 quit
+
+		if "DFQ"[VFMQ do VER(.fLNFEEP) set FINISH = 1 quit
+
+		if (%ProcessMode = 5) set FINISH = 1 quit
+
+		set %PG = %PG + 1
+		}
+	quit
+
+
+VPG00	// Set up
+
+	type public Number %PG, ER
+	type public String %READ, %TAB, VFMQ
+	
+	set %TAB("IO") = $$IO^SCATAB($I)
+	set %TAB("FEETYP") = ".FEETYP/TBL=[LNFEEP]"
+
+	if (%ProcessMode = 0)!(%ProcessMode = 3) set %TAB("FEETYP") = %TAB("FEETYP")_"/XPP=D PPFEE^LNFEEP"
+	
+	if (%ProcessMode = 5) do {
+		
+		set %TAB("FEETYP") = %TAB("FEETYP")_"/XPP=D PPFEE5^LNFEEP"
+		set %TAB("FEECPY") = ".FEECPY/TBL=[LNFEEP]/XPP=D PPFEE^LNFEEP"
+		}
+
+	set %READ = "@@%FN,,,FEETYP/REQ"
+
+	if (%ProcessMode = 2) set %READ = %READ_",,IO/REQ"
+	if (%ProcessMode = 5) set %READ = %READ_",FEECPY/REQ"
+
+	do ^UTLREAD 
+
+	// Required because %PG gets killed when %ProcessMode = 5
+	if (%ProcessMode = 5) set %PG = 0	
+
+	if (VFMQ = "Q") set ER = 1 quit
+
+	if (%ProcessMode = 2),(IO '= $I) do OPEN^SCAIO
+
+	quit
+
+
+VPG01(RecordLNFEEP fLNFEEP)	// Screen
+
+	type public String FEETYP, UPDARR()
+
+	set fLNFEEP = Db.getRecord("LNFEEP","FEETYP = :FEETYP", 1)
+	
+	// Create an array of original values for possible linked fees update
+	if (%ProcessMode = 1) do {
+		
+		set UPDARR("cfre") = fLNFEEP.cfre
+		set UPDARR("amth") = fLNFEEP.amth
+		set UPDARR("cfwa") = fLNFEEP.cfwa
+		set UPDARR("aprf") = fLNFEEP.aprf
+		set UPDARR("trgrp") = fLNFEEP.trgrp
+		set UPDARR("fpoff") = fLNFEEP.fpoff
+		set UPDARR("gltrop") = fLNFEEP.gltrop
+		set UPDARR("feeicrtc") = fLNFEEP.feeicrtc
+		set UPDARR("feeidrtc") = fLNFEEP.feeidrtc
+		}
+
+	do fLNFEEP.setAuditFlag(1)
+
+	do LOADSEQ(FEETYP)
+	
+	if %ProcessMode'=5 do DRV^USID(%ProcessMode,"LNFEEP",.fLNFEEP)
+	
+	quit
+
+
+VER(RecordLNFEEP fLNFEEP)	// Verification
+
+	type public String VFMQ
+
+	if (%ProcessMode = 2)!(%ProcessMode = 4)!(VFMQ = "Q") do END quit
+	
+	do FILE(.fLNFEEP)
+
+	do END 
+
+	quit
+
+
+FILE(RecordLNFEEP fLNFEEP)	// File data 
+	
+	type public Number ER
+	type public String FEECPY, FEETYP, UPDARR(), UTBL()
+	
+	type String VAR = ""
+
+	// Make sure multiple linkages do not exist for a particular fee
+	if (%ProcessMode < 2) do { quit:ER
+		
+		// Record locked by another user
+		lock +UTBL("LNFEE"):2 else  do Runtime.setErrSTBLER("LNFEEP","RECLOC") quit
+				
+		// Linked to Fee
+		if 'fLNFEEP.lfee lock -UTBL("LNFEE") quit
+
+		type DbSet ds = Db.selectDbSet("LNFEEP","FEETYP NOT=:fLNFEEP.feetyp")  //CR27312
+		
+		while ds.next() do { quit:ER
+			
+			type RecordLNFEEP feep = ds.getRecord("LNFEEP")
+				
+			if (fLNFEEP.basis '= feep.basis) quit
+			
+			// Fee ~p1 currently linked to fee ~p2. Multiple linkages not allowed.
+			if feep.lfee do Runtime.setErrMSG("LNFEEP",12,feep.feetyp_"~"_feep.basis)
+			}
+		lock -UTBL("LNFEE")
+		}
+
+
+	if (%ProcessMode = 5) do {
+		
+		set fLNFEEP = Db.getRecord("LNFEEP","FEETYP = :FEETYP")
+		
+		// Copy from file LNFEEP
+		type RecordLNFEEP lnfeep = fLNFEEP.copy()
+		
+		set lnfeep.feetyp = FEECPY
+		
+		// Reset mode to "Insert"
+		do lnfeep.setMode(0)
+		
+		do lnfeep.save()
+
+		// Load from file LNFEEPS
+		do LOADSEQ(FEETYP)
+
+		// Set into file LNFEEPS
+		do SETSEQ(FEECPY)
+		}
+	else  do {		
+
+		do Db.delete("LNFEEP","FEETYP = :FEETYP") 
+		
+		if (%ProcessMode = 3) quit
+
+		// Update linked fees, if necessary
+		if (%ProcessMode = 1) do {
+			
+			// Update of type "Delete then Insert", need to reset mode
+			do fLNFEEP.setMode(0)
+			
+			for  set VAR = UPDARR(VAR).order() quit:VAR.isNull()  if fLNFEEP.@VAR = UPDARR(VAR) kill UPDARR(VAR)
+			
+			// No changes to selected columns
+			if 'UPDARR.exists() quit
+			
+			do LFEE(.fLNFEEP,UPDARR(),FEETYP)
+			}
+
+		do fLNFEEP.save()
+
+		do SETSEQ(FEETYP)
+		}
+	
+	// Compile new program
+	do ^LNFEEC0
+
+	quit
+
+
+LOADSEQ(String FEETYP)	// Load array oper with data from LNFEEPS table
+
+	type public String oper()
+	
+	type Number SEQ = 1
+
+	type DbSet ds = Db.selectDbSet("LNFEEPS","FEETYP=:FEETYP","SEQ")
+	
+	while ds.next() do {
+		
+                type RecordLNFEEPS lnfeeps = ds.getRecord("LNFEEPS")
+                
+		set oper(SEQ) = lnfeeps.op_"|"_lnfeeps.perc_"|"_lnfeeps.element
+		
+		set SEQ = SEQ + 1
+		}
+
+	quit
+
+
+SETSEQ(String FEETYP)	// Insert data from oper() array into LNFEEPS table
+
+	type public String oper()
+	
+	type Number N, SEQ
+	
+	set N = 0 
+	set SEQ = 1
+	
+	for  set N = oper(N).order() quit:N.isNull()  do {
+		
+		if oper(N).piece("|",1).isNull() quit
+		
+		type RecordLNFEEPS lnfeeps = Db.getRecord("LNFEEPS", "FEETYP = :FEETYP, SEQ = :SEQ", 1)
+		
+		set lnfeeps.op = oper(N).piece("|",1)
+		set lnfeeps.perc = oper(N).piece("|",2)
+		set lnfeeps.element = oper(N).piece("|",3)
+		
+		do lnfeeps.save()
+		
+		set SEQ = SEQ + 1
+		}
+	
+	quit
+
+
+PPFEE5	// Fee type post-processor when %O = 5 (Copy)
+
+	type public String X
+
+	if X.isNull() quit
+	
+	type RecordLNFEEP fLNFEEPX = Db.getRecord("LNFEEP","FEETYP = :X",1)
+
+	// Fee ~p1 currently linked to fee ~p2. Multiple linkages not allowed.
+	if fLNFEEPX.lfee,'fLNFEEPX.basis.isNull() do Runtime.setErrMSG("LNFEEP",12,X_"~"_fLNFEEPX.basis)
+
+	quit
+	
+
+PPFEE	// Fee type post-processor
+
+	type public Number %OSAVE, ER
+	type public String I(), X
+
+	if X.isNull() quit
+
+	type String BASIS, TRTYPE
+	
+	set (BASIS,TRTYPE) = ""
+
+	if ((%OSAVE = 0)!(%OSAVE = 5)) do { quit:ER
+
+		// Plan name must begin with an alpha character
+		if ($E(X)'?1A) do Runtime.setErrMSG("LNFEEP",8440) quit
+
+		// Alphanumeric format only
+		if X'?.AN do Runtime.setErrMSG("LNFEEP",248) quit
+		}
+
+	if (%OSAVE = 3) do { quit
+
+	        type ResultSet rs = Db.select("FEETYP","LNFEE","FEETYP=:X")
+	        
+		// Invalid.  Fee plans in use by at least one account may not be deleted.
+		if 'rs.isEmpty() do Runtime.setErrMSG("LNFEE",1520) quit
+		
+		type DbSet ds = Db.selectDbSet("LNFEEP")
+		
+        	while rs.next() do {
+        		
+                	type RecordLNFEEP lnfeep = ds.getRecord("LNFEEP")
+                	
+			if lnfeep.basis'=X quit
+			
+			if 'BASIS.isNull() set BASIS = BASIS_","_lnfeep.feetyp
+			else  set BASIS = lnfeep.feetyp
+			}
+		// Invalid.  Fee serves as basis for plan(s): ~p1.
+		if 'BASIS.isNull() do Runtime.setErrMSG("LNFEEP",1521,BASIS) quit
+		}
+
+	if (%OSAVE'=0),(%OSAVE'=5) quit
+
+	// Record already exists
+	if Db.isDefined("LNFEEP","FEETYP=:X") do Runtime.setErrMSG("LNFEEP",2327) quit
+
+	// Conflict between fee type and escrow type
+	if Db.isDefined("LNTRS","TRTYPE=:X") do Runtime.setErrMSG("LNTRS",600) quit
+
+	// Null out table name to prevent "Invalid table value" returned by VAL^DBSVER
+	set I(3) = ""
+	
+	set TRTYPE = X
+	if X.extract(X.length())?.N do {
+		
+		set TRTYPE = X.extract(1,X.length()-1)
+
+		// Conflict between fee type and escrow type
+		if Db.isDefined("LNTRS","TRTYPE=:TRTYPE") do Runtime.setErrMSG("LNTRS",600) quit
+		}
+	quit
+
+
+LFEE(RecordLNFEEP fLNFEEP,	// Updated LNFEEP record
+     String UPDARR,		// Selected columns that were updated with new values
+     String FEE)		// Fee Type
+     
+     	// Update linked fee plan, if necessary
+
+	type public String FEETYP, UTBL()
+	
+	type String VAR = ""
+	
+	type DbSet ds = Db.selectDbSet("LNFEEP","FEETYP<>:FEETYP")
+	
+	while ds.next() do {
+			
+		type RecordLNFEEP lfeep = ds.getRecord("LNFEEP")
+		
+		if lfeep.lfee,(lfeep.basis = FEE) do {
+			
+			do lfeep.setAuditFlag(1)
+
+			// Record locked by another user
+			lock +UTBL("LNFEE",lfeep.feetyp):2 else  do Runtime.setErrSTBLER("LNFEEP","RECLOCL") quit
+			
+			for  set VAR = UPDARR(VAR).order() quit:VAR.isNull()  set lfeep.@VAR = UPDARR(VAR)
+			
+			do lfeep.save()
+			
+			lock -UTBL("LNFEE",lfeep.feetyp)
+			
+			// Check to see whether linked fee has another one linked to it,
+			// call LFEE recursively to update that one as well
+			do LFEE(.fLNFEEP,UPDARR(),lfeep.feetyp)
+			}
+		}
+
+	quit
+
+
+END	// End of processing
+
+	type public Number ER
+	type public String FEECPY, FEETYP, RM, VFMQ
+
+	if ER!(%ProcessMode = 2)!(%ProcessMode = 4) quit
+
+	if (VFMQ = "Q") do {
+
+		// Loan fee plan ~p1 not created
+		if %ProcessMode = 0 set RM = $$^MSG(1641,FEETYP) quit
+
+		// Loan fee plan ~p1 not modified
+		if %ProcessMode = 1 set RM = $$^MSG(1643,FEETYP) quit
+
+		// Loan fee plan ~p1 not deleted
+		if %ProcessMode = 3 set RM = $$^MSG(1642,FEETYP) quit
+
+		// Loan fee plan ~p1 not copied to plan ~p2
+		set RM = $$^MSG(1640,FEETYP,FEECPY) quit
+		}
+	else  do {
+
+		// Loan fee plan ~p1 created
+		if %ProcessMode = 0 set RM = $$^MSG(1637,FEETYP) quit
+
+		// Loan fee plan ~p1 modified
+		if %ProcessMode = 1 set RM = $$^MSG(1639,FEETYP) quit
+
+		// Loan fee plan ~p1 deleted
+		if %ProcessMode = 3 set RM = $$^MSG(1638,FEETYP) quit
+
+		// Loan fee plan ~p1 copied to plan ~p2
+		set RM = $$^MSG(1636,FEETYP,FEECPY) quit
+		}
+	set ER = "W"
+	
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60775^51805^Keith Shank^9155"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,709 @@
+public PROCAUTO
+
+	/*
+
+	Procedure ID:  BCHAUTPMT
+ 
+	Description: Automatic loan payments from DEP accounts
+ 
+	This procedure definition is compiled into run-time program PROCAUTO.
+
+	---- Revision History ------------------------------------------------
+	
+	06/22/06 - ratht - CR 21419
+		   Modified TAMT and DEPAVL sections to set the variable 
+		   CRCD as public since it was losing the scope when it 
+		   comes out from the sections.
+		   
+	04/20/06 - KELLYP - CR 20856
+		   Modified CICR, CIDR, TRN2, and TTX sections to prevent
+		   UNDEFINED errors from occurring when processing capitalized
+		   interest transactions.
+
+	03/29/06 - KELLYP - CR 20437
+		   Modified SETRTY section to create DAYENDALPRTY record using
+		   Db.getRecord(,,1).  This prevents an RDBSAVEFAIL from 
+		   occurring when a loan is created and the ALP source account 
+		   has no funds but then a backdated loan disbursement is 
+		   procesed after the source account is funded.
+
+	03/03/06 - KELLYP - CR 19885
+		   Modified parameters for EXEC section to only accept ln. The
+		   ttx object it accepted should have been local and did not
+		   need to be passed in from other places.  Also moved all var
+		   initializaton into the EXEC section and added a new section,
+		   AUTCHKS, for ensuring the loan is set up properly for ALP.
+		   These changes were necessary because the system calls EXEC
+		   via the top level (ALP batches) & directly (UANTICLN) and 
+		   EXEC didn't perform all the variable initialization or ALP 
+		   checks the same way for both types of calls.
+
+	01/31/06 - SmithCD - CR 19343 (16890)
+		   Made top and EXEC section public (called by UANTICLN). 
+		   Removed SING section, which is no longer called).
+        
+	11/10/03 - CARROLLJ - 51630
+		   Modified call to COMM^LNMPP to pass correct parameters.
+
+	06/16/03 - CARROLLJ - 51349
+		   Removed the use of %A,A and to and from array's.
+	
+	----------------------------------------------------------------------
+	*/
+
+	type public Boolean ER       
+	type public Number CID
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID",1)
+	
+	do EXEC(.ln)
+	if ER do EXC(.ln) quit 
+
+	quit
+
+AUTCHKS(RecordLN ln)
+
+	// Invalid object
+	if 'ln.exists() quit 0		
+	
+	// Invalid LN
+	if 'ln.getMode() quit 0
+
+	// Not using Auto Loan Payments
+	if 'ln.alpdue quit 0
+
+	// No offset account
+	if ln.auptcid.isNull() quit 0
+	
+	// Invalid offset account
+	if 'Db.isDefined("DEP","CID=:ln.auptcid") quit 0
+	
+	// Account is not active
+	if ln.stat>0 quit 0
+	
+	quit 1
+	
+
+public EXEC(RecordLN ln)
+
+	/*
+	Process one account
+
+	ARGUMENTS:
+	  
+		. ln   Loan Account Record	  /TYPE=RecordLN/REQ/MECH=REFARR:RW
+	  
+	*/
+
+	type public Boolean ER
+	type public Cache %CACHE()
+
+	type Number AUPTCID,AVLBAL,BASEAMT,CCODE,DUEBAL,TAMT
+	type String BCRCD,CRCD,CLDRETC,CLOETC,GPDRETC,LCLETC,LGPETC,SAVOFFST
+
+	type RecordTTX ttx=Class.new("RecordTTX")
+
+	if '$$AUTCHKS(.ln) quit		// Account not valid for ALP
+
+	set AUPTCID=ln.auptcid
+	set CCODE=ln.ccode
+	set DUEBAL=0
+
+	if ln.irp do IRP(.ln,.ttx)
+
+	type RecordPRODCTL ltype=%CACHE("PRODCTL").getRecord("PRODCTL","TYPE=:ln.type")
+	set LCLETC=ltype.crtrci
+	set LGPETC=ltype.crtrgp
+
+	set CRCD=ln.crcd
+	set BCRCD=CRCD				// Screen base Currency Code
+
+	type RecordDEP dep=Db.getRecord("DEP","CID=:AUPTCID")
+	type RecordPRODCTL dtype=Db.getRecord("PRODCTL","dep.type")
+	set CLDRETC=dtype.dralp			// Automatic Loan PaymentTransfer Tran Code
+        set GPDRETC=dtype.drtrgp		// DR General Purpose Tran Code
+	  
+	do TAMT(.dep,.ln,.dtype,.ltype,.ttx) quit:ER
+
+	if CRCD'=ln.crcd set CRCD=ln.crcd
+
+	/* 
+	If there is no payment to be made and there is a balance due, but 
+	there is no error to be logged, set up a retry entry.
+	*/
+
+	if TAMT'>0,DUEBAL do SETRTY(ln.cid,.ln,.ttx) quit
+	if TAMT'>0 quit
+
+	do TFRDR(AUPTCID,ln.cid,.dep,CLDRETC,GPDRETC,.ttx) quit:ER	// Create transfer FROM
+	do TFRCR(ln.cid,AUPTCID,.ln,.LCLETC,LGPETC,.ttx) quit:ER	// Create transfer TO
+	
+	// Payment went through but there is still an amount due
+	if DUEBAL>TAMT set DUEBAL=DUEBAL-TAMT do SETRTY(ln.cid,.ln,.ttx)
+
+	quit
+
+
+TAMT(RecordDEP dep,RecordLN ln,RecordPRODCTL dtype,RecordPRODCTL ltype,RecordTTX ttx)
+	//Calculate total bill amount and check for payoff
+	
+	type public Boolean ER
+	type public Number AVLBAL,BALCMP,DUEBAL,TAMT
+	type public String CRCD,ET
+	
+	new GTDUE,PAOFF,CCODE,BALCMP
+
+	set (DUEBAL,TAMT)=$$DUEAMT(ln.cid,ln.alpdue,.ln)
+	if 'TAMT quit				// Nothing due on loan
+
+	// Cannot process.  Amount equals $~p1.
+	if TAMT<0 set ER=1,ET=$$^MSG(472,$$^SCARND(TAMT,0,ln.cid)) quit
+
+	set PAOFF=0
+	set BALCMP=ln.bal if ln.aruf set BALCMP=BALCMP-ln.udbal
+	if TAMT'<BALCMP,TAMT'<$$GTOTDUE^BCHLNPSR(ln.cid,.ln) do { quit:ER
+		set PAOFF=1
+		do PAYOFF(.ln,.ltype,.ttx) quit:ER
+		}
+
+	//Check available funds on deposit for non-inquiry mode only
+	do DEPAVL(.dep,.ln,.dtype) quit:ER
+
+	// Available funds ~p1 less than payment minimum ~p2
+	if DUEBAL'<ln.alpmin,TAMT<ln.alpmin set ER=1,ET=$$^MSG(1432,TAMT,ln.alpmin) quit
+
+	// Transaction Amount of ~p1 is Greater than the Available Amount of ~p2
+	if DUEBAL>0,'TAMT,ln.cintbnp=0 set ER=1,ET=$$^MSG(7817,DUEBAL,AVLBAL) quit
+	if DUEBAL<ln.alpmin set TAMT=0 quit
+
+	set BASEAMT=""
+	#if CUVAR.%MCP 
+	if CRCD'=BCRCD do { quit:ER
+		type Number EXCAMT
+		// Calculate exchange amount
+		do EXC^CRCDUTL(BCRCD,CRCD,TAMT,1,1,"00",ln.ccode,$G(EFD),1)
+		set BASEAMT=TAMT
+		set TAMT=$$^SCARND(EXCAMT,0,AUPTCID)
+		}
+	#endif
+
+	quit
+
+
+DEPAVL(RecordDEP dep,RecordLN ln,RecordPRODCTL dtype)
+	//Determine the amount of funds available from deposit source account
+
+	type public String CRCD
+	new BLAMT,CTAMT,DPMT,LCID,OSEQ,SQ		// DJH 04/10/01
+	
+	// Tfr account ~p1 closed
+	if dep.stat=4 set ER=1,ET=$$^MSG(5816,AUPTCID) quit
+	
+	set CRCD=dep.crcd		// Source account Currency Code
+
+	set AVLBAL=$$FUNDS(AUPTCID,DUEBAL,.dep,.dtype)
+
+	set CRCD=dep.crcd
+
+	if PAOFF do {  quit
+		if AVLBAL<DUEBAL,'ln.paf set TAMT=0
+		else  if AVLBAL<DUEBAL,ln.paf set TAMT=AVLBAL,CLOETC="",PAOFF=0
+		else  set TAMT=DUEBAL
+		}
+	if 'AVLBAL!(ln.paf) set TAMT=AVLBAL quit
+
+	/* 
+	Deposit account has some funds and no partial payments allowed
+	Determine if funds will satisfy due bill record amount
+	*/
+
+	if AVLBAL=ln.dpmt set TAMT=AVLBAL quit		// Next due date payment amount
+	if AVLBAL<ln.dpmt set TAMT=0 quit		// Do not make a payment (skip)
+
+	// Determine if funds will satisfy any delinquent bill record amounts
+
+	new bil
+	set CTAMT=0
+	set OSEQ=ln.oseq		// Internal Bill Oldest Unsat Seq
+	
+	// VCA 7/26/99  Changed code to only get one record.
+	Type RecordLNBIL1 lnbil1=Db.getRecord("LNBIL1","CID=:ln.cid,SCHSEQ=:OSEQ",1)
+	if lnbil1.getMode()=0 quit
+	set BLAMT=lnbil1.casd
+	if AVLBAL<BLAMT set AVLBAL=0
+	else  set CTAMT=CTAMT+BLAMT,AVLBAL=AVLBAL-BLAMT
+
+	// If CTAMT=0, can't satisfy any delinquent bills
+	if 'CTAMT quit
+	set TAMT=CTAMT
+
+	quit
+
+
+TFRDR(CID,TGTCID,RecordDEP dep,CLDRETC,GPDRETC,RecordTTX ttx)	// 
+
+	//Create deposit account debit transaction
+
+	new TCMT,TSO,CRCD
+	set TSO=""
+	set TSO=$$FIELDIN^UTSO(TSO,"FCID",TGTCID)
+	set CRCD=dep.crcd
+	set TCMT=$$^MSG(3940,TGTCID)		// Transfer to ~p1
+	if $G(CUVAR2),TJD<CUVAR2 set ttx.efd=TJD new TJD set TJD=CUVAR2
+	do TRN(.dep,.ttx,0,CLDRETC,GPDRETC) quit:ER
+
+	quit
+
+
+TFRCR(CID,SRCCID,RecordLN ln,LCLETC,LGPETC,RecordTTX ttx)	// 
+	//Create loan account credit transaction
+
+	if BASEAMT'="" set TAMT=BASEAMT		// Use base amount
+
+	new TCMT,TSO,CRCD
+	set CRCD=ln.crcd
+	set TSO=""
+	set TCMT=$$^MSG(3939,SRCCID)		// Transfer from ~p1
+	set TSO=$$FIELDIN^UTSO(TSO,"OFFST",SAVOFFST)
+	if $G(CUVAR2),TJD<CUVAR2 set ttx.efd=TJD 
+	do TRN(.ln,.ttx,1,LCLETC,LGPETC) quit:ER
+
+	quit
+
+
+TRN(RecordACN acn,RecordTTX ttx,DC,CLETC,GPETC)	// Build TR array entry
+
+	new ETC,ITC,x				//MEW 10/3/00 
+
+	if DC=0 do {
+		set ETC=CLETC			// Automatic Loan Payment Transfer Tran Code
+		if ETC="" set ETC=GPETC		// DR General Purpose Tran Code
+		set SAVOFFST=ETC_":"_AUPTCID
+		type RecordTRN trn=Db.getRecord("TRN","ETC=:ETC")
+		set ITC=trn.itc
+		}
+	else  do {
+		if $G(CLOETC)'="" set ETC=CLETC		// Use closeout tran code
+		else  set ETC=GPETC			// CR General Purpose Tran Code
+		type RecordTRN trn=Db.getRecord("TRN","ETC=:ETC")
+		set ITC=trn.itc
+		}
+
+	// External transaction code not defined
+	if ETC="" set ER=1,ET=$$^MSG(6655) quit
+
+	set TSO=$$FIELDIN^UTSO(TSO,"AUTPMT",1)
+
+	new TTXBLD
+	set TLO=%UserStation
+	do TTX(.TTXBLD)
+	do TTX^TTXBLD(.ttx,.TTXBLD)
+	do TRNSINGL^TRNDRV(.ttx,.acn,%SystemDate,BRCD,4)
+
+	quit
+
+
+PAYOFF(RecordLN ln,RecordPRODCTL ltype,RecordTTX ttx)	// Calculate payoff amount
+
+	// Don't pay off Revolving accounts
+	if ln.revf quit
+
+	// Don't pay off Interim or Deferred Loans
+	if ln.idpf=1!(ln.idpf=3) quit
+
+	// Don't pay off a loan if number of disbursements
+	// and total disbursement amount are both equal 0
+	if 'ln.cntdr,'ln.tdr quit
+
+	new %ACM,%ACR,%DY,%INF,%REPEAT,ACR,ADJ,AF,BAL,BALINT,BL,CNT,DIST1AF
+	new ECID,EFD,EPPEN,GRP,IACM,IAM,INF,INTESC,IRCB,IRN,IUN,IUNC,KVAR
+	new LNPO,MDT,MLT,ODD,ONP,OPCHG,OPCHGSV,PAYACM,PAYOFF,PLDF,PMTGRC
+	new POFF,PREREB,SCHNUM,TRM,TY,VALDATE
+
+	set POFF=0
+	set EFD=TJD
+
+	// Calculate payoff amount - if account has an error, don't post 
+	
+	do PAYOFF^LNPO2(.ln,0,.ttx) if ER set ET=RM quit
+	set PAYOFF=$$^SCARND(PAYOFF,0,ln.cid)
+	if PAYOFF>TAMT quit
+
+	// Account ~p1 payoff not allowed
+	if 'ltype.popat set ER=1,ET=$$^MSG(145,"") quit
+
+	// Account ~p1 payoff amount $~p2
+	if PAYOFF<0 set ER=1,ET=$$^MSG(144,"",PAYOFF) quit
+
+	// Account will be paid off
+	set CLOETC=ltype.crtrci		  	// CR Closeout Tran Code
+	if CLOETC="" set CLOETC=ltype.crtrgp	// CR General Purpose
+
+	set (DUEBAL,TAMT)=PAYOFF
+
+	quit
+
+
+DUEAMT(LCID,METHOD,RecordLN ln)	//		Calculate amount due
+
+	/*	
+		LCID		Loan account number
+		METHOD	Automatic Loan Payment Due Method
+		Example: TAMT=$$DUEAMT(CID,ALPDUE)
+	*/
+
+
+	if 'METHOD quit 0
+
+	new DUE
+
+	if METHOD=1 do { quit DUE
+		set DUE=ln.tdue+ln.lchg+ln.mcnd
+		}
+
+	if METHOD=2 do { quit DUE
+		set DUE=ln.tba+ln.lchg+ln.mcnb	// Misc Charges not Billed
+		}
+
+	// LN.TDUE + LN.LCHG + LN.MCND - LN.UNAPF
+	if METHOD=3 set DUE=$$GTOTDUE^BCHLNPSR(ln.cid,.ln) quit DUE
+	
+	if METHOD=4 do { quit DUE
+		set DUE=ln.tdue+ln.mcnd
+		}
+
+	if METHOD=5 do { quit DUE
+		set DUE=ln.tba+ln.mcnb
+		}
+
+	if METHOD=6 do { quit DUE
+		set DUE=ln.tdue+ln.mcnd-ln.unapf
+		}
+
+	quit 0
+
+
+FUNDS(DCID,REQAMT,RecordDEP dep,RecordPRODCTL dtype)
+	/* 
+	Calculate available funds
+
+		DCID - Payment Source Account
+		REQAMT - amount requested from Loan
+	*/
+	new AVL
+	
+	set AVL=dep.balavl
+	set AVL=AVL-dep.minbal			// Minimum Balance
+	set AVL=$$MC^TTXODC(.dep,AVL,1)
+	if AVL'<REQAMT quit REQAMT		// Ignore excess available
+
+	/*
+	Possible available funds from linked overdraft accounts are
+	considered here in all cases if the due amount cannot be satisfied
+	by the transaction (deposit) account and it is set up for overdraft
+	protection.
+
+	If partial payments are allowed, we need to know the exact amount
+	that can be collected so we can collect as much as possible without
+	the transaction rejecting.
+
+	If partial payments are not allowed, we must still know the exact
+	amount that can be collected in case some delinquent bills can be
+	paid in full.
+	*/
+
+	// O/D protection option (1 and 3 allowed)
+	if CUVAR.odp,%ODP,dep.odo#2 do {
+		new AMT,TOTAVL
+		set ETC=dtype.drtrgp		// DR General Purpose Tran Code
+
+		if CRCD=BCRCD set AMT=TAMT
+		else  do {
+			// Convert amount into currency of deposit account
+			// using no margins (required by overdraft inquiry)
+			new TCRCD
+			set TCRCD=BCRCD		// Save temporary currency
+			new BCRCD,BCUSTCD
+			set BCRCD=CRCD		// Reset base currency
+			new CRCD
+			set CRCD=TCRCD		// Reset current currency
+			set AMT=$$MC^TTXODC(.dep,TAMT,0)
+			}
+
+		set TOTAVL=$$EXTINQ^TTXODC(.dep,AUPTCID,AMT)
+		set TOTAVL=$$MC^TTXODC(.dep,TOTAVL,1)
+
+		/*
+		Previous available from the deposit account plus the funds
+		available from the overdraft account
+		*/
+		set AVL=TOTAVL+AVL
+		}
+
+	quit $S(AVL'<REQAMT:REQAMT,1:AVL)	// Ignore excess available
+
+
+EXC(RecordLN ln,RecordTTX ttx)	// Log error to DAYEND 
+
+	new BAL,EXCDESC
+
+	type RecordSCATBL scatbl=Db.getRecord("SCATBL","%FN")
+	set EXCDESC=scatbl.desc
+	if $G(ET)="" set ET=RM
+	if $G(CID) set BAL=ln.bal
+	else  set (CID,BAL)=""
+
+	if $G(DUEBAL) do {
+		do SETRTY(CID,.ln,.ttx)
+		}
+
+	do LOG^UTLEXC($T(+0),"*",EXCDESC,CID,$G(%ZTSEQ),ET,BAL) 
+
+	set ER=0
+
+	quit
+
+
+SETRTY(Number CID,RecordLN ln,RecordTTX ttx)	// Set up retry entry for tomorrow
+
+	type public Number DUEBAL
+
+	if 'DUEBAL.get() quit			// Must have balance due to retry
+	if ln.cid'=CID.get() quit
+	if 'ln.alprty quit			// ALP Retry Processing   DJH 04/30/01
+
+	// No retry days left 
+	if %SystemDate'<(ln.schld+ln.alprtyd) do { quit
+		if 'ln.cintbnp quit		// Capitalize interest billed not paid
+		do CINTBNP(CID,.ln,.ttx)
+		}
+	
+	type Date NXTRTY
+	set NXTRTY=%SystemDate+1
+		
+	type RecordDAYENDALPRTY dealprty=Db.getRecord("DAYENDALPRTY","TJD=:NXTRTY,CID=:ln.cid",1)
+	do dealprty.bypassSave()
+
+	quit
+
+	
+CINTBNP(Number CID,RecordLN ln,RecordTTX ttx)	// Capitalize interest billed not paid
+
+	type Boolean ER
+	type Number ACRLMT,AVLBAL,DUIN,TAMT
+	
+	set ER=0
+	set DUIN=ln.cuin+ln.unin		// Total interest due
+	
+	if DUIN'>0 quit
+
+	// For credit limit check set TAMT to the lesser of DUIN and AVLBAL
+	if ln.avcrlmt do {
+		set ACRLMT=ln.amtreq-ln.bal	// Available credit limit
+		if DUIN>ACRLMT set TAMT=ACRLMT
+		else  set TAMT=DUIN
+		}
+	else  set TAMT=DUIN			//Total interest due
+	if TAMT'>0 quit				// Only capitalize a positive amount
+
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:ln.type")
+	
+	do CIDR(CID,.ln,prodctl.drtrna,.ttx) quit:ER	// Capitalize interest
+	do CICR(CID,.ln,prodctl.caintcr,.ttx) quit:ER	// Reduce interest due 
+
+	quit
+
+
+CIDR(Number CID,RecordLN ln,String ETCDR,RecordTTX ttx) // Create debit transaction to loan balance
+	
+	type public Date CUVAR2
+	type public Number TAMT
+	
+	type String TCMT
+	
+	set ttx.tso=$$FIELDIN^UTSO(ttx.tso,"INTTRF",TAMT)
+	
+	// Capitalize total interest due: ~p1
+	set TCMT=$$^MSG(3844,TAMT)
+
+	if CUVAR2.get(),%SystemDate<CUVAR2 set ttx.efd=%SystemDate 
+
+	do TRN2(.ln,.ttx,0,ETCDR)
+
+	quit
+ 
+CICR(Number CID,RecordLN ln,String ETCCR,RecordTTX ttx)	// Create credit transaction to interest billed not paid
+
+	type public Date CUVAR2
+	type public Number TAMT
+	
+	type String TCMT
+
+	// Capitalize total interest due: ~p1
+	set TCMT=$$^MSG(3844,TAMT)
+
+	if CUVAR2.get(),%SystemDate<CUVAR2 set ttx.efd=%SystemDate
+
+	do TRN2(.ln,.ttx,1,ETCCR)
+
+	quit
+
+
+TRN2(RecordLN ln,RecordTTX ttx,Number DC,String ETC)		// Post Transaction
+
+	type public Boolean ER
+	type public String BRCD
+
+	type String ITC,TSO,TTXBLD()
+
+	// External transaction code not defined
+	if ETC.isNull() do Runtime.setErrMSG("TRN","6655") quit:ER
+	
+	type RecordTRN trn=Db.getRecord("TRN","ETC=:ETC")
+	set ITC=trn.itc
+ 
+	set TSO=$$FIELDIN^UTSO(ttx.tso,"AUTPMT",1)
+	
+	do TTX(.TTXBLD())
+	do TTX^TTXBLD(.ttx,.TTXBLD())
+	do TRNSINGL^TRNDRV(.ttx,.ln,%SystemDate,BRCD,4)	
+
+	quit
+
+		
+TTX(String TTXBLD())
+
+	type public Number CID,RATE,TAMT
+	type public String BCRCD,CRCD,ETC,ITC,TCMT,TSO
+	
+	type Number CCODE
+
+	type RecordACN acn=Db.getRecord("ACN","CID=:CID")
+	set CCODE=acn.ccode
+
+	set TTXBLD("CID")=CID
+	set TTXBLD("ITC")=ITC
+	set TTXBLD("ETC")=ETC
+ 	set TTXBLD("TAMT")=TAMT
+	set TTXBLD("EFD")=%SystemDate
+	set TTXBLD("TLO")=%UserStation
+	set TTXBLD("TCMT")=TCMT
+	set TTXBLD("CRCD")=CRCD
+	set TTXBLD("TSO")=TSO
+
+	#if CUVAR.%MCP
+	if CRCD'=%SystemCurrency do {
+		type Number EXCAMT
+		do EXC^CRCDUTL(CRCD,%SystemCurrency,TAMT,1,ITC.extract(1),00,CCODE,%SystemDate,1)
+		set TTXBLD("SYSBASE")=$$^SCARND(EXCAMT,0,CID)
+		}
+	set TTXBLD("RATE")=RATE.get()
+	set TTXBLD("CUSTCD")=CCODE
+	set TTXBLD("BCRCD")=BCRCD
+	#endif
+
+	quit
+
+
+IRP(RecordLN ln,RecordTTX ttx)
+	/*
+	DAYEND Interest Reserve Processing
+
+	This section processes an interest-only payment for a loan account
+	which uses Interest Reserve Processing.  A debit transaction is created
+	for the loan's Interest Reserve account (ln.ircid) and a credit 
+	transaction is created for the loan account (ln.cid).  This section
+	processes automatic interest payments only, and does not consider any
+	late charges, loan fees, or other miscellaneous charges when computing
+	the transaction amount. 
+	*/	    	
+
+	new CRETC,DATA,DRETC,DTYP,INDU,IRAMTR,LTYP,TAMT
+
+	if (ln.ircid="")!(ln.stat>0)!(ln.iramtr'>0) quit
+	else  if ('ln.cpf),(ln.duin'>0) quit	// Account - No Interest Due
+		
+	set %MCP=0
+
+	if ln.cpf do { quit 
+		if ln.comindue'>0 quit		// No Interest Due on Commitment
+		do COMM^LNMPP(.ttx,.ln,CID,1)	 	// Mass Pmt Proc for Commitments
+		if $G(ER)=1 do EXC(.ln)		// File exception
+		}
+
+	// Attempt to lock source (deposit) account
+	set IRCID=ln.ircid
+	if 'Db.isDefined("DEP","IRCID") quit
+	type RecordDEP dep=Db.getRecord("DEP","IRCID")
+	set DTYP=dep.type
+
+	set IRAMTR=ln.iramtr			// Int. Reserve Amt Remaining
+	set INDU=ln.duin			// Interest Due
+
+	if IRAMTR>INDU set TAMT=INDU		// Enough funds to pay in full
+	else  set TAMT=IRAMTR			// Use remaining funds
+
+	// Get CR/DR Interest Reserve Auto Posting Trancodes from PRODCTL
+	set LTYP=ln.type
+
+	set DATA=Db.getOneRow("CRIRAP,CRTRGP","PRODCTL","LTYP")
+	set CRETC=$P(DATA,$C(9),1)	// Interest Reserve Autoposting: CR
+	if CRETC="" set CRETC=$P(DATA,$C(9),2)	 // Default CR for LN type
+
+	/* 
+	 KELLYP 40816 - Fixed the following to set DRETC=PRODCTL.DRTRGP instead
+	 of PRODCTL.DRIRAP.
+	*/          
+
+	set DRETC=Db.getOneRow("DRTRGP","PRODCTL","DTYP") // Default DR for DEP type
+
+	if ln.crcd'=dep.crcd quit	// IR Acct and Loan must have same curr.
+
+	// Build TRN for Interest Reserve Account Debit
+	new BCRCD,CRCD,TCMT,TSO
+
+	set CRCD=dep.crcd,TSO=""
+	set BCRCD=CRCD				// KELLYP 40816
+	set TSO=$$FIELDIN^UTSO(TSO,"LNIRCID",ln.cid)
+	set TCMT=$$^MSG(3939,IRCID)	     	// Transfer from ~p1
+	do IRPTRN(.ttx,.ln,DRETC,1) quit:ER	// Build Debit
+
+	// Build TRN for Loan Account Credit
+	set CRCD=ln.crcd
+	set BCRCD=CRCD				// KELLYP 40816
+	set TSO=""
+	set TCMT=$$^MSG(3940,CID)		// Transfer to ~p1
+	do IRPTRN(.ttx,.ln,CRETC,0) quit:ER	// Build Credit
+
+	if ER do EXC(.ln) quit
+ 
+	quit	
+
+
+IRPTRN(RecordTTX ttx,RecordLN ln,ETC,DR)
+	/*
+	TRN Builder for Interest Reserve Processing
+
+	This section builds the TTX array for both transactions related to
+	Interest Reserve Processing.  The DR parameter may take on one of two
+	values: 0 - Credit for loan account or 1 - Debit for Interest reserve
+	account.
+	*/
+
+
+	new CID,ITC,SEQ,TTXBLD
+
+	type RecordTRN trn=Db.getRecord("TRN","ETC=:ETC")
+	set ITC=trn.itc
+	set TLO=%UserStation
+	
+	if DR set CID=ln.ircid		// Debit CID = Interest Reserve Acct
+	else  set CID=ln.cid		// Credit CID = Loan Acct
+
+	do TTX(.TTXBLD)		
+	do TTX^TTXBLD(.ttx,.TTXBLD)
+	do TRNSINGL^TRNDRV(.ttx,.ln,%SystemDate,BRCD,4)	
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60439^19538^Tarini Charan Rath^17780"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,3438 @@
+RECALSEG(RecordDEP dep, RecordTTX ttx)
+
+	/*
+ 	 Procedure ID:	RECALSEG
+ 	     Original:	HAYMANP
+		 Date:	09/09/98
+ 	         Desc:	Recalculation utility for accruals on segmented 
+ 	         	accounts.
+
+ 	---- Comments --------------------------------------------------------
+	This procedure recalculates accruals and creates adjustment transactions
+	for effective dated transactions posted to segmented accounts.
+
+	Arguments:
+		. dep 	Account object		/TYP=RecordDEP/REQ
+		. ttx 	Current Transaction	/TYP=RecordTTX/REQ
+
+	
+	Procedure Variables:
+
+	. RECALSEG Variable that has a value of 1 though this process. 
+		This serves as a general flag to other procedures/routines that 
+		RECALSEG is driving the processing.
+
+	. ACT()	Account activity array keyed by effective date. Second key is
+		sequence number.  Sequences with specific significance:
+
+			99999 Year End Event (reverse & forward)
+			99998 Month End Event (reverse & forward)
+
+			9998 Interest Posting (forward)
+			9997 Interest on available interest posting (forward)
+			9996 Available interest rate change date (forward)
+			9995 Interest rate change date (forward)
+			9994 Non-accrual expiration date (forward)
+
+			8899 Accrual calculation (reverse)
+
+			8898 Interest posting (reverse)
+			8897 Interest on available interest posting (reverse)
+			8896 Available interest rate change date (reverse)
+			8895 Interest rate change date (reverse)
+
+			-99 Accrual calculation (forward)
+
+		ACT entries with the above sequence numbers (other than the
+		accrual calcs -99 and 8899) will have a third key which
+		identifies the segment that will be processed (-1 for account
+		level).  ACT entries not having these special sequence numbers
+		will also have a third key entry with the literal "HSEQ".  The
+		value of this array entry is the corresponding history sequence
+		number for the entry.
+
+	. dep.segacr	Flag to determine if accruing at account or segments
+			0=accrue at segment level
+			1=accrue at account level
+
+	. dep.aiacrf	Flag to determine if accruing on available interest
+			0=don't accrue on available interest
+			1=accrue on available interest
+
+	. dep.airdet	Flag to determine which interest rate to use for 
+		accruing available interest
+			0=use the same rate as segment principal
+			1=use the available interest - interest rate
+
+	. dep.minopt	Option determining how to process accruals if the 
+		account (or segment) balance is less than MINACR This does not 
+		apply to interest on available interest
+			0=Zero ACR, Accrue when Balance > Minimum
+			1=Keep ACR, Accrue when Balance > Minimum
+
+	. dep.minacr	Minimum balance the account (or segment) must have to 
+		accrue interest (not available interest)
+
+	. dep.maxacr	Maximum balance the account (or segment) may accrue 
+		interest on (not available interest)
+
+	. DIR 	The direction the process is flowing ( -1 = reverse ) and ( 1 =
+		forward ).
+
+	. SAVEFD This holds the original EFD value.
+
+	. %SystemDate	This variable is Newed and thus made local to this 
+		procedure. Throughout the reverse and forward traversals of the
+		ACT array, this local version of %SystemDate will equal the 
+		event date (EVNTDT). Through the course of the procedure, 
+		%EffectiveDate also reflects the current event date.
+
+	. INDTYP() Holds index types.  Used to determine if an index is
+		a tiered index.
+
+	. PRODETC() Holds interest posting and accrual adjustment tran
+		codes.  Indexes of this array are:
+
+			1 - DRADIN : DR / Adjust accrued interest
+			2 - DRADIE : DR / Adjust interest expense
+			3 - DRAAI  : DR / Adjust accrued interest on avail int
+			4 - DRPAI  : DR / Adjust interest posted on avail int
+			5 - CRADIN : CR / Adjust accrued interest
+			6 - CRADIE : CR / Adjust interest expense
+			7 - CRAAI  : CR / Adjust accrued interest on avail int
+			8 - CRPAI  : CR / Adjust interest posted on avail int
+
+	. ORIGSEG() Holds a list of original segments
+
+	. POSACR() Array of positive accruals by segment
+
+	. TIER() Flag to determine if any/what segments have tiered indexes
+	
+	. AITIER() Same as above, but for available interest indexes
+
+	. LDINDX() Array of indexes that have been loaded into IX array
+		for SAVEFD through CUVAR2
+
+	. LDMTRX() Array of matrices that have been loaded into AX array
+		for SAVEFD through CUVAR2
+
+	. SEGTXN() Array used to store the most recent TSO and TAMT
+		value of tranactions as they are reversed and reapplied.  This
+		gets filed to the SEGTXN file through FSN.
+
+	. REVEC()  Array that holds the matching transactions for reversals 
+		and error corrects.
+
+	. ORIGDLR() Array holding the original values for DLR.
+
+	. REVINTPS() Array holding reverse interest posting info.
+
+	I18N=QUIT:   Excluded from I18N standards.
+
+
+	----- Revision History -------------------------------------------------
+
+	05/04/07 - SANTHUMS - CR 26828
+		   . Modified REVERSE and FORWARD section to instantiate a new 
+	             ttx record and passed the same to PROCTRAN.
+	           . Modified CURRENT section to remove the call to $$TTXSTR() 
+	             and passed "" for the DATA parameter to PROCTRAN call.
+	           . Removed $$TTXSTR section from the procedure.   
+	           . Modified PROCTRAN section to remove the instantiation of 
+	             ttx , Since the new ttx was killed at the end of the process 
+	             when it gets back to the original transaction.
+	   	   . Modified PROCTRAN section to set 
+	             "ttx.setStoredValue("noJournal", 0)" for the current 
+	             transaction, Since it should get filed to disk at end of 
+	             the process.
+	           . Modified PROCTRAN section to change the code from 
+	             "TAMT,"#".length()" to "TAMT.length("#")" in the for loop,
+	             Since TAMT was set as positive number instead of negative. 
+	
+	05/03/07 - SANTHUMS - CR 26908
+	           Modified FORWARD section to set the value of SAVEFD variable
+	           to LASTACR and EVNTDT instead of current system date
+	           since ACT array should Roll forward from SAVEFD through 
+	           current system date.
+	
+	05/15/06 - RussellDS - CR21296
+		   Changed %CACHE to include table name.
+	
+	04/19/06 - RussellDS - CR20209
+		   Remove obsoleted columns from HIST and TTX.
+	
+	10/13/05 - RADHIKA / SmithCD - CR 16891
+                    . Eliminated PSL deprecated features and warnings
+                    . Removed revision history prior to 2004
+                    . Modified TRAN section (renamed to ACRTRAN) to use 
+                      .setStoredValue("noJournal") to process accrual 
+                      adjustments w/o filing, and "EXACTACR" in TSO to handle 
+                      amounts out to 5 decimal places
+                    . Modified PROCTRAN section to post the current transaction 
+                      as a primary instead of a secondary, and to use 
+                      .setStoredValue("noJournal") to process transactions w/o 
+                      filing when necessary
+                   
+        08/02/05 - SkariahV- CR16679
+                   Removed #WARN and #OPTIMIZE directives.
+	------------------------------------------------------------------------
+	*/
+
+	type Number CLOSE="",EXSKIP="",NWRATE="",PRCTYP="",SEGEXT="",SKIP=""
+	type String NWINDEX="",NWMATRIX=""
+	
+	do MAIN(.dep,.ttx)
+
+	quit
+
+
+Public EXTERN(RecordDEP dep,RecordTTX ttx,String RSPAR(),String NEWARR())
+	/* 
+	Arguments:
+		. dep	Deposit account object	/TYP=RecordDEP/REQ
+
+		. ttx	Current transaction 	/TYP=RecordDEP/REQ
+
+		. RSPAR() Processing qualifiers	/TYP=ARRAY/MECH=REFARR/NOREQ
+
+			CLOSE	Skip Flag	/TYP=L/MECH=VAL/NOREQ
+				Skip certain processing if current transaction 
+				is a closeout
+
+			EXSKIP	Explicit Skip	/TYP=L/MECH=VAL/NOREQ
+				Variable to explicitly set the SKIP flag
+
+			INDNAM	Index Name	/TYP=T/MECH=VAL/NOREQ
+				Used for effective dated index change
+
+			MATNAM	Matrix Name	/TYP=T/MECH=VAL/NOREQ
+				Used for effective dated matrix change
+
+			PRCTYP	External process type	/TYP=N/MECH=VAL/NOREQ
+				Externally called from:
+				1 - INDEXMC
+				2 - MATRIXMC
+				3 - DEPIRN for effective-dated rate maintenance
+				4 - DEPIRN for effective-dated available int 
+				    rate maint.
+
+			RATE	Interest Rate	/TYP=T/MECH=VAL/NOREQ
+				Used for effective dated interest rate change
+
+	 		SEGMENT	Segment		/TYP=N/MECH=VAL/NOREQ
+				Segment of effective dated interest rate change
+
+		. NEWARR() 	New Matrix/Spread information
+						/TYP=ARRAY/MECH=REFARR/NOREQ
+
+	Returns:
+		. ADJACR	Positive Accrued Int/Div (only if closeout)
+						/TYP=N
+	
+	*/
+
+	type Public Number ADJACR
+
+	// Flag to skip processing of current transaction
+	type Number SKIP=1
+
+	// Flag to skip certain processing if current trn is a closeout
+	type Number CLOSE=$G(RSPAR("CLOSE"))
+
+	// Flag to explicitly set the SKIP flag (used in DEPDBS)
+	type Number EXSKIP=$G(RSPAR("EXSKIP"))
+
+	// Don't skip current trn if closeout and not explicitly marked to skip
+	if CLOSE,'EXSKIP set SKIP=""
+
+	// External process type
+	type Number PRCTYP=$G(RSPAR("PRCTYP"))
+
+	// Used for effective dated index change
+	type String NWINDEX=$G(RSPAR("INDNAM"))
+
+	// Used for effective dated matrix change
+	type String NWMATRIX=$G(RSPAR("MATNAM"))
+
+	// Used for effective dated interest rate change
+	type Number NWRATE=$G(RSPAR("RATE"))
+
+	// Segment of effective dated interest rate change
+	type Number SEGEXT=$G(RSPAR("SEGMENT"))
+ 
+	do MAIN(.dep,.ttx)
+
+	quit
+
+
+MAIN(RecordDEP dep,RecordTTX ttx)	// Starting point
+
+	type Public Number ADJACR,ER
+
+	type Public Number CLOSE,EXSKIP,NWRATE,PRCTYP,SEGEXT,SKIP
+	type Public String BRCD,NWINDEX,NWMATRIX
+
+	type Number COSTCTR,DIR,GLCID,OCC,TRB,TYPE
+
+	type String ACT(),AIACR(),AITIER(),FM(,),INDTYP(),LDINDX()
+	type String LDMTRX(),ORIGDLR(),ORIGSEG(),POSACR(),PRODETC(),REVEC()
+	type String REVINTPS(,,),TIER()
+	type String CRCD,GLSC
+
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+
+	type Date CUVAR2=cuvar.tjd
+	type Date SAVEFD=%EffectiveDate
+
+	/* Compiler instruction not to throw "Assigning system variable" warning
+	This variable is declared in this section, so old value is hidden and
+	will be restored when control returned from this procedure*/
+	#ACCEPT DATE={2/13/2003};PGM={Vitaliy Antonov}
+	type Date %SystemDate=CUVAR2
+	type Date %EffectiveDate=CUVAR2
+
+	/* Flag which states that this is a recalc processing for segmented 
+	account */
+	type Number RECALSEG=1
+
+	/* Branch Code may be undefined if coming in from DEPDBS
+	Hide original BRCD variable */
+	if $G(BRCD)="" new BRCD set BRCD=CUVAR.BOBR
+
+	// Set up variables to be used throughout routine
+	do INIT(.dep) quit:ER
+
+	// Cannot effective-date prior to opening date
+	if SAVEFD<dep.odt do Runtime.setErrMSG("DEP",450) quit
+
+	/* Do not allow to effective-date prior to conversion date
+	History cannot support transaction */
+	if dep.convdt,SAVEFD<dep.convdt do Runtime.setErrMSG("DEP",1177) quit
+	/* Do not allow to effective-date prior to history cut-off date
+	History cannot support transaction */
+	if SAVEFD<dep.hisctf do Runtime.setErrMSG("DEP",1177) quit
+
+	// Build ACT array to hold history activity for the account
+	do BUILDACT(.dep) quit:ER
+
+	// Unwind account to its original state on SAVEFD
+	do REVERSE(.dep,.ttx) quit:ER
+
+	// For closeout, DEPCL, DEPDBS, and UMAT need this ADJACR value
+	set:CLOSE ADJACR=dep.posacr-POSACR(-1)
+
+	// Process the current transaction
+	do CURRENT(.dep,.ttx) quit:ER
+
+	// Quit if explicit skip (coming in from DEPDBS to calc closeout amount)
+	quit:EXSKIP
+
+	// Roll forward through ACT array from SAVEFD to current system date
+	do FORWARD(.dep) quit:ER
+
+	/* Compiler instruction not to throw "Assigning system variable" warning
+	This variable is declared in this section, so old value is hidden */
+	#ACCEPT DATE={2/13/2003};PGM={Vitaliy Antonov}
+	set %SystemDate=CUVAR2
+	set %EffectiveDate=CUVAR2
+
+	// If closeout, set account status = Active to process accr adjustment
+	set:CLOSE dep.stat=0
+
+	// Create final accrual adjustment transactions
+	// account level
+	if dep.segacr do ADJACRA(.dep)
+	// segment level
+	else  do ADJACRS(.dep)
+
+	// If closeout, reset Account Status to "Closed"
+	if CLOSE set dep.stat=4
+
+	quit
+
+
+INIT(RecordDEP dep)	
+	// Set up variables to be used throughout routine
+
+	type Public String AIACR(),AITIER(),AX,AX(),CRCD,GLSC,INDTYP()
+	type Public String LDINDX(),LDMTRX(),ORIGDLR(),ORIGSEG()
+	type Public String POSACR(),PRODETC(),TIER()
+
+	type Public Number COSTCTR,ER,GLCID,OCC,PRCTYP,SEGEXT,TRB,TYPE
+
+	type Public Date CUVAR2,SAVEFD
+
+	type Number I
+
+	// Reset arrays before populating.  
+	set TIER=""
+	set AITIER=""
+
+	// General Ledger Set Code
+	set GLSC=dep.glsc
+
+	// Interest expense G/L
+	type RecordUTBLGLSC utblglsc=Db.getRecord("UTBLGLSC","GLSC")
+	set GLCID=utblglsc.dgli	
+
+	// Cost Center
+	set COSTCTR=dep.cc
+
+	// Transaction to Reduce Balance
+	set TRB=dep.trb
+
+	// Product Type
+	set TYPE=dep.type	
+
+	/* Set array of adjustment transaction to be used by $$GETETC() 
+	function. Sequence of selected columns matters. */
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:TYPE",1)
+	if 'prodctl.getMode() for I=1:1:8 set PRODETC(I)=""
+	else  do {
+		set PRODETC(1)=prodctl.dradin
+		set PRODETC(2)=prodctl.dradie
+		set PRODETC(3)=prodctl.draai
+		set PRODETC(4)=prodctl.drpai
+		set PRODETC(5)=prodctl.cradin
+		set PRODETC(6)=prodctl.cradie
+		set PRODETC(7)=prodctl.craai
+		set PRODETC(8)=prodctl.crpai
+		}
+
+	// Currency Code	
+	set CRCD=dep.crcd	
+
+	// Cost Center	
+	set OCC=dep.cc			
+
+	// Pos Accrued Int/Div, account level
+	set POSACR(-1)=dep.posacr	
+
+	// Avail Interest Accrued, account level
+	set AIACR(-1)=dep.aiacr		
+
+	if dep.index'="",dep.segacr do {
+		type RecordINDEX index=Db.getRecord("INDEX","INDEX=:dep.index",1)
+		set INDTYP(dep.index)=index.basrel
+
+		if INDTYP(dep.index)=1 set TIER(-1)=1
+		
+		do LOADIX^INDEXMC(dep.index,SAVEFD,CUVAR2)	// load IX array
+		set LDINDX(dep.index)=""
+		}
+	
+	// Available Interest Index
+	if dep.aiindex'="" do {
+		if '$D(INDTYP(dep.aiindex)) do {
+			type RecordINDEX index=Db.getRecord("INDEX","INDEX=:dep.aiindex",1)
+			set INDTYP(dep.aiindex)=index.basrel
+			}
+
+		if INDTYP(dep.aiindex)=1 set AITIER(-1)=1
+
+		// load IX
+		if '$D(LDINDX(dep.aiindex)) do LOADIX^INDEXMC(dep.aiindex,SAVEFD,CUVAR2)
+		set LDINDX(dep.aiindex)=""
+		}
+
+	// Int/Div Matrix
+	if dep.intmat'="" do {
+		set AX=dep.intmat
+		do LOADAX^MATRIXMC(.AX,SAVEFD,CUVAR2)
+		set LDMTRX(dep.intmat)=""
+		}
+
+	// Available Interest Matrix
+	if dep.aiintmat'="" do {
+		set AX=dep.aiintmat
+		if '$D(LDINDX(dep.aiintmat)) do LOADAX^MATRIXMC(.AX,SAVEFD,CUVAR2)
+		set LDMTRX(dep.aiintmat)=""
+		}
+
+	// Load segment info
+	type DbSet dbs=Db.selectDbSet("DEPSEG","CID=:dep.cid")
+	if 'dbs.isEmpty() while dbs.next() do { quit:ER
+
+		type RecordDEPSEG depseg=dbs.getRecord("DEPSEG")
+
+		// Positive accrued interest, segment level
+		set POSACR(depseg.segment)=depseg.posacr
+
+		// Available interest accrued, segment level
+		set AIACR(depseg.segment)=depseg.aiacr
+
+		// Original segments = Segment Start Date
+		set ORIGSEG(depseg.segment)=depseg.segstart
+
+		// Segment Date of Last Renewal
+		set ORIGDLR(depseg.segment)=depseg.dlr
+		if depseg.dlr'="",depseg.dlr>SAVEFD do { quit:ER
+			// Cannot effective-date prior to date last renewed
+			if PRCTYP=3,SEGEXT=depseg.segment do Runtime.setErrMSG("DEPSEG",449)
+			}
+
+		if depseg.index'="" do {
+			if '$D(INDTYP(depseg.index)) do {
+				type RecordINDEX index=Db.getRecord("INDEX","INDEX=:depseg.index",1)
+				set INDTYP(depseg.index)=index.basrel
+				}
+
+			if INDTYP(depseg.index)=1 set TIER(depseg.segment)=1
+			// load IX
+			if '$D(LDINDX(depseg.index)) do LOADIX^INDEXMC(depseg.index,SAVEFD,CUVAR2)
+			set LDINDX(depseg.index)=""
+			}
+
+		quit:depseg.intmat=""
+
+		// Load AX
+		set AX=depseg.intmat
+		if '$D(LDMTRX(depseg.intmat)) do LOADAX^MATRIXMC(.AX,SAVEFD,CUVAR2)
+		set LDINDX(depseg.index)=""
+		}
+
+	// if externally called from INDEXMC, dump new index values into IX
+	if PRCTYP=1 do INDDUMP quit
+
+	// if externally called from MATRIXMC, dump new matrix values into AX
+	if PRCTYP=2 do MATDUMP quit
+
+	quit
+
+
+INDDUMP	// Dump new index info into IX array
+
+	type Public String IX(,,),NEWARR(),NWINDEX
+	type Public Date SAVEFD
+
+	type Number I=""
+
+	kill IX(NWINDEX,SAVEFD)
+
+	for  set I=$O(NEWARR(I)) quit:I=""  set IX(NWINDEX,SAVEFD,I)=NEWARR(I)
+
+	quit
+
+
+MATDUMP	// Dump new matrix info into AX array
+
+	type Public String AX(,,,),NEWARR(),NWMATRIX
+	type Public Date SAVEFD
+	
+	type Number I=""
+
+	kill AX(NWMATRIX,SAVEFD)
+
+	for  set I=$O(NEWARR(I)) quit:I=""  do {
+
+		type Number ROW=$P(NEWARR(I),"|",1)
+		type Number COL=$P(NEWARR(I),"|",2)
+		type String SPREAD=$P(NEWARR(I),"|",3)
+
+		if ROW'="",COL="" set AX(NWMATRIX,SAVEFD,ROW)=SPREAD
+		else  if COL'="" set AX(NWMATRIX,SAVEFD,ROW,COL)=SPREAD
+		}
+
+	quit
+
+
+BUILDACT(RecordDEP dep)	
+	// Build ACT array to hold history activity for the account
+	
+	type Public Date CUVAR2,SAVEFD
+	type Public String ACT(),REVEC(),SEGTXN(,)
+	type Public Number ER
+
+	type String AIIRNFM(),IRNFM()
+	type Date EOMDATE,EOYDATE,JD
+	
+	type DbSet dbs=Db.selectDbSet("HIST","CID=:dep.cid") 
+	if 'dbs.isEmpty() while dbs.next() do { quit:ER
+
+		type String FMINFO
+		type Number AHSEQ,EXIT=0,ROLL=0
+		type Date EVNTDT
+
+		type RecordHIST hist=dbs.getRecord("HIST")
+
+		if hist.efd="" set hist.efd=hist.tjd
+
+		// do not include entries for the effective date or earlier
+		quit:hist.efd'>SAVEFD
+
+		if hist.tso["ROLL#" set ROLL=1
+
+		// not a financial transaction or file maintenance entry
+		if hist.itc="",hist.tcmt'["[" quit
+
+		// ignore currency code changes due to EURO conversion
+		if hist.tcmt["CRCD" quit
+
+		/* ignore secondary/sysgen accrual adjustment transactions
+		or secondary transactions flagged with UPSCSEG */
+		if hist.itc7,'ROLL do { quit:EXIT
+			// Accrued Interest/Dividend
+			if $P(hist.tamt,"#",3) set EXIT=1 quit
+			// Accrued Interest on Avail
+			if $P(hist.tamt,"#",14) set EXIT=1 quit
+			// Negative Accrued (Authorized)
+			if $P(hist.tamt,"#",6) set EXIT=1 quit
+			// Negative Accrued (Unauth)
+			if $P(hist.tamt,"#",11) set EXIT=1 quit
+
+			if (hist.tso["UPSCSEG#") set EXIT=1
+			}
+
+		// ignore reversals/ECs and flag their matching entries
+		if hist.itc6!hist.itc12 do { quit
+			type String MATCH
+
+			set MATCH=$$FIELD^UTSO(hist.tso,"REV")
+			if MATCH'="" set REVEC(MATCH)=""
+			}
+
+		// ignore reversal/EC matching transactions
+		if $D(REVEC(hist.tseq)) quit
+
+		// event date
+		if hist.efd set EVNTDT=hist.efd
+		else  set EVNTDT=hist.tjd
+
+		// future-dated
+		if hist.efd>CUVAR2 quit
+
+		// ACT history sequence number
+		set AHSEQ=$O(ACT(EVNTDT,""),-1)+1
+
+		// Load whole HIST record to ACT array
+		set ACT(EVNTDT,AHSEQ)=$$HIST2STR(.hist)
+		set ACT(EVNTDT,AHSEQ,"HSEQ")=hist.tseq
+
+		/* Set accrual in reverse event in activity array for possible
+		non-accrual expiration date if using Brazil Segment
+		Processing and a transaction to principal occured in the
+		non-accrual period.The beginning of the non-accrual period
+		is taken care of as a by-product of reversing transactions. */
+		
+		#IF CUVAR.USEGOPT=1
+			if $$MVER^SEGINIDT(.dep,EVNTDT) do {
+				type Date JD
+				type Number PRIN
+				set PRIN=$P(hist.tamt,"#",2)
+				if PRIN="" set PRIN=hist.tamt
+				// No principal amount
+				if 'PRIN quit
+				// Non-Business Date Cal
+				set JD=$$NBDNM^SEGINIDT(EVNTDT,dep.nbdc)-1
+				set ACT(JD,8899)="Accrual calculation (reverse)"
+				}
+		#END IF	
+			
+		// if file maintenance, set up in FM array
+		set FMINFO=$P(hist.tcmt,":",1)
+		if hist.tamt="",FMINFO'="" do BUILDFM(.hist,FMINFO,EVNTDT,AHSEQ) quit
+
+		// if not file maintenance, update SEGTXN array for future ref
+		if FMINFO="" do { quit:ER
+			
+			// Load last values for sequence into SEGTXN array
+			type RecordSEGTXN segtxn=Db.getRecord("SEGTXN","CID=:dep.cid,HSEQ=:hist.tseq",1)
+			if segtxn.getMode() set SEGTXN(dep.cid,hist.tseq)=segtxn.lastso_"|"_segtxn.lastamt
+			}
+		}
+
+	// Set initial values of interest last change dates into ACT array
+	if 'dep.segacr do {
+
+		type DbSet dbs=Db.selectDbSet("DEPSEG","CID=:dep.cid")
+		if dbs.isEmpty() quit
+		while dbs.next() do {
+			
+			type RecordDEPSEG depseg=dbs.getRecord("DEPSEG")
+
+			if depseg.ichld=""!(depseg.ichld<SAVEFD) quit
+			set ACT(depseg.ichld,8895,depseg.segment)="Interest rate change date (reverse)"
+			}
+		}
+	else  if dep.ichld'="",dep.ichld'<SAVEFD set ACT(dep.ichld,8895,-1)="Interest rate change date (reverse)"
+
+	// Set initial ACT entry for available interest rate last change date
+	if dep.aiichld'="",dep.aiichld'<SAVEFD set ACT(dep.aiichld,8896,-1)="Available interest rate change date (reverse)"
+
+	// Set up initial ACT array entries for interest posting dates
+	if dep.segacr do { quit:ER
+		// Int/Div Paid - Last Date
+		if dep.ipld="" do { quit:ER
+			// set up initial IPLD date
+			if (dep.ipf'=""),(dep.inp'="") do {
+				set dep.ipld=$$NJD^UFRE(dep.inp,dep.ipf,,1) quit:ER
+				if dep.ipld<SAVEFD set dep.ipld=""
+				}
+			}
+		if dep.ipld'="",dep.ipld'<SAVEFD set ACT(dep.ipld,8898,-1)="Interest posting (reverse)"
+
+		// Available Interest Last Posting Date
+		if dep.aiipld="" do { quit:ER
+			// set up initial AIIPLD date
+			if (dep.aiipf'=""),(dep.aiinp'="") do {
+				set dep.aiipld=$$NJD^UFRE(dep.aiinp,dep.aiipf,,1) quit:ER
+				if dep.aiipld<SAVEFD set dep.aiipld=""
+				}
+			}
+		if dep.aiipld'="",dep.aiipld'<SAVEFD set ACT(dep.aiipld,8897,-1)="Interest on available interest posting (reverse)"
+		}
+	else  do {	// Do not perform if accruing at account level
+		type DbSet dbs=Db.selectDbSet("DEPSEG","CID=:dep.cid")
+
+		if 'dbs.isEmpty() while dbs.next() do {
+
+			type Date AIIPLD,IPLD
+
+			type RecordDEPSEG depseg=dbs.getRecord("DEPSEG")
+
+			set IPLD=depseg.ipld  // Interest Last Posting Date
+			
+			if IPLD'="" do {
+				if depseg.segment=0,IPLD<SAVEFD do {
+					// Interest Change Frequency
+					if depseg.intfre'="" for  set IPLD=$$NJD^UFRE(IPLD,depseg.intfre) quit:IPLD'<SAVEFD  quit:ER
+					}
+					
+				// Posting interest @ BOD
+				
+				#IF CUVAR.INTPOS=2 
+					if IPLD'>CUVAR2,IPLD'<SAVEFD set ACT(IPLD,8898,depseg.segment)="Interest posting (reverse)"
+				// Posting interest @ EOD
+				#ELSE
+					if IPLD<CUVAR2,IPLD'<SAVEFD set ACT(IPLD,8898,depseg.segment)="Interest posting (reverse)"
+				#END IF			
+				}
+
+			// Available Interest Last Posting Date
+			if 'depseg.aiipld quit
+
+			set AIIPLD=depseg.aiipld
+			if depseg.segment=0,AIIPLD<SAVEFD do {
+				if depseg.intfre'="" for  set AIIPLD=$$NJD^UFRE(AIIPLD,depseg.intfre) quit:AIIPLD'<SAVEFD  quit:ER
+				}
+			// Posting interest @ BOD
+			#if CUVAR.INTPOS=2 
+				if AIIPLD'>CUVAR2,AIIPLD'<SAVEFD set ACT(AIIPLD,8897,depseg.segment)="Interest on available interest posting (reverse)"
+			// Posting interest @ EOD
+			#ELSE
+				if AIIPLD<CUVAR2,AIIPLD'<SAVEFD set ACT(AIIPLD,8897,depseg.segment)="Interest on available interest posting (reverse)"
+			#END IF			 
+			}
+		}
+
+	// Set up reverse accrual entries for all dates in ACT before CUVAR2
+	set JD=CUVAR2
+	for  set JD=$O(ACT(JD),-1) quit:JD=""  set ACT(JD,8899)="Accrual calculation (reverse)"
+
+	// Set up accrual calculations for promotional rate expiration date
+	if dep.trexd,dep.trexd>SAVEFD,dep.trexd<CUVAR2 do {
+		set ACT(dep.trexd-1,8899)="Accrual calculation (reverse)" set ACT(dep.trexd-1,-99)="Accrual calculation (forward)"
+		set ACT(dep.trexd,8899)="Accrual calculation (reverse)" set ACT(dep.trexd,-99)="Accrual calculation (forward)"
+		if dep.trexd+1<CUVAR2 set ACT(dep.trexd+1,8899)="Accrual calculation (reverse)" set ACT(dep.trexd+1,-99)="Accrual calculation (forward)"
+		}
+
+	// Set up Month End events
+	set EOMDATE=$$EOMJD^SCADAT(SAVEFD,1)
+	for  quit:EOMDATE'<CUVAR2  do { quit:ER
+		set ACT(EOMDATE,99998)="Month End Event"
+		set EOMDATE=$$EOMJD^SCADAT((EOMDATE+1),1)
+		}
+
+	// Set up Year End events
+	set EOYDATE=$$EOYJD^SCADAT(SAVEFD,1)
+	for  quit:EOYDATE'<CUVAR2  do { quit:ER
+		set ACT(EOYDATE,99999)="Year End Event"
+		set EOYDATE=$$EOYJD^SCADAT((EOYDATE+1),1)
+		}
+	quit
+
+
+BUILDFM(RecordHIST hist,String FMINFO,Date EVNTDT,Number AHSEQ)	
+	/* Build file maintenance array (FM)
+
+	Arguments:
+		. FMINFO File maintenance info string 	/TYP=T/MECH=VAL/REQ
+		. EVNTDT File maintenance date  	/TYP=D/MECH=VAL/REQ
+		. AHSEQ  ACT history sequence number 	/TYP=N/MECH=VAL/REQ
+	*/
+	type Public String ACT(,),AIIRNFM(),FM(,),IRNFM()
+	type Public String %LIBS
+	type Public Number ER
+
+	type Number SEG=""
+	type String DI,FID,NEWVAL,OLDVAL,SEGINFO,X
+
+	set SEGINFO=$P(FMINFO,"[",1)
+	if SEGINFO'="" set SEG=$P(SEGINFO,",",2)
+	// account level maintenance
+	else  set SEG=-1
+
+	set FMINFO=$P(FMINFO,"[",2) 
+
+	// get file and data item information
+	set X="["_FMINFO do ^DBSDI quit:ER
+
+	// remove entry and quit if not DEP or DEPSEG
+	if FID'="DEP",FID'="DEPSEG" kill ACT(EVNTDT,AHSEQ) quit
+
+	/* If there was already an IRN/AIIRN history entry for this date,
+	kill the original entry.  This is to ensure that only the most recent
+	file maintenance for this date is used.  */
+	if DI="IRN",$D(IRNFM(EVNTDT)) do {
+		type Number TRGSEQ 
+
+		set TRGSEQ=IRNFM(EVNTDT)
+		kill ACT(EVNTDT,TRGSEQ)
+		kill FM(EVNTDT,TRGSEQ)
+		}
+	if DI="AIIRN",$D(AIIRNFM(EVNTDT)) do {
+		type Number TRGSEQ 
+		
+		set TRGSEQ=AIIRNFM(EVNTDT)
+		kill ACT(EVNTDT,TRGSEQ)
+		kill FM(EVNTDT,TRGSEQ)
+		}
+
+	// set entries in IRNFM/AIIRNFM arrays
+	if DI="IRN" set IRNFM(EVNTDT)=AHSEQ
+	if DI="AIIRN" set AIIRNFM(EVNTDT)=AHSEQ
+
+	set OLDVAL=$P(hist.tcmt,":",2)
+	set NEWVAL=$P(hist.tcmt,":",3)
+
+	set FM(EVNTDT,AHSEQ)=SEG_"|"_FID_"|"_DI_"|"_OLDVAL_"|"_NEWVAL
+
+	quit
+
+
+REVERSE(RecordDEP dep,RecordTTX ttx)
+	// Unwind account and segments to the state they were on SAVEFD
+
+	type Public String ACT(),FM(,)
+	type Public Date CUVAR2,SAVEFD
+	type Public Number DIR,ER
+
+	type Date EVNTDT=""
+	type Date LASTACR=CUVAR2	// Last accrued to date
+	type Number EVNTSEQ=""
+	
+	/* Process any commission corrections for portfolio plans that were 
+	a result of this transaction */
+	do COMCOR^TTXCOM(.dep,SAVEFD) quit:ER
+
+	// Calculate commission adjustment if any plan(s) tied to this account
+	type ResultSet rs=Db.select("CPLAN","COMPLNCID","CID=:dep.cid")
+	if 'rs.isEmpty() do COMADJ^RECALC(.dep,.ttx) quit:ER
+
+	// Direction through ACT array
+	set DIR=-1
+
+	for  set EVNTDT=$O(ACT(EVNTDT),-1) quit:(EVNTDT="")!(ER)!(EVNTDT'>SAVEFD)  do {
+		for  set EVNTSEQ=$O(ACT(EVNTDT,EVNTSEQ),-1) quit:(EVNTSEQ="")!(ER)  do {
+			
+			type String DATA
+			type Number RHSEQ
+		
+			#ACCEPT DATE={2/13/2003};PGM={Vitaliy Antonov}  
+
+			/* Compiler instruction not to throw "Assigning 
+			system variable" warning. This variable is declared 
+			in this section, so old value is hidden */
+			#ACCEPT DATE={2/13/2003};PGM={Vitaliy Antonov}
+			type Date %SystemDate=EVNTDT
+
+			type Date %EffectiveDate=EVNTDT
+
+			set DATA=$G(ACT(EVNTDT,EVNTSEQ))
+			set RHSEQ=$G(ACT(EVNTDT,EVNTSEQ,"HSEQ"))
+
+			// Quit if this is a forward accrual event
+			quit:EVNTSEQ=(-99)
+
+			// Reverse Year End event
+			if EVNTSEQ=99999 do REVYE(EVNTDT) quit
+
+			// Reverse Month End event
+			if EVNTSEQ=99998 do REVME(.dep,EVNTDT) quit
+
+			// Process accruals from EVNTDT through LASTACR-1
+			if EVNTSEQ=8899 do { quit
+				do PROCACR(.dep,EVNTDT,LASTACR-1,DIR)
+				set LASTACR=EVNTDT
+				}
+
+			// Reverse available interest change dates
+			if EVNTSEQ=8896 do REVAICH(.dep,EVNTDT) quit
+
+			// Reverse interest change dates
+			if EVNTSEQ=8895 do REVICH(.dep,EVNTDT) quit
+
+			// Reverse interest on available interest posting dates
+			if EVNTSEQ=8897 do REVAIP(.dep,EVNTDT) quit
+
+			// Reverse interest posting dates
+			if EVNTSEQ=8898 do REVIP(.dep,EVNTDT) quit
+
+			// File maintenance
+			if $D(FM(EVNTDT,EVNTSEQ)) do PROCFM(.dep,EVNTDT,EVNTSEQ,DIR) quit
+
+			type RecordTTX ttx=Class.new("RecordTTX")
+			
+			// Post reversal transaction
+			do PROCTRAN(.dep,.ttx,DATA,DIR,,RHSEQ)
+			}
+		}
+	quit:ER
+
+	// make final reverse accrual calculation on SAVEFD
+	do PROCACR(.dep,SAVEFD,LASTACR-1,DIR)
+
+	quit
+
+
+CURRENT(RecordDEP dep,RecordTTX ttx)
+	// Process the current transaction and set up for roll forward
+
+	type Public String ACT(,,),AITIER(),TIER()
+	type Public Number CLOSE,DIR,ER,NWRATE,PRCTYP,SEGEXT,SKIP
+	type Public Date CUVAR2,SAVEFD
+
+	/* Compiler instruction not to throw "Assigning system variable" warning
+	This variable is declared in this section, so old value is hidden */
+	#ACCEPT DATE={2/13/2003};PGM={Vitaliy Antonov}
+	type Date %SystemDate=SAVEFD
+
+	type Date %EffectiveDate=SAVEFD
+	type Date EVNTDT=%SystemDate-1 
+	type Date JD=%SystemDate
+
+	type Number EVNTSEQ=""
+	type Number CNT=""
+
+	set DIR=1
+
+	// Externally called from DEPIRN for effective-dated rate maintenance
+	if PRCTYP=3 do {
+		// Update segment with proper rate value as of EFD
+		if SEGEXT'="" do {
+			type RecordDEPSEG depseg=Db.getRecord("DEPSEG","CID=:dep.cid,SEGMENT=:SEGEXT",1)
+
+			if 'depseg.getMode() quit
+
+			set depseg.irn=NWRATE
+
+			do depseg.save()
+			}
+		// Update account with proper rate value as of EFD
+		else  set dep.irn=NWRATE
+		}
+
+	/* Externally called from DEPIRN for effective-dated available int
+	rate maintenance */
+	if PRCTYP=4 set dep.aiirn=NWRATE
+
+	// Process current transaction unless SKIP flag is set
+	if 'SKIP do { quit:ER
+		do PROCTRAN(.dep,.ttx,,DIR,1) quit:ER
+		}
+
+	// If closeout, quit
+	quit:CLOSE
+
+	if SKIP do {
+		// Process interest rate changes for tiered indexes
+		for  set CNT=$O(TIER(CNT)) quit:CNT=""  do FWDICH(.dep,%SystemDate,CNT)
+		if $G(AITIER(-1))=1 do FWDAICH(.dep,%SystemDate)
+		}
+
+	// Kill all reverse entries, and entries prior to SAVEFD+1
+	for  set EVNTDT=$O(ACT(EVNTDT)) quit:(EVNTDT="")!(ER)!(EVNTDT>CUVAR2)  do {
+		for  set EVNTSEQ=$O(ACT(EVNTDT,EVNTSEQ)) quit:(EVNTSEQ="")!(ER)  do {
+			if EVNTSEQ>8000,EVNTSEQ<9000 kill ACT(EVNTDT,EVNTSEQ)
+			}
+		}
+
+	// Set up forward ACT entries accruing at the account level
+	if dep.segacr do {
+		// Int/Div Change - Next Date
+		if dep.ichnd'="" set ACT(dep.ichnd,9995,-1)="Interest rate change date (forward)"
+
+		// Int/Div Next Posted
+		if dep.inp'="" set ACT(dep.inp,9998,-1)="Interest Posting (forward)"
+
+		// Available Interest Next Posting Date
+		if dep.aiinp'="" set ACT(dep.aiinp,9997,-1)="Interest on available interest posting (forward)"
+		}
+	// Accruing at segment level
+	else  do {
+		type DbSet dbs=Db.selectDbSet("DEPSEG","CID=:dep.cid")
+		if 'dbs.isEmpty() while dbs.next() do { quit:ER
+
+			type RecordDEPSEG depseg=dbs.getRecord("DEPSEG")
+
+			/* Non-accrual balance can only be set if 
+			CUVAR.USEGOPT=1 	(Brazil Segment Processing) */
+			// Non-accrual expiration (NOACREXP)
+			if depseg.noacrexp'="" set ACT(depseg.noacrexp,9994,depseg.segment)="Non-accrual expiration date (forward)"
+
+			// Interest change (ICHND)
+			if depseg.ichnd'="" set ACT(depseg.ichnd,9995,depseg.segment)="Interest rate change date (forward)"
+
+			// Interest posting (INP)
+			if depseg.inp'="" set ACT(depseg.inp,9998,depseg.segment)="Interest Posting (forward)"
+
+			// Available interest posting (AIINP)
+			if depseg.aiinp'="" set ACT(depseg.aiinp,9997,depseg.segment)="Interest on available interest posting (forward)"
+			}
+		}
+	// Accruing on avialable interest
+	if dep.aiacrf do {
+		// Available Interest Next Change Date
+		if dep.aiichnd'="" set ACT(dep.aiichnd,9996,-1)="Available interest rate change date (forward)"
+		}
+
+	// Set up forward accrual calculation entries for every activity date
+	for  set JD=$O(ACT(JD)) quit:JD=""  set ACT(JD,-99)="Accrual calculation (forward)"
+
+	// Set up ACT entry for final forward accrual calculation on CUVAR2
+	set ACT(CUVAR2,-99)="Accrual calculation (forward)"
+
+	quit
+
+
+FORWARD(RecordDEP dep)
+	// Roll forward through ACT array from SAVEFD to current system date
+
+	type Public String ACT(,,),FM(,)
+	type Public Date CUVAR2,SAVEFD
+	type Public Number ER,DIR
+
+	// last accrued to date
+	type Date LASTACR=SAVEFD
+	type Date EVNTDT=SAVEFD-1
+	type Number EVNTSEQ=""
+
+	for  set EVNTDT=$O(ACT(EVNTDT)) quit:(EVNTDT="")!(ER)!(EVNTDT>CUVAR2)  do {
+		for  set EVNTSEQ=$O(ACT(EVNTDT,EVNTSEQ)) quit:(EVNTSEQ="")!(ER)  do {    
+	
+			/* Compiler instruction not to throw "Assigning system 
+			variable" warning. This variable is declared in this 
+			section, so old value is hidden */
+			#ACCEPT DATE={2/13/2003};PGM={Vitaliy Antonov}
+			type Date %SystemDate=EVNTDT
+
+			type Date %EffectiveDate=EVNTDT
+
+			type String DATA=$G(ACT(EVNTDT,EVNTSEQ))
+			type Number RHSEQ=$G(ACT(EVNTDT,EVNTSEQ,"HSEQ"))
+
+			// skip any end of day processes for today
+			if EVNTDT=CUVAR2,EVNTSEQ>8000 quit
+
+			// Process accruals from LASTACR through EVNTDT-1
+			if EVNTSEQ=(-99) do { quit
+				do PROCACR(.dep,LASTACR,EVNTDT-1,DIR)
+				set LASTACR=EVNTDT
+				}
+
+			// Forward Year End event
+			if EVNTSEQ=99999 do FWDYE(EVNTDT) quit
+
+			// Forward Month End event
+			if EVNTSEQ=99998 do FWDME(.dep,EVNTDT) quit
+
+			// Interest posting adjustment
+			if EVNTSEQ=9998 do FWDIP(.dep,EVNTDT) quit
+
+			// Available interest posting adjustment
+			if EVNTSEQ=9997 do FWDAIP(.dep,EVNTDT) quit
+
+			// Available interest change dates
+			if EVNTSEQ=9996 do FWDAICH(.dep,EVNTDT) quit
+
+			// Interest change dates
+			if EVNTSEQ=9995 do FWDICH(.dep,EVNTDT) quit
+
+			/* Non-accrual expiration dates if accruing at the 
+			segment level */
+			if EVNTSEQ=9994,'dep.segacr do FWDNAEXP(EVNTDT) quit
+
+			// File maintenance
+			if $D(FM(EVNTDT,EVNTSEQ)) do PROCFM(.dep,EVNTDT,EVNTSEQ,DIR) quit
+
+			type RecordTTX ttx=Class.new("RecordTTX")
+			
+			// Post (reapply) transaction
+			do PROCTRAN(.dep,.ttx,DATA,DIR,,RHSEQ)
+
+			// Continue only if valid Brazil Segment Processing
+			if CUVAR.USEGOPT'=1!('$$MVER^SEGINIDT(.dep,EVNTDT)) quit
+
+			/* Check segments for change in non-accrual expiration
+			date if using Brazil Segment Processing and a
+			transaction to principal occured in the non-accrual,
+			for the purpose of setting up the future event in the
+			ACT array. The beginning of the non-accrual period
+			is taken care of as a bi-product of re-processing
+			transactions. */
+
+			// Loop though non-zero segments
+			type DbSet dbs=Db.selectDbSet("DEPSEG","CID=:dep.cid")
+			if 'dbs.isEmpty() while dbs.next() do {
+
+				type RecordDEPSEG depseg=dbs.getRecord("DEPSEG")
+
+				if depseg.noacrexp>EVNTDT,depseg.noacrexp<CUVAR2 do {
+					set ACT(depseg.noacrexp,9994,depseg.segment)="Non-accrual expiration date (forward)"
+					set ACT(depseg.noacrexp,-99)="Accrual calculation (forward)"
+					}
+				}
+			}
+		}
+	quit:ER
+
+	// Quit if posting interest at EOD
+	quit:CUVAR.INTPOS'=2
+
+	/* Process interest posting adjustments for CUVAR2 if posting at BOF
+	and if accrue at account level */
+	if dep.segacr do { quit
+		do FWDIPA(.dep,CUVAR2) quit:ER  
+		do FWDAIPA(.dep,CUVAR2)
+		}
+
+	type ResultSet depsrs=Db.select("SEGMENT","DEPSEG","CID=:dep.cid")
+	if 'depsrs.isEmpty() while depsrs.next() quit:ER  do {
+		do FWDIPS(.dep,CUVAR2,depsrs.getCol(1)) quit:ER
+		do FWDAIPS(.dep,CUVAR2,depsrs.getCol(1))
+		}
+
+	quit
+
+
+PROCFM(RecordDEP dep,Date JD,Number FMSEQ,Number DIR)
+	/* Process a file maintenance entry
+	Arguments:
+		. dep	Account Object		/TYP=RecordDEP/REQ
+		. JD 	Date of file maint 	/TYP=D/MECH=VAL/REQ
+		. FMSEQ	Sequence number  	/TYP=N/MECH=VAL/REQ
+		. DIR 	Processing direction 	/TYP=N/MECH=VAL/REQ
+	*/
+
+	type Public String ACT(,,),AITIER(),FM(,),INDTYP(),TIER()
+	type Public Number ER,NWRATE,PRCTYP,SEGEXT
+
+	type String DI,FID,MINFO,OLDVAL,VAL
+	type Number SEG
+	type Number UPDCODE=-1
+
+	// Maintenance info
+	set MINFO=$G(FM(JD,FMSEQ))
+
+	if DIR<0 set VAL=$P(MINFO,"|",4),OLDVAL=$P(MINFO,"|",5)
+	else  set VAL=$P(MINFO,"|",5),OLDVAL=$P(MINFO,"|",4)
+
+	set SEG=$P(MINFO,"|",1)
+	set FID=$P(MINFO,"|",2)
+	set DI=$P(MINFO,"|",3)
+
+	type RecordDEPSEG depseg=Db.getRecord("DEPSEG","CID=:dep.cid,SEGMENT=:SEG",1)
+
+	// File maintenance for a segment that no longer exists
+	if (SEG'=""),('depseg.getMode()) quit
+
+	// Effective dated rate change
+
+	// Ignore this FM and create a new history entry
+	if DIR>0,DI="IRN",PRCTYP=3 do { quit
+		/* Change to segment rate
+		Create file maintenance record in account history */
+		if SEG=SEGEXT do FMIRN(dep.cid,SEG,DI,NWRATE,NWRATE) quit
+		/* Change to account rate
+		Create file maintenance record in account history */
+		if '$D(SEGEXT) do FMIRN(dep.cid,-1,DI,NWRATE,NWRATE)
+		}
+
+	// Effective dated available interest rate change
+
+	// Create file maintenance record in account history
+	if DIR>0,DI="AIIRN",PRCTYP=4 do FMIRN(dep.cid,-1,DI,NWRATE,NWRATE) quit
+
+	// Entry for zero segment
+	if DI="TNUMS",(('OLDVAL)!('VAL)) quit
+
+	// File data into .depseg 
+	if FID="DEPSEG",SEG'="" do { quit:ER
+		set depseg.@DI=VAL 
+		set UPDCODE=SEG
+		do depseg.bypassSave()
+		}
+	// File data into .dep (UPDCODE = -1 in this case)
+	else  if FID="DEP" set dep.@DI=VAL
+
+	// if changing to/from a tiered index, set TIER flag
+	if ((DI="INDEX")!(DI="AIINDEX")) do { quit
+		if '$D(INDTYP(VAL)) do { quit:ER
+			type RecordINDEX index=Db.getRecord("INDEX","INDEX=:VAL",1)
+			set INDTYP(VAL)=index.basrel
+			}
+		if INDTYP(VAL)=1 do {
+			if DI="INDEX" set TIER(-1)=1
+			else  set AITIER(-1)=1
+			}
+		if INDTYP(VAL)'=1 do {
+			if DI="INDEX" kill TIER(UPDCODE)
+			else  kill AITIER(UPDCODE)
+			}
+		// update tiered interest rates
+		do UPDTIER(.dep)
+		}
+
+	quit:VAL=""
+
+	if DIR>0 do {
+		if DI="NOACREXP" set ACT(VAL,9994,UPDCODE)="Non-accrual expiration date (forward)" quit
+		if DI="ICHND" set ACT(VAL,9995,UPDCODE)="Interest rate change date (forward)" quit
+		if DI="AIICHND" set ACT(VAL,9996,UPDCODE)="Available interest rate change date (forward)" quit
+		if DI="AIINP" set ACT(VAL,9997,UPDCODE)="Interest on available interest posting (forward)" quit
+		if DI="INP" set ACT(VAL,9998,UPDCODE)="Interest Posting (forward)" quit
+		}
+
+	if DIR<0 do {
+		if DI="INTFRE" do { quit
+			type Date JD=$$NJD^UFRE(%SystemDate,VAL) quit:ER
+			do REVICH(.dep,JD,UPDCODE,1)
+			}
+		if DI="AIINTFRE" do { quit
+			type Date JD=$$NJD^UFRE(%SystemDate,VAL) quit:ER
+			do REVAICH(.dep,JD,1)
+			}
+		if DI="IPF" do { quit
+			type Date JD=$$NJD^UFRE(%SystemDate,VAL) quit:ER
+			do REVIP(.dep,JD,UPDCODE,1)
+			}
+		if DI="AIIPF" do { quit
+			type Date JD=$$NJD^UFRE(%SystemDate,VAL) quit:ER
+			do REVAIP(.dep,JD,UPDCODE,1)
+			}
+		}
+
+	quit
+
+
+PROCTRAN(RecordDEP dep, RecordTTX ttx,String DATA, Number DIR, Number CURR, Number RHSEQ)
+
+	/*
+	Process transaction
+
+	Arguments:
+		. dep 	Deposit Account Object		/TYP=RecordDEP/REQ
+		. ttx 	Transaction Object		/REF:RW
+		. DATA 	History entry data 		/TYP=T/MECH=VAL/NOREQ
+		. DIR 	Processing direction 		/TYP=N/MECH=VAL/REQ
+		. CURR 	Flag - current tran 		/TYP=N/MECH=VAL/NOREQ
+		. RHSEQ	History sequence # 		/TYP=N/MECH=VAL/NOREQ
+	*/
+
+	type public String ORIGDLR(),REVINTPS(,,),SEGTXN(,)
+	type public String RM,OM()	
+	type public Number BRCD,CLOSE,ER,PTRC
+
+	type String ORIGTSO,TSO
+	type Number ECFLG,ITC12,ORIGTAMT,ROLL,SAVTAMT,SEG,TAMT
+
+	// Check not required parameters
+	set CURR=CURR.get()
+	set RHSEQ=RHSEQ.get()
+	set ECFLG=""
+
+	if 'DATA.get().isNull() do {
+		set ttx.cid=dep.cid
+		set ttx.itc=DATA.piece("|",2)
+		set ttx.etc=DATA.piece("|",3)
+		set ttx.tamt=DATA.piece("|",4)
+		set ttx.efd=DATA.piece("|",5)
+		set ttx.tlo=DATA.piece("|",6)
+		set ttx.tso=DATA.piece("|",7)
+		set ttx.tcmt=DATA.piece("|",8)
+		set ttx.cdt=DATA.piece("|",9)
+		set ttx.tim=DATA.piece("|",10)
+		set ttx.brcde=DATA.piece("|",11)
+		set ttx.trc=DATA.piece("|",12)
+		set ttx.uidt=DATA.piece("|",13)
+		set TSO=DATA.piece("|",7)
+		set ORIGTSO=DATA.piece("|",7)
+		set TAMT=DATA.piece("|",4)
+		set ORIGTAMT=DATA.piece("|",4)
+		set ttx.crcd=DATA.piece("|",17)
+		}
+	else  do {		
+		set (ORIGTSO,TSO)=ttx.tso
+	 	set (ORIGTAMT,TAMT)=ttx.tamt
+		}
+
+	set ITC12=ttx.itc12
+
+	if ttx.tso.isLike("%ROLL#%") set ROLL=1
+	else  set ROLL=0
+
+	// If sysgen interest posting transaction going forward, quit
+	if 'ROLL,DIR>0,ttx.itc4,ttx.itc7 quit
+
+	if CURR do { quit:ER
+		type Date DLR
+		type Number XSEG
+
+		set XSEG=$$FIELD^UTSO(TSO,"SEG")
+		if XSEG.isNull() set XSEG=$$SEARCH^DEPPISEG(.dep,%SystemDate)
+		if XSEG do {
+			set DLR=ORIGDLR(XSEG).get()
+			// Cannot effective-date prior to date last renewed
+			if 'DLR.isNull(),DLR>%SystemDate do Runtime.setErrMSG("DEPSEG",449)
+			}
+		}
+
+	/*
+	If the current transaction is a reversal (or EC), the SEGTXN
+	entry for this transaction is not set up yet (this replaces ^TRNDRV
+	code that uses TAMT from disk)
+	*/
+	if (ttx.itc6)!(ITC12) do {
+		set RHSEQ=$$FIELD^UTSO(TSO,"REV")
+		set ECFLG=$$FIELD^UTSO(TSO,"EC")
+
+		// Load last values for sequence into SEGTXN array
+		type RecordSEGTXN segtxn=Db.getRecord("SEGTXN","CID=:dep.cid,HSEQ=:RHSEQ",1)
+		if segtxn.getMode() set SEGTXN(dep.cid,RHSEQ)=segtxn.lastso_"|"_segtxn.lastamt
+		}
+
+	if SEGTXN(dep.cid,RHSEQ).exists() do {
+		set TSO=SEGTXN(dep.cid,RHSEQ).piece("|",1)
+		set ORIGTSO=SEGTXN(dep.cid,RHSEQ).piece("|",1)
+		set TAMT=SEGTXN(dep.cid,RHSEQ).piece("|",2)
+
+		// No TAMT in SEGTXN entry
+		if TAMT.isNull() set TAMT=ORIGTAMT
+
+		// Use TAMT from SEGTXN
+		else  set ORIGTAMT=TAMT
+		}
+
+	set SEG=$$FIELD^UTSO(TSO,"SEG")
+	set ECFLG=ECFLG.get()
+
+	// Quit if no transaction amount
+	if +TAMT=0 quit
+
+	// If in reverse
+	if DIR<0 do { quit:ER
+		type Number I
+
+		// Update TAMT
+		for I=1:1:TAMT.length("#") if TAMT.piece("#",I) set TAMT.piece("#",I)=-TAMT.piece("#",I)
+
+		// Set up as reversal transaction
+		set ITC12=1
+		set ttx.itc=$$ITC^TTXEXT(ttx.itc,12,1)
+		}
+
+	// Reversal or error correct
+	if (ttx.itc6)!(ITC12) do { quit:ER
+		type Date DLR
+		type Number SCFLG
+
+		/* Note: any transactions being processed in reverse (DIR=-1)
+		will enter this section since they are set up as reversals 
+		above. */
+
+		set TSO=$$FIELDIN^UTSO(TSO,"REV",RHSEQ)
+		if 'ECFLG.isNull() set TSO=$$FIELDIN^UTSO(TSO,"EC",ECFLG)
+
+		/* If this transaction originally created a segment, process
+		transactions to back off any accruals leftover due to rounding */
+		set SCFLG=$$FIELD^UTSO(TSO,"SEGCREATE")
+		quit:'SCFLG!('Db.isDefined("DEPSEG","CID=:dep.cid,SEGMENT=:SCFLG"))
+
+		type RecordDEPSEG depseg=Db.getRecord("DEPSEG","CID=:dep.cid,SEGMENT=:SCFLG")
+
+		set DLR=ORIGDLR(SCFLG).get()
+		// Cannot effective-date prior to date last renewed
+		if 'DLR.isNull() do Runtime.setErrMSG("DEPSEG",449)
+
+		// Clear accrued interest
+		if depseg.posacr do { quit:ER
+			type String LETC=$$GETETC(1) quit:ER
+			do ACRTRAN(.dep,depseg.posacr,LETC,SCFLG) quit:ER
+			}
+
+		// Clear accrued available interest
+		if depseg.aiacr do { quit:ER
+			type String LETC=$$GETETC(3) quit:ER
+			do ACRTRAN(.dep,depseg.aiacr,LETC,SCFLG)
+			}
+		}
+
+	if DIR>0 do { quit:ER
+		type String XTSO,XTSO()
+
+		/* Remove TAMT detail that should be rebuilt by processing the
+		transaction */
+		set TAMT=ttx.prin
+		set SAVTAMT=TAMT
+
+		quit:CURR!(ROLL)
+
+		/* remove TSO entries that should be rebuilt by processing the
+		transaction */
+		do OUT^UTSO(.XTSO,TSO) quit:ER
+
+		// remove entries
+		kill XTSO("SEGP"),XTSO("SEGA"),XTSO("SEGAA")
+		kill XTSO("SEGI"),XTSO("SEGCREATE")
+		set TSO=""
+
+		// reinsert remaining entries
+		do IN^UTSO(.XTSO,.TSO) quit:ER
+		}
+
+	set ttx.tamt=TAMT
+	set ttx.tso=TSO
+	// Error-Correct Data
+	if 'DATA.get().isNull() set ttx.lnerc=DATA.piece("|",16)
+
+	// Only update HIST / DTX for current transaction
+        if 'CURR do {
+		// If interest posting and in reverse, update HIST / DTX and 
+		// create accrual update transaction
+		if DIR<0,ttx.itc4,'ROLL do {
+			type Number ACRAMT,XDC,XSEG
+			type String XTSO
+
+			set XSEG=$$FIELD^UTSO(ttx.tso,"SEG")
+			if XSEG.isNull() set XSEG=-1
+
+			quit:$D(REVINTPS(%SystemDate,XSEG,ttx.etc))
+			set REVINTPS(%SystemDate,XSEG,ttx.etc)=""
+
+			set ACRAMT=$$FIELD^UTSO(ttx.tso,"EXACTACR")
+			if 'ACRAMT set ACRAMT=TAMT.piece("#",1)
+			else  set ACRAMT=-ACRAMT
+
+			// Post reversal of interest posting transaction
+			do TRNSINGL^TRNDRV(.ttx,.dep,%SystemDate,BRCD,4) quit:ER
+
+			// Process accrual adjustment
+			do POSTOFF(.dep,.ttx,SEG,ACRAMT)
+
+			// Create offsetting G/L transaction
+			set XDC='ttx.itc1
+			do GLOFF(TAMT.piece("#",1),XDC)
+			}
+		else  do {
+			// For all other unwind / reapply transactions, process
+			// to update objects, but don't store in HIST / DTX
+	        	do ttx.setStoredValue("noJournal", 1)
+			do TRNSINGL^TRNDRV(.ttx,.dep,%SystemDate,BRCD,4) quit:ER
+			}
+        	}
+	else  do {
+		/*
+		For the current transaction process now to update objects, but 
+		don't store in HIST / DTX... this will be done after 
+		processing is returned to TRNDRV for the original transaction
+		*/
+        	do ttx.setStoredValue("noJournal", 1) 
+		do TRNSINGL^TRNDRV(.ttx,.dep,%SystemDate,BRCD,1,,,,PTRC,,.OM()) quit:ER
+		do ttx.setStoredValue("noJournal", 0)
+		}
+
+	// If currently processing a closeout, no need to continue
+	if CLOSE quit
+
+	if DIR>0,'ROLL do { quit:ER
+		type Number CREATSEG
+
+		// Reversal or error correct
+		if (ttx.itc6)!(ITC12) quit
+
+		// If the transaction created a new segment, set up ACT entries
+		set CREATSEG=$$FIELD^UTSO(ttx.tso,"SEGCREATE")
+		if CREATSEG do NSEGACT(.dep,CREATSEG)
+
+		quit:CURR
+
+		// Update SEGTXN with latest TSO and TAMT values
+		if ttx.tso'=ORIGTSO!(ttx.tamt'=ORIGTAMT) do {
+			type RecordSEGTXN segtxn=Db.getRecord("SEGTXN","CID=:ttx.cid,HSEQ=:RHSEQ", 1)
+
+			set segtxn.lastso=ttx.tso
+			set segtxn.lastamt=ttx.tamt
+
+			do segtxn.bypassSave()
+			}
+		}
+
+	// Update tiered interest rates
+	do UPDTIER(.dep)
+
+	quit
+
+
+POSTOFF(RecordDEP dep,RecordTTX ttx,Number SEG,Number TAMT)
+	/* Set up and process offsetting interest accrual transaction 
+	for interest posting amount 
+
+	Arguments:
+		. dep 	Deposit Account Object		/TYP=RecordDEP/REQ
+		. ttx 	Accrual transaction		/TYP=RecordTTX/REQ
+		. SEG	Segment to post to		/TYP=N/MECH=VAL/REQ
+		. TAMT	Amount of accrual 		/TYP=N/MECH=VAL/REQ
+	*/
+
+	type Public Cache %CACHE()
+	type Public Number BRCD,ER,OCC
+	type Public String DATA
+
+	type String ETC,TSO=""
+
+	// New offset transaction	
+	type RecordTTX offttx=Class.new("RecordTTX")
+
+	if SEG'="",SEG'<0 set TSO=$$FIELDIN^UTSO(TSO,"SEG",SEG)
+	else  set TSO=""
+
+	if ttx.itc1 do { quit:ER
+		if ttx.itc4=1 set ETC=$$GETETC(1)
+		else  set ETC=$$GETETC(3)
+		}
+	else  do { quit:ER
+		if ttx.itc4=1 set ETC=$$GETETC(5)
+		else  set ETC=$$GETETC(7)
+		}
+
+	
+	type RecordTRN trn=%CACHE("TRN").getRecord("TRN","ETC=:ETC")
+
+	set offttx.cid=ttx.cid
+	set offttx.itc=trn.itc
+	set offttx.etc=ETC
+	set offttx.tamt=TAMT
+	set offttx.tlo=%UserStation
+	set offttx.tso=TSO
+	// Transaction Class
+	if trn.cls="M" set offttx.cc=OCC
+	// Currency Code from History entry data of ACT array
+	#IF CUVAR.%MCP set offttx.crcd=$P(DATA,"|",17)
+
+	// Process offsetting transaction
+	do TRNSINGL^TRNDRV(.offttx,.dep,%SystemDate,BRCD,4) quit:ER
+
+	quit
+
+
+UPDTIER(RecordDEP dep)	// Update tiered interest rates
+
+	type Public Number DIR,ER
+	type Public String AITIER(),TIER()
+
+	type Number CNT=""
+
+	// Process interest rate changes for tiered indexes
+	for  set CNT=$O(TIER(CNT)) quit:CNT=""  do { quit:ER
+		if DIR>0 do FWDICH(.dep,%SystemDate,CNT)
+		else  do REVICH(.dep,%SystemDate,CNT)
+		}
+
+	// Process available interest rate change if tiered
+	if $G(AITIER(-1)) do { quit:ER
+		if DIR>0 do FWDAICH(.dep,%SystemDate)
+		else  do REVAICH(.dep,%SystemDate,CNT)
+		}
+
+	quit
+
+
+NSEGACT(RecordDEP dep,Number NEWSEG)
+	/* Set up ACT entries for newly created segment
+
+	Arguments:
+		. dep		Deposit Account Object	/TYP=RecordDEP/REQ
+		. NEWSEG	New segment number	/TYP=N/MECH=VAL/REQ
+	*/
+	type Public String ACT(,,),AIACR(),INDTYP(),POSACR(),TIER()
+	type Public Date CUVAR2
+	type Public Number ER,SAVTAMT
+
+	type RecordDEPSEG depseg=Db.getRecord("DEPSEG","CID=:dep.cid,SEGMENT=:NEWSEG",1)
+	if 'depseg.getMode() quit
+
+	// If no POSACR or AIACR entry, create one
+	if '$D(POSACR(NEWSEG)) set POSACR(NEWSEG)=0
+
+	// If accrue on available interest 
+	if dep.aiacrf,'$D(AIACR(NEWSEG)) set AIACR(NEWSEG)=0
+
+	// set up initial rate if index is defined and accruing at segment level
+	if depseg.index'="",'dep.segacr do {
+		type Number ER=0,RATE
+		type String PAR()
+
+		// Setup parameter array for UINDX
+		do SETPAR^UINDX(.PAR,depseg.index,depseg.intspr,depseg.rndmtd,depseg.intmat,NEWSEG,1,0,0,1,1,1)
+		// Calculate rate
+		do CTL^UINDX(.dep,%SystemDate,SAVTAMT,.PAR) quit:ER ""
+		set depseg.irn=RATE
+		}
+	quit:ER
+
+	// Initial interest rate change date
+	if depseg.ichnd'="" do {
+
+		type String INDEX=dep.index
+
+		quit:INDEX=""
+
+		if '$D(INDTYP(INDEX)) do { quit:ER
+			type RecordINDEX index=Db.getRecord("INDEX","INDEX=:INDEX",1)
+
+			if 'index.getMode() quit
+
+			set INDTYP(INDEX)=index.basrel
+			}
+
+		// Set up TIER entry
+		if INDTYP(INDEX)=1 set TIER(NEWSEG)=1
+		quit:depseg.ichnd'<CUVAR2
+		set ACT(depseg.ichnd,9995,NEWSEG)="Interest rate change date (forward)"
+		set ACT(depseg.ichnd,-99)="Accrual calculation (forward)"
+		}
+
+	// Interest posting date
+	if depseg.inp'="",depseg.inp<CUVAR2 do {
+		set ACT(depseg.inp,9998,NEWSEG)="Interest Posting (forward)"
+		set ACT(depseg.inp,-99)="Accrual calculation (forward)"
+		}
+
+	// Interest on available interest posting date
+	if depseg.aiinp'="",depseg.aiinp<CUVAR2 do {
+		set ACT(depseg.aiinp,9997,NEWSEG)="Interest on available interest posting (forward)"
+		set ACT(depseg.aiinp,-99)="Accrual calculation (forward)"
+		}
+
+	do depseg.bypassSave()
+
+	quit
+
+
+REVICH(RecordDEP dep,Date JD,Number SEG,Number FM)
+	/* Reverse interest change info and update ACT array
+
+	Arguments:
+		. dep	Deposit Account Object		/TYP=RecordDEP/REQ
+		. JD	Calculation base date  		/TYP=D/MECH=VAL/REQ
+		. SEG	Single segment to update 	/TYP=N/MECH=VAL/NOREQ
+		. FM	File maintenance flag  		/TYP=N/MECH=VAL/NOREQ
+	*/
+	type Public Number ER
+	type Public String ACT(,,)
+
+	type Number SEGSEQ
+
+	// Check not required parameters
+	set SEG=$G(SEG)
+	set FM=$G(FM)
+
+	// single update
+	if SEG'="" do { quit
+		if SEG<0 do REVICHA(.dep,JD,FM) quit
+		do REVICHS(.dep,JD,SEG,FM)
+		}
+
+	set SEGSEQ=""
+	for  set SEGSEQ=$O(ACT(JD,8895,SEGSEQ)) quit:(SEGSEQ="")!(ER)  do {
+		if SEGSEQ<0 do REVICHA(.dep,JD) quit
+		do REVICHS(.dep,JD,SEGSEQ)
+		}
+
+	quit
+
+
+REVICHA(RecordDEP dep,Date JD,Number FM)
+	/* Reverse interest change information - account level
+
+	Arguments:
+		. dep	Deposit Account Object		/TYP=RecordDEP/REQ
+		. JD	Calculation base date		/TYP=D/MECH=VAL/REQ
+		. FM	File maintenance flag		/TYP=N/MECH=VAL/NOREQ
+	*/
+	type Public String ACT(,,),TIER()
+	type Public Date SAVEFD
+	type Public Number DIR,ER
+
+	type Number IRN,OLDIRN
+	type Date SAVICHLD
+
+	// Check not required parameter
+	set FM=$G(FM)
+	// Int/Div Change - Last Date
+	set SAVICHLD=dep.ichld
+
+	/* Do not reverse if not a tiered index, not file maintenance, 
+	and not an Int/Div Change - Last Date */
+	if ('$D(TIER(-1))),('FM),(JD'=dep.ichld) quit
+
+	if JD=dep.ichld!(FM) do {
+		type Date NJD
+		type Date XJD=JD
+
+		// Int/Div Check Frequency
+		quit:dep.intfre=""
+
+		set NJD=$$NJD^UFRE(JD,dep.intfre,,1) quit:ER
+		if NJD<dep.odt do {
+			// Date Account Opened
+			set NJD=dep.odt
+			set XJD=$$NJD^UFRE(NJD,dep.intfre) quit:ER
+			}
+		if NJD>SAVEFD set ACT(NJD,8895,-1)="Interest rate change date (reverse)"
+		// Int/Div Change - Next Date
+		set dep.ichnd=XJD
+		// Int/Div Change - Last Date
+		set dep.ichld=NJD
+		}
+
+	// Don't update rate if a file maintenance and not a change date
+	if FM,JD'=SAVICHLD quit
+
+	// Update rate
+	type RecordDEPSEG depseg
+	set IRN=$$INDX(.dep,.depseg,,DIR,dep.irn) quit:ER
+
+	quit:+IRN=(+dep.irn)
+	set dep.irn=+IRN
+
+	quit
+
+
+REVICHS(RecordDEP dep,Date JD,Number SEG,Number FM)
+	/* Reverse interest change information - segment level
+	Arguments:
+		. dep	Deposit Account Object		/TYP=RecordDEP/REQ
+		. JD	Calculation base date  		/TYP=D/MECH=VAL/REQ
+		. SEG	Single segment to update 	/TYP=N/MECH=VAL/NOREQ
+		. FM	File maintenance flag  		/TYP=N/MECH=VAL/NOREQ
+	*/
+	type Public String ACT(,,),TIER()
+	type Public Date SAVEFD
+	type Public Number DIR,ER
+
+	type Number IRN,OLDIRN
+	type Date SAVICHLD
+
+	// Check not required parameters
+	set FM=$G(FM)
+	set SEG=$G(SEG)
+
+	type RecordDEPSEG depseg=Db.getRecord("DEPSEG","CID=:dep.cid,SEGMENT=:SEG",1)
+	// Segment deleted
+	if 'depseg.getMode() quit
+
+	set SAVICHLD=depseg.ichld
+
+	// quit if not a tiered index, not a file maintenance, and not a change date
+	if '$D(TIER(SEG)),'FM,JD'=depseg.ichld quit
+
+	if JD=depseg.ichld!(FM) do {
+		type Date NJD
+		type Date XJD=JD
+
+		quit:depseg.intfre=""
+
+		set NJD=$$NJD^UFRE(JD,depseg.intfre,,1) quit:ER
+		if NJD<depseg.segstart do {
+			set NJD=depseg.segstart
+			set XJD=$$NJD^UFRE(NJD,depseg.intfre) quit:ER
+			}
+		if NJD>SAVEFD set ACT(NJD,8895,SEG)="Interest rate change date (reverse)"
+		set depseg.ichnd=XJD
+		set depseg.ichld=NJD
+		}
+
+	// don't update rate if a file maintenance and not a change date
+	if FM,JD'=SAVICHLD quit
+
+	// update rate
+	set OLDIRN=depseg.irn
+	set IRN=$$INDX(.dep,.depseg,,DIR,OLDIRN) quit:ER
+	quit:+IRN=(+OLDIRN)
+	set depseg.irn=+IRN
+
+	do depseg.save()
+
+	quit
+
+
+REVAICH(RecordDEP dep,Date JD,Date FM)
+	/* Reverse available interest change date info and update ACT array
+
+	Arguments:
+		. dep	Deposit Account Object		/TYP=RecordDEP/REQ
+		. JD 	Calculation base date  		/TYP=D/MECH=VAL/REQ
+		. FM     File maintenance flag		/TYP=N/MECH=VAL/NOREQ
+	*/
+	type Public String ACT(,,),AITIER()
+	type Public Number DIR,ER
+	type Public Date SAVEFD
+
+	type Number IRN
+	type Date SAVICHLD
+
+	set FM=$G(FM)
+	// Available Interest Last Change Date
+	set SAVICHLD=dep.aiichld
+
+	/* Do not reverse if not a tiered index, not a file maintenance, 
+	and not an Available Interest Change Date */
+	if '$D(AITIER(-1)),('FM),(JD'=dep.aiichld) quit
+
+	// Available Interest Last Change Date
+	if JD=dep.aiichld!(FM) do {
+		type Date NJD
+		type Date XJD=JD
+
+		// Avail Interest - Interest Change Freq
+		quit:dep.aiintfre=""
+	
+		set NJD=$$NJD^UFRE(JD,dep.aiintfre,,1) quit:ER
+		if NJD<dep.odt do {
+			set NJD=dep.odt
+			set XJD=$$NJD^UFRE(NJD,dep.aiintfre) quit:ER
+			}
+		if NJD>SAVEFD set ACT(NJD,8896,-1)="Available interest rate change date (reverse)"
+		set dep.aiichnd=XJD
+		set dep.aiichld=NJD
+		}
+
+	// Don't update rate if a file maintenance and not a change date
+	if FM,JD'=SAVICHLD quit
+
+	// Update rate
+	type RecordDEPSEG depseg
+	set IRN=$$INDX(.dep,.depseg,1,DIR,dep.aiirn) quit:ER
+
+	quit:+IRN=(+dep.aiirn)
+	// Available Interest - Interest Rate
+	set dep.aiirn=+IRN
+
+	quit
+
+
+REVIP(RecordDEP dep,Date JD,Number SEG,Number FM)
+	/* Reverse interest posting info and update ACT array
+
+	Arguments:
+		. dep	Deposit account			/TYP=RecordDEP/REQ
+		. JD 	Calculation base date  		/TYP=D/MECH=VAL/REQ
+		. SEG 	Single segment to update 	/TYP=N/MECH=VAL/NOREQ
+		. FM	File maintenance flag  		/TYP=N/MECH=VAL/NOREQ
+	*/
+	type Public String ACT(,,)
+	type Public Number ER
+
+	type Number SEGSQ
+
+	set SEG=$G(SEG)
+	set FM=$G(FM)
+
+	// Single update
+	if SEG'="" do { quit
+		if SEG<0 do REVIPA(.dep,JD,FM) quit
+		do REVIPS(dep.cid,JD,SEG,FM)
+		}
+
+	set SEGSQ=""
+	for  set SEGSQ=$O(ACT(JD,8898,SEGSQ)) quit:(SEGSQ="")!(ER)  do {
+		if SEGSQ<0 do REVIPA(.dep,JD) quit
+		do REVIPS(dep.cid,JD,SEGSQ)
+		}
+
+	quit
+
+
+REVIPA(RecordDEP dep,Date JD,Number FM)
+	/* Reverse interest posting information - account level
+	Arguments:
+		.dep	Account Object		/TYP=RecordDEP/REQ
+		.JD 	Calculation base date	/TYP=D/MECH=VAL/REQ
+		.FM     File maintenance flag	/TYP=N/MECH=VAL/NOREQ
+	*/
+	type Public Date SAVEFD
+	type Public String ACT(,,)
+	type Public Number ER
+
+	type Date NJD
+
+	// Check not required parameter
+	set FM=$G(FM)
+
+	// Quit if not interest posting date and not file maintenance
+	if JD'=dep.ipld,'FM quit
+
+	// Int/Div Posting Frequency
+	quit:dep.ipf=""
+
+	set NJD=$$NJD^UFRE(JD,dep.ipf,,1) quit:ER
+	if NJD<dep.odt do {
+		set NJD=dep.odt
+		set JD=$$NJD^UFRE(NJD,dep.ipf) quit:ER
+		}
+	if NJD>SAVEFD set ACT(NJD,8898,-1)="Interest posting (reverse)"
+
+	set dep.inp=JD
+	set dep.ipld=NJD
+
+	quit
+
+
+REVIPS(Number CID,Date JD,Number SEG,Number FM)
+	/* Reverse interest posting information - segment level
+	Arguments:
+		. CID	Account number			/TYP=N/MECH=VAL/REQ
+		. JD 	Calculation base date  		/TYP=D/MECH=VAL/REQ
+		. SEG 	Single segment to update 	/TYP=N/MECH=VAL/NOREQ
+		. FM 	File maintenance flag		/TYP=N/MECH=VAL/NOREQ
+	*/
+	type Public String ACT(,,)
+	type Public Number ER
+	type Public Date SAVEFD
+
+	type Date NJD
+	
+	type RecordDEPSEG depseg=Db.getRecord("DEPSEG","CID=CID,SEGMENT=:SEG",1)
+	// Segment deleted
+	if 'depseg.getMode() quit
+
+	set FM=$G(FM)
+
+	// Quit if not interest posting date and not file maintenance
+	if JD'=depseg.ipld,'FM quit
+
+	quit:depseg.ipf=""
+	set NJD=$$NJD^UFRE(JD,depseg.ipf,,1) quit:ER
+	if NJD<depseg.segstart do {
+		set NJD=depseg.segstart
+		set JD=$$NJD^UFRE(NJD,depseg.ipf) quit:ER
+		}
+	if NJD>SAVEFD set ACT(NJD,8898,SEG)="Interest posting (reverse)"
+
+	// Update segment data
+	set depseg.inp=JD
+	set depseg.ipld=NJD
+	do depseg.save()
+
+	quit
+
+
+REVAIP(RecordDEP dep,Date JD,Number SEG,Number FM)
+	/* Reverse avilable interest posting info and update ACT array 
+
+	Arguments:
+		. dep	Account Object			/TYP=RecordDEP/REQ
+		. JD 	Calculation base date  		/TYP=D/MECH=VAL/REQ
+		. SEG 	Single segment to update 	/TYP=N/MECH=VAL/NOREQ
+		. FM	File maintenance flag  		/TYP=N/MECH=VAL/NOREQ
+	*/
+	type Public String ACT(,,)
+	type Public Number ER
+
+	type Number SEGSEQ=""
+
+	// Check not required parameters
+	set SEG=$G(SEG)
+	set FM=$G(FM)
+
+	// Single update
+	if SEG'="" do { quit
+		if SEG<0 do REVAIPA(.dep,JD,FM) quit
+		do REVAIPS(dep.cid,JD,SEG,FM)
+		}
+
+	for  set SEGSEQ=$O(ACT(JD,8897,SEGSEQ)) quit:(SEGSEQ="")!(ER)  do {
+		if SEGSEQ<0 do REVAIPA(.dep,JD) quit
+		do REVAIPS(dep.cid,JD,SEGSEQ)
+		}
+
+	quit
+
+
+REVAIPA(RecordDEP dep,Date JD,Number FM)
+	/* Reverse avilable interest posting information - account level
+
+	Arguments:
+		. dep	Account Object		/TYP=RecordDEP/REQ
+		. JD	Calculation base date	/TYP=D/MECH=VAL/REQ
+		. FM	File maintenance flag	/TYP=N/MECH=VAL/NOREQ
+	*/
+	type Public String ACT(,,)	
+	type Public Number ER
+	type Public Date SAVEFD
+
+	type Date NJD
+
+	set FM=$G(FM)
+
+	// quit if not Avl Int Last Posting Date and not file maintenance
+	if JD'=dep.aiipld,'FM quit
+
+	// Available Interest Posting Frequency
+	quit:dep.aiipf=""
+
+	set NJD=$$NJD^UFRE(JD,dep.aiipf,,1) quit:ER
+	if NJD<dep.odt do {
+		set NJD=dep.odt
+		set JD=$$NJD^UFRE(NJD,dep.aiipf) quit:ER
+		}
+	if NJD>SAVEFD set ACT(NJD,8897,-1)="Interest on available interest posting (reverse)"
+	set dep.aiinp=JD
+	set dep.aiipld=NJD
+
+	quit
+
+
+REVAIPS(Number CID,Date JD,Number SEG,Number FM)
+	/* Reverse available interest posting information - segment level
+
+	Arguments:
+		. CID	Account Number			/TYP=N/MECH=VAL/REQ
+		. JD	Calculation base date  		/TYP=D/MECH=VAL/REQ
+		. SEG	Single segment to update	/TYP=N/MECH=VAL/NOREQ
+		. FM	File maintenance flag 		/TYP=N/MECH=VAL/NOREQ
+	*/
+	type Public String ACT(,,)
+	type Public Date SAVEFD
+	type Public Number ER
+
+	type Date NJD
+
+	set FM=$G(FM)
+	set SEG=$G(SEG)
+
+	type RecordDEPSEG depseg=Db.getRecord("DEPSEG","CID=:CID,SEGMENT=:SEG",1)
+	// Segment deleted
+	if 'depseg.getMode() quit
+
+	// quit if not available interest posting date and not file maintenance
+	if JD'=depseg.aiipld,'FM quit
+
+	quit:depseg.aiipf=""
+	set NJD=$$NJD^UFRE(JD,depseg.aiipf,,1) quit:ER
+	if NJD<depseg.segstart do {
+		set NJD=depseg.segstart
+		set JD=$$NJD^UFRE(NJD,depseg.aiipf) quit:ER
+		}
+	if NJD>SAVEFD set ACT(NJD,8897,SEG)="Interest on available interest posting (reverse)"
+	set depseg.aiinp=JD
+	set depseg.aiipld=NJD
+
+	do depseg.save()
+
+	quit
+
+
+REVME(RecordDEP dep,Date JD)
+	/* Reverse Month End event
+
+	Arguments:
+		. dep	Deposit Account Object	/TYP=RecordDEP/REQ
+		. JD 	Calculation base date  	/TYP=D/MECH=VAL/REQ
+	
+	Set current Dollar Day balance bucket to ending month bucket.
+	*/
+	type Number MM=$$MON^SCADAT(JD,1)
+
+	if MM=1 set dep.ddbalcur=dep.ddbal1 quit	// January
+	if MM=2 set dep.ddbalcur=dep.ddbal2 quit	// February
+	if MM=3 set dep.ddbalcur=dep.ddbal3 quit	// March  
+	if MM=4 set dep.ddbalcur=dep.ddbal4 quit	// April      
+	if MM=5 set dep.ddbalcur=dep.ddbal5 quit	// May        
+	if MM=6 set dep.ddbalcur=dep.ddbal6 quit	// June       
+	if MM=7 set dep.ddbalcur=dep.ddbal7 quit	// July       
+	if MM=8 set dep.ddbalcur=dep.ddbal8 quit	// August     
+	if MM=9 set dep.ddbalcur=dep.ddbal9 quit	// September  
+	if MM=10 set dep.ddbalcur=dep.ddbal10 quit	// October    
+	if MM=11 set dep.ddbalcur=dep.ddbal11 quit	// November   
+	if MM=12 set dep.ddbalcur=dep.ddbal12 quit	// December
+
+	quit
+
+
+REVYE(Date JD)
+	/* Reverse Year End event
+
+	Arguments:
+		. JD	Calculation base date	/TYP=D/MECH=VAL/REQ
+
+	Available for future use
+	*/
+	quit
+
+
+FWDICH(RecordDEP dep,Date JD,Number SEG)
+	/* Process interest rate change and set up next ACT entry
+
+	Arguments:
+		. JD	Calculation base date		/TYP=D/MECH=VAL/REQ
+		. SEG	Single segment to update	/TYP=N/MECH=VAL/NOREQ
+	*/
+	type Public String ACT(,,)
+	type Public Number ER
+	
+	type Number SEGSEQ=""
+
+	set SEG=$G(SEG)
+
+	// Single update
+	if SEG'="" do { quit
+		if SEG<0 do FWDICHA(.dep,JD) quit
+		do FWDICHS(.dep,JD,SEG)
+		}
+
+	for  set SEGSEQ=$O(ACT(JD,9995,SEGSEQ)) quit:(SEGSEQ="")!(ER)  do {
+		if SEGSEQ<0 do FWDICHA(.dep,JD) quit
+		do FWDICHS(.dep,JD,SEGSEQ)
+		}
+
+	quit
+
+
+FWDICHA(RecordDEP dep,Date JD)
+	/* Forward update interest change info - account level
+
+	Arguments:
+		. dep	Account Object		/TYP=RecordDEP/REQ
+		. JD	Calculation base date	/TYP=D/MECH=VAL/REQ
+	*/
+	type Public String ACT(,,),TIER()
+	type Public Number DIR,ER
+	type Public Date CUVAR2
+
+	type Number IRN,OLDIRN
+	type Date NJD
+
+	// Quit if accruing at the segment level
+	quit:'dep.segacr
+
+	// Quit if not a tiered index and not a. Int/Div Change - Next Date
+	if '$D(TIER(-1)),JD'=dep.ichnd quit
+
+	// Int/Div Change - Next Date
+	if JD=dep.ichnd do {
+		// Don't quit if interest change at BOD
+		quit:JD=CUVAR2
+		quit:dep.intfre=""
+
+		set NJD=$$NJD^UFRE(JD,dep.intfre) quit:ER
+		if NJD<CUVAR2 set ACT(NJD,9995,-1)="Interest rate change date (forward)" set ACT(NJD,-99)="Accrual calculation (forward)"
+		
+		set dep.ichnd=NJD
+		set dep.ichld=JD
+		}
+
+	// Nominal Int/Div Rate
+	set OLDIRN=dep.irn
+
+	type RecordDEPSEG depseg
+	set IRN=$$INDX(.dep,.depseg,,DIR,OLDIRN) quit:ER
+
+	set OLDIRN=dep.irn
+	quit:+OLDIRN=(+IRN)
+
+	// Create file maintenance record in account history
+	do FMIRN(dep.cid,-1,"IRN",OLDIRN,IRN)
+	// Nominal Int/Div Rate
+	set dep.irn=+IRN
+
+	quit
+
+
+FWDICHS(RecordDEP dep,Date JD,Number SEG)
+	/* Forward update interest change info - segment level
+
+	Arguments:
+		. dep	Account Object			/TYP=RecordDEP/REQ
+		. JD	Calculation base date		/TYP=D/MECH=VAL/REQ
+		. SEG	Single segment to update 	/TYP=N/MECH=VAL/NOREQ
+	*/
+	type Public String ACT(,,),TIER()
+	type Public Number DIR,ER
+	type Public Date CUVAR2
+
+	type Number IRN
+	type Date NJD
+
+	// Quit if accruing at the account level
+	quit:dep.segacr
+
+	type RecordDEPSEG depseg=Db.getRecord("DEPSEG","CID=:dep.cid,SEGMENT=:SEG",1)
+	// Segment deleted
+	if 'depseg.getMode() quit
+
+	// Quit if not a tiered index and not a change date
+	if '$D(TIER(SEG)),(JD'=depseg.ichnd) quit
+
+	if JD=depseg.ichnd do {
+		// don't quit if interest change at BOD
+		quit:JD=CUVAR2
+		quit:depseg.intfre=""
+	
+		set NJD=$$NJD^UFRE(JD,depseg.intfre) quit:ER
+		if NJD<CUVAR2 set ACT(NJD,9995,SEG)="Interest rate change date (forward)" set ACT(NJD,-99)="Accrual calculation (forward)"
+	
+		set depseg.ichnd=NJD
+		set depseg.ichld=JD
+		}
+
+	set IRN=$$INDX(.dep,.depseg,,DIR,depseg.irn) quit:ER
+	quit:+depseg.irn=(+IRN)
+	// Create file maintenance record in account history
+	do FMIRN(dep.cid,SEG,"IRN",depseg.irn,IRN)
+	set depseg.irn=+IRN
+
+	do depseg.save()
+
+	quit
+
+
+FWDAICH(RecordDEP dep,Date JD)
+	/* Process available interest rate change and set up next ACT entry
+
+	Arguments:
+		. dep	Account Object		/TYP=RecordDEP/REQ
+		. JD	Calculation base date 	/TYP=D/MECH=VAL/REQ
+	*/
+	type Public String ACT(,,),AITIER()
+	type Public Number DIR,ER
+	type Public Date CUVAR2
+	
+	type Number IRN
+	type Date NJD
+
+	// quit if not a tiered index and not a change date
+	// Available Interest Next Change Date
+	if '$D(AITIER(-1)),(JD'=dep.aiichnd) quit
+
+	// Available Interest Next Change Date
+	if JD=dep.aiichnd do {
+		// don't quit if interest change at BOD
+		quit:JD=CUVAR2
+		// Avail Interest - Interest Change Freq
+		quit:dep.aiintfre=""
+
+		set NJD=$$NJD^UFRE(JD,dep.aiintfre) quit:ER
+		if NJD<CUVAR2 set ACT(NJD,9996,-1)="Available interest rate change date (forward)" set ACT(NJD,-99)="Accrual calculation (forward)"
+		
+		set dep.aiichnd=NJD
+		set dep.aiichld=JD
+		}
+
+	type RecordDEPSEG depseg
+
+	set IRN=$$INDX(.dep,.depseg,1,DIR,dep.aiirn) quit:ER
+	quit:+dep.aiirn=(+IRN)
+	// Create file maintenance record in account history
+	do FMIRN(dep.cid,-1,"AIIRN",dep.aiirn,IRN)
+	// Available Interest - Interest Rate
+	set dep.aiirn=+IRN
+
+	quit
+
+
+FWDIP(RecordDEP dep,Date JD,Number SEG)
+	/* Make interest posting adjustment and set next date
+
+	Arguments:
+		. dep	Deposit Account Object		/TYP=RecordDEP/REQ
+		. JD	Calculation base date		/TYP=D/MECH=VAL/REQ
+		. SEG	Single segment to update	/TYP=N/MECH=VAL/NOREQ
+	*/
+	type Public String ACT(,,)
+	type Public Number ER
+
+	type Number SEGSQ=""
+
+	set SEG=$G(SEG)
+
+	// Single update
+	if SEG'="" do { quit
+		if SEG<0 do FWDIPA(.dep,JD) quit
+		do FWDIPS(.dep,JD,SEG)
+		}
+
+	for  set SEGSQ=$O(ACT(JD,9998,SEGSQ)) quit:(SEGSQ="")!(ER)  do {
+		if SEGSQ<0 do FWDIPA(.dep,JD)
+		else  do FWDIPS(.dep,JD,SEGSQ)
+		}
+
+	quit
+
+
+FWDIPA(RecordDEP dep,Date JD)
+	/* Forward interest posting - account level
+
+	Arguments:
+		. dep 	Deposit Accoutn Object	/TYP=RecordDEP/REQ	
+		. JD 	Calculation base date	/TYP=D/MECH=VAL/REQ
+	*/
+	type Public String ACT(,,)
+	type Public Date CUVAR2
+	type Public Number ER
+
+	type Date NJD=""
+
+	// Quit if accruing at the segment level
+	quit:'dep.segacr
+
+	// Quit if not Int/Div Next Posted
+	quit:JD'=dep.inp
+
+	if dep.ipf'="" do {
+		set NJD=$$NJD^UFRE(JD,dep.ipf) quit:ER
+		if NJD,NJD<CUVAR2 set ACT(NJD,9998,-1)="Interest Posting (forward)",ACT(NJD,-99)="Accrual calculation (forward)"
+		}
+	set dep.inp=NJD
+	set dep.ipld=JD
+
+	// quit if no accrual to post
+	quit:'dep.posacr
+
+	// post interest for positive accrual amount
+	do POSTINT(.dep,dep.posacr,-1) quit:ER
+
+	quit
+
+
+FWDIPS(RecordDEP dep,Date JD,Number SEG)
+	/* Forward interest posting - segment level
+
+	Arguments:
+		. dep 	Deposit Accoutn Object		/TYP=RecordDEP/REQ
+		. JD 	Calculation base date 		/TYP=D/MECH=VAL/REQ
+		. SEG 	Single segment to update 	/TYP=N/MECH=VAL/NOREQ
+	*/
+	type Public String ACT(,,)
+	type Public Date CUVAR2
+	type Public Number ER
+
+	type Date NJD=""
+
+	// Check not required parameter
+	set SEG=$G(SEG)
+
+	// Quit if accruing at the account level
+	quit:dep.segacr
+
+	type RecordDEPSEG depseg=Db.getRecord("DEPSEG","CID=:dep.cid,SEGMENT=:SEG",1)
+	// Segment deleted
+	if 'depseg.getMode() quit
+	
+	// Quit if not next interest posting date
+	quit:JD'=depseg.inp
+
+	if depseg.ipf'="" do {
+		set NJD=$$NJD^UFRE(JD,depseg.ipf) quit:ER
+		if NJD,NJD<CUVAR2 set ACT(NJD,9998,SEG)="Interest Posting (forward)",ACT(NJD,-99)="Accrual calculation (forward)"
+		}
+	set depseg.inp=NJD
+	set depseg.ipld=JD
+
+	do depseg.save()
+
+	// quit if no accrual to post
+	quit:'depseg.posacr
+
+	// post interest for depseg.posacr amount
+	do POSTINT(.dep,depseg.posacr,SEG) quit:ER
+
+	quit
+
+
+FWDAIP(RecordDEP dep,Date JD,Number SEG)
+	/* Make available interest posting adjustment and set next date
+
+	Arguments:
+		. dep	Account Record Object		/TYP=RecordDEP/REQ
+		. JD	Calculation base date 		/TYP=D/MECH=VAL/REQ
+		. SEG	Single segment to update 	/TYP=N/MECH=VAL/NOREQ
+	*/
+	type Public String ACT(,,)
+	type Public Number ER
+
+	type Number SEGSQ=""
+
+	// Quit if not accruing on available interest
+	quit:'dep.aiacrf
+
+	// Check not required parameter
+	set SEG=$G(SEG)
+
+	// single update
+	if SEG'="" do { quit
+		if SEG<0 do FWDAIPA(.dep,JD) quit
+		do FWDAIPS(.dep,JD,SEG)
+		}
+
+	for  set SEGSQ=$O(ACT(JD,9997,SEGSQ)) quit:(SEGSQ="")!(ER)  do {
+		if SEGSQ<0 do FWDAIPA(.dep,JD) quit
+		do FWDAIPS(.dep,JD,SEGSQ)
+		}
+
+	quit
+
+
+FWDAIPA(RecordDEP dep,Date JD)
+	/* Forward available interest posting - account level
+
+	Arguments:
+		. dep	Account Record Object		/TYP=RecordDEP/REQ
+		. JD 	Calculation base date 		/TYP=D/MECH=VAL/REQ
+	*/
+	type Public String ACT(,,)
+	type Public Date CUVAR2
+	type Public Number ER
+
+	type Date NJD=""
+
+	// Quit if accruing at the segment level
+	quit:'dep.segacr
+
+	// Quit if not Available Interest Next Posting Date
+	quit:JD'=dep.aiinp
+
+	if dep.aiipf'="" do {
+		set NJD=$$NJD^UFRE(JD,dep.aiipf) quit:ER
+		if NJD,NJD<CUVAR2 set ACT(NJD,9997,-1)="Interest on available interest posting (forward)"
+		}
+	set dep.aiinp=NJD
+	set dep.aiipld=JD
+
+
+	// Quit if no accrual to post
+	quit:'dep.aiacr
+
+	// Post available interest for dep.aiacr amount
+	do POSTINT(.dep,dep.aiacr,-1,1) quit:ER
+
+	quit
+
+
+FWDAIPS(RecordDEP dep,Date JD,Number SEG)
+	/* Forward available interest posting - segment level 
+
+	Arguments:
+		. dep	Account Record Object		/TYP=RecordDEP/REQ
+		. JD 	Calculation base date 		/TYP=D/MECH=VAL/REQ
+		. SEG 	Single segment to update 	/TYP=N/MECH=VAL/NOREQ
+	*/
+	type Public String ACT(,,)
+	type Public Date CUVAR2
+	type Public Number ER
+
+	type Date NJD=""
+
+	// Check not required parameter
+	set SEG=$G(SEG)
+
+	// Quit if accruing at the account level
+	quit:dep.segacr
+
+	type RecordDEPSEG depseg=Db.getRecord("DEPSEG","CID=:dep.cid,SEGMENT=:SEG")
+	// Segment deleted
+	if 'depseg.getMode() quit
+
+	// Quit if not next interest posting date
+	quit:JD'=depseg.aiinp
+
+	if depseg.aiipf'="" do {
+		set NJD=$$NJD^UFRE(JD,depseg.aiipf) quit:ER
+		if NJD,NJD<CUVAR2 set ACT(NJD,9997,SEG)="Interest on available interest posting (forward)",ACT(NJD,-99)="Accrual calculation (forward)"
+		}
+	set depseg.aiipld=JD
+	set depseg.aiinp=NJD
+
+	// quit if no accrual to post
+	quit:'depseg.aiacr
+
+	// post available interest for depseg.aiacr amount
+	do POSTINT(.dep,depseg.aiacr,SEG,1) quit:ER
+
+	quit
+
+
+FWDME(RecordDEP dep,Date JD)
+	/* Forward Month End event
+
+	Arguments:
+		. dep	Account Record Object		/TYP=RecordDEP/REQ
+		. JD	Calculation base date  		/TYP=D/MECH=VAL/REQ
+	*/
+	type Number DIM
+
+	type Number MM=$$MON^SCADAT(JD,1)
+
+	// Set dollar days balance for current period
+	do SETDDBAL(.dep,MM,dep.ddbalcur)
+	
+	// Reset the current dollar day balance bucket
+	set DIM=$$NODM^SCADAT(JD+1,1)
+	// Dollar Days Balance For current Period
+	set dep.ddbalcur=dep.bal*DIM
+
+	// Set Month End Balance to current ledger balance
+	do SETMEBAL(.dep,MM,dep.bal)
+
+	quit
+
+
+SETDDBAL(RecordDEP dep,Number MM,Number VAL)
+	/* Set Dollar Days Balance For current Period
+
+	Arguments:
+		. dep	Deposit account			/TYP=RecordDEP/REQ
+		. MM	Month number			/TYP=N/MECH=VAL/REQ
+		. VAL	New dollar days balance value	/TYP=N/MECH=VAL/REQ
+	*/
+
+	// Dollar Days Balance For January - December
+	if MM=1 set dep.ddbal1=VAL quit	 
+	if MM=2 set dep.ddbal2=VAL quit
+	if MM=3 set dep.ddbal3=VAL quit
+	if MM=4 set dep.ddbal4=VAL quit
+	if MM=5 set dep.ddbal5=VAL quit
+	if MM=6 set dep.ddbal6=VAL quit
+	if MM=7 set dep.ddbal7=VAL quit
+	if MM=8 set dep.ddbal8=VAL quit
+	if MM=9 set dep.ddbal9=VAL quit
+	if MM=10 set dep.ddbal10=VAL quit
+	if MM=11 set dep.ddbal11=VAL quit
+	if MM=12 set dep.ddbal12=VAL quit
+
+	quit
+
+
+Public SETMEBAL(RecordDEP dep,Number MM,Number VAL)
+	/* Set Month End Balance to a new value
+
+	Arguments:
+		. dep	Deposit account		/TYP=RecordDEP/REQ
+		. MM	Month number		/TYP=N/MECH=VAL/REQ
+		. VAL	EOM balance value	/TYP=N/MECH=VAL/REQ
+	*/
+
+	// Month End Balance for January - December
+	if MM=1 set dep.mebal1=VAL quit
+	if MM=2 set dep.mebal2=VAL quit
+	if MM=3 set dep.mebal3=VAL quit
+	if MM=4 set dep.mebal4=VAL quit
+	if MM=5 set dep.mebal5=VAL quit
+	if MM=6 set dep.mebal6=VAL quit
+	if MM=7 set dep.mebal7=VAL quit
+	if MM=8 set dep.mebal8=VAL quit
+	if MM=9 set dep.mebal9=VAL quit
+	if MM=10 set dep.mebal10=VAL quit
+	if MM=11 set dep.mebal11=VAL quit
+	if MM=12 set dep.mebal12=VAL quit
+
+	quit
+
+
+Public GETMEBAL(RecordDEP dep,Number MM)
+	/* Get Month End Balance for specified month
+
+	Arguments:
+		. dep	Deposit account		/TYP=RecordDEP/REQ
+		. MM	Month number		/TYP=N/MECH=VAL/REQ
+	
+	Returns:
+		. $$	Month End Balance for specified month	/TYP=N
+	*/
+
+	// Month End Balance for January - December
+	if MM=1 quit dep.mebal1
+	if MM=2 quit dep.mebal2
+	if MM=3 quit dep.mebal3
+	if MM=4 quit dep.mebal4
+	if MM=5 quit dep.mebal5
+	if MM=6 quit dep.mebal6
+	if MM=7 quit dep.mebal7
+	if MM=8 quit dep.mebal8
+	if MM=9 quit dep.mebal9
+	if MM=10 quit dep.mebal10
+	if MM=11 quit dep.mebal11
+	if MM=12 quit dep.mebal12
+
+	quit ""
+
+
+FWDYE(Date JD)
+	/* Forward Year End event
+	
+	Arguments:
+
+		. JD	Calculation base date	/TYP=D/MECH=VAL/REQ
+	*/
+	// Available for future use
+	quit
+
+
+FMIRN(Number CID,Number SEG,String CLMN,Number OVAL,Number NVAL)
+	/* Create interest rate change history entry
+
+	Arguments:
+		. CID 		Account Number		/TYP=N/MECH=VAL/REQ
+		. SEG 		Segment			/TYP=N/MECH=VAL/REQ
+		. CLMN		Column name (IRN,AIIRN)	/TYP=T/MECH=VAL/REQ
+		. OVAL		Old rate value		/TYP=N/MECH=VAL/REQ
+		. NVAL		New rate value 		/TYP=N/MECH=VAL/REQ
+	*/
+	type String TBL,TSO
+	type Number HSEQ
+	
+	type RecordHIST hist=Class.new("RecordHIST")
+
+	// Get next history sequence number
+	type ResultSet rs=Db.select("TSEQ","HIST","CID=:CID","TSEQ DESC")
+	if rs.next() set HSEQ=rs.getCol("TSEQ")+1
+	set TSO="HSEQ#"_HSEQ
+
+	// Get table name
+	if SEG'<0 set TBL="DEPSEG",TSO=TSO_"~SEG#"_SEG
+	else  set TBL="DEP"
+
+	set hist.cid=CID
+	set hist.tseq=HSEQ
+	set hist.tjd=%SystemDate
+	set hist.efd=%SystemDate
+	set hist.tlo=%UserStation
+	set hist.tso=TSO
+	set hist.tcmt=CID_$S(SEG'<0:","_SEG,1:"")_"["_TBL_"]"_CLMN_":"_OVAL_":"_NVAL
+	set hist.cdt=%CurrentDate
+	set hist.time=%CurrentTime
+	set hist.uid=%UserID
+	
+	do hist.bypassSave()
+
+	quit
+
+
+POSTINT(RecordDEP dep,Number ACRAMT,Number SEG,Number AIFLG)
+	/* Post interest
+
+	Arguments:
+		. dep		Deposit Account 	/TYP=N/MECH=VAL/REQ
+		. ACRAMT	Accrual amount to post	/TYP=N/MECH=VAL/REQ
+		. SEG		Segment being posted	/TYP=N/MECH=VAL/REQ
+		. AIFLG		Available interest flag	/TYP=N/MECH=VAL/NOREQ
+	*/
+	type Public Number ER,OCC
+	type Public String BRCD,CRCD
+
+	type Number NEG=0,POKVAL,TAMT
+	type String ETC1,ETC2,TSO=""
+
+	type RecordTTX ttx1=Class.new("RecordTTX")
+	type RecordTTX ttx2=Class.new("RecordTTX")
+
+	if ACRAMT<0 set NEG=1,ACRAMT=-ACRAMT
+
+	if $G(AIFLG) do { quit:ER
+		if NEG set ETC1=$$GETETC(4),ETC2=$$GETETC(7)
+		else  set ETC1=$$GETETC(8),ETC2=$$GETETC(3)
+		set POKVAL=2
+		}
+	else  do { quit:ER
+		if NEG set ETC1=$$GETETC(2),ETC2=$$GETETC(5)
+		else  set ETC1=$$GETETC(6),ETC2=$$GETETC(1)
+		set POKVAL=1
+		}
+
+	type RecordTRN trn1=Db.getRecord("TRN","ETC=:ETC1",1)
+	type RecordTRN trn2=Db.getRecord("TRN","ETC=:ETC2",1)
+
+	if SEG'<0 set TSO=$$FIELDIN^UTSO(TSO,"SEG",SEG)
+	set TSO=$$FIELDIN^UTSO(TSO,"EXACTACR",ACRAMT)
+
+	set TAMT=$$ROUND(dep.cid,ACRAMT)
+	// Don't process zero amount transactions
+	if TAMT do { quit:ER
+		type Number DC
+
+		// Build posting transaction
+		set ttx1.cid=dep.cid
+		set ttx1.itc=$$ITC^TTXEXT(trn1.itc,4,POKVAL)
+		set DC=ttx1.itc1
+		set ttx1.etc=trn1.etc
+		set ttx1.tamt=TAMT
+		set ttx1.efd=%SystemDate
+		set ttx1.tlo=%UserStation
+		set ttx1.tso=TSO
+		#IF CUVAR.%MCP set ttx1.crcd=CRCD
+		if trn1.cls="M" set ttx1.cc=OCC
+
+		do TRNSINGL^TRNDRV(.ttx1,.dep,%SystemDate,BRCD,4) quit:ER
+		// Process G/L offset to posting transaction
+		do GLOFF(TAMT,DC)
+		}
+
+	// Don't process zero amount transactions
+	if ACRAMT do { quit:ER
+		// Build transaction
+		set ttx2.cid=dep.cid
+		set ttx2.itc=$$ITC^TTXEXT(trn2.itc,4,POKVAL)
+		set ttx2.etc=trn2.etc
+		set ttx2.tamt=ACRAMT
+		set ttx2.efd=%SystemDate
+		set ttx2.tlo=%UserStation
+		set ttx2.tso=TSO
+		#IF CUVAR.%MCP set ttx2.crcd=CRCD
+		if trn2.cls="M" set ttx2.cc=OCC
+
+		do TRNSINGL^TRNDRV(.ttx2,.dep,%SystemDate,BRCD,4) quit:ER
+		}
+
+	quit
+
+
+GLOFF(Number TAMT,Number DC)	// Process G/L offset transaction
+
+	type Public Number BRCD,COSTCTR,ER,GLCID,OCC,PRCTYP,TRB
+	type Public String CRCD,GLSC
+	type Public String GLOFST(,,,,)
+
+	type String ETC
+
+	// Transaction to Reduce Balance
+	if 'TRB do {
+		if DC set ETC="MCR"
+		else  set ETC="MDR"
+		}
+	else  do {
+		if DC set ETC="MDR"
+		else  set ETC="MCR"
+		}
+
+	/* If this is coming in from INDEXMC of MATRIXMC, don't post 
+	transaction, just add entry to GLOFST array.  INDEXMC or MATRIXMC will 
+	post the offset transactions. */
+	if (PRCTYP=1)!(PRCTYP=2) do { quit
+		type Number SUM
+
+		if $G(GLOFST(CRCD,1,GLSC,COSTCTR))="" set GLOFST(CRCD,1,GLSC,COSTCTR)=GLCID_"|MDR|"_GLCID_"|MCR"
+
+		set SUM=$G(GLOFST(CRCD,1,GLSC,COSTCTR,DC))
+		set SUM=SUM+$$^SCARND(TAMT,,,CRCD)
+		set GLOFST(CRCD,1,GLSC,COSTCTR,DC)=SUM
+		}
+
+	type RecordTRN trn=Db.getRecord("TRN","ETC")
+	type RecordTTX ttx=Class.new("RecordTTX")
+
+	set ttx.cid=GLCID
+	set ttx.itc=trn.itc
+	set ttx.etc=ETC
+	set ttx.tamt=TAMT
+	set ttx.efd=%SystemDate
+	set ttx.tlo=%UserStation
+	if trn.cls="M" set ttx.cc=OCC
+	#IF CUVAR.%MCP set ttx.crcd=CRCD
+
+	// Post G/L offset transaction
+	do TRNSINGL^TRNDRV(.ttx,,%SystemDate,BRCD,4) quit:ER
+
+	quit
+
+
+ADJACRA(RecordDEP dep)	
+	/* Create final accrual adjustment transactions - account level
+
+	Arguments:
+		.dep	Deposit Account Object	/TYP=RecordDEP/REQ
+	*/
+	type Public String AIACR(),POSACR()
+	type Public Number ER
+
+	type Number DIFF
+	type String ETCF,ETCR
+
+	/* Calculate difference between accrual amount before and after 
+	processing */
+	set DIFF=dep.posacr-POSACR(-1)
+	if DIFF do { quit:ER
+		if DIFF>0 set ETCF=$$GETETC(5),ETCR=$$GETETC(1) quit:ER
+		if DIFF<0 set ETCF=$$GETETC(1),ETCR=$$GETETC(5),DIFF=-DIFF quit:ER
+
+		// Reverse the difference amount
+		do ACRTRAN(.dep,DIFF,ETCR,-1) quit:ER
+		// Create and save accrual adjustment transaction for the difference
+		do ACRTRAN(.dep,DIFF,ETCF,-1,1)
+		}
+
+	// Quit if not accruing on available interest
+	quit:'dep.aiacrf
+
+	// Available Interest Accrued
+	set DIFF=dep.aiacr-AIACR(-1)
+	quit:'DIFF
+	if DIFF>0 set ETCF=$$GETETC(7),ETCR=$$GETETC(3) quit:ER
+	if DIFF<0 set ETCF=$$GETETC(3),ETCR=$$GETETC(7),DIFF=-DIFF quit:ER
+
+	// reverse the difference amount
+	do ACRTRAN(.dep,DIFF,ETCR,-1) quit:ER
+	// create and save an accrual adjustment transaction for the difference
+	do ACRTRAN(.dep,DIFF,ETCF,-1,1)
+
+	quit
+
+
+ADJACRS(RecordDEP dep)
+	/* Create final accrual adjustment transactions - segment level
+
+	Arguments:
+		.dep	Deposit Account Object	/TYP=RecordDEP/REQ  
+	*/
+	type Public String AIACR(),POSACR()
+	type Public Number ER
+
+	type String ETCF,ETCR
+	type Number DIFF,SEGSEQ=""
+
+	for  set SEGSEQ=$O(POSACR(SEGSEQ)) quit:(SEGSEQ="")!(ER)  do {
+
+		if SEGSEQ<0 quit
+
+		type RecordDEPSEG depseg=Db.getRecord("DEPSEG","CID=:dep.cid,SEGMENT=:SEGSEQ",1)
+		if 'depseg.getMode() set DIFF=-$G(POSACR(SEGSEQ))
+		else  set DIFF=depseg.posacr-(POSACR(SEGSEQ))
+
+		if DIFF do { quit:ER
+			if DIFF>0 set ETCF=$$GETETC(5),ETCR=$$GETETC(1) quit:ER
+			if DIFF<0 set ETCF=$$GETETC(1),ETCR=$$GETETC(5),DIFF=-DIFF quit:ER
+
+			// Reverse the difference amount
+			do ACRTRAN(.dep,DIFF,ETCR,SEGSEQ) quit:ER
+			// Create accrual adjsustment trn for the difference
+			do ACRTRAN(.dep,DIFF,ETCF,SEGSEQ,1)
+			}
+
+		// Quit if not accruing on available interest
+		quit:'dep.aiacrf
+
+		if 'depseg.getMode() set DIFF=-$G(AIACR(SEGSEQ))
+		else  set DIFF=depseg.aiacr-AIACR(SEGSEQ)
+
+		if DIFF do { quit:ER
+			if DIFF>0 set ETCF=$$GETETC(7),ETCR=$$GETETC(3) quit:ER
+			if DIFF<0 set ETCF=$$GETETC(3),ETCR=$$GETETC(7),DIFF=-DIFF quit:ER
+
+			// Reverse the difference amount
+			do ACRTRAN(.dep,DIFF,ETCR,SEGSEQ) quit:ER
+			// Create accrual adjustment transaction for difference
+			do ACRTRAN(.dep,DIFF,ETCF,SEGSEQ,1)
+			}
+		}
+	quit
+
+
+ACRTRAN(RecordDEP dep, String TAMT, String LETC, Number SEG, Boolean SAV)
+	/*
+	Process secondary accrual adjustment transactions
+
+	Arguments:
+		. dep	Deposit account 		/TYP=RecordDEP/REQ
+		. TAMT 	Amount of the adjustment	/TYP=N/MECH=VAL/REQ
+		. LETC 	External tran code (local) 	/TYP=T/MECH=VAL/REQ
+		. SEG 	Segment being posted  		/TYP=N/MECH=VAL/REQ
+		. SAV 	Post transaction		/TYP=N/MECH=VAL/NOREQ
+	*/
+	type public Cache %CACHE()
+	type public Number BRCD,ER,OCC
+	type public String CRCD
+
+	type String TSO=""
+
+	type RecordTTX ttx=Class.new("RecordTTX")
+	type RecordTRN trn=%CACHE("TRN").getRecord("TRN","ETC=:LETC")
+	
+	set SAV=SAV.get()
+
+	if SEG'<0 set TSO=$$FIELDIN^UTSO(TSO,"SEG",SEG)
+	
+	set TSO=$$FIELDIN^UTSO(TSO,"EXACTACR",$$^SCARND(TAMT,0,"","",5))
+	set TAMT=$$ROUND(dep.cid,TAMT)
+
+	set ttx.cid=dep.cid
+	set ttx.itc=trn.itc
+	set ttx.etc=LETC
+	set ttx.tamt=TAMT
+	set ttx.efd=%EffectiveDate
+	set ttx.tlo=%UserStation
+	set ttx.tso=TSO
+	if trn.cls="M" set ttx.cc=OCC
+
+	#IF CUVAR.%MCP set ttx.crcd=CRCD
+
+        // Do not update HIST / DTX if indicated - process to get updated
+        // objects
+        if 'SAV do ttx.setStoredValue("noJournal", 1)
+        
+	// Process secondary transaction
+	do TRNSINGL^TRNDRV(.ttx,.dep,%SystemDate,BRCD,4)
+
+	// Process G/L offset ttx.itc1 - DR or CR
+	if SAV do GLOFF($P(ttx.tamt,"#",1),'ttx.itc1)
+
+	quit
+
+
+ROUND(Number CID,Number TAMT)
+	/* Round the amounts in the TAMT field of a transaction
+
+	Arguments:
+		. CID	Account number 		/TYP=N/MECH=VAL/REQ
+		. TAMT	Transaction amount	/TYP=N/MECH=VAL/REQ
+
+	Returns:	
+		TAMT field with rounded amounts	/TYP=S
+	*/
+
+	type Number I,LEN,TAMT1
+
+	set LEN=$L(TAMT,"#")
+	for I=1:1:LEN set TAMT1=$P(TAMT,"#",I) if TAMT1 set $P(TAMT,"#",I)=$$^SCARND(TAMT1,0,CID)
+
+	quit TAMT
+
+
+INDX(RecordDEP dep,RecordDEPSEG depseg,Number AIFLG,Number DIR,Number CRATE)
+	/* Calculates the interest rate for an account or segment
+
+	Arguments:
+		. dep		Account object		/TYP=RecordDEP/REQ 
+		. depseg	Segment Object 		/TYP=RecordDEPSEG/NOREQ
+		. AIFLG		Available interest flag /TYP=T/MECH=VAL/NOREQ
+		. DIR		Processing direction 	/TYP=N/MECH=VAL/REQ
+		. CRATE		Current rate  		/TYP=N/MECH=VAL/REQ
+
+	Returns:
+		Interest rate
+
+	Uses ICHLD for the rate calculation.  For rates calculated
+	on the change date, this is called after the dates are bumped.
+	*/
+	type Public Number ER
+
+	type Number IRCB,RATE
+
+	set AIFLG=$G(AIFLG)
+
+	// Calculate account interest rate
+	if 'depseg.exists() do { quit:'IRCB CRATE
+
+		// Int/Div Rate Calculation Base
+		set IRCB=dep.ircb
+
+		/* If direction is reverse, check FM array to make 
+		sure calc info is correct */
+		if DIR<0 do CHKFM(-1,AIFLG,$S('AIFLG:dep.ichld,1:dep.aiichld))
+
+		// Not available interest rate
+		if 'AIFLG do {
+			type String PAR()
+
+			// Use current rate if no index is defined
+			if dep.index="" set RATE=CRATE quit
+
+			// Setup parameter array for UINDX
+			do SETPAR^UINDX(.PAR,dep.index,dep.intspr,dep.rndmtd,dep.intmat,,1,0,0,1,1,1)
+			/* Calculate rate. Base for rate calculation - 
+			Total Segment Non-Matured Prin Balance */
+			do CTL^UINDX(.dep,dep.ichld,dep.tsnmpb,.PAR) quit:ER ""
+			}
+
+		// Available interest rate
+		else  do {
+			type Number BASE
+			type String PAR()
+
+			// use current rate if no index is defined
+			if dep.aiindex="" set RATE=CRATE quit
+
+			// accruing at account level
+			if dep.segacr set BASE=dep.tsmpb+dep.taims+dep.tainms
+			// Interest Paid Not Credited
+			else  set BASE=dep.intavlncr
+
+			// Setup parameter array for UINDX
+			do SETPAR^UINDX(.PAR,dep.aiindex,dep.aiintspr,dep.airndmtd,dep.aiintmat,,1,0,0,1,1,1)
+			// Calculate rate
+			do CTL^UINDX(.dep,dep.aiichld,BASE,.PAR) quit:ER ""
+			}
+		}
+	// Calculate segment interest rate
+	else  do { quit:ER ""
+		type Number BASE
+		type String PAR()
+
+		/* if direction is reverse, check FM array to make sure calc 
+		info is correct */
+		if DIR<0 do CHKFM(depseg.segment,AIFLG,depseg.ichld)
+
+		// quit if no index is defined
+		if depseg.index="" set RATE=CRATE quit
+
+		/* Non-accrual balance may only be set if CUVAR.USEGOPT=1
+		(Brazil Segment Processing) */
+		set BASE=depseg.bal-depseg.noacrbal
+
+		// Save depseg object so the new data could be used by UINDX 
+		do depseg.bypassSave()
+
+		// Setup parameter array for UINDX
+		do SETPAR^UINDX(.PAR,depseg.index,depseg.intspr,depseg.rndmtd,depseg.intmat,depseg.segment,1,0,0,1,1,1)
+		// Calculate rate
+		do CTL^UINDX(.dep,depseg.ichld,BASE,.PAR) quit:ER
+		}
+
+	// Index ~p1 not set up for ~p2
+	if '$D(RATE) do Runtime.setErrMSG("INDEX",1228,"par(""""INDEX"""")~$$DAT^%ZM(JD)") quit ""
+
+	quit RATE
+
+
+CHKFM(Number SEG,Number AIFLG,Date ICHLD)
+	/* Check FM array for intervening interest calculation data items
+
+	Arguments:
+		. SEG 	Segment number 		   	/TYP=N/MECH=VAL/REQ
+		. AIFLG Available interest flag 	/TYP=T/MECH=VAL/REQ
+		. ICHLD	Interest last change date	/TYP=D/MECH=VAL/REQ
+	*/
+	type Public String AX(),FM(,),LDINDX(),LDMTRX()
+
+	type Public Date CUVAR2,SAVEFD
+	type Public Number ER,IRCB,PRCTYP
+	type Public String AX,INDEX,INTMAT,INTSPR,NWINDEX,NWMATRIX,RNDMTD
+
+	type Date JD=%SystemDate
+
+	// update rate calculation parameters
+	for  set JD=$O(FM(JD),-1) quit:JD=""  quit:JD'>ICHLD  do {
+		type Number FMSEQ=""
+		for  set FMSEQ=$O(FM(JD,FMSEQ),-1) quit:FMSEQ=""  do {
+		
+			type String DI,VAL
+			type Number LSEG
+
+			set LSEG=$P(FM(JD,FMSEQ),"|",1)
+			quit:LSEG'=SEG
+			set DI=$P(FM(JD,FMSEQ),"|",3)
+			set VAL=$P(FM(JD,FMSEQ),"|",4)
+
+			if DI="IRCB" set IRCB=VAL quit
+
+			if 'AIFLG do {
+				if DI="INDEX" set INDEX=VAL quit
+				if DI="INTSPR" set INTSPR=VAL quit
+				if DI="RNDMTD" set RNDMTD=VAL quit
+				if DI="INTMAT" set INTMAT=VAL
+				}
+			else  do {
+				// Available interest
+				if DI="AIINDEX" set INDEX=VAL quit 
+				if DI="AIINTSPR" set INTSPR=VAL quit 
+				if DI="AIRNDMTD" set RNDMTD=VAL quit
+				if DI="AIINTMAT" set INTMAT=VAL
+				}
+			// Update IX if necessary
+			if (DI="INDEX")!(DI="AIINDEX") do { quit
+				/* If new index is INDEXMC index, already 
+				loaded in IX */
+				if PRCTYP=1,INDEX=NWINDEX quit
+				if '$D(LDINDX(INDEX)) do LOADIX^INDEXMC(INDEX,SAVEFD,CUVAR2)
+				}
+			// Update AX if necessary
+			if (DI="INTMAT")!(DI="AIINTMAT") do {
+				/* If new matrix is MATRIXMC matrix, already 
+				loaded in AX */
+				if PRCTYP=2,INTMAT=NWMATRIX quit
+				set AX=INTMAT
+				if '$D(LDMTRX(INTMAT)) do LOADAX^MATRIXMC(.AX,SAVEFD,CUVAR2)
+				}
+			}
+		}
+
+	quit
+
+
+PROCACR(RecordDEP dep,Date BJD,Date EJD,Number DIR)
+	/* Process accrual adjustments
+	Arguments:
+		. dep	Deposit Account 		/TYP=RecordDEP/REQ
+		. BJD	Beginning date for calc		/TYP=D/MECH=VAL/REQ
+		. EJD	Ending date for calc		/TYP=D/MECH=VAL/REQ
+		. DIR	Processing direction		/TYP=N/MECH=VAL/REQ
+
+	NOTE: If in reverse, and current amount of accrued interest on the
+	account is less than the amount calculated to be taken off,
+	this will only take off the current amount accrued.  This
+	situation could arise if accruals failed in a previous dayend.
+	*/
+
+	type Public Number ER
+
+	// Accruals have already been run for this period
+	quit:EJD<BJD
+
+	// Accrue at account level;  accrue on available interest
+	if dep.segacr do ACRA(.dep) quit:ER  if dep.aiacrf do ACRAI(.dep)
+
+	// Accrue at segment level;  accrue on available interest 
+	else  do ACRS(.dep) quit:ER  if dep.aiacrf do ACRAIS(.dep)
+
+	quit
+
+
+ACRA(RecordDEP dep)	// Calculate account level accrual
+
+	type Public Number DIR,ER
+	type Public Date BJD,EJD
+
+	type Number ACR=0
+	type Number BASE,IRN
+	type String LETC
+
+	// Don't accrue interest if no Interest Rate Calculation Base
+	quit:'dep.ircb
+
+	set BASE=dep.tsnmpb
+
+	// No amount to accrue
+	quit:'BASE			
+	
+	// Interest rate
+	set IRN=dep.irn	
+	// Check promotional rate expiration
+	if dep.trexd>BJD set IRN=dep.trate
+
+	// Don't accrue if balance is less than Min Balance to Accrue Int/Div
+	if dep.minacr'="",BASE<dep.minacr do { quit
+		set BASE=0
+
+		// dep.minopt=0 - Zero ACR, Accrue when Balance > Minimum
+		if 'dep.minopt do {
+			// Set accrual balance on account to 0
+
+			// Accrual amount is already 0
+			quit:'dep.posacr
+	
+			set LETC=$$GETETC(1) quit:ER
+			do ACRTRAN(.dep,dep.posacr,LETC,-1)
+			}
+		}
+
+	// Can't accrue on more than Maximum Balance to Accrue Int/Div
+	if dep.maxacr'="",BASE>dep.maxacr set BASE=dep.maxacr
+
+	// Accrue on BASE using IRN
+	set ACR=$$^UIC(BASE,BJD,EJD,dep.iacm,IRN,0,"",dep.ipf,dep.icpf,dep.inp,dep.ipld) quit:ER
+
+	if DIR>0 set LETC=$$GETETC(5) quit:ER	// CRADIN
+	else  do { quit:ER
+		set LETC=$$GETETC(1) quit:ER	// DRADIN
+		if ACR>dep.posacr set ACR=dep.posacr
+		}
+
+	// quit if no accrual amount
+	quit:'$$^SCARND(ACR,0,"","",5)
+
+	do ACRTRAN(.dep,ACR,LETC,-1)
+
+	quit
+
+
+ACRAI(RecordDEP dep)   // Calculate acrual on available interest (account level)
+
+	type Public Number DIR,ER
+	type Public Date BJD,EJD
+
+	type Number ACR,BASE
+	type String LETC
+
+	set BASE=dep.tsmpb+dep.taims+dep.tainms
+	// No base amount
+	quit:'BASE
+
+	set ACR=$$^UIC(BASE,BJD,EJD,dep.iacm,dep.aiirn,0,"",dep.aiipf,dep.icpf,dep.aiinp,dep.aiipld) quit:ER
+	
+	if DIR>0 set LETC=$$GETETC(7) quit:ER		// CRAAI
+	else  do { quit:ER
+		
+		set LETC=$$GETETC(3) quit:ER		// DRAAI
+		if ACR>dep.aiacr set ACR=dep.aiacr
+		}
+
+	// quit if no accrual amount
+	quit:'$$^SCARND(ACR,0,"","",5)
+
+	do ACRTRAN(.dep,ACR,LETC,-1)
+
+	quit
+
+
+ACRS(RecordDEP dep)	// Calculate segment level accruals
+
+	type Public Number DIR,ER
+	type Public Date BJD,EJD
+
+
+	type DbSet dbs=Db.selectDbSet("DEPSEG","CID=:dep.cid")
+	if dbs.isEmpty() quit
+	while dbs.next() quit:ER  do {
+
+		type Number ACR,BASE
+		type String LETC
+
+		type RecordDEPSEG depseg=dbs.getRecord("DEPSEG")
+		// Valid segment
+		if 'depseg.segval quit
+		quit:EJD<depseg.segstart
+
+		if BJD<depseg.segstart set BJD=depseg.segstart
+
+		// Ledger balance
+		set BASE=depseg.bal
+
+		/* Non-accrual balance may only be set if CUVAR.USEGOPT=1
+		(Brazil Segment Processing) */
+		set BASE=BASE-depseg.noacrbal
+
+		/* Don't accrue if segment balance is less than Minimum Balance 
+		to Accrue Int/Div */
+		if dep.minacr'="",BASE<dep.minacr do { quit:ER
+			set BASE=0
+
+			// minopt=0 - Zero ACR, Accrue when Balance > Minimum
+			if 'dep.minopt do {
+				// Set accrual amount on segment to 0
+
+				// Accrual amount is already 0
+				quit:'dep.posacr
+				set LETC=$$GETETC(1) quit:ER
+				do ACRTRAN(.dep,dep.posacr,LETC,depseg.segment)
+				}
+			}
+
+		// can't accrue on more than Maximum Balance to Accrue Int/Div			
+		if dep.maxacr'="",BASE>dep.maxacr set BASE=dep.maxacr
+
+		// quit if no amount to accrue on
+		quit:'BASE
+
+		set ACR=$$^UIC(BASE,BJD,EJD,dep.iacm,depseg.irn,0,"",depseg.ipf,dep.icpf,depseg.inp,depseg.ipld) quit:ER
+
+		// CRADIN
+		if DIR>0 set LETC=$$GETETC(5) quit:ER
+		else  do { quit:ER
+			// DRADIN
+			set LETC=$$GETETC(1) quit:ER
+			if ACR>depseg.posacr set ACR=depseg.posacr
+			}
+
+		// quit if no accrual amount
+		quit:'$$^SCARND(ACR,0,"","",5)
+
+		do ACRTRAN(.dep,ACR,LETC,depseg.segment)
+		}
+
+	quit
+
+
+ACRAIS(RecordDEP dep)  // Calculate acrual on available interest (segment level)
+
+	type Public Number DIR,ER
+	type Public Date BJD,EJD
+
+	type DbSet dbs=Db.selectDbSet("DEPSEG","CID=:dep.cid")
+	if dbs.isEmpty() quit
+	while dbs.next() quit:ER  do {
+
+		type Number ACR,BASE,IRN
+		type String LETC
+
+		type RecordDEPSEG depseg=dbs.getRecord("DEPSEG")
+
+		// Valid segment
+		if 'depseg.segval quit
+		quit:EJD<depseg.segstart
+
+		if BJD<depseg.segstart set BJD=depseg.segstart
+
+		//Available interest balance
+		set BASE=depseg.aibal
+		// No base amount
+		quit:'BASE
+		// Interest rate
+		set IRN=depseg.irn
+		// Use the available interest - interest rate
+		if dep.airdet set IRN=dep.aiirn
+
+		set ACR=$$^UIC(BASE,BJD,EJD,dep.iacm,IRN,0,"",depseg.aiipf,dep.icpf,depseg.aiinp,depseg.aiipld) quit:ER
+
+		// CRAAI
+		if DIR>0 set LETC=$$GETETC(7) quit:ER
+		else  do { quit:ER
+			// DRAAI
+			set LETC=$$GETETC(3) quit:ER
+			if ACR>depseg.aiacr set ACR=depseg.aiacr
+			}
+
+		// quit if no accrual amount
+		quit:'$$^SCARND(ACR,0,"","",5)
+
+		do ACRTRAN(.dep,ACR,LETC,depseg.segment)
+		}
+
+	quit
+
+
+GETETC(Number NUM)
+	/* Retrieve ETC
+	
+	Arguments:
+		. NUM	Index number in PRODETC	array
+						/TYP=N/MECH=VAL/REQ/RANGE=1:8
+	*/
+	type Public String PRODETC()
+
+	type String DI,TC
+
+	set TC=PRODETC(NUM)
+
+	if TC'="" quit TC
+
+	if NUM=1 set DI="DRADIN"
+	else  if NUM=2 set DI="DRADIE"
+	else  if NUM=3 set DI="DRAAI"
+	else  if NUM=4 set DI="DRPAI"
+	else  if NUM=5 set DI="CRADIN"
+	else  if NUM=6 set DI="CRADIE"
+	else  if NUM=7 set DI="CRAAI"
+	else  if NUM=8 set DI="CRPAI"
+
+	do ETCERR(DI)
+
+	quit TC
+
+
+ETCERR(String DI)
+	/* Transaction code missing
+
+	Arguments:
+		. DI	Data Item			/TYP=T/MECH=VAL/REQ
+	*/
+	type Public Number TYPE
+	type Public String %LIBS
+
+	type String DESC=""
+	type String FID="PRODCTL"
+
+	type RecordDBTBL1D dbtbl1d=Db.getRecord("DBTBL1D","%LIBS=:%LIBS,FID=:FID,DI=:DI",1)
+	set DESC=dbtbl1d.des
+
+	// Product ~p1 missing transaction code - ~p2
+	if $G(DESC)'="" do Runtime.setErrMSG("PRODCTL",2268,"TYPE~DESC") quit
+	// Transaction code missing in product ~p1, node ~p2, piece ~p3
+	do Runtime.setErrMSG("PRODCTL",2694,"TYPE~DI")
+
+	quit
+
+
+LOADLAST(Number CID,Number TSEQ)
+	// Load last values for sequence into SEGTXN array
+	
+	type Public String SEGTXN(,)
+
+	type RecordSEGTXN segtxn=Db.getRecord("SEGTXN","CID=:CID,HSEQ=:TSEQ",1)
+	if segtxn.getMode() set SEGTXN(CID,TSEQ)=segtxn.lastso_"|"_segtxn.lastamt
+
+	quit
+
+
+FWDNAEXP(Date JD,Number SEG)
+	/* Process non-accrual expiration and set up next ACT entry
+
+	Arguments:
+		. JD 	Calculation base date  		/TYP=D/MECH=VAL/REQ
+		. SEG 	Single segment to update 	/TYP=N/MECH=VAL/NOREQ
+	*/
+	type Public String ACT(,,)
+	type Public Number ER
+
+	type Number SEGSQ=""
+
+	// Single update
+	if $G(SEG)'="" do FWDNAS(JD,SEG) quit
+
+	for  set SEGSQ=$O(ACT(JD,9994,SEGSQ)) quit:(SEGSQ="")!(ER)  do FWDNAS(JD,SEGSQ)
+
+	quit
+
+
+FWDNAS(Number CID,Date JD,Number SEG)
+	/* Forward update non-accrual expiration info - segment level
+
+	Arguments:
+		. CID	Account Number			/TYP=N/MECH=VAL/REQ
+		. JD 	Calculation base date  		/TYP=D/MECH=VAL/REQ
+		. SEG 	Single segment to update 	/TYP=N/MECH=VAL/NOREQ
+	*/
+	type RecordDEPSEG depseg=Db.getRecord("DEPSEG","CID,SEG",1)
+	// Segment deleted
+	if 'depseg.getMode() quit
+
+	// Quit if not a non-accrual expiration date
+	if JD'=depseg.noacrexp quit
+
+	// Non-accrual balance
+	set depseg.noacrbal=0
+	// Non-accrual expiration date
+	set depseg.noacrexp=""
+
+	do depseg.bypassSave()
+
+	quit
+
+
+HIST2STR(RecordHIST hist)
+	/* Convert HIST record to a string
+	Arguments:
+		. hist	Account history record		/TYP=RecordHIST/REQ
+
+	Returns:
+		. $$	Account history record converted to a string	/TYP=S
+	*/
+
+	type String REC
+	
+	set REC=hist.tjd_"|"_hist.itc_"|"_hist.etc_"|"_hist.tamt_"|"_hist.efd_"|"_hist.tlo_"|"_hist.tso_"|"_hist.tcmt_"|"_hist.cdt_"|"_hist.time
+	set REC=REC_"|"_hist.brcd_"|"_hist.trc_"|"_hist.uid_"|"_hist.spr_"|"_hist.tsb_"|"_hist.xhs16_"|"_hist.crcd_"|"_hist.rate_"|"_hist.vdt_"|"_hist.ben
+	set REC=REC_"|"_hist.dir_"|"_hist.chktyp_"|"_hist.endbal_"|"_hist.mult_"|"_hist.bseamt_"|"_hist.custcd_"|"_hist.tresref_"|"_hist.rty
+	set REC=REC_"|"_hist.msd_"|"_hist.glsc_"|"_hist.udprin_"|"_hist.bcrcd_"|"_hist.xpdo_"|"_hist.sysbase_"|"_hist.cmpsav_"|"_hist.ident
+
+	quit REC
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60754^9985^Sunitha Santhumayor^89667"	// Signature - LTD^TIME^USER^SIZE

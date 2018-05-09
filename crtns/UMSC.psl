@@ -1,0 +1,470 @@
+public	UMSC
+	/*	
+	ORIG: Frank Sanchez (2497)
+	Procedure ID: UMSC
+	DESC: Utility to process miscellaneous transactions
+
+	INPUTS:
+		. TJD  Transaction julian date
+		. TPD   Teller posting date
+		. BRCD  Branch code
+		. %UID  Teller ID
+		. TLO   Transaction location
+		. TSO   Transaction source of funds
+		. GL(0)  Net debit transaction suspense
+		. GL(1)  Net Credit transaction suspense
+		. GLTC(0) Debit transaction code
+		. GLTC(1) Credit transaction code
+		
+	---- Revision History -------------------------------------------------
+	
+	11/23/05 - MbuiM - CR 18352
+		   Modified TTX section to pass CID to call for FILEDMJ^TRNDRV.
+		   This is necessary due to changes made under this CR in 
+		   procedure TRNDRV.
+	
+	08/19/05-  Radhika.P - 16725
+	           In TTX^UMSC, the following Class.new() is changed to a Db.getRecord() 
+	           method by passing a 1 for the third parameter.Removed the setting of
+	           ttxuid.tjd = TPD, ttxuid.brcd = BRCD and ttxuid.uid = %UserID.
+
+        03/15/05 - Hillanbrand - 13281
+	           Added setting of ttx.brcde=BRCD and ttx.uidt= %UserID.  These
+	           columns are needed when TTX is copied into DTX.  TGLMON then
+	           uses the values in dtx.brcd and dtx.uid to create DMJ. 
+	
+	03/14/05 - SmithCD - 13782
+		   . Removed quits from INIT section, which were causing CID 
+		     to be returned as null instead of CUVAR.GLTS (eventually 
+		     causing an undefined on dtx.cid in ^TGLMON)
+		   . Corrected infinite loop situation in OFFSET section
+		   . Removed DMJ section, and replaced call to it with call to 
+		     FILEDMJ^TRNDRV (more efficient, and ensures consistency)
+		   . Modified TTX section to make the ttx record available to 
+		     the entire section, instead of repeating code; Added TTX 
+		     array locking; Simplified Currency code processing
+		   . Declared externally-called functions public
+		   . Removed GL tag (call into top intstead)
+		   . Added %CACHE for RecordTRN
+		   . Modified OFFSET section to ensure %EffectiveDate is 
+		     defined, as it it used in p01, to prevent undefined error
+		   . Removed old revision history
+
+	  -----------------------------------------------------------------------
+	*/
+	
+	type public String ETC, GLTC()
+	type public Number GL()
+	
+	type Number TAMT
+
+	// Account and tran code pre-defined - Update ^TTX only
+
+	if GL(0) set TAMT = GL(0) set ETC = GLTC(0) do TTX("", 0)
+	if GL(1) set TAMT = GL(1) set ETC = GLTC(1) do TTX("", 0)
+
+	quit
+
+
+public	UPD	// Account and tran code pre-defined - Update ^TTX and ^DMJ
+
+	type public String ETC, GLTC()
+	type public Number GL()
+	
+	type Number TAMT
+
+	if GL(0) set TAMT = GL(0) set ETC = GLTC(0) do TTX("", 1)
+	if GL(1) set TAMT = GL(1) set ETC = GLTC(1) do TTX("", 1)
+
+	quit
+
+
+public	RODR	// Reconciling offset (DR)
+
+	type String ETC
+
+	set ETC = "RODR" do INIT do TTX("", 0)
+
+	quit
+
+
+public	ROCR	// Reconciling offset (CR)
+
+	type String ETC
+
+	set ETC = "ROCR" do INIT do TTX("", 0)
+
+	quit
+
+
+public	TSDR	// Transaction suspence (DR)
+
+	type public Number CID
+	type public Boolean CRT
+
+	type String ETC
+	type Number E()
+
+	set ETC = "TSDR" do INIT if CRT.exists() set E(14) = CID quit
+
+	do TTX("", 1)
+
+	quit
+
+
+public	TSCR	// Transaction suspence (CR)
+
+	type public Number CID
+	type public Boolean CRT
+
+	type String ETC
+	type Number E()
+
+	set ETC = "TSCR" do INIT if CRT.exists() set E(14) = CID quit
+	do TTX("", 1)
+
+	quit
+
+
+public	BCHOFF(Date TPD, 
+	       Number BRCD,
+	       String %UserID,
+	       String tot(), 
+	       Boolean DMJ,
+	       Boolean SYSGEN)
+	
+	/*
+
+       	Create reconciling offset in ^TTX
+
+	   Input variables
+
+	     TJD   - System accounting date
+	     TLO   - Terminal location
+
+	   Parameters passed
+
+	     TPD   - Teller posting date (req'd)
+	     BRCD  - Branch code (req'd)
+	     %UID  - User ID (req'd)
+	  -----------------------------------------------------------------------
+
+	*/
+
+	type Number ptype
+
+	set ptype = ""
+
+	for  set ptype = tot(ptype).order() quit:ptype.isNull()  do {
+		do OFFSET(TPD, BRCD, %UserID, "tot("""_ptype_"""", 1, 1)
+		}
+
+	quit
+
+
+public	OFFSET(Date TPD, 		// Teller posting date
+	       Number BRCD, 		// Branch code
+	       String %UserID, 		// User ID
+	       String ARRAY, 		// Array name
+	       Boolean DMJ, 		// Update Daily Misc Journal
+	       Boolean SYSGEN, 		// System-generated transactions
+	       Date %EffectiveDate)	// Effective date		/NOREQ
+
+	/*
+
+	Create reconciling offset in ^TTX
+	
+	   Input variables
+
+	     %SystemDate   - System accounting date
+	     TLO	   - Terminal location
+
+	   Additional notes on parameters passed
+
+	     ARRAY - The array name CANNOT be shared with any
+		     of the variables that are NEW'ed in this
+		     sub-routine (i.e. GLACN, GLETC, S1, etc.)
+
+	     DMJ   - 0 = No (Dft)
+		     1 = Yes
+
+	     SYSGEN - Will not file to ^TTX
+
+	   Sort keys
+
+	     S1 - ALWAYS accumulated by currency code (CRCD)
+	     S2 - Typically by product type (TYPE)
+	     S3 - Typically by G/L set code (GLSC)
+	     S4 - ALWAYS by cost center (CC) (NEVER branch code)
+	  -----------------------------------------------------------------------
+
+	*/
+	
+	type Number CID, ETC, GLACN, S2, S4, TAMT
+	type String ARRAYLEN, ARRLEV1, ARRLEV2, ARRLEV3, ARRLEV4, ARRLEV5
+	type String CRCD, GLETC, LEV4REC, S1, S3
+	
+	type Boolean S5
+	type String TCMT, TSO
+	
+	set %EffectiveDate = %EffectiveDate.get()
+
+	if 'ARRAY.isLike("%(%") set ARRAY = ARRAY_"("
+
+	set ARRAYLEN=ARRAY.length()
+	if ARRAY.extract(ARRAYLEN) = ")" set ARRAY = ARRAY.extract(1, ARRAYLEN - 1)
+	if ARRAY.extract(ARRAYLEN) = "," set ARRAY = ARRAY.extract(1, ARRAYLEN - 1)
+	if 'ARRAY.piece("(",2).isNull() set ARRAY = ARRAY_","
+
+	// Initialize array subscripts
+	set (S1, S2, S3, S4) = ""
+
+	set ARRLEV1 = ARRAY_"S1)" 
+	for  set S1 = @ARRLEV1.order() quit:S1.isNull()  do { 
+		set CRCD = S1
+		set ARRLEV2 = ARRAY_"S1,S2)" 
+		for  set S2 = @ARRLEV2.order() quit:S2.isNull()  do {
+			set ARRLEV3 = ARRAY_"S1,S2,S3)" 
+			for  set S3 = @ARRLEV3.order() quit:S3.isNull()  do {
+				set ARRLEV4 = ARRAY_"S1,S2,S3,S4)" 
+				for  set S4 = @ARRLEV4.order() quit:S4.isNull()  do {
+					set LEV4REC = @ARRLEV4
+					set GLACN(0) = LEV4REC.piece("|",1) 
+					set GLETC(0) = LEV4REC.piece("|",2)
+					set GLACN(1) = LEV4REC.piece("|",3) 
+					set GLETC(1) = LEV4REC.piece("|",4)
+					set TSO = LEV4REC.piece("|",5) 
+					set TCMT = LEV4REC.piece("|",6)
+					for S5 = 0, 1 do {
+						set ARRLEV5 = ARRAY_"S1,S2,S3,S4,S5)" 
+						set TAMT = +@ARRLEV5.get() if 'TAMT quit
+						
+						set CID = GLACN(S5)
+						set ETC = GLETC(S5)
+						if CID.isNull() do INIT
+						if 'ETC.isNull() do TTX(S4, DMJ.get())
+						}
+					}
+				}					
+				
+			}
+		}
+
+	quit
+
+
+TTX(Number OCC, Boolean DMJ)
+
+	// Build system-generated transaction (and process if future-dated)
+
+	type public Cache %CACHE()
+	type public Date TPD
+	type public String CRCD, ETC, TCMT, TSO, TTX(,,)
+	type public Boolean STF, SYSGEN
+	type public Number BCHNUM, BRCD, CID, TAMT, TAPENUM
+	
+	type Number TRC, TRNSRT
+	type String ITC
+
+	set OCC = OCC.get()
+	set DMJ = DMJ.get()
+
+	set TPD = TPD.get() 
+	if 'TPD set TPD = %SystemDate
+
+	set TCMT = TCMT.get()
+	set STF = STF.get()
+	set TSO = TSO.get()
+	set SYSGEN = SYSGEN.get()
+	
+	set TRC = ""
+	
+	type RecordTRN trn = %CACHE("TRN").getRecord("TRN", "ETC=:ETC")
+	
+	set ITC = trn.itc	
+	
+	if SYSGEN set ITC = $$ITC^TTXEXT(ITC, 7, 1)
+
+	// Default Cost Center
+	if 'trn.dftcc.isNull() set OCC = trn.dftcc
+	
+	type RecordTTX ttx = Class.new("RecordTTX")
+		
+	set ttx.tjd = TPD
+	set ttx.brcd = BRCD
+	set ttx.brcde = BRCD
+	set ttx.uid = %UserID
+	set ttx.uidt = %UserID
+	set ttx.cid = CID
+	set ttx.itc = ITC
+	set ttx.etc = ETC
+	set ttx.tamt = TAMT
+	set ttx.tlo = %UserStation
+	set ttx.tso = TSO
+	set ttx.tcmt = TCMT
+	set ttx.cdt = $S(%SystemDate = +%CurrentDate:"", 1:+%CurrentDate)
+	set ttx.tim = %CurrentTime
+	set ttx.cc = OCC
+	
+	if 'CRCD.exists() set CRCD = %SystemCurrency
+	set ttx.crcd = CRCD
+		
+	type RecordSCAU scau = Db.getRecord("SCAU", "%UserID")
+	
+	//Teller Transaction Sort Option 
+	if (BCHNUM.get() + TAPENUM.get()) = 0 set TRNSRT = 0
+	else  set TRNSRT = scau.trnsrt
+
+	if 'SYSGEN, %EffectiveDate.isNull() do {
+
+		if TRNSRT do TRNSRT quit
+
+		lock +TTX(TPD, BRCD, %UserID)
+		
+		set TRC = Db.currVal("TTX", "TPD,BRCD,%UserID")
+
+		if STF set:TRC.isNull() TRC = 1000 set TRC = TRC + 1
+		else  set TRC = (((TRC \ 1000) + 1) * 1000) + 1
+
+		if DMJ do {
+				
+			type RecordTTXUID ttxuid = Db.getRecord("TTXUID","TJD=:TPD,BRCD=:BRCD,UID=%UserID", 1)
+			
+			set ttxuid.lpseq = TRC \ 1000					 
+			 
+			do ttxuid.bypassSave()	
+			}
+
+		set ttx.tseq = TRC
+		do ttx.bypassSave()
+
+		lock -TTX(TPD, BRCD, %UserID)
+		}
+
+	// Process effective dated transactions
+	if '%EffectiveDate.isNull(), %EffectiveDate>%SystemDate do {
+
+		type Number BRCD
+
+		set ttx.efd = %EffectiveDate
+		set BRCD = CUVAR.BOBR
+
+		do TRNSINGL^TRNDRV(.ttx, , TPD, BRCD, 4)
+
+		}
+
+	if DMJ do FILEDMJ^TRNDRV(.ttx, CID)
+
+	quit
+
+
+public	INIT	// Initialize TSCR and TSDR from ^SCAU(1,%UID
+	
+	type public Number CID
+	type public String ETC
+
+	type RecordSCAU scau = Db.getRecord("SCAU", "UID=:%UserID", 1)
+	
+	if ETC = "TSDR" set CID = scau.tsdr  
+	else  if ETC = "TSCR" set CID = scau.tscr
+	else  if ETC = "RODR" set CID = scau.rodr
+	else  if ETC = "ROCR" set CID = scau.rocr
+	else  set CID = ""
+
+	if 'CID.isNull() quit
+	
+	set CID = +CUVAR.GLTS
+
+	quit
+
+
+OCC(RecordTRN trn,RecordTTX ttx,OS)	// Use hierarchy to figure cost center //check the parameters
+
+	/*
+
+	   Plug cost center into the first piece of a DMJ entry. The input
+	   string (IS) must have all data items in the correct position,
+	   (i.e. piece 1 will be set, not concatonated).
+
+	    Variables :
+
+	     OS  - Output string. 
+
+	    Hierarchy to be used when interrogating an existing TTX record.
+	    If TTX record is created via OFFSET^UMSC, any default cost center
+	    for that tran code will take precedence.
+
+	  -----------------------------------------------------------------------
+
+	*/
+	
+	type Number BRC
+
+	if 'ttx.cc.isNull() set OS.piece("|",1) = ttx.cc quit
+	
+	if 'trn.dftcc.isNull() set OS.piece("|",1) = trn.dftcc quit
+
+	set BRC=ttx.brcde 
+	if BRC.isNull() set BRC = +ttx.brcd
+	
+	type RecordUTBLBRCD utblbrcd = Db.getRecord("UTBLBRCD", "BRC")
+	set OS.piece("|", 1) = utblbrcd.ccdef
+
+	quit
+
+
+
+TRNSRT	//Set up Transaction sort Records instead of TTX
+
+	type public Number BCHNUM, BRCD, CID, OCC, TAMT, TAPENUM, TRC
+	type public Boolean STF
+	type public Date TPD
+	type public String CRCD, ETC, ITC, TCMT, TLO, TSO
+
+	type RecordINCTAPEB inctapeb = Db.getRecord("INCTAPEB", "TAPENUM,BCHNUM")
+
+	set TRC = inctapeb.endtrc
+
+	if STF do {
+		set:TRC.isNull() TRC = 1000
+		set TRC = TRC+1
+		}
+	else  set TRC = (((TRC \ 1000) + 1) * 1000) + 1
+
+	type RecordTTXSRTUID ttxsrtuid = Class.new("RecordTTXSRTUID")
+
+	set ttxsrtuid.sjd = TPD
+	set ttxsrtuid.brcd = BRCD
+	set ttxsrtuid.uid = %UserID
+	set ttxsrtuid.lpseq = TRC \ 1000
+
+	do ttxsrtuid.bypassSave()
+	
+	type RecordTTXSRT ttxsrt = Class.new("RecordTTXSRT")
+	
+	set ttxsrt.sjd = TPD
+	set ttxsrt.brcd = BRCD
+	set ttxsrt.uid = %UserID
+	set ttxsrt.dc = ITC.extract()
+	set ttxsrt.cidsrt = CID
+	set ttxsrt.amt = TAMT
+	set ttxsrt.tseq = TRC
+	set ttxsrt.cid = CID
+	set ttxsrt.itc = ITC
+	set ttxsrt.etc = ETC
+	set ttxsrt.tamt = TAMT
+	set ttxsrt.tlo = TLO
+	set ttxsrt.tso = TSO
+	set ttxsrt.tcmt = TCMT
+	set ttxsrt.cdt = $S(%SystemDate = +%CurrentDate:"", 1:+%CurrentDate)
+	set ttxsrt.tim = %CurrentTime
+	set ttxsrt.crcd = CRCD
+	set ttxsrt.cc = OCC
+	
+	do ttxsrt.bypassSave()
+	
+	quit
+	
+	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60232^35975^Marie Mbui^10920"	// Signature - LTD^TIME^USER^SIZE

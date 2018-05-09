@@ -1,0 +1,241 @@
+BCHRECX //Batch BCHRECXH - Recurring Trans Holds (B.O.Day)
+ ;;Copyright(c)2005 Sanchez Computer Associates, Inc.  All Rights Reserved - 08/09/2005 10:39 - spatola
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHRECXH Batch Definition
+ // ***********************************************************
+ //
+ //
+ type Public Number ER
+ type Public String %FN,RM
+ catch vERROR {
+ type String ET,RM
+ set ET=vERROR.type
+ if ET["%GTM-" do ZE^UTLERR quit
+ 
+ set ET=ET_"-"_vERROR.thrownAt
+ set RM=vERROR.description
+ do ^UTLERR
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ set vBCHSTS=$$STATUS^BCHUTL("BCHRECXH")
+ if vBCHSTS=1 set ER=1,RM=$$^MSG(3410) quit
+ if vBCHSTS=2 set ER=1,RM=$$^MSG(3414) quit
+ if vBCHSTS=0 set %BatchRestart=1
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit do EXIT^BCHUTL("BCHRECXH") quit
+ do JOBMGR^BCHUTL(%FN,"BCHRECXH",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ do EXIT^BCHUTL("BCHRECXH")
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson
+ quit
+vPROC(PROCDT,SECID,CID,ORDSEQ) //
+ type Public Number ER
+ type Public String ET,%EVENT,%FN,%INTRPT,RM,vCONTEXT
+ catch vERROR {
+ type String ET,ETLOC,RM
+ do Runtime.rollback()
+ 
+ set ET=vERROR.type
+ set ETLOC=vERROR.thrownAt
+ set RM=vERROR.description
+ 
+ do LOG^UTLEXC("BCHRECXH","*","",PROCDT.get()_","_SECID.get()_","_CID.get()_","_ORDSEQ.get(),ETLOC,ET)
+ if ET["%GTM-" do ZE^UTLERR quit
+ do ^UTLERR
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ if %BatchRestart,$$CHKLOG^BCHUTL(%SystemDate,%FN,"BCHRECXH",PROCDT.get()_","_SECID.get()_","_CID.get()_","_ORDSEQ.get()) do { quit
+ do LOG^BCHUTL(%SystemDate,%FN,"BCHRECXH",PROCDT.get()_","_SECID.get()_","_CID.get()_","_ORDSEQ.get(),"Record already processed")
+ }
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,PROCDT,SECID,CID,ORDSEQ)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHRECXH","*","",PROCDT.get()_","_SECID.get()_","_CID.get()_","_ORDSEQ.get(),"",et)
+ }
+ do UPDLOG^BCHUTL(%SystemDate,%FN,"BCHRECXH",PROCDT.get()_","_SECID.get()_","_CID.get()_","_ORDSEQ.get(),vCONTEXT)
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson
+ quit
+vEXEC(vCONTEXT,PROCDT,SECID,CID,ORDSEQ) //
+	new ACN,AMT,EXTSEQ,HLDSEQ,OLDSEQ,TRADEDT,SHARES,ORDTYPE
+	set HLDSEQ=""
+
+	new mford
+	type RecordMFORD mford
+	set mford=Db.getRecord("MFORD","CID,ORDSEQ")
+
+	if mford.ordstatus'=0 quit
+		
+	set AMT=mford.amt
+	set SHARES=mford.shares
+	set EXTSEQ=mford.tranact
+	set TRADEDT=mford.tradedate
+	set OLDSEQ=mford.hldseq
+	set NETGRS=mford.netgrs
+	set ORDTYPE=mford.type
+	// in mford filer, transfee is generated as soon
+	// as order is filed-using most recent NAV
+	
+	set TRANSFEE=mford.transfee
+
+	set HLDSEQ=$$DOHLD(AMT,SHARES,EXTSEQ,TRADEDT,OLDSEQ)
+
+	// if a hold is put on a tranact - refile order information
+
+        if $G(HLDSEQ) set mford.hldseq=HLDSEQ do mford.bypassSave()
+
+	quit
+
+        //----------------------------------------------------------------------
+DOHLD(AMT,SHARES,EXTSEQ,TRADEDT,OLDSEQ)	//do hold
+        //----------------------------------------------------------------------
+
+	new ACN,CCODE,DATA,HLDAMT,TRCRCD
+
+	// if no subscription hold or subscription hold % quit
+	if (SUBHOLD'=1),(SUBHLDP'="") quit ""
+
+	set ACN=Db.getOneRow("ACN","ACN","CID")
+
+	// cannot set hold on acct not in system
+	if '$$ONUS^MFUTL(EXTSEQ,ACN) quit ""
+	set TRANACT=Db.getOneRow("EXTACCT","CIFEXT","ACN,EXTSEQ")
+	set DATA=Db.getOneRow("CRCD,CCODE","ACN","TRANACT")
+	set TRCRCD=$P(DATA,$C(9),1)
+	set CCODE=$P(DATA,$C(9),2)
+
+	// check available balance in TRANACT first
+	new BALAVAIL
+	set BALAVAIL=Db.getOneRow("BALAVAIL","DEP","TRANACT")
+
+	// check to see if there is already a hold.  If so, then update the
+	// expiration date and quit
+	if ((OLDSEQ'="")&(Db.isDefined("PHLD","TRANACT,OLDSEQ"))) do {  quit ""
+		new EXP,phld
+		set EXP=%SystemDate+1
+		type RecordPHLD phld
+		set phld=Db.getRecord("PHLD","TRANACT,OLDSEQ")
+		set phld.expdt=EXP
+		do phld.bypassSave()
+		}
+
+	//get hold amt by order type
+	if ORDTYPE=0 do {
+		if $G(AMT) set HLDAMT=$G(AMT)+$G(TRANSFEE)
+		else  set HLDAMT=(SHARES*NAV*FACTOR)+$G(TRANSFEE)
+		set HLDAMT=$$^SCARND(HLDAMT,0,CID)
+	}
+	if ORDTYPE=1 set HLDAMT=$G(TRANSFEE)
+
+	//make sure sufficient funds in TRANACT
+	if HLDAMT'<BALAVAIL quit ""
+
+	// check for currency conversion
+        if TRCRCD'=FNDCRCD do {
+		do EXC^CRCDUTL(TRCRCD,FNDCRCD,HLDAMT,0,0,00,CCODE)
+		set HLDAMT=$$^SCARND(EXCAMT,0,TRANACT)
+		}
+
+	set EXP=%SystemDate+1
+	set TCMT=$$^MSG(4589)      ; Recurring Transaction Hold
+	set HLDSEQ=$$PUTHOLD^PHLD(TRANACT,%SystemDate,EXP,HLDAMT,SECHLD,%UserID,BRCD,TCMT) quit:ER
+
+        quit HLDSEQ
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson
+ quit
+vTHREXEC(vINPUT,vRETURN) //
+        new CID,DATA,FNDCRCD,NAV,ONLINE,PRBD,SECHLD,SUBHOLD,SUBHLDP,TRANSFEE
+	new FACTOR
+	set TRANSFEE=0
+
+	set SECID=$P(vINPUT,"~",1)
+	if SECID="" quit
+
+	set NAV=$$GETNAV^MFUTL(SECID,%SystemDate)
+        if NAV="" do Runtime.setErrMSG("DEP",4411) quit:ER
+
+	set DATA=Db.getOneRow("CRCD,SUBHOLD,SUBHOLDPCT,TFPLAN","MFPROD1","SECID")
+	set FNDCRCD=$P(DATA,$C(9),1)
+	set SUBHOLD=$P(DATA,$C(9),2)
+	set SUBHLDP=$P(DATA,$C(9),3)
+	set TFPLAN=$P(DATA,$C(9),4)
+
+	set SECHLD=Db.getOneRow("SECHLD","CUVAR")
+	set ONLINE=Db.getOneRow("ONLINE","MFPROD4","SECID")
+	
+        if SUBHLDP'="" set FACTOR=1+(SUBHLDP/100)  // =1.1%, If SUBHLDP=10%
+
+        set CID=""
+        for  set CID=Db.nextKey("DAYENDRCXHLD","%SystemDate,SECID,CID") quit:CID=""  do {
+		//get order sequence number
+		new ORDSEQ
+		set ORDSEQ=""
+		for  set ORDSEQ=Db.nextKey("DAYENDRCXHLD","%SystemDate,SECID,CID,ORDSEQ") quit:ORDSEQ=""  do {
+			// begin procesing the order
+			set ER=0
+			do vPROC(%SystemDate,SECID,CID,ORDSEQ)
+        	}
+	}
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson
+ quit
+vSCHEXEC(vINPUT,vRETURN) //
+	// Set up a different thread for each security ID
+
+        set SECID=$P(vINPUT,"~",1)
+ 
+        set SECID=Db.nextKey("DAYENDRCXHLD","%SystemDate,SECID")
+ 	set vINPUT=SECID
+
+	quit
+        
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson
+ quit
+vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson
+ quit
+vOPEN(vINPUT,%BatchExit) //
+        set ER=0
+        do SOURCE^BCHSOURC("BOFF","RECXHLD",.%UserID,.BRCD,.%UserClass)
+ 
+        // Set batch exit flag if error returned from above call
+        if ER s vEXIT=1
+
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson
+ type Public ResultSet vRESULT=Db.select("PROCDT,SECID,CID,ORDSEQ","DAYENDRCXHLD","")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson
+ quit
+vTHRINIT(vINPUT,vRETURN) //
+	do SOURCE^BCHSOURC("BOFF","RECXHLD",.%UserID,.BRCD,.%UserClass)
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson
+ quit
+vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson
+ quit
+vSCHINIT(vINPUT,vRETURN) //
+	set vINPUT=""
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson
+ quit
+vSCHEXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

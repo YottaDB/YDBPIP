@@ -1,0 +1,446 @@
+public EUROACC
+
+	/*
+	ORIG: kumarss - 09/27/2005
+	DESC: EURO Conversion Driver
+	
+	---- Comments --------------------------------------------------------
+	
+	---- Revision History ------------------------------------------------
+	07/25/06 - Pete Chenard - CR 22385
+		   Modified occurances of .char() method to remove parameters.  That
+		   method does not accept them.
+	
+	06/23/06 - TITOVE - CR 21827
+		   Modified to use ACN instead of DEP/LN and conform to
+		   standards.
+
+	05/15/06 - RussellDS - CR21296
+		   Replace references to %CACHE, which is reserved for PSL
+		   record objects, with cache array.
+	
+	09/27/05 - KumarSS - 16668
+		   Converted to PSL.
+		   Removed revision history prior to 2004.
+	
+	----------------------------------------------------------------------
+	*/
+	
+	do START
+	
+ 	quit
+
+
+START	// Process start-up
+
+	type public String BRCD, CNVOPT, EURLOG
+	
+	type Date EUREFD = %SystemDate
+	type String input()
+
+	set CNVOPT = CNVOPT.get()
+	
+	type ResultSet rs = Db.select("ACN", "ACN", "EUREFD=:EUREFD")
+
+	if (CNVOPT '= "ALL"), rs.isEmpty() quit
+
+	do SOURCE^BCHSOURC("BOFF", "EUROCNV", .%UserID, .BRCD, .%UserClass)
+	
+	// User ID number not defined
+	if %UserID.isNull() do Runtime.setErrMSG("UTBLSRC1", 6668) quit
+	
+	set EURLOG = EURLOG.get()
+
+	set input("thrlvar") = "cache,CNVOPT,EUREFD,EURLOG,TLO"
+	set input("thrinit") = "THRINIT^EUROACC"
+	set input("threxec") = "THREXEC^EUROACC"
+	set input("threxit") = "THREXIT^EUROACC"
+	set input("thrrcnt") = 1
+
+	set input("schinit") = "SCHINIT^EUROACC"
+	set input("schexec") = "SCHEXEC^EUROACC"
+	set input("schexit") = "SCHEXIT^EUROACC"
+	set input("schrcnt") = 1
+
+	set input("maxsize") = 20000
+
+	do ^JOBMGR(.input)
+	
+	quit
+
+
+SCHINIT(String record,
+	String return)
+
+	type public String SAVEKEYS, TLO
+	
+	set TLO = $$TLO^UTLO
+	
+	do ^EUROINI
+
+	set SAVEKEYS = ""
+	set record = ""
+
+	quit
+
+
+SCHEXEC(String record,
+	String return)
+
+	type public String CNVOPT, SAVEKEYS
+	
+	if (SAVEKEYS = "*") quit
+
+	type Boolean QT = 0
+	type Number cid, eurbch, eurstat, reccnt
+
+	set record = ""
+	set reccnt = 0
+
+	if (CNVOPT = "ALL") do { quit
+		
+		set cid = SAVEKEYS
+
+		type ResultSet rsacn = Db.select("CID,STAT", "ACN", "CID>:cid")
+		
+		while rsacn.next() do {  quit:QT
+
+			set cid = rsacn.getCol("CID")
+			if cid.isNull() set QT = 1 quit
+
+			if rsacn.getCol("STAT") = 4 quit
+
+			set record = record_cid_"|"
+			set reccnt = reccnt + 1
+			
+			if (reccnt > 1000) set QT = 1			
+			}
+			
+		set SAVEKEYS = cid
+		if SAVEKEYS.isNull() set SAVEKEYS = "*"
+		}
+
+	set eurstat = SAVEKEYS.piece("#", 1)
+	set eurbch = SAVEKEYS.piece("#", 2)
+	set cid = SAVEKEYS.piece("#", 3)
+
+	for  do {  quit:QT
+		
+		if eurstat.isNull() set eurstat = $$getstat(.SAVEKEYS) if eurstat.isNull() set QT = 1 quit
+		if eurbch.isNull() set eurbch = $$getbch(.SAVEKEYS) if eurbch.isNull() set eurstat = "" quit
+
+		type ResultSet rs = Db.select("CID", "ACN", "EUREFD = :EUREFD AND EURSTAT = :eurstat AND EURBATCH = :eurbch AND CID>:cid")
+
+		if rs.next() set cid = rs.getCol("CID")
+		
+		if cid.isNull() set eurbch = "" quit
+
+		set record = record_cid_"|"
+		
+		set reccnt = reccnt + 1
+		
+		if (reccnt > 1000) set QT = 1
+		}
+
+	if eurstat.isNull() set SAVEKEYS = "*"
+	else  set SAVEKEYS = eurstat_"#"_eurbch_"#"_cid
+	
+	quit
+
+
+SCHEXIT(String record,
+	String return)
+
+	// Build DAYENDXFR from EUROCNV
+	
+	do XFR(0)	// Transfer out
+	
+	do XFR(1)	// Transfer in
+	
+	do RND		// Segmented account rounding differences
+
+	quit
+
+
+THRINIT(String record,
+	String return)
+
+	type public String cache(,,), BRCD, EURLOG
+	
+	type Boolean INTEG, DFTTHRC
+	type Date DARCLPDT, DARCNPDT, PROVLPDT, PROVNPDT
+	type Number EURRNDCR, EURRNDDR, LOGCNT, RFC, RFR, BOBR
+	type String EMUCRCD, EXPR, LOGFILE, RMC, RMR
+
+	do SOURCE^BCHSOURC("BOFF", "EUROCNV", .%UserID, .BRCD, .%UserClass)
+
+	type RecordCUVAR cuvar = Db.getRecord("CUVAR")
+
+	set RFC = cuvar.rfc		// Rounding Factor - Conversion
+	set RMC = cuvar.rmc		// Rounding Method - Conversion
+	set RFR = cuvar.rfr		// Rounding Factor - Reversal
+	set RMR = cuvar.rmr		// Rounding Method - Reversal
+
+	set BOBR = cuvar.bobr
+	set INTEG = cuvar.eurinteg
+	set DFTTHRC = cuvar.dftthrc
+
+	set EMUCRCD = cuvar.emucrcd
+	set EURRNDCR = cuvar.eurrndcr
+	set EURRNDDR = cuvar.eurrnddr
+
+	/*
+	Required by DAYEND^EUROCNV
+	If 'last date' is prior to yesterday's date, set value to <null> 
+	(the conversion does not convert DAYEND entries prior to yesterday.)
+	*/
+
+	set DARCLPDT = cuvar.darclpdt
+	set DARCNPDT = cuvar.darcnpdt
+	set PROVLPDT = cuvar.provlpdt
+	set PROVNPDT = cuvar.provnpdt
+
+	if DARCLPDT<(%SystemDate - 1) set DARCLPDT = ""
+	if PROVLPDT<(%SystemDate - 1) set PROVLPDT = ""
+
+	if EURLOG.get() do {
+		
+		set LOGFILE = $$FILE^%TRNLNM("EUROCNV_DTL_"_%ProcessID_".TXT", "SCAU$SPOOL")
+		
+		type IO iologfil = Class.new("IO")
+		set iologfil.fileName = LOGFILE
+		set iologfil.openParams = "NEWV/WRITE"
+		set iologfil.timeout = 2
+		set iologfil.recordSize = 1024
+		
+		catch ioxcpt {
+			
+			if ioxcpt'["%PSL-E-IO" throw ioxcpt
+		
+			write "Open failed: ", ioxcpt.type, !
+			
+			do iologfil.close()
+			}
+			
+		do iologfil.open()
+		
+		set LOGCNT = 0
+		}
+
+	// Load ^TMPEUR into cache
+	do TMPEUR^EUROINI(.cache())
+
+	// I18N=OFF
+	// Enable NOISOLATION for ^EUROCNV and ^TMPCACHE for GTM v4.2 and higher
+	#ACCEPT DATE=12/06/05; PGM=KumarSS; CR=16668
+	set EXPR = "VIEW ""NOISOLATION"":""+[EUROCNVRND],[SQLCACHE]""" xecute EXPR
+	// I18N=ON
+
+	quit
+
+
+THREXEC(String record,
+	String return)
+
+	type String cid
+
+	for  do {  quit:record.isNull()
+		
+		set cid = record.piece("|", 1) quit:cid.isNull()
+		
+		set record = record.extract(cid.length() + 2, 99999)
+
+		do EXEC^EUROCNV(cid.toNumber())
+		}
+	quit
+
+
+THREXIT(String record,
+	String return)
+
+	type public IO iologfil
+	type public String LOGFILE
+
+	if 'LOGFILE.isNull() do iologfil.close()
+
+	do DUMP^BCHUTL("EUROCNV")
+	
+	quit
+
+
+XFR(Boolean xflg)
+
+	// Build DAYENDXFR
+
+	type public Date EUREFD
+	type Number cc, cid, job, ptype, seq, trb
+	type String ccrcd, crcd, glsc
+
+	type ResultSet rs = Db.select("SEQ", "DAYENDXFR", "TJD=:EUREFD", "SEQ DESC")
+
+	if rs.next() set seq = rs.getCol("SEQ")
+	else  set seq = 0
+
+	type DbSet dseursum = Db.selectDbSet("EUROSUM", "EUREFD=:EUREFD")
+
+	while dseursum.next() do {
+
+		type RecordEUROSUM eurosum = dseursum.getRecord("EUROSUM")
+
+		set job = eurosum.pid
+		set crcd = eurosum.crcd
+		set ccrcd = eurosum.ccrcd
+		set ptype = eurosum.ptype
+		set cc = eurosum.cc
+		set glsc = eurosum.glsc
+		set trb = eurosum.trb
+
+		type ResultSet eurodtl = Db.select("CID", "EURODTL", "EUREFD=:EUREFD AND PID=:job AND XFLG=:xflg AND CRCD=:crcd AND CCRCD=:ccrcd AND PTYPE=ptype AND CC=:cc AND GLSC=:glsc AND TRB=:trb")
+
+		while eurodtl.next() do {
+
+			set cid = eurodtl.getCol("CID")
+			set seq = seq + 1
+
+			type RecordDAYENDXFR dexfr = Class.new("RecordDAYENDXFR")
+
+			set dexfr.tjd = EUREFD
+			set dexfr.seq = seq
+			set dexfr.xflg = xflg
+			set dexfr.cid = cid
+			set dexfr.type = ptype
+			set dexfr.cc = cc
+			set dexfr.ctype = ptype
+			set dexfr.ccc = cc
+			set dexfr.glsc = glsc
+			set dexfr.cglsc = glsc
+			set dexfr.crcd = crcd
+			set dexfr.ccrcd = ccrcd
+
+			do dexfr.save()
+			}
+		}
+
+	quit
+
+
+RND	// Summarize/report rounding differences
+
+	//I18N=OFF
+
+	type public Date EUREFD
+	type public String rnd()
+	
+	type Number cc, num, type
+	type String glsc, str
+	
+	type IO io = Class.new("IO")
+
+	set io.directory  = "SCAU$SPOOL"
+	set io.fileName   = "EUROCNV_RND.TXT"
+	set io.openParams = "WRITE/NEWV"
+	set io.timeout = 2
+	set io.recordSize = 1024
+
+	catch iox {
+		
+		// If device has been opened, close it
+		if 'io.device.isNull() do io.close()
+
+		// Not an IO exception
+		if iox'["%PSL-E-IO" throw iox
+
+		// Handle the IO exceptions
+		if iox["IOOPEN" write "Open failed", ! quit
+		
+		if iox["IOEOF"  write "Reached end of file", ! quit
+
+		write "Unexpected IO error '", iox.type, "'", !
+		}
+
+	do io.open()	
+	
+	set str = 13.char()_10.char()
+	do io.write(str)
+	set str = "EURO Rounding Differences - "_EUREFD.toString()_13.char()_10.char()
+	do io.write(str)
+	set str = 13.char()_10.char()
+	do io.write(str)
+	set str = "Cost Center    Type      G/L Set Code   DEP.BAL  DEP.POSACR   DEP.AIACR"_13.char()_10.char()
+	do io.write(str)
+	set str = "======================================================================="_13.char()_10.char()
+	do io.write(str)
+	
+	type ResultSet rs = Db.select("CC,TYPE,GLSC,RNDBAL,RNDPOSACR,RNDAIACR", "EUROCNVRND", "EFFDATE=:EUREFD")
+	
+	while rs.next() do {
+
+		set cc = rs.getCol("CC")
+		set type = rs.getCol("TYPE")
+		set glsc = rs.getCol("GLSC")
+
+		set rnd(cc,type,glsc).piece("|", 1) = rnd(cc,type,glsc).get().piece("|", 1) + rs.getCol("RNDBAL")
+		set rnd(cc,type,glsc).piece("|", 2) = rnd(cc,type,glsc).get().piece("|", 2) + rs.getCol("RNDPOSACR")
+		set rnd(cc,type,glsc).piece("|", 3) = rnd(cc,type,glsc).get().piece("|", 3) + rs.getCol("RNDAIACR")
+		
+		set str = 13.char()_10.char()
+
+		set str = str_cc.toString(0, ".9L ").justify(15, 1)
+		set str = str_type.toString(0, ".9L ").justify(10, 1)
+		set str = str_glsc.justify(10, 1)
+
+		set num = rnd(cc,type,glsc).get().piece("|", 1)
+		set str = str_num.toString(2,".9L ").justify(12, 1)
+		set num = rnd(cc,type,glsc).piece("|", 2)
+		set str = str_num.toString(2, ".9L ").justify(12, 1)
+		set num = rnd(cc,type,glsc).piece("|", 3)
+		set str = str_num.toString(2, ".9L ").justify(12, 1)
+		
+		do io.write(str)
+		}
+		
+	do io.close()
+
+	//I18N=ON
+	
+	quit
+
+
+getstat(String SAVEKEYS)
+
+	type Number eurstat, QT
+
+	set eurstat = SAVEKEYS.piece("#", 1)
+
+	set QT = 0
+
+	type ResultSet rs = Db.select("EURSTAT", "ACN", "EUREFD=:EUREFD AND EURSTAT>:eurstat")
+	
+	while rs.next() do {  quit:QT
+
+		set eurstat = rs.getCol("EURSTAT")
+		
+		if eurstat.isNull() ! (eurstat = 1) ! (eurstat = 3) set QT = 1
+		}
+
+	set SAVEKEYS.piece("#", 1) = eurstat
+	
+	quit eurstat
+
+
+getbch(String SAVEKEYS)
+
+	type Number eurbch, eurstat
+	
+	set eurstat = SAVEKEYS.piece("#", 1)
+	set eurbch = SAVEKEYS.piece("#", 2)
+	
+	type ResultSet rs=Db.select("EURBATCH", "ACN", "EUREFD=:EUREFD AND EURSTAT=:eurstat AND EURBATCH>:eurbch")
+
+	if rs.next() set eurbch = rs.getCol("EURBATCH")
+
+	set SAVEKEYS.piece("#", 2) = eurbch
+	
+	quit eurbch
+
+vSIG()	quit "60473^56807^Pete Chenard^9562"	// Signature - LTD^TIME^USER^SIZE

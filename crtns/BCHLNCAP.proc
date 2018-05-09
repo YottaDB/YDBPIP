@@ -1,0 +1,260 @@
+BCHLNCAP //Batch BCHLNCAP - Capitalize Interest Due
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 01/31/2007 12:45 - shetyes
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHLNCAP Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ set vBCHSTS=$$STATUS^BCHUTL("BCHLNCAP")
+ if vBCHSTS=1 set ER=1,RM=$$^MSG(3410) quit
+ if vBCHSTS=2 set ER=1,RM=$$^MSG(3414) quit
+ if vBCHSTS=0 set %BatchRestart=1
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit do EXIT^BCHUTL("BCHLNCAP") quit
+ do JOBMGR^BCHUTL(%FN,"BCHLNCAP",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ do EXIT^BCHUTL("BCHLNCAP")
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(CID) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHLNCAP","*","",CID.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ if %BatchRestart,$$CHKLOG^BCHUTL(%SystemDate,%FN,"BCHLNCAP",CID.get()) do { quit
+ do LOG^BCHUTL(%SystemDate,%FN,"BCHLNCAP",CID.get(),"Record already processed")
+ }
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,CID)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHLNCAP","*","",CID.get(),"",et)
+ }
+ do UPDLOG^BCHUTL(%SystemDate,%FN,"BCHLNCAP",CID.get(),vCONTEXT)
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,CID) //
+	type public Boolean ER
+
+        type RecordLN ln=Db.getRecord("LN","CID=:CID")
+ 
+	if ln.icap < 1 quit
+
+	do EXEC(%SystemDate,.ln)
+
+	quit
+
+
+EXEC(Date SPD,RecordLN ln)	// Determine the Transaction Amount
+
+	type Number BAL
+	type String TRNC(),TRND()
+
+	set BAL=ln.bal
+
+	do TRANAMT(.ln)
+
+	if ln.iropt=2 do SDIRND(.ln)
+	
+	quit
+	
+	
+TRANAMT(RecordLN ln) // Calculate Transaction Amount for capitalizing interest due (TAMT)
+
+	type public Date SPD
+
+	type Boolean TGTOK = 0
+	type Number TAMT
+ 
+        set TAMT=+ln.duin2
+        if TAMT'>0 quit
+
+	// Target account specified
+	if ln.ditgacn do {
+		type RecordACN acn=Db.getRecord("ACN","CID=:ln.ditgacn",1)
+		if 'acn.getMode() quit
+
+		// Post debit transaction to target account, not the loan
+		do POSTTTX(.acn,TAMT,ln.crcd,SPD,0)
+		
+		set TGTOK=1
+		}
+
+	// Invalid target account or no target account specified
+	// Post debit transaction to the loan account
+	if 'TGTOK do POSTTTX(.ln,TAMT,ln.crcd,SPD,0)
+
+	// Post credit transaction to the loan
+	do POSTTTX(.ln,TAMT,ln.crcd,SPD,1)
+ 
+	quit 	
+
+
+POSTTTX(RecordACN acn,Number TAMT,String CRCD,Date SPD,Number DRCR) // Create and post transaction
+
+	type public Cache %CACHE()
+	type public Number BRCD
+	
+	type String ETC
+
+	type RecordPRODCTL prodctl=%CACHE("PRODCTL").getRecord("PRODCTL","TYPE=:acn.type")
+
+	if DRCR set ETC=prodctl.caintcr
+	else  set ETC=prodctl.drtrna
+
+	type RecordTRN trn=%CACHE("TRN").getRecord("TRN","ETC=:ETC")
+	
+	type RecordTTX ttx=Class.new("RecordTTX")
+	
+	set ttx.tjd=%SystemDate
+	set ttx.brcd=BRCD
+	set ttx.uid=%UserID
+	set ttx.cid=acn.cid
+	set ttx.itc=trn.itc
+	set ttx.etc=ETC
+	set ttx.tamt=TAMT
+	set ttx.efd=SPD
+	set ttx.tcmt="Cap Int Due"
+	set ttx.crcd=CRCD
+	set ttx.tlo=%UserStation
+
+	do TRNSINGL^TRNDRV(.ttx,.acn,,BRCD,4)
+	
+	quit
+
+
+SDIRND(RecordLN ln)	// Calculate next resolution date - set new Dayend and account file
+
+	type public Boolean ER
+	type public Date SPD
+
+	set ln.dirnd=SPD.nextFreqDate(ln.dirfre) quit:ER
+	set ln.dirld=SPD
+
+	type RecordDAYENDNEGAM negam=Db.getRecord("DAYENDNEGAM","TJD=:ln.dirnd,CID=:ln.cid",1)
+	do negam.bypassSave()
+	
+	do ln.bypassSave()
+	
+	quit
+
+
+public	EXTERN(RecordLN ln,Date SPD)	// External entrypoint (called by UANTICLN)
+
+	if ln.icap < 1 quit
+
+	do EXEC(SPD,.ln)
+ 
+	quit
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,CID
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set CID=vRECORD.piece($C(9),1)
+ do vPROC(CID)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,CID
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>32767 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+13>32767 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+	type public Boolean ER
+	type public String BRCD,RM
+
+	do SOURCE^BCHSOURC("BOFF","NEGAM",.%UserID,.BRCD,.%UserClass)
+
+	// Interest capitalization teller not defined
+	if BRCD.get().isNull(),%UserID.isNull() set ER=1,%BatchExit=1,RM=$$^MSG("1249") quit
+
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("DISTINCT CID","DAYENDNEGAM","DAYENDNEGAM.TJD=:TJD")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	type public String BRCD
+
+	do SOURCE^BCHSOURC("BOFF","NEGAM",.%UserID,.BRCD,.%UserClass)
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

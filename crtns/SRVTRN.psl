@@ -1,0 +1,256 @@
+SRVTRN		/*
+	     DESC:  Service Fee On-line Processing
+	     ORIG:  David Caliendo (5527) - 01/04/88
+
+	-------- Revision History ---------------------------------------------
+	
+	11/02/06 - Hillanbrand - CR 23709
+	           Modified FILE2 subsection. Set hist.etc="FM".  This is 
+	           needed for exemption fees (YFEEEXP1.PROC).
+	
+	05/30/06 - DESHPANDE S K - CR 20748
+		   Modified subroutine FEETYP(), passed Transaction Sequence 
+		   as parameter instead. 
+	
+	09/13/05 - RussellDS - CR16911
+		   Correct casting problem.
+		   
+		   Remove old revision history.
+	-----------------------------------------------------------------------
+	*/
+
+	quit
+
+
+Public FILE(RecordTTX ttx,String MISCINFO(,))	// Service fee plan detail information
+
+	new CID,ETC,FEEAMT,FEECNT,FEEPLN,FEETAMT,MAXDLY,PGM,SCND,TAMT,TYPE,USPL
+
+	set CID=$$FIELD^UTSO(ttx.tso,"SRVCID")
+	if CID="" quit
+
+	type RecordACN acn=Db.getRecord("ACN","CID")
+
+	set FEECNT=+$$FIELD^UTSO(ttx.tso,"SRVCNT")
+	set ETC=ttx.etc
+
+	if acn.cls="D" do {
+
+		type RecordDEP dep = {RecordDEP}acn
+
+		set FEEPLN = dep.feepln
+		set TYPE = dep.type
+		set SCND = dep.scnd
+		set USPL = dep.uspl
+	}
+
+	else  do {
+
+		type RecordLN ln = {RecordLN}acn
+
+		set FEEPLN = ln.feepln
+		set TYPE = ln.type
+		set SCND = ""
+		set USPL = ""
+	}
+
+	type Number PTRNSEQ = ttx.getStoredValue("TranSeq")
+	
+	set TAMT = $$FEETYP(0, .MISCINFO(), PTRNSEQ)
+	set FEETAMT = TAMT * FEECNT
+
+	if 'FEEPLN.isNull() do FILE2(.acn, .ttx, FEEPLN, 0)
+	if 'USPL.isNull() do FILE2(.acn, .ttx, USPL, 1)
+
+	quit
+
+
+FILE2(RecordACN acn,RecordTTX ttx,FEEPLN,PLTP)
+
+	new FEEAMT,HISTSEQ,MAXDLY,PGM,SAVE,SECSEQ,TSEQ
+
+	set PGM=$$FEEPGM^UFID(FEEPLN,$S(%EffectiveDate="":%SystemDate,1:%EffectiveDate))
+
+	// Service fee program not compiled
+	if PGM="" do Runtime.setErrMSG("DEP",2481,"FEEPLN") quit
+
+	set PGM="^"_PGM_"(.acn,1,ETC,"_+FEECNT_",1,TAMT)"
+
+	do @PGM
+
+	if ER quit
+	if '$D(FEEAMT) quit
+
+	if $G(FEEAMT)="*" do {
+		set FEEAMT=""
+		set OVR(CID,"OVR","CHGOPT3")=""
+	}
+
+	set CHGOPT=$G(CHGOPT,1)
+	set TAMT=+ttx.tamt
+
+	// Only deposits can pass next line
+	if SCND="" quit
+
+	type RecordSRVD srvd=Db.getRecord("SRVD","CID,PLTP,SCND,1,ETC",1)
+
+	if CHGOPT=1 do {
+		if MAXDLY do MAXDLY(.srvd) 
+		if TAMT-FEEAMT set OVR(CID,"OVR","CHGOPT")=""
+	}
+	else  if TAMT set OVR(CID,"OVR","CHGOPT1")=""
+
+	if CHGOPT=1!TAMT do {
+		set srvd.srvcntd=srvd.srvcntd+FEECNT
+		set srvd.srvcstd=srvd.srvcstd+TAMT
+		set XX=srvd.srvcntd
+		set YY="D"
+	}
+	else  do {
+		set srvd.srvcnta=srvd.srvcnta+FEECNT
+		set srvd.srvtamt=srvd.srvtamt+FEETAMT
+		set XX=srvd.srvcnta
+		set YY="A"
+	}
+
+	do srvd.save()
+
+	new TR16
+	set TR16=""
+	set $P(TR16,"#",1)=CID
+	set $P(TR16,"#",2)=FEECNT
+	set $P(TR16,"#",3)=CHGOPT
+	set $P(TR16,"#",4)=MAXDLY
+	set $P(TR16,"#",5)=$G(FEEAMT)
+	set $P(TR16,"#",6)=TAMT
+	set $P(TR16,"#",7)=$G(SAVE)
+	set $P(TR16,"#",9)=$G(FEETAMT)
+
+	// Loan Error-Correct Data
+	set ttx.lnerc=TR16
+	
+	// Update account history
+	set TSEQ = (Db.currVal("HIST","CID = :CID") \ 1) + 1
+	
+	type RecordHIST hist = Class.new("RecordHIST", "CID=:CID,TSEQ=:TSEQ")
+	
+	type RecordTTX ttx2 = Class.new("RecordTTX")
+	
+	set hist.tjd = %SystemDate
+	set hist.efd = %EffectiveDate
+	set hist.etc="FM"
+	set hist.tlo = TLO.get()
+	set hist.tcmt = CID_","_SCND_",1,"_ETC_",[SRVD]SRVCNT"_YY_":"_(XX-FEECNT)_":"_XX_":"_$$^MSG(4984)_$$^SCARND(FEETAMT,0,CID)
+
+	do hist.save()
+
+	quit
+
+
+MAXDLY(RecordSRVD srvd)	// Maximum daily fee amount
+
+	set SAVE=srvd.srvdlr_"#"_srvd.srvdly
+
+	if srvd.srvdlr-%SystemDate do {
+		set srvd.srvdlr=%SystemDate
+		set srvd.srvdly=0
+	}
+
+	// Exceeds maximum daily total of $<MAXDLY>
+	if srvd.srvdly+TAMT>MAXDLY set OVR(CID,"OVR","MAXDLY")=$$^SCARND(MAXDLY,0,CID)
+
+	set srvd.srvdly=srvd.srvdly+TAMT
+
+	quit
+
+
+Public EC(RecordTTX ttx)	// Error correct miscellaneous transaction fee
+
+	new CHGOPT,CID,FEECNT,FEETAMT,LNERC,MAXDLY,SAVE,TAMT
+
+	set LNERC=ttx.lnerc
+
+	set CID=+LNERC
+
+	// Only deposits can pass next line
+	if 'CID quit
+
+	type RecordDEP dep=Db.getRecord("DEP","CID")
+
+	set FEECNT=$P(LNERC,"#",2)
+	set CHGOPT=$P(LNERC,"#",3)
+	set MAXDLY=$P(LNERC,"#",4)
+	set SAVE=$P(LNERC,"#",7,8)
+	set FEETAMT=$P(LNERC,"#",9)
+
+	set TAMT=+ttx.tamt
+
+	// Service Charge
+	if dep.scnd'="" do EC2(CID,0,dep.scnd,ETC)
+
+	// Usage Credit
+	if dep.upndt'="" do EC2(CID,1,dep.upndt,ETC)
+
+	quit
+
+
+EC2(CID,PLTP,SCND,ETC)
+
+	new HISTSEQ,SECSEQ,TSEQ,XX,YY
+
+	type RecordSRVD srvd=Db.getRecord("SRVD","CID,PLTP,SCND,1,ETC",1)
+
+	if srvd.getMode()=0 quit
+
+	if CHGOPT=1!TAMT do {
+		set srvd.srvcntd=srvd.srvcntd-FEECNT
+		set srvd.srvcstd=srvd.srvcstd+TAMT
+		set XX=srvd.srvcntd
+		set YY="D"
+	}
+	else  do {
+		set srvd.srvcnta=srvd.srvcnta-FEECNT
+		set srvd.srvtamt=srvd.srvtamt-FEETAMT
+		set XX=srvd.srvcnta
+		set YY="A"
+	}
+
+	if MAXDLY do {
+		set srvd.srvdlr=+SAVE
+		set srvd.srvdly=srvd.srvdly+TAMT
+	}
+
+	do srvd.save()
+
+	// Update account history
+	set TSEQ = (Db.currVal("HIST","CID = :CID") \ 1) + 1
+	
+	type RecordHIST hist = Class.new("RecordHIST", "CID=:CID,TSEQ=:TSEQ")
+	
+	set hist.tjd = %SystemDate
+	set hist.efd = %EffectiveDate
+	set hist.tlo = TLO.get()
+	set hist.tcmt = CID_","_SCND_",1,"_ETC_"[SRVD]SRVCNT"_YY_":"_(XX+FEECNT)_":"_XX_":"_$$^MSG(4984)_$$^SCARND(FEETAMT,0,CID)
+
+	do hist.save()
+
+	quit
+
+
+FEETYP(Number TAMT, String MISCINFO(,), Number PTRNSEQ)
+	/*
+	    Find TAMT for fees based on a percent of the previous
+	    transaction amount. Example CECF is 10% of TAMT of CEC.
+	    If TAMT returns with zero, then the fee type is based on a percentage
+	    that can not be calculated or the fee type is not based on a
+	    percentage.
+	    If TAMT returns with a value other than 0, then the fee type
+	    is based on a percentage of TAMT that is returned.
+	*/
+	
+
+	if 'MISCINFO(PTRNSEQ-1, "TAMT").exists() quit TAMT
+
+	quit +MISCINFO(PTRNSEQ-1, "TAMT")
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60571^60941^Laura Hillanbrand^5424"	// Signature - LTD^TIME^USER^SIZE

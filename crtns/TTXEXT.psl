@@ -1,0 +1,668 @@
+TTXEXT(String ETC, Number CID, String TAMT)
+
+	/*
+	   Transaction Processing External Interface
+	
+	   ORIG:  Allan R. Mattson (6915) - 06/16/88
+	
+	   Validates the transaction code, account number and transaction
+	   amount.  This function call is a composite of $$ETC, $$ETCID,
+	   and $$TAMT.
+	
+	   KEYWORDS:  Transaction Processing
+	
+	   ARGUMENTS:
+	       . ETC External transaction code		/TYP=T/REQ
+	       . CID PROFILE account number		/TYP=N/REQ
+	       . TAMT Transaction Amount		/TYP=N/NOREQ
+	
+	   INPUTS:
+	       . PBK - Passbook Flag
+	
+	   RETURNS:
+	       . ER Error flag				/TYP=N/COND
+	    Returns ER=1 if an error.
+	
+	       . RM Return message			/TYP=T/COND
+	    Returns error message if ER=1.
+	
+	  ---- Revision History ------------------------------------------------
+
+	   12/21/05 - TITOVE - CR 18591
+	   	      Modified sections CID and ETC to correctly pass arguments
+	   	      to setErrMSG method (variables should not be enclosed
+	   	      in double quotes).
+	   	      Created the public section ETCERR to set error in case 
+	   	      transaction code is not defined on product type.
+	   	      	
+	   04/19/05 - SwarnalathaP - CR 13665
+	   	      Replaced %CACHE("TRN").getRecord with Db.getRecord in 
+	   	      section TRNTYP and passed the third parameter to 
+	   	      instantiate the object if the record does not exists. This 
+	   	      change is done because %CACHE does not support getRecord with 
+	   	      three parameters.
+	  
+	   03/14/05 - SmithCD - CR 13782
+	   	      . Removed PBKBAL, UID, EFD, and BALANCED sections, which 
+	   	        are not used
+	   	      . Corrected EXCHOFF section to use SEQ instead of 1 when 
+	   	        referencing ttx
+	   	      . Fix undefined error when posting a transaction that 
+	   	        has TRNAUT entries in branch Db, but not in host Db 
+	   	        (code in the ETC section was modified to pass the 
+	   	        classNew argument to the getrecord call for trnaut)
+	   	      . Broke apart return string in ITC function to make the 
+	   	        code more readable
+	   	      . Modified trn to use %CACHE
+	   	      . Modified to comply with current PSL standards.
+	   
+	   05/25/04 - KELLYP - CR 8493
+	   	      Replaced a call to $$BALAVL^DEPCDI with a reference to 
+	   	      dep.balavl.
+	   
+	   12/29/03 - CARROLLJ - CR 7658
+		      Replaced call to TTXP2 with call to TRNDRV.
+
+	   10/18/01 - MBUIM - 43583
+	   	      Converted to PSL
+	
+	*/
+	
+	type public Boolean ER, PBK
+	type public Cache %CACHE()
+
+	if ETC.get().isNull() quit
+	
+	type RecordTRN trn = %CACHE("TRN").getRecord("TRN", "ETC=:ETC")
+
+	// PBK is expected from routine that calls from the top
+	do ETC(.trn, PBK) quit:ER
+
+	if CID.get().isNull() quit
+	
+	do ETCCID(.trn, CID) quit:ER
+
+	if TAMT.get().isNull() quit
+		
+	do TAMT(.trn, TAMT, CID) quit:ER
+
+	quit
+
+
+public	ETC(RecordTRN trn, Boolean PBK)	// Transaction code authorization
+
+	/*
+	
+	   This function verifies that the transaction code is a valid PROFILE
+	   transaction code and that the user is authorized to use it.
+	
+	   KEYWORDS:  Transaction Processing
+	
+	   ARGUMENTS:
+	       . trn External transaction code		/TYP=RecordTRN/REQ
+							/MECH=REFNAM:RW
+	
+	       . PBK Passbook/no book indicator		/TYP=N/REQ/MECH=VAL
+	    	     0 = No book;  1 = Passbook
+	
+	   INPUTS:
+	       . System %UCLS
+	
+	   RETURNS:
+	       . ER Error flag				/TYP=N/COND
+		    Returns ER=1 if an error.
+	
+	       . RM Return message			/TYP=T/COND
+		    Returns error message if ER=1.
+
+	
+	*/
+
+	// Transaction code valid for all userclasses
+	if Db.isDefined("TRNAUT", "ETC=:trn.etc,UCLS='*'") quit
+
+	type RecordTRNAUT trnaut = Db.getRecord("TRNAUT", "ETC=:trn.etc,UCLS=:%UserClass", 1)
+	
+	// ~p1 passbook transactions not allowed by userclass ~p2
+	if 'trnaut.bnr.extract(1), PBK do Runtime.setErrMSG("TRNAUT", 3064, trn.etc_"~"_%UserClass) quit
+	   
+	// ~p1 no-book transactions not allowed by userclass ~p2
+	if 'trnaut.bnr.extract(2), 'PBK do Runtime.setErrMSG("TRNAUT", 3057, trn.etc_"~"_%UserClass) quit
+	
+	quit 
+	
+
+public	ETCCID(RecordTRN trn, Number CID)	// Class/Group Verification
+
+	/*
+	
+	   This function verifies that the transaction code is valid for the
+	   account number specified.
+	
+	   KEYWORDS:  Transaction Processing
+	
+	   ARGUMENTS:
+	       . trn External transaction code		/TYP=RecordTRN/REQ
+	
+	       . CID PROFILE account number		/TYP=N/REQ/MECH=VAL
+	
+	   RETURNS:
+	       . ER Error flag				/TYP=N/COND
+	    Returns ER=1 if an error.
+	
+	       . RM Return message			/TYP=T/COND
+	    Returns error message if ER=1.
+
+	
+	*/
+	
+	type public Boolean ER
+	type public String RM
+	
+	// Transaction Class "M"
+	if trn.cls = "M" do GLAD(CID) quit
+
+	do CID(CID) quit:ER
+	
+	type RecordACN acn = Db.getRecord("ACN", "CID=:CID")
+
+	// Transaction Class *
+	if trn.cls = "*" quit
+	
+	// Class error
+	if trn.cls '= acn.cls do Runtime.setErrMSG("TRN", 552)
+	
+	// Group error
+	if trn.grp '= acn.grp do Runtime.setErrMSG("TRN", 1169)
+	
+	// Invalid transaction ~p1
+	if ER do Runtime.setErrMSG("TRN", 1502, RM) quit   
+
+	quit 
+
+
+CID(Number CID)       // Load Account Data
+
+	/*	
+	
+	This function verifies that an account is a valid PROFILE account.
+ 
+	   KEYWORDS:  Transaction Processing
+ 
+	   ARGUMENTS:
+	       . CID PROFILE account number		/TYP=N/REQ/MECH=VAL
+ 
+	   RETURNS:
+	       . ER Error flag				/TYP=N/COND
+	    Returns ER=1 if an error.
+ 
+	       . RM Return message			/TYP=T/COND
+	    Returns error message if ER=1.
+
+	*/
+
+	// Invalid account ~p1
+	if 'Db.isDefined("ACN", "CID=:CID") do Runtime.setErrMSG("ACN", 1259, CID) quit
+	
+	quit
+	
+
+public	GLAD(Number CID, Number OPT)	// Miscellaneous transaction account verification
+
+	/*
+	
+	   This function verifies the account specified is a valid G/L account.
+	   If parameter OPT=1, the function will additional verify that the
+	   account is an asset or liability account.
+	
+	   KEYWORDS:  Transaction Processing
+	
+	   ARGUMENTS:
+	       . CID G/L account number 		/TYP=N/MECH=VAL/REQ
+	
+	       . OPT Validation option 			/TYP=N/MECH=VAL/NOREQ/DFT=0
+	
+	    0 = Verify account is a valid G/L account
+	    1 = Verify account is an asset or liability account
+	
+	   RETURNS:
+	       . ER Error flag   			/TYP=N/COND
+		    Returns ER=1 if an error.
+	
+	       . RM Return message   			/TYP=T/COND
+	    	    Returns error message if ER=1.
+	
+	*/
+
+    	// Invalid G/L account ~p1
+	if 'Db.isDefined("GLAD", "ACN=:CID") do Runtime.setErrMSG("GLAD", 1364, CID) quit
+		
+	if OPT.get() do { quit
+		type RecordGLAD glad = Db.getRecord("GLAD", "ACN=:CID")
+		
+		// Account ~p1 is not an asset or a liability
+		if glad.type '= "A", glad.type '= "L" do Runtime.setErrMSG("GLAD", 117, CID) quit
+		}
+
+	quit 
+
+	
+TAMT(RecordTRN trn, String TAMT, Number CID)	// Transaction amount verification
+
+	/*
+	
+	   This function verifies that the transaction amount is in a valid
+	   format and does not exceed the maximum amount as defined by the
+	   transaction code, if applicable.
+	
+	   KEYWORDS:  Transaction Processing
+	
+	   ARGUMENTS:
+	       . trn External transaction code 		/TYP=RecordTRN/REQ
+							/MECH=REFNAM:RW
+
+	       . TAMT Transaction Amount		/TYP=N/NOREQ
+
+	       . CID PROFILE account number		/TYP=N/REQ/MECH=VAL
+	
+	   RETURNS:
+	       . ER Error flag   			/TYP=N/COND
+		    Returns ER=1 if an error.
+	
+	       . RM Return message   			/TYP=T/COND
+		    Returns error message if ER=1.
+
+	
+	*/
+
+	type public Boolean ER
+	
+	type Number TRMAX
+	
+	// Valid format $$ or $$.cc		
+	if '(TAMT?1N.N ! (TAMT?.N1"."2N)) do Runtime.setErrMSG("TRN", 2909) quit
+	
+	set TRMAX = $$^SCARND(trn.trmax, 0, CID.get())
+
+	// Maximum transaction amount $ ~p1
+	if trn.trmax, TAMT > trn.trmax do Runtime.setErrMSG("TRN", 1696, TRMAX) quit
+
+	quit 
+	
+public	AVLDEP(RecordDEP dep)	// Available balance calculations (deposit accounts)
+
+	/*
+	
+	   This function returns the available balance for deposit accounts.
+	
+	   KEYWORDS:  Transaction Processing
+	
+	   ARGUMENTS:
+	       . dep Deposit Record  		/TYP=RecordDEP/REQ/MECH=VAL
+	
+	   EXAMPLE:
+	       set AVL=$$AVLDEP^TTXEXT(.dep) quit:ER
+
+	*/
+	
+	quit dep.balavl - dep.minbal
+
+
+public	TTX(RecordTTX ttx)	// Build PROFILE/IBS transaction input record
+
+	/*
+	
+	   This function builds a TTX Record
+	   	
+	   INPUTS:
+	       . CID Account number
+	       . %EffectiveDate Effective date
+	       . ETC Transaction code
+	       . %MCP Multi-currency flag
+	       . MSD Miscellaneous screen data
+	       . TAMT Transaction amount
+	       . TCMT Transaction comment
+	       . TLO Transaction location
+	       . TSO Transaction source
+	
+	       . SPR Spray number
+	       . OCC Override cost center
+	       . DISC Discretionary data
+	       . CHKTYP Check type
+	
+	   EXAMPLE:
+	       do $$TTX^TTXEXT(.ttx)
+	
+	*/
+	
+	type public String BCRCD, CRCD, CUSTCD, DISC, ETC, MSD, SPR, TAMT
+	type public String TCMT, TSO
+	type public Number %MCP, BSEAMT, CID, CHKTYP, OCC, RATE, TRESREF
+	type public Boolean MULTIPLY
+	type public Date VDT
+	type public Cache %CACHE()
+	
+	// Internal Transaction Code
+	type RecordTRN trn = %CACHE("TRN").getRecord("TRN", "ETC=:ETC")
+
+	set ttx.cid = CID
+	set ttx.itc = trn.itc
+	set ttx.etc = ETC
+	set ttx.tamt = TAMT
+	set ttx.efd = %EffectiveDate
+	set ttx.tlo = %UserStation
+	set ttx.tso = TSO
+	set ttx.tcmt = TCMT
+
+	// Discretionary data
+	if 'DISC.get().isNull() do {
+		type String UTSO
+		
+		set UTSO("DISC1") = DISC.piece("#", 1)
+		set UTSO("DISC2") = DISC.piece("#", 2)
+		do IN^UTSO(.UTSO, .TSO) 
+		set ttx.tso = TSO
+		}
+ 
+	// Spray number
+	if 'SPR.get().isNull() set ttx.spr = SPR
+
+	// Override cost center
+	if 'OCC.get().isNull() set ttx.cc = OCC
+
+	// Reg CC check type
+	if 'CHKTYP.get().isNull() set ttx.chktyp = CHKTYP
+
+	// Misc screen data
+	if 'MSD.get().isNull() set ttx.msd = MSD
+	
+	// Multi-currency fields
+	if %MCP do {
+		if CRCD '= CUVAR.%CRCD set ttx.crcd = CRCD
+		if 'RATE.get().isNull() set ttx.rate = RATE
+		if 'VDT.get().isNull() set ttx.vdt = VDT
+		if 'MULTIPLY.get().isNull() set ttx.mult = MULTIPLY
+		if 'BSEAMT.get().isNull() set ttx.bseamt = BSEAMT
+		if 'CUSTCD.get().isNull() set ttx.custcd = CUSTCD
+		if 'TRESREF.get().isNull() set ttx.tresref = TRESREF
+		if 'BCRCD.get().isNull() set ttx.bcrcd = BCRCD
+	}
+
+	quit
+
+	
+public CASH(String XTC)
+
+	/*
+	   Cash transaction type
+	
+	   ARGUMENTS:	
+	       . XTC External transaction code 		/REQ/MECH=VAL
+							/TBL=[TRN]
+		
+	   RETURNS:
+	       . $$ Cash transaction flag
+	    "" - Not a cash transaction
+	    0  - Debit cash transaction (cash in)
+	    1  - Credit cash transaction (cash out)
+
+	
+	*/
+	
+	type public Cache %CACHE()
+	
+	type Boolean ER
+	
+	if XTC.isNull() quit ""
+	
+	set ER=0
+	
+	type RecordTRN trn = %CACHE("TRN").getRecord("TRN", "ETC = :XTC")
+
+	// Non-cash transaction
+	if trn.trntyp '= 1 quit ""
+
+	quit +trn.itc
+
+
+public	CSHETC(String CSH(,))	// Cash transaction code
+
+	/*
+	
+	   ARGUMENTS:
+	       . CSH Cash transaction code array 	/NOREQ
+							/MECH=REFARR:W
+	
+	*/
+	type Boolean DC
+   
+	type ResultSet rs = Db.select("ETC", "TRN", "CLS='M'")
+		
+	while rs.next() do {
+       		set DC = $$CASH(rs.getCol("ETC"))
+		if DC.isNull() quit
+		set CSH(DC, rs.getCol("ETC")) = ""
+		}
+	
+	quit 
+
+
+public	TRNTYP(String XTC)	// Transaction type
+
+	/*	
+	   ARGUMENTS:
+	       . XTC External transaction code 		/REQ/MECH=VAL
+							/TBL=[TRN]
+		
+	   RETURNS:				
+	       . $$ Transaction Type
+	    0  - Other
+	    1  - Cash transaction
+	    2  - Check transaction
+	    3  - Check hold transaction
+	
+	*/
+	
+	type public Cache %CACHE()
+	
+	if XTC.isNull() quit 0
+	
+	type RecordTRN trn = %CACHE("TRN").getRecord("TRN", "ETC=:XTC")
+			
+	// Transaction Type
+	quit +trn.trntyp
+
+
+public	ITC(String ITC, Number POS, Number VAL)
+
+	/*
+	   Update Internal Tran Code
+	
+	   This function is used to modify the internal transaction code (ITC).
+	   It is called by various routines to update a specific byte of ITC to
+	   reflect a certain condition (i.e., error correct, reversal, etc).
+	
+	   KEYWORDS:  Transaction Processing
+	
+	   ARGUMENTS:
+	       . ITC Current value of ITC  		/TYP=T/REQ/MECH=VAL
+	
+	       . POS Position of ITC to update 		/TYP=N/REQ/MECH=VAL
+	
+	       . VAL Value of position 'POS'  		/TYP=N/NOREQ
+							/DFT=1/MECH=VAL
+	
+	   RETURNS:
+	       . $$ Modified value of ITC  		/TYP=T
+	
+	*/
+	
+	set:VAL.get().isNull() VAL = 1
+	
+	set ITC.extract(POS) = VAL
+	set ITC = ITC.replace(" ", 0)
+
+	quit ITC
+
+	
+public	EXCHOFF(RecordTTX ttx())
+
+	// Build exchange offset baby trans for multi-currency
+
+	type public Number %MCP
+	type public String CRCDBASE
+	
+	if '%MCP quit
+	
+	type String CRCD
+	type Number DFTSEQ, SEQ
+	type Date %EFD, %EffectiveDate
+
+	set SEQ = ttx("").order(-1)
+	
+	// Base Currency
+	if 'CRCDBASE.exists() new CRCDBASE set CRCDBASE = ttx(SEQ).bcrcd
+	
+	if CRCDBASE.isNull() do {
+		// Currency Code
+		set CRCDBASE = ttx(SEQ).crcd
+		if CRCDBASE.isNull() set CRCDBASE = %SystemCurrency
+		}
+	
+	// Effective Date
+	set (%EffectiveDate, %EFD) = ttx(SEQ).efd
+	
+	set CRCD = ttx(SEQ).crcd
+	
+	do GMCOFF^TTXOFST(.ttx())
+
+	quit 
+
+
+public	TTXTRN(RecordTTX ttx,
+	      Date TPD,
+	      Number BRCD,
+	      String %UserID,
+	      String ETC,
+	      String TCMT)
+
+	/*
+	   File @TRN to TTX
+	   
+	   This function is used to update TTX for non-financial transactions.
+	   The line tag TTXTRN^TTEXT is called by various posting routines.
+	
+	   KEYWORDS:  Transaction Processing
+	
+	   ARGUMENTS:
+	       . ttx Transaction record  	
+	       	
+	   EXAMPLE:
+	   do TTXTRN^TTXEXT(.ttx, TJD, 0, %UID, "@CSH", $$^MSG(Msg #))
+	
+	   In this example a TTX entry will be filed on TJD for
+	   branch code 0, under the current user ID, for an @CSH
+	   transaction.  This is used to log @ transaction as they are
+	   done via the teller system.
+	
+	*/
+
+	if '%UserStation.exists() new %UserStation set %UserStation = $$TLO^UTLO
+	
+	set ttx.etc = ETC
+	set ttx.tlo = %UserStation
+	set ttx.tcmt = TCMT
+	  	
+	do TRNSINGL^TRNDRV(.ttx, , TPD, BRCD, 1)
+
+	quit 
+	
+
+public	ECSCAN(Number CID,
+	      String ETC,
+	      Number TAMT,
+	      Number CLNTTRC,
+	      Date TPD,
+	      Number BRCD,
+	      String UID)
+
+	/*
+	   Return original client trace number.
+	   
+	   DESCRIPTION:
+	    Scan host transaction journal for the match of a client side transaction
+	    to determine if we have a record on the host.
+	
+	   ARGUMENTS:
+	       .CID Account number  			/TYP=N/REQ
+	       .ETC Tran code  				/TYP=T/REQ
+	       .TAMT Transaction amount 		/TYP=$/REQ
+	       .CLNTTRC Client trace number  		/TYP=N/REQ
+	    		from "EC" entry in TSO	
+	       .TPD Teller posting date  		/TYP=D/REQ
+	       .BRCD Teller signon branch   		/TYP=N/REQ
+	       .UID Teller ID  				/TYP=N/REQ
+	
+	   RETURNS:
+	       .$$ Client trace number 			/TYP=N
+	    	   or 0 if no match	
+	*/
+
+	type Boolean FOUND
+	
+     	set CID = CID.get() quit:CID.isNull() 0
+	set ETC = ETC.get() quit:ETC.isNull() 0
+	set TAMT = TAMT.get() quit:TAMT.isNull() 0
+	set CLNTTRC = CLNTTRC.get() quit:'CLNTTRC 0	//  Bad EC trace #
+	
+	set FOUND=0
+	
+	type DbSet ds = Db.selectDbSet("TTX", "TJD=:TPD AND BRCD=:BRCD AND UID=:UID AND CID=:CID AND ETC=:ETC AND TAMT=:TAMT AND TRC=:CLNTTRC")
+
+	while ds.next() do { quit:FOUND
+		type RecordTTX ttx = ds.getRecord("TTX")
+
+		//  check acct number
+		if ttx.cid ' =CID quit
+
+		//  check tran code
+		if ttx.etc ' =ETC quit
+
+		//  check amount
+		if ttx.tamt '= TAMT quit
+
+		//  check client trace
+		if ttx.trc '= CLNTTRC quit
+
+		//  FOUND record
+		set FOUND = 1
+		}
+	
+	//  return client trace
+	if FOUND quit CLNTTRC
+
+	//  return 0 (not found)
+	quit 0
+	
+public	ETCERR(Number TYPE,		// Product type
+	      String DI)		// Column Name
+
+	// Set error if transaction code not defined on product type
+
+	type String DES
+
+	// Verify column's description existence in Data Dictionary Data Items table
+	type RecordDBTBL1D dbtbl1d = Db.getRecord("DBTBL1D", "%LIBS = 'SYSDEV', FID = 'PRODCTL', DI = :DI", 1)
+	
+	set DES = dbtbl1d.des
+	
+	// If no description in DBTBL1D - default table.column reference
+	if DES.isNull() set DES = "PRODCTL."_DI
+
+	// Product ~p1 missing transaction code - ~p2
+	do Runtime.setErrMSG("PRODCTL",2268,TYPE_"~"_DES)
+
+	quit
+	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60255^61630^Eugene Titov^15197"	// Signature - LTD^TIME^USER^SIZE

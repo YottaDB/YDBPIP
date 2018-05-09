@@ -1,0 +1,338 @@
+BALCMP	// History Balance Compare Utility
+	/*
+
+
+	---- Revision History ------------------------------------------------
+	
+	01/09/05 - RussellDS - CR13817
+		   Corrected problems with structure of procedure.
+		   
+		   Resolved PSL warnings.
+		   
+		   Removed old revision history.
+	*/
+	
+	do Db.delete("TMPRPT4","PID=:%ProcessID")
+
+	do Db.delete("TMPRPT5","PID=:%ProcessID")
+
+	do VPG01
+	
+	do Db.delete("TMPRPT4","PID=:%ProcessID")
+        do Db.delete("TMPRPT5","PID=:%ProcessID")
+	
+	quit
+
+
+VPG01	// Set up
+
+	type public String ER
+
+	type Number %PAGE, %PG, PID, EXCNT, OLNTB
+	type String %READ, %TAB(), CID, CLS, GRP, IO, ltbl, RID, TYPE, VFMQ
+
+	set %ProcessMode=2 
+	set %PG=1 
+	set %PAGE=1
+	set EXCNT=0
+	
+	set (CLS,GRP,TYPE,CID)="ALL"
+
+	set ltbl="@table^BALCMP"
+
+	set %TAB("CLS")=".A7/TBL=[STBLCLS]/HLP=[SYSDEV,ACN]CLS/XPP=D EXT^DBSQRY"
+	set %TAB("GRP")=".A8/TBL=[STBLGRP]/HLP=[SYSDEV,ACN]GRP/XPP=D EXT^DBSQRY"
+	set %TAB("TYPE")=".QI1/TBL="_ltbl_"/HLP=[SYSDEV,ACN]TYPE/XPP=D EXT^DBSQRY"
+	set %TAB("CID")=".ACCOUNTS1/TBL=[ACN]/HLP=[SYSDEV,ACN]CID/XPP=D EXT^DBSQRY"
+	set %TAB("IO")=$$IO^SCATAB($I)
+
+	set %READ="@@%FN,,,CLS/REQ,GRP/REQ,TYPE/REQ,CID/REQ,IO/REQ"
+
+	do ^UTLREAD if VFMQ="Q" set ER=1 quit
+
+	if IO'=$I do OPEN^SCAIO quit:ER
+	do PP00 if ER set VFMQ="Q" quit
+	
+	set RID="SCA435" do ^URID
+	// Invalid report linkage <<RID>>
+	if ER do { quit
+		type String ET = "INVLDRPT"
+		do ^UTLERR
+		set VFMQ="Q"
+	}
+	
+	set PID = %ProcessID	// Needed by report
+	do V0^@PGM
+
+	set VFMQ="Q"
+
+	quit
+	
+
+PP00	// Get accounts selected
+
+	type public String CID, CLS, GRP, TYPE
+
+	type Number SEQ
+	type String DQQRY(), WHERE
+	
+	set SEQ = 1
+	if 'CLS.get().isNull(), (CLS '= "ALL") do {
+		set DQQRY(SEQ) = "[ACN]CLS "_CLS
+		set SEQ = SEQ + 1
+	}
+	if 'GRP.get().isNull(), (GRP '= "ALL") do {
+		set DQQRY(SEQ) = "[ACN]GRP "_GRP
+		set SEQ = SEQ + 1
+	}
+	if 'TYPE.get().isNull(), (TYPE '= "ALL") do {
+		set DQQRY(SEQ) = "[ACN]TYPE "_TYPE
+		set SEQ = SEQ + 1
+	}
+	if 'CID.get().isNull(), (CID '= "ALL") do {
+		set DQQRY(SEQ) = "[ACN]CID "_CID
+		set SEQ = SEQ + 1
+	}
+	
+	set WHERE = $$WHERE^SQLCONV(.DQQRY(), "ACN")
+	
+	#ACCEPT Date=01/09/05; PGM=Dan Russell; CR=13871
+	type DbSet ds = Db.selectDbSet("ACN", WHERE, "CID ASC")
+	
+	while ds.next() do {
+		
+		type Boolean HIT
+		type Number %I, N
+		type String BAL(), KEY5
+		
+		type RecordACN acn = ds.getRecord("ACN")
+		
+		set CID = acn.cid
+		set CLS = acn.cls
+		set GRP = acn.grp
+		set TYPE = acn.type
+
+		set %I=1
+		
+		do EXEC(.acn) 
+
+		quit:'HIT
+		
+		type RecordTMPRPT4 tmprpt4 = Db.getRecord("TMPRPT4", "PID=:%ProcessID,KEY1=:CLS,KEY2=:GRP,KEY3=:TYPE,KEY4=:CID", 1)
+	
+		set tmprpt4.data=acn.bal
+		do tmprpt4.save()
+
+		new KEY5
+		set N="" 
+		for  set N=$O(BAL(N)) quit:N=""  do {
+
+			set KEY5=$P(BAL(N),"|",2)
+
+			type RecordTMPRPT5 tmprpt5 = Db.getRecord("TMPRPT5", "PID=:%ProcessID,KEY1=:CLS,KEY2=:GRP,KEY3=:TYPE,KEY4=:CID,KEY5=:KEY5", 1)
+
+			set tmprpt5.data=$P(BAL(N),"|",3,4)
+			do tmprpt5.save()
+		}
+	}
+	
+	quit
+	
+
+EXEC(RecordACN acn)	//
+
+	type public Boolean HIT
+	type public Number %I, CID, X
+	type public String BAL()
+	
+	type Date HISCTF, JD, ODT
+	type Number %TSEQ, TRB
+
+        catch vERROR {
+                new ET,RM
+                set ET=vERROR.type
+ 
+                if ET["%GTM-" do {
+                        do ZE^UTLERR
+        	}
+ 
+                else  do {
+                	set ET=ET_"-"_vERROR.thrownAt
+                	set RM=vERROR.description
+                	do ^UTLERR
+                }
+                
+                do ET
+	}
+
+
+	kill BAL 
+	set HIT=0
+
+	// Transaction to Reduce Balance
+	set TRB=acn.trb
+
+	// History Cut-Off Date
+	set ODT=acn.odt
+	set HISCTF=acn.hisctf
+
+	set %I=%I+1
+	if HISCTF do { quit
+		
+		type Date JD
+		type Number %TSEQ
+		
+		set JD=HISCTF
+
+		type RecordHIST0 hist0=Db.getRecord("HIST0","CID=:CID,JD=:JD")
+		set %TSEQ=+hist0.seqzero
+        	set BAL(%I)=hist0.seqzero_"|"_HISCTF_"|"_hist0.bal_"|"_hist0.bal
+		set %I=%I+1
+		
+		do EXEC1(.acn)
+	}
+
+	else  do {
+		set BAL(%I)="|"_ODT 
+		set JD=ODT 
+		set %TSEQ=0 
+	}
+
+	type ResultSet rs=Db.select("TSEQ","HIST","CID=:CID","TSEQ ASC")
+	if rs.isEmpty() do EXEC1(.acn) quit
+	if rs.next() set X=rs.getCol("TSEQ")	
+	set X=X-1
+
+	set JD=""
+	type ResultSet rs2=Db.select("JD,SEQZERO","HIST0","CID=:CID AND SEQZERO>=:X","JD")
+	if rs2.next() set JD = rs2.getCol("JD") + 1
+
+	do EXEC1(.acn) 
+
+	quit
+
+
+EXEC1(RecordACN acn) 	//
+
+	type public Boolean HIT
+	type public Date JD
+	type public Number CID, TRB
+	type public String BAL()
+	
+	type Number I
+	
+	set I = 0
+	
+	
+	type ResultSet rs=Db.select("JD","HIST0","CID=:CID AND JD>:JD","JD")
+	while rs.next() do {
+		set JD=rs.getCol("JD")
+		set I=I+1
+		type RecordHIST0 hist0=Db.getRecord("HIST0","CID=:CID,JD=:JD")
+		set BAL(I)=hist0.seqzero_"|"_JD_"|"_hist0.bal_"|"_hist0.bal
+	}
+
+        type ResultSet rs2=Db.select("TSEQ","HIST","CID=:CID AND TSEQ>:%TSEQ","TSEQ")
+        quit:rs2.isEmpty()
+ 
+        while rs2.next() do {
+        	
+        	type Boolean EC
+        	type Number %TSEQ, DC, END
+        	type String AMT, ITC
+        	
+                set %TSEQ=rs2.getCol("TSEQ")
+
+		type RecordHIST hist=Db.getRecord("HIST","CID=:CID,TSEQ=:%TSEQ")
+
+		set AMT=hist.tamt
+		if AMT["#" set AMT=$P(AMT,"#",2)
+
+		if 'AMT quit
+		set ITC=hist.itc
+		set DC=$$DC^UTRB($E(ITC),TRB)
+		set EC=$E(ITC,6)
+
+		set AMT=$S(TRB-$E(ITC):AMT,1:-AMT)
+
+		set END=$O(BAL(""),-1)
+
+		for I=1:1:END if $D(BAL(I)),%TSEQ>BAL(I) do {
+			set $P(BAL(I),"|",3)=$P(BAL(I),"|",3)+AMT
+			if 'EC set $P(BAL(I),"|",4)=$P(BAL(I),"|",4)+AMT
+
+		}
+	}
+
+	set I=""
+
+	for  set I=$O(BAL(I)) quit:I=""  do {
+		type Number J
+		for J=3,4 if acn.bal-$P(BAL(I),"|",J) set HIT=1
+
+	}
+
+	quit
+
+
+ET	// Balance Compare Utility
+
+	type public Number CID, EXCNT
+	type public String ET
+	
+	if 'EXCNT do {
+	
+		type RecordDAYENDEXCR dayendexcr = Db.getRecord("DAYENDEXCR","TJD=:%SystemDate,RTN=""BALCMP""", 1)
+	
+		// Balance Compare Utility
+		set dayendexcr.desc=$$^MSG(5216)	
+		
+		do dayendexcr.save()
+	}
+
+	set EXCNT=EXCNT+1
+
+	type RecordDAYENDEXC deexc = Db.getRecord("DAYENDEXC","TJD=:%SystemDate,RTN=""BALCMP"",SORT=""*"",SEQ=EXCNT", 1)
+	
+	set deexc.recid=CID
+	set deexc.et=ET	
+	set deexc.misc="Account not processed"
+	set deexc.time=%CurrentTime
+
+	do deexc.save()
+
+	quit
+	
+
+table	// Lookup table pre-processor
+
+	type public String CLS, typtbl(), vREF
+
+	type String crcd,des,type
+	
+	kill typtbl
+
+	type ResultSet rs
+	if CLS="D" set rs=Db.select("TYPE,DES,CRCD","PRODDFTD","GRP=:GRP")
+	else  set rs=Db.select("TYPE,DES,CRCD","PRODDFTL","GRP=:GRP")
+
+	while rs.next() do {
+		// Add description
+		set type=rs.getCol(1) 
+		set des=rs.getCol(2) 
+		set crcd=rs.getCol(3)
+	
+		if '$D(typtbl(type)) set typtbl(type)=des_$J("",40-$L(des))
+
+		// Add currency code
+		set typtbl(type)=typtbl(type)_" "_crcd
+	}
+
+	if '$D(typtbl) set typtbl=""
+
+	// Define local table
+	set vREF="typtbl("
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "59920^50993^Dan Russell^6380"	// Signature - LTD^TIME^USER^SIZE

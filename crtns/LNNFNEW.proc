@@ -1,0 +1,589 @@
+LNNFNEW	/* Create "PTS" Level of node 70 for new account
+
+	   ORIG:  Chuck Hardy (6721) - 11/02/87
+
+	    INPUT: LN array, CF array from ^LNAPR.
+	   OUTPUT: Complete "PTS" level of LN(70).
+
+
+	  ---- Revision History ------------------------------------------------
+
+	  01/21/06 - MBUIM - 19700
+	   	     Replaced column aoamo.count with column aoamo.cnt. COUNT 
+	   	     is an oracle reserve word and was process issues 
+	   	     e.g error returned in DBSLOAD when running function 
+	   	     @DDPXFR – manual transfers to FEPS
+	   	      
+	  02/02/06 - TITOVE - CR 19308
+	  	     Modified FILE section to limit use of indirection and pass
+	  	     LN and AOAMO by reference to LNNFNEW1. Modified INIT to 
+	  	     initialize TPD and BRCD and V2 section to properly set 
+	  	     DTC/CTC. Added missing call to END section back to VER.
+
+	  05/09/05 - Georges - 13136
+	  	     Modified LN to ln and also modified section 
+	  	     VER to make LOCK changes.
+	  
+	  10/04/02 - TELIV - 49451
+		     Converted to PSL
+	
+	   11/07/01 - APPLEYARDM - 47556:001
+	        Modified section FILE to consider if array AMO was already
+	        set up by another process before going to file short name
+	        source. The before insert trigger of the LNCYCPTS filer
+	        was modified to call into the FILE linetag to handle the
+	        addition of net deferred fees to an existing account
+	        through PFW. The LNCYCPTS filer sets up AMO.
+          --------------------------------------------------------------------
+	*/
+	quit
+
+public	ADD	// 
+
+	do INIT(0)
+	quit
+	   
+
+public	DEL 	//
+
+ 	do INIT(3)
+	quit
+ 
+
+INIT(Number %ProcessMode)
+	
+	type public Number ER
+	
+	type Date TPD = %SystemDate
+	type Number %PAGE, %PG, BRCD, OLNTB
+	type String VFMQ
+
+	type RecordLNCYCPTS fLNCPTS
+	type RecordAOAMO fAOAMO
+	type RecordLN ln
+
+	set %PG = 0 
+	set %PAGE = 1
+	set BRCD = CUVAR.bobr
+
+	if (%ProcessMode = 1) do { quit:ER
+
+		type RecordTPCTRL tpctrl = Db.getRecord("TPCTRL", "BRCD = :BRCD, UID = :%UserID, TPD = :%SystemDate", 1)
+
+		set TPD = tpctrl.pmdate
+
+		// Batch posting invalid for PMed users		
+		if 'TPD.isNull() do Runtime.setErrSTBLER("TPCTRL","BTCHPM") quit
+		}
+
+	do VPG(.fLNCPTS,.fAOAMO,.ln)
+
+	quit
+
+
+VPG(RecordLNCYCPTS fLNCPTS,RecordAOAMO fAOAMO,RecordLN ln)	// Page control
+	new FINISH
+	set FINISH=0
+
+ 	for  do { quit:FINISH=1
+	   	if %PG=0 do VPG00(.fLNCPTS,.fAOAMO,.ln) if ER set FINISH=1 quit
+                 		
+		if %PG>0 do VPG01(.fLNCPTS,.fAOAMO,.ln) if ER set FINISH=1 quit
+
+		// Process completed/aborted
+		if "DFQ"[VFMQ do VER(.fLNCPTS,.fAOAMO,.ln) set FINISH=1 quit
+
+		set %PG=%PG+1
+		}
+	quit
+
+
+VPG00(RecordLNCYCPTS fLNCPTS,RecordAOAMO fAOAMO,RecordLN ln)	// Set up
+
+	set %TAB("CID")=".CID3/HLP=[LN]CID/XPP=D PCID^LNNFNEW"
+
+	set %TAB("PLAN")=".PLAN2/HLP=[AOAMO]PLAN/TBL=[UTBLLNNFG]IRCB,[UTBLLNNFG]DESC:QU ""[UTBLLNNFG]GRP=<<GRP>>""/XPR=S GRP=$$TGRP^LNNFNEW/XPP=D PPLN^LNNFNEW"
+
+	if %ProcessMode=3 set %READ="@@%FN,,,CID/REQ"
+	else  set %READ="@@%FN,,,CID/REQ,PLAN/REQ"
+
+	do ^UTLREAD 
+	
+	if VFMQ="Q" set ER=1
+	quit
+
+
+TGRP()	//
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+	set GRP=ln.grp
+	quit GRP
+
+
+VPG01(RecordLNCYCPTS fLNCPTS,RecordAOAMO fAOAMO,RecordLN ln)	// Screen
+
+	set ln=Db.getRecord("LN","CID=:CID")	
+	set TYPE=ln.type
+	set CRCD=ln.crcd 
+	set IAM=ln.iam 
+
+	set TYP="PTS"
+
+	set fLNCPTS=Db.getRecord("LNCYCPTS","CID=:CID,TYP=:TYP",1)
+	do fLNCPTS.setAuditFlag(1)
+
+	if %ProcessMode=3 set PLAN=fLNCPTS.plan 
+
+	if PLAN="" set ER=1 quit
+
+	set fAOAMO=Db.getRecord("AOAMO","TYP=:TYP,PAYEE=1,PLAN=:PLAN",1)
+	set BASE=ln.schbal
+
+	if 'BASE set BASE=ln.crlmt
+		
+	// Int/Div Paid - Life
+	if $E(IAM)=1 set BASE=BASE-(ln.iun-ln.ipl)
+ 
+	if %ProcessMode=3 set fLNCPTS.mben=BASE 
+	else  do {
+		set FRE=fAOAMO.fre	
+		set JD=%SystemDate 
+
+		set NJD=$$NJD^UFRE(JD,FRE,.AF) 
+	
+		set AMAF=AF
+	        set JD=NJD 
+	
+		set NJD=$$NJD^UFRE(JD,FRE,,1)      
+	
+		// APR - Fees (Req'd of All Borrowers)
+		set X=ln.orgfa+ln.comfa+ln.aprapp+ln.aprapp1
+		type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:TYPE",1)
+
+		set X=X-($$^SCARND(BASE*prodctl.lexv/100,0,"",$G(CRCD))+prodctl.lexf)
+	
+		// Original Number of Payments 
+		set fLNCPTS.caltd=0
+		set fLNCPTS.nxadt=JD
+		set fLNCPTS.lsadt=NJD
+		set fLNCPTS.cntr=ln.schnum
+		set fLNCPTS.term=ln.onp
+		set fLNCPTS.amt=X
+		set fLNCPTS.payee=1
+		set fLNCPTS.mben=BASE
+		set fLNCPTS.plan=PLAN
+		set fLNCPTS.npda=0
+		}
+
+	do DRV^USID(%ProcessMode,"LNNFC",.fLNCPTS,.fAOAMO,.ln)
+
+	quit
+
+
+ERR	//
+	set ER=1 
+	
+	do ^UTLERR
+	
+	set VFMQ="Q"
+	quit
+
+
+VER(RecordLNCYCPTS fLNCPTS,RecordAOAMO fAOAMO,RecordLN ln)
+
+	if %ProcessMode=2!(%ProcessMode=4)!(VFMQ="Q") do END quit
+
+	lock +ACN(CID):2 else  set ET="RECLOC" do ERR do END quit
+
+	do FILE(.fLNCPTS,.fAOAMO,.ln)
+	
+	do END
+	
+	quit
+
+
+END	//
+	kill %TAB
+	if ER quit
+	set CID=$G(CID)
+
+	if VFMQ="Q" do {
+
+		// Fees for account ~p1 not deleted
+		if %ProcessMode=3 set RM=$$^MSG("1073",CID) quit
+
+		// Fees for account ~p1 not created
+		set RM=$$^MSG("1072",CID)
+		}
+	else  do {
+
+		// Fees for account ~p1 deleted
+		if %ProcessMode=3 set RM=$$^MSG("1070",CID) quit
+
+		// Fees for account ~p1 created
+		set RM=$$^MSG("1069",CID)
+		}
+
+	set ER="W"
+
+	quit
+
+
+FILE(RecordLNCYCPTS fLNCPTS,RecordAOAMO fAOAMO,RecordLN ln)	//
+
+	type Number PMTFRE
+	type String PMTACR
+	
+	set TSEQ=1
+	type ResultSet rs=Db.select("TSEQ","HIST","CID=:CID","TSEQ DESC")
+	if rs.next() set TSEQ=rs.getCol("TSEQ")+1
+
+	set CIDSV=CID
+
+	if %ProcessMode=3 do KILL(.fLNCPTS,.fAOAMO,.ln) quit
+
+	// Monthly Insurance Benefit
+	set fLNCPTS.mben="" 
+	set NDFAMT=fLNCPTS.amt
+		
+	// Product Type 
+	set TYPE=ln.type
+
+	// Interest Amortization Method
+	set IAM=ln.iam
+
+	if fLNCPTS.rate'="" do V2(.fLNCPTS,.fAOAMO,.ln) quit
+
+	// Set plan to not use odd days because we will not be factoring in odd
+	// days interest.
+	set fAOAMO.oprf=0
+	
+	new D,I,J,P,T
+
+	// Obtain P+I distributions 
+	for I=1:1:4 for J="P","I" set PRIO(I,J)=""
+
+	set I=0
+	type RecordLNBIL0 lnbil0=Db.getRecord("LNBIL0","CID=:CID",1)
+        for I=1:1:20 do {
+                if $L(I)=1 set T="0"_I
+                else  set T=I
+                set P="pe"_T_"ea"
+                set D="pe"_T_"pf"
+                
+                set PMTACR = lnbil0.@P
+                set PMTFRE = lnbil0.@D
+                
+                if (PMTACR="P") ! (PMTACR="I") do {
+                	
+                        if 'PMTFRE set PMTFRE=1
+                        
+                        set %PR(I)=PMTACR_"|1|"_PMTFRE
+                        }
+                }
+	
+	// Last Date to Calculate
+	set NJD=fLNCPTS.nxadt 
+	set JD=fLNCPTS.lsadt
+	
+	// Scheduled Balance
+	set BASE=ln.schbal 
+	
+	// Credit Limit - Current
+	if 'BASE set BASE=ln.crlmt
+	
+	// Int/Div Paid - Life
+	if $E(IAM)=1 set BASE=BASE-(ln.iun-ln.ipl)
+		                             
+	// Principal and Interest Payment
+	set PMT=ln.pmtpi
+
+	// Scheduled Payment Number
+	set CF(1)=PMT_"|"_(ln.onp-ln.schnum)
+
+	// Balloon loans
+	if ln.ambas-ln.onp do {
+		set FV=0
+	
+		// Distribution 1 Annual Factor
+		set DIST1AF=ln.dist1af
+
+		if DIST1AF set FV=$$FV^UFINC(BASE,+ln.irn/DIST1AF,+ln.ambas,PMT)
+
+		set FV=$$^SCARND(FV,0,CID,"","","+")
+		set $P(CF(1),"|",2)=$P(CF(1),"|",2)-1
+
+		set CF(2)=(FV+PMT)_"|1"
+		}
+
+	do ADD^LNNFNEW1(.ln,.fAOAMO,NDFAMT,fLNCPTS.plan)
+
+	do V2(.fLNCPTS,.fAOAMO,.ln)
+
+	quit
+ 
+
+V2(RecordLNCYCPTS fLNCPTS,RecordAOAMO fAOAMO,RecordLN ln)	//
+
+	// Insert new record
+	do fLNCPTS.save()
+
+	/*
+	 If the loan was opened today, general ledger entries will be
+	 posted tonight.
+	*/
+
+	if Db.isDefined("DTJNA","TJD=:TJD,CLS='L',GRP=:GRP,TYP=:TYPE,CID=:CID") quit
+
+        type RecordTTXUID ttxuid=Db.getRecord("TTXUID","TJD=:TPD,BRCD=:BRCD,UID=:%UserID",1)
+	if ttxuid.getMode()=0 do ttxuid.save()
+
+	/* 
+	 Need to find correct value for TRC.  It is possible that the
+	 %UserID level of TTX (pc 1 = last screen number posted) could
+	 have been previously incremented by 1 but no entries were
+	 actually written to TTX.  Certain batch postings and other
+	 functions do this (ie: @LNNF04).  The last screen number posted
+	 in the %UserID level of TTX (ATRC) must be compared to the screen
+	 number of the last transaction sequence entry actually written
+	 to TTX (BTRC).  Whichever value is greater gets set into TRC.
+	 Now TRC has the real last posted screen number.  Then add 1000
+	 to TRC to get the next available screen number.
+	*/
+	
+	
+	type RecordTTXUID ttxuid=Db.getRecord("TTXUID","TJD=:TPD,BRCD=:BRCD,UID=:%UserID",1)
+	set ATRC=ttxuid.lpseq	
+	
+	set BTRC=0
+	type ResultSet rs=Db.select("TSEQ","TTX","TJD=:TPD AND BRCD=:BRCD AND UID=:%UserID","TSEQ DESC")
+	if rs.next() set BTRC=rs.getCol("TSEQ")	
+
+	set ATRC=ATRC*1000
+	set BTRC=BTRC\1000*1000
+	set TRC=$S(ATRC>BTRC:ATRC,1:BTRC)
+	set TRC=TRC+1000
+
+	set DTC=fAOAMO.dtran 
+	set CTC=fAOAMO.ctran
+	
+	type RecordTRN trn=Db.getRecord("TRN","ETC=:DTC",1)
+	type RecordTRN trn1=Db.getRecord("TRN","ETC=:CTC",1)
+	
+	set DETC=trn.itc
+	set CETC=trn1.itc
+
+	do TR
+
+	// Add new Net Fees ~p1
+	set DES=$$^MSG("4164",CID)
+	
+	// Original Amount RecordLNCYCPTS fLNCPTS
+	set AMT=fLNCPTS.amt
+	if AMT do {
+		set DNAGL=fAOAMO.dnagl
+		set CNAGL=fAOAMO.cnagl
+  		set TRC=TRC+1
+ 	        type RecordTTX TTX=Db.getRecord("TTX","TJD=:TPD,BRCD=:BRCD,UID=:%UserID,TSEQ=:TRC",1)
+		if AMT<0 do {
+			set TTX.cid=DNAGL
+	        	set TTX.itc=CETC
+        		set TTX.etc=CTC
+	        	set TTX.tamt=-AMT
+			}
+
+		else  do {
+			set TTX.cid=DNAGL	
+			set TTX.itc=DETC
+			set TTX.etc=DTC
+			set TTX.tamt=AMT
+			}	
+
+		set TTX.tlo=TLO
+		set TTX.tcmt=DES
+		set TTX.cdt=%CurrentDate
+		set TTX.tim=%CurrentTime
+		set TTX.brcde=BRCD
+		set TTX.trc=TRC
+		set TTX.uidt=%UserID
+
+		if CRCD'="" set TTX.crcd=CRCD 
+
+		do TTX.save()
+
+		set TRC=TRC+1
+	
+		type RecordTTX TTX=Db.getRecord("TTX","TJD=:TPD,BRCD=:BRCD,UID=:%UserID,TSEQ=:TRC",1)
+        	if AMT<0 do {
+                	set TTX.cid=CNAGL 
+                	set TTX.itc=DETC
+                	set TTX.etc=DTC
+                	set TTX.tamt=-AMT
+                	}
+        	else  do {
+                	set TTX.cid=CNAGL
+                	set TTX.itc=CETC
+                	set TTX.etc=CTC
+                	set TTX.tamt=AMT
+                	}
+
+	 	set TTX.tlo=TLO
+                set TTX.tcmt=DES
+                set TTX.cdt=%CurrentDate
+                set TTX.tim=%CurrentTime
+                set TTX.brcde=BRCD
+                set TTX.trc=TRC
+                set TTX.uidt=%UserID
+
+                if CRCD'="" set TTX.crcd=CRCD	
+		do TTX.save()	
+		}
+
+	// Post CALTD
+	set CALTD=fLNCPTS.caltd
+	if CALTD do {
+		set DGL=fAOAMO.dgl
+		set CGL=fAOAMO.cgl
+		set TRC=TRC+1
+
+		type RecordTTX TTX=Db.getRecord("TTX","TJD=:TPD,BRCD=:BRCD,UID=:%UserID,TSEQ=:TRC",1)
+        	if CALTD<0 do {
+                	set TTX.cid=DGL
+                	set TTX.itc=CETC
+                	set TTX.etc=CTC
+                	set TTX.tamt=-CALTD
+                	}
+        	else  do {
+                	set TTX.cid=DGL
+                	set TTX.itc=DETC
+                	set TTX.etc=DTC
+                	set TTX.tamt=CALTD
+                	}
+
+                set TTX.tlo=%UserStation
+                set TTX.tcmt=DES
+                set TTX.cdt=%CurrentDate
+                set TTX.tim=%CurrentTime
+                set TTX.brcde=BRCD
+                set TTX.trc=TRC
+		set TTX.uidt=%UserID
+		
+                if CRCD'="" set TTX.crcd=CRCD
+
+		do TTX.save()
+
+		set TRC=TRC+1
+
+                if CRCD'="" set $P(X,"|",17)=CRCD
+
+       		type RecordTTX TTX=Db.getRecord("TTX","TJD=:TPD,BRCD=:BRCD,UID=:%UserID,TSEQ=:TRC",1)
+         	if CALTD<0 do {
+                	set TTX.cid=CGL
+                 	set TTX.itc=DETC
+                 	set TTX.etc=DTC
+                 	set TTX.tamt=-CALTD
+                 	}
+         	else  do {
+                 	set TTX.cid=CGL
+                 	set TTX.itc=CETC
+                 	set TTX.etc=CTC
+                 	set TTX.tamt=CALTD
+                 	}
+
+                 set TTX.tlo=TLO
+		 set TTX.tcmt=DES
+                 set TTX.cdt=%CurrentDate
+                 set TTX.tim=%CurrentTime
+                 set TTX.brcde=BRCD
+                 set TTX.trc=TRC
+                 set TTX.uidt=%UserID
+                 
+                 if CRCD'="" set TTX.crcd=CRCD
+
+		 do TTX.save()
+		 }   
+
+	// Nothing to post
+	if CALTD+AMT=0 quit
+
+	do ^TTXP1
+	
+	set CID=$G(CIDSV)
+	quit
+
+
+PCID	// Post processor to CID prompt
+
+	if X="" quit
+	set %EXT=1 
+	set (CLS,ZCLS)="L" 
+	
+	do ^UACN 
+
+	if ER quit
+
+	if CID="" quit	
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+	if ln.stat=4 set ER=1 set ET="ACNCLO"
+
+	if %OSAVE'=3,ln.ptsp set ER=1 set ET="AHNDF"
+	if %OSAVE=3,'ln.ptsp set ER=1 set ET="NONFEE"
+	
+	if ER do ^UTLERR set (CID,X)="" quit
+	
+	quit
+
+
+PPLN	// Verify that loan qualifies for plan
+
+	if X="" quit
+	if 'Db.isDefined("UTBLLNNFG","GRP=:GRP,IRCB=:X") quit
+	type RecordAOAMO fAOAMO=Db.getRecord("AOAMO","TYP='PTS',PAYEE='1',PLAN=:X")
+	
+	if fAOAMO.fmet quit
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+	set PCM=ln.pcm	
+
+	type RecordSTBLPCM fstblpcm=Db.getRecord("STBLPCM","KEY=:PCM",1)
+	set P=fstblpcm.pcmp
+	if $E(P)!($E(P,3)=4) quit
+		
+	if ln.mdt'=""!(ln.trm)!(ln.ptrm) quit
+	
+	// Loan must have term or maturity to use interest method plan
+	set ER=1 set RM=$$^MSG("1646")
+	quit
+
+
+KILL(RecordLNCYCPTS fLNCPTS,RecordAOAMO fAOAMO,RecordLN ln)	// Delete deferred fees from account
+	
+	if fLNCPTS.amt-fLNCPTS.caltd set ER=1 set ET="AHNDFB" do ^UTLERR quit
+
+	type RecordLNCYCPTS lncycpts=Db.getRecord("LNCYCPTS","CID=:CID,TYP=:PLAN",1)
+
+	set lncycpts.reb=fAOAMO.cnt-1
+	do lncycpts.bypassSave()
+	
+	set ln.ptsp=""
+	set TYPE=ln.type 
+	set GRP=ln.grp 
+	set CC=ln.cc
+	do ln.bypassSave()
+	
+	do Db.delete("LNCYCPTS","CID=:CID AND TYP=:TYP")
+
+	quit
+
+
+TR	// Setting PMing Indicator
+
+	if TPD-%SystemDate=0 quit
+	set DETC=$E(DETC,1,7)_$E("0000000",1,7-$L(DETC))_1_$E(DETC,9,99)
+	set CETC=$E(CETC,1,7)_$E("0000000",1,7-$L(CETC))_1_$E(CETC,9,99)
+	quit
+
+	
+
+vSIG()	quit "60317^55562^Marie Mbui^13066"	// Signature - LTD^TIME^USER^SIZE

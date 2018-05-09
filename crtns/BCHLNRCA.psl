@@ -1,0 +1,716 @@
+BCHLNRCA //Batch BCHLNRCALC - Provision Calculations
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 08/30/2007 15:08 - joynerd
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHLNRCALC Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit quit
+ do JOBMGR^BCHUTL(%FN,"BCHLNRCALC",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(CID) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHLNRCALC","*","",CID.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,CID)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHLNRCALC","*","",CID.get(),"",et)
+ }
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,CID) //
+	type RecordACN acn = Db.getRecord("ACN", "CID = :CID")
+	
+	type RecordPRODCTL prodctl = Db.getRecord("PRODCTL", "TYPE = :acn.type")
+ 
+	if 'prodctl.provpo quit		// Provision Processing Option
+
+	do EXEC1(CID, "10", .acn)
+
+	quit
+
+
+public EXEC1(Number CID,		// Account number
+	     String CTL,		// Control variable
+	     RecordACN acn)		// Account
+
+	/*	
+	 Additional notes on arguments:
+
+	    . CTL   Control Variable
+	
+		    Position 1: 0 - Do not file to disk
+				1 - File to disk (ACN, TTX and other
+				    supporting files)
+	
+		    Position 2: 0 - Do not init "run" variables
+				1 - Init "run" variables.  These are
+				    variables that need to be defined
+				    prior to processing an account,
+				    such as %UID and BRCD.  A call
+				    into EXEC from an external source
+				    would be a candidate for passing
+				    this control parameter.
+	
+	*/
+
+	type public Boolean ER
+	type public String utblacc(,)
+	
+	type Boolean PROVRFLG
+	type Date DIST1ND, PROVEXPD
+	type Number ACLS, BAL, BALCMP, CALACLS, COLVAL, OVACLS, PROVADJ, PROVBAL
+	type Number PROVOAMT, PROVPCT, RACOVR
+	type String CLS, COLOFF, TAG, TARGET
+
+	// Intialize here only if called from an outside source
+	if CTL.extract(2) do INIT quit:ER
+
+	set ACLS = ""
+	set (PROVPCT,PROVRFLG) = 0
+		
+	set CLS = acn.cls
+
+	if (CLS = "L") do {
+		
+		type RecordLN ln = {RecordACN}acn
+		
+		set COLOFF = ln.coloff			// Collection Officer
+		set DIST1ND = ln.dist1nd		// Distribution 1 Next Due
+		set COLVAL = ln.provcol.roundCur(ln.crcd)	// Provision Collateral
+		set BALCMP = ln.balcmp			// Balance (Computed) 
+		}
+	else  set COLOFF = ""
+
+	set BAL = acn.bal			// Ledger Balance
+	set PROVBAL = acn.provbal		// Provision Balance
+	set CALACLS = acn.calacls		// Provision Calculated Asset Class
+	set PROVEXPD = acn.provexpd		// Provision Expiration Date
+	set OVACLS = acn.provcat		// Provision Category
+	set RACOVR = acn.racovr		  	// Provision Category Override
+	
+	/*
+	Only Deposits with negative balances qualify and PROVCAT in ACN has no
+	value. If OVACLS contains a value, there was once a provision because
+	the account was either negative or an override was on the account. 
+	Only continue on if the account is positive to see if there is an 
+	adjustment.
+	*/
+
+	if (CLS = "D"), 'RACOVR, (acn.bal '< 0), 'OVACLS quit	
+
+	/*
+	Determine if an override amount, override percentage or override 
+	provision category is used. If none of the above, call compiled 
+	routine to get the info needed to calculate the reverse amount.
+	*/
+	
+	// Provision Override Amount
+	if 'acn.provoamt.isNull() do {		
+	
+		set PROVRFLG = 1
+		set PROVOAMT = acn.provoamt
+		set ACLS = acn.racovr    	  	
+		set PROVPCT = $$PROVPCT^LNCDI(ACLS, PROVOAMT, CID)
+		
+		// Calculate target balance and adjustment to current amount 
+		set PROVADJ = PROVOAMT - PROVBAL   
+		}
+	// Provision Override Percentage
+	else  if 'acn.provopct.isNull() do {	
+	
+		set PROVRFLG = 1
+		set PROVPCT = acn.provopct
+		set ACLS = acn.racovr
+		
+		// Calculate target balance and adjustment to current amount
+		do PROVCAL(.acn)		
+		}
+	// Override provision category
+	else  if 'acn.racovr.isNull() do {
+	
+		set PROVRFLG = 1
+		set ACLS = acn.racovr
+		set PROVPCT = utblacc(CLS,ACLS).piece("|", 3)		
+		if PROVPCT.isNull() set PROVPCT=0
+		// Calculate target balance and adjustment to current amount
+		do PROVCAL(.acn)			
+		}
+	// Find class and adjustment
+	else  do {
+		
+		do FINDCLS(.acn)
+		
+		// Calculate target balance and adjustment to current amount
+		do PROVCAL(.acn)
+		}
+
+	do FILE(.acn)
+
+	quit
+	
+
+FINDCLS(RecordACN acn)
+
+	// No override, find class
+
+	type public Date PROVEXPD
+	type public Number ACLS, CALACLS, DIST1ND, OVACLS, PROVPCT
+	type public String CLS, utblacc(,)
+
+	do PROVLOOP(.acn)
+	
+	if 'ACLS.isNull() do { quit
+		set PROVPCT = utblacc(CLS,ACLS).piece("|", 3)
+		if PROVPCT.isNull() set PROVPCT=0
+		}	
+
+	/* 
+	Loan account is current and did not meet provision query. 
+	Check for expiration processing. If CALACLS contains a value, the
+	account's previous provision class was set with an override.  
+	Expiration processing should not occur if the override was removed.
+	*/
+
+	if (CLS = "L"), (DIST1ND '< %SystemDate), OVACLS, 'CALACLS do {
+		
+		// Check expiration period and find category
+		set ACLS = $$EXPPER(OVACLS, .PROVEXPD)
+		
+		if 'ACLS.isNull() do {
+			set PROVPCT = utblacc(CLS,ACLS).piece("|", 3)
+			if PROVPCT.isNull() set PROVPCT=0
+			}
+		}
+
+	/*
+	If a provision asset class is not found, set the provision percentage
+	to zero to see if there is an adjustment. Also set the provision
+	expiration date to null.
+	*/
+
+	if ACLS.isNull() set PROVPCT = 0,PROVEXPD = ""
+	
+	quit
+	
+
+PROVLOOP(RecordACN acn)
+	
+	// If not an override then collate through utblacc array and execute each 
+	// query until one is true
+
+	type public Boolean DARCDFLG
+	type public Date DIST1ND, PROVEXPD
+	type public Number ACLS, CALACLS, OVACLS
+	type public String CLS, utblacc(,)
+
+	type Boolean QUIT = 0
+	
+	set ACLS = ""
+
+	for  set ACLS = utblacc(CLS,ACLS).order(-1) quit:ACLS.isNull()  do { quit:QUIT
+		if (utblacc(CLS,ACLS).piece("|", 9)'="") do PROVCAT(.acn)
+		}
+	
+	/*
+	If the account is delinquent and an expiration date exist on the
+	account, this means the account was once current.  The account remains
+	in the asset classification assigned to the account.  If the new
+	delinquency class is less than the delinquency class assigned
+	to the loan while it is in the expiration period, the higher
+	delinquency class (worst) will be assigned.  If the delinquency
+	determination flag is on in customer variables, the account
+	remains in the asset classification assigned to the account when
+	the delinquency class was first assigned.  However, an account can
+	be moved to a more servere delinquency class.
+	*/
+
+	if (CLS = "L") , (DIST1ND < %SystemDate) do {
+		
+		type Number COMPACLS
+		
+		/*	
+		Comparison is done on previous calculated class. If CALACLS
+		contains a value, then the previous class in OVACLS was from
+		an override. ACLS should then be compared to CALACLS.
+		*/
+		
+		set COMPACLS = $select(CALACLS:CALACLS,1:OVACLS)
+		
+		if ('PROVEXPD.isNull() ! DARCDFLG) , (ACLS < COMPACLS) set ACLS = COMPACLS,PROVEXPD = ""
+		}
+ 	
+	quit
+	
+
+PROVCAL(RecordACN acn)	
+	
+	// Provision Calculation - Use calculatation to determine target balance
+
+	type public Number ACLS, PROVADJ, PROVBAL, PROVPCT, TARGET
+	type public String utblacc(,)
+
+	type Number BAL
+	type String CALC, CLS
+	
+	// Account is no longer in a provision category
+	set BAL = acn.bal
+	set CLS = acn.cls
+	
+	if ACLS.isNull() set CALC = "",TARGET = 0
+	
+	// Use provision extrinsic
+	else  if 'utblacc(CLS,ACLS).piece("|", 7).isNull() do {
+	
+			set CALC = utblacc(CLS,ACLS).piece("|", 7)
+			
+			if (CALC.extract(1, 2) '= "$$") set CALC = "$$"_CALC
+			
+			set CALC = "S TARGET="_CALC
+			}
+	
+	// Use provision Data-QWIK expression
+	else  if 'utblacc(CLS,ACLS).piece("|", 8).isNull() set CALC = "S TARGET=$$dqprov"_CLS_ACLS_"^LNRCMP1(.acn)"
+	
+	// Use original calculation with computed balance
+	else  set CALC = "S TARGET=$$CALC(BAL,CLS)"  
+
+	// Execute and return TARGET balance
+	#accept pgm=spier;date=12/9/03;CR=7403
+	if 'CALC.isNull() xecute CALC
+	
+	// Deposit balance should be used as an absolute value
+	if (CLS = "D") , (TARGET < 0) set TARGET = TARGET * (-1)
+	
+	// Set Provison adjustment using target balance and previous provision
+	set PROVADJ = ((PROVPCT * TARGET) / 100).roundCur(acn.crcd) - PROVBAL
+	
+	quit
+	
+
+CALC(Number balance,		// Provision Balance
+     String class)		// Product Class
+	
+	// Calculate Provision with Computed Balance and Collateral Information
+
+	type public Number BALCMP, CID, COLVAL
+
+	type Number TARGET	
+	
+	if (class = "L") do {
+
+		// Target balance used for calculations
+		if 'BALCMP.get().isNull() ! 'COLVAL.get().isNull() do {
+			
+			type RecordLN ln = Db.getRecord("LN", "CID = :CID")
+			
+			set BALCMP = ln.balcmp
+			
+			set COLVAL = ln.provcol.roundCur(ln.crcd)
+			}
+			
+		set TARGET = BALCMP - COLVAL
+		
+		if (TARGET < 0) set TARGET = 0
+		}
+
+	else  set TARGET = balance	
+
+	quit TARGET	
+
+
+BALCALC(Number balance,		// Provision Balance
+	String class)		// Product Class
+	
+	/*
+	 Calculate Provision with Ledger Balance and Collateral Information.
+	 
+	 This function is called indirectly by PROVCAL section, in case it is
+	 specified in UTBLACC.PROVEXT (Provision Balance Extrinsic) column.
+	 This can be accompished by running UTBLACC01/UTBLACC02 functions.
+	  
+	 IMPORTANT: Because starting this version, this function takes two
+	 arguments, it is imperative to specify them on the screen. The values
+	 are assigned to two variables, BAL and CLS, in PROVCAL section.
+	 
+	 Format:  Provision Balance Extrinsic: $$BALCALC^BCHLNRCA(BAL,CLS)
+	 
+	*/
+
+	type public Number COLVAL,  TARGET
+
+	if (class = "L") do {
+		
+		// Target balance used for calculations
+		set TARGET = balance - COLVAL
+		
+		if (TARGET < 0) set TARGET = 0
+		}
+	
+	else  set TARGET = balance
+	
+	quit TARGET
+	
+
+FILE(RecordACN acn)
+
+	// File Information and post if no offset
+
+	type public Date PROVNPDT
+	type public Number ACLS, OVACLS, PROVADJ, PROVBAL, PROVOFF
+		
+	type Number PROVTOT
+	
+	set OVACLS = acn.provcat			// Original provision category
+	set PROVADJ = PROVADJ.roundCur(acn.crcd)			
+	
+	// Account is closed and no provision is scheduled
+	if (acn.stat = 4), 'PROVBAL quit
+	
+	if (acn.stat = 4), PROVBAL set PROVADJ = -PROVBAL
+	
+	// Post changes to account and G/L now
+	if (PROVOFF < 1) do {
+		
+		type Boolean ER = 0
+		
+		do EXEC1^BCHLNRPO(acn.cid, "01")
+		
+		if ER do EXC 
+		}
+
+	/*
+	Moved this section below the call to EXEC^BCHLNRPOST since EXEC^BCHLNRPOST
+	files the account changes for expiration date changes.
+	No adjustment and Provision Category is not changing.
+	*/
+
+	if (PROVADJ = 0), (ACLS = acn.provcat) quit	// Provision Category
+
+	// New provision total amount equals current provision balance on the 
+	// account plus the provision adjustment
+	set PROVTOT = PROVBAL + PROVADJ
+	
+	// Update Suspense File Povision with provision adjustment
+	#if CUVAR.MRPT do MRPT^SUSPROC(.acn, acn.cid, PROVADJ, $$EOMJD^SCADAT(PROVNPDT, 1))
+	
+	// File into DAYENDLNRP	
+	do DAYEND
+	
+	quit
+
+
+DAYEND
+	// File data into [DAYENDLNRP] for posting/reports
+
+	type public Boolean PROVRFLG
+	type public Date PROVEXPD, PROVNPDT
+	type public Number ACLS, CID, OVACLS, PROVADJ, PROVBAL, PROVPCT, PROVTOT
+	type public String COLOFF
+	
+	type RecordDAYENDLNRP dayendlnrp = Class.new("RecordDAYENDLNRP")
+	
+	set dayendlnrp.provnpdt = PROVNPDT	// Provision Next Posting Date
+	set dayendlnrp.cid = CID		// Account Number
+	set dayendlnrp.acls = ACLS		// Asset Classification
+	set dayendlnrp.provadj = PROVADJ	// Loan Provision Adjustment
+	set dayendlnrp.provbal = PROVBAL	// Loan Provision Balance
+	set dayendlnrp.coloff = COLOFF		// Collection Officer
+	set dayendlnrp.provpct = PROVPCT	// Loan Provision Percentage
+	set dayendlnrp.uid = %UserID		// User ID
+	set dayendlnrp.ovacls = OVACLS		// Asset Classification Old Value
+	set dayendlnrp.provexpd = PROVEXPD	// Provision Expiration Date 
+	set dayendlnrp.provrflg = PROVRFLG	// Provision Category Override Flag
+	set dayendlnrp.provtot = PROVTOT	// Total Override Provision Amount
+	
+	do dayendlnrp.bypassSave()
+		
+	quit
+	
+
+PROVCAT(RecordACN acn)
+
+	/*
+	Call query. Set QUIT if it meets the query and return necessary
+	variables.
+	
+	. paclsD1()	Provision Sub-Standard Deposits
+	. paclsD2()	Provision Doubtful Deposits
+	. paclsD3()	Provision Lost Deposit
+	. paclsL1()	Provision SUBSTANDARD
+	. paclsL2()	Provision DOUBTFUL
+	. paclsL3()	Provision LOST LOANS
+	. paclsL4()	Provision Spec Loans
+
+	*/
+
+	type public Boolean QUIT
+	type public Number ACLS
+	type public String CLS, TAG
+
+	set TAG = "pacls"_CLS_ACLS
+	
+	set QUIT = $$@TAG^LNRCMP1(.acn)
+
+	quit
+
+
+INIT
+	
+	/*
+	Initialize the utblacc array, CUVAR data and variables needed for 
+	process. Plus make sure that the process is due to run and the
+	regeneration date is defined.
+	*/
+	
+	type public Boolean DARCDFLG, REGEN = 0
+	type public Date PROVNPDT, PROVRCDT
+	type public Number PROVOFF
+	type public String PROVFREQ
+
+	do INIUTBL^BCHLNRPO		// Initialize utblacc(CLS,AC array
+	
+	type RecordCUVAR cuvar = Db.getRecord("CUVAR")
+ 
+	set PROVFREQ = cuvar.provfreq	// Provision Frequency
+	set PROVNPDT = cuvar.provnpdt	// Provision Next Posting Date
+	set PROVOFF = cuvar.provoff	// Provision Calculation Offset Days
+	set PROVRCDT = cuvar.provrcdt	// Provision Regeneration Calculation Date
+	set DARCDFLG = cuvar.darcdflg	// Delinquency Asset Class Determination
+ 
+
+	/*
+	If the regeneration calc date equals today, create the DAYENDLNRP file
+	for the regeneration post date. If the regeneration calculation date
+	and the regeneration posting date equal today's date, set the 
+ 	offset period to null so BCHLNRPOST will be called to post the file.
+	*/
+
+	if (PROVRCDT = %SystemDate) do {
+		
+		if (PROVNPDT '= %SystemDate) set PROVNPDT = cuvar.provrpdt,REGEN = 1 
+		else  set PROVOFF = ""
+		}
+	
+	quit
+
+
+EXPPER(Number PACLS,		// Provision Category
+       Date PROVEXPD)		// Provision expiration date	/REF:RW
+
+	// Current loans in expiration period
+
+	type public String CLS, utblacc(,)
+
+	type String DARCEXP
+	
+	set DARCEXP = utblacc(CLS,PACLS).get().piece("|", 4)
+	
+	if DARCEXP.isNull() quit ""
+	
+	// Account just became current.  Put in existing class.
+	if PROVEXPD.isNull() set PROVEXPD = $$EXT^UMDT(DARCEXP, %SystemDate) quit PACLS
+	
+	// Account remains in expiration period at same risk class
+	if (PROVEXPD > %SystemDate) quit PACLS					
+
+	// Account has been current for the expiration period, get new class
+	// for new percentage
+	set PACLS = utblacc(CLS,PACLS).order(-1)
+	set DARCEXP = utblacc(CLS,PACLS).get().piece("|", 4)
+	
+	// Account is no longer a risk
+	if PACLS.isNull() set PROVEXPD = ""
+	// Account will be placed in a lesser risk class and the
+	// expiration waiting period is recalculation from today's date
+	else  set PROVEXPD = $$EXT^UMDT(DARCEXP, %SystemDate)
+	
+	quit PACLS
+	
+
+EXC	// Log error to DAYENDEXC
+	
+	type public Number CID
+	type public String RM
+	
+	do LOG^UTLEXC(%RoutineName, "*", RM.get(), CID.get())
+
+	quit
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,CID
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set CID=vRECORD.piece($C(9),1)
+ do vPROC(CID)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,CID
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>32767 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+13>32767 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+	type public Boolean DARCDFLG, ER, REGEN = 0
+	type public Date PROVNPDT, PROVRCDT
+	type public Number BRCD, PROVOFF
+	type public String PROVFREQ, RM
+
+	type RecordCUVAR cuvar = Db.getRecord("CUVAR")
+	
+	set PROVFREQ = cuvar.provfreq	// Loan provision posting frequency
+	set PROVNPDT = cuvar.provnpdt	// Loan provision next posting date
+	set PROVOFF = cuvar.provoff  	// Loan provision calculation offset
+	set PROVRCDT = cuvar.provrcdt	// Loan provision regeneration calc
+	set DARCDFLG = cuvar.darcdflg	// Delinquency asset class determination
+       
+	/*
+ 	If the regeneration calc date equals today, create the DAYENDLNRP file
+	for the regeneration post date. If the regeneration calculation date
+	and the regeneration posting date equal today's date, set the
+	offset period to null so BCHLNRPOST will be called to post the file.
+	*/      
+
+	if (PROVRCDT = %SystemDate) do {
+		
+		if (PROVNPDT '= %SystemDate) set PROVNPDT = cuvar.provrpdt set REGEN = 1
+		else  set PROVOFF = ""
+       		}
+
+	// Not scheduled to run
+	if 'REGEN, (PROVNPDT - PROVOFF - %SystemDate) set %BatchExit = 1 quit    
+
+	do SOURCE^BCHSOURC("BOFF", "PROV", .%UserID, .BRCD, .%UserClass)
+
+	// Batch teller and/or branch not defined
+        if ER set RM = $$^MSG(7484),%BatchExit = 1 do EXC quit
+        
+
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("CID","ACN","ACN.CLS<>'*'")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	type public Boolean DARCDFLG, ER
+	type public Date PROVNPDT, PROVRCDT
+	type public Number BRCD, PROVOFF
+	type public String PROVFREQ
+
+	type RecordCUVAR cuvar = Db.getRecord("CUVAR")
+	
+	set PROVFREQ = cuvar.provfreq	// Loan provision posting frequency
+	set PROVNPDT = cuvar.provnpdt	// Loan provision next posting date
+	set PROVOFF = cuvar.provoff	// Loan provision calculation offset
+	set PROVRCDT = cuvar.provrcdt	// Loan provision regeneration calc
+	set DARCDFLG = cuvar.darcdflg	// Delinquency asset class determination
+
+	// If the [DAYENDRLP] file already exist for PROVNPDT, then this is
+	// a regeneration of an existing posting file that has not been posted.
+
+	set ER = 0
+	
+	do SOURCE^BCHSOURC("BOFF", "PROV", .%UserID, .BRCD, .%UserClass)
+	
+	// Initialize utblacc(CLS,AC) array
+	do INIUTBL^BCHLNRPO
+	
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+	type public Date PROVNPDT
+
+	// If the DAYENDLNRP record already exists for PROVNPDT, then this is
+	// a regeneration of an existing posting file that has not been posted
+
+	do Db.fastDelete("DAYENDLNRP", "PROVNPDT=:PROVNPDT")
+	
+	
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+	type public Number PROVOFF
+
+	// Update the G/L, update dates in CUVAR
+	if 'PROVOFF do FILE^BCHLNRPO
+	
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

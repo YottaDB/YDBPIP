@@ -1,0 +1,420 @@
+CMSGL	//
+	/*
+	       ORIG:  Mike Winigrad (6969) - 12/05/86
+	  CALLED BY:
+	      CALLS:
+	   PROJ #'S:  1628
+	       DESC:  Custom card transaction formatting
+	              Source ID: RFSB_ACH (^CTBL("INC",src))
+
+	                    THIS ROUTINE IS TO BE COMPILED WITH TTXFMT
+	                        DO NOT RUN THIS ROUTINE STANDALONE
+	      FILES:
+	       READ:
+	        SET:
+
+	      INPUT:
+	     OUTPUT:
+
+	  ---- Revision History ------------------------------------------------
+
+            12/12/05 - SPR - 18555
+		       Card Management - General DBI3 system area cleanup.
+	  
+	  ----------------------------------------------------------------------
+	*/
+	
+	quit
+	
+	
+public RECCALL	// Record menu section
+
+	type public String ER,RECTYPE,REC
+
+	if ER.get()>0 quit
+
+	/* Following is custom for RS/2
+	   Here the record must be translated for any unwritable characters
+	*/
+	set REC=$$TRANSLATE(REC)
+
+	// Header record
+	if RECTYPE="FH" do REC1 quit
+
+	// Unknown record - Abort
+	if RECTYPE="" quit
+
+	// Trailer record
+	if RECTYPE="FT" do REC9 quit
+
+	// Must be detail record
+	do REC6
+
+	quit
+
+
+ALLREC	// All records section
+
+	type public Number ERR,RECCNT
+	type public String RECTYPE
+
+	if RECCNT=1,RECTYPE'="FH" set ERR=11 do RECERR(1)
+
+	quit
+
+
+public UFILINIT	// File intialization
+
+	type public Number TOTAMT,TOTDIS,TOTNET,TOTPMNTS,TOTROUND,TYPEPOS1,TYPEPOS2
+
+	// Record type
+	set TYPEPOS1=1
+	set TYPEPOS2=2
+
+	// Initialize values to later compare with trailer.
+	set (TOTAMT,TOTDIS,TOTNET,TOTPMNTS,TOTROUND)=0
+
+	quit
+
+
+REC1	// File header record
+
+	/*
+	   Calculate last TTX sequence number for this %UID and BRCD.
+	   This is later used to kill out new TTX records if the batch
+	   happens to be bad.
+	*/
+
+	type public Number %UserID,BRCD,ERR,FID,LASTTTXSEQ
+	type public String %DIR,%INST,SRC,REC
+	type public Date %EffectiveDate,FDATE
+
+	set LASTTTXSEQ=""
+
+	type RecordCTBLINC ctblinc=Db.getRecord("CTBLINC","KEY=:SRC",1)
+
+	set BRCD=ctblinc.brcd
+	set %UserID=ctblinc.teller
+
+	type ResultSet rs=Db.select("TSEQ","TTX","TJD=:%SystemDate AND BRCD=:BRCD AND UID=:%UserID","TSEQ DESC")
+	if rs.next() set LASTTTXSEQ=rs.getCol("TSEQ")
+
+	// Destination Directory
+	do INT^%DIR
+
+	set %INST=%DIR
+
+	// Following is custom at RS/2 and would change at other sites
+	// File ID
+	set FID=REC.extract(3,8)
+
+	// Merchant Payment
+	if FID'="GENLED" set ERR=15 do RECERR(1) quit
+
+	// File Creation Date
+	set FDATE=REC.extract(9,16)
+
+	set %EffectiveDate=%SystemDate
+	do BCHINIT
+
+	quit
+
+
+UBCHINIT	// User batch intialization
+
+	quit
+
+
+UBCHEND	// User batch end
+
+	type public Number BCHTOT,BCHCR,BCHDR,NUMBTR,TOTPMNTS
+	type public String ER,RM
+
+	// Verify Debit and Credit Totals
+	if ER.get()>0 do KILLTTX quit
+
+	set BCHTOT=$S(BCHDR>BCHCR:BCHDR-BCHCR,1:BCHCR-BCHCR)
+
+	// If trailer record matches batch post transactions
+	if TOTPMNTS'=NUMBTR do {
+
+		// Record count does not match trailer
+		set ER=1
+		set RM=$$^MSG(207)
+
+		do KILLTTX
+		}
+	quit
+
+
+KILLTTX	// kill ttx records
+
+	type public Number %UserID,BRCD,LASTTTXSEQ,SEQ
+
+	set SEQ=LASTTTXSEQ
+	do Db.delete("TTX","TJD=:%SystemDate AND BRCD=:BRCD AND UID=:%UserID AND TSEQ>:SEQ")
+
+	quit
+
+
+public PREOPEN	//
+
+	quit
+
+
+public POSTREAD	//
+
+	quit
+
+
+TRANSLATE(String REC)	// Translates the unwritable characters in a record.
+
+	set REC=REC.translate($C(144)," ")
+	quit REC
+
+
+TRNAMT(Number AMT,Number EXP)	// Transaction amount with decimal value
+
+	if EXP.get()>0 quit AMT/(10**EXP)
+
+	quit AMT.get()
+
+
+SHVZRO1(String FIELD)	// This removes the zero filler from the front of a string.
+
+	// Shave zeros from beginning of string.
+	for  quit:FIELD.extract()'=0  do {
+		if FIELD.extract()=0 set FIELD=FIELD.extract(2,(FIELD.length()))
+		}
+
+	quit FIELD
+
+
+SHVZRO2(String FIELD)	// Shave zeros from end of string.
+
+	type public Number SPC
+
+	set SPC=FIELD.find("0")
+	if SPC>0 set FIELD=FIELD.extract(1,(SPC-2))
+	quit FIELD
+
+
+SHVSP1(String FIELD)	// Shave space from beginning of account string.
+
+	type public Number SPC
+
+	for  quit:FIELD.extract()'=" "  do {
+		if FIELD.extract()=" " set FIELD=FIELD.extract(2,FIELD.length())
+		}
+
+	// Shave spaces from end of account string.
+	set SPC=FIELD.find(" ")
+	if SPC>0 set FIELD=FIELD.extract(1,(SPC-2))
+	quit
+
+
+ACCCHECK(String CID)	// Check if this is a valid profile account.
+
+	type public Number ERR
+	type public String ER,RM
+
+	// Account does not exist
+	type RecordGLAD glad=Db.getRecord("GLAD","ACN=:CID")
+	if 'glad.getMode() set ER=1 set ERR=1 set RM=$$^MSG(57)
+	
+	quit
+
+
+REC6	// Detail record
+
+	type public Number AMTEXP,CID,CROFF,DROFF,ERR,ETC,ITC,ITCO,%JD,OCID,ROUND,TAMT,TOTPMNTS,TOTROUND
+	type public String CRCD,ER,REC,TLO,TRANTYPE,TSO
+	type public Date BCHEFD,%EffectiveDate
+
+	// Increment total payments.
+	set TOTPMNTS=TOTPMNTS+1
+
+	set CRCD=REC.extract(17,19)
+	set CID=REC.extract(190,205)
+	do SHVSP1(.CID)
+
+	do ACCCHECK(.CID)
+
+	if ER.get()>0 set ERR=1 quit
+
+	type RecordCMSOPT cmsopt=Db.getRecord("CMSOPT",,1)
+	set DROFF=cmsopt.cidall
+
+	do SHVSP1(.DROFF)
+
+	set CROFF=DROFF
+
+	set OCID=DROFF
+	set TRANTYPE=REC.extract(30,35)
+	do SHVSP1(.TRANTYPE)
+
+	if TRANTYPE="DEBIT" do {
+		set ITC=0
+		set ITCO=1
+		set ETC="MDR"
+		}
+	else  do {
+		set ITC=1
+		set ITCO=0
+		set ETC="MCR"
+		}
+
+	set AMTEXP=REC.extract(99,99)
+
+	// set Net amount to pay rounded
+	set ROUND=REC.extract(145,159)
+	set ROUND=$$TRNAMT(ROUND,AMTEXP)
+
+	set TOTROUND=TOTROUND+ROUND
+	set TAMT=ROUND
+
+	/* Define BCHEFD in proper format
+	   This can be a date in the future, a date on which the transaction
+	   should impact the balance on the account.
+	   Payment date
+	*/
+	set BCHEFD=REC.extract(75,82)
+
+	set %JD=BCHEFD.toDate("YEARMMDD")
+
+	set BCHEFD=%JD
+	set %EffectiveDate=BCHEFD
+
+	/* The file may not actually contain a payment date.  If it doesn't then
+	 the effective date should be the system date.
+	*/
+	if %EffectiveDate=-1 do {
+		set %EffectiveDate=%SystemDate
+		set BCHEFD=%SystemDate
+		set ER=0
+		}
+
+	// Set terminal location
+	set TLO=$$TLO^UTLO
+
+	set TSO=""
+	do SETTSO(.TSO)
+
+	// Set transaction comment.
+	set CRCD=REC.extract(17,19)
+
+	// file TTX records
+	do TTXFILE
+
+	quit
+
+
+SETTSO(String TSO)	//
+
+	// build TSO, (a piece in TR array, with subpieces of its own.)
+
+	type String MCITY,MTDNME,x()
+	type public String REC
+
+	// Set TSO field "Merchant City"
+	set MCITY=REC.extract(36,48)
+	do SHVSP1(.MCITY)
+
+	set x("MCITY")=MCITY
+
+	// Set TSO field "Merchant Country"
+	set x("MCNTRY")=REC.extract(49,51)
+
+	// Set TSO field "Merchant Trade Name"
+	set MTDNME=REC.extract(11,35)
+	do SHVSP1(.MTDNME)
+
+	set x("MTDNME")=MTDNME
+
+	// Construct and return TSO.
+	do IN^UTSO(.x,.TSO)
+
+	quit
+
+
+REC9	// File control (trailer) record
+
+	type public String NUMBTR,REC
+	type public Number EOT
+
+	set NUMBTR=REC.extract(3,8)
+	set NUMBTR=$$SHVZRO1(NUMBTR)
+
+	set EOT=1
+	quit
+
+
+RECERR(Number ABORT)	// Record error
+
+	type public Number ERR,ERRIND
+	type public String ERRMSG
+
+	//ERRIND used in UBCHEND
+	set ABORT=ABORT.get()
+	set ERRIND=1
+
+	// Missing file header record
+	if ERR=11 set ERRMSG=$$^MSG(3038)
+
+	// Invalid file type
+	if ERR=15 set ERRMSG=$$^MSG(3039)
+
+	// Process error
+	if ABORT do ABORT^TPINERR quit
+
+	do ^TPINERR
+
+	if ABORT.get()=0 set ERR=""
+	quit
+
+
+public TCODE	// Custom tran code translation and checking
+
+	/*
+	   Following is custom at RS/2 and would have to be changed at
+	   other sites.
+	*/
+
+	type public String ETC,GRP,TCODE
+	type public Number CID
+	
+	type RecordACN acn=Db.getRecord("ACN","CID=:CID",1)
+
+	// needed below
+	set GRP=acn.grp
+
+	// Tran Code not predefined, check user table
+	type RecordUTBLEXTTRN1 exttrn1=Db.getRecord("UTBLEXTTRN1","INTRFACE='CMS',CODE=:TCODE",1)
+	if exttrn1.trtype="DEBIT" set ETC=exttrn1.dretc
+	if exttrn1.trtype="CREDIT" set ETC=exttrn1.cretc
+
+	quit
+
+
+%STOPLOD	// Stop %ZRTNLOD from this point on down
+	
+	quit
+
+
+BCHINIT	// Dummy line reference for GT.M
+
+	quit
+	
+	
+BCHEND	// Dummy line reference for GT.M
+
+	quit
+	
+	
+TTXFILE	// Dummy line reference for GT.M
+
+	quit
+	
+	
+
+vSIG()	quit "60254^34578^Renga SP^7407"	// Signature - LTD^TIME^USER^SIZE

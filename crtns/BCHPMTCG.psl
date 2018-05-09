@@ -1,0 +1,419 @@
+BCHPMTCG //Batch BCHLNPMTC - Change P+I Payment At PCHND
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 08/30/2007 15:08 - joynerd
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHLNPMTC Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit quit
+ do JOBMGR^BCHUTL(%FN,"BCHLNPMTC",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(CID) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHLNPMTC","*","",CID.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,CID)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHLNPMTC","*","",CID.get(),"",et)
+ }
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,CID) //
+	set BAL=""
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+	do PROCESS(.ln)
+
+	quit
+
+
+Public EXTERN(RecordLN ln,PCHND,CTL)	// Single Loan Reset
+	
+	new BAL,ERR,HIST
+
+	set CTL=$G(CTL)
+
+	set BAL=""
+	set SING=1
+	if '$D(EFD) set EFD=TJD
+	
+	do PROCESS(.ln)
+
+	if $D(ERR) do {
+		set ER=1
+		set N=""
+		for I=1:1 set N=$O(ERR(N)) quit:N=""  set RM(I)=ERR(N)
+		}
+	quit	
+
+PROCESS(RecordLN ln)	//process a account.
+
+	if ln.stat=4 quit
+	
+	/* 
+	The following code is used to prevent processing a account
+	twice.  Because this process updates ln.pchnd to a new date
+	during filing, we are able to prevent reprocessing by comparing
+	the next date on the account with the date passed in for processing
+	This line replaces use of the Restart logic on the control page
+	of this batch.
+	*/
+	   
+	if ln.pchnd'=PCHND set:'$E(CTL) ER=1,RM=$$^MSG(4115) quit
+
+	set LNPT=$G(PCBD(CID,"PCHND",EFD,CID))
+
+ 	if LNPT'="" set PINC=+$P(LNPT,"|",3) 
+
+	else  do {
+		if Db.isDefined("LNPTCHG","EFD,CID") do { quit
+			new lnptchg,x
+			type ResultSet lnptchg=Db.select("NPMT","LNPTCHG","PCHND=:EFD and CID=:CID")
+			set x=lnptchg.next()
+			set PINC=lnptchg.getCol(1)
+			}
+		set PINC=""
+		}
+	set PCHM=ln.pchm
+	// New Payment Amount Not Defined - Account Not Reset
+	if PCHM'=4,'PINC,'ln.stat set ERR(2)=$$^MSG(4202)
+	
+	set PMTPI=ln.pmtpi
+	set PCHND=ln.pchnd
+	set ANPTND=ln.anptnd
+	set ANPTO=ln.anpto
+	set ln.cntc=ln.cntc+1
+	set NUMCH=ln.numch
+	set PTS=""
+
+	new lncycpts
+	type RecordLNCYCPTS lncycpts
+
+	if Db.isDefined("LNCYCPTS","CID=:CID,TYP=""PTS""") do {
+		set lncycpts=Db.getRecord("LNCYCPTS","CID,""PTS""")
+		}
+
+	else  do {
+		set lncycpts=Class.new("RecordLNCYCPTS")
+		set lncycpts.cid=CID
+		set lncycpts.typ="PTS"
+		}
+	
+	if ln.stat do P2A1(.ln,.lncycpts) quit
+	if 'ln.ptsp do P1(.ln,.lncycpts) quit
+	
+	set PLAN=lncycpts.plan
+ 	if $D(PLAN),'$D(PTS(PLAN)) 
+ 	if '$D(PTS(PLAN)) do {
+
+		new aoamo
+		type RecordAOAMO aoamo
+		set aoamo=Db.getRecord("AOAMO","""PTS"",1,PLAN")
+		set PTS(PLAN)=aoamo.rypc  
+		}
+
+	if 'PTS(PLAN) do P1(.ln,.lncycpts) quit
+	
+	set NYLD=lncycpts.nyld
+
+	// Invalid Next Change Net Investment Yield
+	if 'NYLD set ET=$$^MSG(4200) do LOGERR do P1(.ln,.lncycpts) quit
+	
+	set RATE=$P(PTS,"|",8)
+	set lncycpts.rate=NYLD
+	set lncycpts.nyld=""
+	set histcmt=CID_",PTS[LNCYCPTS]RATE:"_RATE_":"_NYLD
+	set dtjcmt=CID_",PTS[LNCYCPTS]RATE:"_RATE_":"_NYLD
+	do HISTFILE(.ln,histcmt,dtjcmt)
+
+	set histcmt=CID_",PTS[LNCYCPTS]NYLD:"_NYLD_":"
+	set dtjcmt=CID_",PTS[LNCYCPTS]NYLD:"_NYLD_":"
+	do HISTFILE(.ln,histcmt,dtjcmt)
+	do P1(.ln,.lncycpts)
+	quit
+
+P1(RecordLN ln,RecordLNCYCPTS lncycpts)	// Update principal variance data 
+
+	if 'ln.pvar set PVO=0 do P2(.ln,.lncycpts) quit
+	
+	set PVAR=+ln.pvar
+	set PVO=ln.pvo
+	do P2(.ln,.lncycpts)
+	quit
+	
+P2(RecordLN ln,RecordLNCYCPTS lncycpts)	// Reset P+I amount and annual payment limits.
+
+  	set ln.pmtpi=PINC
+	do P2A1(.ln,.lncycpts)
+	quit
+
+P2A1(RecordLN ln,RecordLNCYCPTS lncycpts)	// Bump dates for GEM & IEM loans.
+
+	if PCHM=1!(PCHM=4) do P2A(.ln,.lncycpts) quit
+	if NUMCH'<ln.cntc do P2A(.ln,.lncycpts) quit
+	set ln.pcfre=""
+	set ln.anpto=""
+	set ln.pchnd=""
+	do P4(.ln,.lncycpts)
+	quit
+	
+P2A(RecordLN ln,RecordLNCYCPTS lncycpts)	// Bump dates for Pmt Change.
+
+	set FRE=ln.pcfre
+	set ln.pchld=PCHND
+	
+	// If there is no frequency (this is a one time change) then 
+	// null out PCHND.
+	if FRE="" set ln.pchnd="" do P3(.ln,.lncycpts) quit
+	
+	set JD=PCHND
+
+	// Invalid Next Payment Change Date
+	do ^UFRE I ER set ERR(4)=$$^MSG(4201) do P3(.ln,.lncycpts) quit
+	set ln.pchnd=NJD
+	if ln.stat do FILE(.ln,.lncycpts) quit
+	do P3(.ln,.lncycpts)
+	quit
+	
+
+P3(RecordLN ln,RecordLNCYCPTS lncycpts)	// Update annual limits.
+
+	set JD=ln.anptnd
+	if JD'=PCHND do P4(.ln,.lncycpts) quit
+	
+	
+	set ln.anptld=JD
+	set NJD=$$NJD^UFRE(JD,"1YA") 
+	// Invalid Annual Payment Limit Next Change Date
+	if ER set ERR(5)=$$^MSG(4199)
+	else  set ln.anptnd=NJD
+	
+	set ln.anpto=PINC
+	do P4(.ln,.lncycpts)
+	quit
+	
+
+P4(RecordLN ln,RecordLNCYCPTS lncycpts)	// Set up History Record for changes.
+
+	if $D(ERR) do ERR quit
+	
+	// If the principal variance option dictates, zero out variance.
+	if PVO'<2 do {
+		set ln.pvar=0
+	
+		set histcmt=CID_"[LN]PVAR:"_PVAR_":0"
+		set dtjcmt=CID_"[LN]PVAR:"_PVAR_":0"
+		do HISTFILE(.ln,histcmt,dtjcmt)
+		}
+	
+	
+	if PMTPI-PINC'=0 D {
+		set histcmt=CID_"[LN]PMTPI:"_PMTPI_":"_PINC
+		set dtjcmt=CID_"[LN]PMTPI:"_PMTPI_":"_PINC
+		do HISTFILE(.ln,histcmt,dtjcmt)
+		
+		set histcmt=CID_"[LNPTCHG]NPMT:"_PMTPI_":"_PINC
+		set dtjcmt=CID_"[LNPTCHG]NPMT:"_PMTPI_":"_PINC
+		do HISTFILE(.ln,histcmt,dtjcmt)
+		}
+
+	// Only update if annual payment limits have changed.
+	set X=ln.anptnd I X=ANPTND do FILE(.ln,.lncycpts) quit
+	set histcmt=CID_"[LN]ANPTND:"_ANPTND_":"_X
+	set dtjcmt=CID_"[LN]ANPTND:"_ANPTND_":"_X
+	do HISTFILE(.ln,histcmt,dtjcmt)
+	
+	set histcmt=CID_"[LN]ANPTO:"_ANPTO_":"_ln.anpto
+	set dtjcmt=CID_"[LN]ANPTO:"_ANPTO_":"_ln.anpto
+	do HISTFILE(.ln,histcmt,dtjcmt)
+	do FILE(.ln,.lncycpts)
+	quit
+	
+
+FILE(RecordLN ln,RecordLNCYCPTS lncycpts)	// File one account
+
+	I ln.pchnd!PCHND do {
+
+		set histcmt=CID_"[LN]PCHND:"_PCHND_":"_ln.pchnd
+		set dtjcmt=CID_"[LN]PCHND:"_PCHND_":"_ln.pchnd
+		do HISTFILE(.ln,histcmt,dtjcmt)
+		}
+
+
+	if $D(ERR) do ERR quit
+	
+ 	if '$E(CTL) do {
+		do ln.bypassSave()
+		if ln.ptsp,PTS'="" do lncycpts.bypassSave()
+
+		}
+
+ 	else  set DAYEND(CID,EFD,"PCHND",CID)=PMTPI
+
+	// If the loan is a GEM or IEM and it has reached its final pmt change,
+	// do not file future dayend entries.
+	if (PCHM=2!(PCHM=3)),ln.cntc=ln.numch quit
+
+	// File next Dayend entries based upon next date. 
+	set NJD=ln.pchnd if 'NJD quit
+	if PCHND'=EFD quit
+
+	if $E(CTL) set DAYEND(CID,NJD,"PCHND",CID)=""
+
+	quit
+
+ERR	if SING quit
+	set N="",ER=0
+	for  set N=$O(ERR(N)) quit:N=""  set ET=ERR(N) do LOGERR
+	kill ERR
+	quit
+
+HISTFILE(RecordLN ln,histcmt,dtjcmt)	//
+
+	type RecordHIST hist
+	set hist=Class.new("RecordHIST")
+	set hist.cid=CID
+	set hist.tseq=Db.nextVal("HIST","CID")
+	set hist.tjd=%SystemDate
+	set hist.tlo=%UserStation
+	set hist.cdt=%CurrentDate
+	set hist.time=%CurrentTime
+	set hist.uid=%UserID
+	set hist.tcmt=histcmt
+
+	type RecordDTJFM dtjfm
+	set dtjfm=Class.new("RecordDTJFM")
+	set dtjfm.tjd=%SystemDate
+	set dtjfm.cls=ln.cls
+	set dtjfm.grp=ln.grp
+	set dtjfm.typ=ln.type
+	set dtjfm.cid=CID
+	set dtjfm.tseq=hist.tseq
+	set dtjfm.tlo=%UserStation
+	set dtjfm.cdt=%CurrentDate
+	set dtjfm.time=%CurrentTime
+	set dtjfm.uid=%UserID
+	set dtjfm.cc=ln.cc
+	set dtjfm.tcmt=dtjcmt
+
+	do hist.bypassSave()
+	do dtjfm.bypassSave()
+
+	quit
+
+LOGERR	// Log error in exception file
+	// Variable Payment Loan Change Date Reset
+
+	do LOG^UTLEXC($T(+0),"*",$$^MSG(4203),$G(CID),$G(%ZTSEQ),$G(ET),+$G(BAL))
+	kill ET,%ZTSEQ
+	quit
+	
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,CID
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set CID=vRECORD.piece($C(9),1)
+ do vPROC(CID)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,CID
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>32767 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+13>32767 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("CID","LN","LN.PCHND=:TJD AND LN.PCFRE is not null")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	set EFD=%SystemDate
+	set %UserID="BATCH"
+	set (SING,CTL)=""
+	quit
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

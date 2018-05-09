@@ -1,0 +1,596 @@
+EFTGIROC // Outgoing GIRO Interface
+  /*
+	ORIG: kumarb - 01/10/2006
+	DESC: Outgoing GIRO Interface
+
+		
+	       This routine is the outgoing GIRO interface.  When executed,
+	       it extracts data from global ^EFTCUS building a text file for
+	       loading via the ING Hungary Custom Interface.
+	
+		Note:	Only the following message types are supported, all
+			of which are placed into ^EFTCUS by the incoming
+			GIRO interface (EFTGIRO2) based upon incoming
+			file name:
+	
+				404	094 Confirmation
+				294	094 Rejection
+				207	007 Rejection
+	
+	---- Revision History -------------------------------------------------
+
+	12/21/05 - KUMARB - CR 17423
+		Converted to PSL.
+
+	-----------------------------------------------------------------------
+
+	*/
+
+	/* Outgoing GIRO File (File Type: 002) has 3 record types:
+	
+		'01' - Heading Record		(1 record in each file)
+		'02' - Transaction record	(n records) (from ^EFTCUS)
+		'03' - Ending Record		(1 record in each file)
+	*/
+	
+	do START
+	
+	quit
+	
+START	// Start processing of outgoing GIRO messages
+	
+	type public Boolean ER
+	type public Number NEWFILE
+	
+	type Number RECCNT,TOTAMT
+	type String ARCHDIR,FILENAME,GMSG,GNO
+	
+	set (ER,NEWFILE,RECCNT,TOTAMT)=0
+	
+	// error trapping
+	catch vERROR {
+		
+		do ZTSTART
+		quit
+	        } 
+	
+	// initialize variables
+	do INIT
+	
+	if ER quit
+	
+	do HEADER
+	// loop through EFTCUS building outgoing GIRO file
+	do LOOP1 
+	do TRAILER
+	do END
+	
+	if NEWFILE do START quit
+	
+	quit
+	
+INIT // Initialize variables
+	
+	type public String ARCHDIR,FILENAME,GNO,GCHARSET,TMPFIL
+
+	// giro number - place on all CIDs
+	set GNO=CUVAR.iso
+	if GNO.length()'=4 set GNO=$$ZEROS(GNO,4)
+	
+	// archive directory
+	set ARCHDIR=CUVAR.eftarcdir
+	if ARCHDIR.isNull() do Runtime.setErrMSG("CUVAR",3086) quit
+	
+	// output directory 
+	set FILENAME=CUVAR.eftccout
+	if FILENAME.isNull() do Runtime.setErrMSG("CUVAR",3087) quit
+	set FILENAME=FILENAME_$$FNAME
+	
+	set TMPFIL=$$FILE^%ZOPEN(FILENAME,"WRITE/NEWV")
+	if 'TMPFIL do Runtime.setErrMSG("CUVAR",3090,FILENAME) quit
+	
+	if 'GCHARSET.exists() set GCHARSET=$$GCHARSET^EFTGIRO1
+	
+	quit
+	
+LOOP1 /* Loop through global ^EFTCUS at the date level, setting the date
+	 level to the last record processed on last execution, as this
+	 may be executed multiple times per day.
+	*/
+	
+	type public Number TSEQ
+	
+	type Date DATE,SJD
+	type Number LASTP,LASTF
+	
+	set (DATE,LASTP,LASTF)=""
+	
+	type ResultSet rs=Db.select("SJD,TSEQ","EFTCUS",,"SJD,TSEQ")
+	while rs.next() do {
+		set DATE=rs.getCol("SJD")
+		set TSEQ=rs.getCol("TSEQ")
+		// last seq processed
+		type RecordEFTCUS0 eftcus0=Db.getRecord("EFTCUS0","SJD=:DATE",1)
+		set LASTP=eftcus0.endseq
+		if LASTP.isNull() set LASTP=0
+		// last seq filed
+		type ResultSet rs1=Db.select("TSEQ","EFTCUS","SJD=:DATE","TSEQ DESC")
+		if rs1.next() set LASTF=rs1.getCol("TSEQ")
+		// no new recs to process
+		if LASTP=LASTF quit
+		do LOOP2(DATE,LASTP,.eftcus0)
+		}
+		
+	quit
+	
+LOOP2(Date DATE,Number TSEQ,RecordEFTCUS0 eftcus0) // Loop through EFTCUS at the sequence level
+
+	type public Number NEWFILE,QUIT,RECCNT
+	
+	type DbSet ds=Db.selectDbSet("EFTCUS","SJD=:DATE AND TSEQ>:TSEQ","TSEQ")
+	if ds.isEmpty() quit
+	while ds.next() do {
+		type RecordEFTCUS eftcus=ds.getRecord("EFTCUS")
+		// extract data
+		do EXTRACT(.eftcus)
+		// last seq processed
+		set eftcus0.endseq=TSEQ
+		do eftcus0.save()
+		if RECCNT>499 set (NEWFILE,QUIT)=1
+		}
+		
+	quit
+	
+EXTRACT(RecordEFTCUS eftcus) // EXTRACT data from EFTCUS global
+	
+	// EFTPAY specific fields
+	type public Number TSEQ
+	type public String ET,GMSG,ORIGMTYP
+	
+	type Number PSEQ
+	type String ACKMSG,EFTTYPE,FCID,RCID,REJECT,RINS,UTSO
+	
+	// pull out TSO field, as EFTPAY fields are stored there
+	do OUT^UTSO(.UTSO,eftcus.tso)
+	
+	// sending/Profile acct
+	set FCID=UTSO("FCID").get()
+	
+	// if the sending account is a G/L
+	if FCID["-" set FCID=FCID.piece("-",2)
+
+	if FCID.isNull() do ERR(TSEQ) quit
+	if PSEQ.isNull() set ET="Invalid sequence for account "_FCID.get() do ERR(TSEQ) quit
+	
+	type RecordEFTPAY fEFTPAY=Db.getRecord("EFTPAY","CID=:FCID,SEQ=:PSEQ",1)
+	if 'fEFTPAY.getMode() do { quit
+		set ET="No EFTPAY record for account "_FCID.get()_" sequence "_PSEQ.get()
+		do ERR(TSEQ)
+		}
+	
+	// payment sequence
+	set PSEQ=UTSO("SEQ").get()
+	set ORIGMTYP=UTSO("ORIGMTYP").get()
+	
+	set REJECT=UTSO("REJMSG").get() if 'REJECT.isNull() do BUILD(.fEFTPAY) quit
+	set ACKMSG=UTSO("ACKMSG").get() if 'ACKMSG.isNull() do BUILD(.fEFTPAY) quit
+	
+	// payment type
+	set EFTTYPE=UTSO("EFT").get()
+	if EFTTYPE.isNull() do ERR(TSEQ) quit
+	
+	if ORIGMTYP="094" set GMSG="404"
+	if (GMSG.get()).isNull() do ERR(TSEQ) quit
+	
+	do BUILD(.fEFTPAY)
+	
+	quit
+	
+BUILD(RecordEFTPAY fEFTPAY) // Build message
+
+	type public Boolean ER
+	type public Number PSEQ,RECCNT
+	type public String FCID,GMSG,RCID,REJECT,RINS,UTSO
+	
+	type String BANK,GIRO,REC
+	
+	// reject msg typ
+	if 'REJECT.isNull() set GMSG=REJECT.get()
+	
+	// build GIRO area
+	do GIROA(.fEFTPAY,GMSG) quit:ER
+	// build bank area
+	do BANKA(.fEFTPAY,GMSG) quit:ER
+	
+	// combine sections
+	set REC=GIRO_BANK
+	// write record to output
+	do WRREC(REC)
+	
+	set RECCNT=RECCNT+1
+	
+	kill FCID,PSEQ,RINS,RCID,REJECT,UTSO
+	
+	quit
+	
+GIROA(RecordEFTPAY PREC,String MSG) // GIRO AREA - Build the GIRO area of the message
+
+	/*
+	 The structure of the GIRO area is identical with that of the
+	 001, per page 59 of the MPO Message Standards book.
+	*/
+	
+	type public Date DATE
+	type public Number TAMT,TOTAMT,TSEQ
+	type public String FCID,GIRO,RCID,RINS,UTSO()
+	
+	type Date G9,G51
+	type Number PREC1,PREC2
+	type String G1,G2,G3,G4,G41,G42,G43,G5,G52,G53,G6,G61,G62,G63
+	type String G7,G8,G81,G82,G10,G11,G12,G121,G122,G13,G14
+	
+	if 'PREC.getMode() do {
+		set PREC1=UTSO("FCID").get()
+		set PREC2=UTSO("SEQ").get()
+		if (PREC1.isNull())!(PREC2.isNull()) quit
+		set PREC=Db.getRecord("EFTPAY","CID=:PREC1,SEQ=:PREC2",1)
+		}
+	
+	// 1-2 item code "02"
+	set G1="02"
+	// 3-5 transaction code
+	set G2=MSG
+	
+	// 6-7 transaction sub-code
+	set G3=PREC.subcode
+	// default "00"
+	if G3.isNull() set G3="00"
+	
+	if (G2=294),('(UTSO("G4").get()).isNull()) do GIRO294 quit
+	
+	// 8-8 qualifier / Hungarian = 1
+	set G41=1
+	
+	// 9-14 bank code
+	set G42=CUVAR.iso
+	if G42.length()'=6 set G42=$$SPACE(G42,6)
+	
+	// 15-19 branch code
+	set G43=FCID.extract(1,4)
+	if G43.length()'=5 set G43=$$ZEROS(G43,5)
+	
+	// 8-19	originator bank reference
+	set G4=G41_G42_G43
+	
+	set G51=DATE
+	
+	// 20-27 entry date
+	set G51=G51.toString("YEARMMDD")
+	
+	// 28-34 sequence number (EFTCUS.TSEQ)
+	set G52=$$ZEROS(TSEQ,7)
+	
+	// 35-36 folio number
+	set G53="00"
+	// 20-36 transaction number
+	set G5=G51_G52_G53
+	
+	// recipient inst
+	set RINS=UTSO("RINS").get() if RINS.isNull() do ERR(TSEQ) quit
+	// recipient acct
+	set RCID=UTSO("RCID").get() if RCID.isNull() do ERR(TSEQ) quit
+	
+	// 37-37 qualifier - Hungarian bank
+	set G61=1
+	// 38-43 bank code
+	set G62=RINS.extract(1,3)
+	if G62.length()'=6 set G62=$$SPACE(G62,6)
+	// 44-48 branch code
+	set G63=RINS.extract(4,8)
+	// 37-48 beneficiary bank reference
+	set G6=G61_G62_G63
+	
+	// payment amount
+	set TAMT=PREC.amount
+	if (G2'="092"),(G2'=292),(G2'=294) set TOTAMT=TOTAMT+TAMT
+	// 49-66 settlement amount
+	set G7=$$ZEROS(TAMT,16)_"00"
+	
+	// 67-69 iso code
+	set G81=PREC.crcd
+	if G81.isNull() set G81=CUVAR.%crcd
+	
+	// 70-70 decimal
+	set G82=$$curdec^CRCDUTL(G81)
+	// 67-70 currency code
+	set G8=G81_G82
+	
+	set G9=PREC.efd
+	// 71-78 settlement date
+	set G9=G9.toString("YEARMMDD")
+	
+	// 79-79 priority code
+	set G10=PREC.pri
+	// default low priority "0"
+	if G10.isNull() set G10=0
+	
+	// 80-80 emergency code
+	set G11=0
+	// 81-81 fee code
+	set G121=" "
+	// 82-83 reference fee table
+	set G122="  "
+	// 81-83 charges
+	set G12=G121_G122
+	// 84-93 reserved for giro further use
+	set G13="          "
+	// 94-95 error code
+	set G14="00"
+	
+	set GIRO=G1_G2_G3_G4_G5_G6_G7_G8_G9_G10_G11_G12_G13_G14
+	
+	quit
+	
+GIRO294 // Immediate rejection 094
+	
+	// identical sections.
+	do GIRO294^EFTGIRO1
+	
+	quit
+	
+BANKA(RecordEFTPAY PREC,String GMSG) // BANK AREA - Build the BANK area of the message
+	/*
+	 This area contains all of the information which is not necessary
+	 for the GIRO system but is necessary for the dialogue between banks,
+	 branches and customers.  This area is a fixed 260 characters in size.
+	*/
+	
+	type String cod
+	
+	// do the appropriate bank area depending upon the message type.
+	//do @GMSG(.PREC)
+	
+	set cod=@GMSG_"^EFTGIROC(.PREC)"
+	#ACCEPT Date=02/02/06; PGM=BALA
+	xecute cod
+	
+	quit
+	
+404(RecordEFTPAY PREC) // 094 Response
+	
+	do 404^EFTGIRO1(.PREC)
+	
+	quit
+	
+207(RecordEFTPAY PREC) // Message Type (207) Rejection 
+	
+	quit
+	
+294(RecordEFTPAY PREC) // Message Type (294) Rejection
+
+	type public String BANK,UTSO()
+	
+	// Message Type (2xx) where xx represents the original message
+
+	// reject message in TSO
+	set BANK=UTSO("REJREC").get()
+	if BANK.isNull() quit
+	if BANK.length()'=260 set BANK=$$SPACE(BANK,260)
+	
+	quit
+	
+WRREC(String REC) // Write record to output file
+
+	type public String FILENAME,GCHARSET
+
+	set REC=REC.translate(GCHARSET,$J(" ",GCHARSET.length()))
+	
+	use FILENAME write !,REC
+	
+	quit
+	
+ZEROS(String VAL,Number N) // Pad on left with zeroes
+	
+	type public String X
+	
+	type Number I
+	
+	if VAL.length()>N quit VAL.extract(1,N)
+	
+	for I=1:1:N set X=X.get()_0
+	
+	quit X.extract(1,N-VAL.length())_VAL
+	
+SPACE(String VAL,Number N) // Pad on right with spaces
+	
+	if VAL.length()>N quit VAL.extract(1,N)	
+	
+	quit VAL_$J(" ",N).extract(1,N-VAL.length())
+	
+ERR(String S) // ERROR - Internal error section
+
+	type public Boolean ER
+	type public String ET
+	
+	set ER=1
+	if S.get() set S=S_"-"
+	set ET=S.get()_ET.get()
+	
+	do EXC
+	
+	quit
+	
+ZTSTART // Error trap
+	
+	do ZE^UTLERR
+	
+	do EXC
+	
+	quit
+	
+EXC	// Log error into DAYEND
+
+	type public Number %ZTSEQ
+	type public String ET,FCID
+	
+	type String DESC
+	
+	set DESC="Outgoing GIRO Interface - Custom"
+	
+	do LOG^UTLEXC($T(+0),"*",DESC,FCID.get(),%ZTSEQ.get(),ET.get())
+	kill ET,%ZTSEQ
+	
+	quit
+	
+END	// END execution - close outfile, archive it, and quit.
+
+	type public Number RECCNT
+	type public String FILENAME
+	
+	if +RECCNT=0 do { quit
+		type RecordEFTCUS0 eftcus0=Db.getRecord("EFTCUS0","SJD=:%SystemDate",1)
+		set eftcus0.endseq=eftcus0.endseq-1
+		do eftcus0.save()
+		close FILENAME:DELETE
+		}
+		
+	close FILENAME
+	
+	// copy file to archive directory then finish
+	do ARCH
+	
+	quit
+	
+ARCH // Copies the file to the archive directory specified in CUVAR
+
+	type public String ARCHDIR,FILENAME
+
+	type String STRFL,X
+	
+	set STRFL=ARCHDIR
+	set X=$$COPYFIL^%OSSCRPT(FILENAME,STRFL) 
+	
+	quit
+	
+HEADER // Build header for output file
+	
+	type public String FILENAME,BRCDV
+
+	type Number GSP,HSEQ,X
+	type String GNO,HEAD
+
+	// Interbanking sending remittance heading (pg. 52)	
+	type RecordEFTCUS0 eftcus0=Db.getRecord("EFTCUS0","SJD=:%SystemDate",1)
+	set HSEQ=eftcus0.endseq
+	if HSEQ.isNull() set HSEQ=1
+	
+	// header sequence
+	if HSEQ.toString().length()'=4 set HSEQ=$$ZEROS(HSEQ,4)
+	
+	// 2 - header record "01"
+	set HEAD="01"
+	// 3 - file type "002"
+	set HEAD=HEAD_"002"
+	
+	// 1 - qualifier/Hungarian
+	set HEAD=HEAD_"1"
+	
+	set GNO=CUVAR.iso
+	if GNO.length()<6 do {
+		set GSP=6-GNO.length()
+		for X=1:1:GSP set GNO=GNO_" "
+		}
+	
+	// 6 - bank's GIRO number
+	set HEAD=HEAD_GNO
+	
+	// 5 - branch code + check digit
+	set BRCDV="00011"
+	set HEAD=HEAD_BRCDV
+	
+	// 8 - today's system date
+	set HEAD=HEAD_%SystemDate.toString("YEARMMDD")
+	// 4 - header sequence
+	set HEAD=HEAD_HSEQ
+	
+	// 1 - priority
+	set HEAD=HEAD_"0"
+	// 1 - emergency
+	set HEAD=HEAD_"0"
+	// 1 - qualifier
+	set HEAD=HEAD_"1"
+	
+	// 8 - today's system date
+	set HEAD=HEAD_%SystemDate.toString("YEARMMDD")
+	
+	// 3 - banks' base currency
+	set HEAD=HEAD_CUVAR.%crcd
+	// 1 - credit/debit code
+	set HEAD=HEAD_"C"
+	// 1 - inter/intra code
+	set HEAD=HEAD_"0"
+	
+	for X=1:1:18 set HEAD=HEAD_" "
+	use FILENAME write HEAD
+	
+	quit
+	
+TRAILER // Build trailer for output file
+
+	type public Number RECCNT,TOTAMT
+	type public String FILENAME
+	
+	type Number X
+	type String TRAIL
+	
+	// Interbanking sending remittance ending (pg. 57)
+
+	// item code
+	set TRAIL="03"
+	
+	if RECCNT.toString().length()'=4 set RECCNT=$$ZEROS(RECCNT,4)
+	// number of transactions
+	set TRAIL=TRAIL_RECCNT
+	
+	if TOTAMT.toString().length()'=20 set TOTAMT=$$ZEROS(TOTAMT,20)
+	// total amount
+	set TRAIL=TRAIL_TOTAMT
+	
+	// reserved future
+	for X=1:1:4 set TRAIL=TRAIL_" "
+	use FILENAME write !,TRAIL
+	
+	quit
+	
+FNAME() // Generate output file name - CYMMDD99.002
+
+	type Date DT
+	type Number GSEQ
+	type String NAME 
+	
+	set DT=%SystemDate
+	set DT=DT.toString("YEARMMDD") 
+	set DT=DT.toString().extract(4,8)
+	
+	type RecordEFTCUS0 eftcus0=Db.getRecord("EFTCUS0","SJD=:%SystemDate",1)
+	set GSEQ=eftcus0.endseq
+	if GSEQ.isNull() set GSEQ=1 
+	set eftcus0.endseq=GSEQ+1
+	do eftcus0.save()
+	
+	set GSEQ=$$ZEROS(GSEQ,2) 
+	set NAME="C"_DT_GSEQ_".002"
+	
+	quit NAME
+	
+GCHARSET() // Define the characters that can not be used for the GIRO
+	
+	type Number I
+	type String X
+
+	set X=""	
+	for I=1:1:9,11,12,14:1:31,127:1:192,194:1:200,202,203,204,206:1:210,212,215,216,217,221:1:224,226:1:232,234,235,236,238:1:242,244,247,248,249,253:1:256 set X=X_$C(I)
+	
+	quit X
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60299^31994^Balasubramonian Sankar^12343"	// Signature - LTD^TIME^USER^SIZE

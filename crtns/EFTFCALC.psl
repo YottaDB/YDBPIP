@@ -1,0 +1,296 @@
+public EFTFCALC(RecordEFTPAY eftpay,FEEAMT,FEECRCD,CNVAMT,CNVCRCD,AAMT,ARTE,AFEE,ACNF,AHLD,ARVR)
+
+	/*
+	 ORIG: RICKARDSC - 01/08/2002
+	 DESC: Foreign Payment Amount Calculation
+	       This procedure calculates fees and anticipated amounts
+	       associated with incoming and outgoing foreign payments.
+
+	 ARGUMENTS:
+		eftpay		Foreign payment object
+
+	 RETURNS:
+		FEEAMT		Fee amount (account curr. or base curr.)
+		FEECRCD		Fee currency
+		CNVAMT		Conversion fee amount (account currency)
+		CNVCRCD		Conversion currency
+		AAMT		Anticipated total payment amount (account currency)
+		ARTE		Anticipated exchange rate (payment --> account)
+		AFEE		Anticipated fee amount (account currency)
+		ACNF		Anticipated conversion fee amount (account curr.)
+		AHLD		Anticipated hold amount (account currency)
+		ARVR		Anticipated receiver charge amount (account currency)
+
+	 INPUTS:
+		eftpay.cid	Account number
+		eftpay.feetype	Fee calculation method
+		eftpay.amount	Payment amount
+		eftpay.crcd	Payment currency
+		eftpay.feeconv	Conversion fee flag (logical)
+		eftpay.ccode	Customer code
+		eftpay.antrate	User defined rate
+		eftpay.rcvrchg	Receiver charge
+		eftpay.rcvrchgc	Receiver charge currency
+		eftpay.efttype	Payment type
+		eftpay.ttype	Transaction type
+		eftpay.feepayor Fee paid by
+
+	 ---- Comments --------------------------------------------------------
+
+	 Return value AAMT is the sum of the payment amount and the receiver
+	 charges for outgoing foreign payments. This is because the payment 
+	 amount of incoming foreign payments include the receiver charges.
+
+	 ---- Revision History ------------------------------------------------
+
+	 09/08/05 - KELLYP - CR 17050
+	 	Modified AMOUNT section to define eftpay.crcdcid if it's not
+	 	already defined.  This data item is normally set up by the 
+	 	EFTPAY BEFORE_INSERT trigger, however, it's not defined when
+	 	coming through here for the account balance calculations for
+	 	MRPC041.  Also remove pre-2003 revision history.
+
+	 09/18/03 - CARROLLJ - 51630
+		Removed from array and XAMOUNT section.
+
+	 ----------------------------------------------------------------------
+	*/
+
+	new AMTCID,CID,EFTTYPE,HLDPER
+
+	set (ARTE,CNVAMT,CNVCRCD,FEEAMT,FEECRCD)=""
+	set (AAMT,ACNF,AFEE,AHLD,ARVR)=0
+
+	set CID=eftpay.cid
+
+	// Calculate the account amount
+	do AMOUNT(.eftpay,.AMTCID,.AAMT,.ARTE,.ARVR)
+	if ER quit
+
+	// Calculate the anticipated hold amount for GL outgoing payments
+	set EFTTYPE=eftpay.efttype
+	set HLDPER=Db.getOneRow("PERCENT","CTBLEFTTYPE","EFTTYPE")
+	set HLDPER=$S(HLDPER="":1,1:HLDPER/100)
+	if eftpay.efttype="NDPO" set AHLD=$$^SCARND((AAMT*HLDPER),0,CID)
+
+	// Calculate fee amounts and the fee currency
+	do FEE(.eftpay,.FEEAMT,.FEECRCD,.AFEE)
+	if ER quit
+
+	// Compute 1 percent conversion fee
+	if eftpay.feeconv do {
+		set CNVAMT=AMTCID*.01
+		set CNVCRCD=eftpay.crcdcid
+		set ACNF=$$^SCARND(CNVAMT,0,CID)
+	}
+
+	quit
+
+
+public FEE(RecordEFTPAY eftpay,FEEAMT,FEECRCD,AFEE)
+
+	/*
+	 Calculate fee amounts and fee currency. A fee will not be assessed
+	 if the payment is an incoming payment and the transaction charges
+	 are to be borne by the ordering customer (eftpay.feepayor="OUR").
+
+	 ARGUMENTS:
+		eftpay		Foreign payment object
+
+	 RETURNS:
+		FEEAMT		Fee amount (account curr. or base curr.)
+		FEECRCD		Fee currency
+		AFEE		Anticipated fee amount (account currency)
+
+	 INPUTS:
+		eftpay.cid	Account number
+		eftpay.feetype	Fee calculation method
+		eftpay.amount	Payment amount
+		eftpay.crcd	Payment currency
+		eftpay.ccode	Customer code
+		eftpay.efttype	Payment type
+		eftpay.ttype	Transaction type
+		eftpay.feepayor	Fee paid by
+	*/
+
+	new data,AMTBSE,AMTFIX,AMTMAX,AMTMIN,CID,EXCAMT,FEECYOPT,FEETYPE
+	new MAXRATE,MINOPT,MINRATE,MULTIPLY,PERCENT,RATE,TRESREF,VARIANCE
+
+	set (FEEAMT,FEECRCD)=""
+	set AFEE=0
+
+	set CID=eftpay.cid
+
+	// Check if transaction charges are to be borne by orderer
+	if eftpay.feetype="" quit
+	if (eftpay.efttype="NDPOIN"),(eftpay.feepayor="OUR") quit
+
+	// Retrieve EFT fee plan information
+	set FEETYPE=eftpay.feetype
+	set data=Db.getOneRow("FEECYOPT,AMTFIX,PERCENT,AMTMIN,MINOPT,AMTMAX","EFTFEE","FEETYPE")
+	set FEECYOPT=$P(data,$C(9),1)	// 0-System currency, 1-Account currency
+	set AMTFIX=$P(data,$C(9),2)
+	set PERCENT=$P(data,$C(9),3)
+	set AMTMIN=$P(data,$C(9),4)
+	set MINOPT=$P(data,$C(9),5)
+	set AMTMAX=$P(data,$C(9),6)
+	set PERCENT=PERCENT/100
+
+	// Convert payment amount to base curr. (no margins, non-cash, mid-rate)
+	if eftpay.crcd'=%SystemCurrency do {
+		do EXC^CRCDUTL(eftpay.crcd,%SystemCurrency,eftpay.amount,1,2,"00",eftpay.ccode,"",1)
+		if ER quit
+		set AMTBSE=EXCAMT
+	}
+	else  set AMTBSE=eftpay.amount
+	if ER quit
+
+	// Use the fixed fee amount if defined, otherwise use the percentage
+	set FEEAMT=$S(AMTFIX'="":AMTFIX,1:AMTBSE*PERCENT)
+
+	// Apply the MIN and MAX conditions
+	if (AMTMIN'=""),(FEEAMT<AMTMIN) set FEEAMT=$S(MINOPT:0,1:AMTMIN)
+	if (AMTMAX'=""),(FEEAMT>AMTMAX) set FEEAMT=AMTMAX
+
+	// Determine the fee currency
+	set FEECRCD=$S(FEECYOPT:eftpay.crcdcid,1:%SystemCurrency)
+
+	// Convert fee amount to acct currency (no margins, non-cash, mid-rate)
+	if eftpay.crcdcid'=%SystemCurrency do {
+		do EXC^CRCDUTL(%SystemCurrency,eftpay.crcdcid,FEEAMT,1,2,"00",eftpay.ccode,"",1)
+		if ER quit
+		set AFEE=EXCAMT
+	}
+	else  set AFEE=FEEAMT
+	if ER quit
+
+	// Convert fee amount to fee currency (no margins, non-cash, mid-rate)
+	if FEECRCD'=%SystemCurrency do {
+		do EXC^CRCDUTL(%SystemCurrency,FEECRCD,FEEAMT,1,2,"00",eftpay.ccode,"",1)
+		if ER quit
+		set FEEAMT=EXCAMT
+	}
+	if ER quit
+
+	set AFEE=$$^SCARND(AFEE,0,CID)
+
+	quit
+
+
+public AMOUNT(RecordEFTPAY eftpay,AMTCID,AAMT,ARTE,ARVR)
+	/*
+	 Calculate the anticipated amount and anticipated exchange rate
+
+	 ARGUMENTS:
+		eftpay		Foreign payment object
+
+	 RETURNS:
+		AMTCID		Account total amount (account currency)
+		AAMT		Anticipated total account amount (account currency)
+		ARTE		Anticipated exchange rate
+		ARVR		Anticipated receiver charge amount (account currency)
+
+	 INPUTS
+		eftpay.cid	Account number
+		eftpay.amount	Payment amount
+		eftpay.crcd	Payment currency
+		eftpay.ccode	Customer code
+		eftpay.antrate	User defined rate
+		eftpay.efttype	Payment type
+		eftpay.rcvrchg	Receiver charge
+		eftpay.rcvrchgc	Receiver charge currency
+		eftpay.ttype	Transaction type
+	*/
+
+	new data,BUY,CID,EXCAMT,GLACN,MAXRATE,MINRATE,MULTIPLY
+	new RATE,RCVRCHG,TRESREF,UDRC,VARIANCE
+
+	set (AMTCID,ARTE)=""
+	set (AAMT,ARVR)=0
+
+	// Retrieve user defined rate code
+	set UDRC=CUVAR.udrc
+
+	// Determine buy/sell indicator (0-sell,1-buy)
+	set BUY=$S(eftpay.efttype="NDPO":1,1:0)
+
+	set CID=eftpay.cid
+
+	/* 
+	 When coming through MRPC041 for the account balance calculations,
+	 eftpay.crcdcid is not defined because it was changed from a computed
+	 to a calculated data item and the code that sets it up (EFTPAY-
+	 BEFORE_INSERT.TRIG) hasn't been called yet.
+	*/
+		
+	if eftpay.crcdcid.isNull() set eftpay.crcdcid=$$CRCDCID^EFTFUNCS(eftpay.cid,eftpay.ttype,eftpay.crcd)
+
+	// Calculate the exchange rate
+	if eftpay.crcd'=eftpay.crcdcid do {
+		if (eftpay.ccode=UDRC),(eftpay.antrate'="") set AMTCID=eftpay.amount*eftpay.antrate,ARTE=eftpay.antrate quit
+		do EXC^CRCDUTL(eftpay.crcd,eftpay.crcdcid,eftpay.amount,1,BUY,"00",eftpay.ccode,"",1)
+		if ER quit
+		set AMTCID=EXCAMT
+		if eftpay.amount=0 set ARTE=RATE quit
+		set ARTE=EXCAMT/eftpay.amount
+	}
+	else  set AMTCID=eftpay.amount,ARTE=1
+	if ER quit
+
+	set AAMT=$$^SCARND(AMTCID,0,CID)
+	set ARTE=$$^SCARND(ARTE,0,"","",6)
+	
+	// Convert the receiver charge amount to the acct curr. (margins, non-cash, mid-rate)
+	set RCVRCHG=eftpay.rcvrchg
+	if (RCVRCHG>0),(eftpay.rcvrchgc'=eftpay.crcdcid) do {
+		if (eftpay.ccode=UDRC),(eftpay.antrate'=""),(eftpay.rcvrchgc=eftpay.crcd) set RCVRCHG=RCVRCHG*eftpay.antrate quit
+		do EXC^CRCDUTL(eftpay.rcvrchgc,eftpay.crcdcid,RCVRCHG,1,BUY,"00",eftpay.ccode,"",1)
+		if ER quit
+		set RCVRCHG=EXCAMT
+	}
+	if ER quit
+
+	set ARVR=$$^SCARND(RCVRCHG,0,CID)
+
+	// Include receiver charges in total payment amount for outgoing payments
+	if eftpay.efttype="NDPO" set AMTCID=AMTCID+RCVRCHG,AAMT=AAMT+ARVR
+
+	quit
+
+
+public XEFTFCALC(RecordEFTPAY eftpay,FEEAMT,FEECRCD,CNVAMT,CNVCRCD,AAMT,ARTE,AFEE,ACNF,AHLD,ARVR)
+
+	/*
+	 XEFTFCALC calculates fees and anticipated amounts associated with
+	 incoming and outgoing foreign payments. XEFTFCALC takes the payment
+	 short name array and builds an eftpay object. The eftpay object is
+	 then passed to EFTFCALC to calculate the fees and amounts.
+
+	 XEFTFCALC should only be used by non-PSL routines (i.e., Data-Qwik
+	 screens). All PSL code should call directly into EFTFCALC for
+	 processing.
+
+	 RETURNS:
+		FEEAMT		Fee amount (account curr. or base curr.)
+		FEECRCD		Fee currency
+		CNVAMT		Conversion fee amount (account currency)
+		CNVCRCD		Conversion currency
+		AAMT		Anticipated total payment amount (account currency)
+		ARTE		Anticipated exchange rate (payment --> account)
+		AFEE		Anticipated fee amount (account currency)
+		ACNF		Anticipated conversion fee amount (account curr.)
+		AHLD		Anticipated hold amount (account currency)
+		ARVR		Anticipated receiver charge amount (account currency)
+
+	 INPUTS:
+		CID		Account number
+		SEQ		Payment sequence
+		fEFTPAY		Payment short name array
+
+	*/
+
+	do ^EFTFCALC(.eftpay,.FEEAMT,.FEECRCD,.CNVAMT,.CNVCRCD,.AAMT,.ARTE,.AFEE,.ACNF,.AHLD,.ARVR)
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60151^41951^Pat Kelly^8829"	// Signature - LTD^TIME^USER^SIZE

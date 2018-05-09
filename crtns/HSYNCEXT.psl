@@ -1,0 +1,214 @@
+HSYNCEXT		
+	/*
+	SCA - FEP - V4.1 - DDP Network Routine and Global Transfers
+	
+	Client HOST sync Processing - Software Transfers
+
+	This utility will set up for transfer to clients data received from a 
+	RMS header file. Typically this call is used from the loading software
+	used for Sanchez releases.
+
+	---- Revision History ------------------------------------------------
+	09/16/04 - RussellDS - CR8102
+		   Modified call to ^DBSTBLM from LOADFILE to LOOKUP.
+		   
+		   Cleaned up scope errors (did not attempt to properly
+		   type (Number vs. String) all variables.
+		   
+		   Removed old revision history.
+		   
+	12/08/03 - Spier 7403
+		   psl warning message cleanup
+	*/
+
+	quit
+
+	
+EXIMP(IO,DIR)	// Public; External call for DDP loading from an RMS Header file
+
+	/*
+	 This function will enable external calls into the
+	 transfer utility to set up data transfers to all FEPs
+	 currently in the configuration.
+
+	 ARGUMENTS:
+	  IO		Import Header File			/TYP=T/REQ/MECH=VAL
+	  DIR		Directory name				/TYP=T/REQ/MECH=VAL
+
+	 RETURNS:
+
+	  $$		Error status (0/1)
+	
+	 EXAMPLE:
+	
+	 	S ER=$$%EXIMP^DDPXFR(IO,DIR)
+	*/
+	
+	type Public Number ER
+	type Public String FEP
+	
+	type Number I
+	type String CLIENT,CTBL,CTBL1,DATE,DDPDIR,ER,FID1,FLG,HOSTDIR,MISC,NATIVE,NOINT
+	type String PFID,%QN,STBL,STBL1,TIME,TRAN1,TWLOAD,TYPE,TYP,UTBL,UTBL1
+
+	catch vERROR {
+		type String ET,RM
+		set ET=vERROR.type
+		do ZE^UTLERR
+		}
+	
+	set ER=0
+	set TWLOAD=1 
+	set NOINT=1
+	set HOSTDIR=$$DIR^DDPUTL
+	if HOSTDIR="" quit 1
+	
+	if $G(%SystemDate)="" new %SystemDate do {
+		type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+		#accept pgm=spier;date=12/9/03
+		set %SystemDate=cuvar.tjd
+		}
+	//get the DDP sub-directory
+	set DDPDIR=$$DDPDIR^DDPUTL(HOSTDIR)    
+	for I=2,10,14,15,16,18 set FLG(I)=0
+
+	//read the import file
+	do IMPORT if ER quit 1
+	                 
+	set DATE=%CurrentDate 
+	set TIME=%CurrentTime
+
+	// load in all FEPs
+	do FEPALL^DDPXFR if ER quit 1
+
+	// do not continue if no feps exist
+	if '$D(FEP) quit 0                     
+
+	//Formatted output
+	do DDPXFR1
+	quit 0
+
+
+	
+IMPORT	//Private; convert export file into arrays of tables to transfer to client
+
+	/*
+	This label breaks apart a file which is in a semi import/export format. The file is built
+	by the Trackware loading software in order to provide a means to transport released data and
+	schema to a PFW client automatically.  This label builds arrays to reflect the data that must
+	be transferred.  It basically emulates the arrays that are built by the routines executing 
+	when the function DDPXFR is executed.
+	
+	*/
+
+	type Public Number ER = 0
+	type Public String CTBL1,DIR,FLG(),FID1,IO,STBL1,TRAN1(),UTBL1
+
+	type String ARRAY,ELMNT,EOT,ETYP,LIBS,%LIBS,REC,TYPE,vtblutbl,X
+	
+	set %LIBS="SYSDEV"
+	do LOOKUP^DBSTBLM("STBL", .vtblutbl)
+	do LOOKUP^DBSTBLM("CTBL", .vtblutbl)
+		
+	/*
+	Open import file.
+	*/
+	
+	type IO io=Class.new("IO")
+	set io.fileName=IO
+	set io.openParams="READ"
+	set io.directory=DIR
+	set io.timeout=2
+	do OPENFILE(.io)
+	
+	// Unable to open import file ~p1
+	if ER quit
+
+	// ignore first record
+	set REC=io.read(.EOT)
+	
+	for  set REC=io.read(.EOT) quit:EOT'=0!(REC="<EOH>")  do {
+		set TYPE=$P(REC,"|",1) quit:TYPE="" 
+		set ELMNT=$P(REC,"|",2) quit:ELMNT="" 
+		set ARRAY(TYPE,ELMNT)="SYSDEV"
+		if TYPE="FILE" do {
+			do SETENTRY^DDPXFR1(ELMNT,.FID1)
+			set FLG(2)=1 	
+			}
+
+		if TYPE="TRNCODE" set TRAN1(ELMNT)="" set FLG(10)=1
+		if TYPE="UTBL" do {
+			do SETENTRY^DDPXFR1(ELMNT,.UTBL1)
+			set FLG(14)=1
+			}
+		if TYPE="STBL" do {
+			new FILE
+			if '$D(vtblutbl(ELMNT)) quit 
+			set FILE=$P(vtblutbl(ELMNT),"|",2)
+			do SETENTRY^DDPXFR1(FILE,.STBL1)
+			set FLG(15)=1
+			}
+		if TYPE="CTBL" do {
+			new FILE
+			if '$D(vtblutbl(ELMNT)) quit 
+			set FILE=$P(vtblutbl(ELMNT),"|",2)
+			do SETENTRY^DDPXFR1(FILE,.CTBL1)
+			set FLG(16)=1
+			}
+		}
+	do io.close()
+
+	quit
+	
+	
+OPENFILE(IO io)	// Open a file 
+
+	/*
+	  This label exists in order to control the effects of a bad file being passed
+	  which could not be opened.  The catch block provides enough control so an error
+	  can be reported back to the calling label.
+	*/
+	
+	type Public Number ER
+	type Public String RM
+	
+	catch vERROR {
+               
+		set ER=1 
+		set RM=$$^MSG(2800,io.fileName)
+                }
+
+	do io.open()
+	
+	quit	
+
+
+DDPXFR1	//Private;formatted file outout
+
+	/*
+	The data has been selected by the user and stored in arrays specific to the type
+	of data  being sent to the client. RESETTAB makes adjustments to the arrays to
+	avoid duplication that could occur due to foreign keys.
+	
+	This label is then a wrapper to get a sequence number, build the file and update
+	the tables DDPTQUE1 and DDPTQUE with the information so a client can retrieve the file.  
+	
+	*/
+
+	type Public Number %QN
+	type Public String CTBL1,FID1,FLG(),UTBL1,STBL1
+
+	if $D(FID1) do RESETTAB^DDPXFR1(.FID1)
+	if $D(UTBL1) do RESETTAB^DDPXFR1(.UTBL1)
+	if $D(STBL1) do RESETTAB^DDPXFR1(.STBL1)
+	if $D(CTBL1) do RESETTAB^DDPXFR1(.CTBL1)
+	
+	if FLG(2)!(FLG(10))!(FLG(14))!(FLG(15))!(FLG(16)) do {
+		set %QN=$$GETQUE^DDPXFR1                     
+		do BUILD^HSYNCFBD
+		do FILE^DDPXFR1
+		}
+	quit 
+	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "59886^43519^Sanchez SCM Administrator^4864"	// Signature - LTD^TIME^USER^SIZE

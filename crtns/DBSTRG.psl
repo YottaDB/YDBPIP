@@ -1,0 +1,1368 @@
+private DBSTRG	/* Build run-time trigger routine
+	Copyright(c)2003 Sanchez Computer Associates, Inc.  All Rights Reserved - 09/26/03 10:16:15 - GIRIDHARANB
+
+	ORIG: FSANCHEZ - 11/11/2003
+	DESC: Generate Trigger logic & filer procedure
+
+	---- Comments --------------------------------------------------------
+	This routine is a re-write of DBSTRG from M into PSL and implements
+	numerous performance optimizations.
+
+	---- Revision History ------------------------------------------------
+	
+	09/04/07 - RussellDS - CR27653
+		   Modified VDD section to consider pattern match.
+	
+	07/30/07 - RussellDS - CR28507
+		   Modified COMPILE to return label to trigger map.
+	
+	03/01/07 - RussellDS - CR26386
+		   Eliminate remapping of large filers.  Generate to a single
+		   procedure.
+		   
+		   Eliminate ADD and TAG sub-routines and call same code that
+		   is in DBSFILB.
+		   
+		   Modifed to handle the case where there is more than one
+		   trigger for the same column(s).
+		   
+		   Remove QA sections - not used.
+		   
+		   Remove old revision history.
+	
+	01/22/07 - RussellDS - CRs: 24902 / 24903 / 24974
+		   Replaced use of variable true with isTrue to avoid conflict
+		   with new PSL intrinsic variable
+	
+	08/17/06 - RussellDS - CRs: 22719 / 20613
+		   Replace references to OBJGBL^UCUTIL with getGbl^UCXDD.
+		   
+		   Eliminate call to $$OBJNAME^UCUTIL.
+		   
+		   Removed #xecutes that were generated to .proc files -
+		   this code was obsolete.
+	
+	08/17/06 - RussellDS - CR22719
+		   Remove all skip warning code.  Allow this to all be handled
+		   at this point by UCOPTS.
+	
+	06/15/06 - RussellDS - CR21912
+		   Modify cascade delete logic to pass the same qualifiers as
+		   are passed to the parent filer.
+	
+	04/28/06 - RussellDS - CR20602
+		   Modify remap logic.
+	
+	02/22/06 - RussellDS - CR19723
+		   Modified generated code to only check columns that have
+		   changed for required attributes on update.
+		   
+		   Fixed problems related to node being used for review of
+		   -100 level of vobj.
+	
+	02/20/06 - RussellDS - CR19579
+		   Modified various generated section to treat ER and RM as
+		   public scope.  This is needed until we fully resolve all
+		   error handling vis-a-vis catch/throw vs. ER/RM.
+	
+	02/13/06 - RussellDS - CR19556
+		   Modify COMPILE section to eliminate PSL casting warning.
+		   
+		   Modify DEFTBL and REQUIRD sections to use PSLColumn class
+		   to take advantage of changes to force logical data types
+		   to be required and have default values.
+		   
+		   Remove old revision history.
+	
+	02/02/06 - RussellDS - CR19376
+		   Further changes to KEYCHG logic to add code to NOT FIRE
+		   before or after triggers on insert/delete of record.  Just
+		   fire update triggers.
+	
+	01/16/06 - RussellDS - CR19069
+		   Modify KEYCHG section to change logic for how key changes
+		   work.  Old logic did not work against RDB due to constraints
+		   related to parent and child records.
+	*/
+	
+	//I18N=OFF
+
+	quit
+
+
+private COMPILE(String fid,	// Compile triggers
+		String code(),
+		String vsts(),
+		String keytrgs(),
+		Boolean isRDB,
+		SchemaTable tblrec,
+		String labelmap())
+ 
+	type Boolean f
+	type Date tld = ""
+	type Number count = 0
+	type Number seq
+	type String i,j,trgid,tag(),tagseq(),v,vtag(),z
+
+	type Number del = tblrec.columnDelimiter
+	type String delstr
+	type String rectyp = tblrec.recordType
+	
+	if 'del.isNull() do {
+	
+		if (del < 32) ! (del > 127) set delstr = "$C("_del_")"
+		else  set delstr = del.char().addQuotes()
+	}
+
+	type String objName = fid.lowerCase().translate("_")	// Object name
+
+	do ADD^DBSFILB(.code(), "",,500)			 	// Reserve slots for dispatch logic
+	set tag(1) = "vbi"
+	set tag(2) = "vbu"
+	set tag(3) = "vbd"
+	set tag(4) = "vai"
+	set tag(5) = "vau"
+	set tag(6) = "vad"
+
+	for i = 1:1:6 set tagseq(i) = 1
+
+	// Triggers applicable to key changes only
+	set keytrgs("vbu") = 0
+	set keytrgs("vau") = 0
+
+	type ResultSet rs = Db.select("TRGID,TLD","DBTBL7","TABLE = :fid")
+
+	while rs.next() do {
+		set trgid = rs.getRow().trgid
+		if rs.getRow().tld>tld set tld = rs.getRow().tld
+		if $$build(fid,trgid,.code(),.tag(),.tagseq(),.vtag(),.vsts(),.keytrgs(),isRDB,tblrec,.labelmap()) set count = count + 1
+		}
+
+	set code = count_$C(9)_tld
+
+	if vtag("").order().isNull() quit			// No triggers
+
+	set seq = 2
+
+	set i = "" 
+	for  set i = vtag(i).order() quit:i.isNull()  do {
+	
+		set tag = i.upperCase()
+		do ADD^DBSFILB(.code(), "",,seq)
+		set seq = seq+1
+		do ADD^DBSFILB(.code(), tag_" //",,seq)
+		set seq = seq+1
+		do ADD^DBSFILB(.code(), " type public Number ER = 0",,seq)
+		set seq = seq+1
+		do ADD^DBSFILB(.code(), " type public String vx(),RM",,seq)
+		set seq = seq+1
+		if tag = "VBU" do ADD^DBSFILB(.code(), " type public Record"_fid_" "_objName,,seq)
+		set seq = seq+1
+		
+		set f = 0
+		set j = ""
+		for  set j = vtag(i,j).order() quit:j.isNull()  do {
+			// Quit out of trigger before column based triggers if no changes
+			if 'f,'(j = +j) do {
+				set v = " if vx("""").order().isNull()"
+				if tag = "VBU" set v= v_" do AUDIT^UCUTILN("_objName_",.vx(),"_rectyp_","_delstr_")"
+				set v = v_" quit"
+				do ADD^DBSFILB(.code(), v,,seq)
+				set f = 1,seq = seq+1
+			}
+
+			do ADD^DBSFILB(.code(), vtag(i,j),,seq) 
+			set seq = seq+1
+			
+			// Code for multiple triggers on same column
+			if vtag(i, j, 1).exists() do {
+				
+				type Number tseq
+				
+				for tseq = 1:1 quit:'vtag(i, j, tseq).exists()  do {
+				
+					do ADD^DBSFILB(.code(), vtag(i, j, tseq), , seq)
+					set seq = seq + 1
+				}
+				
+				do ADD^DBSFILB(.code(), " }", , seq)
+				set seq = seq + 1
+			}
+		}
+
+		// Since before update triggers can update other columns, vx() may need to be updated
+	
+		if tag = "VBU" do {
+			set z = " do AUDIT^UCUTILN("_objName_",.vx(),"_rectyp_","_delstr_")"
+			do ADD^DBSFILB(.code(), z,,seq) set seq = seq+1
+		}
+
+		do ADD^DBSFILB(.code(), " quit",,seq) set seq = seq+1
+	}
+
+	quit
+
+
+build(	String fid,			// Build trigger logic
+	String trgid,
+	String code(),
+	String tag(),
+	String tagseq(),
+	String vtag(),
+	String vsts(),
+	String keytrgs(),
+	Boolean isRDB,
+	SchemaTable tblrec,
+	String labelmap())	// Label to trigger name map	/MECH=REFARR:W
+	
+	type Boolean onlyKeys()
+	type Number i,lasttag,seq
+	type String columns,des,sts,tags(),z
+
+	type String objName  = fid.lowerCase().translate("_")
+
+	type ResultSet rs = Db.select("CODE","DBTBL7D","TABLE = :fid and TRGID = :trgid")
+	if rs.isEmpty() quit 0				// No trigger code
+
+	type RecordDBTBL7 dbtbl7 = Db.getRecord("DBTBL7","%LIBS = ""SYSDEV"", TABLE = :fid, TRGID = :trgid")
+
+	set code = dbtbl7.ifcond
+	if 'code.isNull(),'$$ifComp(code) quit 0	// Conditionally include trigger
+
+	set des = dbtbl7.des
+	set sts = dbtbl7.actbi
+	set sts.piece("|",2) = dbtbl7.actbu
+	set sts.piece("|",3) = dbtbl7.actbd
+	set sts.piece("|",4) = dbtbl7.actai
+	set sts.piece("|",5) = dbtbl7.actau
+	set sts.piece("|",6) = dbtbl7.actad
+	set columns = dbtbl7.columns		// Column triggers
+	
+	/* If update trigger involving only keys, do not call it out of VBU or VAU
+	   sections, but move check and call to keychanged section.  Note that this
+	   logic is only valid if M database, since keychange logic is not built
+	   into filers for RDB.
+	*/
+	for i=1:1:6 set onlyKeys(i)=0
+	if 'isRDB,dbtbl7.actbu!dbtbl7.actau,'dbtbl7.columns.isNull() do {
+		type Boolean onlyPrim = 1
+		type Number i
+		type String primkeys = ","_tblrec.primaryKeys_","
+		type String columns = dbtbl7.columns
+		
+		for i=1:1:columns.length(",") if primkeys'[(","_columns.piece(",",i)_",") set onlyPrim=0 quit
+		
+		if onlyPrim do {
+			if dbtbl7.actbu set onlyKeys(2)=1
+			if dbtbl7.actau set onlyKeys(5)=1
+		}
+	}
+	
+	// Update status indicators for entire trigger set (must be after IFCOND)
+	if dbtbl7.actbi set vsts("BI") = "VBI"
+	if dbtbl7.actbu,'onlyKeys(2) set vsts("BU") = "VBU"
+	if dbtbl7.actbd set vsts("BD") = "VBD"
+	if dbtbl7.actai set vsts("AI") = "VAI"
+	if dbtbl7.actau,'onlyKeys(5) set vsts("AU") = "VAU"
+	if dbtbl7.actad set vsts("AD") = "VAD"
+	
+	/* Since one trigger may execute for multiple conditions, last condition
+	   will contain code, other labels will call it.  Get labels first, then
+	   deal with each accordingly.
+	*/
+	
+	for i = 1:1:6 if sts.piece("|", i) do {
+
+		set seq = tagseq(i)
+		set tagseq(i) = tagseq(i)+1
+		set tag = tag(i)_seq
+		set tags(i) = tag
+		set lasttag = i
+	}
+	
+	set i = ""
+	for  set i = tags(i).order() quit:i.isNull()  do {
+		
+		set tag = tags(i)
+
+		// Order non-column based triggers first, then accumulate
+		// within triggers within column tests
+		if columns.isNull()  set vtag(tag(i),seq) = " do "_tag_" if ER throw Class.new(""Error"",""%PSL-E-DBFILER,""_RM.get().replace("","",""~""))"
+		else  do {
+			
+			type Number tseq = 0
+			
+			set z = vtag(tag(i),columns).get()
+			
+			// Handle situation of more than one trigger on same column(s)
+			if z.isNull() set z = $$colvx(columns)
+			else  do {
+				
+				set tseq = vtag(tag(i), columns, "").order(-1) + 1
+				
+				// Second trigger, split to structured do
+				if (tseq = 1) do {
+					set vtag(tag(i), columns, 1) = "  do "_z.piece(" do ", 2)
+					set vtag(tag(i), columns) = z.piece(" do ", 1)_" do {"
+					set tseq = 2
+				}
+				
+				set z = " "
+			}
+				
+			set z = z_" do "_tag
+			if onlyKeys(i) do {
+				set keytrgs(tag(i),columns) = z
+				set keytrgs(tag(i))=keytrgs(tag(i))+1
+			}
+			else  do {
+				
+				set z = z_" if ER throw Class.new(""Error"",""%PSL-E-DBFILER,""_RM.get().replace("","",""~""))"
+				if (tseq = 0) set vtag(tag(i), columns) = z
+				else  set vtag(tag(i), columns, tseq) = z
+			}
+		}
+
+		do TAG^DBSFILB(.code(), tag_" // Trigger "_trgid_" - "_des)
+		set labelmap(tag) = "Trigger|"_fid_"-"_trgid
+		
+		if (i '= lasttag) do {
+		
+			do ADD^DBSFILB(.code(), " do "_tags(lasttag))
+			do ADD^DBSFILB(.code(), "")
+			do ADD^DBSFILB(.code(), " quit")
+		}
+	}
+
+	do ADD^DBSFILB(.code(), " type public Record"_fid_" "_objName)
+
+	if dbtbl7.actbu do ADD^DBSFILB(.code(), " do "_objName_".setAuditFlag(1)")
+
+	while rs.next() do ADD^DBSFILB(.code(), rs.getRow().toString())
+
+	// Get the last line
+	type Number line = code("").order(-1)
+ 
+	for  quit:'code(line).translate($C(9,32)).isNull()  set line = code(line).order(-1) if line.isNull() quit
+
+	type Boolean isQuit = code(line).translate($c(9)," ").trim(0).upperCase() = "QUIT"
+
+	// To avoid dead code warning, only add a quit if the procedure doesn't have one
+
+	if 'isQuit do ADD^DBSFILB(.code(), " quit")
+	
+	quit 1
+
+
+colvx(String col) 	// Convert column list to vx(column).exists() logic 
+
+	type Number i
+	type String di
+	type String list = ""
+
+	for i=1:1:col.length(",") do {
+
+		set di = col.piece(",",i)
+		set list = list_"!vx("_di.addQuotes()_").exists()"
+	}
+
+	quit " if "_list.extract(2,list.length())
+
+
+private REQUIRD(String fid,	// Return procedural code to process required data items 
+		String code(),
+		SchemaTable tblrec)
+
+	type String req = tblrec.requiredList
+	if req.isNull() quit
+
+	type List reqnokys = ""
+	type String sort(,)
+	type String objName = fid.lowerCase().translate("_")
+	type String rectyp = tblrec.recordType
+	type String keys = tblrec.primaryKeys
+
+	do TAG^DBSFILB(.code(), "vreqn // Validate required data items")        
+
+	do ADD^DBSFILB(.code(), " type public Record"_fid_" "_objName)
+	do ADD^DBSFILB(.code(), "")
+	
+	type Number i
+	for i = 1:1:req.length(",") do {
+
+		type String di = req.piece(",",i)
+		if di.isLiteral() quit			// Legacy literal keys
+		if {List}keys.contains(di) quit		// Key
+		
+		set reqnokys = reqnokys.add(di)
+		
+		// for multi-node global, build array sorted by node
+		
+		type PSLColumn rec = Db.getSchemaColumn(fid, di)
+
+		do ADD^DBSFILB(.code(), " if "_objName_"."_di.lowerCase()_".isNull() do vreqerr("_di.addQuotes()_") quit")
+		if rectyp = 1 quit			// No node-level check
+
+		type String pos = +rec.position
+		if 'rec.subfieldTag.isNull() set pos = pos_"~"_rec.subfieldTag
+		set sort(rec.getOldNode(1), pos) = di
+	}
+
+	do ADD^DBSFILB(.code(), " quit")
+
+
+	do TAG^DBSFILB(.code(), "vrequ // Valid required columns on update")
+	do ADD^DBSFILB(.code(), "")
+
+	do ADD^DBSFILB(.code(), " type public String vx()")
+	do ADD^DBSFILB(.code(), " type public Record"_fid_" "_objName)
+	do ADD^DBSFILB(.code(), "")
+
+	// First check the primary keys
+	// Note keys may be null for CUVAR-like tables
+	if 'keys.isNull() for i = 1:1:keys.length(",") do {
+
+		type String di = keys.piece(",",i)
+		do ADD^DBSFILB(.code(), " if "_objName_"."_di.lowerCase()_".isNull() do vreqerr("_di.addQuotes()_") quit")
+	}
+
+	do ADD^DBSFILB(.code(), "")
+	
+	// If multi-node table, optimize by checking if any changes on a node
+	type String nod = "",pos = ""
+	for  set nod = sort(nod).order() quit:nod.isNull()  do {
+
+		do ADD^DBSFILB(.code(), " if 'vobj("_objName_",-100,"_nod_","""").order().isNull() do {")
+
+		for  set pos = sort(nod,pos).order() quit:pos.isNull()  do {
+			type String di = sort(nod,pos)
+			do ADD^DBSFILB(.code(), "  if vx("""_di_""").exists(),"_objName_"."_di.lowerCase()_".isNull() do vreqerr("_di.addQuotes()_") quit")
+		}
+
+		do ADD^DBSFILB(.code(), " }")
+	}
+	// Type 1 record
+	for i = 1:1:reqnokys.count() do {
+		
+		type String di = reqnokys.elementAt(i)
+		
+		do ADD^DBSFILB(.code(), "  if vx("""_di_""").exists(),"_objName_"."_di.lowerCase()_".isNull() do vreqerr("_di.addQuotes()_") quit")
+	}
+
+	do ADD^DBSFILB(.code(), " quit")
+
+	do TAG^DBSFILB(.code(), "vreqerr(di) // Required error")
+	do ADD^DBSFILB(.code(), " type public Boolean ER = 0")
+	do ADD^DBSFILB(.code(), " type public String RM")
+	do ADD^DBSFILB(.code(), " do SETERR^DBSEXECU("_fid.addQuotes()_",""MSG"",1767,"""_fid_".""_di)")
+	do ADD^DBSFILB(.code(), " if ER throw Class.new(""Error"",""%PSL-E-DBFILER,""_RM.get().replace("","",""~""))")
+	do ADD^DBSFILB(.code(), " quit")
+	
+	quit
+
+
+private DEFTBL(String fid,	// Return procedural code to create defaults in create mode
+	       String code(),
+	       SchemaTable tblrec)
+
+	type Number count,i
+
+	type String objName = fid.lowerCase().translate("_")	 // Object name
+	type String dftList = tblrec.defaultList
+	type String acckeys = tblrec.primaryKeys
+
+	do TAG^DBSFILB(.code(), "vinit // Initialize default values")
+	do ADD^DBSFILB(.code(), " type public Record"_fid_" "_objName)
+
+	// Define access keys as local variables to support use in defaults
+	if 'acckeys.isNull() do {
+	
+		do ADD^DBSFILB(.code(), "")
+		do ADD^DBSFILB(.code(), " // Type local variables for access keys for defaults")
+		for i = 1:1:acckeys.length(",") do {
+
+			type String di = acckeys.piece(",",i)
+			type String var = di.translate("_").upperCase()
+
+			do ADD^DBSFILB(.code(), " type public String "_var)
+		}
+	}
+
+	do ADD^DBSFILB(.code(), "")
+	
+	set count = 0
+
+	if 'dftList.isNull() for i = 1:1:dftList.length(",") do {
+
+		type String di = dftList.piece(",",i)
+		
+		type SchemaColumn rec = Db.getSchemaColumn(fid, di)
+
+		quit:rec.default.isNull()
+		quit:'rec.computation.isNull()		// Computeds can't have default values
+
+		type String  v = $$value^DBSFILER(rec.default,rec.dataType)
+
+		set di = di.lowerCase()
+
+		if (v?1A.AN)!(v?1"%".AN) do ADD^DBSFILB(.code(), " type public String "_v)
+		do ADD^DBSFILB(.code(), " if "_objName_"."_di_".isNull() set "_objName_"."_di_" = "_v, di)
+		
+		set count = count + 1
+	}
+
+	do ADD^DBSFILB(.code(), " quit")
+	
+	set code=count
+	
+	quit
+
+
+public ACNVAL(String fid,		// Account validation logic
+	      String code())
+
+	type Number i
+	type String dilist,dinam,list()
+
+	// Hard coded references to DEP/LN not good (FRS)
+	if '((fid = "DEP")!(fid = "LN")) quit		// Support LN and DEP only
+
+	type ResultSet rs1 = Db.select("COLNAMES","UTBLPRODRL")
+	type ResultSet rs2 = Db.select("COLNAME","UTBLPRODRT")
+
+	// Reference to UX() needs to be checked (FRS)
+
+	do TAG^DBSFILB(.code(), "VACNVAL // Rule based default logic")
+	do ADD^DBSFILB(.code(), " type public String value(),UX()")
+	do ADD^DBSFILB(.code(), " type public Number %O,CID")
+
+	if rs1.isEmpty(),rs2.isEmpty() do ADD^DBSFILB(.code(), " quit") quit
+
+	// Get a list of referenced columns used in the queries
+
+	while rs1.next() do {
+		
+		type String colnames
+
+		set colnames = rs1.getRow().colnames
+		for i = 1:1:colnames.length(",") do {
+			set dinam = colnames.piece(",",i)
+			if dinam.piece(".",1) = fid set list(dinam) = ""
+		}
+	}
+
+	// Get a list of column names from results definition
+
+	while rs2.next() do {
+		set dinam = rs2.getRow().colname
+		if dinam.piece(".",1) = fid set list(dinam) = ""
+	}
+
+	set dilist = "",i = ""
+	for  set i = list(i).order() quit:i.isNull()  set dilist=dilist_","_({String}i.piece(".",2))
+
+	// Not sure what this is about (FRS)
+	for i = "ACN","TYPE","BOO" set list(fid_"."_i)=""
+
+	do ADD^DBSFILB(.code(), " if %O=1,'$$CHANGED^PROC1DB("_fid.addQuotes()_",.UX,"_dilist.extract(2,dilist.length()).addQuotes()_") quit")
+	do ADD^DBSFILB(.code(), "")
+	do ADD^DBSFILB(.code(), " // new value")
+
+	for  set i = list(i).order() quit:i.isNull()  do {
+		do ADD^DBSFILB(.code(), " set value("_({String}i.piece(".",2)).addQuotes()_") = "_i)
+	}
+
+	do ADD^DBSFILB(.code(), "do RESULTS^PROC1DB(%O,CID,.value,.UX)")
+	do ADD^DBSFILB(.code(), " quit")
+	quit
+
+
+private VDD(String fid,		// Data dictionary attribute verification
+	    String code(),
+	    SchemaTable tblrec,
+	    Boolean isRDB)
+
+	type public Number ER
+
+	type Date tld
+	type Number count, hit, pos
+	type String di, gbl, lastkey, nod, rectyp, xnod, ws, v, z
+	type String objName = fid.lowerCase().translate("_")
+	
+	type SchemaColumn dilist(,)
+	
+	set tld = ""
+	set (count, hit) = 0
+
+	set xnod = ""
+	set gbl = tblrec.global.piece("(",1)		// Global name
+	set rectyp = tblrec.recordType
+	if isRDB set rectyp=$$RDBRCTYP^DBSFILB(fid)
+	if rectyp=11 set lastkey=tblrec.primaryKeys.piece(",",tblrec.primaryKeys.length(","))
+
+	do TAG^DBSFILB(.code(), "vddver // Validate data dictionary attributes")
+	do ADD^DBSFILB(.code(), " type public Number %O")
+	do ADD^DBSFILB(.code(), " type public String vpar,vx()")
+	do ADD^DBSFILB(.code(), "")
+	do ADD^DBSFILB(.code(), " type String vRM,X")
+	do ADD^DBSFILB(.code(), " type public Record"_fid_" "_objName)
+	do ADD^DBSFILB(.code(), "")
+
+	if rectyp>1 do ADD^DBSFILB(.code(), " if (%O = 2) do vload")
+	
+	// Build list of elements sorted by node (appropriate to the
+	// target database)
+	type ResultSet rs = Db.select("DI", "DBTBL1D", "FID = :fid AND CMP IS NULL AND TYP NOT IN ('M','B')")
+	
+	while rs.next() do {
+		
+		set di = rs.getCol("DI")
+		
+		if 'di.isLiteral(), ((di ? 1A.AN) ! (di ? 1"%".AN) ! (di ? .A."_".E)) do {
+		
+			type SchemaColumn rec = Db.getSchemaColumn(fid, di)
+		
+			set dilist(rec.node, di) = rec
+		}
+	}
+
+	set (nod, di) = ""
+	for  set nod = dilist(nod).order() quit:nod.isNull()  do { quit:ER
+		
+		for  set di = dilist(nod, di).order() quit:di.isNull()  do { quit:ER
+
+			type Number max, min
+			type String ptn, tbl, typ
+			
+			type SchemaColumn rec = dilist(nod, di)
+		
+			set tbl = rec.lookupTable
+			set typ = rec.dataType
+			set min = rec.minimum
+			set max = rec.maximum
+			set ptn = rec.pattern
+
+			set count = count+1
+			if (rec.dateUpdated > tld) set tld = rec.dateUpdated
+
+			if 'tbl.isNull() do { quit:ER
+	
+				if tbl.isLike("%:NOVAL%") set tbl = "" quit
+		
+				if tbl.beginsWith("["),(tbl?1"["1A.AN1"]".E)!(tbl?1"[%".AN1"]".E) do { quit
+					type String QRY = ""
+				
+					/* Attempt to use :QUERY info to provide missing keys
+					   for multi-key tables if the values are literals.  Ignore
+					   :DISTINCT, date item lists, etc.
+					*/
+				
+					if tbl[":QU" set QRY=tbl.piece(":QU",2).piece(" ",2,99)
+				
+					set tbl=tbl.piece("[",2).piece("]",1)
+				
+					if tbl = fid!(tbl = tblrec.parentTable) set tbl= "" quit
+				
+					if 'Db.isDefined("DBTBL1","%LIBS='SYSDEV',FID=:tbl") do { quit
+						set ER = 1
+						write " Aborted - invalid table linkage for column ",di
+					}
+				
+					type SchemaTable z = Db.getSchemaTable(tbl)
+
+					// If more than a single key, try to use query info
+					if z.primaryKeys.length(",") > 1 do {
+				
+						type Number i
+						type String key,keyname,keys,TOK,x
+				
+						if QRY.isNull() set tbl = "" quit
+						set QRY=QRY.stripQuotes()
+						set QRY=$$TOKEN^%ZS(QRY,.TOK)
+						set keys=""
+					
+						for i=1:1:z.primaryKeys.length(",")-1 do { quit:tbl=""
+							set keyname=z.primaryKeys.piece(",",i)
+							set key="["_tbl_"]"_keyname_"="
+							if QRY'[key set tbl="" quit
+							set x=QRY.piece(key,2)
+							set x=$$ATOM^%ZS(x,0,",:&",TOK,0)
+							if x.isNull() set tbl="" quit
+							if '(x.isNumber()!(x?1"""".e1"""")) set tbl="" quit
+							set keys=keys_keyname_"="_x_","
+						}
+					
+						quit:tbl=""
+					
+						set keyname=z.primaryKeys.piece(",",z.primaryKeys.length(","))
+						set keys=keys_keyname_"=:X"
+						set tbl="Db.isDefined("_tbl.addQuotes()_","_keys.addQuotes()_")"
+
+					}
+					else  set tbl = "Db.isDefined("_tbl.addQuotes()_",""X"")"
+				}
+
+				// Don't check indirection or local arrays
+				if tbl.beginsWith("@") set tbl = ""
+				else  if tbl?1A.AN1"(" set tbl = ""
+			
+				// Picklist
+				if tbl.beginsWith(",") do {
+				
+					type Number I
+					type String LIST, tbltok, tok
+				
+					set tbltok = $$TOKEN^%ZS(tbl, .tok)
+					set LIST = ""
+				
+					for I = 2:1:tbltok.length(",") set LIST = LIST_tbltok.piece(",", I).piece("#", 1)_","
+				
+					set tbl = $$UNTOK^%ZS(LIST.extract(1, LIST.length() - 1), tok)
+				
+					set tbl = "{List}"_tbl.addQuotes()_".contains(X)"
+				}
+
+				#IF %VersionID'<7
+				if tbl.beginsWith("^") do { quit
+				
+					set ER = 1
+					write " Aborted - invalid global reference for table look-up on column ",di
+				}
+				#ELSE
+				// Allow table linkage to globals in versions prior to 7.0
+				if tbl.beginsWith("^") do {
+					
+					if tbl = (gbl_"(") set tbl = ""
+					else  do {
+						
+						if tbl.length("#") = 2,tbl?.E1"#".N.E set tbl = tbl.piece("#",1)
+						set tbl = tbl_"X).data()"
+					}
+				}
+				#ENDIF
+			
+				if tbl.isNull(1) set tbl = ""
+			}
+
+			set z = "set X = "_objName_"."_di.lowerCase()_" if 'X.isNull()"
+
+			if 'tbl.isNull() do {
+				// The following preamble may be globally relevant
+				// set z = "if '(%O = 1)!vx("""_di_""").exists() "_z
+				set z = z_",'"_tbl_" set vRM = $$^MSG(1485,X) do vdderr("""_di_""", vRM) quit"
+			}
+
+			else  if typ = "F" do {
+
+				set z = z_" set vRM = """" do DBSEDT^UFRE(""["_fid_"]"_di_""",0)"
+				set z = z_" if 'vRM.get().isNull() do vdderr("""_di_""", vRM) quit"
+			}
+		
+			else  do {
+				if 'min.isNull() set min = $$value^DBSFILER(min,typ)
+				if 'max.isNull() set max = $$value^DBSFILER(max,typ)
+
+				// Build a parameter string 'v' to pass to DBSVER
+
+				set v = typ.addQuotes()
+				set v.piece(",",2) = +rec.length
+				set v.piece(",",3) = +rec.isRequired
+				if 'ptn.isNull() set v.piece(",",5) = ptn.addQuotes()
+				set v.piece(",",6) = min
+				set v.piece(",",7) = max
+				set v.piece(",",8) = +rec.precision
+		
+				// Don't need to perform length checks if not GTM database
+				if "UT"[typ,min.isNull(),max.isNull(),ptn.isNull() do {
+					if 'isRDB set z = "if "_objName_"."_di.lowerCase()_".length()>"_rec.length_" set vRM = $$^MSG(1076,"_rec.length_") do vdderr("""_di_""", vRM) quit"
+					else  set z = ""
+				}
+				/* Need numeric check on non-GTM databases since otherwise DB
+			 	   may apply own rules.  E.g., Oracle will take 1.01 into a
+			  	   numeric, no decimal, field, by truncating and treating as 1
+				*/
+				else  if "$N"[typ,'rec.precision  do {
+					if rec.length = 1 set z = z_",X'?1N set vRM=$$^MSG(742,""N"") do vdderr("""_di_""", vRM) quit"
+					else  set z = z_",X'?1."_(+rec.length)_"N,X'?1""-""1."_(rec.length-1)_"N set vRM=$$^MSG(742,""N"") do vdderr("""_di_""", vRM) quit"
+				}
+
+				else  if "BM"[typ do {
+					if 'isRDB set z = "if "_objName_"."_di_".length()>"_rec.length_" set vRM = $$^MSG(1076,"_rec.length_") do vdderr("""_di_""", vRM) quit"
+					else  set z = ""
+				}
+			
+				else  if typ = "D" set z = z_",X'?1.5N set vRM=$$^MSG(742,""D"") do vdderr("""_di_""", vRM) quit"
+				else  if typ = "C" set z = z_",X'?1.5N set vRM=$$^MSG(742,""C"") do vdderr("""_di_""", vRM) quit"	
+				else  if typ = "L" set z = "if '(""01""["_objName_"."_di_") set vRM=$$^MSG(742,""L"") do vdderr("""_di_""", vRM) quit"
+		
+				else  set z = z_" set vRM = $$VAL^DBSVER("_v_") if 'vRM.isNull() set vRM = $$^MSG(979,"""_fid_"."_di_"""_"" ""_vRM) throw Class.new(""Error"",""%PSL-E-DBFILER,""_vRM.replace("","",""~""))"
+			}
+		
+			quit:z=""				// Nothing to check since RDB
+		
+			set hit = 1
+		
+			set ws = " "
+
+			if rectyp>1,'(nod = xnod) do {		// Conditional check
+		
+				type String zz
+
+				if 'xnod.isNull() do ADD^DBSFILB(.code(), ws_"}")
+				if nod["*" set xnod="" quit	// Access key
+				set xnod = nod
+				if rectyp=11,nod=lastkey set zz = "if vobj("_objName_").exists() ! 'vobj("_objName_","""").order().isNull() do {"
+				else  do {
+					type String x
+				
+					if nod.isNumber() set x = nod
+					else  set x = """"_nod_""""
+				
+					set zz = "if vobj("_objName_","_x_").exists() do {"
+				}
+				do ADD^DBSFILB(.code(), ""),ADD^DBSFILB(.code(), ws_zz),ADD^DBSFILB(.code(), "")
+			}
+
+			if 'xnod.isNull() set ws = "  "
+	
+			do ADD^DBSFILB(.code(), ws_z)
+		}
+	}
+
+	quit:ER
+
+	set ws = " "
+
+	if 'xnod.isNull() DO ADD^DBSFILB(.code(), ws_"}")
+
+	do ADD^DBSFILB(.code(), ws_"quit")
+
+	do TAG^DBSFILB(.code(), "vdderr(di, vRM) // Column attribute error")
+	do ADD^DBSFILB(.code(), ws_"type public Boolean ER = 0")
+	do ADD^DBSFILB(.code(), ws_"type public String RM")
+	do ADD^DBSFILB(.code(), ws_"do SETERR^DBSEXECU("""_fid_""",""MSG"",979,"""_fid_".""_di_"" ""_vRM)")
+	do ADD^DBSFILB(.code(), ws_"if ER throw Class.new(""Error"",""%PSL-E-DBFILER,""_RM.get().replace("","",""~""))")
+	do ADD^DBSFILB(.code(), ws_"quit")
+
+	set code = count_$C(9)_tld
+	
+	if 'hit kill code	// No validation
+
+	quit
+
+
+private FKEYS(String fid,		// Build foreign key verification logic
+	      String code(),
+	      SchemaTable tblrec) 
+
+	type public Number ER = 0
+
+	type Number i,p
+	type String fkeys,forfid,forgbl,forkeys,gbl,lastKey,z
+	type String fk()
+
+	type Number exist  = tblrec.existsNode
+
+	type String objName = fid.lowerCase().translate("_")
+
+	// load all the foreign key definitions for this table and it's ancestors into the fk() array
+
+	type String TABLE = fid
+
+	for  do { if TABLE.isNull() quit
+
+		type ResultSet rs = Db.select("FKEYS,TBLREF","DBTBL1F","FID = :TABLE AND TBLREF IS NOT NULL")
+		while rs.next() set fk(rs.getCol(1)) = rs.getCol(2)
+
+		if tblrec.table = TABLE set TABLE = tblrec.parentTable
+		else  do {
+			type SchemaTable tblrec = Db.getSchemaTable(TABLE)
+			set TABLE = tblrec.parentTable
+		}
+	}
+
+	// The following throws an invalid warning about fk being undefined.  Use accept
+	// until that error is resolved in PSL.
+	#ACCEPT DATE=03/29/04; PGM=Dan Russell; CR=20602
+	if fk("").order().isNull() quit			// No foreign keys
+
+	do TAG^DBSFILB(.code(), "VFKEYS // Foreign keys")
+
+	do ADD^DBSFILB(.code(), " type public String vfkey(),vpar")
+	do ADD^DBSFILB(.code(), "")
+	do ADD^DBSFILB(.code(), " type public Record"_fid_" "_objName)
+
+	set fkeys = ""
+
+	for  set fkeys = fk(fkeys).order() quit:fkeys.isNull()  do {
+	
+		set forfid = fk(fkeys)
+		type SchemaTable tblrec = Db.getSchemaTable(forfid)
+ 
+		type Number exist  = tblrec.existsNode
+		type String gbl  = tblrec.global
+		type String forgbl = gbl.piece("(",1)		// Global name
+		type String forkeys = gbl.piece("(",2,999)	// Access keys
+		type String v
+		
+		set p = 1
+
+		if 'exist.isNull() set forkeys = forkeys_","_exist // Add node checking logic
+		set forkeys = forkeys.translate(",",$C(0)) 	// Replace , with $C(0)
+
+		for i = 1:1:forkeys.length($C(0)) do {	 // Map each key
+			
+			type String key
+			
+			set key = forkeys.piece($C(0),i) 	// Access key
+			if key = +key quit	 	// Numeric key
+			if key.beginsWith("""") set forkeys.piece($C(0),i) = key.addQuotes() quit
+			set key = fkeys.piece(",",p),p = p+1 	// foreign key
+			set lastKey = key
+			set forkeys.piece($C(0),i) = """""""""_"_objName_"."_key.lowerCase()_"_"""""""""
+		}
+
+		set v = ""
+		for i = 1:1:forkeys.length($C(0)) set v = v_forkeys.piece($C(0),i)_"_"",""_"
+		set v = v.extract(1,v.length()-5)
+
+		set forkeys = v.translate($C(0),",")	 // Insert , character
+
+		set v = " if '"_objName_"."_lastKey.lowerCase()_".isNull()"
+		set v = v_" set vfkey("""_forgbl_"(""_"_forkeys_"_"")"")="
+		set v = v_""""_fid_"("_fkeys_") -> "_forfid_""""
+		do ADD^DBSFILB(.code(), v)
+	}
+
+	do ADD^DBSFILB(.code(), " quit")
+
+	do CHKFKEYS(fid,.code(),tblrec)
+	quit
+
+
+private KEYCHG(String fid,			// Access key changed logic
+	       String code(),
+	       SchemaTable tblrec,
+	       String vsts(),
+	       String keytrgs(),
+	       Boolean vreqsec,
+	       String sections(),
+	       Number rectyp,
+	       Boolean isRDB)
+	       
+	/* Key change logic is similar for both MDB and RDBs:
+	
+		- Create the new parent record
+		- Create new versions of the children
+		- Delete the old children
+		- Delete the old parent
+		
+	   This logic prevents constraint errors due to either missing
+	   children or missing parents during the change.
+	   
+	   Only the update triggers are fired for the record since
+	   we treat it as an update (of the keys), not a logical
+	   insert/delete.
+	*/
+
+	type String gbl,key,keyq,numkeys,objName,v,vreqtag,z
+	type Number i,saveline
+
+	type Boolean hasIndex = $$hasIndex(fid)
+	type Boolean hasMB = (tblrec.hasMemo!tblrec.hasBlob)
+
+	set objName = fid.lowerCase().translate("_")
+
+	type String keys = tblrec.primaryKeys
+	
+	set numkeys = keys.length(",")
+	set gbl = $$getGbl^UCXDD(tblrec, objName)	// Global reference
+
+	do TAG^DBSFILB(.code(), "vkchged // Access key changed")
+
+	do ADD^DBSFILB(.code(), " type public Record"_fid_" "_objName)
+	do ADD^DBSFILB(.code(), "")
+	do ADD^DBSFILB(.code(), " type public Boolean ER = 0")
+	do ADD^DBSFILB(.code(), " type public String RM,vpar,vx()")
+	do ADD^DBSFILB(.code(), "")
+	do ADD^DBSFILB(.code(), " type Number %O = 1")
+	do ADD^DBSFILB(.code(), " type String vnewkey,voldkey,vux")
+
+	// If there is an after update trigger, save vpar
+	if vsts("AU").exists()!keytrgs("vau") do ADD^DBSFILB(.code(), " type String voldpar = vpar.get()","Save filer switches")
+	
+	do ADD^DBSFILB(.code(), "")
+
+	// Copy keys into vux or vux array to save them
+	set v = ""
+	if numkeys = 1 do ADD^DBSFILB(.code(), " set vux = vx("""_keys_""")")
+	else  for i = 1:1:numkeys do {
+
+		set key = keys.piece(",",i)
+		if i>1 set v = v_"_"",""_"
+		set v = v_objName_"."_key.lowerCase()
+		set z=" if vx("""_key_""").exists() set vux("""_key_""") = vx("""_key_""")"
+		do ADD^DBSFILB(.code(), z)
+	}
+	
+	if numkeys = 1 set z= " set voldkey = vux.piece(""|"",1),vobj("_objName_",-3) = voldkey" 
+	else  set z = " do vkey(1) set voldkey = "_v
+
+	do ADD^DBSFILB(.code(), z,"Copy old keys into object")
+	do ADD^DBSFILB(.code(), "")
+
+ 	if 'isRDB do ADD^DBSFILB(.code(), " set vpar = $$setPar^UCUTILN(vpar,""NOINDEX"")","Switch Index off")
+ 	
+ 	// Data needs to be loaded to support VALDD and prior to deletion
+	if rectyp > 1 do ADD^DBSFILB(.code(), " do vload","Make sure all data is loaded locally")
+
+	if 'isRDB, vreqsec do {
+		set vreqtag="vrequ"
+		do ADD^DBSFILB(.code(), " if vpar[""/VALREQ/"" do "_vreqtag)
+	}
+	
+	// If before update triggers (non-key or key columns), handle
+	if vsts("BU").exists()!keytrgs("vbu") do {
+		type String n,xcode
+		
+		if 'keytrgs("vbu") do ADD^DBSFILB(.code(), " if vpar[""/TRIGBEF/"" do "_vsts("BU"))
+		else  if 'vsts("BU").exists(),keytrgs("vbu")=1 do {	// just one
+			set n=keytrgs("vbu","").order()
+			set xcode=keytrgs("vbu",n)
+			set xcode=xcode_" if ER throw Class.new(""Error"",""%PSL-E-DBFILER,""_RM.get().replace("","",""~""))"
+			do ADD^DBSFILB(.code(), " if vpar[""/TRIGBEF/"""_xcode)
+		}
+		else  do {
+			do ADD^DBSFILB(.code(), " if vpar[""/TRIGBEF/"" do { quit:ER")
+			if vsts("BU").exists() do ADD^DBSFILB(.code(), "  do "_vsts("BU"))
+			set n = ""
+			for  set n = keytrgs("vbu",n).order() quit:n=""  do {
+				set xcode=keytrgs("vbu",n)
+				set xcode=xcode_" if ER throw Class.new(""Error"",""%PSL-E-DBFILER,""_RM.get().replace("","",""~""))"
+				do ADD^DBSFILB(.code(), " "_xcode)
+			}
+			do ADD^DBSFILB(.code(), " }")
+		}
+	}
+
+		 
+	if sections("vddver").exists() do ADD^DBSFILB(.code(), " if vpar[""/VALDD/"" do vddver",,.saveline)
+	
+	do ADD^DBSFILB(.code(), " do vexec")
+
+	do ADD^DBSFILB(.code(), "")
+
+	if numkeys = 1 set z= " set vnewkey = vux.piece(""|"",2),vobj("_objName_",-3) = vnewkey"
+	else  set z = " do vkey(2) set vnewkey = "_v
+	do ADD^DBSFILB(.code(), z,"Copy new keys into object")
+	
+	// Create new copy to insert
+	do ADD^DBSFILB(.code(), " type Record"_fid_" vnewrec = "_objName_".copy()")
+	do ADD^DBSFILB(.code(), " do vnewrec.setMode(0)")
+	do ADD^DBSFILB(.code(), " do vnewrec.save(""/NOVAL/NOCASDEL/NOJOURNAL/NOTRIGBEF/NOTRIGAFT/"")")
+
+	
+	do ADD^DBSFILB(.code(), "")
+	set z = " set %O = 1 do CASUPD^DBSEXECU("_fid.addQuotes()_",voldkey,vnewkey) if ER throw Class.new(""Error"",""%PSL-E-DBFILER,""_RM.get().replace("","",""~""))"
+	do ADD^DBSFILB(.code(), z,"Cascade update")
+
+	// If after update triggers (non-key or key columns), handle
+	if vsts("AU").exists()!keytrgs("vau") do {
+		type String n,xcode
+		
+		do ADD^DBSFILB(.code(), " set vpar = voldpar")
+		
+		if 'keytrgs("vau") do ADD^DBSFILB(.code(), " if vpar[""/TRIGAFT/"" do "_vsts("AU"))
+		else  if 'vsts("AU").exists(),keytrgs("vau")=1 do {	// just one
+			set n=keytrgs("vau","").order()
+			set xcode=keytrgs("vau",n)
+			do ADD^DBSFILB(.code(), " if vpar[""/TRIGAFT/"""_xcode)
+		}
+		else  do {
+			do ADD^DBSFILB(.code(), " if vpar[""/TRIGAFT/"" do {")
+			do ADD^DBSFILB(.code(), "  do "_vsts("AU"))
+			set n = ""
+			for  set n = keytrgs("vau",n).order() quit:n=""  do {
+				set xcode=keytrgs("vau",n)
+				set xcode=xcode_" if ER throw Class.new(""Error"",""%PSL-E-DBFILER,""_RM.get().replace("","",""~""))"
+				do ADD^DBSFILB(.code(), " "_xcode)
+			}
+			do ADD^DBSFILB(.code(), " }")
+		}
+	}
+	
+	do ADD^DBSFILB(.code(), "")
+	
+	// Delete the old record
+	if numkeys = 1 set z= " set vobj("_objName_",-3) = vux.piece(""|"",1)" 
+	else  set z = " do vkey(1)"
+	do ADD^DBSFILB(.code(), z, "Reset key for delete")
+	do ADD^DBSFILB(.code(), " set vpar = $$initPar^UCUTILN(""/NOVAL/NOCASDEL/NOJOURNAL/NOTRIGBEF/NOTRIGAFT/"")")
+	do ADD^DBSFILB(.code(), " set %O = 3 do vdelete(1)","Delete old record")
+	
+	do ADD^DBSFILB(.code(), "")
+	
+	do ADD^DBSFILB(.code(), " quit")
+
+	if numkeys>1 do {
+
+		do TAG^DBSFILB(.code(), "vkey(Number i) // Restore access keys")
+
+		do ADD^DBSFILB(.code(), " type public String vux()")
+		do ADD^DBSFILB(.code(), " type public Record"_fid_" "_objName)
+		do ADD^DBSFILB(.code(), "")
+
+		for i = 1:1:numkeys do {
+
+			set key = keys.piece(",",i)
+			do ADD^DBSFILB(.code(), " if vux("""_key_""").exists() set "_objName_"."_key.lowerCase()_" = vux("""_key_""").piece(""|"",i)")
+		}
+		
+		do ADD^DBSFILB(.code(), " quit")
+	}
+
+	quit
+
+
+hasIndex(String fid)	// Return whether fid has an index
+
+	type ResultSet rs = Db.select("FID","DBTBL8","FID = :fid")
+	quit 'rs.isEmpty()
+
+
+CHKFKEYS(String fid,	// Check foreign keys
+	 String code(),
+	 SchemaTable tblrec)
+
+	type Number i
+	type String di,errmsg,fkeys,forfid,objref,z,z1,z2
+
+	type String fk()
+	type String table = fid
+
+	type String objName = fid.lowerCase().translate("_")
+
+	type List req = tblrec.requiredList
+	type Number exist = tblrec.existsNode
+
+	for  do { if table.isNull() quit
+
+		type ResultSet rs = Db.select("FKEYS,TBLREF","DBTBL1F","FID = :table AND TBLREF IS NOT NULL")
+		while rs.next() set fk(rs.getCol("FKEYS")) = rs.getCol("TBLREF")
+
+		if tblrec.table = table set table = tblrec.parentTable
+		else  do {
+			type SchemaTable tblrec = Db.getSchemaTable(table)
+			set table = tblrec.parentTable
+		}
+	}
+
+
+	do TAG^DBSFILB(.code(), "CHKFKS   // Check foreign keys when not under buffer")
+
+	if fk("").order().isNull() do ADD^DBSFILB(.code(), " quit") quit			// No foreign keys
+
+	do ADD^DBSFILB(.code(), "")
+	do ADD^DBSFILB(.code(), " type public Record"_fid_" "_objName)
+	do ADD^DBSFILB(.code(), " type public Number %O")
+	do ADD^DBSFILB(.code(), " type String vERRMSG")
+	do ADD^DBSFILB(.code(), "")
+
+	set fkeys = ""
+
+	for  set fkeys = fk(fkeys).order() quit:fkeys.isNull()  do {
+	
+		set forfid = fk(fkeys)
+ 
+		set z1 = "",z2 = ""
+		for i = 1:1:fkeys.length(",") do {
+
+			if 'z2.isNull() set z2 = z2_","
+
+			set di = fkeys.piece(",",i)
+		
+			if di.beginsWith("""")!(di=+di) set z2 = z2_di quit
+			set objref = objName_"."_di.lowerCase()
+			set z2 = z2_":"_objref
+
+			if 'req.contains(di) do {
+				if 'z1.isNull() set z1 = z1_","
+				set z1 = z1_"'"_objref_".isNull()"
+			}
+		}
+
+		set errmsg = $$^MSG(8563,fid_"("_fkeys_") -> "_forfid)
+		set errmsg = errmsg.replace(",", "~")
+
+		set z = " if 'Db.isDefined("""_forfid_""","""_z2_""")"
+		set z = z_" set vERRMSG = $$^MSG(8563,"""_fid_"("_fkeys_") -> "_forfid_""")"
+		set z = z_" throw Class.new(""Error"",""%PSL-E-DBFILER,""_vERRMSG.replace("","",""~""))"
+		if 'z1.isNull() set z = " if "_z1_z
+
+		do ADD^DBSFILB(.code(), z)
+	}
+
+	do ADD^DBSFILB(.code(), " quit")
+	quit
+
+	
+private CASDEL(String fid,		 // Build cascade delete code
+	       String code(),
+	       SchemaTable tblrec)
+
+	type Boolean hasDel
+	type Number n
+	type String acckeys,list(),OBJNAME
+	
+	do CASDELST(fid,.list())
+	if (fid="LN")!(fid="DEP") do CASDELST(fid,.list())	// Supertype logic
+	
+	quit:list("").order().isNull()
+	
+	set acckeys=tblrec.primaryKeys
+	quit:acckeys.isNull()
+	
+	set acckeys=acckeys.lowerCase()
+	
+	set OBJNAME=fid.lowerCase()			// Primary table object name
+	
+	do ADD^DBSFILB(.code(), " type public Record"_fid_" "_OBJNAME)
+	do ADD^DBSFILB(.code(), " type public String vpar")
+	do ADD^DBSFILB(.code(), "")
+	
+	set n = ""
+	set hasDel = 1
+	for  set n = list(n).order() quit:n.isNull()  if 'list(n).piece("|", 3) set hasDel = 0 quit
+	if 'hasDel do {
+		do ADD^DBSFILB(.code(), " type String vERRMSG")
+		do ADD^DBSFILB(.code(), "")
+	}		
+	
+	set n=""
+	for  set n=list(n).order() quit:n=""  do {
+		type Number i
+		type String del,fkeys,fkfid,ftblkeys,where,xcode
+		
+		set fkfid=list(n).piece("|",1)
+		set fkeys=list(n).piece("|",2)
+		set del=list(n).piece("|",3)
+		
+		type RecordDBTBL1 dbtbl1=Db.getRecord("DBTBL1","%LIBS='SYSDEV',FID=:fkfid",1)
+		quit:'dbtbl1.getMode()		// Invalid table
+		
+		set ftblkeys=$$KEYS^SQLDD("",dbtbl1.acckeys)		
+		
+		set where=""
+		for i=1:1:fkeys.length(",") set where=where_fkeys.piece(",",i)_"=:"_OBJNAME_"."_acckeys.piece(",",i)_" AND "
+		set where=where.extract(1,where.length()-5)
+		
+		if 'del do {	// Restriction
+			type String ERMSG
+			
+			// Record on file - delete restriction
+			set ERMSG = "$$^MSG(8563,"""_fkfid_"("_fkeys_") -> "_fid_"("_acckeys.upperCase()_")"")"
+		
+			// If number of keys match, can use Db.isDefined
+			if ftblkeys.length(",")=acckeys.length(",") do {
+				set xcode=" if Db.isDefined("""_fkfid_""","""_where_""")"
+				set xcode=xcode_" set vERRMSG = "_ERMSG
+				set xcode=xcode_" throw Class.new(""Error"",""%PSL-E-DBFILER,""_vERRMSG.replace("","",""~""))"
+				do ADD^DBSFILB(.code(), xcode,"Restriction on delete")
+			}
+			
+			// Otherwise, need to do select
+			else  do {
+				set xcode=" type ResultSet rs"_n_"=Db.select("""_fkeys_""","
+				set xcode=xcode_""""_fkfid_""","""_where_""")"
+				do ADD^DBSFILB(.code(), xcode,"Restriction on delete")
+				set xcode=" if 'rs"_n_".isEmpty()"
+				set xcode=xcode_" set vERRMSG = "_ERMSG
+				set xcode=xcode_" throw Class.new(""Error"",""%PSL-E-DBFILER,""_vERRMSG.replace("","",""~""))"
+				do ADD^DBSFILB(.code(), xcode)
+			}
+		}	
+		
+		else  do {	// Cascade
+			set xcode=" do Db.delete("""_fkfid_""","""_where_""",vpar)"
+			do ADD^DBSFILB(.code(), xcode,"Cascade delete")
+						
+			if ",ACN,DEP,LN,CIF,"[(","_fkfid_",") do {
+				write !!?15," ** Warning ** Review cascade delete definition"
+				write !?15,xcode,!
+			}
+		}
+
+		do ADD^DBSFILB(.code(), "")
+	}
+	
+	quit
+		
+
+CASDELST(String fid,		// Private - Build list of foreign keys
+	 String list())
+
+	type Number n = ""
+	
+	set n = list(n).order(-1)+1
+
+	type ResultSet rs=Db.select("FID,FKEYS,DEL","DBTBL1F","%LIBS='SYSDEV' AND TBLREF=:fid")
+	
+	while rs.next() do {
+		set list(n) = rs.getCol("FID")_"|"_rs.getCol("FKEYS")_"|"_rs.getCol("DEL")
+		set n = n+1
+	}
+	
+	quit
+
+
+ifComp(String code)	// xecute DBTBL7.IFCOMP and return truth
+
+	/* This procedure calls the PSL compiler with the PSL expression
+	contained in code.  The expression is parsed and executed. 
+	The expression can reference the configuration table CUVAR
+	at compile time.  e.g., code = 'CUVAR.%MCP = 1'
+	*/
+
+	type Boolean isTrue = 0
+	do ifCompx(code,.isTrue)
+	quit isTrue
+	
+	
+ifCompx(String code,	// Error trap protected compile-time condition execution
+	Boolean isTrue)
+	
+	type public Number ER
+	type public String RM
+	
+	type Number cnt, seq
+	type String cmperr(), m(), psl()
+
+	set psl(1) = " if "_code
+	do cmpA2A^UCGM(.psl,.m,,,,,.cmperr()) if cmperr.get() do { quit
+		set ER = 1
+		set RM = "Trigger condition compile error: "_code
+	}
+	
+	/* Check number of generated lines.  We only allow a single line of
+	executable code.  PSL will generate a minimum of two lines, since
+	if adds a "Q" for the last line, so more than two lines is a problem.
+	*/
+	set cnt = 0
+	set seq = ""
+	for  set seq = m(seq).order() quit:seq.isNull()  set cnt = cnt + 1
+	if cnt > 2 do { quit
+		set ER = 1
+		set RM = "Invalid trigger condition - multi-line generated code: "_code
+	}
+
+	new $ZT
+	set $ZT = "S ER=1,RM=""Invalid trigger condition: ""_code ZG "_($ZL - 1)
+	set cnt = m("").order()				// Get code to execute
+	#ACCEPT DATE=11/11/03; PGM=Frank Sanchez; CR=Frank Sanchez
+	xecute m(cnt)
+	
+	set isTrue = $T
+	
+	quit
+
+vSIG()	quit "60877^68879^Dan Russell^39664"	// Signature - LTD^TIME^USER^SIZE

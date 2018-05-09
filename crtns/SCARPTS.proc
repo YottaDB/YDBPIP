@@ -1,0 +1,398 @@
+SCARPTS ; Procedure SCARPTS - Miscellaneous routine calls from reports
+ ;;Copyright(c)2005 Sanchez Computer Associates, Inc.  All Rights Reserved - 08/09/05 10:35 - spatola
+ ;
+ ; **** This is a DATA-QWIK generated routine (level 25) ****
+ ;
+	/*
+	ORIG: smithc - 03/03/2005
+	DESC: Miscellaneous routine calls from reports
+
+	---- Comments --------------------------------------------------------
+	
+	03/14/05 - SmithCD - CR 13782
+		   Converted to PSL. This is needed for computed column 
+		   CURRVAL^DTJFMCDI (among other things). Did not convert the 
+		   following sections that are currently not called from any 
+		   elements in p04 (if elements are added in the future that 
+		   need these sections, they should be converted / added at 
+		   that time). These sections include LUT, R100, R101, R012, 
+		   TT13, V6P, and related sections. Also did not convert 
+		   code involving RELACN, which is not a valild table in p04 
+		   (the code was not doing anything useful anyway).
+	
+	---- Revision History ------------------------------------------------
+
+	*/
+	
+	quit
+
+public	R138	// Called by function LNR010 (delinquent notices)
+
+	type public String RID
+
+	set RID = CUVAR.DLQNT
+	if RID.isNull() set RID = "SCA138"
+
+	quit
+
+
+public	EFFRATE(Date %SystemDate,
+		String CRCD,
+		String CLS,
+		String GRP,
+		Number TYPE,
+		String GLSC,
+		Number CC,
+		Number BAL,
+		Number BALADJ,
+		Number ACR,
+		Number BALRT00,
+		Number BALRT01,
+		Number ACR00,
+		Number ACR01,
+		Number ACRAACM)
+
+	// Daily effective rate, computed for [TTL]EFFRATE, used by SCA034
+
+	type Number BALCMP, EFFRATE, ACRADJ
+
+	// Here, UDBAL has only been filed into piece 29 if ARUF=1 on the loan
+	set BALCMP = BAL - BALADJ
+	if BALCMP = 0 set EFFRATE = 0 quit EFFRATE
+	
+	// The sum of DAA for "00", "01", "03" loans
+	set ACRADJ = ACR00 + ACR01
+	
+	/*
+	The following formula computes the effective rate for a day. The
+	calculation is obtaining the daily earnings dividing that number by
+	the loan balance (BALCMP). This sounds easy until the effects of
+	standard period interest calculations ("00", "01", "03") are
+	considered. Because of periodic accrual adjustments to loan accounts
+	([LN]AACM), the daily accrued amount (ACR in the formula; [DEP,LN]DAA
+	in the account record), the ACR for these loans may not be valid.
+	
+	BALRT00 + (BALRT01 * 360 / 365)
+	The formula takes the weighted rate/balance for "00"s (BALRT00) and
+	adds to it the weighted rate/balance for "01"s (BALRT01), adjusted
+	by the days per year. This considers the standard loans. Note that
+	^BTTDRV computes these numbers by multiplying BALINT by IRN. This
+	represents the annual earnings for those balances and rates,
+	multiplied by 100.
+	
+	plus     (ACR - ACRADJ * 36500)
+	Here ACRADJ is the sum of the daily accrued for "00", "01" and "03"
+	loans.  This amount is subtracted from the total daily accrued to
+	leave the actual-based accrual number. This remainder is multiplied
+	by 36500 to represent the annual interest amount for these loans,
+	multiplied by 100.
+	
+	divided by BALCMP
+	The sum of the total annual earnings (multiplied by 100) is divided
+	by the sum of the balances. This represents the effective rate for
+	the product.
+	*/
+	
+	set EFFRATE = (BALRT00 + ((BALRT01 * 360) / 365) + ((ACR - ACRADJ) * 36500)) / BALCMP
+	
+	set EFFRATE = EFFRATE.justify(0, 3)
+
+	quit EFFRATE
+
+
+public	TTLAVGS(Date %SystemDate,
+		String CRCD,
+		String CLS,
+		String GRP,
+		Number TYPE,
+		String GLSC,
+		Number CC)
+
+	/*
+	 Monthly effective rate and average ba$
+	
+	 Computed [TTL]XAVGS = EFFRATEM | AVGBALM | MTDAVGBL
+	
+	 ARGUMENTS:
+		%SystemDate	Current date	/REQ/TYP=D/LEN=10
+		CRCD		Currency Code	/REQ/TYP=T/LEN=3
+		CLS		Account Class	/REQ/TYP=T/LEN=1
+		GRP		Account Group	/REQ/TYP=T/LEN=4
+		TYPE		Account Type	/REQ/TYP=N/LEN=12
+		GLSC		GL Set Code	/REQ/TYP=T/LEN=6
+		CC		Cost Center	/REQ/TYP=N/LEN=6
+	*/
+
+	type Number ACR, ACRST, AVGBALM, BALCMP, DIP, DIP1, EFFRATEM, MEACRADJ
+	type Number MTDAVGBL, XAVGS
+	type Date BOM, EOM, JD
+	
+	set (ACR, ACRST, BALCMP, MEACRADJ, MTDAVGBL) = 0
+	
+	set EOM = $$EOMJD^SCADAT(%SystemDate, 1)
+	set BOM = $$BOMJD^SCADAT(%SystemDate, 1)
+
+	type DbSet ds = Db.selectDbSet("TTL", "TJD NOT<:BOM AND TJD NOT>:EOM", "TJD ASC")
+	
+	while ds.next() do {
+
+		type RecordTTL ttl = ds.getRecord()
+		
+		set BALCMP = BALCMP + (ttl.bal - ttl.baladj)	// Balance
+
+		// Month-to-date bal... stop accumulating after the current date
+		if ttl.tjd '> %SystemDate set MTDAVGBL = BALCMP
+
+		/*
+		ACRST = "Standard" accruals
+		= Total for 00's, 01's, and AACM's
+		= ACR00 + ACR01 + ACRAACM
+		*/
+	
+		set ACRST = ACRST + ttl.acr00 + ttl.acr01 + ttl.acraacm
+		set MEACRADJ = MEACRADJ + ttl.meacradj
+		set ACR = ACR + ttl.acr
+	}
+
+	set DIP = EOM - BOM + 1
+	set DIP1 = TJD - BOM + 1
+	
+	/*
+	ACR - ACRST = "Actual" accruals
+	= Total for 10's and 11's
+	*/
+	if 'BALCMP set EFFRATEM = 0
+	else  do {
+		set EFFRATEM = (((ACRST + MEACRADJ) * 1200 * DIP) + ((ACR - ACRST) * 36500)) / BALCMP
+		set EFFRATEM = EFFRATEM.justify(0, 5)
+	}
+
+	set AVGBALM = BALCMP / DIP.justify(0)
+	set MTDAVGBL = MTDAVGBL / DIP1.justify(0)	// mtd avg balance
+	set XAVGS = EFFRATEM_"|"_AVGBALM_"|"_MTDAVGBL
+
+	quit XAVGS
+
+
+public	EOM	
+
+	// End of month post-processor for Monthly Effective Rate Report 
+	// (SCA243)
+	
+	type public String %MSKD, X
+	
+	type Date BOM, EOM, JD
+
+	quit:X.isNull()
+	
+	set JD = X.toDate(%MSKD.get())
+	if JD < 0 quit
+	
+	set EOM = $$EOMJD^SCADAT(JD, 1)
+	
+	// Not end-of-month
+	if JD '= EOM do Runtime.setErrMSG("SCT", 4859) quit
+	
+	set BOM = $$EOMJD^SCADAT(JD, 1)
+	
+	type ResultSet rs1 = Db.select("DISTINCT TJD", "TTL", "TJD=:BOM")
+	
+	// TTL file does not exist for beginning-of-month
+	if rs1.isEmpty() do Runtime.setErrMSG("TTL", 2762) quit
+	
+	type ResultSet rs2 = Db.select("DISTINCT TJD", "TTL", "TJD=:EOM")	
+	
+	// TTL file does not exist for end-of-month
+	if rs2.isEmpty() do Runtime.setErrMSG("TTL", 2763) quit
+	
+	quit
+
+
+public	data(Date %SystemDate,
+	     String CLS,
+	     String GRP,
+	     Number TYP,
+	     Number CID,
+	     Number TSEQ)
+
+	// Assignment Expression for column DATA in table DTJFM
+	
+	type public String MPLCT(,)
+	type public Boolean ER
+	
+	type String %LIBS, DATA, DESC, DFID, DI, DI1, DILNM, DIX, KEY, NEWV
+	type String NEWV1, NEWV2, NEWV3, NEWV4, NEWVUF, OLDV1, OLDV2
+	type String OLDV3, OLDV4, TBL, X
+
+	set %LIBS = "SYSDEV"
+	set (DATA, KEY) = ""
+
+	set (NEWV, NEWV2, NEWV3, NEWV4) = ""
+	set (OLDV2, OLDV3, OLDV4) = ""
+	
+	type RecordDTJFM dtjfm = Db.getRecord("DTJFM", "%SystemDate,CLS,GRP,TYP,CID,TSEQ")
+
+	set DATA = dtjfm.tcmt
+	set OLDV1 = DATA.piece(":", 2)
+	set NEWV1 = DATA.piece(":", 3)
+	set DIX = DATA.piece(":", 1)
+	set NEWVUF = DATA.piece(":", 3)
+
+	if DIX.isLike("%[%") set DIX = DIX.piece("[",2), DIX = "["_DIX
+	else  do { quit DATA
+		set DESC = DIX
+		set DI=""
+		do DSET
+	}
+
+	if 'DATA.isLike("%[%") set:DESC.isNull() DESC = DATA, DI = "" do DSET quit DATA
+	
+	set DFID = DIX.piece("]", 1)
+	set DFID = DFID.piece("[", 2)
+	
+	set DI1 = DIX.piece("]", 2)
+	set X = DIX
+	
+	do ^DBSDI
+	if ER quit ""
+	
+	set DESC = DILNM.get()
+
+	// Mailing Address
+	if DI = "MSEQ" set DESC = $$^MSG("4857")
+
+	// Legal Address
+	if DI = "LSEQ" set DESC = $$^MSG("4856")
+
+	// Invalid Data Item (DI not in ^DBTBL)
+	if DI.isNull() do { quit ""
+		set DESC = $$^MSG(1298)
+		set DI = DIX
+		do DSET
+	}
+	
+	type RecordDBTBL1D dbtbl1d = Db.getRecord("DBTBL1D", "%LIBS='SYSDEV',FID=:DFID,DI=:DI1", 1)
+
+	set TBL = dbtbl1d.tbl
+	set DESC = dbtbl1d.des
+	
+	if dbtbl1d.typ = "D" do {
+		set:(OLDV1?1.5N) OLDV1 = {Date}OLDV1.toString()
+		set:(NEWV1?1.5N) NEWV1 = {Date}NEWV1.toString()
+	}
+
+	if TBL.extract() = "[" set TBL = $$GETTBL(TBL, .KEY)
+
+	if 'TBL.isNull(),'KEY.isNull() do LOOKUP
+	
+	set DI = DI1
+	set DESC = DESC.extract(1, 20)
+	set OLDV1 = OLDV1.extract(1, 35)
+	set NEWV1 = NEWV1.extract(1, 35)
+	
+	do DSET
+	
+	quit DATA
+
+
+DSET	// set the variables
+
+	type public String DI, DATA, DESC, NEWV, NEWVUF, NEWV1, NEWV2, NEWV3
+	type public String NEWV4, OLDV1, OLDV2, OLDV3, OLDV4
+
+	if 'DI.isNull(), OLDV1.isNull() set OLDV1 = "Null"
+	if 'DI.isNull(), NEWV1.isNull() set NEWV1 = "Null"
+
+	set DATA = DI_"|"_DESC_"|"_OLDV1_"|"_OLDV2_"|"_OLDV3_"|"_OLDV4_"|"_NEWV1_"|"_NEWV2_"|"_NEWV3_"|"_NEWV4_"|"_NEWV_"|"_NEWVUF
+	
+	quit
+
+
+LOOKUP	// Find table values
+
+	type public String COL = "", KEY, NEWV1, OLDV1, TBL
+	
+	type Number LEN
+	
+	// Select non-key columns
+	type ResultSet rs = Db.select("DI", "DBTBL1D", "%LIBS='SYSDEV' AND FID=:TBL AND NOD NOT LIKE '%*%'")
+	
+	// Assume first column
+	if rs.next() set COL = rs.getCol("DI")
+	if COL.isNull() quit
+
+	do TBL(COL, TBL, KEY, .NEWV1)
+	do TBL(COL, TBL, KEY, .OLDV1)
+
+	set LEN = $S(NEWV1.length() > OLDV1.length():NEWV1, 1:OLDV1).length()
+
+	set NEWV1 = NEWV1_" "_"                    ".extract(1, LEN - NEWV1.length())
+	set OLDV1 = OLDV1_" "_"                    ".extract(1, LEN - OLDV1.length())
+	
+	quit
+
+
+TBL(String COL, String TBL, String KEY, String VAL)	// Decode table
+
+	type String WHERE
+
+	if VAL.isNull() set VAL = "Null" quit
+	
+	set WHERE = KEY_"='"_VAL_"' OR "_KEY_"='"_VAL.piece(" ", 1)_"'"
+
+	#ACCEPT DATE=03/21/05;PGM=SmithCD
+	type ResultSet rs = Db.select(COL, TBL, WHERE)
+	
+	if rs.next() set VAL = VAL_" ["_rs.getCol(1)_"]"  quit
+	
+	// No Table Entry
+	set VAL = $$^MSG("4858")
+	
+	quit
+
+
+GETTBL(String TBL, String KEY)	// Get table from table reference
+
+	type public String %LIBS
+
+	type String KEYLIST
+	
+	// Parse table ref
+	set TBL = TBL.piece("]", 1)
+	set TBL = TBL.piece("[", 2)
+	
+	type RecordDBTBL1 dbtbl1 = Db.getRecord("DBTBL1", "%LIBS='SYSDEV',FID=:TBL", 1)
+	
+	set KEYLIST = dbtbl1.acckeys
+	quit:KEYLIST.isNull() TBL
+	
+	set KEY = $$TRIMKEYS(KEYLIST) quit:KEY="" ""
+	
+	// Return table name
+	quit TBL
+
+
+TRIMKEYS(String KEYLIST)	// Trim key names from global ref
+
+	type String KEYVAL, KEY = ""
+	type Number I, NUMKEYS
+	type Boolean NONLIT = 0
+	
+	set NUMKEYS = KEYLIST.length(",")
+
+	// Parse key dinams
+	for I = 1:1:NUMKEYS do {  quit:NONLIT = 1
+		set KEYVAL = KEYLIST.piece(",", I)
+		
+		// Exclude literal keys
+		if KEYVAL.isLiteral() quit
+		
+		set NONLIT = 1
+
+		// Keep the first non-literal
+		set KEY = KEYVAL
+	}
+
+	quit KEY
+
+vSIG()	quit "59987^74891^Chad Smith^9349"	// Signature - LTD^TIME^USER^SIZE

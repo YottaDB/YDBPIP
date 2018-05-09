@@ -1,0 +1,737 @@
+DBSFILER
+
+	// **********************************************************************
+	// * IMPORTANT NOTE:                                                    *
+	// * According to the rules that apply to PSL compiler upgrades,        *
+	// * the generated M routine associated with this procedure must be     *
+	// * checked into StarTeam and released with the procedure whenever     *
+	// * changes are made to this procedure.                                *
+	// *                                                                    *
+	// * The mrtns version will be used during upgrades and will then be    *
+	// * removed from the mrtns directory.  Therefore, other than in a      *
+	// * development environment, or during an upgrade, an mrtns version of *
+	// * this routine should not exist.                                     *
+	// *                                                                    *
+	// * Keep these comments as single line to ensure they exist in the     *
+	// * generated M code.                                                  *
+	// **********************************************************************
+		 
+	/*
+	DATA-QWIK general purpose database filer.
+	
+	Much of this procedure will be obsoleted once all code is converted
+	to PSL.
+	
+	NOTE:  The EXT section of this procedure cannot be used for tables that
+	are in an RDB.  Any callers expecting to file to an RDB must be written
+	in PSL and use the save() methods.
+
+	---- Revision History -------------------------------------------------
+	
+	10/13/06 - RussellDS - CR22719
+		   Modified use of delimiter in VDDUX section to use the
+		   table delimiter, not "|".
+	
+	10/09/06 - SmithCD - CR 23395
+		   In VDDUX section, replaced RM variable usage with vRM to 
+		   avoid hiding the RM variable from the application after 
+		   the external error trap is executed, when an error is 
+		   thrown in VDDUX.
+	
+	05/08/06 - Allan Mattson - CR20048
+	           Replaced occurences of '$C(254)' with 'PSL.maxCharValue - 1'
+	           (Unicode support).
+
+	12/22/05 - RussellDS - CR18400
+		   Added comments related to need for mrtns version.
+	
+	10/25/05 - RussellDS - CR17834
+		   Converted to PSL.
+		   
+		   Modify tbl function to always return null.  Remove it once
+		   ^SQLCMP no longer calls it.
+		   
+		   Removed PRCFILE and PRCLOAD as the concept in lodnod^DBSDD
+		   related to special loading/filing is no longer used.
+		   
+		   Removed lots of unused code.
+		   
+		   Removed all old revision history since even more recent is
+		   no longer applicable due to the extent of the rewrite.
+
+	-----------------------------------------------------------------------
+	*/
+
+	quit		// Do not call from top
+
+	
+public EXT(String fid,			// Table name
+	   Number %ProcessMode,		// Processing mode [*]
+	   String par)			// Parameters		/NOREQ
+	   
+	/*
+	Update a single record based on the access keys and the short name
+	
+	NOTE:  This section is for backward compatibility for code that has
+	not yet been rewritten to PSL.  Once all code is PSL, this section
+	and all it's supporting code should be removed.
+	
+	This call is not to be used by any PSL code.
+	
+	ARGUMENT NOTES:
+	
+		. %ProcessMode		Values - 0 = insert
+						 1 = update
+						 2 = integrity check
+						 3 = delete
+	*/
+	
+	// vfkey() is public array used by SQL for buffered commits in
+	// order to perform foreign key checking at end.
+	
+	type public Boolean ER
+	type public String RM, UX(,), vfkey()
+
+	type Boolean vtp
+	type Date vtjd
+	type Number I
+	type String vgbl, vkeys, vkeysx, vlvn, vpgm, vreftim, vreftld, vrefuid, vsysnm, vuid
+	
+	set ER = 0
+	
+	if $$rdb^UCDB(fid) do { quit
+		
+		set ER = 1
+		set RM = "^DBSFILER is not valid for RDB tables.  Rewrite caller to PSL using save methods."
+	}
+	
+	type RecordDBTBL1 dbtbl1 = Db.getRecord("DBTBL1", "%LIBS='SYSDEV',FID=:fid")
+	
+	set vlvn = dbtbl1.fsn
+	if 'vlvn.endsWith("(") set vlvn = vlvn_"("
+	set vgbl = dbtbl1.glref
+	set vkeysx = dbtbl1.acckeys
+	set vkeys = ""
+	for I = 1:1:vkeysx.length(",") do {
+		
+		type String key
+		
+		set key = vkeysx.piece(",", I)
+		
+		if 'key.isLiteral() set vkeys = vkeys_key_","
+	}
+	set vkeys = vkeys.extract(1, vkeys.length() - 1)	// No literals
+
+	set vpgm = dbtbl1.udfile				// Filer
+	set vreftld = dbtbl1.ptrtld
+	set vrefuid = dbtbl1.ptruser
+	set vreftim = dbtbl1.ptrtim
+	set vsysnm = dbtbl1.syssn
+	
+	set vtp = $Tlevel				// Is TP already on?
+	
+	if 'vtp do Runtime.start("CS", "*")
+	
+	// If there's a filer, use it
+	if 'vpgm.isNull() do {
+		
+		if (%ProcessMode = 2) do {		// Integrity check
+			
+			type String vpgmx
+			
+			set vpgmx = "vlegacy^"_vpgm_"(%ProcessMode,$G(par))"
+			
+			do @vpgmx
+		}
+		else  do {
+			
+			type Number obj
+			type String vpgmx, vobj()
+			
+			set obj = $$SN2OBJ^UCUTIL(fid)	// Convert to object format
+			
+			set vpgmx = "^"_vpgm_"(obj,$G(par))"
+			
+			do @vpgmx			// Call filer
+		}
+	}
+	else  do {					// No filer
+		
+		// Skip CUVAR (vkeys.isNull()), but shouldn't be here anyway
+		// since it has a filer
+		if (%ProcessMode < 2), 'vkeys.isNull() do { quit:ER
+		
+			type String REQLIST, REQMISNG, vfsn()
+		
+			// Check require fields
+			set REQLIST = dbtbl1.listreq
+			set REQMISNG = ""
+			
+			for I = 1:1:REQLIST.length(",") do {
+				
+				type String COL, VAL
+				
+				set COL = REQLIST.piece(",", I)
+				
+				// Get field value, either local or on disk
+				set VAL = $$RETVAL^DBSDB(fid_"."_COL,,,,.vfsn)
+				
+				if VAL.isNull() set REQMISNG = REQMISNG_COL_","
+			}
+			
+			set REQMISNG = REQMISNG.extract(1, REQMISNG.length() - 1)
+			
+			if 'REQMISNG.isNull() do { quit:ER
+			
+				set ER = 1
+				// Data Required
+				set RM = $$^MSG(741)_", "_REQMISNG
+			}
+			
+			// Don't allow key updates
+			if (%ProcessMode > 0) do { quit:ER
+				
+				for I = 1:1:vkeys.length(",") do { quit:ER
+					
+					type String key
+					
+					set key = vkeys.piece(",", I)
+					
+					if UX(fid, key).exists() do {
+					
+						set ER = 1
+						// Cannot update access key ~p1
+						set RM = $$^MSG(8556, vkeys.piece(",", I))		
+					}
+				}
+			}
+		}
+		
+		// Check delete restriction
+		else  if (%ProcessMode = 3) do { quit:ER
+			
+			/*
+			type String v, vret
+			
+			set v = ""
+			for I = 1:1:vkeys.length(",") set v = v_$C(28)_@vkeys.piece(",", I)
+			
+			set vret = $$CASDEL^DBSDB(fid, v, "")
+			
+			if 'vret.isNull() do {
+			
+				set ER = 1
+				set RM = vret.piece("|", 2, 99)
+			}
+			*/
+			
+			set ER = 1
+			set RM = "^DBSFILER is not valid for tables requiring cascade deletes.  Rewrite caller to PSL using save methods."
+		}
+		
+		set vuid = %UserID.get()
+		if vuid.isNull() set vuid = $$USERNAM^%ZFUNC
+		
+		set vtjd = %SystemDate.get()
+		if vtjd.isNull() do {
+			
+			type RecordCUVAR cuvar = Db.getRecord("CUVAR")
+			
+			set vtjd = cuvar.tjd
+		}
+
+		// Use different values for DATA-QWIK
+		if (vsysnm = "DBS") do {
+			
+			set vuid = $$USERNAM^%ZFUNC
+			set vtjd = %CurrentDate
+		}
+		
+		// Update date/time/user if required
+		if 'vreftld.isNull() do {
+		
+			do SETVAL^DBSDD(fid_"."_vreftld, vtjd)
+			kill UX(fid, vreftld)
+		}
+		if 'vreftim.isNull() do {
+		
+			do SETVAL^DBSDD(fid_"."_vreftim, %CurrentTime)
+			kill UX(fid, vreftim)
+		}
+		if 'vrefuid.isNull() do {
+		
+			do SETVAL^DBSDD(fid_"."_vrefuid, vuid)
+			kill UX(fid, vrefuid)
+		}
+
+		set ER = $$INDEX(fid, .RM) quit:ER		// Update Indices
+		
+		set RM = $$FILE(%ProcessMode, .dbtbl1, .@vlvn.piece("(", 1), vgbl, vkeys)
+		
+		if 'RM.isNull() set ER = 1
+	}
+	
+	quit:vtp				// Let calling routine to manage TP
+	
+	kill vfkey				// Don't return if not under TP
+	
+	if '$Tlevel set ER = 1 quit		// TP restart error?
+	
+	if ER do Runtime.rollback() quit
+	
+	do Runtime.commit()
+	
+	quit
+	
+	
+INDEX(String fid,	// Table name
+      String RM)	// Error message, if any	/MECH=REF:W
+
+	/*
+	Update DATA-QWIK indices based upon the definition in DBTBL8
+
+	Indices which contain pre/post processors and/or Queries
+	cannot be managed through this subroutine.  In those cases
+	they can be updated only through compiled filer programs.
+	*/
+	
+	type public String UX(,)
+	
+	type Boolean ER = 0
+	
+	type DbSet ds = Db.selectDbSet("DBTBL8", "%LIBS='SYSDEV' AND FID=:fid")
+	
+	while ds.next() do { quit:ER
+		
+		type Boolean add, del, isChangd
+		type Number I
+		type String gbl, newkeys, oldkeys, ordby, ordval, vfsn
+		
+		type RecordDBTBL8 dbtbl8 = ds.getRecord("DBTBL8")
+		
+		set ordby = dbtbl8.orderby
+		set ordval = ordby.piece("=", 2)
+		set ordby = ordby.piece("=", 1)
+		
+		// If update and no change to index, don't continue
+		if (%ProcessMode = 1) do { quit:'isChangd
+			
+			set isChangd = 0
+			for I = 1:1:ordby.length(",") if UX(fid, ordby.piece(",", I)).exists() set isChangd = 1
+		}
+		
+		// Cannot do if queries
+		if ('dbtbl8.qry1.isNull() ! 'dbtbl8.qry2.isNull()) do { quit
+			
+			set ER = 1
+			// Cannot Process Index ~p1 ~p2 , Build filer
+			set RM = $$^MSG(3459, fid, dbtbl8.indexnm)
+		}
+		
+		set gbl = dbtbl8.global
+		if gbl.isNull() do {
+			
+			set gbl = "XDBREF"
+			set ordby = """"_fid_"."_dbtbl8.indexnm_""","_ordby
+		}
+		
+		set gbl = "^"_gbl_"("
+
+		set newkeys = ordby
+		set oldkeys = ordby
+		set (add, del) = 1
+
+		for I = 1:1:ordby.length(",") do { quit:ER
+			
+			type String key, nv, ov
+			
+			set key = ordby.piece(",", I)
+			quit:key.isNull()
+			quit:key.isLiteral()
+			quit:key.beginsWith("$")
+			
+			if key.beginsWith("<<") do { quit
+				
+				set nv = key.piece("<<", 2).piece(">>", 1)
+				set nv = @nv.get()
+				set newkeys.piece(",", I) = nv
+				set newkeys.piece(",", I) = nv
+			}
+			
+			set nv = $$RETVAL^DBSDB(fid_"."_key,,,,.vfsn) quit:ER
+			
+			if UX(fid, key).exists() set ov = UX(fid, key).piece("|", 1)
+			else  set ov = nv
+			
+			if dbtbl8.upcase do {
+				
+				set nv = nv.upperCase()
+				set ov = ov.upperCase()
+			}
+			
+			if dbtbl8.nullflg do {
+				
+				if nv.isNull() set nv = (PSL.maxCharValue - 1).char()
+				if ov.isNull() set ov = (PSL.maxCharValue - 1).char()
+			}
+			
+			if nv.isNull() set add = 0	// Don't add this index
+			if ov.isNull() set del = 0	// Don't delete this index
+			
+			if add set newkeys.piece(",", I) = """"_nv_""""
+			if del set oldkeys.piece(",", I) = """"_ov_""""
+		}
+		
+		if (ordval ? 1A.AN) set ordval = $$RETVAL^DBSDB(fid_"."_ordval,,,,.vfsn) quit:ER
+		else  if ordval.beginsWith("<<"), ordval.endsWith(">>") do {
+			
+			set ordval = ordval.extract(3, ordval.length() - 3)
+			set ordval = @ordval.get()
+		}
+		
+		// Set new index
+		if add, (%ProcessMode < 3) do {
+			
+			type String x
+			
+			set x = gbl_newkeys_")"
+			
+			set @x = ordval
+		}
+		
+		// Delete old index
+		if del, (%ProcessMode <> 0) do {
+			
+			type String x
+			
+			set x = gbl_oldkeys_")"
+			
+			#ACCEPT Date=10/31/05; Pgm=RussellDS; CR=17834
+			kill @x
+		}
+	}
+	
+	quit ER
+
+
+FILE(Number %ProcessMode,	// %ProcessMode value
+     RecordDBTBL1 dbtbl1,	// Table record
+     String sn,			// Local record storage		/MECH=REFNAM:R
+     String gbl,		// Global structure
+     String keys)		// Non-literal keys
+     
+	/*
+	General Purpose Filer when a filer is not provided
+
+	INPUT:
+
+		. @KEY(1)...	Access Key values
+		. UX		Modified record journal
+	
+	RETURNS:
+	
+		. $$	Error message, or Null			/TYP=T
+		
+	*/
+	
+	type public String UX()
+	
+	type Number del, rectyp
+	type String fid, RM
+	
+	set RM = ""
+	
+	set fid = dbtbl1.fid
+	set rectyp = dbtbl1.rectyp
+	
+	if dbtbl1.log do ^DBSLOG(fid, %ProcessMode, .UX())	// Update log file
+	
+	// Process delete
+	if (%ProcessMode = 3) do {
+		
+		type String gblx
+		
+		set gblx = gbl_")"
+		
+		if (rectyp > 1) do {
+			
+			#ACCEPT Date=10/31/05;Pgm=RussellDS;CR=17834
+			kill @gblx
+		}
+		else  ZWI @gblx
+
+	}
+	
+	else  do {			// GT.M database
+		
+		type String fnode(), node
+	
+		set del = dbtbl1.del
+	
+		if (rectyp = 1) do { if 'RM.isNull() quit RM
+		
+			type String z, zgbl
+			
+			set zgbl = gbl_")"
+			
+			if (%ProcessMode = 0), (@zgbl.data() # 10) do {
+				
+				// Already on file
+				set RM = $$^MSG(2327)
+			}
+			
+			else  if (%ProcessMode = 1), ((@zgbl.data() # 10) = 0) do {
+				
+				// Not on file
+				set RM = $$^MSG(7932)
+			}
+			
+			else  if (del = 124) set @z = sn.get().trim(-1, "|")
+			
+			else  set @z = sn.get()
+		}
+		
+		do { quit:'fnode.exists()	// Get list of nodes to deal with
+
+			type String N
+			
+			set N = ""
+			
+			if (%ProcessMode = 0) do {
+				
+				type String N = ""
+				
+				if (sn.data() # 2) set fnode = ""
+				
+				for  set N = sn(N).order() quit:N.isNull()  set fnode(N) = ""
+			}
+			
+			else  if (sn.data() = 1) set fnode = ""		// No lower level
+			
+			else  do {
+				
+				type String N = ""
+				
+				for  set N = UX(fid, N).order() quit:N.isNull()  do {
+
+					type Number PIECE
+					type String NODE
+					
+					set NODE = UX(fid, N).piece("|", 3)
+					set PIECE = UX(fid, N).piece("|", 4)
+					
+					quit:(PIECE = "*")	// Access key
+					
+					if NODE.isNull(), PIECE.isNull() set NODE = $$NOD^DBSDD(fid_"."_N)
+					
+					if NODE = keys.piece("|", keys.length(",")) set NODE = ""
+					
+					if '(NODE.isNull() ! (NODE = " ")) set fnode(NODE) = ""
+				}
+			}
+		}
+		
+		if ((rectyp # 10) <> 0), ((fnode.data() # 2) <> 0) do {
+			
+			type String gblx, z
+			
+			if (del = 124) set @z = sn.get().trim(-1, "|")
+			else  set z = sn
+			
+			set gblx = gbl_")"
+			
+			set @gblx = z
+		}
+		
+		quit:rectyp = 1				// Unsegmented
+		quit:(fnode.data() < 10)		// No lower levels
+		
+		set node = ""
+		
+		// Global without access keys, e.g, CUVAR
+		if gbl.piece("(", 2).isNull() set gbl = gbl_"node)"
+		else  set gbl = gbl_",node)"
+
+		for  set node = fnode(node).order() quit:node.isNull()  do {
+			
+			type String z
+			
+			if (del = 124) set @z = sn(node).trim(-1, "|")
+			else  set z = sn(node)
+			
+			if z.isNull() zwi @gbl
+			else  set @gbl = z
+		}
+	}
+	
+	quit
+
+
+public VDDUX(String fid,	// Table name
+	     String vx())	// Data buffer [*]	/MECH=REFARR:R
+
+	/*
+	Validate input based on data dictionary attributes.
+	
+	Called by filer generated code.
+	
+	If encounters an error, will throw error.
+
+	ARGUMENT NOTES:
+
+		. vx	vx(column)=old_value|new_value
+
+	EXAMPLES:
+
+		do VDDUX("DEP",.vx)
+	*/
+	
+	type String col, delim, vRM
+	
+	type SchemaTable tblrec = Db.getSchemaTable(fid)
+	
+	set delim = tblrec.columnDelimiter.char()
+	
+	set (col, vRM) = ""
+	
+	for  set col = vx(col).order() quit:col.isNull()  do { quit:'vRM.isNull()
+		
+		type String max, min, tbl, typ, X
+		
+		type RecordDBTBL1D dbtbl1d = Db.getRecord("DBTBL1D", "%LIBS='SYSDEV',FID=:fid,DI=:col")
+		
+		quit:(dbtbl1d.nod ? 1N1"*")		// No need to check keys
+		
+		set tbl = dbtbl1d.tbl
+	
+		if 'tbl.isNull() do {			// Table look-up
+		
+			type Number I, keycnt
+			type String acckeys, tblfid
+		
+			// No validation
+			if tbl.beginsWith("@") set tbl = "" quit
+
+			// No validation
+			if tbl.isLike("%:NOVAL%") set tbl = "" quit
+			
+			// Not table reference
+			if (tbl '? 1"{".E1"]".E) set tbl = "" quit
+			
+			// Check for too many keys
+			set tblfid = tbl.piece("[", 2).piece("]", 1)
+			
+			type RecordDBTBL1 dbtbl1 = Db.getRecord("DBTBL1", "%LIBS='SYSDEV',FID=:tblfid", 1)
+
+			// Not valid table
+			if (dbtbl1.getMode() = 0) set tbl = "" quit
+			
+			set acckeys = dbtbl1.acckeys
+			set keycnt = 0
+			for I = 1:1:acckeys.length(",") if 'acckeys.piece(",", I).isLiteral() set keycnt = keycnt + 1
+
+			// Too many keys
+			if (keycnt <> 1) set tbl = ""
+		}
+	
+		set typ = dbtbl1d.typ
+		set min = dbtbl1d.min
+		if 'min.isNull() set min = $$valuea(min, typ)
+		set max = dbtbl1d.max
+		if 'max.isNull() set max = $$valuea(max, typ)
+		
+		// Get current value - needed by VAL^DBSVER
+		set X = vx(col).piece(delim, 2)
+		
+		set vRM = $$VAL^DBSVER(typ, +dbtbl1d.len, +dbtbl1d.req, tbl, , min, max, +dbtbl1d.dec, , "["_fid_"]"_col, 0)
+
+		if 'vRM.isNull() set vRM = fid_"."_dbtbl1d.di_" "_vRM
+	}
+	
+	if 'vRM.isNull() throw Class.new("Error","%PSL-E-DBFILER,"_vRM.replace(",","~"))
+	
+	quit
+	
+	
+valuea(String v,	// Input value
+       String typ)	// Data type
+
+	set v = $$value(v, typ)
+	if ((v ? 1A.AN) ! (v ? 1"%".AN)) set v = "<<"_v_">>"	// <<variable>> 
+	
+	quit v
+	
+	
+value(String v,		// Input value
+      String typ)	// Data type
+      
+	/*
+	Convert internal to external format
+	
+	EXAMPLES:     External            Internal      Type
+	
+	              SystemDate           TJD            D
+	              CurrentDate          +$H            D
+	              123		   123            
+	              XYZ		   "XYZ"     
+	              <<ABCDE>>            ABCDE      
+		      T		   	   TJD            D
+	              C                    +$H            D
+	              Y                    1              L
+	              N                    0              L
+	*/
+	
+	type String RETURN
+	
+	if v.isNull() set RETURN = ""
+	else  if Db.isDefined("STBLJRNFUNC", "FUNC=:v") do {	// System keyword
+	
+		type RecordSTBLJRNFUNC jrnfunc = Db.getRecord("STBLJRNFUNC", "FUNC=:v")
+	
+		set RETURN = jrnfunc.code
+	}
+	else  if v.isNumber() set RETURN = v
+	else  if v.beginsWith("<<"), v.endsWith(">>") set RETURN = v.piece("<<", 2).piece(">>", 1)	// <<Variable>>
+	
+	else  if (typ = "D") do {
+		
+		if (v = "T") set RETURN = "TJD"			// System Date
+		else  if (v = "C") set RETURN = "+$H"		// Calendar Date
+		else  set RETURN = ""
+	}
+	else  if (typ = "C") do {
+		
+		if (v = "C") set RETURN = "$P($H,"","",2)"	// Current time
+		else  set RETURN = ""
+	}
+	else  if (typ = "L") do {				// Logical
+		
+		if (v = "Y") set RETURN = 1
+		else  set RETURN = 0
+	}
+	else  if (v = """") set RETURN = """"""""""		// String delimiter
+	else  set RETURN = """"_v_""""				// Text
+	
+	quit RETURN
+
+
+private tbl(String tbl)		// [table] reference
+
+	/*
+	This is only called by ^SQLCMP and should be removed once
+	SQLCMP is modified to eliminate the call.  Global reference
+	formats should no longer be allowed with DBI.
+	
+	This used to return [FID] type lookup in global format.  Since
+	we are no longer supporting global format look-ups, it will now
+	just return null to act as a valid return for ^SQLCMP.
+	
+	RETURNS:
+	
+		. $$	Null
+
+	*/
+	
+	quit ""	
+
+vSIG()	quit "60564^56147^Dan Russell^16903"	// Signature - LTD^TIME^USER^SIZE

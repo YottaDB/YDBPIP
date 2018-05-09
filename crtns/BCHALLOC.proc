@@ -1,0 +1,643 @@
+BCHALLOC //Batch BCHALLOCHLD - Adjustments for Negative Available
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 01/31/2007 12:44 - shetyes
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHALLOCHLD Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ set vBCHSTS=$$STATUS^BCHUTL("BCHALLOCHLD")
+ if vBCHSTS=1 set ER=1,RM=$$^MSG(3410) quit
+ if vBCHSTS=2 set ER=1,RM=$$^MSG(3414) quit
+ if vBCHSTS=0 set %BatchRestart=1
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit do EXIT^BCHUTL("BCHALLOCHLD") quit
+ do JOBMGR^BCHUTL(%FN,"BCHALLOCHLD",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ do EXIT^BCHUTL("BCHALLOCHLD")
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(CID) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHALLOCHLD","*","",CID.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ if %BatchRestart,$$CHKLOG^BCHUTL(%SystemDate,%FN,"BCHALLOCHLD",CID.get()) do { quit
+ do LOG^BCHUTL(%SystemDate,%FN,"BCHALLOCHLD",CID.get(),"Record already processed")
+ }
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,CID)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHALLOCHLD","*","",CID.get(),"",et)
+ }
+ do UPDLOG^BCHUTL(%SystemDate,%FN,"BCHALLOCHLD",CID.get(),vCONTEXT)
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,CID) //
+	type RecordDEP dep
+	
+	set dep=Db.getRecord("DEP","CID")
+
+        do EXEC(.dep)
+        
+	quit	
+
+
+
+EXEC(RecordDEP dep)	// Process account 
+
+	type Number DCL,GCRAVL,SECAVL,x
+	type String RCRCD
+
+	// needed as a temporary patch for a compiler problem
+	// sets up node 51 when dep object is instantiated
+	set x=dep.bal
+
+	set DCL=dep.dcl		// deposit coverage line available
+	set GCRAVL=dep.gcravl	// GCR risk holds available
+	set SECAVL=dep.secavl	// securities coverage available
+	set RCRCD=dep.crcd	// recipient account currency code
+
+	if GCRAVL'<0,SECAVL'<0,DCL'<0 quit	// nph 10.1.99
+
+	if GCRAVL<0 do ADJGCR(.dep)
+
+	if DCL<0 do ADJDCL(.dep)
+
+        if SECAVL<0 do ADJSEC(.dep)
+
+        // save recipient account data to disk
+        do dep.bypassSave()
+
+	quit
+
+
+
+ADJGCR(RecordDEP dep)	// Transfer GCR holds to donor accounts and security holds
+
+	type Public Number CID,DCL,GCRAVL,SECAVL
+	type Public String ET
+	type Public Boolean ER
+	type Number DEFICIT,HLDAMT,REDRSK,SAVDEF
+	type Date EXPDT
+	set DEFICIT=-GCRAVL	// amount of GCR deficit
+	set SAVDEF=DEFICIT
+
+	type ResultSet hldrs
+	// result set of GCR holds for this account
+	set hldrs=Db.select("EXPDT,GCRHLD","HLD11","CID=:CID")
+
+	for  quit:'hldrs.next()!('DEFICIT)  do {
+
+		set EXPDT=hldrs.getCol(1)	// expiration date of hold
+		set HLDAMT=hldrs.getCol(2)	// amount of hold
+
+		type RecordHLD11 hldrec
+		// hold record object
+		set hldrec=Db.getRecord("HLD11","CID,EXPDT")	
+
+		// if there is DCL available on the account, attempt to 
+		// reallocate GCR holds to cover the DEFICIT amount
+		if DCL>0 do DCL(.dep,11)
+	
+		// if there are security funds available, attempt to reallocate
+		// GCR holds to cover the DEFICIT amount
+		if SECAVL>0,HLDAMT,DEFICIT do {
+			set REDRSK=dep.gcrrsk
+			do SEC(.dep,11)
+			set dep.gcrrsk=REDRSK
+			}
+
+		// update amount on hold record
+		set hldrec.gcrhld=HLDAMT
+
+		// save hold record
+		do hldrec.bypassSave()
+
+		} // end for
+
+	if DEFICIT do {		// set exception if there is still a DEFICIT
+		// GCR available is negative
+		set ER=1,ET=$$^MSG(3278)
+		do EXC
+		set ER=0
+		}
+	
+	// reduce GCR risk amount on account by amount reallocated
+	set dep.gcrrsk=dep.gcrrsk-(SAVDEF-DEFICIT)
+
+	quit
+
+
+
+ADJDCL(RecordDEP dep)	// Transfer donor holds to GCR and security holds
+
+	type Public Number CID,DCL,GCRAVL,SECAVL
+	type Public String ET,RCRCD
+	type Public Boolean ER
+	type Number DEFICIT,DONACT,HLDAMT,REDRSK,SAVDEF
+	type String DCRCD
+	type Date EXPDT
+	set DEFICIT=-DCL	// amount of DCL deficit
+	set SAVDEF=DEFICIT
+
+        type ResultSet rs
+	// result set of donor accounts for this recipient account in 
+	// descending priority order
+        set rs=Db.select("PRI,DONACT","DEPDONOR","CID=:CID","PRI DESC")
+
+        for  quit:'rs.next()!('DEFICIT)  do {
+		
+		set DONACT=rs.getCol(2)	// donor account number
+
+		type ResultSet hldrs
+		// result set of donor holds for the donor account 
+		set hldrs=Db.select("EXPDT,RSKAMT","HLD10","CID=:DONACT")                
+
+		for  quit:'hldrs.next()!('DEFICIT)  do {
+ 
+			set EXPDT=hldrs.getCol(1)	// expiration date of hold
+			set HLDAMT=hldrs.getCol(2)	// hold amount
+ 
+			type RecordHLD10 hldrec
+			// hold record object
+			set hldrec=Db.getRecord("HLD10","DONACT,EXPDT,CID")
+ 
+			type RecordACN acn
+			set acn=Db.getRecord("ACN","DONACT")
+ 
+			set DCRCD=acn.crcd	// donor currency code
+
+			// if different currency codes, convert HLDAMT to recipient currency
+			if DCRCD'=RCRCD set HLDAMT=$$CONV^CRCDUTL(HLDAMT,RCRCD,DCRCD)
+		
+			set REDRSK=acn.donrsk	// donor risk amount on recipient account
+
+			if GCRAVL>0 do GCR(.dep,10,DONACT)
+
+                	// if there is security funds available on the account, attempt to
+                	// reallocate donor holds to cover the DEFICIT amount
+			if SECAVL>0,HLDAMT,DEFICIT do SEC(.dep,10,DONACT)
+			
+			set acn.donrsk=REDRSK
+ 
+			// if different currency codes, convert HLDAMT back to donor currency code
+			if DCRCD'=RCRCD set HLDAMT=$$CONV^CRCDUTL(HLDAMT,DCRCD,RCRCD)
+
+			// update hold amount in hold record
+			set hldrec.rskamt=HLDAMT
+ 
+			// save hold record and donor account record
+			do hldrec.bypassSave()
+ 			do acn.bypassSave()
+			
+			} // end for
+ 
+                } // end for
+ 
+        if DEFICIT do {         // set exception if there is still a DEFICIT
+		// DCL available is negative
+                set ER=1,ET=$$^MSG(3279)
+                do EXC
+		set ER=0
+		}
+
+
+ 	quit
+
+
+
+ADJSEC(RecordDEP dep)	// Transfer security holds to GCR and donor holds
+
+	type Public Number CID,DCL,GCRAVL,SECAVL
+	type Public Boolean ER
+	type Public String ET
+	type Number DEFICIT,HLDAMT,REDRSK,SAVDEF
+	type Date EXPDT
+        set DEFICIT=-SECAVL	// amount of SEC deficit
+	set SAVDEF=DEFICIT 
+
+        type ResultSet hldrs
+	// result set of security holds on this account
+        set hldrs=Db.select("EXPDT,SECHLD","HLD12","CID=:CID")
+ 
+        for  quit:'hldrs.next()!('DEFICIT)  do {
+ 
+                set EXPDT=hldrs.getCol(1)	// expiration date of hold
+                set HLDAMT=hldrs.getCol(2)	// hold amount
+ 
+                type RecordHLD12 hldrec
+		// hold record object
+                set hldrec=Db.getRecord("HLD12","CID,EXPDT")
+		
+                if GCRAVL>0 do {
+			set REDRSK=dep.secrsk
+			do GCR(.dep,12)
+                        set dep.secrsk=REDRSK
+ 			}
+		
+                // if there is DCL available on the account, attempt to
+                // reallocate security holds to cover the DEFICIT amount
+                if DCL>0,HLDAMT,DEFICIT do DCL(.dep,12)
+
+		// update hold amount in hold record
+		set hldrec.sechld=HLDAMT
+
+		// save hold record
+                do hldrec.bypassSave()
+ 
+                } // end for
+ 
+        if DEFICIT do {         // set exception if there is still a DEFICIT
+                // SEC available is negative
+		set ER=1,ET=$$^MSG(3280)
+                do EXC
+		set ER=0
+                }
+
+	// reduce security risk amount on account by amount reallocated
+	set dep.secrsk=dep.secrsk-(SAVDEF-DEFICIT)
+
+	quit
+
+
+
+GCR(RecordDEP dep,FRMHLD,DONACT)	// Move hold amount to GCR hold
+
+	type Number AMT	// amount of reallocation
+	type Public Number CID,DEFICIT,GCRAVL,HLDAMT,REDRSK
+	type Public Date EXPDT
+
+	set DONACT=$G(DONACT)	
+
+	if HLDAMT'<DEFICIT set AMT=DEFICIT
+	else  set AMT=HLDAMT
+	if GCRAVL<AMT set AMT=GCRAVL
+	set GCRAVL=GCRAVL-AMT
+	set DEFICIT=DEFICIT-AMT
+	set HLDAMT=HLDAMT-AMT
+	set REDRSK=REDRSK-AMT
+	set dep.gcrrsk=dep.gcrrsk+AMT
+
+	if 'AMT quit
+
+	// see if a hold record with this expiration date exists
+	type ResultSet rs
+	set rs=Db.select("GCRHLD","HLD11","CID=:CID AND EXPDT=:EXPDT")
+
+	// if a hold record already exists, update the amount
+	if rs.next() do {
+		// retrieve the existing record
+		type RecordHLD11 modrec
+		set modrec=Db.getRecord("HLD11","CID,EXPDT")
+ 
+		// update hold amount
+		set modrec.gcrhld=modrec.gcrhld+AMT
+ 
+		// save the modified hold record
+		do modrec.bypassSave()
+		}
+ 
+	else  do {
+		// create a new GCR hold record
+		type RecordHLD11 newrec=Class.new("RecordHLD11")
+		set newrec.cid=CID
+		set newrec.expdt=EXPDT
+		set newrec.gcrhld=AMT
+ 
+		// save new GCR hold record to disk
+		do newrec.bypassSave()
+		}
+
+	// update detail records
+	do DTL(CID,FRMHLD,11,DONACT)
+
+	quit
+
+
+
+DCL(RecordDEP dep,FRMHLD) // Move hold amount to a donor account
+
+	type Public Number CID,DCL,DEFICIT,HLDAMT
+	type Public String RCRCD
+	type Public Date EXPDT
+	type ResultSet rs
+	// record set of donor accounts in priority order
+	set rs=Db.select("PRI,DONACT","DEPDONOR","CID=:CID")
+ 
+	for  quit:'rs.next()!('DEFICIT)!('HLDAMT)  do {
+
+		type Number DONACT
+		set DONACT=rs.getCol(2)	// donor account number
+ 
+		type RecordACN acn
+		// donor account object
+		set acn=Db.getRecord("ACN","DONACT")
+ 
+		type String DCRCD
+		set DCRCD=acn.crcd	// donor account currency code
+ 
+		type Number AVLBAL
+ 
+		if acn.cls="L" do {
+			type RecordLN dln 
+			set dln=Db.getRecord("LN","DONACT")
+			set AVLBAL=dln.avlbal
+			}
+		if acn.cls="D" do {
+			type RecordDEP ddep
+			set ddep=Db.getRecord("DEP","DONACT")
+			set AVLBAL=ddep.balavl
+			}
+		if AVLBAL'>0 quit
+ 
+		if RCRCD'=DCRCD set AVLBAL=$$CONV^CRCDUTL(AVLBAL,RCRCD,DCRCD)
+ 
+		new AMT	// amount of reallocation
+
+		if HLDAMT'<DEFICIT set AMT=DEFICIT
+		else  set AMT=HLDAMT
+		if AVLBAL<AMT set AMT=AVLBAL
+		set DCL=DCL-AMT
+		set DEFICIT=DEFICIT-AMT
+		set HLDAMT=HLDAMT-AMT
+
+		if 'AMT quit
+
+		// if different currencies, convert AMT to donor currency
+		if RCRCD'=DCRCD set AMT=$$CONV^CRCDUTL(AMT,DCRCD,RCRCD)
+
+		// update donor risk amount in donor account object
+		set acn.donrsk=acn.donrsk+AMT
+ 
+		type ResultSet rs2
+		set rs2=Db.select("RSKAMT","HLD10","CID=:DONACT AND EXPDT=:EXPDT AND RCID=:CID")
+ 
+		// if a hold record already exists, update the amount
+		if rs2.next() do {
+			// retrieve the existing record
+			type RecordHLD10 modrec
+			set modrec=Db.getRecord("HLD10","DONACT,EXPDT,CID")
+
+			// update hold amount
+			set modrec.rskamt=modrec.rskamt+AMT
+
+			// save the modified hold record		
+			do modrec.bypassSave()
+			}
+
+		else  do {
+			// create new donor hold record
+			type RecordHLD10 newrec=Class.new("RecordHLD10")
+			set newrec.cid=DONACT
+			set newrec.expdt=EXPDT
+			set newrec.rcid=CID
+			set newrec.rskamt=AMT
+
+			// save new donor hold record to disk
+			do newrec.bypassSave()
+			}
+
+		// update detail records
+		do DTL(CID,FRMHLD,10,DONACT)
+
+		// save donor account object to disk
+		do acn.bypassSave()
+ 
+		} // end for
+ 
+	quit
+
+
+
+SEC(RecordDEP dep,FRMHLD,DONACT)	// Move hold amount to security hold
+
+	type Number AMT	// amount of reallocation
+	type Public Number CID,DEFICIT,HLDAMT,REDRSK,SECAVL
+	type Public Date EXPDT
+
+	set DONACT=$G(DONACT)
+
+	if HLDAMT'<DEFICIT set AMT=DEFICIT
+	else  set AMT=HLDAMT
+	if SECAVL<AMT set AMT=SECAVL
+	set SECAVL=SECAVL-AMT
+	set DEFICIT=DEFICIT-AMT
+	set HLDAMT=HLDAMT-AMT
+	set REDRSK=REDRSK-AMT
+	set dep.secrsk=dep.secrsk+AMT
+ 
+	if 'AMT quit
+
+	// see if a hold record with this expiration date exists
+	type ResultSet rs
+	set rs=Db.select("SECHLD","HLD12","CID=:CID AND EXPDT=:EXPDT")
+
+	// if a hold record already exists, update the amount
+	if rs.next() do {
+		// retrieve the existing record
+		type RecordHLD12 modrec
+		set modrec=Db.getRecord("HLD12","CID,EXPDT")
+ 
+		// update hold amount
+		set modrec.sechld=modrec.sechld+AMT
+ 
+		// save the modified hold record
+		do modrec.bypassSave()
+		}
+
+	else  do {
+		// create new security hold record
+		type RecordHLD12 newrec=Class.new("RecordHLD12")
+		set newrec.cid=CID
+		set newrec.expdt=EXPDT
+        	set newrec.sechld=AMT
+ 
+		// save new security hold record to disk
+		do newrec.bypassSave()
+		}
+
+	// update detail records
+	do DTL(CID,FRMHLD,12,DONACT)
+
+	quit
+
+
+
+DTL(CID,FRMHLD,TOHLD,DONACT)	// update detail records
+
+	type Public Number AMT
+	type Public Date EXPDT
+	type ResultSet rs
+	// result set of recipient account detail records that expire on EXPDT
+	// and have the correct HLDTYP as FRMHLD 
+	set rs=Db.select("TJD,TRNSEQ,RSKSEQ,HLDAMT","RSKHD","CID=:CID AND EXPDT=:EXPDT AND HLDTYP=:FRMHLD")
+
+	for  quit:'rs.next()!('AMT)  do {
+			
+		type Number DTLAMT,NRECAMT,RSKSEQ,TRNSEQ
+		type Date TRNDT
+
+		set TRNDT=rs.getCol(1)	// transaction date
+		set TRNSEQ=rs.getCol(2)	// transaction sequence
+		set RSKSEQ=rs.getCol(3)	// risk hold sequence
+		set DTLAMT=rs.getCol(4)	// hold amount
+	 	
+		type RecordRSKHD dtlrec
+		// detail account record object
+		set dtlrec=Db.getRecord("RSKHD","TRNDT,CID,TRNSEQ,RSKSEQ")
+
+		// modify donor account info if to or from a donor hold
+		if FRMHLD=10 set dtlrec.dcid=""
+		if TOHLD=10 set dtlrec.dcid=DONACT
+
+		// change hold type on detail record to new type
+		set dtlrec.hldtyp=TOHLD
+
+		/* if amount of reallocation is more than detail record amount,
+		 decriment AMT by DTLAMT */
+
+		if AMT'<DTLAMT set AMT=AMT-DTLAMT
+
+		/* otherwise change the hold amount on the detail record and
+		 create a new record with the original HLDTYP for the
+		 remaining amount */
+		else  do {
+			// set current detail record amount 
+			set dtlrec.hldamt=AMT
+			set NRECAMT=DTLAMT-AMT
+			set AMT=0
+			
+			// create a new detail record for leftover amount
+			type RecordRSKHD newrec=Class.new("RecordRSKHD")
+			set newrec.tjd=TRNDT
+			set newrec.cid=CID
+			set newrec.trnseq=TRNSEQ
+			set newrec.rskseq=Db.nextVal("RSKHD","TRNDT,CID,TRNSEQ")
+			if FRMHLD=10 set newrec.dcid=DONACT
+			set newrec.expdt=EXPDT
+			set newrec.hldtyp=FRMHLD
+			set newrec.hldamt=NRECAMT
+			
+			// save new detail record to disk
+			do newrec.bypassSave()
+			}
+
+		// save modified detail record to disk
+		do dtlrec.bypassSave()
+
+		} // end for
+
+	quit
+
+
+
+EXC     // Log error to DAYEND
+
+	type Public Number BAL,CID,%ZTSEQ
+        type Public String ET,RM
+        type Public Boolean ER
+        if '$D(ET) set ET=$G(RM)
+	do LOG^UTLEXC($T(+0),"*",$G(RM),$G(CID),$G(%ZTSEQ),$G(ET),$G(BAL))
+	set ER=0
+        kill ET,%ZTSEQ
+        quit
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,CID
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set CID=vRECORD.piece($C(9),1)
+ do vPROC(CID)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,CID
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>32767 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+13>32767 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("CID","DEP","")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

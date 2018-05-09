@@ -1,0 +1,201 @@
+CRTCK(RecordTTX ttx, RecordTRN trn)
+  /*
+	ORIG: KELLYP - 12/29/2004
+	DESC: Check Print Input
+
+   ---- Comments --------------------------------------------------------
+
+   This procedure acts as the posting program for check-oriented transaction
+   codes (e.g., TC).  In versions prior to Profile04, a FSN entry was created
+   for each check-oriented transaction code being posted and FILE^CRTCK was 
+   specified as the filer in the FSN entry.  Since FSN is no longer necessary
+   in Profile04, the FILE section has been modified to only process the CK
+   array FSN record corresponding to the transaction being processed.  
+
+   ---- Revision History ------------------------------------------------
+   	
+   	17/07/06 - DESHPANDE SK - CR 20748
+   		   Replaced Transaction Variable with Transaction stored
+   		   Value.	
+   		
+	11/04/05 - SAHUN - CR17011
+		   Modified EC and FILE sections to replace the references
+		   to XCHKREG table with CHKREG1 table.
+		   	
+	09/21/05 - RussellDS - CR16911
+		   Modify FILE section to set CID=CKCID before call to
+		   HISTBLD^ACNFUNCS so that correct account number is used.
+
+	12/30/04 - KELLYP - CR 13667
+		Reintroduced this procedure as it has been previously
+		obsoleted.  Only converted the sections of the original 
+		CRTCK routine that were needed to PSL.
+
+   ----------------------------------------------------------------------
+ */
+	type Public String CK()
+
+	if 'CK(ttx.getStoredValue("TranSeq")).data() quit
+
+	do FILE(.ttx,ttx.getStoredValue("TranSeq"))
+
+	quit
+
+EC(RecordTTX ttx, RecordTRN trn) // Error correct section - used for voiding
+	
+	type Public String CK(),ER,FSN()
+	type String CKNUM,CKTYP,X
+	
+	set X=$$FIELD^UTSO(ttx.tso,"CKREG")
+	
+	if X.isNull() quit
+	
+	set CKNUM=X.piece("^",1)
+	set CKTYP=X.piece("^",2)
+
+	if 'CKNUM.isNull() do {  quit:ER
+		type ResultSet rs = Db.select("STATUS","CHKREG1","CKNO=:CKNUM AND CTYPE=:CKTYP")
+		if rs.isEmpty() quit
+		else  do {
+			if rs.getCol("STATUS")=2 do Runtime.setErrSTBLER("CHKREG1","PREVVOID") quit:ER	
+			}		
+		}
+
+	set CK(ttx.getStoredValue("TranSeq"))=X
+
+	do FILE(.ttx,ttx.getStoredValue("TranSeq"))
+	
+	quit
+
+FILE(RecordTTX ttx, Number SEQ)	// File data
+
+	/*
+	 This section will create/update the CHKREG1 and XPDO records
+	 necessary for check-oriented transactions.
+	*/
+
+	type Public String BRCD,CK(),%MSKD
+
+	type Number CID,CKCID,CKOPT,GLNO,ITC6,ITC12,TAMT,TRC
+	type String CKNUM,CKTYP,CNAME,TCMT,X
+	
+	set X=CK(SEQ)
+	
+	set CKNUM=X.piece("^",1)
+	set CKTYP=X.piece("^",2)
+	set CKCID=X.piece("^",3)
+	set CKOPT=X.piece("^",11)
+
+	set ITC6=ttx.itc6
+	set ITC12=ttx.itc12
+	set TAMT=ttx.tamt
+	set TRC=ttx.trc
+	
+	if ITC6!ITC12 do {
+		/* 
+		 If the check transaction is being error corrected or 
+		 reversed, delete the entry in XPDO if it hasn't yet 
+		 been printed.  Otherwise, flag the entry in CHKREG1 
+		 as VOID.
+		*/
+		  
+		if ITC6 set TRC=$$FIELD^UTSO(ttx.tso,"EC")
+		if CKNUM.isNull() do KXPDO quit
+		
+		type ResultSet rs = Db.select("CO,GL","CHKREG1","CKNO=:CKNUM AND CTYPE=:CKTYP")
+		if rs.isEmpty() quit
+		else  do {
+			set CNAME=rs.getCol("CO")
+			set GLNO=rs.getCol("GL")
+			}
+		
+		type RecordCHKREG1 chkreg1=Db.getRecord("CHKREG1","CO=:CNAME,GL=:GLNO,CKNO=:CKNUM",1)
+		if 'chkreg1.getMode() quit
+		
+		set chkreg1.status=2	// Void
+		do chkreg1.bypassSave()		
+		
+		}	
+	
+	else  if CKNUM.isNull() do {
+		/*
+		 If the check transaction does not have a check number 
+		 associated with it, file check information into XPDO
+		 if the print option is 2 (batch).
+		*/
+
+		if CKOPT'=2 quit
+		
+		type RecordXPDO xpdo=Class.new("RecordXPDO")
+		
+		set xpdo.tjd=%SystemDate
+		set xpdo.cktyp=CKTYP
+		set xpdo.ckseq="NEXTVAL"		// Next seq?
+		set xpdo.brcd=BRCD
+		set xpdo.uid=%UserID
+		set xpdo.trc=TRC
+		set xpdo.cid=CKCID
+		set xpdo.tamt=$$^SCARND(+TAMT,0,CKCID)
+		set xpdo.addr=CK(SEQ).piece("^",2,11)
+		set xpdo.efd=ttx.efd
+		
+		do xpdo.bypassSave()	
+		}
+		
+	else  do {
+		/*
+		 Otherwise, file the check information into CHKREG1 with
+		 a status of OUTSTANDING.  Also, add check number into
+		 TTX.TSO.
+		*/
+		
+		if ttx.tso["CKREG" do {
+			type String CKREG,ZCKNO
+			set CKREG=$$FIELD^UTSO(ttx.tso,"CKREG")
+			
+			set ZCKNO=CKREG.piece("^",1)
+			if 'ZCKNO.isNull() quit
+			
+			set CKREG.piece("^",1)=CKNUM
+			set ttx.tso=$$FIELDIN^UTSO(ttx.tso,"CKREG",CKREG)
+			}			
+		
+		type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+		if cuvar.gls.isNull() quit
+		
+		type RecordUTBLCHKS utblchks=Db.getRecord("UTBLCHKS","CHKS=:CKTYP",1)
+		if 'utblchks.getMode() quit
+
+		type RecordCHKREG1 chkreg1=Class.new("RecordCHKREG1")
+		set chkreg1.co=cuvar.gls
+		set chkreg1.gl=utblchks.cid
+		set chkreg1.ckno=CKNUM
+		set chkreg1.ctype=CKTYP
+		set chkreg1.tjd=%SystemDate
+		set chkreg1.brcd=BRCD
+		set chkreg1.uid=%UserID
+		set chkreg1.trc=TRC
+		set chkreg1.status=0	// Outstanding
+		do chkreg1.bypassSave()		
+		
+		if CKCID.isNull() quit
+
+		set CID = CKCID		// Needed by HISTBLD^ACNFUNCS
+
+		// Check number ~p1 generated for ~p2 by user ~p3
+		set TCMT=$$^MSG(5300,CKNUM,$$DAT^%ZM($S(ttx.efd.isNull():%SystemDate,1:ttx.efd),%MSKD.get()),%UserID)
+		do HISTBLD^ACNFUNCS(TCMT,BRCD)
+		}
+
+	quit
+
+
+KXPDO	// No check # has been assigned.  Kill it out of XPDO before it's printed
+
+	type Public String BRCD,CKTYP,TRC
+
+	do Db.delete("XPDO","TJD=:%SystemDate AND CKTYP=:CKTYP AND BRCD=:BRCD AND UID=:%UserID AND TRC=:TRC")
+	
+	quit
+
+vSIG()	quit "60463^75592^Shriram Deshpande^5059"	// Signature - LTD^TIME^USER^SIZE

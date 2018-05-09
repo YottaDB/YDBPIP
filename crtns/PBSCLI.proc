@@ -1,0 +1,907 @@
+PBSCLI	//Public;PROFILE/IBS Client Driver
+	/*
+	   ORIG:  MATTSON - 28 MAY 1991
+	 
+	   PBSCLI contains the native CLIENT calls responsible for constructing
+	   messages for the various service classes.  These functions are
+	   executed on a front-end processor; they are NOT executed by the
+	   server.
+	 
+	   KEYWORDS: Client/Server
+	 
+	   INPUTS:
+	       . TLO	Terminal location		/TYP=T/REQ
+	  						/ddref=[TTX]TLO
+	 
+	       . %CSID	Client connect ID		/TYP=T/REQ
+	  	
+	       . %LOGID	Login information		/TYP=T/REQ
+	 
+	       . %UID	User ID				/TYP=T/REQ
+	  						/ddref=[SCAU]UID
+	 
+	   LIBRARY:
+	       . $$NMSP - Network Management & Stored Procedures
+	       . $$TSSP - Transaction Services & Stored Procedures
+	       . $$FSSP - Function Services & Stored Procedures
+	       . $$MRPC - MUMPS Remote Procedure Function Calls
+	       . $$MSQL - MUMPS Remote Procedure Function Calls
+	       . STUB   - MUMPS Remote Procedure Program Calls
+	       . $$DQRT - DATA-QWIK Results Table
+	 
+	  ----- Revision History ----------------------------------------------
+
+	   01/04/05 - KELLYP - CR 12996
+	   	      Removed the #WARN and #OPTIMIZE commands and removed other
+	   	      additional comments that did not need to be included.  Also
+	   	      corrected various comments, typed argument lists, and removed
+	   	      references to the STF global.
+
+	   12/30/04 - Georges - CR 12996
+	   	      Converted the M routine to procedure for DBI Project
+	   	        
+	   01/19/01 - Allan Mattson - 43699 (IPB#593)
+	              Modified subroutine MRPC to set the value of 'v' equal
+	              to $G(vzfld(2)) to resolve an <UNDEFINED> error if the
+	              data returned from the MRPC is null.
+	 
+	              Deleted pre-1999 revision history.
+	 
+	   11/29/99 - Jerry Petrole - 35726
+	              Added $G around references to %CSID in section
+	              EXCHMSG to prevent FEP undefined error when creating
+	              new User ID.
+	 
+	   08/04/99 - Eugene Titov - 32341
+	              Modified ER section to reset piece 4 of OVR array to "RPA"
+	              if the original override is a retirement restriction.
+	*/
+	
+CLCNCT(String RM)	//Private;Client connect API
+	/*
+	   Connects a PROFILE client (FEP) process to the message transport.
+	 
+	   ARGUMENTS:
+	       . RM	Return message			/TYP=T/NOREQ
+	  						/MECH=REFNAM:W
+	   INPUTS:
+	       . %LOGID
+	       . %NET
+	 
+	   RETURNS:
+	       . $$	Error flag			/TYP=N
+	       . %CSID	Client/server connect ID	/TYP=T/LEN=128
+	*/
+	type Public String %CSID,%LOGID,%NET
+	
+	set %CSID=%CSID.get() if %CSID'="" do CLDSCNCT
+	if %LOGID.piece("|",1)'=1 quit 0
+	set RM=1
+	type String ER
+
+	// Client connect
+	if %NET set ER=0 set RM=$$CLCNCT^%MTAPI(.%CSID)
+	if RM="" do {
+		// Re-connect timer
+		set %LOGID.piece("|",5)=""
+		// Init client token
+		set %LOGID.piece("|",6)=""
+		// Init client message ID
+		set %LOGID.piece("|",7)=""
+		}
+	else  do {
+		// Set re-connect timer
+		set %LOGID.piece("|",5)=%CurrentDate.translate(",")
+		// Non-specific error
+		if RM="CS_MTERROR" set RM=%CSID
+		// No connect
+		set %CSID=""
+		}
+	// Sign-on to SCA$IBS serverdo NMSP(.scau)
+	set ER=$$NMSP(1,.RM)
+	quit ER
+
+
+CLDSCNCT	//Private;Client disconnect API
+	/*
+	   Issues a sign-off request to the MTM and disconnects a PROFILE client
+	   (FEP) process from the message transport.
+	*/
+	
+	type Public String %CSID
+	
+	set %CSID=%CSID.get() if %CSID="" quit 
+	type String ER,ET,X
+
+	set ER=$$NMSP(0)
+	set ET=$$CLDSCNCT^%MTAPI(%CSID)
+	if ET'="" do ^UTLERR
+	set %CSID=""
+	quit
+
+
+NMSP(Number srvprc,String rm,String id,String par)	//Public;NMSP Service class
+	/*
+	   Network Management Services and Procedures
+	   Service class = 0.
+	 
+	   KEYWORDS: Client/Server
+	 
+	   ARGUMENTS:
+	       . srvprc	Service Procedure		/TYP=N/REQ
+	  		 0 = Sign-off			/MECH=VAL
+	  		 1 = Sign-on
+	  		 2 = Heartbeat
+	  		 3 = Client context
+	  		99 = System Services (private)
+	 
+	       . rm	Return message			/TYP=T/NOREQ
+	  						/MECH=REFNAM:W
+	 
+	       . id	Identifier			/TYP=T/NOREQ
+	  		(^%ZFUNC entry)			/MECH=VAL
+	 
+	       . par	NMSP Input parameters		/TYP=T/NOREQ
+	  						/MECH=REFARR:R
+	 
+	   RETURNS:
+	       . $$	Error code			/TYP=N
+	 
+	   EXAMPLE:
+	       S ER=$$NMSP^PBSCLI(0,.RM)			; Sign-off
+	       S ER=$$NMSP^PBSCLI(1,.RM)			; Sign-on
+	       S ER=$$NMSP^PBSCLI(2,.RM)			; Heartbeat
+	       S ER=$$NMSP^PBSCLI(3,.RM,"",.par)		; Client context
+	       S ER=$$NMSP^PBSCLI(99,.RM,"GETSYI",.par)	; Functions
+	                       where par(1)="NODENAME"
+	*/
+	type Public String %LOGID
+	
+	type String er,erptr,log,reply,msg,uid
+	type RecordSCAU scau=Db.getRecord("SCAU","uid=:%UserID")
+	
+	// Sign-off
+	if srvprc=0 do {
+		type String token,x
+		set token=$$TOKEN
+		set x(1)=0 set x(2)=token
+		set log=0 set msg=$$V2LV^MSG(.x)
+		}
+		
+	// Sign-on
+	if srvprc=1 do {
+		type String x
+		set x(1)=1
+		set x(2)=%UserID
+		set x(3)=%UserStation
+		set x(4)=$char(1)_scau.pswd
+		set x(5)=""
+		set x(6)=$char(0)
+		set log=1 set msg=$$V2LV^MSG(.x)
+		}
+
+	// Heartbeat
+	if srvprc=2 set log=0 set msg=$$V2LV^MSG(2)
+
+	// Client context
+	if srvprc=3 do {
+		type String token,x
+		set token=$$TOKEN
+
+		set x(1)=3
+		set x(2)=token
+		set x(3)=$$V2LV^MSG(.par)
+		set log=1 set msg=$$V2LV^MSG(.x)
+		}
+	
+	// System services
+	if srvprc=99 do {
+		type String x
+		set x(1)=99
+		set x(2)=id
+		set x(3)=$$V2LV^MSG(.par)
+		set log=0 set msg=$$V2LV^MSG(.x)
+
+		}
+	set er=$$SNDMSG(.msg,.reply,0,log)
+	if er set erptr=$$ER(.reply,.rm)
+	else  do {
+		if srvprc=0 quit
+		if srvprc=1 do { quit
+			type String ptr,x
+			set ptr=$$LV2V^MSG(reply,.x)
+			set x(1)=x(1).translate("|",$char(26))
+
+			// Client token
+			set %LOGID.piece("|",6)=x(1)
+			// Language ID
+			set %LOGID.piece("|",8)=x(2)
+			}
+		if srvprc=2 quit
+		if srvprc=3 do { quit
+			type String ptr,x
+			set ptr=$$LV2V^MSG(reply,.x) set rm=x(1)
+			}
+		}
+	quit er
+
+
+TSSP(String msg,String rm,String om(),String ovr(),erptr)	//Public;TSSP service class
+
+	/*
+	   Transaction Services - Stored Procedures
+	   Service class = 1.
+	 
+	   KEYWORDS: Client/Server
+	 
+	   ARGUMENTS:
+	       . msg	Transaction message		/TYP=T/REQ
+	  						/MECH=REFNAM:R
+	 
+	       . rm	Return message			/TYP=T/REQ
+	  						/MECH=REFNAM:W
+	 
+	       . om	Output array			/TYP=T/NOREQ
+	  						/MECH=REFARR:W
+	 
+	       . ovr	Override array			/TYP=T/NOREQ
+	  						/MECH=REFARR:W
+	 
+	   RETURNS:
+	       . $$	Error code			/TYP=N
+
+	 
+	*/
+	
+	type Public String %LOGID
+	
+	type String er,reply
+
+	//Remote location - do exchg
+	if %LOGID set er=$$SNDMSG(.msg,.reply,1,1)
+	//Host location - proc locally
+	else  set er=$$^PBSTSSP(.reply,0,msg,0)
+
+	if er set erptr=$$ER(.reply,.rm,.ovr)
+	else  set erptr=$$LV2V^MSG(reply,.om)
+	quit er
+
+
+Public FSSP(String fn,String input(),String rm)	//Public;FSSP service class
+
+	/*
+	   Function Services - Stored Procedures
+	   Service class = 2.
+	 
+	   This subroutine is responsible for building %INP (input data) from
+	   the journal array constructed by DATA-QWIK, initiating a message
+	   to the PROFILE server and waiting for a reply.
+	 
+	   The determination to log the message is based upon a flag in the
+	   function definition ([SCATBL]REPOST).
+	 
+	   KEYWORDS: Client/Server
+	 
+	   ARGUMENTS:
+	       . fn	PROFILE function		/TYP=T/REQ
+	  						/MECH=VAL
+	 
+	       . input	User Input			/TYP=T/REQ
+	  						/MECH=REFARR:R
+	 
+	       . rm	Return message(s)		/TYP=T/REQ
+	  						/MECH=VAL
+	 
+	   RETURNS:
+	       . $$	Error flag			/TYP=N
+	 
+	   EXAMPLE:
+	       S ER=$$FSSP^PBSCLI(%FN,.%INP,.RM)
+	*/
+	type String er,fld,i,inp,len,log,msg,n,ovr,pos,ptr,reply,sub,x
+	type RecordSCATBL scatbl=Db.getRecord("SCATBL","FN=:fn")
+
+	set n=0
+	for i=1:1 quit:'input(i).data()  do { 
+		set x=input(i) set len=x.length("|")
+		for pos=1:1:len  do {
+			set n=n+1
+			set sub(n)=x.piece("|",pos)
+			}
+		}
+		
+	set fld(1)=fn
+	set fld(2)=$$V2LV^MSG(.sub)
+
+	set msg=$$V2LV^MSG(.fld)
+	set log=scatbl.norepost
+
+	set er=$$SNDMSG(.msg,.reply,2,log)
+
+	if er set ptr=$$ER(.reply,.rm,.ovr)
+	else  do {
+		kill fld
+		set ptr=$$LV2V^MSG(reply,.fld)
+		for i=1:1 quit:'fld(i).data()  set rm(i)=fld(i)
+		}
+	quit er
+
+
+MRPC(String vzrpc,String vzver,String vzpar(),String vzlst,String vzinp,String vzout,Number vzlog)	//Public;MRPC service class
+
+	/*
+	   M Remote Procedure Calls
+	   Service class = 3.
+	 
+	   KEYWORDS: Client/Server
+	 
+	   ARGUMENTS:
+	       . vzrpc	Remote Procedure Call		/TYP=T/REQ
+	  		Public  = [SCATBL5]RPCID	/MECH=VAL
+	  		Private = {$$}{tag}^pgm
+	 
+	       . vzver	Version control string		/TYP=T/COND
+	  		(Required if MRPC is		/MECH=VAL
+	  		 version controlled)
+	 
+	       . vzpar	Input parameters		/TYP=T/NOREQ
+	  		(public MRPC only)		/MECH=REFARR:R
+	  		par(1)-par(n)
+	 
+	       . vzlst	Input list (ordered)		/TYP=T/NOREQ
+	  		(private MRPC only)		/MECH=REFNAM:R
+	  		val1,val2,val3...
+	 
+	       . vzinp	Variable save list (client)	/TYP=T/NOREQ
+	  		(private MRPC only)		/MECH=REFNAM:R
+	  		lvn1,lvn2,lvn3...
+	 
+	       . vzout	Variable save list (server)	/TYP=T/NOREQ
+	  		(private MRPC only)		/MECH=REFNAM:R
+	  		lvn1,lvn2,lvn3...
+	 
+	       . vzlog	Log message			/TYP=N/NOREQ
+	  		(private MRPC only)		/MECH=VAL/DFT=0
+	  		0 = Do not log, 1 = Log
+	 
+	   RETURNS:
+	       . $$	Error flag			/TYP=N
+	 
+	   EXAMPLE:
+	       S rtnval=$$MRPC^PBSCLI(1,1,.par)
+
+	 
+	*/
+	type Public String ER,RM
+	
+	type String vzfld,vzi,vzmsg,vzpgm,vzreply,vzreturn,vzx,v
+
+	set vzver=vzver.get()
+	set vzpar=vzpar.get()
+	set vzlst=vzlst.get()
+	set vzinp=vzinp.get()
+	set vzout=vzout.get()
+	set vzlog=vzlog.get()
+
+	/*
+	 If private, add ER and RM to the variables to be returned and
+	 optimize the program call by resolving the parameter list, if
+	 applicable.
+	*/
+	if vzrpc["^" do {
+		set vzout=$$add("ER",vzout)
+		set vzout=$$add("RM",vzout)
+
+		type String vzptr,vzstr,vzx
+		set vzpgm=vzrpc.piece("(",1)
+		set vzstr=vzrpc.piece("(",2,99)
+		set vzstr=vzstr.extract(1,vzstr.length()-1) quit:vzstr="" 
+
+		set vzptr=1
+		set vzpgm=vzpgm_"("
+		set vzstr=vzstr_","
+		for  set vzptr=vzstr.find(",") quit:'vzptr  do { 
+			set vzx=vzstr.extract(1,vzptr-2)
+			if vzx.length("""")#2=0 quit 
+
+			if vzx.extract()="." do { 
+				set vzinp=$$add(vzx,vzinp)
+				set vzout=$$add(vzx,vzout)
+				}
+			else  do {
+				if vzx=+vzx quit
+				if vzx.extract()=$char(34) quit 
+				set vzinp=$$rem(vzx,vzinp)
+
+				set vzx=@vzx.get()
+				if vzx'=+vzx set vzx=""""_vzx_""""
+				}
+			set vzpgm=vzpgm_vzx_","
+			set vzstr=vzstr.extract(vzptr,vzstr.length()) set vzptr=1
+			}
+		set vzrpc=vzpgm.extract(1,vzpgm.length()-1)_")"
+		}
+		
+	set vzpar=""
+	for vzi=1:1 quit:'vzpar(vzi).data()  set vzpar=vzpar_$$V2LV^MSG(vzpar(vzi))
+	if vzinp'="" set vzinp=$$VSAV^PBSUTL(vzinp)
+
+	set vzfld(1)=vzrpc
+	set vzfld(2)=vzver
+	set vzfld(3)=vzpar
+	set vzfld(4)=vzlst
+	set vzfld(5)=vzinp
+	set vzfld(6)=vzout
+	set vzfld(7)=vzlog
+	set vzmsg=$$V2LV^MSG(.vzfld)
+
+	set ER=$$SNDMSG(.vzmsg,.vzreply,3,vzlog)
+	if ER do {
+		set vzx=$$ER(.vzreply,.RM)
+		set vzreturn=""
+		}
+	else  do {
+		type String vzfld,vzptr
+		if vzrpc'["^" set vzreturn=vzreply quit
+		set vzptr=$$LV2V^MSG(vzreply,.vzfld)
+
+		set vzreturn=vzfld(1).get()
+
+		set v=vzfld(2).get()
+		if vzfld(3).get()'="" do VLOD^PBSUTL(vzfld(3))
+		}
+	quit vzreturn
+
+
+DQRT(String vzmsg,String vzreply)	//
+	/*
+	   DATA-QWIK Results Table
+	   Service class = 4
+	 
+	   KEYWORDS: Client/Server
+	 
+	   ARGUMENTS:
+	       . vzmsg	Client message			/TYP=T/REQ
+	  						/MECH=REFNAM:R
+	 
+	       . vzreply	Server reply			/TYP=T/REQ
+	  						/MECH=REFNAM:W	 
+	*/
+	
+	type Public String ER,RM
+	
+	type String vzreturn,vzx
+
+	set ER=$$SNDMSG(.vzmsg,.vzreply,4,0)
+	if ER do {
+		set vzx=$$ER(.vzreply,.RM)
+		set vzreturn=""
+		}
+	quit ER
+
+
+MSQL(String vzexpr,String vzpar,Number vzsta,String vzdta,Number vzcnt,String vzind,Boolean vzlog)	//Public;MSQL Service class
+
+	/*
+	   M SQL Interface
+	   Service class = 5.
+	 
+	   KEYWORDS: Client/Server
+	 
+	   ARGUMENTS:
+	  	. vzexpr	- SQL expression	/TYP=T/REQ/MECH=VAL
+	  	. vzpar		- PROFILE/SQL Qualifiers
+	  						/TYP=T/NOREQ/MECH=VAL
+	  	. vzsta		- SQL status code	/TYP=N/MECH=REFNAM:W
+	  	. vzdta		- Data returned from SQL
+	  			  expression		/TYP=T/MECH=REFNAM:W
+	  	. vzcnt		- Row counter		/TYP=N/MECH=REFNAM:W
+	  	. vzind		- Column attributes indicator
+	  						/TYP=T/MECH=REFNAM:W
+	  	. vzlog		- Logging flag		/TYP=L/NOREQ/MECH=VAL
+	 
+	   RETURNS:
+	       . $$	Error flag			/TYP=N
+	 
+	   EXAMPLE:
+	*/
+	
+	type Public String ER,RM
+	
+	type String vzfld,vzi,vzmsg,vzreply,vzreturn,vzx,z
+
+	set vzexpr=vzexpr.get()
+	set vzlog=vzlog.get()
+
+	//SQL statement
+	set vzfld(1)=vzexpr
+	
+	//PROFILE/SQL qualifiers
+	set vzfld(2)=vzpar.get()
+	set vzmsg=$$V2LV^MSG(.vzfld)
+
+	set ER=$$SNDMSG(.vzmsg,.vzreply,5,vzlog)
+	if ER do {
+		set vzx=$$ER(.vzreply,.RM)
+		set vzreturn=ER
+		}
+	else  do {
+		type String vzfld,vzptr
+		set vzptr=$$LV2V^MSG(vzreply,.vzfld)
+
+		//SQL state code
+		set vzsta=vzfld(1).get()
+		//Stored procedure name
+		set RM=vzfld(2).get()
+		//Number of rows returned
+		set vzcnt=vzfld(3).get()
+		//Results table
+		set vzdta=vzfld(4).get()
+		//Column attributes (protection)
+		set vzind=$$COLIN^%ZFUNC(vzfld(5).get())
+		set vzreturn=0
+		}
+	quit vzreturn
+
+STUB(String vzrpc,String vzver,String vzpar(),String vzlst,String vzinp,String vzout,Number vzlog)	//Private;MRPC program call
+
+	type String vzreturn
+	set vzver=vzver.get()
+	set vzpar=vzpar.get()
+	set vzlst=vzlst.get()
+	set vzinp=vzinp.get()
+	set vzout=vzout.get()
+	set vzlog=vzlog.get()
+	set vzreturn=$$MRPC(vzrpc,vzver,vzpar,vzlst,vzinp,vzout,vzlog)
+	quit
+
+
+add(String x,String y)	//Private;Add variable 'x' to variable list 'y'
+
+	if x.extract()="." set x=x.extract(2,x.length())
+	if '(","_y_",").find((","_x_",")) set y=$select(y="":x,1:y_","_x)
+	quit y
+
+
+rem(String x,String y)	//Private;Remove variable 'x' from variable list 'y'
+
+	if x.extract()="." set x=x.extract(2,x.length())
+
+	type String i,n
+	set n=y.length(",")
+	for i=1:1:n if y.piece(",")= x  do {  quit 
+		if i=1 set y=y.piece(",") quit 
+		if i= n  set y=y.piece(",") quit 
+		set y=y.piece(",")_","_y.piece(",")
+		}
+	quit y
+
+
+SNDMSG(String msg,String reply,String srvcls,Number log,Number stfflg)	//Private;Send client message
+
+	/*
+	 
+	   This subroutine is responsible for sending a message to the
+	   standard PROFILE server and returning a reply from the
+	   calling routine.
+	 
+	   ARGUMENTS:
+	       . msg	Application message		/TYP=T/REQ
+	  						/MECH=REFNAM:R
+	 
+	       . reply	Server reply message		/TYP=T/REQ
+	  						/MECH=REFNAM:W
+	 
+	       . srvcls	Format and protocol		/TYP=T/REQ
+	  						/MECH=VAL
+	 
+	  		0 = NMSP (Network Mgmt Services & Procedures)
+	  		1 = TSSP (Transaction Services - Stored Proc)
+	  		2 = FSSP (Function Services - Stored Proc)
+	  		3 = MRPC (MUMPS Remote Procedure Calls)
+	  		4 = DQRT (D/Q Results Tables)
+	 
+	       . log	Log message flag		/TYP=N/NOREQ
+	  						/MECH=VAL/DFT=0
+	  		0 = Do not log message
+	  		1 = Log message
+	 
+	       . stfflg	store and forward value		/TYP=N/NOREQ
+	  						/MECH=VAL/DFT=0
+	 
+	   RETURNS:
+	       . $$	Error flag			/TYP=N/LEN=1
+	 
+	  		0 = No error
+	  		1 = Server error
+	  		2 = Network error
+	*/
+	
+	type Public String %CSID,%LOGID,%NET
+	
+	type String i
+	for i=1:1 quit:msg.extract(msg.length()) '= $char(1)  do {
+		set msg=msg.extract(1,msg.length()-1)
+		}
+	if msg.get()="" set reply="" quit ""
+
+	type String et,fld,hdr,pkt,ptr,sts,svreply,x
+
+	set hdr=$$HDR(srvcls,+stfflg.get())
+	set pkt=$$V2LV^MSG(hdr)_$$V2LV^MSG(msg)_$char(0,0)
+	if '$$EXCHMSG(.pkt) do STF(.reply,.pkt,log.get(),2) quit 2
+
+	set et=$$EXCHMSG^%MTAPI(pkt,.svreply,"SCA$IBS",.%CSID,60)
+	if et'="" do { quit 2
+		/*
+		Message exchange failure:
+		 In the event the message exchange failed, log the
+		 error, mark client off-line, set the client
+		 reconnect timer equal to the current system
+		 time.
+		*/
+
+		set %NET=0 set %LOGID.piece("|",5)=%CurrentDate.translate(",")
+		set reply=$$CSERR^PBSUTL(et)
+
+		/*
+		Store and forward handling:
+		 The following errors result from a failure that
+		 would prevent the message from being received,
+		 and consequently from being processed, by a
+		 server.  These errors will be logged with a
+		 store and forward status of 2 (off-line).
+		*/
+
+		// CS_MTMCNCT CS_NOSVTYP
+
+		if et="CS_MTMCNCT" do STF("",.pkt,log.get(),2) quit 
+		if et="CS_NOSVTYP" do STF("",.pkt,log.get(),2) quit 
+
+		/*
+		 All other message exchange errors result in an
+		 unknown status and will be logged with a store
+		 and forward status of 1 (questionable).
+		 Errors falling into this category are:
+		*/
+
+		// CS_MTERROR CS_SVFAIL
+		// CS_TIMEOUT CS_TIMEOUTNC
+
+		do STF("",.pkt,log.get(),1)
+		}
+		
+	// Parse server reply message
+	set ptr=$$LV2V^MSG(svreply,.x)
+	// Parse server reply header
+	set ptr=$$LV2V^MSG(x(1).get(),.hdr)
+	// Parse server reply record
+	set ptr=$$LV2V^MSG(x(2).get(),.fld)
+
+	if hdr(1).get()'=$$TOKEN!(hdr(2).get()'=%LOGID.piece("|",7)) do {  quit 2
+		set reply=$$CSERR^PBSUTL("SV_WRONGMSG")
+		}
+	set reply=fld(2).get()
+	quit fld(1).get()
+
+
+HDR(String srvcls,String stfflg)	//Private;Client message header
+	/*
+	   RETURNS:
+	       . $$	Client message header		/TYP=T
+	 
+	   INPUTS:
+	       . System	%LOGID
+	*/
+	
+	type String fld
+	set fld(1)=srvcls
+	set fld(2)=$$TOKEN
+	set fld(3)=$$MSGID
+	set fld(4)=+stfflg.get()
+	set fld(5)=""
+	quit $$V2LV^MSG(.fld)
+
+
+EXCHMSG(String vzpkt)	//Private;Should a client message exchange be made?
+	/*
+	   This function call returns a status code that indicates if the
+	   client message should be exchanged.  The message will NOT be
+	   exchanged under the folllowing conditions:
+	 
+	    o the client is OFF-LINE or;
+	    o the client is in LOCAL mode or;
+	    o the client connection cannot be established or;
+	    o store and forward messages are pending AND the
+	      client request is an update message.
+	 
+	   ARGUMENTS:	
+	  	. vzpkt	- Complete client message packet, including
+	                   header.  		/TYP=T/REQ/MECH=REF
+	 
+	   RETURNS:
+	       . $$	Exchange message flag		/TYP=L
+	 
+	  		0 = No  (off-line, local or STF pending)
+	  		1 = Yes (on-line, STF not pending)
+	*/
+	type Public Number log,srvcls
+	type Public String %CSID,ER,ET,%LOGID,%NET,RM
+	
+	// Local mode
+	if %LOGID.piece("|",1)=2 quit 0
+	
+	// Off-line
+	if %NET=0 quit 0
+	set ER=0
+
+	if %LOGID.piece("|",6)="",%CSID.get()'="" set ET=$$CLDSCNCT^%MTAPI(%CSID.get()) set %CSID=""
+	// JP 11/29/99
+	if %CSID.get()="" do {  if %CSID.get()="" quit 0
+		if %CurrentDate.translate(",")-(%LOGID.piece("|",5))<120 quit 
+		type String ET
+
+		set ET=$$CLCNCT^%MTAPI(.%CSID) if ET="" do {  quit:'ER 
+			set %LOGID.piece("|",5)="" quit:srvcls=0 
+			quit:%LOGID.piece("|",6)'= ""
+
+			type String msg,pkt,reply
+			// Non-NMSP, get token
+			set ER=$$NMSP(1,.RM)
+			// Sign-on failed
+			if ER set %CSID="" quit
+			set vzpkt=$$TOKNIN(vzpkt,srvcls)
+			}
+			
+		set %LOGID.piece("|",5)=%CurrentDate.translate(",")
+		}
+		
+	// Prevent exchange for non-NMSP
+	type Boolean hasstf
+	type ResultSet rs=Db.select("UID","STF1","UID=:%UserID")
+	if rs.isEmpty() set hasstf=1
+	else  set hasstf=0
+	if log,srvcls,hasstf quit 0
+	quit 1
+
+
+STF(String reply,String pkt,Boolean log,Number stfflg)	//Private;Store and forward
+	/*
+	   ARGUMENTS:
+	       . reply	Reply message			/TYP=T/NOREQ
+	  						/MECH=REFNAM:W
+	 
+	       . pkt	Message packet			/TYP=T/REQ
+	  						/MECH=REFNAM:R
+	 
+	       . log	Log message			/TYP=L/REQ
+	  						/MECH=VAL
+	 
+	       . stfflg	Store and forward flag		/TYP=N/REQ
+	  		1 = Questionable off-line	/MECH=VAL
+	  		2 = Off-line
+	 
+	   INPUTS:
+	       . TLO		Terminal location
+	       . %LOGID		User logon info
+	       . %UID		User ID
+	*/
+	
+	// Host not available
+	if 'log set reply=$$ERRMSG^PBSUTL($$^MSG(4371)) quit
+	// Transactions filed into Store and Forward file
+	set reply=$$ERRMSG^PBSUTL($$^MSG(2744))
+
+	type String fld,i,ptr,rec,seq
+
+	// Parse client request message
+	set ptr=$$LV2V^MSG(pkt,.rec)
+
+	// Update stf_flag in client request header
+	set ptr=$$LV2V^MSG(rec(1),.fld) set fld(4)=stfflg
+	set rec(1)=$$V2LV^MSG(.fld) set pkt=$$V2LV^MSG(.rec)_$char(0,0)
+	
+	type RecordSTF1 stf1=Class.new("RecordSTF1")
+	set stf1.uid=%UserID
+	type Number seq=Db.nextVal("STF1","%UserID")
+	set stf1.seq=seq
+	set stf1.tlo=%UserStation
+	do stf1.bypassSave()
+	
+	for i=1:400:pkt.length() do {
+		type RecordSTF stf=Class.new("RecordSTF")
+		set stf.uid=%UserID
+		set stf.seq=seq
+		set stf.sseq=(i\400)+1
+		set stf.stfmsg=pkt.extract(i,i+399)
+		do stf.bypassSave()
+		}
+	quit
+
+
+MSGID()	//Private;Increment/return client message ID
+	/*
+	   RETURNS:
+	       . $$	Client message ID		/TYP=N
+	 
+	   INPUTS:
+	       . System	%LOGID
+	*/
+	
+	type Public String %LOGID
+	
+	if %LOGID.get()="" quit ""
+	type String msgid
+
+	set msgid=%LOGID.piece("|",7)+1
+	set %LOGID.piece("|",7)=msgid
+	quit msgid
+
+
+TOKEN()	//Private;Return client token
+	/*
+	   RETURNS:
+	       . $$	Client token			/TYP=T
+	*/
+	
+	type Public String %LOGID
+	
+	quit (((%LOGID.get()).piece("|",6)).translate($char(26),"|"))
+
+
+TOKNIN(String pkt,String srvcls)	//Private; Insert new token into already built message
+
+
+	type String ptr,rec
+
+	// Parse client request message
+	set ptr=$$LV2V^MSG(pkt,.rec) set rec(1)=$$HDR(srvcls)
+	quit $$V2LV^MSG(rec(1))_$$V2LV^MSG(rec(2))_$char(0,0)
+
+
+ER(String ermsg,String rm(),String ovr())	//Private;Process server reply error message
+	/*
+	   ARGUMENTS:
+	       . ermsg	Reply error message		/TYP=T/REQ
+	  						/MECH=REFNAM:R
+	 
+	       . rm	Return message array		/TYP=T/NOREQ
+	  						/MECH=REFARR:W
+	 
+	       . ovr	Override array			/TYP=T/NOREQ
+	  						/MECH=REFARR:W
+	*/
+	
+	type String ercat,erptr,fld,param,ptr
+
+	set ptr=$$LV2V^MSG(ermsg,.fld)
+	set ercat=fld(1).get()
+	set erptr=fld(2).get()
+
+	if ercat="AU" do {
+		type String i,j,k2,k3,k4,x,y,z
+		set ptr=$$LV2V^MSG(fld(3),.x)
+
+		// Build override array
+		for i=1:1 quit:'x(i).data()  kill y do { 
+			set ptr=$$LV2V^MSG(x(i),.y)
+			for j=1:1 quit:'y(j).data()  kill z do { 
+				set ptr=$$LV2V^MSG(y(j),.z)
+				set k2=z(1).piece("_",1)
+				set k3=z(1).piece("_",3)
+				set k4=z(1).piece("_",2)
+
+				if k2="RFLG" set param=z(3)
+				else  set param=z(2)
+				if k4="CIF" set param.piece("|",4)="CIF"
+				// ET 32341 08/04/99
+				if k4="RPA" set param.piece("|",4)="RPA"
+				set ovr(i,z(4),k2,k3)=param
+
+				}
+			}
+		}
+	if ercat="ER" set rm=fld(5)
+	quit erptr
+
+vSIG()	quit "59940^34185^Pat Kelly^21084"	// Signature - LTD^TIME^USER^SIZE

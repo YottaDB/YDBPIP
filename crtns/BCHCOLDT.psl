@@ -1,0 +1,306 @@
+BCHCOLDT //Batch BCHCOLXTRDTJ - Collections Daily Transaction Extract
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 08/30/2007 15:07 - joynerd
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHCOLXTRDTJ Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ set vBCHSTS=$$STATUS^BCHUTL("BCHCOLXTRDTJ")
+ if vBCHSTS=1 set ER=1,RM=$$^MSG(3410) quit
+ if vBCHSTS=2 set ER=1,RM=$$^MSG(3414) quit
+ if vBCHSTS=0 set %BatchRestart=1
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit do EXIT^BCHUTL("BCHCOLXTRDTJ") quit
+ do JOBMGR^BCHUTL(%FN,"BCHCOLXTRDTJ",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ do EXIT^BCHUTL("BCHCOLXTRDTJ")
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(CTJD,CID) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHCOLXTRDTJ","*","",CTJD.get()_","_CID.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ if %BatchRestart,$$CHKLOG^BCHUTL(%SystemDate,%FN,"BCHCOLXTRDTJ",CTJD.get()_","_CID.get()) do { quit
+ do LOG^BCHUTL(%SystemDate,%FN,"BCHCOLXTRDTJ",CTJD.get()_","_CID.get(),"Record already processed")
+ }
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,CTJD,CID)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHCOLXTRDTJ","*","",CTJD.get()_","_CID.get(),"",et)
+ }
+ do UPDLOG^BCHUTL(%SystemDate,%FN,"BCHCOLXTRDTJ",CTJD.get()_","_CID.get(),vCONTEXT)
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,CTJD,CID) //
+	/* Walton 08/2000
+
+	   This batch collates through the table COLEXTR (populated by
+	   batch BCHCOLEXTR) for SystemDate-2 and checks for any entries
+	   in DTJ for SystemDate-1.  A record will be produced in the
+	   Collection Daily Transaction Extract for each loan transaction
+	   and each deposit transaction where DTJ.PRIN is greater than 
+	   zero.  COLEXTR.DFLG must be equal to 1 for all accounts, a 0
+	   means that the account no longer qualifies for this extract. 
+	   For each record selected, predefined data from the DTJ
+	   table is included in the extract (see NCO Collection Extract
+	   specification for more details).
+
+	   The EXEC section will populate the temporary table TMPNCO and
+	   the SCHEXIT section will produce the extract based on the 
+	   entries in TMPNCO.
+
+	   NOTE - this batch is to be placed in the beginning of day
+		  after accruals.
+
+	   Timeline of events -
+ 
+                Feb 1.  EOD  account 123 becomes delinquent
+                Feb 2.  BOD  BCHCOLEXTR files entry into COLEXTR
+                             using Feb. 1 for account 123, is
+                             included in Collections Extract
+                        BOD  BCHCOLXTRDTJ looks in COLEXTR for
+                             Jan. 31 (no information)
+                        EOD  account 456 becomes delinquent
+                Feb 3.  BOD  BCHCOLEXTR files entry into COLEXTR
+                             using Feb. 2 for account 456, is
+                             included in Collections Extract
+                        BOD  BCHCOLXTRDTJ looks in COLEXTR for
+		             Feb. 1 (finds account 123), then selects
+                             all records in DTJ for Feb. 2 and includes
+                             them in Collections Transaction Extract
+
+	*/ 
+
+	// quit if the account is no longer delinquent or negative balance
+	type RecordCOLEXTR colextr=Db.getRecord("COLEXTR","CTJD=:CTJD,CID=:CID",1)
+	if colextr.getMode() if 'colextr.dflg quit
+
+	new DES,ITC,PRIN,REC,SEQ,TOT,XCID,XCLS,XETC
+
+	set XCID=CID
+	type RecordACN acn=Db.getRecord("ACN","CID=:CID",1)
+	if acn.getMode() set XCLS=acn.cls
+	
+	set SEQ=0
+
+	type RecordTMPNCO tmp=Class.new("RecordTMPNCO")
+
+	type ResultSet rs=Db.select("ETC,TOT,ITC1,INT,PRIN","DTJ","TJD=:XTJD1 AND CID=:XCID AND ITC1 IS NOT NULL")
+	if rs.isEmpty() quit
+	while rs.next() do {
+		
+		set PRIN=rs.getCol(5)
+		if XCLS="D",PRIN'>0 quit
+		set PRIN=$$ZERO(PRIN,15)
+
+		set SEQ=SEQ+1
+
+		set XETC=rs.getCol(1)
+		
+		type RecordTRN trn=Db.getRecord("TRN","ETC=:XETC",1)
+		if trn.getMode() set DES=$$BLK(trn.des,35)
+		
+		set XETC=$$BLK(XETC,12)		 
+		set TOT=$$ZERO(rs.getCol(2),15)
+		set ITC=$$ZERO(rs.getCol(3).extract(1,1),1)
+
+		if XCLS="L" set INT=rs.getCol(4)
+		else  set INT=""
+
+		set INT=$$ZERO(INT,15)
+
+		set REC=111_$$ZERO(XCID,12)_XETC_DES_TOT_ITC_INT_PRIN_DATE
+		set REC=$$BLK(REC,118)
+	
+		set tmp.cid=XCID
+		set tmp.seq=SEQ
+		set tmp.record=REC
+		
+		// store 0=DEBIT, 1=CREDIT 
+		set tmp.dflg=ITC.piece(",",1) 
+		
+		do tmp.bypassSave()
+
+		}
+
+	quit
+
+BLK(VAL,N)      //
+ 
+        if VAL.length()>N quit VAL.extract(1,N)
+        quit VAL_$J(" ",N).extract(1,N-VAL.length())
+ 
+ZERO(VAL,N)     //
+ 
+        set X=""
+        set X.piece(0,N-VAL.length())=0
+        quit X_VAL
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,CTJD,CID
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set CTJD=vRECORD.piece($C(9),1)
+ set CID=vRECORD.piece($C(9),2)
+ do vPROC(CTJD,CID)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,CTJD,CID
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>32000 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+26>32000 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+	// create blank file incase there are no records
+
+	new CO,DATE,HEADER,TRAILER
+
+	set XTJD=%SystemDate-2
+
+	set DATE=%CurrentDate.toString("MMDDYEAR")
+	
+	set CO=CUVAR.co
+
+	type IO io=Class.new("IO")
+        set io.fileName="NCODTJ_"_CO_"_"_DATE_".EXT"
+        set io.openParams="/WRITE/NEWV"
+	do io.open()
+
+	set HEADER=$$BLK("000NCO"_$$BLK(CO,8)_DATE,118)
+        do io.write(.HEADER)
+        set TRAILER=$$BLK(999_$$ZERO("",24),118)
+        do io.write(.TRAILER)
+
+	do io.close()
+
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("CTJD,CID","COLEXTR","CTJD=:XTJD")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	set XTJD1=%SystemDate-1
+	set DATE=XTJD1.toString("MM/DD/YEAR")
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+	// write records stored in TMPNCO to extract file
+
+	new CCNT,CNT,CO,DATE,DCNT,DFLG,HEADER,ITC,REC,TRAILER
+	type IO io=Class.new("IO")
+
+	set DATE=%CurrentDate.toString("MMDDYEAR")
+        set CO=CUVAR.co
+
+	set io.fileName="NCODTJ_"_CO_"_"_DATE_".EXT"
+	set io.openParams="/WRITE/NEWV"
+
+	do io.open()
+
+	set CO=CUVAR.co
+        set HEADER=$$BLK("000NCO"_$$BLK(CO,8)_DATE,118)
+        do io.write(.HEADER)
+
+	type ResultSet rs1=Db.select("RECORD,DFLG","TMPNCO")
+	if 'rs1.isEmpty() while rs1.next() do {
+		set REC=rs1.getCol(1) 
+		set ITC=rs1.getCol(2)
+		do io.write(.REC)
+		
+		// credit/debit coounters
+		set CNT(ITC)=CNT(ITC).get()+1	
+		}
+
+	// debit count
+	set DCNT=$$ZERO(CNT(0).get(),12)		
+	
+	// credit count
+	set CCNT=$$ZERO(CNT(1).get(),12)		
+
+	set TRAILER=$$BLK(999_CCNT_DCNT,118)
+	do io.write(.TRAILER)
+	
+	do io.close()
+
+	do Db.fastDelete("TMPNCO")
+
+	quit
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

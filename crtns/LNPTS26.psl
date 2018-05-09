@@ -1,0 +1,364 @@
+LNPTS26		/*
+	PAYOFF OF LOAN - KEEP ACCOUNT OPEN
+
+	---- Revision History ------------------------------------------------
+	   07/29/07 - CHHABRIS - CR27841
+		      Modified PROC and LOAD section to include VAT on interest,
+		      VAT on fees and VAT on late charge amounts in calculating
+		      the total payoff amount. If there is an adjustment on
+		      accrual VAT will be calculated on the adjustment amount
+		      in the PROC section. Added details in XP and IXP arrays
+		      to post transactions for the VAT amounts.
+
+	   03/22/07 - GIRIDHAL CR 26066
+	   	      This fix isolates the payoff related fees from
+	   	      Misc fees that are already part of TBA so that they are deducted
+	   	      properly before raising a restriction that says the computed Payoff
+	   	      amount is different from the actual Payoff amount.
+	
+	   01/05/07 - KUMARB - CR24680
+		      Modified section LOAD in the setting of XP("A") to pass
+		      the 3rd parameter as Transaction Code Object in ^LNPTS15.
+	
+	   08/29/06 - GIRIDHAL CR 22612
+	   	      Modified section LOAD to change the condition on which the
+	   	      for loop quits. Existing code exited before the last
+	   	      piece was processed thereby causing wrong ending balances
+	   	      when RPOO was processed.
+	   	      
+	   06/23/06 - DESHPANDE S K - CR 20748
+		      Removed unused reference to %TRNSEQ and replace call
+		      $$RECOV^LNPTS2(ttx.tso) with $$FIELD^UTSO(ttx.tso,"RECOV").
+		   	
+	   05/25/06 - GIRIDHAL - CR 21297
+	   	      Removed references to SPLTDY from LOAD section
+	   	      
+	   07/11/05 - KinI - 16566
+	   	      Modified PROC section to add ttx object as parameter to
+	   	      LNFEE^LNPO2 call. 
+
+	   05/05/05 - Carol Scott - CR 15816
+	   	      Modified section LOAD to define SEQ with %TRNSEQ since
+	   	      calling program notes that this can either be a primary
+	   	      or a secondary transaction.
+	   	      In section RUN, added a $ to a P.
+	   	      	
+	   05/06/05 - KinI - 15524
+	   	      Modified ADJINT, ADJ2 and BILL sections to replace 
+	   	      lnbil1.bp1 pieces with direct sub-fields update per 
+	   	      DBI standards. Modified to check BSEQ before calling
+	   	      sections above.	
+	   	
+	-----------------------------------------------------------------------
+	*/
+
+	quit
+
+
+public	PROC(RecordLN ln,
+	     RecordTTX ttx,
+	     RecordTRN trn)
+
+	type Number VI,VF,VL,VATREMACR
+
+	set VATREMACR=0
+
+	set BSEQ=ln.bseq		// Billing - Last Sequence Number
+	set UNAPF=ln.unapf		// Unapplied Funds
+	set TDUE=ln.tdue		// Total Due
+	set CUIN=ln.cuin		// Current Interest
+	set UNIN=ln.unin		// Uncollected Interest
+	set CUPR=ln.cupr		// Current Principal
+	set UNPR=ln.unpr		// Uncollected Principal
+	set ACR=$$^SCARND(ln.acr,0,CID)	// Accrued Interest
+	set BAL=ln.bal			// Ledger Balances
+	set COA=ln.coa			// Charge-Off Amount
+	set REC=ln.rec			// Recovery Amount
+	set TBA=ln.tba			// Total Outstanding Due Amount
+	set PPO=ln.ppo			// Payoff - Priority Order
+	set VF=ln.vatfeedue		// VAT on Loan Fees Due
+	set VL=ln.vatlchgdue		// VAT on Late Charges Due
+
+	set BALCMP=$S(ln.aruf:BAL-ln.udbal,1:BAL)      // Unadvanced Balance
+
+	// If TRN.PCFL43 is not on, don't allow payoff w/negative accrual balance
+	// Cannot process with negative accrual  ~p1
+	if $E(E23,43)'=1,ACR<0 do Runtime.setErrMSG("LN",471,"ACR") quit:ER
+
+	set ADJ=ACR-UNIN-CUIN
+	if (ADJ < 0) , (BSEQ > 0) do ADJINT(.ln,BSEQ)
+
+	set L=$$FIELD^UTSO(ttx.tso,"LCEFDAMT")	// Transaction Source of Funds
+	if L="" set L=ln.lchg			// Late Charge Due
+	set L=$$LCHGADJ^LNPO2(.ln,CID,L)	// Check min/max amounts
+
+	// Total Fees Not Billed
+	set MC=$$MCNB^LNCO3(.ln,CID)
+
+	// Total Fees Due
+	set M=$$MCHG^LNCO3(CID)
+
+	// Add fees calculated as part of payoff
+	type Number MCPO
+	set MCPO=$$LNFEE^LNPO2(.ln,"01",,.ttx)
+	set M=M+MCPO
+
+	// VAT on remaining interest accrual amount
+	if ln.vatintopt,ADJ do { quit:ER
+	
+		type RecordLNBIL1 lnbil1 = Class.new("RecordLNBIL1")
+
+		/*
+		  Calculate the VAT on remaining accrual for the loan account.
+		  We are passing '20' as the 4th parameter as we want to
+		  calculate the VAT and also process the secondary offset
+		  transactions.
+		*/
+		do VATINT^PROCLNB1(.ln,.lnbil1,ADJ,"20",%UserClass,%UserID,ln.boo,.VATREMACR,.ttx)
+		}
+
+	// VAT on Interest Due is now updated with the VAT on remaining interest
+	set VI=ln.vatintdue
+
+	// Use payment transaction code
+	if ZAMT<(L+M+ACR+BALCMP+VI+VL+VF-UNAPF-COA+REC) do Runtime.setErrMSG("LN",2839) quit:ER
+
+	do LOAD(.ln,.ttx,.trn,BSEQ)
+
+	quit
+
+
+public	LOAD(RecordLN ln,RecordTTX ttx,RecordTRN trn,BSEQ)
+
+	type Boolean LOOPDONE
+	type public Number MCPO,VI,VF,VL
+	
+	set XP("TBA")="^LNPTS3(.ln,.ttx,.trn)|"
+	set XP("P")="^LNPTS4(.ln,.ttx,.trn)|"
+	set XP("A")="^LNPTS15(.ln,.ttx,.trn)|"
+	set XP("L")="INIT^LNPTS12(.ln,.ttx)|"
+	set XP("M")="^LNPTS13(.ln,.ttx,.trn)|"
+	set XP("VL")="VATPMT^LNPTS12(.ln,.ttx,.trn)|"	
+	set XP("VI")="VATPMT^LNPTS15(.ln,.ttx,.trn)|"	
+	set XP("VF")="VATPMT^LNPTS13(.ln,.ttx,.trn)|"
+
+	set X=$S(CUIN<0:0,1:CUIN)
+	set A=$S(ACR-UNIN-X<0:0,1:ACR-UNIN-X)
+	set X=$S(CUPR<0:0,1:CUPR)
+	set P=BALCMP-UNPR-X
+
+	if (BSEQ > 0) do BILL(BSEQ)
+
+	if (A < 0) , (BSEQ > 0) do {
+		set ADJ=A
+		set A=0
+		do ADJ2(.ln,BSEQ)
+		}
+	
+	/*
+	   Compute payoff amount.  Add in TBA if interest and principal is
+	   billed.  Because TBA may contain billed fees, reduce it by the net
+	   of the total fees due and the total fees not billed.  This net amount
+	   is already contained in TBA.
+	*/
+	set X=L+M+A+P+VI+VL+VF-UNAPF-COA+REC
+	if 'ln.idp set X=X+TBA-(M-MC-MCPO)          // Check IDP
+
+	if UNAPF do UNAPF(.ln,.ttx)
+
+	set RECOV=$$FIELD^UTSO(ttx.tso,"RECOV")
+
+	do LNFEE^LNPTS23(.ln,.ttx,1) if ER quit
+
+	if RECOV do {
+		set R=RECOV*OPR8R
+		do GL^LNPTSU(.ttx,R,11)
+		do GL^LNPTSU(.ttx,-R,10) 
+		set ln.coa=ln.coa+(-R)       // Charge-Off Amount
+		}
+
+	if PPO'=1,(PPO'=2) do {
+		set IXP(1)="M|"_M
+		set IXP(2)="VF|"_VF
+		set IXP(3)="TBA"_"|"_TBA
+		set IXP(4)="L"_"|"_L
+		set IXP(5)="VL|"_VL
+		set IXP(6)="A"_"|"_A
+		set IXP(7)="VI|"_VI
+		set IXP(8)="P"_"|"_P
+		set P=8
+		}
+
+	if PPO=1 do {
+		set IXP(1)="M|"_M
+		set IXP(2)="VF|"_VF
+		set IXP(3)="TBA"_"|"_TBA
+		set IXP(4)="P"_"|"_P
+		set IXP(5)="A"_"|"_A
+		set IXP(6)="VI|"_VI
+		set IXP(7)="L"_"|"_L
+		set IXP(8)="VL|"_VL
+		set P=4
+		}
+
+	if PPO=2 do {
+		set IXP(1)="M|"_M 
+		set IXP(2)="VF|"_VF
+		set IXP(3)="TBA"_"|"_TBA
+		set IXP(4)="L"_"|"_L	
+		set IXP(5)="VL|"_VL
+		set IXP(6)="P"_"|"_P
+		set IXP(7)="A"_"|"_A
+		set IXP(8)="VI|"_VI
+		set P=6
+		}
+
+	if ZAMT-X,$E(E23,10) set OVR(CID,"OVR","PAYOFF")=$$^SCARND(X,0,CID)
+
+	set N=""
+	set X=ZAMT+UNAPF
+	set LOOPDONE=0
+	for  set N=$O(IXP(N)) quit:(N="")  do { quit:LOOPDONE
+
+		set Q=IXP(N)
+		set AC=$P(Q,"|",1)
+		set Y=$P(Q,"|",2)
+
+		if Y'>X do {
+			set $P(XP(AC),"|",2)=Y 
+			set X=X-Y
+			}
+		else  set LOOPDONE=1
+		}
+	
+	if N="" do { do RUN(.ln) quit
+		quit:'X
+		set $P(XP("P"),"|",2)=$P(XP("P"),"|",2)+X
+		}
+
+	set $P(XP(AC),"|",2)=X
+
+	do RUN(.ln)
+	quit
+
+
+RUN(RecordLN ln)
+
+	set IXP=""
+	for  set IXP=$O(IXP(IXP)) quit:IXP=""!ER  do {
+
+		set XP=$P(IXP(IXP),"|",1) 
+		quit:'$P(XP(XP),"|",2)
+
+		set (zamt,ZAMT)=$P(XP(XP),"|",2)
+		for  do { quit:'ZAMT!(zamt-ZAMT=0)  set zamt=ZAMT
+			set X=$P(XP(XP),"|",1)
+			do @X
+			}
+
+		quit:ER 
+		}
+
+	if IXP="" do { quit
+		kill F
+		set N=""
+		for  set N=$O(XP(N)) quit:N=""  do {
+			set X=$P(XP(N),"|",3)
+			for J=1:1 quit:$P(X,",",J,99)=""  do {
+				set Y=$P(X,",",J)
+				set:+Y F(Y)=""
+				}
+			}
+
+		set ZAMT=0
+		set ln.acr=0
+		kill OVR(CID,"OVR","MINBAL")
+		}
+
+	quit
+
+
+UNAPF(RecordLN ln,RecordTTX ttx)
+
+	set ln.unapf=0			// Unapplied Funds
+	do GL^LNPTSU(.ttx,-UNAPF,9)
+	quit 
+
+
+ADJINT(RecordLN	ln,
+       Number BSEQ) 	// Billing - Last Sequence Number
+
+	// Interest adjustment
+
+	type Number I
+	type String D
+
+	type RecordLNBIL1 lnbil1 = Db.getRecord("LNBIL1","CID,BSEQ")
+
+	set lnbil1.casd = lnbil1.casd + ADJ
+	set lnbil1.ctab = lnbil1.ctab + ADJ
+	set lnbil1.cpid = lnbil1.cpid + ADJ
+	set lnbil1.cpib = lnbil1.cpib + ADJ
+
+	set D = $$SUB^BILFUNCS("I",.lnbil1)
+	for I = 3,4 set $P(D,"#",I) = $P(D,"#",I) + ADJ
+	do SETELMT^BILFUNCS(.lnbil1,"I",D)
+
+	do lnbil1.bypassSave()
+
+	set TBA = TBA + ADJ
+	set TDUE = TDUE + ADJ
+	set CUIN = CUIN + ADJ
+	if (CUIN < 0) do {
+		set UNIN = UNIN - CUIN
+		set CUIN = 0
+		}
+
+	set ln.tdue = TDUE                       // Total Due
+	set ln.cuin = CUIN                       // Current Interest
+	set ln.unin = UNIN                       // Uncollected Interest
+	set ln.tba = TBA                         // Total Outstanding Due Amount
+
+	quit 
+
+
+ADJ2(RecordLN ln,
+     Number BSEQ) 	// Billing - Last Sequence Number
+
+	// Interest adjustment
+
+	type RecordLNBIL1 lnbil1=Db.getRecord("LNBIL1","CID,BSEQ")
+
+	set lnbil1.casd=lnbil1.casd+ADJ
+	set lnbil1.ctab=lnbil1.ctab+ADJ
+	set lnbil1.cpid=lnbil1.cpid+ADJ
+	set lnbil1.cpib=lnbil1.cpib+ADJ
+
+	set D=$$SUB^BILFUNCS("I",.lnbil1)
+	for I=3,4 set $P(D,"#",I)=$P(D,"#",I)+ADJ
+	do SETELMT^BILFUNCS(.lnbil1,"I",D)
+
+	set TBA=TBA+ADJ
+	set ln.tba=TBA		// Total Outstanding Due Amount
+
+	do lnbil1.bypassSave()
+
+	quit 
+
+
+BILL(Number BSEQ)	// Billing - Last Sequence Number
+
+	type Number I
+	type String D
+
+	type RecordLNBIL1 lnbil1=Db.getRecord("LNBIL1","CID,BSEQ")
+
+	if (lnbil1.cdpd '> %SystemDate) quit
+
+	for I=2:1 set D=$$SUB^BILFUNCS(I,.lnbil1) quit:D=""
+		set:$E(D,1,2)="P#" P=P-$P(D,"#",4) 
+		set:$E(D,1,2)="I#" A=A-$P(D,"#",4)
+		
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60840^77263^Sanjay Chhabria^8890"	// Signature - LTD^TIME^USER^SIZE

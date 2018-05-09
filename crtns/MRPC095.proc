@@ -1,0 +1,745 @@
+MRPC095(return,versn,CID,efd,BRCD)
+
+	/*
+  
+	ORIG: LEVINTOLR - 03/07/2000
+	DESC: Loan Sub-Account Creation
+
+
+	ARGUMENTS:
+	   . return	Error Message		/TYP=T/REQ/MECH=REFNAM:W
+
+	   . versn	version number			/TYP=N/REQ/MECH=VAL
+			current version=1
+
+	   . CID	Parent Account Number		/TYP=N/REQ/MECH=VAL
+
+	   . efd	Effective Date			/TYP=D/REQ/MECH=VAL
+	
+	   . BRCD	Branch Code			/TYP=N/NOREQ/MECH=VAL
+
+
+	RETURNS:
+	   . $$		Error Message		/TYP=T
+			NULL - No Error
+
+	   . return	Error Message		/TYP=T
+			NULL - No Error
+
+	RELATED:
+		. $$^PBSMRPC - MRPC Service Class Driver
+	-----------------------------------------------------------------------
+
+	When a loan is so delinquent that the bank considers it a problem loan
+	the bank may wish to redefine how it reports the loan amounts to its
+	general ledger accounts.
+
+	To allow such a loan (called the parent customer view loan) to continue
+	to function normally while reporting amounts and/or partial amounts of
+	its principal, interest, fees, and late charges to different general
+	ledger accounts, PROFILE will open three linked problem loan
+	sub-accounts to drive the bank level general ledger reporting.
+
+	The non-accrual sub-account will have a non-accrual general ledger set
+	tied to it.  All or part of the customer view loan's principal, 
+	interest, fees, or late charges may be defined on this non-accrual
+	sub-account.  Amounts in non-accrual the bank cannot count on obtaining
+	or obtaining in a timely manner.  The bank reports them separately so 
+	that it does not make plans for the use of these funds.
+
+	The charge-off sub-account will have a charge-off general ledger set
+	tied to it.  All or part of the customer view loan's principal,
+	interest, fees, or late charges may be defined on this charge-off
+	sub-account.  Amounts that are charged-off, the bank takes as a loss, 
+	because it assumes it will not be able to obtain these funds owed.
+
+	The current sub-account will have the original parent customer view	
+	general ledger set tied to it.  This is the sub-account that drives
+	the amounts that the bank still considers to be good and that they
+	expect to see perform as normal on the loan.  Amounts on the 
+	customer view loan that have not been allotted to the non-accrual
+	or charge-off sub-accounts will generally be defined on the current
+	sub-account.
+
+	This MRPC will create the three problem loan sub-accounts with the 
+	proper general ledger sets.  It will assign a new "dummy" general 
+	ledger set to the customer view loan.  It will apply the amount of 
+	principal, interest, fees, and late charges to the current sub-account
+	in order to initialize the sub-accounts for the reclassificataion of 
+	amounts to the three sub-accounts.  This reclassification is performed
+	manually by a qualified user through the Problem Accounts tab in PFW.
+
+
+	------------------  Revision History  ---------------------------------
+	07/25/06 - Pete Chenard - CR 22385
+		   Removed unsupported parameter on commit() method call.
+	
+	05/01/06 - DHANALAKSHMI R - 20996
+		   Modified the section SUBACCT to insert a address record  
+		   into ACNADDR table for sub accounts.
+
+	03/20/06 - RussellDS - CR16892
+		   Removed references to obsolete CUVAR.TRACROP.
+		   
+		   Some PSL clean-up.
+	
+	06/22/05 - SwarnalathaP - CR16394
+		   Modified section SUBACCT to call the lnall.save() first and 
+		   then to call relcif.save() because the loan sub account 
+		   should exist before inserting that particular sub account 
+		   record into relcif and removed the lock which locks the 
+		   account until it is getting created.  Also modified section 
+		   SETTRAN to process the fee processing only if the LNFEE record 
+		   exists by removing the line "if rs.isEmpty() quit".
+		 
+	06/13/05 - SwarnalathaP - CR13281
+	           Modified section SETTRAN to not to pass the parameters 
+	           ttx1() and ttx while calling EXEC^LNUEFD, since this is not 
+	           a transaction posting
+	
+	05/24/05 - RussellDS - CR16071
+		   Changed TP method from "BA" to "CS".
+		   
+		   Removed old revision history.
+	*/
+
+
+	new ER,RM
+	set ER=0
+	set RM=""
+
+	// Version number of client message is not compatible with server
+	if $G(versn)'=1 quit $$ERRMSG^PBSUTL($$^MSG(2951))
+
+	do Runtime.start("CS",trnreject,stack)    // Start TP
+
+	do START	//Create sub-accounts and post originating transations
+
+	if ER do {  quit $$ERRMSG^PBSUTL(RM)
+		if $Tlevel do Runtime.rollback()
+		}
+	do Runtime.commit()
+
+	quit ""
+
+
+START	// Open sub-accts->Post trans to current sub-acct->Update parent acct
+
+
+	new ln,placn,plfee,TYPE,GLSC,CVGLSC,CRCD,CC,crntcid
+	type RecordLN ln=Db.getRecord("LN","CID")
+
+	do CREATE(.ln) quit:ER			// generate sub-accounts
+	do SETTRAN(crntcid,efd,.ln) quit:ER	// curr sub-acct initial trans
+	do SAVCV(.ln) quit:ER			// update parent account
+	quit
+
+
+CREATE(RecordLN ln)	// Create sub-accounts
+
+
+	new BLNAGLSC,BLCOGLSC,nacid,cocid
+
+	do INIT(.ln) quit:ER
+	set crntcid=$$SUBACCT(1,GLSC) quit:ER		//curr sub-acct->swap on parent GL set 
+	set nacid=$$SUBACCT(2,BLNAGLSC) quit:ER		//non-accr sub-acct 
+	set cocid=$$SUBACCT(3,BLCOGLSC) quit:ER		//charge-off sub-acct
+	quit
+
+
+INIT(RecordLN ln)	// Initialize parent account values
+
+
+	if $G(efd)="" set efd=%SystemDate	// default system date
+	else  set efd=$$DSJD^SCADAT(efd)	// convert to Julian format
+	
+	// Effective date may not be in the future
+	if efd>TJD set ER=1,RM=$$^MSG(876) quit
+
+	// Cannot effective-date prior to opening date
+	if efd<ln.odd set ER=1,RM=$$^MSG(450) quit
+
+	new lnrow,pcidstat,stat,pl,subflg
+	set subflg=ln.pcidstat
+	 // Problem sub-accounts already exist
+	if subflg>0 set ER=1,RM=$$^MSG(4374) quit
+	type ResultSet rs=Db.select("PCIDSTAT,STAT","LN","CVCID=:CID")
+	if 'rs.isEmpty() while rs.next() do { quit:ER
+		set lnrow=rs.getRow()
+		set pcidstat=$p(lnrow,$c(9),1)
+		set stat=$p(lnrow,$c(9),2)
+		// Problem sub-accounts already exist
+		if pcidstat>0,stat'=4 set ER=1,RM=$$^MSG(4374)
+	}
+	quit:ER
+	set TYPE=ln.type
+	set GLSC=ln.glsc 	// general leger set code
+	set CRCD=ln.crcd
+	set CC=ln.cc		// Cost Center
+	
+	if BRCD.get().isNull() do {
+	
+		type RecordSCAU scau = Db.getRecord("SCAU", "UID=:%UserID", 1)
+		
+		set BRCD = scau.brcd
+	
+		if BRCD="" set BRCD=CUVAR.BOBR
+		}
+
+	// Bank Level GL Set codes
+	// Bank level GL set codes are not defined for product type ~p1
+	if 'Db.isDefined("UTBLBNKLVLGL","TYPE") set ER=1,RM=$$^MSG(4378,TYPE) quit 
+
+	new plgl
+	type RecordUTBLBNKLVLGL plgl=Db.getRecord("UTBLBNKLVLGL","TYPE")
+	set CVGLSC=plgl.cvglsc		// new customer view (dummy) GL set
+	set BLNAGLSC=plgl.blnaglsc	// non-accrual GL set
+	set BLCOGLSC=plgl.blcoglsc	// charge-off GL set
+	// Bank level GL set codes are not defined for product type ~p1
+	if 'CVGLSC!'BLNAGLSC!'BLCOGLSC set ER=1,RM=$$^MSG(4378,TYPE) quit
+
+	set placn=CUVAR.PLACN
+	set plfee=CUVAR.PLFEE
+	// Problem sub-account owner must be defined in institution variables
+	if placn="" set ER=1,RM=$$^MSG(4375) quit
+	// Problem sub-account fee plan must be defined in institution variables
+	if plfee="" set ER=1,RM=$$^MSG(4376) quit
+	quit
+
+
+SUBACCT(PCIDSTAT,GLSC)	// Create Sub-Accounts
+
+
+	new subcid
+	type RecordLN lnall=Class.new("RecordLN")
+
+	// Generate a unique Account # for each Sub-Account
+	do {
+		new CID
+		set subcid=$$CID^NEW
+		}
+	if $G(ER)=1 quit ""
+	// Unable to create new account number
+	if subcid="" set ER=1,RM=$$^MSG(7761) quit ""
+	new rs,rs1,string,DATA,collist,lnvals,ROLE,REL,%NOLOCK
+
+	/*
+	Read columns and their values out of the user table to apply to the
+	sub-accounts.
+	*/
+	type ResultSet rs=Db.select("COLUMN,VALUE","UTBLSUBLNCRT")
+	if rs.isEmpty() do {  quit subcid
+		set ER=1
+		// User table SUBLNCRT must be populated
+		set RM=$$^MSG(4491)
+		}
+	while rs.next() do {
+		new data,col,value
+		set data=rs.getRow()
+		set col=$P(data,$C(9),1)
+		set value=$P(data,$C(9),2)
+		set col=$$UPPER^%ZFUNC(col)
+		// create string of columns and values to build overlay array
+		if value'="" set string=$G(string)_","_"LN."_col_"="_value 
+		// create a list of values to extract from the parent record
+		else  set collist=$G(collist)_","_col
+		}
+	set collist=$E($G(collist),2,$L($G(collist)))
+	if collist'="" do {  quit:$G(ER) subcid
+		new expr
+		set expr=collist_" FROM LN WHERE CID=:CID"
+		do SELECT^SQL(expr,,,.lnvals)
+		quit:$G(ER)
+		new col,val
+		for i=1:1:$L(collist,",") do {
+			set col=$P(collist,",",i)
+			set val=$P(lnvals,$C(9),i)
+			set string=$G(string)_","_"LN."_col_"="_val
+			}
+		}
+	set string=$E($G(string),2,$L($G(string)))
+	do STR2ARR^UTLMRPC(string,.DATA)
+	do lnall.overlay("DATA")
+	
+	set lnall.CID=subcid		// new sub-account number
+	set lnall.cvcid=CID		// linked parent account
+	set lnall.pcidstat=PCIDSTAT	// current, non-accr, or chg-off account
+	set lnall.glsc=GLSC		// GL set code from parent account
+	set lnall.odt=TJD		// Account Opening Date=System Date
+	set lnall.odd=efd		// Orig. Date of Disb.=Effective date
+	set lnall.dtnt=efd		// Date of Note=Effective date
+	set lnall.acn=placn		// Bank sub-account owner from CUVAR
+	do lnall.save()
+
+	/*-------- Code to include this account in RELCIF-----------------*/
+	
+	/* Set-up instructions for this project indicate that a RELCODE with 
+	no more than one account owner be established, and that this same 
+	relationship code be established as the value of ACNRELC on the
+	UTBLSUBLNCRT user table.  Therefore, only one ROLE (role number 1) will 
+	be defined for this RELCODE record, and only one RELCIF record should 
+	be generated.
+	*/
+
+	set ROLE=1		// Only one role code for this type ownership
+	set REL=$G(DATA("LN.ACNRELC"))
+	// Column ACNRELC must be included on the Sub-Account Creation Columns user table
+	if REL="" set ER=1,RM=$$^MSG(4377) quit subcid
+	type RecordRELCODE relcode=Db.getRecord("RELCODE","REL,ROLE")
+
+	type RecordRELCIF relcif	
+
+	set relcif=Class.new("RecordRELCIF")	
+	set relcif.acn=placn		// Bank sub-account owner from CUVAR
+	set relcif.cid=subcid		// Sub-account number
+	set relcif.role=ROLE		
+
+	do relcif.save()
+
+	// Account Address Section
+	type RecordACNADDR acnaddr
+	set acnaddr=Class.new("RecordACNADDR")
+	set acnaddr.cid=subcid
+	do acnaddr.overlay("DATA")
+
+	if acnaddr.ad1="" do {
+
+		type RecordCIF cifdata=Db.getRecord("CIF","ACN=:placn")
+		set acnaddr.ad1=cifdata.mad1
+		set acnaddr.ad2=cifdata.mad2
+		set acnaddr.ad3=cifdata.mad3
+		set acnaddr.ad4=cifdata.mad4
+		set acnaddr.city=cifdata.mcity
+		set acnaddr.state=cifdata.mstate
+		set acnaddr.mzip=cifdata.mzip
+		set acnaddr.cntry=cifdata.mcntry
+		set acnaddr.loc=cifdata.mloc
+	}
+
+	do acnaddr.save()
+
+	quit:ER $G(subcid)
+
+	// Account ~p1 created
+	set TCMT=$$^MSG(107,lnall.cid)
+	do hist(TCMT,efd)
+	quit subcid
+
+
+SETTRAN(CID,efd,RecordLN ln)
+
+	
+	/* 
+	This sub-routine sets up the account numbers, the transaction codes 
+	and other initial conditions and calls into the TRNPST subroutine for
+	each transaction to the current sub-account and its offseting general
+	ledger.
+
+	If the sub-accounts are opened with a past date then the amounts 
+	that will be applied to the current sub-account should be the amounts
+	on the parent customer view account as of that effective date.
+	
+	Call into EXEC^LNUEFD to unwind the customer view account to the
+	effective date and set the BAL,ACR,MCHG,and LCHG from the %A array.
+	*/
+
+	new acr,bal,CVCID,feepln,feerem,feetyp,frwrd,lchg,mchg
+	new seq
+	set frwrd=0
+
+	// define customer account number
+	set CVCID=ln.cid,mchg=0
+	type RecordLN cvcid=Db.getRecord("LN","CID=CVCID")
+
+	type RecordLN ln1=Db.getRecord("LN","CID")
+
+	if efd<TJD do { quit:ER
+		new BIL,ETC,ITC
+		do EXEC^LNUEFD(.cvcid,,,efd) quit:ER
+		set bal=cvcid.bal
+		if cvcid.aruf set bal=bal-cvcid.udbal
+		set acr=cvcid.acr
+		set acr=$$^SCARND(acr,0,CVCID)
+
+		/*
+                Misc fees on the customer account
+                This excludes any fees assessed using a fee plan with it's
+                own general ledgers.
+                */
+
+		set feetyp="",mchg=""
+		type ResultSet rs=Db.select("FEETYP,FEEREM","LNFEE","CID=:CVCID")
+		
+		while rs.next() do {
+			set feepln=$$FEEPLN^LNU(rs.getCol("FEETYP"))
+			if ($P(feepln,"|",22)!$P(feepln,"|",23)!$P(feepln,"|",24)) quit
+			set mchg=mchg+rs.getCol("FEEREM")
+			}
+		 
+		set lchg=cvcid.lchg
+		set frwrd=1
+		if 1		// reset $T for else clause
+		}
+	
+	else  do {
+		set bal=ln.balcmp
+		set acr=$$^SCARND(ln.acr,0,CVCID)
+
+		/* 
+		Misc fees on the customer account
+		This excludes any fees assessed using a fee plan with it's
+		own general ledgers.
+		*/
+
+		set mchg=""
+
+		type ResultSet rs=Db.select("FEETYP,FEEREM","LNFEE","CID=:CVCID")
+		while rs.next() do {
+			set feetyp=rs.getCol(1)
+			set feepln=$$FEEPLN^LNU(feetyp)
+			if ($P(feepln,"|",22)!$P(feepln,"|",23)!$P(feepln,"|",24)) quit
+			set feerem=rs.getCol(2)
+			set mchg=mchg+feerem
+			}
+
+		set lchg=ln.lchg
+		}
+
+	new prodctl,glsc
+
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","ln.type")
+	type RecordUTBLGLSC glsc=Db.getRecord("UTBLGLSC","ln1.glsc")
+	set tlo=%UserStation
+	
+	if bal do {  quit:ER
+		new etc,offetc,offcid,tso,tcmt,cvtcmt
+		set etc=prodctl.drtrpr		// debit principal
+		set offetc="MCR"		// miscellaneous credit for all offsets
+		set offcid=glsc.lglpo		// current principal offset
+		set tso="",tso=$$FIELDIN^UTSO(tso,"CRNP",bal)
+		set tcmt=""
+		do TRNPST(ln1.cid,bal,.ln1) quit:ER
+		}
+
+	if acr do {  quit:ER
+		new etc,offetc,offcid,tso,tcmt
+		//new efd
+		//set efd=TJD			//???
+		set etc=prodctl.dradin		// debit accrued interest
+		set offetc="MCR"		// miscellaneous credit for all offsets
+		set offcid=glsc.lgli		// interest income
+		else  set offcid=glsc.lglio		// interest offset
+		set tso="",tso=$$FIELDIN^UTSO(tso,"CRNI",acr)
+		set tcmt=""
+		do TRNPST(ln1.cid,acr,.ln1)
+		}
+
+	if mchg do {  quit:ER
+		new etc,offetc,offcid,tso,tcmt
+		set etc=prodctl.drtrmfi     // debit misc. fees
+		
+		// misc CR fee
+		#IF CUVAR.FEEICRTC.isNull()
+		set offetc = "MCR"
+		#ELSE
+		set offetc = CUVAR.FEEICRTC
+		#ENDIF
+		
+		set offcid=glsc.lglf		// fee income account
+		set tso="",tso=$$FIELDIN^UTSO(tso,"LNFEEIN",plfee_":"_mchg)
+		set tso=$$FIELDIN^UTSO(tso,"CRNF",mchg)
+		set tcmt=""
+		do TRNPST(ln1.cid,mchg,.ln1)
+		}
+
+	if lchg do {  quit:ER
+		new etc,offetc,offcid,tso,tcmt
+		set etc=prodctl.drtrpe		// debit late charges
+		set offetc="MCR"
+		//set offcid=glsc.lgllc	// current late charge offset
+		set offcid=glsc.lgll		// late charge income
+		set tso="",tso=$$FIELDIN^UTSO(tso,"CRNLC",lchg)
+		set tcmt=""
+		do TRNPST(ln1.cid,lchg,.ln1)
+		}
+
+	// if backdated update sub-acct with frwrd posting trans from parent
+	if frwrd do FRWRD(ln.cid,ln1.cid,efd,.ln1) quit:ER
+
+	quit
+
+
+TRNPST(cid,tamt,RecordLN ln1)
+
+
+	/*
+	This sub-routine uses SETTR to build the transactions and then 
+	immediately posts them by calling into POST.  It is necessary to 
+	limit the transactions to two per transaction set since no more 
+	than one effective dated transaction to the same account can post
+	at a time.
+
+	ARGUMENTS:
+ 
+		.cid	Sub-Account Number		/TYP=N/REQ/MECH=VAL
+
+		.tamt	Transaction amount		/TYP=$/REQ/MECH=VAL
+
+		.ln1	Pointer to Sub-Account Object
+ 
+	INPUTS:
+		.etc		Transaction Code
+
+		.offetc		Offsetting Tran Code
+
+		.offcid		Offseting General Ledger
+
+		.tso		Transaction Source
+
+		.tcmt		Teller Comment
+ 	*/
+
+	new ts
+	type TranSet ts
+	set ts=Class.new("TranSet")
+
+	do SETTR(cid,efd,etc,tamt,tcmt,tso,.ts,.ln1) quit:ER
+	do SETTR(offcid,efd,offetc,tamt,tcmt,tso,.ts,.ln1) quit:ER
+	
+	do POST(.ts)
+	quit
+	
+
+SETTR(CID,EFD,ETC,TAMT,TCMT,TSO,TranSet ts,RecordLN lns)  // Private Create Transaction Set
+
+ 
+	/* 
+	Create current sub-account transactions.  During sub-account
+	creation the parent customer view account's principal (BAL), interest
+	(ACR), fees (MCHG) and late charges (LCHG) must be applied to the 
+	current sub-account.  These are the amounts that the bank wishes to
+	evaluate on separate general ledgers, if they plan to charge-off or
+	place them in a non-accrual status.  The sub-accounts will ensure that
+	the amounts are reported to the proper GLs, so when opening these 
+	accounts (and before redfining how they are classified) the current 
+	sub-account must reflect what is on the customer view account.
+
+	ARGUMENTS:
+
+		.CID	Account number			/TYP=N/REQ/MECH=VAL
+
+		.EFD	Effective Date			/TYP=D/REQ/MECH=VAL
+
+		.ETC	External transaction code	/TYP=T/REQ/MECH=VAL
+
+		.TAMT	Transaction amount		/TYP=$/REQ/MECH=VAL
+
+		.TCMT	Transaction comment		/TYP=T/REQ/MECH=VAL
+
+		.TSO	Transaction source		/TYP=T/REQ/MECH=VAL
+
+		.ts	Transaction Set Object
+		
+		.lns	Sub-Account Object
+
+	RETURNS:
+
+		ttx()	Transaction object
+ 	*/
+
+
+	if 'TAMT quit
+ 
+	// Posting offset account not defined. Posting halted for sub-account ~p1.
+	if CID="" set ER=1,RM=$$^MSG(4311,crntcid) quit
+
+	// Posting transaction code not defined. Posting halted for sub-account ~p1.
+	if ETC="" set ER=1,RM=$$^MSG(4312,crntcid) quit
+	if 'Db.isDefined("TRN","ETC=:ETC") set ER=1,RM=$$^MSG(4312,crntcid) quit
+
+	new trn,itc
+	type RecordTRN trn=Db.getRecord("TRN","ETC=:ETC")
+	set itc=trn.itc
+	
+	new ttx,x
+	type RecordTTX ttx
+	set ttx=Class.new("RecordTTX")
+	set ttx.cid=CID
+	set ttx.itc=itc
+	set ttx.etc=ETC
+	set ttx.tamt=TAMT
+	set ttx.efd=EFD
+	set ttx.tlo=tlo
+	set ttx.tso=TSO
+	set ttx.tcmt=TCMT
+	set ttx.cc=lns.cc
+	#if CUVAR.%MCP set ttx.crcd=lns.crcd
+	set x=ts.copyTran(ttx)
+	quit
+
+
+FRWRD(CVCID,CID,EFD,RecordLN ln1)	// Post the forward trans from parent
+
+
+	/* 
+	If the opening transactions were backdated then the transactions 
+	that on the parent account that occured between then and now must
+	be applied to the current account on the same dates.
+	*/
+
+	new exe,vsql,tseq,hist,hstdt,stp,itc,dc,tamt,prin,int,fee,lchg
+	new hstsys,prodctl,glsc,revseq,HIST
+
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE")
+	type RecordUTBLGLSC glsc=Db.getRecord("UTBLGLSC","ln1.glsc")
+	
+	// Get history going backward to not have to get all of history
+	set vsql=$$OPEN^UHFETCH(.exe,CVCID,"",1)
+	set stp=0
+	for  quit:stp  set vsql=$$FETCH^UHFETCH(.exe,CVCID,.tseq,.hist) quit:vsql=0  do {
+		new efd
+		set hstdt=$P(hist,"|",5)
+		set hstsys=+hist
+		if hstdt="" set hstdt=hstsys
+		if hstsys'>EFD set stp=1 quit	// quit and stop going through hist
+		if hstdt'>EFD quit		// quit but keep going through hist
+		set efd=hstdt
+		set HIST(tseq)=hist
+		}
+		do CLOSE^UHFETCH
+	
+	// Process history going in a forward direction
+	set tseq=""
+	for  set tseq=$O(HIST(tseq)) quit:tseq=""  do { 
+		new efd,hstsys
+		set hist=HIST(tseq)
+		set efd=$P(hist,"|",5)
+		set hstsys=+hist
+		if efd="" set efd=hstsys
+		set itc=$P(hist,"|",2)
+		set dc=$E(itc)		// debit or credit indicator
+		set tso=$P(hist,"|",7)
+		if $E(itc,6) quit	// error correct - ignore
+		if $E(itc,12) set dc='dc	// reversal handle as the oppos.
+		set tamt=$P(hist,"|",4)
+		set prin=$P(tamt,"#",2)+$P(tamt,"#",5)
+		set int=$P(tamt,"#",3)
+		set fee=$P(tamt,"#",6)
+		set lchg=$P(tamt,"#",4)
+		
+		// check amt fields and get deflt trn codes using dc (deb/cred)
+
+		if prin do {  quit:ER
+			new etc,offetc,offcid,tso,tcmt
+			if 'dc set etc=prodctl.drtrpr,offetc="MCR"
+			else  set etc=prodctl.crtrpr,offetc="MDR"
+			set offcid=glsc.lglpo		// current principal offset
+			set tso="",tso=$$FIELDIN^UTSO(tso,"CRNP",prin)
+			set tcmt=""
+			do TRNPST(ln1.cid,prin,.ln1)
+			}
+
+		/* 
+		Only update interest for manually posted interest adjustments
+		otherwise let the system handle the recalculation and  
+		adjusted interest based upon the back-dated disbursement.
+		Offset it to interest offset rather than interest income.
+		*/
+		if int do {  quit:ER
+			if $E(itc,7)>0 quit	// secondary transaction
+			new etc,offetc,offcid,tso,tcmt
+			if 'dc set etc=prodctl.dradin,offetc="MCR"
+			else  set etc=prodctl.cradin,offetc="MDR"
+			set offcid=glsc.lgli	// int income
+			else  set offcid=glsc.lglio	// interest offset
+			set tso="",tso=$$FIELDIN^UTSO(tso,"CRNI",int)
+			set tcmt=""
+			do TRNPST(ln1.cid,int,.ln1)
+			}
+
+		if fee do {  quit:ER
+			new etc,offetc,offcid,tso,tcmt
+			if 'dc do {  if 1
+				set etc=prodctl.drtrmfi		// debit misc. fees
+				
+				// misc credit for fees
+				#IF CUVAR.FEEICRTC.isNull()
+				set offetc = "MCR"
+				#ELSE
+				set offetc = CUVAR.FEEICRTC
+				#ENDIF
+				}
+			else  do {
+				set etc=prodctl.crtrmfr		// credit fee
+				
+				// misc debit for fees
+				#IF CUVAR.FEEIDRTC.isNull()
+				set offetc = "MDR"
+				#ELSE
+				set offetc = CUVAR.FEEIDRTC
+				#ENDIF
+				}
+			set tso="",tso=$$FIELDIN^UTSO(tso,"LNFEEIN",plfee_":"_fee)
+			set tso=$$FIELDIN^UTSO(tso,"CRNF",fee)
+			set offcid=glsc.lglf		// fee income account
+			set tcmt=""
+			do TRNPST(ln1.cid,fee,.ln1)
+			}
+
+		if lchg do {  quit:ER
+			new etc,offetc,offcid,tso,tcmt
+			if 'dc set etc=prodctl.drtrpe,offetc="MCR"
+			else  set etc=prodctl.crtrpe,offetc="MDR"
+ 			set offcid=glsc.lgll	// late charge income
+			set tso="",tso=$$FIELDIN^UTSO(tso,"CRNLC",lchg)
+			set tcmt=""
+			do TRNPST(ln1.cid,lchg,.ln1)
+			}
+		}
+	quit
+		
+
+POST(TranSet ts)	// Post transactions to current account
+
+
+	new par,TPD,i
+	set par("IPMODE")=3
+	set par("OPTION")=2
+	set TPD=%SystemDate	// Post today - effective dated (ttx.efd)
+ 
+	// Post transactions for this account.
+	do ts.postTSet(%SystemDate,BRCD,.par)	// Post today -effective dated
+	quit:ER
+	// Rejected
+	//for i=1:1:$L(ts.status,"|") quit:ER  if $P(ts.status,"|",i)=1 set ER=1,RM=$$^MSG(3494) 
+	quit
+
+
+hist(TCMT,EFD)	// update history record on the customer view account
+
+
+	new TSEQ
+	set TSEQ=Db.nextVal("HIST","CID")
+	
+	type RecordHIST hist = Class.new("RecordHIST", "CID=:CID,TSEQ=:TSEQ")
+	
+	set hist.tjd = TJD
+	set hist.efd = EFD
+	set hist.tcmt = TCMT
+	
+	do hist.save()
+
+	quit
+
+
+SAVCV(RecordLN ln)	// Save Customer View (Parent) Account Updates
+
+
+	do ln.setAuditFlag(1)	
+	set ln.glsc=CVGLSC	// customer view (dummy) GL set
+	set ln.paoi=1		// turn on problem account open indicator
+	set ln.pcidstat=0	// indicates it is a customer view account
+	do ln.save()
+	quit
+
+vSIG()	quit "60472^62255^Pete Chenard^20835"	// Signature - LTD^TIME^USER^SIZE

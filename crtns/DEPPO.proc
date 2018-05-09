@@ -1,0 +1,1004 @@
+public	DEPPO(RecordDEP dep, RecordTTX ttx, RecordTRN trn)
+	/*
+	       ORIG: Allan Mattson
+	       DESC: Deposit account paid-out (debit) transaction processor.
+
+	   I18N=QUIT:   Excluded from I18N standards.
+
+	---- Revision History ------------------------------------------------
+	
+	12/04/06 - KinI - CR 22979
+		   Modified to remove PWTAX section and the call to it as it 
+		   should have been deleted along with some obsoleted Patagon 
+		   system area elements (Premature Withdrawal Tax processing).
+	
+	07/17/06 - DESHPANDE S K - CR 20748
+		   Replaced Transaction variables (%TRNMODE and %TRNPRIM)
+		   with Transaction Stored Values.
+	
+	06/05/06 - SANTHUMS - CR 21314
+	  	   Passed PRIN as a new parameter to ^DEPPEN procedure.
+	  	   
+	05/18/05 - GIRIDHAL - CR 21297
+		   Modified procedure to remove references to split day 
+		   processing.
+		   
+	03/15/06 - ALAGARSS - CR 20000
+		   Modified the condition to check the TSO("CK").
+		   
+	11/09/05 - NATRAJAH - CR 17245
+		   In DEPPO section, modified the if codition for call to ODPE
+		   section, since ODPE section has to call when CUVAR.ODPE=Y 
+		   and CUVAR.ODP=N
+		   
+	03/14/05 - SmithCD - CR 13782
+		   . Replaced %ttxmode with %TRNMODE in TAMT section to 
+		     correctly recognize the transaction mode
+		   . Modified STOP section to handle possibility of undefined 
+		     ttxuid level
+		   . Made top of procedure private (to the Transaction Posting 
+		     system area; it is called by TRNDRV)
+		   . Modified to comply with current standards
+		   . Removed old revision history
+
+	*/
+	
+	type public String OVR(,,)
+	type public Boolean %ODP, ER
+	type public Number LOANRVSQ
+
+	type Number CID
+
+	set CID = dep.cid
+
+	// Invalid pledged account
+	if trn.pcfd30, 'dep.pldg do Runtime.setErrMSG("DEP", 3524) quit
+
+	// Override - Used pledged account transaction
+	if dep.pldg, 'trn.pcfd30 set OVR(dep.cid, "OVR", "PLDGPCF") = ""
+
+	// Backdated transaction to a segmented account
+	if dep.segflg, '%EffectiveDate.isNull() , %EffectiveDate < %SystemDate do ^RECALSEG(.dep, .ttx) quit
+
+	type Number AVLBAL, DCLACN, DSWA, DWA, INT, INTAVL, LNCID, PEN
+	type Number PRIN, NET
+	type String TAMT, TSO, TSO()
+
+	set TAMT = +ttx.tamt
+	set NET = TAMT
+	set INTAVL = $S(dep.iaf = 2:dep.intavlncr, 1:"")
+
+	/*
+	 Value date to next accrual calculation date for low balance based
+	 on collected balance
+	*/
+	if trn.pcfd21, dep.ircb = 6 do { quit:ER
+		type Date TRNDT, VDT
+
+		set VDT = $$VALNACP^DEPLBB(.dep, %EffectiveDate) quit:ER
+
+		set ttx.vdt = VDT
+		if %EffectiveDate set TRNDT = %EffectiveDate
+		else  set TRNDT = %SystemDate
+
+		// Value date forward offset limit exceeded
+		if VDT > (TRNDT + CUVAR.VDTFWD) set OVR(dep.cid, "OVR", "VDTFWD") = ""
+		}
+
+	if dep.iaf = 2 set PRIN = $S(NET > INTAVL:NET-INTAVL, 1:"")
+	else  set PRIN = NET
+
+	set INT = $S(NET > INTAVL:INTAVL, 1:NET)
+
+	if dep.regd = 5 do ^DEPMMDA(.dep, .ttx, .trn) quit:ER
+
+	// Do Not Calculate Penalty on Notice Accts
+	if dep.notice, 'trn.pcfd6 do { quit:ER
+		do ^DEPPEN(.dep, .ttx,PRIN)
+		set NET = NET + PEN
+		}
+
+	if dep.ira do WITHHOLD(.dep, .ttx) quit:ER
+
+	if ttx.getStoredValue("TranMode") '= 1, ttx.itc7 = 2 do { if ER set ER = 0 quit
+		if 'dep.stp.isNull() ! ($$EUROCHK^CHKPROC(dep.cid)) do STOP(.dep, .ttx)
+		if OVR.data() > 0 do STPOVR(.ttx, .OVR)
+		}
+
+	// Set up all TSO fields in TSO array to avoid extra calls to FIELD^UTSO
+	set TSO = ""
+	do OUT^UTSO(.TSO, ttx.tso)
+
+	/*
+	 Is there a Hold linked to this transaction which must be removed
+	 before it's processed
+	*/
+	if ttx.itc13 do { quit:ER
+
+		type Number RVAL
+
+		// Remove EFT holds
+		if 'TSO("EFT").get().isNull() do { quit
+			if TSO("FCID").get().isNull() quit
+			if TSO("SEQ").get().isNull() quit
+			set ER = '$$RMHLDS^EFTFUNCS(TSO("FCID"), TSO("SEQ"))
+			}
+
+		set RVAL = $$EXPHOLD^ITSHOLDS(dep.cid, TSO("HLDSEQ").get(), TAMT, TSO("REAPPLY").get())
+		}
+
+	set AVLBAL = dep.balavl
+	if ER quit
+
+	if dep.balcol < AVLBAL set AVLBAL = dep.balcol
+
+	set AVLBAL = AVLBAL - $$TRNFEE(.dep, .trn, ttx.getStoredValue("isPrimary"))
+
+	if NET > AVLBAL,'PEN.get() do { quit:ER
+		/*
+		We only consider overdraft protection on a withdrawal for:
+		 . Primary transactions
+		 . Secondary interest transfer adjustments
+		*/
+		if 'ttx.getStoredValue("isPrimary"), 'TSO("INTTRFADJ").exists() quit
+
+		// No adjustments allowed
+		if TSO("NOADJ").get() = 1 quit
+
+		// Process overdraft immediately
+		if %ODP.get() do ODP(.dep, .ttx, .trn) quit
+
+		// End of Day Overdraft Option, Invoke O/D Protection (OTC)
+		if CUVAR.ODPE, 'CUVAR.ODP do ODPE(.ttx)
+		}
+
+	// Direct transaction fees and effective dated service fee adjustment
+	if 'ttx.etc.isNull(), ttx.getStoredValue("isPrimary") do { quit:ER
+
+		// Transaction Fee
+		if trn.pcfd10 do ^SRVTRN2(.dep, .ttx, .trn, +TAMT)
+
+		// Restate Service Fee
+		if trn.pcfd13, 'dep.feepln.isNull() do {
+
+			if %EffectiveDate, (%EffectiveDate - %SystemDate) = 0 quit
+			
+			// Service Fee Plan
+			if '$$OLP^BCHFEEUT(dep.cid, dep.feepln, %EffectiveDate, ttx.etc) quit
+
+			// Service Fee Adjustment
+			do EFDFEE^BCHFEEUT(dep.cid, dep.feepln, %EffectiveDate)
+			}
+		}
+
+	// Update returned amount (PCFD17)
+	// Update GCR Check Deposit Returned
+	if trn.pcfd17 do {
+		// Return Item Amount Date
+		if dep.rnamtdt '= %SystemDate do {
+			set dep.rnamt = ttx.tamt
+			set dep.rnamtdt = %SystemDate
+			}
+		else  set dep.rnamt = dep.rnamt + ttx.tamt
+		}
+
+	// Core Account Transaction processing
+	if dep.swpf = 1 do {
+		// Update Funds Ineligible for Investment
+		if +trn.pcfd14 '= 0 do {
+			type Number INVADJ
+
+			set INVADJ = TAMT
+
+			if (dep.swpile - INVADJ) < 0 set INVADJ = dep.swpile set dep.swpile = 0
+			else  set dep.swpile = dep.swpile - INVADJ
+
+			// Transaction Source of Funds
+			set ttx.tso = $$FIELDIN^UTSO(ttx.tso, "INVADJ", INVADJ)
+
+			// Refresh the TSO array
+			do OUT^UTSO(.TSO, ttx.tso)
+			}
+		}
+
+	// FEE-DD: Service Fees
+	if '((ttx.getStoredValue("isPrimary") '= 1) & (ttx.tcmt.extract(1, 4) = "FEE-")) do { quit:ER
+		do BALOVR(.dep, .ttx, .trn)
+		do AUT(.dep, .ttx)
+		}
+
+	// Segmented Account Transaction processing
+	if dep.segflg do { quit:ER
+		do START^DEPPOSEG(.dep, .ttx, .trn)
+		// Refresh the TSO array
+		do OUT^UTSO(.TSO, ttx.tso)
+		}
+
+	if %EffectiveDate.isNull() ! (%EffectiveDate = %SystemDate) do UPDAVB(.dep, .ttx) quit:ER
+
+	// For a segmented account, don't do section INTAVL, because
+	// DEPPOSEG.M should set those pieces of the array.
+	if dep.iaf,'dep.segflg do INTAVL(.dep,.ttx) quit:ER
+
+	set dep.bal = dep.bal - PRIN - PEN.get() - DWA.get() - DSWA.get()
+	set dep.tld = %SystemDate
+
+	if DCLACN.data() do {
+		type Number DCID
+
+		set DCID = ""
+
+		for  set DCID = DCLACN(DCID).order() quit:DCID.isNull()  do {
+			type RecordDEP dep2 = Db.getRecord("DEP", "CID=:DCID")
+
+			set dep2.donrsk = dep2.donrsk + DCLACN(DCID, "DONRSK").get()
+
+			do dep2.bypassSave()
+			}
+		}
+
+	if 'dep.commfper.isNull(), '%EffectiveDate.isNull() do {
+
+		if dep.commefd.isNull(), %EffectiveDate '= %SystemDate set dep.commefd = %EffectiveDate
+
+		// Get the earliest effective date of today's transactions to this account
+		if %EffectiveDate < dep.commefd set dep.commefd = %EffectiveDate
+		}
+
+	// If TRB is 1, then credit reduces bal. - increase credit counter
+	if +dep.trb = 1 do {
+		// Number of Credits
+		set dep.cntcr = dep.cntcr + 1
+		// Update Last Credit Amount
+		set dep.lcamt = PRIN
+		// Update Last Credit Date
+		set dep.lcdt = %SystemDate
+		}
+	// If TRB is 0, then debit reduces bal. - increase debit counter
+	else  do {
+		// Number of Debits
+		set dep.cntdr = dep.cntdr + 1
+		// Update Last Debit Amount
+		set dep.ldamt = PRIN
+		// Update Last Debit Date
+		set dep.lddt = %SystemDate
+		}
+
+	// If the hold has expired, update the collected balance
+	if ttx.vdt '> %SystemDate ! (ttx.vdt.isNull()) set dep.balcol = dep.balcol - PRIN - PEN.get() - DWA.get() - DSWA.get()
+
+	// Update account status
+	do ^UPDSTAT(.dep, .trn) quit:ER
+
+	// For a segmented account, don't do section BLDTAMT, because DEPPOSEG.M will set TAMT.
+	if PRIN '= NET, 'dep.segflg do BLDTAMT(.dep, .ttx) quit:ER
+
+	// Process any commissions
+	do START^TTXCOM(.dep, .ttx)
+	if ER quit
+
+	if %EffectiveDate, (%EffectiveDate - %SystemDate) do { quit:ER
+		/*
+		Effective dated transaction
+		We only recalculate interest on a withdrawal transaction for:
+		. Primary transactions
+		. Secondary transfers
+		. Secondary automatic loan payment offsets
+		*/
+
+		if ttx.getStoredValue("isPrimary") '= 1, ttx.tcmt '[ "TFR-", 'LOANRVSQ.data() quit
+		// No int adjustments allowed
+		if TSO("NOADJ").get() = 1 quit
+
+		do ENT^RECALC(.dep, .ttx)
+		}
+
+	// update check status if european type check if applicable
+	if 'TSO("CK").get().isNull() do {
+		type Number CHKNUM, CHKTYP, NEWSTAT
+
+		set CHKNUM = TSO("CK")
+		set CHKTYP = dep.chks
+
+		// Not a check processing account
+		if '$$EUROCHK^CHKPROC(dep.cid) quit
+
+		if ER quit
+		do CHKACT^CHKPROC("PAY", CHKNUM, dep.cid, , , .NEWSTAT)
+
+		// Create a OVR if an error occours
+		if ER do { quit
+			set ER = 0
+			set OVR(dep.cid, "OVR", "INVCHK") = CHKNUM
+			}
+
+		type RecordCHECK check = Db.getRecord("CHECK", "CHKS=:CHKTYP,CHKNUM=:CHKNUM")
+
+		set check.chksts = NEWSTAT
+
+		do check.bypassSave()
+		}
+	if ER quit
+
+	// Budget Account Processing
+	if 'TSO("BGT").get().isNull() do {
+
+		type Number AMT
+		type String SAVEEC
+
+		set AMT = PRIN - PEN.get() - DWA.get() - DSWA.get()
+
+		do BGTPROC(.ttx, AMT, TSO("BGT"), 0, trn.pcfd33, trn.pcfd34)
+
+		// Save data for Error Correct
+		set SAVEEC = ttx.lnerc
+		// Budget Payment
+		set SAVEEC.piece("#", 32) = trn.pcfd33
+		// Miscellaneous Budget Contribution
+		set SAVEEC.piece("#", 33) = trn.pcfd34
+		// Loan Error-Correct Data
+		set ttx.lnerc = SAVEEC
+		}
+
+	// Interest Reserve Processing
+	set LNCID = TSO("LNIRCID").get()
+
+	if LNCID.isNull() do {
+		type ResultSet rs = Db.select("LNCID", "RELIR", "IRCID=:CID")
+
+		if rs.next() set LNCID = rs.getCol(1)
+		}
+
+	if 'LNCID.isNull() do {
+
+		type RecordRELIR relir = Db.getRecord("RELIR", "IRCID=:CID,LNCID=:LNCID", 1)
+		if relir.getMode() = 0 quit
+
+		set relir.iramtr = relir.iramtr - TAMT
+
+		do relir.bypassSave()
+		}
+
+	quit
+
+
+AUT(RecordDEP dep, RecordTTX ttx) // Deposit paid out authorization
+
+	type public String OVR(,,), TAMT
+	type public Number NET
+
+	// Restriction Flag
+	if dep.rflg do ^UFLG(.dep)
+
+	// Stop Payments
+	if 'dep.stp.isNull() ! ($$EUROCHK^CHKPROC(dep.cid)) do STOP(.dep, .ttx)
+
+	// Restrict Flag
+	if dep.flg do FLG^UFLG(.dep, ttx.itc)
+
+	// Account Status
+	if dep.stat set OVR(dep.cid, "OVR", "STAT"_dep.stat) = ""
+
+	// Debit amount must be in increment of $<INCDR>
+	if dep.incdr, (TAMT # dep.incdr) set OVR(dep.cid, "OVR", "INCDR") = $$^SCARND(dep.incdr, 0, dep.cid)
+
+	// Withdrawal amount is less than minimum of $<MINDR>
+	if TAMT < dep.mindr set OVR(dep.cid, "OVR", "MINDR") = $$^SCARND(dep.mindr, 0, dep.cid)
+
+	// Partial Withdrawals Require Approval
+	if dep.daparwd set OVR(dep.cid, "OVR", "PWTRA") = ""
+
+	if (dep.bal - TAMT) < 0, 'dep.odlim.isNull() do {
+		// Authorized Overdraft Limit Expiration Date
+		if 'dep.odexp.isNull(), dep.odexp < %SystemDate set OVR(dep.cid, "OVR", "ODEXP") = ""
+
+		// Authorized Overdraft Limit
+		if dep.bal-TAMT '< -dep.odlim set OVR(dep.cid, "OVR", "ODLIM") = $$^SCARND(dep.odlim, 0, dep.cid)
+
+		// Unauthorized Overdraft Limit
+		if dep.bal-TAMT < -dep.odlim set OVR(dep.cid, "OVR", "ODUNAMT") = $$^SCARND(dep.odlim, 0, dep.cid)
+		}
+
+	// Maximum Withdrawal
+	if dep.maxdr, TAMT > dep.maxdr set OVR(dep.cid, "OVR", "MAXDR") = $$^SCARND(dep.maxdr, 0, dep.cid)
+
+	if dep.iaf>0, 'dep.segflg do {
+		type Number TOTINTAV
+
+		set TOTINTAV = $$TOTINTAV^DEPCDI(dep.cid)
+
+		// Transaction exceeds available int/div of $<INTAVL>
+		if NET > TOTINTAV set OVR(dep.cid, "OVR", "INTAVL") = TOTINTAV
+		}
+
+	// Int/div paid but not disbursed of $<IPND>
+	if dep.ircb,dep.ipnd > 0 set OVR(dep.cid, "OVR", "IPND") = ""
+
+	// Outstanding anticipated int/div check <AECOUT>
+	if dep.ircb, dep.intchk set OVR(dep.cid, "OVR", "AECOUT") = dep.intchk
+
+	// New balance is less than minimum to accrue $<MINACR>
+	if 'dep.minacr.isNull(), (dep.bal - NET) < dep.minacr set OVR(dep.cid, "OVR", "MINACR") = $$^SCARND(dep.minacr, 0, dep.cid)
+
+	// Number of debits exceeds maximum of <MAXDRCT>
+	if +dep.trb = 0, 'dep.maxdrct.isNull(), (dep.cntdr + 1) > dep.maxdrct set OVR(dep.cid, "OVR", "MAXDRCT") = dep.maxdrct
+
+	if dep.ira do RPAOVR(.dep)
+
+	// Lease Admin. Fee & Paid Int\Div may need manual adjusting
+	if dep.lsp = 1, '%EffectiveDate.isNull(), %EffectiveDate < %SystemDate set OVR(dep.cid, "OVR", "LSP")=""
+
+	quit
+
+
+BALOVR(RecordDEP dep, RecordTTX ttx, RecordTRN trn)	// Balance violations
+
+	type public Number INT, NET
+	type public Boolean SPLTDY
+	type public String OVR(,,), TAMT
+
+	type Number COL, OVRAMT, TNET, TYPE
+
+	set TYPE = dep.type
+
+	type RecordPRODCTL prodctl = Db.getRecord("PRODCTL","TYPE=:TYPE")
+
+	set OVRAMT = dep.bal - NET + INT.get()
+	
+	set COL = dep.balcol-NET + INT.get()
+	
+	if TAMT [ "#" set TNET = TAMT.piece("#", 2)
+	else  set TNET = NET
+
+	// Check BALAVL against IBAL
+	do AUT^UHLD(.dep, (TNET - INT.get()), ttx.itc, .OVR(,,))
+
+	// Transaction exceeds ledger balance of $<BAL>
+	if OVRAMT + ($S(dep.odbb = 0:dep.nsflim,1:0)) < 0, dep.stat '= 5 set OVR(dep.cid, "OVR", "BAL") = $$^SCARND(dep.bal, 0, dep.cid)
+
+	// Transaction exceeds collected balance of $<BALCOL>
+	if COL + ($S(dep.odbb = 1:dep.nsflim, 1:0)) < 0 set OVR(dep.cid, "OVR", "BALCOL") = $$^SCARND(dep.balcol, 0, dep.cid)
+
+	// New balance is less than minimum allowed of $<MINBAL>
+	if 'dep.minbal.isNull(), (dep.bal - NET + INT.get()) < dep.minbal set OVR(dep.cid, "OVR", "MINBAL") = $$^SCARND(dep.minbal, 0, dep.cid)
+
+	if dep.fnbodp do {
+		type Number AMT
+
+		if TAMT [ "#" set AMT = TAMT.piece("#", 2)
+		else  set AMT = TAMT
+
+		// Amt exceeds neg bal limit due to OPD
+		if 'dep.nbodplm.isNull(), (AMT - dep.bal) > dep.nbodplm set OVR(dep.cid,"OVR","NBODPLM") = $$^SCARND(dep.bal, 0, dep.cid)
+
+		// Amt exceeds neg tran limit on overdraft protection
+		if 'dep.ntodplm.isNull(), (AMT - dep.bal) > dep.ntodplm set OVR(dep.cid,"OVR","NTODPLM") = $$^SCARND(dep.ntodplm, 0, dep.cid)
+		}
+
+	/*
+	  Calculate two minimum deposit account balances using a percentage
+	  of the customers total outstanding loan portfolio balance.
+	  Check if the deposit account ledger balance is brought below either
+	  of the two computed minimum balances.
+
+	  If Consider Computed Minimum Balances flags set and
+	  at least on of the percentages not equal 0, calculate
+	  Consider Computed Minimum Balances
+	*/
+	if dep.minbalfl, trn.pcfd31, ((+prodctl.lnbalpc1 '= 0) ! (+prodctl.lnbalpc2 '= 0)) do {
+
+		type Number LNMBAL1, LNMBAL2
+
+		if +prodctl.lnbalpc1 = 0 set LNMBAL1 = 0
+		else  set LNMBAL1 = $$LNMBAL1^DEPCDI(dep.cid)
+
+		if +prodctl.lnbalpc2 = 0 set LNMBAL2 = 0
+		else  set LNMBAL2 = $$LNMBAL2^DEPCDI(dep.cid)
+
+		if +prodctl.lnbalpc1 > +prodctl.lnbalpc2 do {
+			// Below computed minimum balance #2 of $<LNMBAL2>
+			if OVRAMT < LNMBAL2 set OVR(dep.cid, "OVR", "LNMBAL2") = LNMBAL2
+
+			// Below computed minimum balance #1 of $<LNMBAL1>
+			if OVRAMT < LNMBAL1,OVRAMT '< LNMBAL2 set OVR(dep.cid, "OVR", "LNMBAL1") = LNMBAL1
+			}
+
+		if +prodctl.lnbalpc1'>+prodctl.lnbalpc2 do {
+			// Below computed minimum balance #1 of $<LNMBAL1>
+			if OVRAMT < LNMBAL1 set OVR(dep.cid, "OVR", "LNMBAL1") = LNMBAL1
+
+			// Below computed minimum balance #2 of $<LNMBAL2>
+			if OVRAMT < LNMBAL2, OVRAMT '< LNMBAL1 set OVR(dep.cid, "OVR", "LNMBAL2") = LNMBAL2
+			}
+		}
+
+	quit
+
+
+ODP(RecordDEP dep, RecordTTX ttx, RecordTRN trn) // Overdraft protection
+
+	type public Number PRIN
+	type public Boolean ER
+	type public String OVR(,,), TAMT, TSO()
+	
+	type Number TSCRCID
+
+	type RecordSCAU scau = Db.getRecord("SCAU", "UID=:%UserID")
+
+	if TSO("PAT").exists(), scau.odp = 2 do {
+		// Retries Remaining
+		if ttx.rty.isNull() set ER = 1 quit
+		
+		// Retries Remaining
+		if (scau.marty - ttx.rty) '> (scau.odpret - 1) set ER = 1
+		}
+
+	// Transaction exceeds total available for overdraft $<ODAVLF>
+	if ER do { quit
+		set ER = 0
+		set OVR(dep.cid, "OVR", "ODAVLF") = ""
+		}
+
+	/*
+	 Only allow secondary loan fee from deposit account to call ^TTXODC.
+	 All other deposit class secondary's should not call Overdraft 
+	 Protection.
+	*/
+	if ttx.getStoredValue("isPrimary") '= 1, TSO '[ "LNFEEIN", TSO '[ "AUTPMT" quit
+
+	set ttx.tamt = PRIN
+	set TSCRCID = scau.tscr
+
+	do ^TTXODC(.dep, .ttx, .trn)
+
+	set ttx.tamt = TAMT
+
+	quit
+
+
+BLDTAMT(RecordDEP dep, RecordTTX ttx)	// Build pieces 2 through (n) of TAMT
+
+	type public Number DSWA, DWA, INT, NET, PEN
+	type public String RM, TAMT
+
+	set TAMT.piece("#", 2) = NET - INT.get()
+	set DWA = DWA.get()
+	set DSWA = DSWA.get()
+	set PEN = PEN.get()
+
+	if DWA do {
+		set TAMT.piece("#", 5) = DWA
+		set TAMT.piece("#", 15) = DSWA
+		// ~p1  withholding $~p2
+		set RM = $$^MSG(3001, RM.get(), $$^SCARND(DWA, 0, dep.cid))
+		// Backup Withholding Year-to-Date
+		set dep.bwy = dep.bwy + DWA + DSWA
+		// Backup Withholding Tax Year-to-date
+		set dep.bwtytd = dep.bwtytd + DWA + DSWA
+		// Fed W/H Year-to-Date
+		set dep.fwy = dep.fwy + DWA
+		// tate W/H Year-to-Date
+		set dep.swy = dep.swy + DSWA
+		}
+
+	if PEN do {
+		set TAMT.piece("#", 4) = PEN
+		// ~p1  penalty assessed $~p2
+		set RM = $$^MSG(2999, RM.get(), $$^SCARND(PEN,0,dep.cid))
+		// Penalty Financial Year-to-Date
+		set dep.pytd = dep.pytd + PEN
+		// Penalty Tax Year-to-date
+		set dep.pentytd = dep.pentytd + PEN
+		// Penalty Paid Life
+		set dep.ppl = dep.ppl + PEN
+		}
+
+	// ~p1 available interest $~p2
+	if dep.iaf = 2 do {
+		set TAMT.piece("#", 8) = INT
+		set RM = $$^MSG(2995, RM.get(), $$^SCARND(INT, 0, dep.cid))
+		}
+
+	// Transaction Amount
+	set ttx.tamt = TAMT
+
+	kill DWA, DSWA, NET, PEN
+
+	quit
+
+
+Public INTAVL(RecordDEP dep, RecordTTX ttx)	// Update available interest
+	/*
+	   This sub-routine will update the data items mentioned below to adjust
+	   the Available Interest([LN]TOTINTAV) only if [DEP]IAF'=0.  The Data
+	   Items updated in this Sub-Routine are as follows:
+
+	         DEP.INTAVL	Interest Paid Credited
+	         DEP.INTAVLNCR  Interest Paid Not Credited
+	         DEP.INTPRIOR   Interest Prior Term
+	         HIST.INTAVL    Interest Paid
+	         HIST.INTPRIOR  Interest Prior
+
+	    INPUTS:
+	         dep            Deposit account			/TYP=RecordDEP
+	         ttx            Transaction being processed	/TYP=RecordTTX
+	         NET            Net Amount			/TYP=N/REQ
+	*/
+	
+	type public Number NET
+
+	// This subroutine should only be used for available interest (IAF'=0).
+	if '+dep.iaf quit
+
+	type String LNERC
+	type Number XNET
+
+	// Loan Error-Correct Data
+	set LNERC = ttx.lnerc
+
+	// Current Term
+	if dep.intavlr '= 2 do {
+
+		if dep.iaf = 1 set XNET = dep.intavl
+		else  set XNET = dep.intavlncr
+
+		if NET < XNET set XNET = NET
+
+		if dep.iaf = 1 set dep.intavl = dep.intavl - XNET
+		else  set dep.intavlncr = dep.intavlncr - XNET
+
+		set LNERC.piece("#", 20) = XNET
+		}
+
+	// Prior Term
+	if dep.intavlr = 2 do {
+		if NET < dep.intprior do {
+
+			set dep.intprior = dep.intprior - NET
+			set LNERC.piece("#", 21) = NET
+			}
+
+		else  do {
+			type Number TMPNET
+
+			set TMPNET = NET - dep.intprior
+			set LNERC.piece("#", 21) = dep.intprior
+			set dep.intprior = 0
+
+			if dep.iaf = 1 set XNET = dep.intavl
+			else  set XNET = dep.intavlncr
+
+			if TMPNET < XNET set XNET = TMPNET
+
+			if dep.iaf = 1 set dep.intavl = dep.intavl - XNET
+			else  set dep.intavlncr = dep.intavlncr - XNET
+
+			set LNERC.piece("#", 20) = XNET
+			}
+		}
+
+	set ttx.lnerc = LNERC
+
+	quit
+
+
+TRNFEE(RecordDEP dep, RecordTRN trn, Boolean ISPRIM)
+
+	type public String TAMT
+
+	// Service Charge Account Number
+	if 'dep.svcfeecid.isNull() quit 0
+
+	// Consider Transaction Service Fee
+	if trn.pcfd10, ISPRIM quit $$TRNFEE^TTXODC(.dep,+TAMT,trn.etc)
+
+	quit 0
+
+
+Public STOP(RecordACN acn, RecordTTX ttx)	// Stop payments
+
+	/*
+	   This sub-routine will perform checks on stop payments.
+
+	    INPUTS:
+	         dep	Deposit account				/TYP=RecordDEP
+	         ttx	Transaction being processed		/TYP=RecordTTX
+	*/
+
+	type public Date TPD
+	type public String SRC()
+	type public Number BRCD
+
+	if TPD.get().isNull() set TPD = %SystemDate
+	if 'SRC(%UserID).exists() do {
+
+		type RecordTTXUID ttxuid = Db.getRecord("TTXUID", "TJD=:TPD,BRCD=:BRCD,UID=:%UserID", 1)
+
+		set SRC(%UserID) = ttxuid.src
+		}
+
+	// Stop ACH transaction
+	if SRC(%UserID).find("ACH") ! (ttx.tlo.extract(1, 4) = "ACH-") do ACH^DEPSTP(.acn, .ttx)
+
+	// call for all deposit debits (not only DDA)
+	do DEP^DEPSTP(.acn, .ttx)
+
+	quit
+
+
+STPOVR(RecordTTX ttx, String ZOVR(,,))
+	/*
+	   Copy OVR array, and call override processing to see if
+	   the stop is overridable.  If ER, then routine DEPPO is exited with
+	   OVR intact.  If no ER, then DEPPO processing continues.
+	*/
+
+	type String L1, L2, L3, OVR(,,)
+
+	set (L1, L2, L3) = ""
+
+	for  set L1 = ZOVR(L1).order() quit:L1.isNull()  do {
+		if ZOVR(L1).data() # 10 = 1 set OVR(L1) = ZOVR(L1)
+		set L2 = ""
+		for  set L2 = ZOVR(L1, L2).order() quit:L2.isNull()  do {
+			if ZOVR(L1, L2).data() # 10 = 1 set OVR(L1, L2) = ZOVR(L1, L2)
+			set L3 = ""
+			for  set L3 = ZOVR(L1, L2, L3.order()) quit:L3.isNull()  do {
+				if ZOVR(L1, L2, L3).data() # 10 = 1 set OVR(L1, L2, L3) = ZOVR(L1, L2, L3)
+				}
+			}
+		}
+
+	do ^CRTOVR(.ttx)
+
+	quit
+
+
+Public WITHHOLD(RecordDEP dep, RecordTTX ttx)	// RPA Withholding
+
+	type public Boolean ER
+	type public Number DSWA, DWA, NET
+	type public String TAMT
+
+	type String IRADTAMT
+
+	set IRADTAMT = $$TAMT(TAMT, ttx.tamt, ttx.tso, ttx.getStoredValue("TranMode"))
+
+	if IRADTAMT [ "#" do {
+		type String TAMT
+		type Number NET
+
+		set TAMT = IRADTAMT
+
+		do ^IRA(.dep, .ttx)
+		}
+
+	else  do ^IRA(.dep, .ttx)
+
+	if ER quit
+
+	set NET = NET + DWA + DSWA
+
+	quit
+
+
+TAMT(Number AMT, String TAMT, String TSO, Number DTRNMODE)
+	// Find real TAMT since IRADIS process will have already built 
+	// the field
+	
+	// Protect UTSO
+	type String UTSO()
+
+	//  Not batch or sys generated
+	if DTRNMODE '= 3 quit AMT
+
+	set TAMT = TAMT.get()
+
+	if 'TAMT quit AMT
+	//  Not applicable
+	if TAMT '[ "#" quit AMT
+
+	//  Find UTSO("IRAD")
+	do OUT^UTSO(.UTSO, TSO)
+
+	//  Not applicable
+	if 'UTSO("IRAD").exists() quit AMT
+
+	quit TAMT
+
+
+RPAOVR(RecordDEP dep)	// Set up any RPA overrides
+
+	type public String OVR(,,)
+	type public Number NET
+
+	type Number ACN, DIST, RPASEQ, YR
+
+	// Retirement Plan Account Sequence Number
+	set RPASEQ = dep.rpaseq
+
+	if RPASEQ.isNull() quit
+
+	set ACN = dep.acn
+
+	type RecordIRATYPE iratype = Db.getRecord("IRATYPE", "ACN=:ACN,RPASEQ=:RPASEQ")
+
+	// Plan is locked in. Override required for withdrawals.
+	if RPASEQ, (iratype.lock) set OVR(dep.cid, "OVR", "LOCK") = ""
+
+	// not a Life Income Fund
+	if dep.ira '= 7 quit
+
+	set YR = $$YEAR^SCADAT($S('%EffectiveDate.isNull():%EffectiveDate, 1:%SystemDate))
+
+	type RecordIRA ira = Db.getRecord("IRA", "ACN=:ACN,RPASEQ=:RPASEQ,TAXYR=:YR", 1)
+	if ira.getMode() = 0 quit
+
+	// total distribution amount
+	set DIST = ira.d1 + ira.d2 + ira.d3 + ira.d4 + ira.d5 + ira.d6 + ira.d7
+	set DIST = DIST + ira.d8 + ira.d10 + ira.d11 + ira.d12 + ira.d13
+	set DIST = DIST + ira.d14 + ira.d15 + ira.d16 + ira.d17 + ira.d18
+	set DIST = DIST + ira.d19 + ira.d20 + ira.d21 + ira.d22 + ira.d23
+	set DIST = DIST + ira.d24 + ira.d25 + ira.d26 + ira.d27 + NET
+
+	// Set up for Max Annual Dist. Max amount will be exceeded
+	if 'ira.maxlif.isNull(), (DIST > ira.maxlif) set OVR(dep.cid, "OVR", "MAXPAY") = ""
+
+	quit
+
+
+ODPE(RecordTTX ttx)	// End of Day Overdraft Option
+
+	type Number CID
+	type Date JD
+
+	set CID = ttx.cid
+	set JD = %SystemDate
+
+	type RecordDAYENDODPE deodpe = Db.getRecord("DAYENDODPE", "TJD=:JD,CID=:CID", 1)
+	if deodpe.getMode() = 1 quit
+
+	// Set DAYEND file
+	do deodpe.bypassSave()
+
+	quit
+
+
+Public UPDAVB(RecordDEP dep, RecordTTX ttx)
+
+	/*
+	Update the Average Balance fields
+	
+	   This section will update the current dollar days balance field
+	   based on the transaction amount.
+
+	   INPUTS:
+	         dep	deposit account				/TYP=RecordDEP
+	         ttx    Transaction being processed		/TYP=RecordTTX
+	*/
+	
+	type public Date TPD
+
+	type Number DLIM, PRIN
+	type Date EOMJD
+
+	// Get the principle amount from the transaction
+	set PRIN = ttx.prin
+
+	// If there is no principle adjustment, quit
+	if PRIN = 0 quit
+
+	// Determine positive or negative based on debit-credit indicator
+	if dep.trb-ttx.itc1 = 0 set PRIN = -PRIN
+
+	// Calculate the average balance for the current month
+ 	if TPD.get().isNull() set TPD = %SystemDate
+
+	// Date of the last day in month
+	set EOMJD = $$EOMJD^SCADAT(TPD, 1)
+	// Days left in the month
+	set DLIM = EOMJD - TPD + 1
+
+	set dep.ddbalcur = dep.ddbalcur + (DLIM * PRIN)
+
+	quit
+
+
+Public BGTPROC(RecordTTX ttx, 
+	       Number PRIN, 
+	       Number BGTSEQ, 
+	       Number MODE, 
+	       Number BGTCHK, 
+	       Number MISCON)
+	       
+	/*
+	   ARGUMENTS:
+	   	 . ttx           Transaction being processed	/TYP=RecordTTX
+	         . PRIN          Principal Amount          	/TYP=N/MECH=VAL
+	         . BGTSEQ        Budget Sequence Number    	/TYP=N/MECH=VAL
+	         . MODE          Mode type                 	/TYP=N/MECH=VAL
+	                         0 Withdrawal
+	                         1 Deposit
+	                         2 Reversal/error correct of withrawal
+	                         3 Reversal/error correct of deposit
+	         . BGTCHK        Budget Payment Flag       	/TYP=N/MECH=VAL
+	                         1 Normal Budget Payment
+	                         2 Corrected Budget Payment
+	         . MISCON        Misc Budget Contribution  	/TYP=N/MECH=VAL
+	                         Flag
+	*/
+	
+	type public String OVR(,,)
+	type public Number NET
+
+	type Date BEFD, BGTYRSD
+	type Number CID
+
+	if %EffectiveDate set BEFD = %EffectiveDate
+	else  set BEFD = %SystemDate
+
+	set CID = ttx.cid
+
+	type ResultSet rs = Db.select("BGTYRSD", "BUDGET", "CID=:CID AND BGTYRSD NOT >:BEFD", "BGTYRSD DESC")
+
+	if 'rs.next() quit
+
+	set BGTYRSD = rs.getCol(1)
+
+	type RecordBUDGET budget = Db.getRecord("BUDGET", "CID=:CID,BGTYRSD=:BGTYRSD,BGTSEQ=:BGTSEQ", 1)
+
+	// Budget record does not exist
+	if budget.getMode() = 0 do Runtime.setErrMSG("DEP", 4015) quit
+
+	if 'MODE do {
+		// Billing number applies only to withdrawal
+		type Number BILLNBR
+
+		// Transaction Source of Funds
+		set BILLNBR = $$FIELD^UTSO(ttx.tso, "BGTBILL")
+
+		// Billing account number not defined in budget record
+		if budget.billnbr.isNull() set OVR(CID, "OVR", "NOBILL") = ""
+
+		// Billing account and sequence number mismatch
+		if 'budget.billnbr.isNull() , (BILLNBR '= budget.billnbr) set OVR(CID, "OVR", "BILLNBR") = ""
+
+		set ttx.tso = $$FIELDIN^UTSO(ttx.tso, "BGTCD", budget.bgtcd)
+		}
+
+	// Update budget record
+	if 'MODE,BGTCHK = 1 do {
+		type Number BGTARR
+
+		// Update budget payment information for withdrawals only
+		set budget.amtpd = budget.amtpd + PRIN
+		if PRIN>0 set budget.bgtpmts = budget.bgtpmts + 1
+
+		// Budget payment exceeds annual budget amount
+		if budget.bgtamtcy<PRIN set OVR(CID, "OVR", "BGTPMT") = ""
+
+		// Applies to Budget Payments only
+		set BGTARR = $$BGTARR^DEPCDI(CID)
+
+		// Budget account in arrears
+		if BGTARR > 0 set OVR(CID, "OVR", "BGTARR") = ""
+		}
+
+	else  if BGTCHK do {
+		// Budget payments flag not applicable to deposits and REV/EC
+		// of deposits
+		if MODE = 1 ! (MODE = 3) quit
+
+		set budget.bgtjrnl = budget.bgtjrnl + NET
+		}
+
+	// Miscellaneous cash applies to deposit or REV/EC of deposit
+	if MODE = 1 ! (MODE = 3), MISCON set budget.misccsh = budget.misccsh + PRIN
+
+	do budget.bypassSave()
+
+	quit
+
+	
+
+vSIG()	quit "60603^53103^Irina Kin^26114"	// Signature - LTD^TIME^USER^SIZE

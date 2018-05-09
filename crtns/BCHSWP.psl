@@ -1,0 +1,340 @@
+BCHSWP //Batch BCHDEPSWP - Investment Sweep based on Priority
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 08/30/2007 15:07 - joynerd
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHDEPSWP Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ set vBCHSTS=$$STATUS^BCHUTL("BCHDEPSWP")
+ if vBCHSTS=1 set ER=1,RM=$$^MSG(3410) quit
+ if vBCHSTS=2 set ER=1,RM=$$^MSG(3414) quit
+ if vBCHSTS=0 set %BatchRestart=1
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit do EXIT^BCHUTL("BCHDEPSWP") quit
+ do JOBMGR^BCHUTL(%FN,"BCHDEPSWP",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ do EXIT^BCHUTL("BCHDEPSWP")
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(CID) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHDEPSWP","*","",CID.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ if %BatchRestart,$$CHKLOG^BCHUTL(%SystemDate,%FN,"BCHDEPSWP",CID.get()) do { quit
+ do LOG^BCHUTL(%SystemDate,%FN,"BCHDEPSWP",CID.get(),"Record already processed")
+ }
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,CID)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHDEPSWP","*","",CID.get(),"",et)
+ }
+ do UPDLOG^BCHUTL(%SystemDate,%FN,"BCHDEPSWP",CID.get(),vCONTEXT)
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,CID) //
+        new ts,ttx,ttxseqno
+ 
+        // define TranSet object
+        type TranSet ts
+        set ts=Class.new("TranSet")
+        new par
+        set ttxseqno=0
+        do PROC(.ts)
+        quit
+ 
+PROC(TranSet ts)        // Process accounts
+ 	
+ 	type public Number CID,CPRIO,ICID,SWPBAL
+ 	type public String ET,RM
+        type String P()
+        
+        set ER=0
+        type RecordDEP dep=Db.getRecord("DEP","CID=:CID",1)
+        if 'dep.getMode() quit
+        if dep.stat=4 quit
+ 
+        // No threshold
+        if dep.swpt="" quit
+ 
+        type RecordPRODDFTD dftd=Db.getRecord("PRODDFTD","TYPE=:dep.type",1)
+	if 'dftd.getMode() quit
+        // Find appropriate sweep account balance to consider (DEP.SWPBO).
+        set SWPBAL=dep.bal
+        if dep.swpbo.isNull() set dep.swpbo=dftd.swpbo
+        if dep.swpbo=1 set SWPBAL=dep.balcol
+        if dep.swpbo=2 set SWPBAL=dep.balavl
+ 
+        // Determine amount required to hit threshold
+ 
+        set TREQ=$$SWPAMT^BCHSWPCT(.dep)
+ 
+        // At threshold
+        if TREQ=0 quit
+ 
+        type ResultSet dep101=Db.select("ICID,CPRIO","DEP101","CID=:CID")
+        if dep101.isEmpty() quit
+        while dep101.next() do {
+                set ICID=dep101.getCol(1)
+                set CPRIO=dep101.getCol(2)
+                type RecordDEP acct=Db.getRecord("DEP","CID=:ICID",1)
+		if 'acct.getMode() quit
+                if acct.stat=4 quit
+                set P(CPRIO,ICID)=""
+                }
+ 
+        type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:dep.type",1)
+	if 'prodctl.getMode() quit
+        set TREQAMT=$S(TREQ>0:TREQ,1:-TREQ)
+        if TREQ>0 do FMSWP(CID,.prodctl,.dep,.ts)
+        if TREQ<0 do TOSWP(CID,.prodctl,.dep,.ts)
+        quit
+ 
+FMSWP(SWP,RecordPRODCTL prodctl,RecordDEP dep,TranSet ts)
+ 
+        // Transfer from Sweep Account (SWP) to Investment Account (CID)
+ 
+        set (CID,PRI)="",SEQ=0
+        for  set PRI=$O(P(PRI)) quit:PRI=""  do { quit:'TREQAMT
+                for  set CID=$O(P(PRI,CID)) quit:CID=""  do { quit:'TREQAMT
+                        new fmdep,ts
+                        if 'Db.isDefined("DEP","CID=:CID") quit
+                        type RecordDEP fmdep=Db.getRecord("DEP","CID=:CID",1)
+			if 'fmdep.getMode() quit
+                        type RecordPRODCTL iprodctl=Db.getRecord("PRODCTL","TYPE=:fmdep.type",1)
+			if 'iprodctl.getMode() quit
+                        set TAMT=TREQAMT
+                        if fmdep.maxbal,fmdep.bal+TAMT>fmdep.maxbal set TAMT=fmdep.maxbal-fmdep.bal if TAMT'>0 quit
+ 
+                        type TranSet ts
+                        set ts=Class.new("TranSet")
+ 
+                        // Sweep transfer to ~p1
+                        set TCMT=$$^MSG(3515,CID),SEQ=SEQ+1
+                        do TR(SWP,0,.dep,.prodctl,.ts)
+ 
+                        // Sweep transfer from ~p1
+                        set TCMT=$$^MSG(3512,SWP),SEQ=SEQ+1
+                        do TR(CID,1,.fmdep,.iprodctl,.ts)
+ 
+                        set TREQAMT=TREQAMT-TAMT
+                        if ttxseqno>0 do POST(.ts)
+ 
+                        }
+                }
+ 
+        quit
+ 
+TOSWP(SWP,RecordPRODCTL prodctl,RecordDEP dep,TranSet ts)
+ 
+        // Transfer to Sweep Account (SWP) from Investment Account (CID)
+ 
+        set (CID,PRI)="",SEQ=0
+ 
+        // Cycle through in reverse priority order
+        for  set PRI=$O(P(PRI),-1) quit:PRI=""  do { quit:'TREQAMT
+                for  set CID=$O(P(PRI,CID)) quit:CID=""  do { quit:'TREQAMT
+                        new ts
+                        if 'Db.isDefined("DEP","CID") quit
+                        type RecordDEP todep=Db.getRecord("DEP","CID=:CID",1)
+			if 'todep.getMode() quit
+                        type RecordPRODCTL iprodctl=Db.getRecord("PRODCTL","TYPE=:todep.type",1)
+			if 'iprodctl.getMode() quit
+                        set AVL=todep.balavl
+                        if ER quit
+ 
+                        set AVL=AVL-todep.minbal
+ 
+                        if AVL<TREQAMT set TAMT=AVL
+                        else  set TAMT=TREQAMT
+                        if TAMT'>0 quit
+ 
+                        type TranSet ts
+                        set ts=Class.new("TranSet")
+ 
+                        // Sweep transfer to ~p1
+                        set TCMT=$$^MSG(3515,SWP),SEQ=SEQ+1
+                        do TR(CID,0,.todep,.iprodctl,.ts)
+ 
+                        // Sweep from Investment ~p1
+                        set TCMT=$$^MSG(3512,CID),SEQ=SEQ+1
+                        do TR(.SWP,"1",.dep,.prodctl,.ts)
+ 
+                        set TREQAMT=TREQAMT-TAMT
+                        if ttxseqno>0 do POST(.ts)
+ 
+                        }
+                }
+ 
+        if TREQAMT set CID=SWP,ET=$$^MSG(5618,TREQAMT) do LOGERR quit
+        quit
+ 
+TR(CID,DC,RecordDEP deptr,RecordPRODCTL prodctl,TranSet ts)
+ 
+        //Build transaction
+ 
+        set CRCD=deptr.crcd
+ 
+        /*
+        Find tran code.  First look at sweep specific tran code.  If null,
+        use general purpose transaction code.
+        */
+        new ETC
+        if DC=0 do {
+                set ETC=prodctl.drtrcs if prodctl.drtrcs="" set ETC=prodctl.drtrgp
+                type RecordTRN trn=Db.getRecord("TRN","ETC=:ETC",1)
+		if 'trn.getMode() quit
+                set ITC=trn.itc
+                }
+        else  do {
+                set ETC=prodctl.crtrcs if prodctl.crtrcs="" set ETC=prodctl.crtrgp
+                type RecordTRN trn=Db.getRecord("TRN","ETC=:ETC",1)
+		if 'trn.getMode() quit
+                set ITC=trn.itc
+                }
+        set ttxseqno=1
+        new TTXBLD
+        type RecordTTX ttx
+        set ttx=Class.new("RecordTTX")
+        set TLO=%UserStation
+        do TTX(.TTXBLD,CID)
+        set x=ts.copyTran(ttx,.TTXBLD)
+        quit
+ 
+TTX(TTXBLD,CID)
+        set TTXBLD("CID")=CID
+        set TTXBLD("ITC")=ITC
+        set TTXBLD("ETC")=ETC
+        set TTXBLD("TAMT")=TAMT
+        set TTXBLD("TLO")=TLO
+        set TTXBLD("TCMT")=TCMT
+        set TTXBLD("CRCD")=CRCD
+        quit
+ 
+POST(TranSet ts)        // Post TR array
+ 
+        set par("IPMODE")=3
+        set par("OPTION")=2
+        set TPD=%SystemDate
+ 
+        // Post transactions for this account.
+        do ts.postTSet(TPD,BRCD,.par)
+        quit
+ 
+LOGERR  // Log error in exception file
+ 
+        do LOG^UTLEXC($T(+0),"*",$$^MSG(3509),$G(CID),$G(%ZTSEQ),$G(ET))
+        K ET,%ZTSEQ
+        set ER=0
+        quit
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,CID
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set CID=vRECORD.piece($C(9),1)
+ do vPROC(CID)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,CID
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>32767 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+13>32767 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("DISTINCT CID","DEP101","")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	
+	do SOURCE^BCHSOURC("BOFF","SWP",.%UserID,.BRCD,.%UserClass)
+	set PASS=1
+	quit
+	
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+	do SOURCE^BCHSOURC("BOFF","SWP",.%UserID,.BRCD,.%UserClass)
+
+	//Deposit Sweep teller not set up in source table.
+	if %UserID="" set ER=1,RM=$$^MSG(3510) quit
+	
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

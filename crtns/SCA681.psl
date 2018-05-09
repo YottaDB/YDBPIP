@@ -1,0 +1,249 @@
+SCA681	 /*
+ORIG: KELLYP - 04/26/2000
+DESC: Temp File Builder for SCA681A/B Reports
+
+---- Comments --------------------------------------------------------
+  This procedure, called from the @REP680 function, builds entries in the
+SCA680A, SCA680B, and SCA680C table definitions for the SCA680A and SCA680B
+reports.  SCA680B uses the SCA680B table for collateral information (one record
+per account number) and uses the SCA680C table for budget/draw information 
+(possible multiple records per account number).  All three file definitions are
+deleted by the report post-processors.	
+---- Revision History ------------------------------------------------
+ 
+  08/02/05 - KUMARB - 16684
+  	Modified TOPCOMM and TOPACCT section to remove "ORDER BY" text from
+  	the corresponding Db.select parameter to prevent SQL issues.
+  	Modified section PROC, changed the table name LNLCOM to LN in 
+  	Db.select
+
+  03/02/01 - GRAY - 43583
+	     Replaced lookup of compiled report routine using a global
+	     reference with the Db.getOneRow method.
+	
+  09/06/00 - KELLYP - 41749
+        The @REP681 function was causing an undefined error because code in 
+	the TOPCOMM and TOPACCT sections was attempting to retrieve LN.LDAMT 
+	which was removed from the system under ARQ 35222:01.  Modified the
+  	code in these sections to retrieve the most recent disbursement date
+	and amount directly from HIST instead of attempting to retrieve 
+	LN.LADT and LN.LDAMT.    
+
+  07/05/00 - KELLYP - 40816
+	Added code to the START section for killing the SCA681A,SCA681B, and
+	SCA681C temp globals.  Previously, these globals were killed by the
+	SCA681A and SCA681B reports' post-processors.  However, the post-
+	processor was never called if the user exited from any page other than
+	the last one in the report.  Also initialized ZPID in the START section.
+
+ */
+
+ quit
+
+START		// Start processing/Call reports
+   	/*
+	 This section handles the calls to the SCA681A and SCA681B reports and
+	 also initializes the ZPID variable.
+	*/
+
+	new PGM,RID,ZPID
+
+	set ZPID=%ProcessID
+	set RID="SCA681A"
+
+	do Db.fastDelete("SCA681A","ZPID")	// Kill temp global entries
+	do Db.fastDelete("SCA681B","ZPID")	// Kill temp global entries
+	do Db.fastDelete("SCA681C","ZPID") 	// Kill temp global entries
+
+	do DRV^URID				// Run SCA681A report
+	do Db.fastDelete("SCA681A","ZPID")	// Kill temp global entries
+	if $G(VFMQ)="Q" quit
+
+	set RID="SCA681B"
+	set PGM=Db.getOneRow("PGM","DBTBL5H","%LIBS,RID")
+	if PGM'="" do {
+		do V0^@PGM			   // Run SCA681B report
+		do Db.fastDelete("SCA681B","ZPID") // Kill temp global entries
+		do Db.fastDelete("SCA681C","ZPID") // Kill temp global entries
+		}
+	quit
+
+PROC(XCCL)	// Main processing control
+	/*
+	 This section handles the processing control for the generation
+	 of records for the temporary table definitions associated with
+	 the SCA680A and SCA680B reports.
+	*/
+
+	new ACCTS,XCID,rs
+
+	type ResultSet rs=Db.select("CID","LN","CCL=:XCCL")
+	if rs.isEmpty() quit
+	while rs.next() do {
+		new XCID,XCPF
+		set XCID=rs.getCol(1)
+		set XCPF=Db.getOneRow("CPF","LN","XCID")
+
+		if XCPF do TOPCOMM(XCID) if 1
+		else  do TOPACCT(XCID) if 1
+		}
+
+	set PID=ZPID
+
+	quit
+
+TOPCOMM(XCCL)	// SCA681A Commitment Record Builder
+	/*
+	 This section handles the population of the SCA681A table for any
+	 sub-commitments tied to the master commitment number entered in the 
+	 SCA681A report's query.  It also handles population of the SCA681B
+	 and SCA681C tables via calls to the BLDCOLL and BLDBUD sections.
+	*/
+
+	new DATA,rs2,tmpcomm
+
+	type RecordSCA681A tmpcomm=Class.new("RecordSCA681A")
+	
+ 	set tmpcomm.pid=ZPID
+	set tmpcomm.cid=XCCL
+
+	// Sub-Commitment Level Non-Computed Data
+	set DATA=Db.getOneRow("OFF,IRN,CRLMT,IRAMTO,IRAMTR,REVF,ORG,UDBAL","LN","XCCL")
+
+	set tmpcomm.off=$P(DATA,$C(9),1)
+	set tmpcomm.irn=$P(DATA,$C(9),2)
+	set tmpcomm.commamt=$P(DATA,$C(9),3)
+	set tmpcomm.iramto=$P(DATA,$C(9),4)
+	set tmpcomm.iramtr=$P(DATA,$C(9),5)
+	if $P(DATA,$C(9),6)=1 set tmpcomm.revorg=$P(DATA,$C(9),7),tmpcomm.revbal=$P(DATA,$C(9),8)
+	
+	// Sub-Commitment Level Computed Data
+	type ResultSet rs2=Db.select("CID,STAT,BAL,AVLBAL,COLL","LN","CCL=:XCCL")
+
+	if rs2.isEmpty() quit
+
+	while rs2.next() do {
+		N BUDSEQ,CCID,CSTAT,CLAMT,CLDT,COLNBR
+		set CCID=rs2.getCol(1)
+		set CSTAT=rs2.getCol(2)
+		set COLNBR=rs2.getCol(5)
+		set tmpcomm.prbal=tmpcomm.prbal+rs2.getCol(3)
+		set tmpcomm.avlbal=tmpcomm.avlbal+rs2.getCol(4)
+
+	        // 41749 - Get most recent disbursment from HIST
+        	type ResultSet rshist=Db.select("TJD,TAMT","HIST","(ITC=0 OR ITC='') AND ((PRIN>0) OR (WHLD>0)) AND CID=:CCID","TSEQ DESC")
+        	if rshist.next() do {	// Only need first entry from rs
+                	set CLDT=rshist.getCol(1)
+                        set CLAMT=rshist.getCol(2)
+                        }
+		
+		if $G(CLDT)>tmpcomm.ladt set tmpcomm.ladt=CLDT,tmpcomm.ladtamt=+CLAMT
+
+		if COLNBR'="" do BLDCOLL(CCID,CSTAT,COLNBR)
+		set BUDSEQ=""
+		set BUDSEQ=Db.nextKey("LNENT","CCID,BUDSEQ")
+		if BUDSEQ'="" do BLDBUD(CCID)
+		}
+
+	do tmpcomm.save()
+	quit
+
+TOPACCT(XCID)	// SCA681A Account Record Builder
+	/*
+	 This section handles the population of the SCA681A table with 
+	 information on an account that is directly linked to the master
+	 commitment number entered in the SCA681A report's query.
+	*/
+
+	new DATA,rowstr,tmpacct
+ 
+	type RecordSCA681A tmpacct=Class.new("RecordSCA681A")
+ 
+	set tmpacct.pid=ZPID
+	set tmpacct.cid=XCID
+ 
+	set tmpacct.commamt=""	// Commitment Amount should be 0 for non-commitments
+ 
+	set rowstr="OFF,IRN,BAL,AVLBAL,IRAMTO,IRAMTR,REVF,ORG"
+	set DATA=Db.getOneRow(rowstr,"LN","XCID")
+ 
+	set tmpacct.off=$P(DATA,$C(9),1)
+	set tmpacct.irn=$P(DATA,$C(9),2)
+	set tmpacct.prbal=$P(DATA,$C(9),3)
+	set tmpacct.avlbal=$P(DATA,$C(9),4)
+	set tmpacct.iramto=$P(DATA,$C(9),5)
+	set tmpacct.iramtr=$P(DATA,$C(9),6)
+
+	// 41749 - Get most recent disbursment from HIST
+	type ResultSet rshist=Db.select("TJD,TAMT","HIST","(ITC=0 OR ITC='') AND ((PRIN>0) OR (WHLD>0)) AND CID=:XCID","TSEQ DESC") 
+	if rshist.next() do {	// Only need first entry from result set
+		set tmpacct.ladt=rshist.getCol(1)
+		set tmpacct.ladtamt=+rshist.getCol(2)
+		}
+	
+	if $P(DATA,$C(9),7)=1 set tmpacct.revorg=$P(DATA,$C(9),8),tmpacct.revbal=$P(DATA,$C(9),3)
+ 
+	do tmpacct.save()
+ 
+	quit
+
+BLDCOLL(CID,STAT,COLL)  // SCA681B Table Record Builder (Collateral)
+	/*
+	 This section, called from the TOPCOMM section, handles the population
+	 of the SCA681B table with collateral information on the loans linked
+	 to the Construction sub-commitment in a Builder Loan Commitment.
+	*/	
+
+	new tmpcoll
+
+	if 'Db.isDefined("COL","COLL") quit	// No collateral defined
+
+	type RecordSCA681B tmpcoll=Class.new("RecordSCA681B")
+	set tmpcoll.pid=ZPID
+	set tmpcoll.cid=CID
+	set tmpcoll.stat=STAT	
+
+	set DATA=Db.getOneRow("BLDLOT,LOT,PNAME,PRICE","COL","COLL")
+	
+	set tmpcoll.bldlot=$P(DATA,$C(9),1)
+	set tmpcoll.lot=$P(DATA,$C(9),2)
+	set tmpcoll.pname=$P(DATA,$C(9),3)
+	set tmpcoll.price=$P(DATA,$C(9),4)	
+
+	do tmpcoll.save()
+	quit
+
+BLDBUD(CID) // SCA681C Table Record Builder (Budget/Draw Information)
+	/*
+	 This section, called by the TOPCOMM section, handles the population
+	 of the SCA681C table with budget/draw information on a loan tied
+	 to the Construction sub-commitment in a Builder Loan Commitment.
+	*/
+	
+	new budgdes,data,projact,tmpbud,totact,totbud
+
+	set BUDGNO=""
+	set (totact,totbud)=0
+	for  set BUDGNO=Db.nextKey("LNENT","CID,BUDGNO") quit:BUDGNO=""  do {
+
+		type RecordSCA681C tmpbud=Class.new("RecordSCA681C")
+		set tmpbud.pid=ZPID
+		set tmpbud.cid=CID
+		set tmpbud.budgno=BUDGNO
+	
+		set tmpbud.budgdes=Db.getOneRow("DESC","UTBLECT","BUDGNO")
+
+		set data=Db.getOneRow("BUD,ACT,LADT","LNENT","CID,BUDGNO")
+
+		set tmpbud.bud=$P(data,$C(9),1),totbud=totbud+tmpbud.bud
+		set tmpbud.act=$P(data,$C(9),2),totact=totact+tmpbud.act
+		set tmpbud.ldadv=$P(data,$C(9),3)
+
+		set tmpbud.totbud=totbud	// Running total for projected
+		set tmpbud.totact=totact	// Running total for actual
+
+		do tmpbud.save()
+		}
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60136^37302^Balasubramonian Sankar^7684"	// Signature - LTD^TIME^USER^SIZE

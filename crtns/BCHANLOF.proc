@@ -1,0 +1,222 @@
+BCHANLOF //Batch BCHANLOFF - Analysis Offset Days Processing
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 01/31/2007 12:44 - shetyes
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHANLOFF Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit quit
+ do JOBMGR^BCHUTL(%FN,"BCHANLOFF",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(CID) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHANLOFF","*","",CID.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,CID)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHANLOFF","*","",CID.get(),"",et)
+ }
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,CID) //
+	kill %TRN
+
+	new anllsd,ts,ttxset,PLTP,SCND,SCLD
+
+	type TranSet ts
+ 	set ts=Class.new("TranSet")
+
+ 	set ttxset=0,PLTP=0			// PLTP=0 are service fees
+		
+	new dep
+	type RecordDEP dep
+	set dep=Db.getRecord("DEP","CID")
+
+	set anllsd=dep.anllsd
+
+	/* 
+	   Only charge options of 1 and 5 apply for this batch process.  If
+	   1 then a negative analysis position is collected/charged for the
+	   account.   If the charge option is 5 then the net loss start date
+	   will be set according to the anlaysis position.  If the position is
+	   negative, then anllsd is set to TJD.  Otherwise it will be reset to
+	   null.
+	*/
+
+	if dep.anltyp'=1 quit
+	
+	set SCLD=dep.scld			// service charge date
+	
+	new srv
+	type RecordSRV srv
+	set srv=Db.getRecord("SRV","CID,PLTP,SCLD")
+
+	if srv.netfwd<0,dep.anlchg=1 do {
+	
+		new FEEACT,CTL,NLOFF
+
+		set NLOFF=1			// Control flag for BCHFEEUT
+		set SCND=dep.scnd
+		set CTL=0
+		set FEEACT=-srv.netfwd		// fee amount to collect
+		do BUILDTR^BCHFEEUT(CID,.ts,.dep,NLOFF) if ER quit
+
+		// ttxset will be set to 1 if a transaction was created
+		if ttxset do { 
+			new par
+			set par("IPMODE")=3
+			set par("OPTION")=2
+			do ts.postTSet(%SystemDate,BRCD,.par)
+
+			do dep.setAuditFlag(1)
+			set dep.anlstchg=FEEACT
+			do dep.save()
+			}
+		}
+
+	if dep.anlchg=5 do {
+	
+		do dep.setAuditFlag(1)
+
+		if srv.netfwd'<0 set dep.anllsd=""
+		else  if dep.anllsd="",dep.anlsnl>0 set dep.anllsd=%SystemDate
+
+		if anllsd'=dep.anllsd do dep.save()
+	
+		}
+
+	do SRVFILE(.srv)
+
+	quit
+
+SRVFILE(RecordSRV srv)
+
+	do srv.setAuditFlag(1)
+	set srv.netfwdp=srv.netfwd
+	do srv.save()
+
+	quit
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,CID
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set CID=vRECORD.piece($C(9),1)
+ do vPROC(CID)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,CID
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>32000 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+13>32000 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+	set XTJD=%SystemDate
+
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("CID","DEP","DEP.ANLOFFED=:XTJD")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	do SOURCE^BCHSOURC("FEE","FEE",.%UserID,.BRCD,.%UserClass,.TSDRCID,.TSCRCID)
+	if ER quit
+ 
+	quit
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+	do SOURCE^BCHSOURC("FEE","FEE",.%UserID,.BRCD,.%UserClass,.TSDRCID,.TSCRCID)
+	if ER quit
+ 
+	/*
+	Set up entries in ^TTX(TPD,BRCD,%UID) by calling TTXLOK,
+	then release the lock on ^TTX(TPD,BRCD,%UID)
+	*/
+
+	set STATUS=0 do ^TTXLOK if ER quit
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+	do OFFSET^TTXBLD(%SystemDate,BRCD,%UserID,"BCHSRVFEE")
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

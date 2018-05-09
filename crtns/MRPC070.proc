@@ -1,0 +1,303 @@
+MRPC070(return,versn,param)	//Public;Escrow Analysis Modeling
+	/*
+	   ORIG: Diane Hundermark - 04/28/98
+	   DESC: Escrow Analysis Modeling
+
+	   [SCATBL5]RPCID=70
+
+	   KEYWORDS: Client/Server
+
+	   ARGUMENTS:
+
+	   . return           			/TYP=T/REQ
+	        				/MECH=VAL
+
+	   . versn      ^MRPC070 version number /TYP=N/REQ
+	          	Current version = 1 	/MECH=VAL
+
+	   . loandtl    Loan detail input       /TYP=T/REQ
+		    	(param => pc 1)   	/MECH=VAL
+
+	   . remitdtl   Remittance detail input /TYP=T/REQ
+	    		(param => pc 2-99)   	/MECH=VAL
+
+	   RETURNS:
+
+	   . $$     	Error message  		/TYP=T
+	         	Null = No error
+
+	   RELATED:
+
+	   . $$^PBSMRPC - MRPC Service Class Driver
+
+
+	  ---- Revision History ------------------------------------------------
+	  
+	  12/21/05 - Srinivar -16890
+	    	Modified the section MODEL to pass additional null parameter
+	    	as a secongd parameter  for lnapchge object while
+	    	calling EXEC^LNEA section.	
+
+	   09/15/03 - GRAY - 51349
+		Corrected call into EXEC^LNEA when AOPT=0 (account
+		projection).
+
+	   05/31/2002 - TELIV - 49794
+		Converted to PSL
+
+	   10/03/01 - ANTONOVS - 47454
+	        Modified MODEL section to display an error message 1934 -
+	        "No escrow accounts tied to this loan" if ECID is null.
+
+
+
+	*/
+	new ER,ET,RM
+
+	// Version number of client message is not compatible with server
+	if $G(versn)'=1 quit $$ERRMSG^PBSUTL($$^MSG(2951))
+
+	new ACTDAT,ACTSBAL,AEDT,ANPDT,AOPT,ASDT,BEGBAL,CALSBAL,CID,CLS,CTL
+	new CUSH,CUSHF,DAYDIS,dtlout,ECID,ESC,ESCFRE,I,J,LINE,loandtl,NAMADD
+	new out,recout,remitdtl,seq,SVBEGBAL,TYPE,X,XLINE,Y
+
+	set loandtl=$P(param,";",1) 
+	set remitdtl=$P(param,";",2,99)
+
+	// loan account number
+	set CID=$P(loandtl,"|",1)
+
+	type RecordLN ln
+	
+	// product type
+	set TYPE=$P(loandtl,"|",2)
+
+	// analysis start date
+	set ASDT=$P(loandtl,"|",3)
+
+	// analysis end date
+	set AEDT=$P(loandtl,"|",4)
+
+	// cushion factor
+	set CUSHF=$P(loandtl,"|",5)
+
+	// cusion amount
+	set CUSH=$P(loandtl,"|",6)
+
+	// escrow payment frequency
+	set ESCFRE=$P(loandtl,"|",7)
+
+	// beginning balance
+	set BEGBAL=$P(loandtl,"|",8)
+
+	// dayend disclosure flag
+	set DAYDIS=$P(loandtl,"|",9)
+
+	for seq=1:1 quit:$P(remitdtl,";",seq)=""  set LINE(seq)=$P(remitdtl,";",seq)
+
+	// Verify input data
+	set ER=0 
+	do VERINP(.ln) quit:ER $$ERRMSG^PBSUTL($G(RM),$G(ET))
+
+	// Perform escrow analysis modeling
+	set ER=0
+	do MODEL(.ln) quit:ER $$ERRMSG^PBSUTL($G(RM),$G(ET))
+
+	// Structure output data
+	do RETURN
+
+	quit ""
+
+
+VERINP(RecordLN ln)	// Verify input data
+
+	type RecordPRODDFTL proddftl
+
+	if CID'="" do { quit:ER
+		// Invalid account ~p1
+		if 'Db.isDefined("LN","CID=:CID")  set ER=1,RM=$$^MSG(1259,CID) quit
+	
+		set ln=Db.getRecord("LN","CID=:CID")
+		set CLS=ln.cls
+
+		// Class error
+		if CLS="" set ER=1 set RM=$$^MSG(552) quit
+		}
+
+	if TYPE'="" do { quit:ER
+		set proddftl=Db.getRecord("PRODDFTL","TYPE=:TYPE")
+		set CLS=proddftl.cls
+
+		// Invalid product type
+		if CLS="" set ER=1 set RM=$$^MSG(1503) quit
+		}
+
+	// End Date must be greater than Start Date
+	if AEDT'>ASDT set ER=1 set RM=$$^MSG(6160) quit
+	set X=ESCFRE do EDT^UFRE quit:ER
+
+	// Invalid entry ~p1
+	if DAYDIS'=0,DAYDIS'=1,DAYDIS'=2 set ER=1 set RM=$$^MSG(5791,DAYDIS) quit
+
+	for I=1:1 quit:'$D(LINE(I))  do { quit:ER
+		set Y=LINE(I)
+		if $P(Y,"|",2)<ASDT!($P(Y,"|",2)>AEDT) kill LINE(I)
+		set X=$P(Y,"|",4) do EDT^UFRE quit:ER
+		}
+
+	if '$D(LINE(1)) do {
+		set I="" 
+		set J=1
+		for  set I=$O(LINE(I)) quit:I=""  do {
+			set XLINE(J)=LINE(I) 
+			set J=J+1
+			}
+		set J=""
+		for  set J=$O(XLINE(J)) quit:J=""  set LINE(J)=XLINE(J)
+		}
+
+	quit
+
+
+MODEL(RecordLN ln)	// Perform escrow analysis modeling
+
+	/*
+	   "AOPT" must be set to 0 for an "account projection"
+	   "AOPT" must be set to 1 for "true modeling" (with or without an
+	          			     account # and/or product type)
+	   For an "account projection", "DAYDIS" is either 0 (no) or 1 (yes)
+	   For "true modeling", "DAYDIS" is always 2
+
+	*/
+	type public String ESC
+	set ESC="ESC1"
+	type RecordDEP dep
+
+	if CID'="" do { quit:ER
+		// retrieve escrow account number
+		set ECID=$$ECID^LNU(CID,ESC)
+
+		// 1934 - No escrow accounts tied to this loan
+		if ECID="" set ER=1 set RM=$$^MSG(1934) quit
+
+		set dep=Db.getRecord("DEP","CID=:ECID")
+		set ANPDT=dep.anpdt
+
+		// Cannot run initial statement. Analysis posting has occurred.
+		if $G(ECID)'="",ANPDT'="" set ER=1 set RM=$$^MSG(8632) quit
+		}
+
+	set AOPT=$S(DAYDIS<2:0,DAYDIS=2:1)
+	set CTL=$S(AOPT=0:"01",AOPT=1:2)
+
+	// modeling - retain begbal from window
+	if AOPT=1 set SVBEGBAL=BEGBAL
+
+	kill LNEAM,JD,DATA
+
+	if AOPT=0 do EXEC^LNEA(.ln,,CID,.LNEAM,ESC,.ASDT,.AEDT,CTL,.DATA) quit:ER
+	if AOPT=1 do EXEC^LNEA(.ln,,CID,.LNEAM,ESC,ASDT,AEDT,CTL,.DATA) quit:ER
+
+	for I=1:1:5 set NAMADD(I)=""
+
+	// Retrieve name/address if loan account number
+
+	if CID'="" do {
+		set NAMADD="NAMADD"
+		do ^UTLADDR(,.NAMADD,5,2,"ACN",CID) quit:ER
+		}
+
+	// Update DAYEND "ESCSTMT" if account projection
+
+	if DAYDIS=0 do Db.delete("DAYENDESCSTM","TJD=:TJD AND CID=:CID AND ESC=:ESC")
+	if DAYDIS=1 do {
+		type RecordDAYENDESCSTM dayendescstm=Class.new("RecordDAYENDESCSTM")
+
+		set dayendescstm.tjd=%SystemDate
+        	set dayendescstm.cid=CID
+        	set dayendescstm.esc=ESC
+        	set dayendescstm.fd=ASDT
+        	set dayendescstm.td=AEDT
+
+		do dayendescstm.bypassSave()
+		}
+
+	quit
+
+
+RETURN	// Structure output data
+
+	set CALSBAL=$P(DATA,"|",2)
+	set ACTSBAL=$S(AOPT=0:$P(DATA,"|",3),AOPT=1:SVBEGBAL)
+	set out=""
+
+	// calculated starting balance
+	set out(1)=CALSBAL
+
+	// actual starting balance
+	set out(2)=ACTSBAL
+
+	// product type
+	set out(3)=TYPE
+
+	// loan account number
+	set out(4)=CID
+
+	// analysis start date
+	set out(5)=ASDT
+
+	// analysis end date
+	set out(6)=AEDT
+
+	// name line 1
+	set out(7)=NAMADD(1)
+
+	// name line 2
+	set out(8)=NAMADD(2)
+
+	// address line 1
+	set out(9)=NAMADD(3)
+
+	// address line 2
+	set out(10)=NAMADD(4)
+
+	// address line 3
+	set out(11)=NAMADD(5)
+
+	set out=out(1)_$C(9)_out(2)_$C(9)_out(3)_$C(9)_out(4)_$C(9)
+	set out=out_out(5)_$C(9)_out(6)_$C(9)_out(7)_$C(9)_out(8)_$C(9)
+	set out=out_out(9)_$C(9)_out(10)_$C(9)_out(11)
+	set out=out_$C(13,10)
+
+	set (ACTDAT,dtlout)=""
+
+	for  set ACTDAT=$O(LNEAM(ACTDAT)) quit:ACTDAT=""  do {
+		set recout=""
+
+		// activity date
+		set recout(1)=ACTDAT
+
+		// payment amount
+		set recout(2)=$P(LNEAM(ACTDAT),"|",1)
+
+		// remittance amt
+		set recout(3)=$P(LNEAM(ACTDAT),"|",2)
+
+		// ending balance
+		set recout(4)=$P(LNEAM(ACTDAT),"|",3)
+
+		// description
+		set recout(5)=$P(LNEAM(ACTDAT),"|",4)
+
+		set recout=recout(1)_$C(9)_recout(2)_$C(9)_recout(3)_$C(9)
+		set recout=recout_recout(4)_$C(9)_recout(5)
+		set recout=recout_$C(13,10)
+		set dtlout=dtlout_recout
+		}
+
+	set return=out_dtlout
+	set return=$$V2LV^MSG(return)
+
+	quit
+
+vSIG()	quit "60276^28423^Srinivasan, Rajesh^6334"	// Signature - LTD^TIME^USER^SIZE

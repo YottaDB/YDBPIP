@@ -1,0 +1,390 @@
+UPRODDFT(COLVAL,DFT)	//
+
+	/*
+	---- Revision History ------------------------------------------------
+	
+	05/15/06 - RussellDS - CR21296
+		   Changed to use cache array instead of %CACHE, which is
+		   reserved for PSL record objects.
+		   
+		   Cleaned up PSL warning issues.
+		   
+	01/06/05 - ARPAVC 13861
+		   Fixed compile errors and miscellaneous issues.  
+		   - Properly scoped all variables
+		   
+	12/08/03 - spier 7403
+		   psl compiler warning message clean up
+		   
+	01/13/03 - Spier -51423
+		   Removed exclusive new in INFO section and added
+		   news of variables found. New compiler issues error
+		   on excluse new's
+
+	21/20/01 - SKLYUTD - 48739
+		   Modified section LLD to add logic for the UTBLLLDT
+                   table.  If UTBLLLDT.MIFLAG (manual input flag) is set to 1
+                   skip that default definition will be done in LLDDEF
+		   procedure.
+
+	08/24/01 - Allan Mattson - 47342
+                   Converted procedural code to PSL.
+
+	           Cached product default information to improve performance.
+	 
+	12/15/99 - SKLYUTD - 33756
+	           Modified the procedure to merge COLVAL() array values into
+	           DFT() array before call to RULES section.  If the 
+	           rules were not set up an incomplete set of defaults was
+	           returned.
+	----------------------------------------------------------------------
+
+	ARGUMENTS:
+	     .COLVAL	Column values	/TYP=T/REQ/MECH=REFARRY:R
+	 		COLVAR(di)=value
+	 
+	 		Following column values should be defined:
+	  		
+	 		   TYPE		Product Type
+	  		   ACN		CIF Number
+	  		   BOO	        Branch Code
+	                   CRCD         Currency Code
+	 
+	     .DFT	Default values	/TYP=T/REQ/MECH=REFARRY:W
+	 		DFT(fid.di)=Default_value
+	 
+	RETURNS:
+	     .ER	Error flag
+	     .RM	Error message
+	 
+	EXAMPLES:
+	      S data("ACN")=1234,data("TYPE")=100
+	      S data("DEP")=5,data("CRCD")="USD"
+	      D ^UPRODDFT(.data,.dft)
+	 
+	     returns:	dft("DEP.IRN")=6.5
+	 		dft("DEP.GLSC")=100A
+	 		dft("DEP.INTGRC")=5
+	 
+	****** Use QA^UPRODDFT function to test default logic ******
+
+	----------------------------------------------------------------------
+	Processing steps:
+	 
+	1) Get product class from PRODCTL table
+	2) Based on class, get all non-NULL values from the PRODDFTD or
+	   PRODDFTL table
+	3) Apply single database rules/defaults logic
+	4) Apply low level default logic
+	5) Apply single database rules/defaults logic again
+	  
+	I18N=OFF
+	----------------------------------------------------------------------
+	*/
+	
+	new ACN,BOO,CRCD,TYPE
+	new cls,di,fid
+	
+	type Public Boolean ER
+	type Public String RM
+	type Public String cache(,,)
+	
+	set ER=0
+	
+	set ACN=$G(COLVAL("ACN"))
+	set BOO=$G(COLVAL("BOO"))
+	set TYPE=$G(COLVAL("TYPE"))
+	set CRCD=$G(COLVAL("CRCD"))
+	 
+	// Missing required data item ~p1
+	if $G(TYPE)="" set ER=1,RM=$$^MSG(1767,"TYPE") quit
+	
+	type RecordPRODCTL prodctl = Db.getRecord("PRODCTL", "TYPE=:TYPE", 1)
+
+	set cls = prodctl.cls
+
+	if cls="D" set fid="DEP"
+	else  if cls="L" set fid="LN"
+	else  set ER=1,RM=$$^MSG(2259,TYPE) quit	// Invalid type
+
+	if cache("PRODDFT", "TYPEDFT", TYPE).exists() do {
+		new di,i,v,x
+
+		set x=cache("PRODDFT", "TYPEDFT", TYPE)
+
+		for i=1:2 set di=$P(x,$C(9),i) quit:di=""  do {
+			set v=$P(x,$C(9),i+1)
+			set DFT(fid_"."_di)=v
+			}
+		}
+
+	else  do TYPEDFT(TYPE,cls,fid) if ER quit
+
+	set di=""
+	for  set di=$O(COLVAL(di)) quit:di=""  set DFT(fid_"."_di)=COLVAL(di)
+
+	do RULES(fid,.DFT)			// Apply single database rules
+	do LLD(cls,.DFT)			// Apply low level default rules
+	do RULES(fid,.DFT)			// Validate it again
+	quit
+
+
+	//----------------------------------------------------------------------
+TYPEDFT(TYPE,CLS,fid)	// Load product defaults in DFT() array 
+	//----------------------------------------------------------------------
+	/*
+	ARGUMENTS:
+	     .TYPE	Product type			/TYP=T/REQ/MECH=VAL
+	     .CLS	Product class			/TYP=T/REQ/MECH=VAL
+	     .fid	File ID				/TYP=T/REQ/MECH=VAL
+	     
+	RETURNS:
+	     .DFT(di)	Default values
+	     .cache("PRODDTF", "TYPEDFT", TYPE)
+	*/
+	 
+	new col,data,di,i,sql,tbl,v,x
+	
+	type Public String DFT(),cache(,,)
+	type Public Boolean ER
+	type Public String RM
+
+	if CLS="D" set tbl="PRODDFTD"		// deposit defaults
+	if CLS="L" set tbl="PRODDFTL"		// loan defaults
+
+	set col=$$LIST^SQLOADER(tbl)		// get column list
+
+	set sql="SELECT "_col_" FROM "_tbl_" WHERE TYPE=:TYPE"
+
+	set ER=$$^SQL(sql,,,.data)			// get column values
+	if data="" set ER=1,RM=$$^MSG(2259,TYPE) quit	// Invalid type
+	 
+	set x=""
+	for i=1:1:$L(col,",") do {
+		set v=$P(data,$C(9),i)		// column value
+		if v="" quit			// NULL value
+		set di=$P(col,",",i)		// column name
+		set DFT(fid_"."_di)=v		// save default value
+		set x=x_$C(9)_di_$C(9)_v
+		}
+
+	set cache("PRODDFT", "TYPEDFT", TYPE) = $E(x,2,$L(x))
+	quit
+
+
+	//----------------------------------------------------------------------
+RULES(fid,DFT) // Single database rules
+	//----------------------------------------------------------------------
+
+	new DEP,LN,CIF
+	new di,i,v
+	
+	type Public Boolean ER
+	type Public String RM
+	type Public String COLVAL()
+	
+	set ER=0
+
+	type ResultSet rs=Db.select("TYPE","UTBLPRODLNK")
+
+	if rs.isEmpty() quit
+
+	set di=""
+	for  set di=$O(DFT(di)) quit:di=""  do {  quit:ER
+		set v=$$PARSE^SQLDD(di) quit:ER		// short name expression
+		#accept pgm=spier;date=12/8/03; cr=51423
+		xecute "set "_v_"=DFT(di)"		// Convert into DEP() or LN()
+		}
+
+	do RESULTS^PROC1DB(0," ",.COLVAL,,.DFT)		// Apply rules
+	quit
+
+
+	//----------------------------------------------------------------------
+LLD(cls,DFT) // Low level default logic
+	//----------------------------------------------------------------------
+
+	new column,fid,i,item,j,key,list,relation,seq,skip,where,v
+	new DFTDEF
+
+	type Public Boolean ER
+	type Public String RM
+	type Public Number ACN
+	
+	// Default logic not implemented
+	if 'Db.isDefined("DBTBL1","""SYSDEV"",""UTBLLLD""") quit
+
+	type ResultSet rs=Db.select("DFTDEF","UTBLLLDT")
+
+	while rs.next() do {
+		set DFTDEF=rs.getCol(1)				// table name for the data table
+
+		kill item
+		set ER=0,skip=0
+		set seq=0,list="",where=""
+
+		type ResultSet utbl=Db.select("COLUMN,KEY,RELATION","UTBLLLD","DFTDEF=:DFTDEF")
+
+		while utbl.next() do {
+			set column=utbl.getCol(1)		// column name for the data table
+			set key=utbl.getCol(2)			// key value indicator
+			set relation=utbl.getCol(3)		// relationship to DEP or LN
+			set fid=$p(relation,".",1)		// source table name
+
+			if 'key do { quit			// not key column
+				if cls="D",fid'="DEP" quit	// wrong file
+				if cls="L",fid'="LN" quit
+
+				set seq=seq+1
+				set item(seq)=relation 		// save column mapping in item() array
+				set list=list_","_column	// build select list
+				}
+
+			if fid="CIF" do {  quit
+				if $G(ACN)="" set skip=1 quit	// Skip definition if can't access CIF data
+
+				set ER=$$^SQL("SELECT "_relation_" FROM CIF WHERE ACN=:ACN",,,.v)
+				if ER set skip=1 quit		// Invalid column name
+
+				if $G(v)="" set skip=1 quit	// missing key value
+				do LLDWHR			// build where clause
+				}
+
+			if fid'="DEP",fid'="LN" set skip=1 quit		// skip this definition
+
+			if '$D(DFT(relation)) set skip=1 quit	// key value is not in the default array
+			set v=DFT(relation)			// get it from product default
+			do LLDWHR				// build where clause
+			}
+
+		if skip quit
+		do LLDEF					// apply default logic
+		}
+
+	quit
+
+
+LLDWHR	// ----- Build SQL WHERE clause
+
+	new v1
+	
+	type Public String column,v,where
+
+	set v1=column_"="_"'"_v_"'"		// column='value'
+	if where="" set where=v1	
+	else  set where=where_" AND "_v1		// col1='value' AND col2='value'
+	quit
+
+
+LLDEF	// ----- Apply low level default logic
+
+	new data,j,v
+
+	type Public Boolean ER
+	type Public String DFT(),DFTDEF,item(),list,RM,where,ztrace()
+	type Public Number seq
+	
+	set ER=$$^SQL("SELECT START,END"_list_" FROM "_DFTDEF_" WHERE "_where,,,.data) quit:ER
+
+	if $G(data)="" quit						// no match
+	if $P(data,$C(9),1)'="",%SystemDate<$P(data,$C(9),1) quit	// not active (before START date)
+	if $P(data,$C(9),2)'="",%SystemDate>$P(data,$C(9),2) quit	// expired (after END date)
+
+	for j=1:1:seq do {
+		set v=$p(data,$C(9),j+2)				// column value
+		if v="" quit
+		set DFT(item(j))=v					// new default value
+		if $G(DFT) set ztrace(item(j))=2			// audit information
+		}
+
+	quit
+
+
+	//----------------------------------------------------------------------
+Public QA	// Function to test the default logic
+	//----------------------------------------------------------------------
+
+	new i,opt,ztrace,DFT,VFMQ
+
+	type Public Boolean ER
+	type Public String IO,RM
+	
+	do QA1 if VFMQ="Q" quit			// not processed
+	if $G(ER) write RM quit			// display error message
+	do OPEN^SCAIO quit:ER			// open output device
+
+	use IO write #
+
+	set i=""
+	for  set i=$O(ztrace(i)) quit:i=""  do {
+		write !,i,?18," = ",DFT(i)      	// data item , value
+		set opt=ztrace(i)			// source (audit info)
+
+		write ?40," ",$S(opt=1:"Rules",1:"Low Level")
+		kill DFT(i)
+		}
+
+	write !!
+
+	set i="" for  set i=$O(DFT(i)) quit:i=""  W !,i,?18," = ",DFT(i),?40," Product Default"
+	write !
+
+	do CLOSE^SCAIO
+	quit
+
+
+QA1	//
+
+	new %CTPRMT,%O,%READ,%TAB,COLVAR,KVAR,OLNTB,PGM,VFMQ
+	new %fkey,col,i,v,val
+	
+	type Public String DFT(),IO
+
+	set %TAB("IO")=$$IO^SCATAB
+	if 'IO.exists() set IO = $I
+	set v="IO,"
+
+	for i=1:1:20 do {
+		set %TAB("col("_i_")")=".DITEM",%TAB("val("_i_")")=".A32"
+		set v=v_",col("_i_")" if i<5 set v=v_"/REQ"	// first 4 items only
+		set v=v_",val("_i_")" if i<5 set v=v_"/REQ"
+		}
+
+	set %CTPRMT="2|30",OLNTB=20
+	set %READ=v
+
+	set col(1)="TYPE",col(2)="ACN",col(3)="BOO",col(4)="CRCD"
+	do INFO					// Include optional items
+	do ^UTLREAD
+	if VFMQ="Q" quit
+
+	for i=1:1:20 if col(i)?1A.AN,val(i)'="" set COLVAR(col(i))=val(i)
+
+	set DFT=1					// Audit flag
+	do UPRODDFT(.COLVAR,.DFT)			// process default logic
+	quit
+
+INFO	// This function will return a list of columns referenced by the
+	// rules/results definitions
+
+	new di,fid,i,list,seq
+	
+	type Public String col()
+
+	set seq=4
+
+	for fid="DEP","LN" do {
+		kill list
+		do ACNVAL^DBSTRG(fid,.list)
+
+		set i=""
+		for  set i=$O(list(i)) quit:i=""  do {
+			if list(i)'[" S value(" quit
+			set di=$P(list(i),"""",2)
+			if ",TYPE,ACN,BOO,CRCD,"[(","_di_",") quit
+			set seq=seq+1,col(seq)=di
+			}
+		}
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60401^67462^Dan Russell^9752"	// Signature - LTD^TIME^USER^SIZE

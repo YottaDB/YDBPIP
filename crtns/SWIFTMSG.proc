@@ -1,0 +1,853 @@
+SWIFTMSG //ITS SWIFT Message Loader ; Procedure SWIFTMSG - SWIFT Message Loader
+ ;;Copyright(c)2005 Sanchez Computer Associates, Inc.  All Rights Reserved - 08/09/05 10:36 - spatola
+ ;
+ ; **** This is a DATA-QWIK generated routine (level 25) ****
+ ;
+
+	 /*
+	   DESC: Migrate S.W.I.F.T. Messages from Boston Treasury System(BTS)
+	         to Profile
+
+	   ORIG: P. Karpiak
+
+	  ---- Revision History ------------------------------------------------
+	
+	   01/29/04 - CARROLLJ - CR7997
+		      Correct parameter mismatch errors.
+
+	   10/08/02 - DATTAR - 49451
+	              Converted to PSL
+
+
+	   07/11/00 - ZWITKOWITSM - 39571
+		      Modified section 202 to bring up some of Karpiak's changes
+		      from V446:
+		    - Get the Recipient Institution to handle cases when
+		      Beneficiary Institution has the account with the
+		      Recipient Institution and is not defined in the CORRE
+	              table. Applicable only for local currency payments.
+
+	  ---------------------------------------------------------------------
+	*/
+
+INIT	//
+	if $$SCAU^%TRNLNM("TREAS_SWIFT") do { quit
+		set ER=1 
+		set RM=$$^MSG(7146,"SCAU$TREAS_SWIFT") 
+		}
+
+	// ~p1 - Logical not defined
+	if $$SCAU^%TRNLNM("TREAS_SWIFT_OLD") do { quit
+		set ER=1 
+		set RM=$$^MSG(7146,"SCAU$TREAS_SWIFT_OLD") 
+		}
+
+	set CO=CUVAR.co
+
+	set $P(LINE,"-",79)="+"
+
+	//confirmations
+	do BLDTBL(".CNF")
+
+	//payments
+	do BLDTBL(".PAY")
+
+	//received
+	do BLDTBL(".RCV")
+
+	//trade finance
+	do BLDTBL(".OUT")
+
+	do SWTBL
+
+	if '$D(%UserStation) do {
+
+		do ^UTLO 
+
+		set %UserStation=UTLO
+		}
+
+	set (msgcnt,totmsg)=0
+	set maxlen=400
+
+	do DRV^USID(%ProcessMode,"ITSSWIFT")
+
+	if VFMQ="Q" quit
+
+	do INITVAR
+
+	do OPEN
+
+	quit
+
+
+OPEN	//loop thru ptsswift array and process each file that is indicated.
+	for loopcnt=1:1 quit:'$D(ptsswift(loopcnt))  do {
+		set file=$P(ptsswift(loopcnt),"|",2)
+		if file="" quit
+
+		if 'ptsswift(loopcnt) quit
+
+		// Open SWIFT RMS file
+		type IO ior=Class.new("IO")
+		set ior.fileName=file
+		set ior.openParams="READ"		
+		do ior.open()
+		if ER.get() do { quit
+			set RM=$$^MSG(7878,file) 
+			do EXC
+                        }
+		
+		set logfile=$P(ptsswift(loopcnt),"|",3)	
+		type IO io=Class.new("IO")
+                set io.fileName=logfile
+                set io.openParams="NEWV/WRITE"
+                do io.open()
+                if ER.get() do { quit
+                        set RM=$$^MSG(7878,logfile) 
+			do EXC
+                        }
+
+		//I18N=OFF
+		//Initialize log files
+		set REC=file
+		do io.write(.REC)
+
+		set REC=$$DAT^%ZM(%CurrentDate)_" - "_$$TIM^%ZM(%CurrentTime)
+
+		do io.write(.REC)
+
+		//I18N=ON
+
+		//record layout
+		set recfmt=$P(ptsswift(loopcnt),"|",4)
+		if recfmt="FIX" do TFS(.ior,.io) quit
+		for  set nextmsg=$$getmsg(.ior) quit:'nextmsg  do savmsg(savmsg,swdel,fs3,fs6,fs2,cs2)
+	
+		do END(.ior,.io)
+		}
+
+	quit
+
+
+TFS(IO ior,IO io)	//Trade Finance messages
+
+	new message,stop,%ZTSEQ,%ZTHANG
+	catch vERROR { 
+	        new ET,RM 
+        	set ET=vERROR.type 
+
+		if ET["%GTM-" do { quit 
+
+			do ZE^UTLERR 
+
+			do EXC
+			}       
+
+		set ET=ET_"-"_vERROR.thrownAt 
+		set RM=vERROR.description 
+		set (ET,RM)=$ZS
+		do ^UTLERR 
+
+        	do EXC 
+		}
+
+	set stop=0
+	set ET=0
+	set ER=0 
+	set RM=""
+	for  set message=$$FIXLEN(.ior,.previous,.stop) quit:stop  do {
+ 
+		//process trade finance message
+		do savmsg(message,tfdel,tffs3,tffs6,tffs2,tfcs2,.io)
+		}
+
+	quit
+
+
+FIXLEN(IO ior,previous,stop)	//process fixed length message file
+
+	/*
+	   initialize msg = $g(saved message from prior read)
+	   read record (X)
+	   concatenate with previous read (msg... prev is null if first read)
+	   does msg contain "-}"  ?
+	   yes.....truncate at -} and save remainder
+	   process msg
+
+	   no......go read another record
+
+	*/
+
+	new flg,loc,msg
+
+	set msg=$G(previous)
+
+	for  do { quit:flg=1
+		if $G(ET),msg'["-}" set stop=1 set flg=1 quit  do {
+			set X=""
+			if '$G(ET) set X=ior.read(.ET) 
+
+			set msg=msg_X
+			do DELIMIT(.msg,.previous)
+			}		
+		}
+
+	if $G(ET),msg'["-}" quit ""
+
+	quit msg
+	
+
+DELIMIT(msg,previous)	//
+	/*
+	    Separate the message into pieces using
+	    -} as the delimiter.
+
+	    RETURN: msg - message up to -} (which is the start
+	            of the next message)
+
+	    previous - The leftover part of the message if
+
+	*/
+	if msg'["-}" quit
+
+	set previous=$E(msg,$FIND(msg,"-}"),99999)
+	set msg=$E(msg,1,$FIND(msg,"-}"))
+
+	quit
+
+
+BLDTBL(fext)	// Build array of swift RMS files located in the download directory
+
+	//I18N=OFF
+	new logfile
+
+	set file=$$SCAU^%TRNLNM("TREAS_SWIFT")_"*"_fext
+	for  set REC=$$SEARCH^%ZFUNC(file) quit:REC=""  do RECCHK
+
+	quit
+
+
+SWTBL	//
+	new fext,file,logfile,recfmt
+
+	set file="" 
+	set I=0 
+	set %ProcessMode=0 
+	set %REPEAT=0
+
+	for  set file=$O(TBL(file)) quit:file=""  do {
+
+		set recfmt=$$FILE^%ZFUNC(file,"RFM")
+
+		set %REPEAT=%REPEAT+1
+		set logfile=$P(file,";",1)
+		set fext=$E(logfile,$L(logfile)-2)
+		set logfile=$E(file,1,$L(logfile)-3)_fext_"lg"
+		set ptsswift(%REPEAT)=1_"|"_file_"|"_logfile_"|"_recfmt
+		}
+
+	quit
+
+
+RECCHK	//
+
+R1	//
+	if REC["::" set REC=$P(REC,"::",2)
+	if REC[":" set REC=$P(REC,":",2)
+	if REC["]" set REC=$P(REC,"]",2)
+
+	set CNT=$$SCAU^%TRNLNM("TREAS_SWIFT")_$P(REC," ",1)
+
+	set TBL(CNT)=$P(REC," ",2)
+
+	quit
+
+	//I18N=ON
+
+
+END(IO io,IO ior)	// Messages processed. Close and archive RMS Swift Files.
+
+	//I18N=OFF
+	do io.close()
+	do ior.close()
+
+	set savfile=file
+	if savfile[":" set savfile=$P(savfile,":",2)
+	if savfile["]" set savfile=$P(savfile,"]",2)
+	set OLD=".OL"_$E($P(savfile,".",2))
+	set newfil=$P(savfile,".",1)_".OLD"
+
+	set newfil=$$SCAU^%TRNLNM("TREAS_SWIFT_OLD",newfil)
+
+	set X=$$MOVE^%OSSCRPT(file,newfil)
+
+	set savfile=logfile
+	if savfile[":" set savfile=$P(savfile,":",2)
+	if savfile["]" set savfile=$P(savfile,"]",2)
+
+	set newfil=$$SCAU^%TRNLNM("TREAS_SWIFT_OLD",savfile)
+
+	set X=$$MOVE^%OSSCRPT(logfile,newfil)
+
+	//I18N=ON
+
+	if VFMQ="Q" quit
+
+	// ~p1 of ~p2 SWIFT messages loaded
+	set ER=1 
+	set RM=$$^MSG(1406,msgcnt,totmsg)
+
+	quit
+
+
+getmsg(IO ior)	// Read one message at a time from the RMS Swift File
+
+	set nextmsg=1
+	set savmsg=""
+	set msgline=$G(msgline)
+	
+	for  do { quit:ER
+		set ER=0 
+		set RM="" 
+		set lftf=0
+	
+		// The  record from the last read may have a part of the next message
+		if $F(msgline,swdel) set lftf=1
+		if lftf set msgline=$E(msgline,$F(msgline,swdel),$L(msgline)) do lftovr quit
+
+		// End of RMS file
+		set msgline=ior.read(.ET) use 0 if ET quit 0
+
+		// Add CRLF at the end of each record
+		set msgline=msgline_cs2
+		do lftovr
+		}
+	quit
+
+
+lftovr	//    ; set terminal as I/O
+
+	// Save next message line
+	set savmsg=savmsg_msgline
+
+	// End of the message record
+	if $F(msgline,swdel) quit 1
+
+	quit
+
+
+savmsg(savmsg,swdel,	// Write information to IBS SWIFT file after setting fSWIFT(-)
+	fs3,fs6,fs2,cs2,IO io)	
+
+	new segarr,TRREFNO,msg,typ
+
+	type RecordSWIFT fSWIFT=Class.new("RecordSWIFT")
+
+	set SWDIRECT="OUT"
+
+	// no message to process
+	if '$D(savmsg) quit
+
+	// total messages loaded
+	set totmsg=totmsg+1
+	set msg=$E(savmsg,$F(savmsg,$C(123))-1,$F(savmsg,swdel)-1)
+	set notok=$$PARSE^SWIFTFMT(msg,.segarr)
+
+	// Error parsing SWIFT message
+	// Not able to parse incoming message.
+	if notok set RM=$$^MSG(7306) do LOG(.io) quit
+	set typ=$E($G(segarr(2,2)),5,7)
+	set MSG=typ
+
+	//~p1 Message type not supported
+	if 'Db.isDefined("STBLSWFTDSC","TYPE=:typ") do { quit
+		set RM=$$^MSG(374,typ) 
+
+		do LOG(.io)
+		}
+
+	// Format the Basic Header (Vision)
+	do bashdrV^SWIFTFMT(.fSWIFT)
+
+	// Format the Application Header (Vision)
+	do apphdrV^SWIFTFMT(.fSWIFT)
+
+	// MJZ
+	if ("100,202"[typ)!((recfmt'="FIX")&("100,202,210,300"[typ)) do {
+		do txtblcI^SWIFTFMT(.fSWIFT)
+		}
+	//save message as one data item
+	else  do savbody(.fSWIFT)
+
+
+	// Transaction Reference Number (Formatted)
+	set TRREFNO=fSWIFT.trnofmt
+
+	//Transaction reference number does not exist
+	if TRREFNO="" set RM=$$^MSG(7680) do LOG(.io) quit
+
+	// Local currency payments settle through clearing center
+	if MSG="202",fSWIFT.vcas2[%SystemCurrency set RM=$$^MSG(1296) do LOG(.io) do 202(.fSWIFT,.io) quit
+	
+	// Local currency payments settle through clearing center
+	if MSG="100",fSWIFT.vcas2[%SystemCurrency set RM=$$^MSG(1296) do LOG(.io) do 100(.fSWIFT,.io) quit
+
+	// Local currency notices are not processed via SWIFT
+	// Do not place in RTT Queue
+	if MSG="210",fSWIFT.crcdamtb[%SystemCurrency set RM=$$^MSG(1297) do LOG(.io) quit
+
+	// Ready to transmit
+	set fSWIFT.status=0
+	do filesw(.fSWIFT,.io)
+
+	quit
+
+
+savbody(RecordSWIFT fSWIFT) // Store the body of the free formatted message in node 500
+
+	new fldcnt,fldval,node,subcnt,subval,tfldcnt,tsubcnt,txt
+
+	set TRREFNO=$P($P(msg,"20:",2),fs3,1)
+
+	set txt=$P($P(msg,fs6,1),fs7,2)
+	set start=$FIND(txt,":")
+	set txt=$E(txt,start,99999)
+
+	do 500^SWIFTUTL(txt,maxlen,.fSWIFT)
+
+	set fSWIFT.trnofmt=TRREFNO
+	set fSWIFT.swftdt=%SystemDate
+
+	quit
+
+
+filesw(RecordSWIFT fSWIFT,IO io) // Save the message in SWIFT file using filer and place it in RTT queue
+
+	new FLG,ZTRREFNO
+	set ER=0
+	if Db.isDefined("SWIFT","SWDIRECT=:SWDIRECT,TRREFNO=:TRREFNO,MSG=:MSG") do { quit:ER
+
+		if recfmt="FIX","700,705"'[MSG do { quit
+			new i
+			for i=2:1 quit:'Db.isDefined("SWIFT","SWDIRECT=:SWDIRECT,TRREFNO=:ZTRREFNO,MSG=:MSG")
+			set TRREFNO=TRREFNO_"#"_i
+			}
+
+		if "340,341,360,361,320,305,300"'[MSG set ER=1 set RM=$$^MSG(1416,MSG,TRREFNO) do LOG(.io)
+		if MSG'=300 set MTST=$P(fSWIFT.cmnref,"/",1)
+		else  set MTST=$P(fSWIFT.typeop,"/",1)
+
+		if fSWIFT.itsmsg'="" set MTST=fSWIFT.itsmsg
+		set MTST=$$UPPER^%ZFUNC(MTST)
+
+		if "CANCEL,AMEND,ROLLOVER"'[MTST set ER=1 set RM=$$^MSG(1416,MSG,TRREFNO) do LOG(.io)
+		
+		set ZTRREFNO=TRREFNO_$C(i)
+		type RecordSWIFT swift=Db.getRecord("SWIFT","SWDIRECT=:SWDIRECT,TRREFNO=:ZTRREFNO,MSG=:MSG",1) 
+		set FLG=swift.getMode()=0
+		for i=65:1 quit:ER!FLG  do {
+			
+			set OMTST=$P(swift.strefno,"/",1)
+			set OMTST=$$UPPER^%ZFUNC(OMTST)
+	
+			// Duplicate message ~p1: ~p2
+			if (OMTST=MTST),("AMEND"'[MTST) set ER=1 set RM=$$^MSG(1416,MSG,TRREFNO) do LOG(.io)
+			}
+		set TRREFNO=TRREFNO_$C(i)
+		}
+
+	set fSWIFT.swdirect=SWDIRECT
+	set fSWIFT.trrefno=TRREFNO
+	set fSWIFT.msg=MSG
+	do fSWIFT.save()
+
+	if ER do LOG(.io) quit
+	set msgcnt=msgcnt+1
+
+	// Place Swift Message in RTT Queue  
+	do QUEUE^SWIFTGEN("RTT",%SystemDate)
+
+	quit
+
+
+INITVAR	//Initialization
+	set ER=0
+
+	type RecordST400CTLSV ctlsv
+	do INITS^SWIFTUTL(.ctlsv)
+
+	//SWIFT delimiter -}
+	set swdel=$C(45,125,3)
+
+	//tfs delimiter -}
+	set tfdel=$C(45,125)
+	set tffs2=$C(0,13,0,10,58)
+	set tffs3=$C(0,13,0,10,58)
+	set tffs6=$C(0,13,0,10)_"-}"
+	set tfcs2=$C(0,13,0,10)
+
+	quit
+
+
+202(RecordSWIFT fSWIFT,IO io) //
+
+	// create domestic payment orders
+	new AMT,CID,CURDAT,EFT,EFTTYPE,LOCK,MET,PRIORITY,SEQ,SRC,TTYP
+
+	    catch vERROR {
+                new ET,RM
+                set ET=vERROR.type
+ 
+                if ET["%GTM-" do { quit
+
+                        do ZE^UTLERR
+
+                        do EXC
+                        }
+ 
+                set ET=ET_"-"_vERROR.thrownAt
+                set RM=vERROR.description
+                set (ET,RM)=$ZS
+
+                do ^UTLERR
+
+                do EXC
+                }
+
+
+	//Called by WriteRec subroutine
+	set ER=0
+	set MET="CC"
+	set EFTTYPE="PO"
+	type RecordCTBLEFTTYPE fCTBLEFT=Db.getRecord("CTBLEFTTYPE","KEY=:EFTTYPE")
+
+	//Local Settlement Account
+	set CID=fCTBLEFT.washgl
+	if CID="" do {
+
+		//OFFLINE TELLER
+		type RecordCTBLINC fUTBL=Db.getRecord("CTBLINC","KEY='TREASURY'")
+
+
+		set TELLER=fUTBL.teller
+
+		//USE TSDR
+		type RecordSCAU fSCAU=Db.getRecord("SCAU","UID=:TELLER")
+		set CID=fSCAU.tsdr
+
+		// No acct defined for local treasury settlements. Using suspense acct ~p1.
+		set RM=$$^MSG(1423,CID)
+		do LOG(.io)
+		}
+
+	set TTYPE=2
+	type RecordACN acn=Db.getRecord("ACN","CID=:CID")
+	type RecordGLAD fGLAD=Db.getRecord("GLAD","ACN=:CID")
+	set LNM=$S(TTYPE=0:$E(acn.title1,1,20),1:$E(fGLAD.desc1,1,20))
+
+	// Value Date/Currency/Amount (Sell)
+	set VCAS2=fSWIFT.vcas2
+	set BENINACC=fSWIFT.beninacc
+	set BENINST=fSWIFT.beninst1
+	if BENINST="" set BENINST=fSWIFT.rcvr
+
+	if BENINST["XXX",'Db.isDefined("UTBLCORRE","KEY=:BENINST") set BENINST=$E(BENINST,1,8)
+	if 'Db.isDefined("UTBLCORRE","KEY=:BENINST") set BENINST=$TR(BENINST," ","")
+
+	type RecordUTBLCORRE ucorre=Db.getRecord("UTBLCORRE","KEY=:BENINST")
+	type RecordEFTPAY fEFTPAY=Db.getRecord("EFTPAY","CID=:CID,SEQ=:SEQ",1)
+	set fEFTPAY.recinst=ucorre.instcd
+
+	/*
+	   Get the Recipient Institution to handle cases when Beneficiary
+	   Institution has the account with the Recipient Institution and
+           is not defined in the CORRE table.
+	*/
+
+	if fEFTPAY.recinst="" do { quit:ER
+
+		set BENINST=fSWIFT.send
+		if $G(BENINST)="" set ER=1 set RM=$$^MSG(1426,"MT202",TRREFNO) do LOG(.io) quit
+		if (BENINST["XXX"),'Db.isDefined("UTBLCORRE","KEY=:BENINST") set BENINST=$E(BENINST,1,8)
+		if 'Db.isDefined("UTBLCORRE","KEY=:BENINST") set BENINST=$TR(BENINST," ","")
+
+		// Fee Calculation Method
+		type RecordUTBLCORRE ucorre=Db.getRecord("UTBLCORRE","KEY=:BENINST")
+	        set fEFTPAY.recinst=ucorre.instcd				
+		}
+
+	// Fee Calculation Method
+	if fEFTPAY.recinst="" do { quit:ER
+
+		// Recipient institution not defined for ~p1. Reference ~p2.
+		set ER=1 
+		set RM=$$^MSG(1426,BENINST,TRREFNO)
+
+		do LOG(.io)
+		}
+
+	set BENINACC=$S(BENINACC["/":$P(BENINACC,"/",2),1:BENINACC)
+
+	set fEFTPAY.recacct=$TR(BENINACC," ","")
+	if fEFTPAY.recacct="" do { quit:ER
+
+		// Recipient institution not defined for ~p1. Reference ~p2.
+		set ER=1 
+		set RM=$$^MSG(1426,BENINST,TRREFNO)
+
+		do LOG(.io)
+		}
+
+	set CURDAT=$E(VCAS2,1,6)
+
+	set CURDAT=$$^SCAJD(CURDAT,"YYMMDD")
+
+	set AMT=$E(VCAS2,10,99)
+	set AMT=$TR(AMT,",",".")
+
+	set fEFTPAY.amount=AMT
+	set fEFTPAY.crcd=%SystemCurrency
+	set CON=$E(fSWIFT.by1,1,10)
+	set fEFTPAY.constant=$TR(CON," ","")
+	set fEFTPAY.efd=CURDAT-1
+	set fEFTPAY.cc=fCTBLEFT.ccdft
+	set fEFTPAY.status="A"
+	set fEFTPAY.met=MET
+	set fEFTPAY.tries=fCTBLEFT.tries
+	set fEFTPAY.procdt=CURDAT-1
+	set fEFTPAY.amttyp=1
+	set fEFTPAY.efttype=EFTTYPE
+	if (fSWIFT.priority["U")!(CURDAT'>(%SystemDate+1)) set PRIORITY=1
+	set fEFTPAY.pri=+$G(PRIORITY)
+	type RecordUTBLSRC fUTBLSRC=Db.getRecord("UTBLSRC","SRCTYP='BOFF',KEY='DEAL'")
+	set fEFTPAY.brcd=fUTBLSRC.brcd
+	set fEFTPAY.lnm=LNM
+	set fEFTPAY.ttype=TTYPE
+	set fEFTPAY.datecre=+%CurrentDate
+	set fEFTPAY.timecre=%CurrentTime
+
+	//used in EFTFILE
+	set ogl=1
+
+	//deleted later
+	set SRC="PO"
+
+	set LOCK=1
+	for Z=1:1:10 do { quit:'LOCK
+		type RecordEFTPAY1 fEFTPAY1=Db.getRecord("EFTPAY1","CID=:CID")
+		set SEQ=fEFTPAY1.seq
+		lock +EFTPAY(CID,SEQ)
+		else  quit
+
+		if Db.isDefined("EFTPAY","CID=:CID,SEQ=:SEQ") lock -EFTPAY(CID,SEQ) quit
+		set LOCK=0 
+		set ZSEQ=SEQ
+		}
+
+	if LOCK do { quit
+		set ER=1 
+		set RM=$$^MSG(2333) 
+		do LOG(.io)
+		}
+
+	//Overnight Payment
+	if fSWIFT.priority["U" do ^EFTOVT(CID) 
+
+	//Standard Payment Order
+	else  do fSWIFT.save()
+
+	lock -EFTPAY(CID,SEQ)
+	if ER do LOG(.io)
+
+	set msgcnt=msgcnt+1
+
+	quit
+
+
+100(RecordSWIFT fSWIFT,IO io)
+ 
+        // create domestic payment orders
+	new AMT,CID,CURDAT,EFT,EFTTYPE,MET,PRIORITY,SEQ,SRC,TTYP
+ 
+	catch vERROR {
+		new ET,RM
+		set ET=vERROR.type
+		if ET["%GTM-" do { quit
+		 	do ZE^UTLERR
+			do EXC
+			}
+ 
+                set ET=ET_"-"_vERROR.thrownAt
+                set RM=vERROR.description
+                set (ET,RM)=$ZS
+
+                do ^UTLERR
+
+                do EXC
+                }
+ 
+ 
+	//Called by WriteRec subroutine
+	set ER=0
+	set MET="CC"
+	set EFTTYPE="PO"
+	type RecordCTBLEFTTYPE fCTBLEFT=Db.getRecord("CTBLEFTTYPE","KEY=:EFTTYPE")
+ 
+	//Local Settlement Account
+	set CID=fCTBLEFT.washgl
+	if CID="" do {
+ 
+		//OFFLINE TELLER
+		type RecordCTBLINC fUTBL=Db.getRecord("CTBLINC","KEY='TREASURY'")
+		set TELLER=fUTBL.teller
+ 
+                //USE TSDR
+		type RecordSCAU fSCAU=Db.getRecord("SCAU","UID=:TELLER")
+		set CID=fSCAU.tsdr
+ 
+		// No acct defined for local treasury settlements. Using suspense acct ~p1.
+		set RM=$$^MSG(1423,CID)
+		do LOG(.io)
+		}
+ 
+	set TTYPE=2
+	type RecordACN acn=Db.getRecord("ACN","CID=:CID")
+	type RecordGLAD fGLAD=Db.getRecord("GLAD","ACN=:CID")
+	set LNM=$S(TTYPE=0:$E(acn.title1,1,20),1:$E(fGLAD.desc1,1,20))
+ 
+	// Value Date/Currency/Amount (Sell)
+	set VCAS2=fSWIFT.vcas2
+	set BENINACC=fSWIFT.bnfcry
+	set BENINST=fSWIFT.rcvr
+
+	if (BENINST["XXX"),'Db.isDefined("UTBLCORRE","KEY=:BENINST") set BENINST=$E(BENINST,1,8)
+	if 'Db.isDefined("UTBLCORRE","KEY=:BENINST") set BENINST=$TR(BENINST," ","")
+ 
+	// Fee Calculation Method
+	type RecordUTBLCORRE ucorre=Db.getRecord("UTBLCORRE","KEY=:BENINST")
+	type RecordEFTPAY fEFTPAY=Db.getRecord("EFTPAY","CID=:CID,SEQ=:SEQ",1)
+	set fEFTPAY.recinst=ucorre.instcd
+ 
+	if fEFTPAY.recinst="" do { quit:ER
+ 
+		// Recipient institution not defined for ~p1. Reference ~p2.
+		set ER=1
+		set RM=$$^MSG(1426,BENINST,TRREFNO)
+		do LOG(.io)
+		}
+ 
+	set BENINACC=$S(BENINACC["/":$P(BENINACC,"/",2),1:BENINACC)
+ 
+	set fEFTPAY.recacct=$TR(BENINACC," ","")
+	if fEFTPAY.recacct="" do { quit:ER
+ 
+		// Recipient institution not defined for ~p1. Reference ~p2.
+		set ER=1
+		set RM=$$^MSG(1426,BENINST,TRREFNO)
+		do LOG(.io)
+                
+		}
+ 
+	set CURDAT=$E(VCAS2,1,6)
+	set CURDAT=$$^SCAJD(CURDAT,"YYMMDD")
+	set AMT=$E(VCAS2,10,99)
+	set AMT=$TR(AMT,",",".")
+	set fEFTPAY.amount=AMT
+	set fEFTPAY.crcd=%SystemCurrency
+	set CON=$E(fSWIFT.by1,1,10)
+	set fEFTPAY.constant=$TR(CON," ","")
+	set fEFTPAY.efd=CURDAT
+	set fEFTPAY.cc=fCTBLEFT.ccdft
+	set fEFTPAY.status="A"
+	set fEFTPAY.met=MET
+	set fEFTPAY.tries=fCTBLEFT.tries
+	set fEFTPAY.procdt=CURDAT
+	set fEFTPAY.amttyp=1
+	set fEFTPAY.efttype=EFTTYPE
+	if (fSWIFT.priority["U")!(CURDAT'>(%SystemDate+1)) set PRIORITY=1
+	set fEFTPAY.pri=+$G(PRIORITY)
+	type RecordUTBLSRC fUTBLSRC=Db.getRecord("UTBLSRC","SRCTYP='BOFF',KEY='DEAL'")
+	set fEFTPAY.brcd=fUTBLSRC.brcd
+	set fEFTPAY.lnm=LNM
+	set fEFTPAY.ttype=TTYPE
+	set fEFTPAY.datecre=+%CurrentDate
+	set fEFTPAY.timecre=%CurrentTime
+ 
+	//used in EFTFILE
+	set ogl=1
+ 
+	//deleted later
+	set SRC="PO"
+
+	new LOCK 
+	set LOCK=1
+	for Z=1:1:10 do { quit:'LOCK
+		type RecordEFTPAY1 fEFTPAY1=Db.getRecord("EFTPAY1","CID=:CID")
+		set SEQ=fEFTPAY1.seq
+		lock +EFTPAY(CID,SEQ)
+		else  quit
+
+		if Db.isDefined("EFTPAY","CID=:CID,SEQ=:SEQ") lock -EFTPAY(CID,SEQ) quit
+		set LOCK=0
+		set ZSEQ=SEQ
+		}
+ 
+	if LOCK do { quit
+		set ER=1
+		set RM=$$^MSG(2333)
+		do LOG(.io)
+		}
+ 
+	//Overnight Payment
+	if fSWIFT.priority["U" do ^EFTOVT(CID)
+ 
+	//Standard Payment Order
+	else  do fEFTPAY.save()
+ 
+        lock -EFTPAY(CID,SEQ)
+        if ER do LOG(.io)
+ 
+        set msgcnt=msgcnt+1
+ 
+        quit
+
+
+EXC    //Log error in exception file
+	new ET
+	set ET=$G(RM)
+
+	// Error loading SWIFT message
+	do LOG^UTLEXC($T(+0),"*",$$^MSG(1431),$G(CID),$G(%ZTSEQ),ET)
+	if $G(ET)'="" set ET=": *"_ET_"*"
+	kill %ZTSEQ
+	quit
+
+
+LOG(IO io)	// Write exception to log file
+
+	//I18N=OFF
+	set RM=$G(RM)
+
+	//log exception
+	do EXC
+	
+	do io.write("")
+	do io.write(.LINE)
+
+	//write exception to log file
+	do io.write("")	
+	do io.write(.RM)
+
+	//write SWIFT message to log file
+	do io.write("")
+	do io.write("")
+	set REC=$G(msg)
+	do io.write(.REC)
+	do io.write(.LINE)
+
+
+	//I18N=ON
+	quit
+
+vSIG()	quit "59886^43614^Sanchez SCM Administrator^17786"	// Signature - LTD^TIME^USER^SIZE

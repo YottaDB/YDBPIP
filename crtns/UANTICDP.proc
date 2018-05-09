@@ -1,0 +1,1069 @@
+UANTICDP	// Account Projection Utilities - Deposits
+ 
+	/*
+
+	---- Revision History -------------------------------------------------
+
+	08/07/06 - KELLYP - CR 22530
+		   Modified EVENTD section not to setup an accrual event for
+		   EFD-1 for same-day error corrects/reversals.  This prevents
+		   an accrual adjustment from being posted in error.
+
+	05/17/06 - Mugilvannan - CR 21147
+		   Modified the comment in BUILDQ section for the BALIRN() array
+		   as it populate vale if the interest rate or balance change.
+		   	
+	04/27/06 - SmithCD - CR 20965
+		   Added consideration of dep.minacr, dep.minopt in DEPACR 
+		   section to prevent accrual on balances less than the 
+		   minimum (prevents "Accrued amount exceeds Int/Div" error 
+		   in DEPACR1).
+	
+	04/03/06 - S.Krishnan - CR 20431
+		   . Added .get() method to the variable SEGLIST in the
+		     section DICHND to avoid undefined error. 
+		   . The calls to DICHND in DEPACR section is modified as
+		     follows:
+		       a) In the section DEPACR, For interest on available 
+	   	          interest, changed the variable INDTYPE to pass 2 
+		          instead of a 1 to the call to DICHND
+		       b) In the section DEPACR, For regular (non-segmented)
+ 		          interest, changed the variable INDTYPE to pass 0
+ 		          instead of a 1.
+		   
+	03/22/06 - S.Krishnan - CR 20199
+		   Added .get() method to the variable LBC in the IF condition
+		   of the section SETQUE to avoid undefined error. 
+
+	01/26/06 - SmithCD - CR 19343 (16890)
+		   Retrofitted changes involving escrow-related CR 2916, and 
+		   interest index fixes from p01. Changes include:
+		   . Added NXDT public extrinsic function as part of escrow-
+		     related changes
+		   . Added ESCADJ section to handle escrow accrual adjustments
+		   . Removed IPDPRC variable occurrences and replaced with 
+		     compiler directives on CUVAR.IPD
+		   . Removed ACRID references
+   		   . Changed key structure of QUEUE(EVNTJD,EVNTSQ) to
+		     QUEUE(EVNTJD,CID,EVNTSQ) to accommodate multiple accounts
+		   . Changed DEPACR section to use ACRDT() instead of ACRDT, 
+		     call DEPLBB when applicable
+		   . Removed restrictions on escrow accounts in EVENTD 
+		     section
+		   . Moved RATECHGD and INTFRED sections to ^UANTIC (enhanced 
+		     for efficiency and renamed to RATECHG and INTFRE, 
+		     respectively) b/c the basic index logic s/be mostly the 
+		     same for loans and deposits
+		   . Removed EVNTSQ parameter from RUN* sections since they 
+		     are no longer used in those sections
+		   . Removed FHMTRN section - uses AuditFlag(1) instead
+		   . Modified SETIPF section to use ACNDSD records when
+		     applicable
+		   . Removed code for dep.ircb = 2 (this option is no longer 
+		     valid)
+		   . Labeled sections that are only called from within the 
+		     system area as private (instead of public)
+		   	
+	10/07/05 - SmithCD - CR 16885
+		   . Removed all occurrences of ACTVY(), which is no longer 
+		     needed
+		   . Corrected SETSRV section to reference dep.upfre instead 
+		     of dep.scfre for usage credits, and made changes to 
+		     correct a potential undefined error if dep.scrfe or 
+		     dep.upfre is not defined
+		   . Modified DICHND section to properly set PAR() that is 
+		     passed in CTL^UINDX
+		   . Eliminated occurrences of FRSTCHNG - not needed
+		   . Performed some general cleanup
+
+ 	08/02/05 - SkariahV - CR16679
+	    	   Removed #WARN and #OPTIMIZE directives(earlier commented 
+	    	   section).
+	
+	*/
+
+	quit
+
+
+private BUILDQ(RecordDEP dep,		// Deposit account		/REF:RW
+	       Date %SystemDate,	// System date
+	       Date %EffectiveDate,	// Effective date
+	       String BALIRN(),		// Interest Accrual Projection	/REF:RW
+	       Date ACRDT())		// Accrual date			/REF:W
+
+	// Build QUEUE(,,) for deposit accounts
+	
+	// Initialize accrued-thru date
+	set ACRDT(dep.cid) = %SystemDate - 1
+
+	/*
+	For Interest Accrual Projection Report, set up BALIRN() entry for 
+	first day, and later everytime the rate or balance is changed
+	*/
+	if BALIRN set BALIRN(%SystemDate) = dep.bal_"|"_dep.irn
+	
+	/*
+	Go off and perform the specific functions for deposit
+	(Set up deposit event QUEUE(,,))
+	*/
+	do EVENTD(.dep, %SystemDate, %EffectiveDate)
+
+	quit
+
+
+EVENTD(RecordDEP dep,			// Deposit account		/REF:R
+       Date %SystemDate,		// System date
+       Date %EffectiveDate)		// Effective date
+       
+	// Build events for deposit accounts
+
+	type public Date CUVAR2,SAVTJD
+	type public String BALIRN(), QUEUE(,,)
+	
+	// Set-up for beginning-of-day interest posting
+	#IF CUVAR.INTPOS=2 do SETIPF(.dep)
+
+	// Set EFT Collection Orders
+	if BALIRN do SETEFT^UANTIC(.dep, %SystemDate, %EffectiveDate, 2)
+
+	// Set up PAT entries to post
+	do SETPAT^UANTIC(.dep, %SystemDate, %EffectiveDate)
+
+	// Set-up for maturity processing 
+	do SETMDTD(.dep)
+
+	// Set service charge entries
+
+	// Service Fee Plan
+	if 'dep.feepln.isNull() do SETSRV(.dep, 0)
+	// Usage Credit Plan
+	if 'dep.uspl.isNull() do SETSRV(.dep, 1)
+
+	// Set EFT Payment Orders
+	if BALIRN do SETEFT^UANTIC(.dep, %SystemDate, %EffectiveDate, 1)
+	
+	// Set-up for end-of-day interest posting	
+	#IF CUVAR.INTPOS=1 do SETIPF(.dep)
+
+	// Interest index queue setup
+	do DEPINDEX(.dep)
+
+	// Ensure final accrual event is set
+	if (SAVTJD '= CUVAR2)!(%EffectiveDate > CUVAR2) set QUEUE((%EffectiveDate - 1), dep.cid, 9999) = "Calculate accruals"
+
+	quit
+
+
+SETMDTD(RecordDEP dep)			// Deposit account		/REF:R
+
+	// Set-up for maturity processing
+
+	// Account Maturity Date
+	if dep.mdt.isNull() quit
+
+	do SETQUE(.dep, "", dep.mdt, 0, 0, "Maturity Date Processing|RUNMDTD")
+
+	quit
+
+
+SETIPF(RecordDEP dep)			// Deposit account		/REF:R
+
+	// Set-up for interest posting and low balance processing
+	
+	type public Boolean ER
+	type public Date CUVAR2, SAVEFD
+
+	type String EVNT, MFRE
+	type Date JD
+	type Date START
+	
+	// Set-up interest posting for segmented accounts.
+	#IF 'CUVAR.NOSEGMENTS if dep.segflg do SETIPFS(.dep) quit
+	
+	// Low Balance processing
+	if 'dep.ipf.isNull(), dep.inp, (dep.ircb = 5 ! (dep.ircb = 6)) do { quit:ER
+		set MFRE = $$MFRE^DEPLBB(dep.ipf)
+
+		set EVNT = "Low Balance Re-calculation|RUNLBCM"
+
+		// Consider special case with semi-monthly
+		set JD = $$NXDT(dep.ipld, MFRE, dep.lbcm) quit:ER
+		if JD < %SystemDate set JD = dep.inp
+
+		do SETQUE(.dep, MFRE, JD, 0, 0, EVNT, dep.lbcm)
+
+		// Same event dates
+		if dep.lbcm = dep.lbcp quit
+
+		set EVNT = "Low Balance Periodic Calculation|RUNLBCP"
+
+		// Consider special case with semi-monthly
+		set JD = $$NXDT(dep.ipld, MFRE, dep.lbcp) quit:ER
+		if JD < %SystemDate set JD = dep.inp
+
+		do SETQUE(.dep, MFRE, dep.inp, 0, 0, EVNT, dep.lbcp)
+		}
+
+	#IF CUVAR.INTPOS=1
+		set EVNT = "Interest Posting (EOD)|INTPOST|0"
+		set START = %SystemDate
+	#ELSE
+		set EVNT = "Interest Posting (BOD)|INTPOST|0"
+		set START = %SystemDate + 1
+	#ENDIF
+
+	// Use actual posting dates if in the past
+	if SAVEFD '> CUVAR2 do {
+		type ResultSet rs = Db.select("SCHDT", "ACNDSD", "CID=:dep.cid AND FRECOL='IPF' AND SCHDT>0 AND SCHDT NOT<:START")
+		while rs.next() do SETQUE(.dep, "", rs.getCol("SCHDT"), 0, 0, EVNT)
+	        }
+	// Use posting frequency if projecting into the future
+	else  if 'dep.ipf.isNull(), dep.inp do SETQUE(.dep, dep.ipf, dep.inp, 0, 0, EVNT) quit:ER
+
+	#IF CUVAR.INTPOS=1
+		set EVNT = "Negative Interest Posting (EOD)|INTPOST|1"
+	#ELSE
+		set EVNT = "Negative Interest Posting (BOD)|INTPOST|1"
+	#ENDIF
+
+	// Use actual posting dates if in the past
+	if SAVEFD '> CUVAR2 do {
+		type ResultSet rs = Db.select("SCHDT", "ACNDSD", "CID=:dep.cid AND FRECOL='NEGIPF' AND SCHDT>0 AND SCHDT NOT<:START")
+		while rs.next() do SETQUE(.dep, "", rs.getCol("SCHDT"), 0, 0, EVNT)
+	        }
+	// Use posting frequency if projecting into the future
+	else  if 'dep.negipf.isNull(), dep.neginp do SETQUE(.dep, dep.negipf, dep.neginp, 0, 0, EVNT) quit:ER
+
+	quit
+
+
+SETIPFS(RecordDEP dep)		// Deposit account			/REF:R
+
+	// Set-up for interest posting - segmented accounts
+	
+	type public String POSTDT()
+
+	type Date INP
+	type String IPF,EVNT
+	type Number SEGMENT
+	
+	// Segment Accrual Option
+	if dep.segacr do { quit
+		
+		// Int/Div Posting Frequency
+		if 'dep.ipf.isNull() do {
+			set EVNT = "Segment Interest Posting|INTPOST|2"
+			do SETQUE(.dep, dep.ipf, dep.inp, 0, 0, EVNT)
+			}
+				
+		// Avail Int Accrual Flag
+		if 'dep.aiacrf quit	
+
+		// Available Int Posting Freq
+		if dep.aiipf.isNull() quit	
+
+		// Post segment interest on available interest
+			
+		// Available Int Next Posting
+		set EVNT = "Segment Available Interest Posting|INTPOST|3"
+		do SETQUE(.dep, dep.aiipf, dep.aiinp,0,0,EVNT)
+		}
+
+	type DbSet ds = Db.selectDbSet("DEPSEG", "CID=:dep.cid")		   
+	while ds.next() do {
+		type RecordDEPSEG depseg = ds.getRecord("DEPSEG")
+
+		set SEGMENT = depseg.segment
+
+		if 'depseg.ipf.isNull() do {
+			set EVNT = "Segment Interest Posting|INTPOST|2"
+			do SETQUE(.dep, depseg.ipf, depseg.inp, 0, 0, EVNT)
+			}
+		if dep.aiacrf, 'depseg.aiipf.isNull() do {
+			set EVNT = "Segment Available Interest Posting|INTPOST|2"
+			do SETQUE(.dep, depseg.aiipf, depseg.aiinp, 0, 0, EVNT)
+			}
+		}
+		
+	quit
+
+
+SETSRV(RecordDEP dep,			// Deposit account		/REF:R
+       Number PLTP)			// Service fee indicator
+
+	// Set service charge / usage credit entries
+
+	// Service changes
+	if 'PLTP, 'dep.scfre.isNull() do SETQUE(.dep, dep.scfre, dep.scnd, 0, 0, "Service Charges|RUNSRV|0")
+
+	// Usage credits
+	if PLTP, 'dep.upfre.isNull() do SETQUE(.dep, dep.upfre, dep.upndt, 0, 0, "Usage Credits|RUNSRV|1")
+
+	quit
+
+
+DEPINDEX(RecordDEP dep)			// Deposit account		/REF:R
+	
+	// Interest index queue setup
+	
+	type public Boolean ER
+
+	type String EVNT
+	
+	#IF 'CUVAR.NOSEGMENTS
+		if dep.segflg, 'dep.segacr do { quit
+
+			// Segmented account accruing at segment level index
+			set EVNT = "Deposit segment interest change|DICHND|1"
+	
+			type DbSet ds = Db.selectDbSet("DEPSEG", "CID=:dep.cid")		   
+			while ds.next() do {
+				type RecordDEPSEG depseg = ds.getRecord("DEPSEG")
+				do INTFRE^UANTIC(.dep, depseg.index, depseg.intfre, depseg.ichnd, EVNT, 1, depseg.segment)
+				}
+	
+			if dep.aiacrf, dep.airdet do INTFREAI(.dep) 
+			}
+	#ENDIF
+
+	if 'dep.index.isNull() do { quit:ER
+		set EVNT = "Deposit interest change|DICHND|0"
+		do INTFRE^UANTIC(.dep, dep.index, dep.intfre, dep.ichnd, EVNT, 0) quit:ER
+		}
+
+	// Segmented account accruing at account level index
+	#IF 'CUVAR.NOSEGMENTS if dep.segflg, dep.aiacrf do INTFREAI(.dep) 
+
+	quit
+
+
+INTFREAI(RecordDEP dep)			// Deposit account		/REF:R
+
+	// Interest change date - Available Interest
+	
+	type public Boolean ER
+
+	if dep.aiindex.isNull() quit
+
+	type String EVNT
+
+	set EVNT = "Deposit Available interest change|DICHND|2"
+	do INTFRE^UANTIC(.dep, dep.aiindex, dep.aiintfre, dep.aiichnd, EVNT, 2) quit:ER
+
+	quit
+
+
+private SETQUE(RecordDEP dep,		// Deposit account		/REF:R
+	      String FRE,		// Posting frequency of event	/NOREQ
+	      Date NJD,			// Date of the event
+	      Number OFF,		// Bulling date offset
+	      Boolean PLUS1,		// Plus 1
+	      String EVNT,		// Event name
+	      String LBC)		// Low balance control		/NOREQ
+
+	// Set the processing queue
+	
+	type public Date CUVAR2, SAVEFD
+	type public String CTL, QUEUE(,,)
+	type public Boolean DONE, ER
+
+	type Date EVNTJD
+
+	if 'NJD quit
+
+	set DONE = 0
+	for  do { quit:ER ! (DONE)
+		set EVNTJD = NJD - OFF + PLUS1
+
+		// Beyond effective date - stop
+		if EVNTJD > %EffectiveDate set DONE = 1 quit
+		
+		do SETEVENT(dep.cid, EVNT, EVNTJD, .QUEUE(,,))
+		
+		// Single event
+		if FRE.isNull() set DONE = 1 quit
+		
+		// Multiple events
+		if LBC.get().isNull() set NJD = NJD.nextFreqDate(FRE) quit:ER
+		else  set NJD = $$NXDT(NJD, FRE, LBC) quit:ER
+		}
+
+	quit
+	
+	
+SETEVENT(Number CID,		// Account number
+	 String EVNT,		// Event data
+	 Date EVNTJD,		// Event date
+	 String QUEUE(,,))	// Event queue				/REF:RW
+	 
+	// Set a single event and an accompanying accrual event
+
+	type public String POSTDT()
+	type public Number SEGMENT
+
+	type Number PRVQSQ
+	type String PRVQUE
+
+	// Get previous non-acrual sequence
+	set PRVQSQ = QUEUE(EVNTJD, CID, 9999).order(-1)
+	
+	// Concatenate segment # if applicable, and quit
+	if 'SEGMENT.get().isNull() do { quit
+		set PRVQUE = QUEUE(EVNTJD, CID, PRVQSQ).get()
+		if EVNT.piece("|", 1, 4) '= PRVQUE.piece("|", 1, 4) quit
+
+		set QUEUE(EVNTJD, CID, PRVQSQ) = PRVQUE_","_SEGMENT
+		}
+
+	// Set new entry in QUEUE(,,)
+	set QUEUE(EVNTJD, CID, PRVQSQ + 1) = EVNT
+
+	// Store segment # in new entry if applicable
+	if 'SEGMENT.get().isNull() set QUEUE(EVNTJD, CID, (PRVQSQ + 1)).piece("|", 5) = SEGMENT
+
+	if EVNTJD > %SystemDate, EVNTJD '> %EffectiveDate set QUEUE(EVNTJD - 1, CID, 9999) = "Calculate accruals"
+
+	// Set POSTDT() with posting dates for IPD accounts
+	// Set the queue entry for accruals in order to delete DEP.IPDTRF
+	#IF CUVAR.IPD
+		if EVNT.piece("|", 2).isLike("%INTPOST%") do {
+			set POSTDT(EVNTJD) = ""
+			set QUEUE(EVNTJD, CID, 9999) = "Calculate accruals"
+			}
+        #ENDIF
+
+	quit
+
+
+private RUNMDTD(RecordDEP dep,		// Deposit account		/REF:RW
+	       Date %SystemDate)	// System date
+
+	// Maturity Date processing
+	
+	type public Boolean ER
+	type public Date SAVEFD
+
+	if 'dep.bal, 'dep.posacr quit
+	
+	// Assume payout
+	if 'dep.rencd ! (dep.rencd = 5) set dep.rencd = 1
+	
+	// Generate transactions.
+	do EXTERN^BCHROLL(.dep) quit:ER
+
+	/*
+	If this was an automatic renewal, project one more term
+	with a payout at the end
+	*/
+	if dep.rencd = 3 set dep.rencd = 1
+
+	/*
+	Account Maturity Date - future dated.
+	SATEFD is set in EXEC^UANTIC and equal original
+	effective date.
+	*/
+	if dep.mdt > %SystemDate, dep.mdt '> SAVEFD do SETMDTD(.dep)
+
+	quit
+
+
+private INTPOST(RecordDEP dep,		// Deposit account		/REF:RW
+	        Date %SystemDate,	// System date
+	        Number POSTING)		// Posting type
+
+	/*
+	Post interest
+
+	Additional notes on ARGUMENTS:
+
+	. POSTING
+	    Position 
+	      0  Positive Interest
+	      1  Negative interest
+	      2  Segment interest
+	      3  Segment available interest
+	*/
+	
+	type public Boolean ER
+	type public RecordLN ln
+
+	// DAYEND process: Batch Interest Posting (all types)
+	do EXTERN^BCHINTPS(dep.cid, POSTING, .dep, .ln) quit:ER
+
+	quit
+
+
+private RUNSRV(RecordDEP dep,		// Deposit account		/REF:RW
+	       Date %SystemDate,	// System date
+	       Number PLTP)		// Service fee indicator
+
+	// Run service charge utility
+
+	type String %UserID, KEY
+
+	// Service Fee
+	if 'PLTP set KEY = "FEE"
+	// Usage Credit
+	else  set KEY = "UCR"
+
+	// Retrieve teller information	
+	type RecordUTBLSRC utblsrc = Db.getRecord("UTBLSRC", "SRCTYP='FEE',KEY=:KEY")
+	set %UserID = utblsrc.uid
+	
+	do UID^UANTIC(%UserID)
+
+	/*
+	The variable PLTP must be set. It is used in the batch to indicate 
+	that the processing being performed is service fee processing or 
+	useage credit processing.
+	*/
+	
+	type public Boolean ER
+
+	// Service fee processing
+	if 'PLTP do START^BCHSRVFE(.dep) quit:ER
+
+	// Useage Credit processing
+	else  do START^BCHUSEAG(.dep, PLTP) quit:ER
+
+	quit
+
+
+private DICHND(RecordDEP dep,		// Deposit account		/REF:RW
+	       Date EVNTJD,		// Event date
+	       Number INDXTYPE,		// Index type
+	       Date CUVAR2,		// Customer variable system date
+	       String SEGLIST)		// Segment postings list	/NOREQ
+
+	/*
+	Change interest rate and bump interest change dates on this 
+	projected system date
+
+	Additional notes on ARGUMENTS:
+
+	. INDXTYPE
+	     Position 	0  Interest index
+			1  Segment interest index
+	       		2  Available interest index
+	*/
+	
+	type public Boolean ER
+
+	type Number BASE, RATE, RRATE, SEGMENT, SRATE, URATE
+	type String PAR()
+
+	if 'INDXTYPE do { quit
+
+		// Interest Index/Matrix processing
+	
+		// Bump interest change dates
+		if dep.ichnd = EVNTJD do {
+        		set dep.ichld = EVNTJD
+			set dep.ichnd = dep.ichld.nextFreqDate(dep.intfre)
+			}
+
+		set BASE = $$IRCB(.dep, , INDXTYPE)
+		
+		set PAR("ROUND") = 1
+
+		// Calculate new rate
+		do CTL^UINDX(.dep, EVNTJD, BASE, .PAR()) quit:ER
+		
+		if (dep.irn - RATE) '= 0 do {
+			do dep.setAuditFlag(1)
+			set dep.irn = RATE
+			}
+		}
+ 
+	// Segment Interest Index/Matrix processing
+	if INDXTYPE = 1 do { quit:ER
+
+		type Number UPOS = 0
+		set SEGLIST=SEGLIST.get()
+		for  set UPOS = UPOS + 1 set SEGMENT = SEGLIST.piece(",", UPOS) quit:SEGMENT.isNull() ! (ER)  do { quit:ER
+			type RecordDEPSEG depseg = Db.getRecord("DEPSEG", "CID=:dep.cid,SEGMENT=:SEGMENT")
+				
+			// Bump interest change dates
+			if depseg.ichnd = EVNTJD do {
+        			set depseg.ichld = EVNTJD
+				set depseg.ichnd = depseg.ichld.nextFreqDate(depseg.intfre)
+				}
+
+			set BASE = $$IRCB(.dep, depseg.bal, INDXTYPE)
+
+			set PAR("INDEX") = depseg.index
+			set PAR("MATRIX") = depseg.intmat	
+			set PAR("ROUND") = 1
+			set PAR("SEG") = SEGMENT
+
+			// Calculate new rate
+			do CTL^UINDX(.dep, EVNTJD, BASE, .PAR()) quit:ER 	
+
+			if (depseg.irn - RATE) '= 0 do {
+				do depseg.setAuditFlag(1)
+				set depseg.irn = RATE
+				}
+			}
+		}
+
+	// Available Interest Index/Matrix processing
+	if INDXTYPE = 2 do { quit:ER
+		
+		// Bump interest change dates
+		if dep.aiichnd = EVNTJD do {
+        		set dep.aiichld = EVNTJD
+			set dep.aiichnd = dep.aiichld.nextFreqDate(dep.aiintfre)
+			}
+
+	 	// Int Paid Not Credited
+		if dep.ircb set BASE = dep.intavlncr	  
+		else  set BASE = 0
+	
+		set PAR("INDEX") = dep.aiindex
+		set PAR("MATRIX") = dep.aiintmat
+		set PAR("ROUND") = 1
+
+		do CTL^UINDX(.dep, EVNTJD, BASE, .PAR()) quit:ER
+
+		if (dep.aiirn - RATE) '= 0 do {
+			do dep.setAuditFlag(1)
+			set dep.aiirn = RATE
+			}
+		}
+
+	quit
+
+
+public	IRCB(RecordDEP dep,		// Deposit account		/REF:R
+	     Number SEGBAL,		// Segment balance
+	     Number INTTYP)		// Interest type
+
+	/*
+	Return balance for interest calculations
+	
+	Additional notes on ARGUMENTS:
+	. dep.ircb
+		0  No Accrual
+		1  Ledger Balance
+		2  Available Balance
+		3  Collected Balance
+		4  Sales Price
+		5  Low Balance Based on Ledger Balance
+		6  Low Balance Based on Collected Balance
+
+	. INTTYP
+            0  Interest on principal
+            1  Segment interest on principal
+            2  Interest on available interest
+            3  Segment Interest on available interest
+	*/
+	
+	if 'dep.ircb quit 0
+
+	type Number BALINT = 0
+
+	// Segment Ledger Balance
+	if INTTYP = 1 set BALINT = SEGBAL
+	// Total Seg Matured Prin + Total Available Int Bal (Segments)
+	if INTTYP = 2 set BALINT = dep.tsmpb + dep.taibs
+	// Segment Available Interest Balance
+	if INTTYP = 3 set BALINT = SEGBAL
+	// Total Segment Non-Matured Prin Balance
+	#IF 'CUVAR.NOSEGMENTS if INTTYP = 0, dep.segflg = 1 set BALINT = dep.tsnmpb
+	
+	if INTTYP = 0, dep.segflg = 0  do {
+		// Ledger Balances
+		if dep.ircb = 1  ! (dep.ircb = 5) set BALINT = dep.bal
+		// Collected Balance
+		else  if dep.ircb = 3  ! (dep.ircb = 6) set BALINT = dep.balcol
+		// Sales Price
+		else  if dep.ircb = 4 set BALINT = $select(dep.bal:dep.salesprc, 1:0)
+		}
+
+	if 'dep.maxacr.isNull(), BALINT > dep.maxacr set BALINT = dep.maxacr
+
+	quit BALINT
+
+
+private DEPACR(RecordDEP dep,		// Deposit account		/REF:RW
+	       RecordTTX ttx,		// Primary transaction		/REF:R
+	       Date EVNTJD,		// Event date
+	       Date ACRDT())		// Accrual date
+
+	// Calculate accrual amount for deposit account
+	
+	type public Boolean BASREL(), DAILYFRE(,), ER
+	type public String POSTDT()
+	type public Date CUVAR2
+
+	type Number ACRAMT, BASE, IRCB
+	type Date ACRLD, ACRND
+	
+	set ACRAMT = 0
+	set ACRLD = ACRDT(dep.cid) + 1 
+	set ACRND = EVNTJD
+	set ACRDT(dep.cid) = EVNTJD
+	if ACRND < ACRLD set ACRLD = ACRND
+
+	/*
+	For IPD accounts the accrual is calculated in the posting process on
+	posting dates... POSTDT() set in SETIPF section
+	*/
+	#IF CUVAR.IPD
+		// Include Posting Date Accrual
+		set dep.ipda = ""	
+		// Include Posting Date Tfr Amt	
+		set dep.ipdtrf = ""
+		
+		if POSTDT(EVNTJD).exists() quit
+	#ENDIF
+
+	#IF 'CUVAR.NOSEGMENTS
+		type Number SEGMENT
+		
+		if dep.segflg, 'dep.segacr do { quit
+								
+			/*
+			If BASREL (not basis index) check for interest 
+			rate change. If daily freq for index type bump
+			the dates, skipping dates within the accrual period
+		        */
+			if dep.aiacrf, dep.airdet, 'dep.aiindex.isNull() do {
+				if BASREL(dep.aiindex) do DICHND(.dep, ACRLD, 2, CUVAR2)
+				if DAILYFRE(dep.cid, 2) do {
+					set dep.aiichnd = ACRND + 1
+					set dep.aiichld = ACRND
+					}
+				}
+
+			// Accrue at segment level
+			type DbSet ds = Db.selectDbSet("DEPSEG", "CID=:dep.cid")
+
+			while ds.next() do {
+
+				type RecordDEPSEG depseg = ds.getRecord("DEPSEG")
+			
+				// Is it Valid Segment
+				if depseg.segval.isNull() quit
+
+				/*
+				If BASREL (not basis index) check for interest 
+				rate change. If daily freq for index type, bump
+				the dates, skipping dates within the accrual 
+				period
+		        	*/
+				if 'depseg.index.isNull() do {
+					if BASREL(depseg.index) do DICHND(.dep, ACRLD, 1, CUVAR2, depseg.segment)
+					if DAILYFRE(dep.cid, 1) do {
+						set depseg.ichnd = ACRND + 1
+						set depseg.ichld = ACRND
+						}
+					}
+			
+				set BASE = $$IRCB(.dep, depseg.bal, 1)
+
+				if BASE set ACRAMT = $$^UIC(BASE, ACRLD, ACRND, dep.iacm, dep.irn, 0, dep.intaf, dep.ipf, dep.icpf, dep.inp) quit:ER
+				else  set ACRAMT = 0
+
+				// Update segment level positive accrual
+				set ACRAMT = ACRAMT.roundDec(5)
+				set depseg.posacr = depseg.posacr + ACRAMT
+
+				// Update account level positive accrual		
+				set dep.posacr = dep.posacr + ACRAMT	
+
+				// Accrue at segment level - AIACR
+				if 'dep.aiacrf  quit
+				
+				set BASE = $$IRCB(.dep, depseg.aibal, 3)
+				
+				if BASE set ACRAMT = $$^UIC(BASE, ACRLD, ACRND, dep.iacm, dep.irn, 0, dep.intaf, dep.ipf, dep.icpf, dep.inp) quit:ER
+				else  set ACRAMT = 0
+
+				// Update segment level accrual on available interest
+				set ACRAMT = ACRAMT.roundDec(5)
+				set depseg.aiacr = depseg.aiacr + ACRAMT
+
+				// Update account level accrual on available interest		
+				set dep.aiacr = dep.aiacr + ACRAMT
+				}
+			}
+	#ENDIF
+
+	set BASE = $$IRCB(.dep, , 0) + dep.cmp
+	
+	set IRCB = dep.ircb
+	
+	#IF CUVAR.IPD if IRCB set BASE = BASE - dep.ipdtrf
+	
+	/*
+	If BASREL (not basis index) check for interest rate change. If daily 
+	freq for index type, bump the dates, skipping dates within the accrual 
+	period
+        */
+	if 'dep.index.isNull() do { quit:ER
+		if BASREL(dep.index) do DICHND(.dep, ACRLD, 0, CUVAR2)
+		if DAILYFRE(dep.cid, 0) do {
+			set dep.ichnd = ACRND + 1
+			set dep.ichld = ACRND
+			}
+		}
+
+	/*
+	Only calculate "regular" accrual if not low balance (note IRCB can be 
+	reset in ^DEPLBB due to negative balance) and an accrual amount has 
+	not been calculated yet
+	*/
+	if IRCB = 5 ! (IRCB = 6) do { quit:ER
+		type Date %SystemDate = ACRLD
+		
+		/*
+		Note that ^DEPLBB should never be called here for a low
+		balance accrual date going forward... the call from 
+		GETIPDA^UIC will handle instead (INTPOST^UANTIC -> 
+		EXTERN^BCHINTPS -> GETIPDA^UIC).
+        	*/
+		do ^DEPLBB(.dep, .ACRAMT, .IRCB, .BASE, 0) quit:ER
+		}
+
+	// Consider minimum balance to accrue
+	if 'dep.minacr.isNull(), (BASE < dep.minacr) do {
+		if (dep.minopt <> 0) set ACRAMT = 0		// Keep accrual
+		else  set ACRAMT = -dep.posacr			// Zero accrual
+	        }
+	/*
+	Only calculate "regular" accrual if not low balance (note IRCB can be 
+	reset in ^DEPLBB due to negative balance) and an accrual amount has 
+	not been calculated yet
+	*/
+	else  if IRCB '= 5 , IRCB '= 6, 'ACRAMT, BASE set ACRAMT = $$^UIC(BASE, ACRLD, ACRND, dep.iacm, dep.irn, 0, dep.intaf, dep.ipf, dep.icpf, dep.inp)
+
+	// Negative Accrued Processing Option
+	if dep.negacrpo = 1, ACRAMT < 0 do {
+		// Note: Unauthorized and uncollected negative accrual not
+		// supported yet for unwind / reapply
+		set ACRAMT = (ACRAMT * (-1)).roundDec(5)
+		
+		// Update Negative Int/Div Accrued
+		set dep.negacr = dep.negacr + ACRAMT
+		}
+	else  do {
+		set ACRAMT = ACRAMT.roundDec(5)
+
+		// Update Positive Accrued Int/Div
+		set dep.posacr = dep.posacr + ACRAMT
+
+		/*
+		If backup withholding flag (DEP.BWF) and accrued withholding 
+		tax processing are set calculate the tax withholding based on 
+		positive accrued amount
+		*/
+		if ACRAMT > 0, dep.bwf, dep.awtp do { quit:ER
+			type Number BWA, TAXRATE
+
+			set TAXRATE = dep.awtr
+		
+			do ^DEPBW(.dep,.ttx, ACRAMT, .BWA, , CUVAR.BWAPGM, dep.awti, dep.irn, .TAXRATE) quit:ER
+		
+			set BWA = BWA.roundDec(5)
+
+			// Update AWT - Accrued Withholding Tax amount
+			set dep.awt = dep.awt + BWA	
+
+			if (dep.awtr - TAXRATE) '= 0 do {
+				do dep.setAuditFlag(1)		
+				set dep.awtr = TAXRATE
+				}
+			}
+		}
+
+	// Uncomment for trouble-shooting statistics (do not remove)
+	//write !,"Re/apply DEP "_dep.cid_": DEPACR Accrue "_BASE_" at "_dep.irn_"% "_ACRLD.toString()_"-"_ACRND.toString()_" = "_ACRAMT
+	//write !,$char(9)_"(dep.acr = "_dep.acr_")"
+	
+	#IF 'CUVAR.NOSEGMENTS
+		if dep.segflg , dep.aiacrf do {
+			/*
+			If BASREL (not basis index) check for interest rate change. 
+			If daily freq for index type, bump the dates, skipping dates 
+			within the accrual period
+		        */
+			if dep.airdet, 'dep.aiindex.isNull() do {
+ 				if BASREL(dep.aiindex) do DICHND(.dep, ACRLD, 1, CUVAR2)
+				if DAILYFRE(dep.cid, 2) do {
+					set dep.aiichnd = ACRND + 1
+					set dep.aiichld = ACRND
+					}
+				}
+
+			// Accrue at account level - AIACR
+			set BASE = $$IRCB(.dep, , 2)
+			if BASE set ACRAMT = $$^UIC(BASE, ACRLD, ACRND, dep.iacm, dep.aiirn, 0, dep.intaf, dep.ipf, dep.icpf, dep.inp)
+			else  set ACRAMT = 0
+
+			// Update account level accrual on available interest
+			set ACRAMT = ACRAMT.roundDec(5)
+	
+			// Available Interest Accrued
+			set dep.aiacr = dep.aiacr + ACRAMT
+			}
+	#ENDIF
+
+	quit
+	
+	
+public	NXDT(Date NJD,		// Next julian date
+	     String FRE,	// Frequency
+	     Number LBC,	// Low balance calculation
+	     Boolean DIR)	// Direction (low balance)		/NOREQ
+
+	// Set the low balance next date
+	
+	type public Boolean ER
+	
+	set DIR = DIR.get()
+
+	if LBC.isNull() set NJD = NJD.nextFreqDate(FRE,,DIR) quit:ER NJD
+	else  set NJD = $$LBACNJD^DEPLBB(NJD, FRE, DIR, LBC) quit:ER NJD
+        
+	quit NJD
+
+	
+private	RUNLBCM
+
+	// Low balance accrual calculation method
+
+	/*
+	No processing to perform here... all low balance processing be
+	performed in ^DEPLBB, which is called from section DEPACR. The
+	purpose of having this section is merely to allow for a place
+	holder in the QUEUE array, which will cause functionally cause
+	an accrual entry to be set up around it, but also serves as a
+	reminder that the low balance accrual calculation event will take
+	place, and when it will occur in relation to other events.
+
+	The Low Balance Calculation Period (LBCM) determines the interval
+	over which accrual is calculated on the lowest balance over the
+	interval.
+	*/
+
+	quit
+
+
+private	RUNLBCP
+
+	// Low balance accrual calculation method (periodic RE-calculation)
+
+	/*
+	See comment above for RUNLBCM
+
+	The Low Balance Calculation Period (LBCP) determines the interval
+	over which accrual is RE-calculated based on the lowest balance
+	over the period interval. If this interval is the same as the Low
+	Balance Calculation Method (LBCM), no re-calculation is necessary.
+	*/
+
+	quit
+	
+	
+private	ESCADJ(RecordTTX ttx,		// Primary transaction		/REF:R
+	       RecordLN ln,		// Loan account			/REF:RW
+	       RecordDEP dep(),		// Deposit accounts		/REF:RW
+	       Number CID,		// Deposit account number
+	       Date CUVAR2,		// Current date
+	       Number ACRTYPE,		// Accrual type
+	       Number AMT)		// Transaction amount
+
+	// Create Escrow accrual adjustment transactions
+	
+	type public Cache %CACHE()
+	type public Boolean ER
+	type public Number ACRADJ(,)
+
+	type Boolean DRCR
+	type Number GLCID, TAMT, TCCTL
+	type String ETC, TSO, OFFSET
+
+	/*
+	At this point, the dep object has the correct (end result) accrual 
+	amount, and AMT is the original accrual amount. If there is an 
+	adjustment, we need to modify the accrual bucket by this adjustment 
+	amount so that the following transaction can go through and properly 
+	the dep object.
+	
+	Use G/L of escrow account for offsetting transaction
+        */
+	
+	type RecordUTBLGLSC utblglsc = %CACHE("UTBLGLSC").getRecord("UTBLGLSC", "GLSC=:dep(CID).glsc")
+	
+	/*
+        Determine transaction code control indicator (NEGACRUN and UNCACR
+        should be the same in the end because adjustments for unauthorized
+        and uncollected accrual are not yet supported for escrow deposit
+        accounts).
+        */
+	if ACRTYPE = "POSACR" do {
+		set TCCTL = 1
+		set TAMT = dep(CID).posacr - AMT
+		set dep(CID).posacr = dep(CID).posacr - TAMT
+		set GLCID = utblglsc.dgli		// Interest Expense G/L
+		}
+        else  if ACRTYPE = "NEGACR" do {
+		set TCCTL = 4
+		set TAMT = dep(CID).negacr - AMT
+		set dep(CID).negacr = dep(CID).negacr - TAMT
+		set GLCID = utblglsc.dglii		// Interest Income G/L
+	        }
+	else  if ACRTYPE = "NEGACRUN" do {
+		set TCCTL = 6
+		set TAMT = dep(CID).negacrun - AMT
+		set dep(CID).negacrun = dep(CID).negacrun - TAMT
+		set GLCID = utblglsc.dglii		// Interest Income G/L
+	        }
+	else  if ACRTYPE = "UNCACR" do {
+		set TCCTL = 7
+		set TAMT = dep(CID).uncacr - AMT
+		set dep(CID).uncacr = dep(CID).uncacr - TAMT
+		set GLCID = utblglsc.dglii		// Interest Income G/L
+	        }
+	else  quit
+
+	set ACRADJ(CID, ACRTYPE) = TAMT
+	if 'TAMT quit
+
+	// Flip DR/CR indicator if necessary
+	if TCCTL = 1 do {
+		// Positive accrual < 0 is a debit to escrow
+		if TAMT < 0 set DRCR = 0, TAMT = -TAMT
+		else  set DRCR = 1
+		}
+	else  do {
+		// Negative accrual < 0 is a credit to escrow
+		if TAMT < 0 set DRCR = 1, TAMT = -TAMT
+		else  set DRCR = 0
+		}
+	
+	set TSO = $$FIELDIN^UTSO("", "EXACTACR", TAMT)
+	set TSO = $$FIELDIN^UTSO(TSO, "SGAA", 1)
+	set TSO = $$FIELDIN^UTSO(TSO, "SYS", "")
+	set TSO = $$FIELDIN^UTSO(TSO, "ESC", dep(CID).esc)
+
+	set TAMT = TAMT.roundCur(dep(CID).crcd)
+
+	// Find loan transaction code for escrow accounts
+	set ETC = $$LETC^ESCFUNCS(ln.type, TCCTL, DRCR) quit:ER
+
+	do POST^LNTRB(.ttx, ln.cid, ETC, TAMT, CUVAR2, %UserStation, TSO, , dep(CID).crcd) quit:ER
+
+	/*
+	Offset should always be MDR if the transaction is a credit,
+	and MCR for a debit - even for debit balance accounts
+	*/
+	if DRCR = 1 set OFFSET = "MDR"
+	else  set OFFSET = "MCR"
+
+	do POST^LNTRB(.ttx, GLCID, OFFSET, TAMT, CUVAR2, TLO, "SGAA#1", , dep(CID).crcd, dep(CID).cc) quit:ER
+
+	quit
+
+vSIG()	quit "60484^44374^Pat Kelly^28797"	// Signature - LTD^TIME^USER^SIZE

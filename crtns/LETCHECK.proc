@@ -1,0 +1,187 @@
+LETCHECK	  /*
+ORIG: myersk - 08/14/2000
+DESC: Daily Check Letters
+
+---- Comments --------------------------------------------------------
+
+---- Revision History ------------------------------------------------
+	
+	01/30/06 Radhika - CR 17423
+		 .Eliminated PSL deprecated features and warnings.
+---------------------------------------------------------------------- 
+ */
+	//Variable Definition
+	type public String %FN
+        type Date FORMTJD
+        type Number DAY
+        type String XTJD(),SAVFN,XFID,XFORM,zz
+        
+        set XFID="XPDO"
+
+	set SAVFN=%FN
+
+        type ResultSet rs=Db.select("FORM","UTBLFORMBCH","FID=:XFID")
+        if rs.isEmpty() quit
+        while rs.next() do {
+                set XFORM=rs.getCol("FORM")
+ 
+                type ResultSet rs1=Db.select("TJDVAL","UTBLFORMVAR","FORM=:XFORM")
+                if rs1.isEmpty() quit
+                while rs1.next() do {
+                        set XTJD=rs1.getCol("TJDVAL")
+                        set XTJD(XTJD)=""
+                        } //end of nested while
+ 
+                } //end of while
+
+	set zz=""		  
+	for  set zz=XTJD(zz).order() quit:zz.isNull()  do {
+		set DAY=zz.piece("T",2)
+		set FORMTJD=%SystemDate+DAY
+		set %FN=SAVFN_"_"_zz
+		do DRV^UBCHID("BCHLETCHECK")
+		} //end of for
+	quit	
+
+CHKTRIG(String AGRP,String FORM,Number VAR)
+	
+	// Trigger to load Check Records to ^LETTER
+	
+	type public Number ACN,CID,CKSEQ,CKTYP
+	type public Date TJD,LETTJD
+	type Number AFLG,CKNO,i,recseq,IRECTYPE,seq,SKIP,SCNT,x,xi,XREC
+	type String cflg(),cnt,CLS,CONFLG,DDATA,LDATA
+	type String pkeys,RECORDS,REC,SCD
+	
+        // quit if Parmraters not passed
+        quit:AGRP.get().isNull()
+        quit:FORM.get().isNull()
+        quit:VAR.get().isNull()
+	set CID=CID.get(0)
+	set ACN=ACN.get(0)
+ 
+        // set error trap
+        catch vERROR {
+        	type String ET,RM
+                set ET=vERROR.type
+                if ET["%GTM-" do ZE^UTLERR quit
+ 
+                set ET=ET_"-"_vERROR.thrownAt
+                set RM=vERROR.description
+                do ^UTLERR
+                }
+
+	// One Check could have multiple entries in XPDO, so we need to
+	//   track which checks have already been written
+	type RecordXPDO xpdo=Db.getRecord("XPDO","TJD=:TJD,CKTYP=:CKTYP,CKSEQ=:CKSEQ")
+	set CKNO=+xpdo.ckno
+
+	type RecordLETCHKTMP tmp=Db.getRecord("LETCHKTMP","CKTYP=:CKTYP,CKNO=:CKNO",1) 
+	if tmp.getMode() quit
+
+        set (seq,SCNT,SKIP)=""
+        if CID.get().isNull() set CID=0
+ 
+        type RecordUTBLFORMVAR utformvar=Db.getRecord("UTBLFORMVAR","CO=:AGRP,FORM=:FORM,VAR=:VAR")
+        set RECORDS=utformvar.rectypes
+        set AFLG=utformvar.addrflg
+        set CONFLG=utformvar.conflg
+        if 'CONFLG.isNull() for xi=1:1:CONFLG.length(",") set cflg(CONFLG.piece(",",xi))=""
+ 
+        // if consolidation is allowed set SKIP=1 when TRN is defined
+        // for same new accounts, only check TRN for customer number
+        if cflg.data() do {
+                 if (CONFLG["300")!(CONFLG["301")!(CONFLG["400")!(CONFLG["401") do { quit
+                        if 'Db.currVal("LETTER","LETTJD,AGRP,FORM,VAR,ACN").isNull() set SKIP=1
+                        }
+                type RecordLETTER lett=Db.getRecord("LETTER","SJD=:LETTJD,CO=:AGRP,FORM=:FORM,VAR=:VAR,ACN=:ACN,CID=:CID,RECTYPE=1,SEQ=1",1)
+                if lett.getMode() set SKIP=1
+                }
+
+        if 'SKIP set REC=$$TRN^LETTERU(CID.get(),ACN.get(),AFLG,FORM,VAR)
+        if 'SKIP do FILE^LETTERU(ACN.get(),CID.get(0),FORM,AGRP,VAR,1,1,REC)
+        if CID.get()'=0 do {
+                type RecordACN dACN=Db.getRecord("ACN","CID=:CID")
+                set CLS=dACN.cls
+                
+                if CLS="D" do {
+                        set SCD=$$XDEP08^DEPCDI(CID)
+                        set DDATA=SCD.piece("|",1)_$C(9)_SCD.piece("|",2)_$C(9)_SCD.piece("|",3)
+                        }
+                else  do {
+                        set SCD=$$XLN14^LNCDI(CID)
+                        set LDATA=SCD.piece("|",1)_$C(9)_SCD.piece("|",2)_$C(9)_SCD.piece("|",3)
+                        }
+                }
+        set i=""
+        for cnt=1:1:RECORDS.length(",") set XREC(RECORDS.piece(",",cnt))=""
+        for  set i=XREC(i).order() quit:i=""  do {
+                if SKIP,'cflg(i).data() quit  // can not condense record type
+                type RecordUTBLFORM0 acc=Db.getRecord("UTBLFORM0","RECTYPE=:i")
+                set pkeys=acc.acckeys
+                
+                set IRECTYPE=i
+                // don't allow multiples of rectype '= 800
+                if ((i'=800)&(Db.currVal("LETTER","LETTJD,AGRP,FORM,VAR,ACN,CID,IRECTYPE"))) quit
+                if $S(i=201:1,i=202:1,i=211:1,1:0) do {  quit
+                        if i=201 set SCNT=SCNT+1
+                        if CLS.get()="D" set pkeys=DDATA.piece($C(9),SCNT)
+                        else  set pkeys=LDATA.get().piece($C(9),SCNT)
+                        if pkeys.isNull() quit
+                        if i=201 set seq=seq+1
+                        set x="set REC=$$"_i_"^LETTERF("_pkeys_")"
+			#ACCEPT DATE=12/08/03;PGM=John Carroll
+                        xecute x
+                        do FILE^LETTERU(ACN.get(),CID.get(0),FORM,AGRP,VAR,i,seq,REC)
+                        }
+                if ((i=300)!(i=301)),CLS.get()'="D" quit
+                if ((i=400)!(i=401)),CLS.get()'="L" quit
+		if i'<700,(i<900) quit	// 51206 - allow custom records
+                set IRECTYPE=i
+      		set recseq=Db.nextVal("LETTER","LETTJD,AGRP,FORM,VAR,ACN,CID,IRECTYPE")
+                if recseq.isNull() set recseq=1
+                set x="set REC=$$"_i_"^LETTERF("_pkeys_")"
+		#ACCEPT DATE=12/08/03;PGM=John Carroll
+                xecute x
+                do FILE^LETTERU(ACN.get(),CID.get(0),FORM,AGRP,VAR,i,recseq,REC)
+                }
+	if XREC(800).data() do REC800(.xpdo)
+
+	// File record to LETCHKTMP, so we don't write the check again
+	type RecordLETCHKTMP chk=Db.getRecord("LETCHKTMP","CKTYP=:CKTYP,CKNO=:CKNO",1)
+	do chk.save()
+	quit
+
+REC800(RecordXPDO xpdo)
+
+	// Set Variables needed for 800 record and file to ^LETTER
+
+	type public Date TJD,LETTJD
+	type public Number AGRP,ACN,CID,CKNO,VAR
+	type public String CKTYP,CKSEQ,FORM
+	type Number CKAMT,SEQ
+	type String ADDR,AD1,AD2,AD3,CITY,NAME,NAME2,PAYEE,REC,STATE,ZIP
+
+	type ResultSet rs=Db.select("TAMT,PAYEE","CHKREG1","CKNO=:CKNO AND CTYPE=:CKTYP")
+	quit:rs.isEmpty()
+	quit:'rs.next()
+	set CKAMT=rs.getCol("TAMT")
+	set PAYEE=rs.getCol("PAYEE")
+	set ADDR=xpdo.addr
+	set NAME=ADDR.piece("^",3)
+	set NAME2=ADDR.piece("^",4)
+	set AD1=ADDR.piece("^",5)
+	set AD2=ADDR.piece("^",6)
+	set AD3=ADDR.piece("^",7)
+	set ADDR=ADDR.piece("^",8)
+	set CITY=ADDR.piece(",",1)
+	set ZIP=ADDR.piece(" ",ADDR.length(" "))
+	set STATE=ADDR.extract((CITY.length())+2,ADDR.length()-ZIP.length())
+	set STATE=$$TRIM^%ZS(STATE)
+	set REC=$$800^LETTERF(TJD,CKTYP,CKSEQ)
+	
+	set SEQ=Db.nextVal("LETTER","LETTJD,AGRP,FORM,VAR,ACN,CID,800")
+	do FILE^LETTERU(ACN,CID,FORM,AGRP,VAR,800,SEQ,REC)		
+	quit
+
+vSIG()	quit "60298^29390^Radhika Panchanathan^6769"	// Signature - LTD^TIME^USER^SIZE

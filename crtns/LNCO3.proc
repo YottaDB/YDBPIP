@@ -1,0 +1,648 @@
+LNCO3		/*
+
+	Computed Data Items
+
+	---- Revision History ------------------------------------------------
+
+	11/14/06 - NATRAJAH - CR 24061
+		   Modifed XLN29A section to return the Total Miscellaneous
+		   Charges Due(LN.MCHG) properly.
+
+	07/19/06 - KELLYP - CR 22174
+		   Modified TAMT section to return UAVB(5) properly & removed
+		   third "H" parameter which was not being used.
+
+	02/27/06 - KinI - CR 19809
+		   Modified MCND section to use ln.cid instead of CID when 
+		   ln object that is supposed to be passed in exists.
+
+	01/05/06 - SmithCD - CR 18783
+		   Scoped BIL, BIL1, and BIL5 arrays locally in XLN29A to 
+		   prevent arrays from getting too large (was causing a 
+		   problem when called ultimately from BTTDRV for computed 
+		   columns ln.mchg and ln.mcnd). Replaced .getPointer() with 
+		   .exists(). Removed old revision history.
+
+	10/12/05 - Sahun - CR16663
+		   Modified HIST2 section to fix the syntax errors in the 
+		   order by clause of Db.select statements.
+		   
+	06/09/05 - KinI - 16252
+		   Modified MCNB section to type feend (fees not due) as the 
+		   number. 
+
+	04/27/05 - GEORGES - CR13136
+		   Added section CNAMT back into the procedure 
+		   that was removed when converted to PSL, since
+		   this is required by a report.
+	*/
+
+	quit
+
+
+public TAMT(Number CID,Number TSEQ)	// Return transaction components
+
+	/*
+	INPUT:
+	.CID	Customer Account		/TYP=N/REQ
+
+	.TSEQ	History Sequence		/TYP=N
+
+
+	RETURNS:
+
+	. UAVB(5) See [LNTAMT] file definition, or routine ^UAVB: UAVB(5) 
+	  definition for list of returned values.
+	*/
+
+	type Date ADJEFD,EFD,FD
+	type Number AV,BAL,DC,I,INCRS,NEGAMTRED,P,PRNCPLE,SEQ,TAMT,TRB,UNC
+	type String CLS,CTL,ETC,HST,IND,ITC,TRN,TSO,UAVB()
+
+	if (CID.get().isNull())!(TSEQ.get().isNull()) quit ""
+
+	if TSEQ'>0 quit ""
+
+	// Set this for calls to UAVB
+	set SEQ=TSEQ
+
+	type RecordHIST hist=Db.getRecord("HIST","CID=:CID,TSEQ=:TSEQ",1)
+	if 'hist.getMode() quit ""
+	
+	set CTL="000000000000000001"
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID",1)
+	if 'ln.getMode() quit ""
+
+	set BAL=hist.endbal
+	set TRB=ln.trb
+	set CLS=ln.cls
+	set FD=0
+	
+	for I=51:1:59 set AV(I)=""
+	for I=510:1:526 set AV(I)=""
+	
+	do LOADH^UAVB(.ln,.hist)
+	do UAVB5^UAVB(.ln)
+	do FILE5^UAVB
+
+	quit UAVB(5)
+
+
+public HIST(CID,TSEQ)	// Break history transaction down to component amounts
+
+	/*
+	INPUT:
+	.CID	Customer Account		/TYP=N/REQ
+
+	.TSEQ	History Sequence		/TYP=N
+
+
+	RETURNS:
+
+	.XH01	 
+
+	*/
+
+	new HISTSB,ITC,PRIN
+
+	set PRIN=0
+	set ER=""
+	if 'Db.isDefined("HIST","CID,TSEQ") quit	
+	type RecordHIST hist=Db.getRecord("HIST","CID,TSEQ")
+	if '(hist.tamt),(hist.itc)="" set XH01="" quit
+
+	if Db.isDefined("LN","CID=:CID") do {
+		type RecordLN ln=Db.getRecord("LN","CID=:CID")
+		if ln.type="" quit 
+		set XH01=$S(hist.tamt["#":$P(hist.tamt,"#",2),1:(hist.tamt)) 
+		set F=$P(hist.tamt,"#",9) 
+
+		// Principle
+		set PRIN=0
+		// Undisbursed
+		if ln.aruf set XH01=XH01+$P(hist.tamt,"#",5)
+	
+		// Internal Transaction Code
+		set ITC=hist.itc
+		if (ln.grp'="ESC") do {
+			if (hist.tamt<0) do {
+				do HIST2(.hist) 
+				set:PRIN PRIN=-PRIN 
+				}
+			else  do {
+				set HISTSB=""
+				type ResultSet rs=Db.select("PE01,PE02,PE03,PE04,PE05","HISTSB","CID=:CID and SLN=:TSEQ")
+				if rs.isEmpty() quit
+				while rs.next() do { quit:ER
+					set HISTSB=rs.getCol(1)_"|"_rs.getCol(2)_"|"_rs.getCol(3)_"|"_rs.getCol(4)_"|"_rs.getCol(5)_"|"
+					do HIST1(HISTSB,.PRIN)
+					}
+				}
+			}
+		set $P(XH01,"|",1)=XH01-PRIN
+		set $P(XH01,"|",2)=PRIN
+		set $P(XH01,"|",5)=F
+		}
+	
+	// Escrow
+	set $P(XH01,"|",6)=$P(hist.tamt,"#",7)
+	if '$P(XH01,"|",6) set $P(XH01,"|",6)=""
+	
+	/* 
+	Interest - distinction between accrual adjustment and collection
+	External Transaction Code
+	*/
+
+	set E=hist.etc 
+	if '$L(E) quit
+	type RecordTRN trn=Db.getRecord("TRN","ETC=:E")
+	set PCF=trn.pcf
+	if '$E(PCF,20) set $P(XH01,"|",3)=$P(hist.tamt,"#",3)
+	else  set $P(XH01,"|",4)=$P(hist.tamt,"#",3)
+
+	quit 
+	
+
+HIST1(HISTSB,PRIN)	// Lower level
+
+	// Principal Only
+	for J=2:1 quit:$P(HISTSB,"*#P#",J)=""  set PRIN=PRIN+$P(HISTSB,"*#P#",J)
+
+	quit 
+	
+
+HIST2(RecordHIST hist)	// reversal
+
+	/*
+	
+	   The history sequence that was reversed is only stored in the
+	   primary error-correct transaction.  If the error-correct
+	   generated secondary transactions, we have to look to the primary
+	   to find the original record.
+	*/
+
+	if '$E(ITC,6) do {
+		set S=""
+		// Transaction Source of Funds
+		if '$E(ITC,7) set S=hist.tso
+		else  do { quit:'$E($P(ITC,"|",2),7)
+			type ResultSet rs=Db.select("TSEQ,ITC,TSO","HIST","CID=:CID and TSEQ<:TSEQ","TSEQ DESC")
+			if rs.isEmpty() quit
+			while rs.next() do { quit:ER
+				set TSEQ=rs.getCol(1)
+				set ITC=rs.getCol(2)
+				set TSO=rs.getCol(3)
+				}
+			} 
+		if TSO do {
+			type ResultSet rs1=Db.select("PE01,PE02,PE03,PE04,PE05","HISTSB","CID=:CID and SLN=:TSEQ")
+			if rs1.isEmpty() quit
+			while rs1.next() do { quit:ER
+				set HISTSB=rs1.getCol(1)_"|"_rs1.getCol(2)_"|"_rs1.getCol(3)_"|"_rs1.getCol(4)_"|"_rs1.getCol(5)_"|"
+				do HIST1(HISTSB,.PRIN)
+				}
+			}
+		}
+
+
+	// error correct
+	else  do {
+		new XRCD,XETC,XITC,XTAMT,XTRC,XTSEQ,XUID
+
+		set XITC=hist.itc
+		set XTSEQ=hist.tseq
+		set XETC=hist.etc
+		set XTAMT=hist.tamt
+		set XBRCD=hist.brcd 
+		set XTRC=hist.tso
+		set XUID=hist.uid
+		type ResultSet rs=Db.select("TSEQ","HIST","CID=:CID and TSEQ<:XTSEQ and ITC=:XITC and ETC=:XETC and TAMT=:XTAMT and BRCD=:XBRCD and TRC=:XTRC and UID=:XUID","TSEQ DESC")
+		if rs.isEmpty() quit
+		while rs.next() do { quit:ER
+			set TSEQ=rs.getCol(1)
+			type ResultSet rs1=Db.select("PE01,PE02,PE03,PE04,PE05","HISTSB","CID=:CID and SLN=:TSEQ")
+	 		if rs1.isEmpty() quit
+			while rs1.next() do { quit:ER
+		       		set HISTSB=rs1.getCol(1)_"|"_rs1.getCol(2)_"|"_rs1.getCol(3)_"|"_rs1.getCol(4)_"|"_rs1.getCol(5)_"|"
+				do HIST1(HISTSB,.PRIN)
+				}
+			}
+		}
+	quit 
+	
+
+public	SCHPMT(CID) // Scheduled payment amount (next scheduled date)
+
+	/*
+	INPUT:
+	.CID	Customer Account		/TYP=N/REQ
+
+	.TSEQ	History Sequence		/TYP=N
+
+
+	RETURNS:
+
+	.SCHPMT	Scheduled payment amount	/TYP=$
+	*/
+	
+	new BSEQ,ESCROW,KEY,PCHND,PMT,SCHSEQ
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+
+	// current P & I
+	set SCHPMT=ln.schpmt
+	// No next scheduled date
+	if 'ln.schnd quit
+	// Schedule sequence
+	set SCHSEQ=ln.schseq
+	// Payment Change next date
+	set PCHND=ln.pchnd
+	// Payment Calculation method
+	set KEY=ln.pcm
+	
+	// Use amount from bill file if record exists
+	if ln.bseq>SCHSEQ,Db.isDefined("LNBIL1","CID=:CID,SCHSEQ=:SCHSEQ") do { quit
+		type RecordLNBIL1 lnbil1=Db.getRecord("LNBIL1","CID=:CID,SCHSEQ=:SCHSEQ")
+		set SCHPMT=lnbil1.ctab
+		}
+	
+	// Use last payment amount if PCM does not call for a P & I amount
+	if 'Db.isDefined("STBLPCM","KEY") set SCHPMT=ln.pmt quit 
+	
+	// Use P & I amount from payment change file if appropriate
+	if PCHND=ln.schnd,Db.isDefined("LNPTCHG","PCHND=:PCHND,CID=:CID") do {
+		type RecordLNPTCHG lnptchg=Db.getRecord("LNPTCHG","PCHND=:PCHND,CID=:CID")
+		set SCHPMT=lnptchg.npmt
+		if '$L(SCHPMT) set SCHPMT=PMTPI
+		}
+	// Find next escrow payment amount for each escrow item
+	type RecordLNBIL0 lnbil0=Db.getRecord("LNBIL0","CID")
+	set INSTANT=lnbil0.pe01
+	set ELENUM=0
+	for  set ESCROW=$$ESCACT^BILFUNCS(.lnbil0,.ELENUM) quit:ESCROW=""  do {
+		set ECID=$P(ESCROW,$C(9),1)
+		if ECID="" quit
+		type RecordDEP dep=Db.getRecord("DEP","CID=:ECID")
+		if dep.stat=4 quit
+		set SCHPMT=SCHPMT+$S($L(dep.recamt):dep.recamt,1:dep.curramt)
+		}
+
+	quit 
+
+	
+public MCHG(CID)	// Total fees due
+	/*
+	INPUT:
+	.CID	Customer Account		/TYP=N/REQ
+
+	RETURNS:
+
+	.XLN29	Total fees due			/TYP=$
+	*/	
+
+	new XLN29
+	
+	type RecordLN ln=Db.getRecord("LN","CID")
+	do XLN29(.ln,CID)
+	
+	quit +XLN29
+	
+
+public MCNB(RecordLN ln,CID)	// Misc charges outstanding, not billed
+
+	/*	
+	   ARGUMENTS:
+	
+	   . ln		Loan Record		/TYP=RecordLN/NOREQ/MECH=REFARRAY
+	      Passing in the LN object will indicate that the current values
+	      of the ln object should be used.  If no object is passed in, a
+	      new ln object will be created.
+	
+	   . CID 	Account number		/TYP=N/NOREQ/MECH=VAL
+	      If the cid is passed in, the procedure will create a new
+	      ln object based on this cid.  If the cid is Null and the object
+	      has not been passed in, the system will create a new object based 
+	      on what is currently defined in CID.  If both ln object and cid
+	      are passed in, procedure will use the existing ln object and 
+	      ignore the cid.
+	*/
+	
+	type Number feend
+
+	if 'ln.exists() do {
+		if 'CID.get() set feend="" quit
+
+		type RecordLN ln=Db.getRecord("LN","CID")
+		do FEEND^LNPTS13(.ln,.feend,1)
+		}
+	else  do FEEND^LNPTS13(.ln,.feend,1)
+
+	quit feend
+
+	
+public MCND(Number CTL,		// Control Parameter 
+            RecordLN ln,	// Loan object
+            Number CID)		// Misc charge outstanding, not due
+
+	/*
+	   . CTL Control Parameter 	/TYP=N/NOREQ
+	       1   0 - "N"ew array MCND(FeeType)
+		   1 - Do Not "New" M
+		   			
+	   . ln    Loan Parameter	/TYP=N/NOREQ/MECH=REFARRAY	
+		Passing in the LN object will indicate that the current values
+		of the ln object should be used.  If no object is passed in, a
+		new ln object will be created.
+
+	   . CID   Account number	/TYP=N/NO			
+		If the CID  is passed in, the procedure will create a new
+		ln object based on this id is Null and the object
+		has not been passed in, the system will create a new object based
+		on what is currently defined in CID.  If both ln object and CID
+		are passed in, procedure will use the existing ln object and
+		ignore the CID.	
+
+	   RETURNS:
+
+	   . MCND(FEETYPE) Misc charge outstanding, not due by fee type	
+	*/
+
+	type String FEE, XLN29
+
+	set CTL=CTL.get()
+
+	if 'ln.exists() do {
+		if 'CID.get() set return="" quit
+		type RecordLN ln=Db.getRecord("LN","CID")
+
+		do MCND1(.ln,CID,.return)
+		}
+
+	else  do MCND1(.ln,ln.cid,.return)
+
+	quit return
+
+
+MCND1(RecordLN ln,CID,return)
+	
+	if '$G(CTL) new MCND
+
+	do XLN29(.ln,CID)
+
+	set FEE="" 
+	for  set FEE=$O(XLN29(FEE)) quit:FEE=""  do {
+		set MCND(FEE)=XLN29(FEE)-$P(XLN29(FEE),"|",4)-$S($P(XLN29(FEE),"|",5)>0:$P(XLN29(FEE),"|",5),1:0)
+		}
+
+	set return=XLN29-$P(XLN29,"|",4)-$S($P(XLN29,"|",5)>0:$P(XLN29,"|",5),1:0)
+
+	quit 
+	
+
+public UNMC(CTL,CID)	// Uncollected misc charge
+
+	/*
+	
+	   ARGUMENTS:
+	   . CTL Control Parameter /TYP=N/NOREQ
+		 	0 - Do not "N"ew arrays
+		 	1 - "N"ew arrays (currently used by BTTLN)
+	
+	   . CID Account number  /TYP=N/NOREQ/MECH=VAL
+	
+	
+
+	*/
+	
+	set CTL=$G(CTL)
+	
+	do XLN29(,CID)
+
+	quit +$P(XLN29,"|",4)
+	
+
+public XLN29(RecordLN ln,CID) // Calculate fee amounts
+
+	/*
+	   . ln      Loan Parameter	  /TYP=N/NOREQ/MECH=REFARRAY
+	
+	      Passing in the LN object will indicate that the current values
+	      of the ln object should be used.  If no object is passed in, a
+	      new ln object will be created.
+ 
+	   . CID Account number  /TYP=N/NOREQ/MECH=VAL
+	      If the CID number is passed in, the procedure will create a new
+	      ln object based on this CID.  If the CID is Null and the object
+	      has not been passed in, the system will create a new object based
+	      on what is currently defined in CID.  If both ln object and CID
+	      are passed in, procedure will use the existing ln object and
+	      ignore the CID.	
+	
+	*/
+
+	new BSEQ,FEE,OSEQ,SCHSEQ,Y
+	new stsel
+
+	if 'ln.exists(),'($G(CID)) quit ""
+	if 'ln.exists() do XLN291(CID) quit
+
+	do XLN29A(.ln,CID)
+
+	quit
+
+
+XLN291(CID)	// Creates an object if one doesn't exist
+
+	type RecordLN ln=Db.getRecord("LN","CID")
+
+	do XLN29A(.ln,CID)
+
+	quit
+
+
+XLN29A(RecordLN ln,CID)
+
+	type String BIL(,),BIL1(,),BIL5(,,)
+
+	set FEE=""
+	set XLN29=""
+	set ER=""
+	set stsel="FEEREM,FEEYTD,FEELF,ASYTD,ASLF,ASPY,FEEPY,ASTYTD,ASPTY,FEETYTD,FEEPTY,FEETYP"
+
+	type ResultSet rs=Db.select(stsel,"LNFEE","CID=:CID")
+	if rs.isEmpty() quit
+	while rs.next() do { quit:ER
+		set FEETYP=rs.getCol(12)
+		set ITC=rs.getCol(1)
+		set $P(XLN29(FEETYP),"|",1)=rs.getCol(1)
+		//FEEREM
+		set $P(XLN29,"|",1)=rs.getCol(1)+$P(XLN29,"|",1)
+		//FEEYTD
+		set $P(XLN29,"|",2)=rs.getCol(2)+$P(XLN29,"|",2)
+		//FEELF
+		set $P(XLN29,"|",3)=rs.getCol(3)+$P(XLN29,"|",3)
+		//ASYTD
+		set $P(XLN29,"|",6)=rs.getCol(4)+$P(XLN29,"|",6)
+		//ASLF
+		set $P(XLN29,"|",7)=rs.getCol(5)+$P(XLN29,"|",7)
+		//ASPY
+		set $P(XLN29,"|",8)=rs.getCol(6)+$P(XLN29,"|",8)
+		//FEEPY
+		set $P(XLN29,"|",10)=rs.getCol(7)+$P(XLN29,"|",10)
+		//ASTYTD
+		set $P(XLN29,"|",11)=rs.getCol(8)+$P(XLN29,"|",11)
+		//ASPTY
+		set $P(XLN29,"|",12)=rs.getCol(9)+$P(XLN29,"|",12)
+		//FEETYTD
+		set $P(XLN29,"|",13)=rs.getCol(10)+$P(XLN29,"|",13)
+		//FEEPTY
+		set $P(XLN29,"|",14)=rs.getCol(11)+$P(XLN29,"|",14)
+		}
+
+	set SEQ=0
+	if 'Db.isDefined("LNBIL0","CID") quit
+	type RecordLNBIL0 lnbil0=Db.getRecord("LNBIL0","CID")
+	
+	set BIL(CID,0)=$$ELEMENT^BILFUNCS(.lnbil0)
+	set BL0=BIL(CID,0)
+	
+	// Scheduled Internal Bill Sequence Number
+	set SCHSEQ=ln.schseq
+	// Internal Bill Oldest Unsatisfied Seq Nbr
+	set OSEQ=ln.oseq
+	// Billing - Last Sequence Number
+	set BSEQ=ln.bseq
+	
+	new S,SEQ
+	if OSEQ<SCHSEQ set SEQ=OSEQ
+	else  set SEQ=SCHSEQ
+
+	for S=SEQ:1:SCHSEQ do {
+		new SCHSEQ
+		set SCHSEQ=S
+		type RecordLNBIL1 lnbil1
+		if Db.isDefined("LNBIL1","CID,SCHSEQ") do {
+			set lnbil1=Db.getRecord("LNBIL1","CID,SCHSEQ")	
+			set BIL1(CID,SCHSEQ)=$$BIL1ELE^BILFUNCS(.lnbil1)
+			type ResultSet rs=Db.select("FEETYP,BFAMT,BRFAMT","LNBIL5","CID=:CID AND SCHSEQ=:SCHSEQ AND DUEAMT=1")
+			if rs.isEmpty() quit
+			while rs.next() do {
+				set FEE=rs.getCol("FEETYP")
+				set BFAMT=rs.getCol("BFAMT")
+				set BRFAMT=rs.getCol("BRFAMT")
+				set BIL5(CID,SCHSEQ,FEE)=BFAMT_"|"_BRFAMT
+				}
+			}
+		}
+
+	new DATA,ELMNT,I		     
+	set I=OSEQ-.000000000001
+	for  set I=$O(BIL(CID,I)) quit:(I="")!(I'<SCHSEQ)  do {
+		if I'>0 quit
+		set ELMNT=""
+		for  set ELMNT=$O(BIL5(CID,I,ELMNT)) quit:ELMNT=""  do {
+			set $P(XLN29(ELMNT),"|",4)=$P($G(XLN29(ELMNT)),"|",4)+$P(BIL5(CID,I,ELMNT),"|",2)
+			set $P(XLN29,"|",4)=$P(XLN29,"|",4)+$P(BIL5(CID,I,ELMNT),"|",2)
+			}
+
+		for PC=2:1:$L(BL0,$C(9)) set DATA=$P(BL0,$C(9),PC) if DATA'="" do {
+			set ELMNT=$P(DATA,"#",1)
+			if ("-I-P-L-"'[("-"_ELMNT_"-")),'($P(DATA,"#",2)) do {
+				set $P(XLN29(ELMNT),"|",4)=$P($G(XLN29(ELMNT)),"|",4)+$P($P(BIL(CID,I),"|",PC),"#",4)
+				set $P(XLN29,"|",4)=$P(XLN29,"|",4)+$P($P(BIL(CID,I),"|",PC),"#",4)
+				}
+			}
+		}
+
+	set I=SCHSEQ do {
+		if I'>0 quit
+		set ELMNT=""
+		for  set ELMNT=$O(BIL5(CID,I,ELMNT)) quit:ELMNT=""  do {
+			set $P(XLN29(ELMNT),"|",5)=$P($G(XLN29(ELMNT)),"|",5)+$P(BIL5(CID,I,ELMNT),"|",2)
+			set $P(XLN29,"|",5)=$P(XLN29,"|",5)+$P(BIL5(CID,I,ELMNT),"|",2)
+			}
+		for PC=2:1:$L(BL0,"|") do {
+			set DATA=$P(BIL(CID,0),$C(9),PC) 
+			if DATA'="" do {
+				set ELMNT=$P(DATA,"#",1)
+				if "-I-P-L-"'[("-"_ELMNT_"-"),'$P(DATA,"#",2) do {
+					set $P(XLN29(ELMNT),"|",5)=$P($G(XLN29(ELMNT)),"|",5)+$P($P(BIL(CID,I),"|",PC),"#",4)
+					set $P(XLN29,"|",5)=$P(XLN29,"|",5)+$P($P(BIL(CID,I),$C(9),PC),"#",4)	
+					}
+				}
+			}
+		}
+	new PC
+	set I=SCHSEQ 
+	for  set I=$O(BIL(CID,I)) quit:I=""  do {
+		set ELMNT=""
+		for  set ELMNT=$O(BIL5(CID,I,ELMNT)) quit:ELMNT=""  do {
+			set X=BIL5(CID,I,ELMNT)
+			set $P(XLN29(ELMNT),"|",5)=$P($G(XLN29(ELMNT)),"|",5)-(X-$P(X,"|",2))
+			set $P(XLN29,"|",5)=$P(XLN29,"|",5)-(X-$P(X,"|",2))
+			set $P(XLN29,"|",9)=$P(XLN29,"|",9)+$P(X,"|",2)
+			}
+		for PC=2:1:$L(BL0,$C(9)) set DATA=$P(BL0,$C(9),PC) I DATA'="" do {
+			set ELMNT=$P(DATA,"#",1)
+			if ("-I-P-L-"'[("-"_ELMNT_"-")),'$P(DATA,"#",2) do {
+				new X
+				set X=$P(BIL(CID,I),$C(9),PC)
+				set $P(XLN29(ELMNT),"|",5)=$P($G(XLN29(ELMNT)),"|",5)-($P(X,"#",3)-$P(X,"#",4))
+				set $P(XLN29,"|",5)=$P(XLN29,"|",5)-($P(X,"#",3)-$P(X,"#",4))
+				set $P(XLN29,"|",9)=$P(XLN29,"|",9)+$P(X,"#",4)
+				}
+			}
+		}
+
+	quit
+
+
+public EDV(CID)	// Computed operation [LN]XLN27 - Effective dated values.
+ 
+	//  Returns WIRN array value of specified EFD.
+ 
+	new UAVB,WIRN
+	if '$G(%EffectiveDate) set %EffectiveDate=%SystemDate
+	Type RecordACN acn=Db.getRecord("ACN","CID=:CID",1)
+	if %EffectiveDate<acn.odt quit ""
+	do INIT^UAVB(.acn,CID,%EffectiveDate,%EffectiveDate,1000001)
+
+	// Return nulls if UAVB returns error.
+	if ER kill WIRN,RM set ER=0
+
+	quit $G(WIRN(EFD))
+
+        
+public CNAMT(CID,FEETYP)    // Calculate computed - not assessed amount
+        //
+	type Number AMT,ARRAY,ELMNT,FEEAMT,TAMT
+	type Date EFD,LD,ND
+	type String X
+	type RecordLNFEEP lnfeep=Db.getRecord("LNFEEP","FEETYP=:FEETYP",1)
+	if 'lnfeep.getMode() quit ""
+        if 'lnfeep.basis.isNull() quit ""
+        if lnfeep.amth'=1,lnfeep.amth'=3 quit ""
+        set FEEAMT=""
+	set AMT=""
+	set ELMNT=""
+	set EFD=%SystemDate
+        if lnfeep.dtst,%SystemDate<lnfeep.dtst quit ""
+ 
+        type RecordLN ln=Db.getRecord("LN","CID")
+
+	#ACCEPT DATE=11/18/03;PGM=John Carroll
+        set X="S TAMT=$$"_FEETYP_"^LNFEECMP(.ln)" xecute X
+ 
+        set ARRAY(FEETYP)=ARRAY(FEETYP).get()+TAMT
+        set ARRAY=ARRAY.get()+TAMT
+	
+        if lnfeep.amth do {	
+		type RecordLNFEE lnfee=Db.getRecord("LNFEE","CID,FEETYP")
+        	set ND=lnfee.asnd,LD=lnfee.asld I ND'>LD quit
+        	set ARRAY(FEETYP)=(%SystemDate-ND)/(ND-LD)*(ARRAY(FEETYP).get())
+        	set ARRAY(FEETYP)=$$^SCARND(ARRAY(FEETYP),0,CID)
+		}
+        quit ARRAY(FEETYP).get()
+
+vSIG()	quit "60583^36868^Hari Natrajan^16326"	// Signature - LTD^TIME^USER^SIZE

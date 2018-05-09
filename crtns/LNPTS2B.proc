@@ -1,0 +1,646 @@
+public	LNPTS2B(RecordLN ln)		// Loan account			/REF:RW
+
+	/*
+	Loan backdated transaction utility
+
+
+	   ORIG:  Tom Locke (2424) - 03/24/89
+	
+	   KEYWORDS: Interest, Loans, Transaction Processing
+	
+	   INPUTS:
+
+	       . CTL Control Parameter			/NOREQ
+	
+	                          CTL: position 1 - 0 IX array not loaded
+	                                            1 IX array preloaded
+	
+	                                        2 - 0 Do not have UAVB recalc
+	                                              rates for each WIRN entry
+	                                            1 Force UAVB to recalc rates
+	
+	---- Revision History ------------------------------------------------
+	
+	11/02/06 - KELLYP - CR 23839
+		   Modified EXEC section to fix a problem where an interest
+		   adjustment wasn't being made when the current accrual
+		   on the account was zero.
+	
+	10/12/06 - SmithCD - CR 23607
+		   In EXEC section, changed call to INIT^UAVB to pass ln1 
+		   instead of ln to prevent ln object from getting "dirty". 
+		   In the case where file maintenance was present in history 
+		   for ln.ptsp on account with net deferred fees, "Net 
+		   deferred fee data does not exist" error was occurring on 
+		   backdated interest rate maintenance.
+	
+	08/11/06 - SmithCD - CR 22489 (20748)
+		   Remove all %TRNSEQ, TRNSEQ, %SEQ, and SEQ references - not 
+		   needed in p04.
+	
+	04/11/06 - TITOVE - CR 20348
+		   Removed section P2^LNPTS2B that is no longer in use.
+
+	04/01/06 - SmithCD - CR 20364
+		   Pass WIRN() by reference to $$ACRCALC() in P2A section. 
+		   Fixes an undefined error that occurred during effective 
+		   dated rate maintenance. Performed some cleanup, including 
+		   removal of HIS4^LNPTS1 calls (^LNTRB now makes this call).
+	
+	10/11/05 - Radhika - CR 17252	
+		   In section ACR2 the occurrences of %EffectiveDate are 
+		   replaced with LD.
+		   
+	06/16/05 - Carol Scott CR 16330
+		   Change the parameter in call to INIT^UAVB in section EXEC 
+		   from %TRNSEQ ot %SEQ. %TRNSEQ may not always be defined.
+		   Modified parameter passing WIRN to define it as an array.
+		   
+	05/10/05 - Carol Scott 
+		   . Added parameter WIRN() to call into CALCWRN^UAVB in 
+		     section P2. 
+		   . Added .get to ACR in P2A.
+		   
+	04/12/05 - SmithCD - CR15305
+		   . Removed INDEX and ERR sections, which were not being used
+		   . Removed call to INDDATA^LNU, which is no longer necessary
+		   . Fixed parameters passed to CTL^UINDX in SETWRN2 section
+		   . Added missing check on index.mcf near top of routine
+		     when setting "INDXEFD" override
+		   . Fixed typos in FMFORW section, and consolidated FMFORW 
+		     and FMBACK into a single FM section
+		   . Fixed utblglsc.lgli reference, and quit on trn.pcfl5 in 
+		     P2A section
+		   . Removed TELL2 section, which was useless
+		   . Removed INIT section, and used ln object references 
+		     instead of variable references where possible
+		   . Cleaned up to conform to current PSL standards
+		   . Removed old Revision History
+		   . Retrofitted the following from p01dev1:
+				11/27/01 - ANTONOVV - 47535:2
+			Removed calls to %INDEX and %IRN sections from
+			SETWRN and SETWRN2 sections. Removed %IRN and %INTSPR
+			sections and references to them. This is done in order
+			to avoid double filing of history records. LN filer
+			takes care of the history.
+		   . Removed call to TRNSINGL^TRNDRV, which was no longer 
+		     necessary due to the above change, and changed 
+		     CREATE^LNTRB calls to POST^LNTRB (which themselves call 
+		     into TRNSINGL^TRNDRV) to bring inline with the p01 version
+	
+	02/01/05 - SmithCD - CR13661
+		   Labeled ACRCALC section as public, and removed public 
+		   label from other sections that are not called externally.
+		   Moved quit w/ACR from the ACR2 section (not extrinsic) to 
+		   the ACRCALC (extrinsic), and replaced w/regular quit. 
+		   Modified ACRCALC to quit from the ACR2 for loop if there 
+		   is no differece between %SystemDate and ND (code was 
+		   originally converted incorrectly to quit in the opposite 
+		   condition). Fixes an infinite loop situation.
+	
+	  -----------------------------------------------------------------------
+	
+	*/
+	
+	type public Number CID
+	type public String OVR(,)
+	
+	type Boolean %TRANS = 1
+	type String IX, UAVB(), WIRN()
+	
+	set IX = ln.index
+	if 'IX.isNull() do {
+		type RecordINDEX index = Db.getRecord("INDEX", "INDEX=:IX")
+		
+		// Effective-dated index change is in process for <INDXEFD>
+		if index.mcf set OVR(CID, "OVR", "INDXEFD") = IX
+		}
+
+	do START(.ln)
+
+	quit
+
+
+public	START(RecordLN ln)	// Initialize levels needed by UAVB
+
+	type public Boolean %TRANS, ER
+	
+	type public String WIRN()
+	type public Number ACR
+	
+	// IX array not fully loaded
+	type String CTL = "00"
+	
+	do EXEC(.ln, .ACR, %TRANS, CTL)
+	if ER do ^UTLERR quit 
+	
+	/*
+	If the teaser expiration date is not greater than the effective date
+	(ie teaser has expired) set IRN to the appropriate rate
+	*/
+	if ln.trexd '> %EffectiveDate, %EffectiveDate '< %SystemDate set ln.irn = +WIRN(WIRN(%EffectiveDate + 1).order(-1))
+	
+	/*
+	At this point, the transaction has not yet been posted. We need the
+	interest rate and accrual balance as of the effective date before
+	the transaction is processed.
+	*/
+	set ln.acr = ACR
+
+	quit
+	
+
+EXEC(RecordLN ln,		// Loan account object			/REF:R
+     Number ACR,		// Accrual amount			/REF:W
+     Boolean %TRANS,		// Transaction indicator
+     String CTL)		// Control data
+
+	type public Number CID, IRN, SACR, SBALCMP, SIRN
+	type public String UAVB(), WIRN()
+	type public Boolean ER
+
+	type String UAVBCTL
+	type Number ACRAMT
+	
+	type RecordLN ln1 = ln.copy()
+
+	/*
+	Call UAVB with today's date. We need to consider today's
+	transactions in case some were effective dated.
+	*/
+	set UAVBCTL = 1000001000_%TRANS_CTL.extract(1)_"0000"_CTL.extract(2)
+ 
+        do INIT^UAVB(.ln1, CID, %EffectiveDate, %SystemDate, UAVBCTL, , , , .WIRN()) quit:ER
+	/*
+	Save values of IRN, BALCMP and ACR. These old values are needed after
+	the transaction has been processed.
+	*/
+	set SIRN = ln.irn
+	set SBALCMP = ln.balcmp
+	set SACR = ln.acr
+
+	/*
+	Use the average balance and weighted interest rate to calculate the
+	accrued interest rate from EFD to TJD.
+	*/
+	set ACRAMT = $$ACRCALC(.ln,.WIRN)
+
+	/*
+	 ACR is being set below to the accrual at the old rate as of TJD
+	 less the new accrual at the new rate from EFD to TJD.  This is 
+	 done to determine the accrual at the old rate as of EFD.  However,
+	 if the initial accrual is zero as of TJD, ACR was being set to
+	 the negative value of the new accrual.  This wound up cancelling
+	 out the effect of the new accrual at the new rate in the P2A section
+	 which caused a situation where an adjustment wasn't made when it
+	 should have been. ACRAMT is reset to zero here to prevent that from 
+	 happening.
+	*/
+
+	if SACR = 0 set ACRAMT = 0
+	
+	set ACR = SACR - ACRAMT - UAVB(2).piece("|", 10)
+
+	set IRN = +WIRN(%EffectiveDate)
+	
+	quit
+
+	
+P2A(RecordLN ln,		// Loan account			/REF:R
+    RecordTTX ttx,		// Transaction			/REF:R
+    Number ACR)			// Accrual amount		/REF:RW
+
+	/*
+	   If this is a payoff transaction then we should not calculate
+	   forward - charges due to payoff would cause an accrual calculation
+	   which would be incorrect. At the time of EFD, the balance
+	   will become zero so there should not be a calculation from
+	   EFD to TJD.
+	
+	*/
+	
+	type public String %NOREV(), CTL, ETC, UAVB(), WIRN()
+	type public Boolean ER, INCRS
+	type public Number CID, SACR
+	
+	type Number ACRAMT, BAL, INT, IRN, LD, ND, TAMT
+	
+	set ACRAMT = $$ACRCALC(.ln, .WIRN())
+	set ACR = ACR.get()
+	
+	// Subtract the accrual for the EFD if it's a payoff and the PLDF is set
+	if 'ETC.get().isNull(), ln.pldf = 1 do {
+		type RecordTRN trn = Db.getRecord("TRN", "ETC")
+		if 'trn.pcfl5 quit
+		
+		set IRN = +WIRN(%EffectiveDate)
+		set BAL = WIRN(%EffectiveDate).piece("|", 5)
+		set LD = %EffectiveDate 
+		set ND = %EffectiveDate
+		set INT = 0
+		
+		if ln.ircb set INT = $$^UIC(BAL, LD, ND, ln.iacm, IRN, 0, ln.dist1af, ln.dist1fre, ln.icpf, ln.schnd, ln.schld)
+		
+		set ACRAMT = ACRAMT - INT
+		}
+
+	/*
+	 SACR is current accural at current rate through TJD.
+	 ACRAMT is accrual at new rate from EFD through TJD.
+	 ACR is accrual up until EFD.
+	*/
+	
+	// Total new accrual equals accrual at old rate up until 
+	// EFD + the accrual at the new rate from EFD to TJD.
+	set ACR = ACR + ACRAMT + UAVB(2).piece("|", 10)
+	
+	// Cancel out the effect of the interest portion of the transaction
+	set INT = 0
+	if ttx.exists(), ttx.tseq set INT = ttx.int
+	if INT set SACR = SACR + $select(INCRS:INT, 1:-INT)
+	
+	/*
+	Set the old accrual figure into the account. The new figure will
+	be set by the accrual adjustment transaction.
+	*/
+	set ln.acr = SACR
+	
+	/*
+	Set the new rate into the loan. If the loan is tied to a tiered
+	index, the rate could be different than before the transaction
+	went through.
+	*/
+	set IRN = +WIRN(WIRN(%SystemDate + 1).order(-1))
+	if ln.irn - IRN do {
+		if ln.trexd > %SystemDate quit
+		set ln.irn = IRN
+		}
+
+	/*
+	 SACR is the current accrual at current rate through TJD. ACR
+	 is now the total new accrual taking into consideration the old
+	 accrual at the old rate up until EFD plus the new accrual at
+	 the new rate from EFD through TJD.  Subtract the existing
+	 accrual from the total new accrual to determine the adjustment.
+	*/
+	set TAMT = (ACR - SACR).roundCur(ln.crcd)
+	if 'TAMT quit
+	
+	// Do not generate transactions
+	if 'CTL.extract(1) quit
+	
+	do {
+		type Date %EffectiveDate = ""
+		type String TC
+		
+		type RecordPRODCTL prodctl = Db.getRecord("PRODCTL", "TYPE=:ln.type")
+
+		if TAMT < 0 do {
+			set TAMT = -TAMT
+			// CR Adj Int/Div Accrued Tran Code
+			set TC = prodctl.cradin
+			}
+		// DR Adj Int/Div Accrued Tran Code
+		else  set TC = prodctl.dradin
+
+		do POST^LNTRB(.ttx, CID, TC, TAMT, "", %UserStation, "SYS#", , ln.crcd, ln.cc) quit:ER
+
+		set TC = $select(ttx.itc.extract(1):"MDR", 1:"MCR")
+
+		type RecordUTBLGLSC utblglsc = Db.getRecord("UTBLGLSC", "GLSC=:ln.glsc")
+		
+		do POST^LNTRB(.ttx, utblglsc.lgli, TC, TAMT, "", %UserStation, "SYS#", , ln.crcd, ln.cc) quit:ER
+		}
+		
+	quit 
+
+
+public	ACRCALC(RecordLN ln, 	// Loan account				/REF:RW
+		String WIRN())	// Interest Activity array		/REF:RW
+		
+	// Calculate accrual from EFD to TJD
+
+	type public Date EJD
+
+	type Date LD, ND
+	type Number ACR
+
+	set ACR = ""
+	
+	set EJD = EJD.get()
+	if EJD.isNull() set EJD = %SystemDate
+	
+	set (LD, ND) = %EffectiveDate
+
+	for  do ACR2(.ln, .ACR, .WIRN) quit:%SystemDate = ND
+
+	quit ACR
+
+
+ACR2(RecordLN ln,		// Loan account				/REF:R
+     Number ACR,		// Accrual amount			/REF:RW
+     String WIRN())		// Interest Activity array		/REF:RW
+     	
+
+
+	type public Date LD, ND
+	type Number BAL, INT, IRN
+	type Date DT
+	
+	set ND = WIRN(ND).order()
+	if ND > %SystemDate ! (ND.isNull()) set ND = %SystemDate
+	if 'WIRN(LD).exists() do {
+		set DT = WIRN(LD).order(-1)
+		set:'DT DT = WIRN(LD).order()
+		set WIRN(LD) = WIRN(DT)
+		}
+	
+	set IRN = +WIRN(LD)
+	set BAL = WIRN(LD).piece("|", 5)
+	set INT = 0
+	
+	if ln.ircb set INT = $$^UIC(BAL, LD, ND - 1, ln.iacm, IRN, 0, ln.dist1af, ln.dist1fre, ln.icpf, ln.schnd, ln.schld)
+
+	// Interest Accrual Flag
+	set ACR = ACR + INT
+	set LD = ND
+	
+	quit
+	
+
+public	EFDIRN(RecordLN ln)	// Loan account				/REF:RW
+
+	// Effective dated interest rate changes
+	// Called only by before update trigger in LN filer (BU_INTINFO)
+
+	type public String %FN
+	type public Boolean ER
+	
+	type String CTL, INDEX, UAVB(), WIRN(), WIRNREC
+	type Number %FRC, ACR, N
+	
+	// If this is Renewal Processing Maintenance, all processing is 
+	// already being considered
+	if %FN.get() = "LNM006" quit
+	
+	/*
+	Do not file changes to ln.ichnd, ln.ichnd, etc... if the effective date is
+	prior to today.
+	*/
+
+	type RecordTTX ttx = Class.new("RecordTTX")
+
+	do TELL(.ln, .ttx) quit:ER
+	
+	// Generate accrual adjustment transactions
+	set CTL = 1
+	set %FRC = 1
+	
+	if 'ln.intfre.isNull() do INTFRE(.ln, .WIRN())
+	
+	do SETWRN(.ln, .WIRN())
+	
+	if WIRN(%SystemDate).exists() do NEWV(.ln)
+	
+	do P2A(.ln, .ttx, .ACR) quit:ER
+	
+	/*
+	Find latest WIRN entry where flag (piece 3) is set to 1 or 2.
+	Extract IRN and INDEX. These are the most current values.
+	*/
+	type Date JD = %SystemDate + 1
+	for  set WIRNREC = WIRN(WIRN(JD).order(-1)) if WIRNREC.piece("|", 3) = 1 quit 
+	
+	set ln.irn = +WIRNREC
+	set INDEX = WIRNREC.piece("|", 4)
+	
+	set ln.index = INDEX
+
+	// Interest change dates are not applicable if there is no index
+	if INDEX.isNull() set ln.ichnd = "", ln.ichld = ""
+	
+	quit
+
+	
+NEWV(RecordLN ln)		// Loan account				/REF:R
+
+	// Set new fields into WIRN()
+
+	type public String WIRN()
+	
+	type String INDEX, OV, WIRNREC
+	type Number IRN
+	type Date JD
+
+	set WIRNREC = WIRN(%SystemDate) 
+	set INDEX = ln.index
+	set IRN = ln.irn
+	set OV = WIRNREC.piece("|", 4)
+	set WIRNREC.piece("|", 4) = INDEX
+
+	if INDEX.isNull() do { quit
+		set OV = +WIRNREC
+		if WIRNREC.piece("|", 3) do {
+			set WIRNREC.piece("|", 1) = IRN
+			set WIRN(%SystemDate) = WIRNREC
+		}
+	}
+	
+	/*
+	The values in WIRN(TJD) must be updated to those found in the last
+	WIRN entry before TJD where FLAG is 1 or WIRN(ln.ichld). Whichever
+	is more recent.
+
+	If ln.ichld is equal to %SystemDate cannot use that WIRN entry. Must 
+	loop backwards again to get previous entry. Otherwise WIRN(TJD) entry
+	doesn't get updated with proper IRN and INDEX values.
+	*/
+	set JD = %SystemDate + 1
+	for  set JD = WIRN(JD).order(-1) if ((WIRN(JD).piece("|", 3) = 1) ! ((JD = ln.ichld) & (ln.ichld '= %SystemDate))) do { quit
+		set IRN = +WIRN(JD)
+		set INDEX = WIRN(JD).piece("|", 4)
+		}
+	
+	set OV = +WIRNREC
+
+	if WIRNREC.piece("|", 3) = 1 do {
+		set WIRNREC.piece("|", 1) = IRN
+		set WIRNREC.piece("|", 4) = INDEX
+	}
+	
+	set WIRN(%SystemDate) = WIRNREC
+
+	quit 
+
+	
+TELL(RecordLN ln,		// Loan account				/REF:R
+     RecordTTX ttx)		// Transaction				/REF:RW
+
+	type Boolean %TRANS = 0
+
+	set ttx.brcd = CUVAR.BOBR
+	set ttx.tjd = %SystemDate
+
+	do START(.ln)
+	
+	quit
+
+	
+INTFRE(RecordLN	ln,		// Loan acount				/REF:RW
+       String WIRN())		// Weighted interest rate data		/REF:RW
+
+	// Include any interest change dates in WIRN() for current (new) 
+	// interest change columns
+
+	type public Boolean ER
+
+	type Date START, WEFD
+	
+	do ln.setAuditFlag(1)
+
+	if ln.ichnd.isNull() set ln.ichnd = %SystemDate.nextFreqDate(ln.intfre) quit:ER
+	if ln.ichld.isNull() set ln.ichld = %SystemDate
+	
+	set START = WIRN("").order()
+	set WEFD = ln.ichld
+	
+	// Indicate rate set by scheduled change for initial last change date
+	if WIRN(WEFD).exists() set WIRN(WEFD).piece("|", 3) = 2
+
+	// Cycle backward to populate WIRN() for interest change dates
+	for  set WEFD = WEFD.nextFreqDate(ln.intfre, "", 1) quit:ER ! (WEFD < START)  do {
+
+		// If WIRN(WEFD) does not exists, copy from prior entry
+		if 'WIRN(WEFD).exists() set WIRN(WEFD) = WIRN(WIRN(WEFD).order(-1))
+
+		// Indicate rate set by scheduled change
+		set WIRN(WEFD).piece("|", 3) = 2
+		}
+
+	quit 
+
+	
+SETWRN(RecordLN	ln, 		// Loan account object			/REF:R
+       String WIRN())		// Weighted interest rate array		/REF:RW
+       
+	// Update WIRN() with interest-related information for the current 
+	// (new) interest values
+	
+	type public Date %EffectiveDate, EJD
+	
+	type Boolean HIT = 0
+	type String INDEX, WICHND, WINDEX, WIIRN
+	type Number IRN
+	type Date WEFD
+
+	if 'WIRN(%EffectiveDate).piece("|", 3) set WIRN(%EffectiveDate).piece("|", 3) = 1
+
+	set IRN = ln.irn
+	set INDEX = ln.index
+
+	set (WEFD, WICHND) = ""
+	set (WINDEX, WIIRN) = "*" 
+
+	for  do SETWRN2(.ln, .WIRN()) if (WEFD.isNull()) ! (WEFD > EJD) quit
+
+	quit
+
+	
+SETWRN2(RecordLN ln, 		// Loan account				/REF:R
+	String WIRN())		// Weighted interest rate data		/REF:RW
+
+	// Update WIRN() with interest-related information for the current 
+	// (new) interest values based for %EffectiveDate
+
+	type public String INDEX, WINDEX
+	type public Date EJD, WICHND, WEFD
+	type public Boolean ER
+	type public Number IRN, WIIRN
+
+	type String OV, TMPIND, WIRNREC
+	type Number RATE, RRATE, SRATE, URATE
+
+	set WEFD = WIRN(WEFD).order()
+	
+	if WEFD.isNull() quit 
+	if WEFD > EJD quit 
+	
+	set WIRNREC = WIRN(WEFD)
+	
+	if 'INDEX.isNull() do { quit:ER
+		set WICHND = WEFD - 1
+		set WICHND = WICHND.nextFreqDate(ln.intfre) quit:ER
+		}
+		
+	set OV = WIRNREC.piece("|", 4)
+
+	if 'INDEX.isNull(), WEFD = WICHND set WIRNREC.piece("|", 3) = 2
+	
+	// Remove spread from the index before updating history
+	set TMPIND = WIRNREC.piece("|", 4)
+	if INDEX '= TMPIND set WIRNREC.piece("|", 4) = INDEX
+	set WINDEX = OV
+	
+	if 'INDEX.isNull(), WEFD '< WICHND do { quit:ER
+		type String PAR()
+		
+		set PAR("INDEX") = INDEX
+		set PAR("ROUND") = 1
+		set PAR("LIMIT") = 1
+
+		do CTL^UINDX(.ln, WEFD, WIRNREC.piece("|", 2), .PAR()) quit:ER
+		set IRN = RATE 
+	}
+
+	set OV = +WIRNREC 
+
+	set WIRNREC.piece("|", 1) = IRN
+	set WIRNREC.piece("|", 3) = 1 
+
+	set OV = WIIRN
+
+	set WIRN(WEFD) = WIRNREC
+
+	quit
+
+
+public	EXT(RecordLN ln, String CTL)
+
+	/*
+	External line tag used to calculate average rate and balance
+	through UAVB when IX array has previously been loaded.
+	Used by INDEXMC and MATRIXMC.
+	*/
+	
+	type public Number ACR
+
+	do EXEC(.ln, .ACR, 0, CTL)
+
+	quit
+
+
+FM(RecordLN ln, Number DIR)
+
+	// Roll file maintenance forward / backward
+
+	type public String WIRN(,)
+
+	type String DI, VAL, WIRNREC
+	type Date JD
+	type Number PC
+	
+	if DIR < 0 set PC = 1
+	else  set PC = 2
+	
+	set (JD, DI) = ""
+	for  set JD = WIRN(JD).order(DIR) quit:JD.isNull()  do {
+		for  set DI = WIRN(JD, DI).order(DIR) quit:DI.isNull()  do {
+			set WIRNREC = WIRN(JD, DI)
+			set VAL = WIRNREC.piece("|", PC)
+			set ln.@DI = VAL
+			}
+		}
+
+	quit 
+
+vSIG()	quit "60571^43480^Pat Kelly^16758"	// Signature - LTD^TIME^USER^SIZE

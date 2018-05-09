@@ -1,0 +1,664 @@
+DBSINDXZ	
+		 
+	/*
+	Rebuild Index Files
+	
+	NOTE:  Because indexes are maintained by DATA-QWIK only for MDB, the
+	       use of global references is allowed.
+		    
+	LIBRARY:
+		. ADD      - Create index files for a single table
+		. ALL      - Create index files for a single system
+		. BUILD    - Build prompts for index file selection
+
+	---- Revision History -------------------------------------------------
+	08/07/07 - RussellDS - CR28507
+		   Removed references to obsolete column DBTBL8.SAVFLG
+	
+	08/29/06 - RussellDS - CR22719
+		   Fix massdel section to not kill off any data in top node
+		   when deleting index info.
+	
+	06/28/06 - RussellDS - CR22037
+		   Fix logic that prevented all old index entries from being
+		   deleted when ACN was being rebuilt with DEP and/or LN.
+		   
+		   Fixed other errors that showed up once this was resolved.
+	
+	01/10/06 - RussellDS - CR18942
+		   Fixed code in onerun section that generates indexes to
+		   set up -2 level of vobj data.
+	
+	12/15/05 - RussellDS - CR18400
+		   Created.
+
+	-----------------------------------------------------------------------
+	*/
+
+	quit			// No entry from top
+	
+
+public ADD(String file,		// Table name
+	   List list,		// List of index names		/NOREQ
+	   Number REBUILD)	// Rebuild option		/NOREQ/DFT=1
+
+	/*
+	Rebuild requested index files for requested table
+	
+	EXAMPLE:   
+		D ADD^DBSINDXZ("CIF")               Rebuild all for CIF
+		D ADD^DBSINDXZ("CIF","NAME,TAXID")  Rebuild only NAME and TAXID
+	*/
+	
+	type String filer
+	
+	quit:$$rdb^UCDBRT(file)				// Don't do it if in RDB
+	
+	type RecordDBTBL1 dbtbl1 = Db.getRecord("DBTBL1", "%LIBS='SYSDEV',FID=:file")
+	
+	set filer = dbtbl1.udfile
+	
+	quit:filer.isNull()				// Filer required if indexes
+
+	if REBUILD.get().isNull() set REBUILD = 1
+	
+	if 'list.exists() set list = Class.new("List")
+	
+	if (list.isNull()) set list = $$allidxs(file)		// All indexes
+	
+	do DROP(file, list, REBUILD)			// Delete existing index files
+	
+	#ACCEPT Date=12/16/05; Pgm=RussellDS; CR=18400
+	xecute (" D VIDXBLD^"_filer_"("_""""_list_""""_")")	// Build index files
+
+	quit	
+
+
+DROP(String fid,	// Table name
+     List list,		// List of index names
+     Number REBUILD)	// Rebuild option
+     
+	/*
+	Delete index files in list
+	*/
+	
+	type Number I
+	
+	if list.isNull() set list = $$allidxs(fid)
+	
+	for I = 1:1:list.count(",") do {
+		
+		type String indexnm, v
+		
+		set indexnm = list.piece(",", I)
+		
+		type RecordDBTBL8 dbtbl8 = Db.getRecord("DBTBL8", "%LIBS='SYSDEV',FID=:fid,INDEXNM=:indexnm")
+		
+		quit:'dbtbl8.parfid.isNull()		// Supertype linkage
+		
+		// Delete the entire index prior to rebuild
+		if (REBUILD = 1) set v = $$massdel(fid, indexnm)
+		
+		// Delete record-by-record if no longer valid index entry
+		if (REBUILD = 2) set v = $$recdel(fid, indexnm)
+		
+		#ACCEPT Date=12/16/05; Pgm=RussellDS; CR=18400
+		if 'v.isNull() xecute v			// Delete the index file
+	}
+	
+	quit
+	
+	
+allidxs(String fid)		// Table name
+
+	/*
+	Return list of all indexes for this table
+	
+	RETURNS:
+		. $$		Index list for fid
+	*/
+	
+	type List return = Class.new("List")
+	
+	type ResultSet rs = Db.select("INDEXNM", "DBTBL8", "%LIBS='SYSDEV' AND FID=:fid")
+		
+	while rs.next() do {
+			
+		type String indexnm = rs.getCol("INDEXNM")
+			
+		set return = return.add(indexnm)
+	}
+	
+	quit return
+
+
+massdel(String fid,		// Table name
+	String indexnm)		// Index name
+	
+	/*
+	Procedure code to delete a single index file en mass.
+	
+	RETURNS:
+		. $$	Executable code to delete index
+	*/
+	
+	type Number firstvar, I, lastlit
+	type String global, keys, return
+
+	type RecordDBTBL8 dbtbl8 = Db.getRecord("DBTBL8", "%LIBS='SYSDEV',FID=:fid,INDEXNM=:indexnm") 
+	
+	set global = "^"_dbtbl8.global
+	set keys = dbtbl8.orderby
+	
+	// Find first variable and last literal
+	set (firstvar, lastlit) = 0
+	for I = 1:1:keys.length(",") do {
+		
+		type String key = keys.piece(",", I)
+		
+		if key.isLiteral() set lastlit = I
+		else  if (firstvar = 0) set firstvar = I
+	}
+	
+	// If no literals, kill entire global
+	if (lastlit = 0) set return =" kill "_global
+	// If leading literals, kill up to literals
+	else  if (firstvar > lastlit) set return = " kill "_global_"("_keys.piece(",", 1, firstvar - 1)_")"
+	// otherwise, kill up to last literal
+	else  do {
+		
+		type Boolean noLits = 0
+		
+		if (lastlit = 0) do {
+			
+			set noLits = 1
+			set lastlit = keys.length(",")
+		}
+		
+		set global = global_"("
+		set return = " new i,vx"
+		
+		for I = 1:1:lastlit do {
+			
+			type String key = keys.piece(",", I)
+			
+			if key.isLiteral() set global = global_key_","
+			else  do {
+				
+				set return = return_" set i("_I_")="""" for  set i("_I_")=$order("_global_"i("_I_"))) quit:i("_I_")=""""  "
+				set global = global_"i("_I_"),"
+			}
+		}
+		
+		set global = global.extract(1, global.length() - 1)_")"
+		
+		set return = return_"set vx=$G("_global_") "
+		set return = return_"kill "_global
+		set return = return_" set:vx'="""" "_global_"=vx"		
+	}
+	
+	quit return
+
+
+recdel(String fid,		// Table name
+       String indexnm)		// Index name
+	
+	/*
+	Procedure code to delete a single index file, record by record for
+	records that no longer belong in the index.
+	
+	RETURNS:
+		. $$	Executable code to delete index
+	*/
+	
+	type List fidkeys
+	type Number I
+	type String fsn(), global, keys, newkeys, notkeys(), qry, return
+	
+	do fsn^DBSDD(.fsn(), fid)
+
+	type RecordDBTBL8 dbtbl8 = Db.getRecord("DBTBL8", "%LIBS='SYSDEV',FID=:fid,INDEXNM=:indexnm") 
+	
+	set global = "^"_dbtbl8.global_"("
+	set keys = dbtbl8.orderby
+	
+	set fidkeys = fsn(fid).piece("|", 3)
+	
+	for I = 1:1:keys.length(",") do {
+		
+		type String key = keys.piece(",", I)
+		
+		if 'key.isLiteral(), 'fidkeys.contains(key) set notkeys(I) = key_","_$$DI^SQLDD(key, fid)
+	}
+
+	set (newkeys, return) = ""
+
+	for I = 1:1:keys.length(",") do {
+		
+		type String key = keys.piece(",", I)
+		
+		if (I = 1) set global = global_key
+		else  set global = global_","_key
+		
+		if 'key.isLiteral() do {
+		
+			set newkeys = newkeys_key_","
+			set return = return_" set "_key_"="""" for  set "_key_"=$O("_global_")) Q:"_key_"="""" "
+		}
+	}
+		
+	set return = "new "_newkeys.extract(1, newkeys.length() - 1)_return
+	
+	set (I, qry) = ""
+	for  set I = notkeys(I).order() quit:I.isNull()  do {
+		
+		type String notkey = notkeys(I).piece(",", 1)
+		
+		type RecordDBTBL1D dbtbl1d = Db.getRecord("DBTBL1D", "%LIBS='SYSDEV',FID=:fid,DI=:notkey")
+		
+		if (fsn(fid).piece("|", 4) = 1) do {
+			
+			set qry = qry_" kill:$piece($get("_fsn(fid).piece("|", 2)_")),"
+			set qry = qry_"""|"","_dbtbl1d.pos_")'="_notkey_" "_global_") "
+		}
+		
+		else  if (fsn(fid).piece("|", 4) = 10) do {
+			
+			set qry = qry_" kill:$piece($get("_fsn(fid).piece("|", 2)_","
+			set qry = qry_dbtbl1d.nod_")),""|"","_dbtbl1d.pos_")'="_notkey_" "_global_") "
+		}
+	}
+	
+	set return = return_qry
+	
+	quit return
+
+
+public ALL(String sys)	// System name			/NOREQ/DFT="PBS"
+
+	/*
+	Build index files for a selected system
+	*/
+	
+	type Number I
+	type String fid, index()
+	
+	if sys.get().isNull() set sys = "PBS"
+	
+	do SYSVAR^SCADRV0(sys)			// Init system variables
+
+	set %ProcessMode = 0
+	
+	if (sys = "PBS") do {
+	
+		do RUNLOG("ACN")				// Process ACN, DEP, LN first
+					
+		for I = "ACN", "DEP", "LN" set index(I) = "*"	// index files first
+		do onerun(.index(), 1)
+	}
+	
+	type ResultSet rs = Db.select("DISTINCT FID", "DBTBL8", "%LIBS='SYSDEV' AND NOT (FID='ACN' OR FID='DEP' OR FID='LN')")
+	
+	while rs.next() do {
+		
+		set fid = rs.getCol("FID")
+		
+		type RecordDBTBL1 dbtbl1 = Db.getRecord("DBTBL1", "%LIBS='SYSDEV',FID=:fid")
+		
+		if (dbtbl1.syssn = sys) do {
+		
+			do RUNLOG(fid)
+		
+			do ADD(fid, "", 1)
+		}
+	}
+	
+	quit
+		
+
+public BUILD(Boolean opt)	// Display DQ index files	/NOREQ
+
+	/*
+	Rebuild Index files (called by functions XREFBUILD and DBSIDXEX)
+	*/
+	
+	type Number REBUILD
+	type String %READ, %TAB(), ARRAY(), fid, index(), line, VFMQ
+	
+	do select(.index(), opt.get())			// Select files
+	quit:'index.data()
+	
+	set line.piece("-", 80) = ""
+	
+	write !,line
+	
+	set fid=""
+	for  set fid = index(fid).order() quit:fid.isNull()  do {
+		
+		write !, fid, ?20, index(fid)
+	}
+	
+	// Fast rebuild
+	set ARRAY(1) = $$^MSG(4566)
+	// Records processed individually (24x7 mode)
+	set ARRAY(2) = $$^MSG(4567)
+	
+	set %TAB("REBUILD") = ".REBUILDOPT/REQ/TBL=ARRAY("
+	set %READ = "REBUILD"
+	
+	do ^UTLREAD quit:(VFMQ = "Q")
+
+	// Combine ACN,DEP,LN files into one proceesing logic
+
+	set %ProcessMode = 0
+	
+	if ((index("DEP").get() = "*") ! (index("LN").get() = "*")) set index("ACN") = "*"
+
+	if (index("DEP").exists() ! index("LN").exists() ! index("ACN").exists()) do onerun(.index(), REBUILD)
+	
+	// Dispatch other files to standard ADD (index build) function
+	set fid=""
+	for  set fid = index(fid).order() quit:fid.isNull()  do {
+		
+		type String list
+		
+		set list = index(fid)			// Index file list
+		if (list = "*") set list = ""		// All Index files
+		
+		do ADD(fid, list, REBUILD)		// delete and rebuild
+	}
+	
+	quit
+	
+	
+select(String index(),	// Index selection array	/MECH=REFARR:W
+       Boolean opt)	// Include DQ tables
+       
+	/*
+	Return a list of selected index files (full or partial)
+	*/
+	
+	type Boolean INDEX()
+	type Number %PAGE, %PG, BLOCK, BREAK, I, LENGTH, PAGE
+	type String %READ, %TAB(), FID, INDEXFL(), VFMQ, zread(), ztab()
+
+	set %READ = ""
+	set zread = "@@%FN/REV/CEN"
+ 
+	// Display major files first
+
+	for FID = "ACN", "CIF", "DEP", "LN", "COL", "ACNADDR", "RELCIF", "CIFHH", "TRN" do {
+
+		type ResultSet rs = Db.select("INDEXNM", "DBTBL8", "%LIBS='SYSDEV' AND FID=:FID")
+		
+		if 'rs.isEmpty() do buildtab(FID, .INDEX(), .INDEXFL(), .%READ, .%TAB())
+	}
+
+	type ResultSet rs2 = Db.select("DISTINCT FID", "DBTBL8", "%LIBS='SYSDEV'")
+	
+	while rs2.next() do {
+		
+		set FID = rs2.getCol("FID")
+		
+		quit:{List}"ACN,DEP,LN,CIF,COL,ACNADDR,RELCIF,CIFHH,TRN".contains(FID)
+		
+		type RecordDBTBL1 dbtbl1 = Db.getRecord("DBTBL1", "%LIBS='SYSDEV',FID=:FID")
+			
+		if 'opt, dbtbl1.syssn = "DBS" quit
+		
+		quit:(dbtbl1.filetyp = 7)
+		
+		type ResultSet rs3 = Db.select("INDEXNM", "DBTBL8", "%LIBS='SYSDEV' AND FID=:FID AND PARFID IS NULL")
+		
+		if 'rs3.isEmpty() do buildtab(FID, .INDEX(), .INDEXFL(), .%READ, .%TAB())
+	}
+	
+	set %READ = %READ.extract(1, %READ.length() - 1)	// Remove trailing comma
+
+	quit:%READ.isNull()					// No selections
+
+	set BLOCK = 40
+	set BREAK = 0
+	set %PAGE = 0
+	set LENGTH = %READ.length(",")
+	
+	// Break up into pages
+        for  do {  quit:(LENGTH '> 0)
+        	
+		set %PAGE = %PAGE + 1
+		set zread(%PAGE) = zread_","_%READ.piece(",", BREAK + 1, BREAK + BLOCK)
+		set BREAK = BREAK + BLOCK
+		set LENGTH = LENGTH - BLOCK
+        }
+        
+        set (%PG, PAGE) = 1
+        set VFMQ = ""
+        
+	while '((VFMQ = "Q") ! (VFMQ = "F")) do {
+	
+		type Number %FRAME, OLNTB
+		type String %CTPRMT, N
+	
+		set %READ = zread(%PG)
+		
+		// Save and restore %TAB (destroyed by ^UTLREAD)
+		set N = ""
+		for  set N = %TAB(N).order() quit:N.isNull()  set ztab(N) = %TAB(N)
+		
+		set %ProcessMode = 1
+		set OLNTB = 34
+		set %CTPRMT = "2|38"
+		set %FRAME = 2
+		do ^UTLREAD
+		
+		set N = ""
+		for  set N = ztab(N).order() quit:N.isNull()  set %TAB(N) = ztab(N)
+		
+		set %PG = VFMQ + 1
+	}
+
+	quit:(VFMQ = "Q")
+
+	for I = 1:1 quit:'INDEX(I).exists()  if INDEX(I) do {
+	
+		set FID = INDEXFL(I)				// Files selected
+		if (INDEX(I) = 2) set index(FID) = "*"		// Select all
+		else  do {
+			
+			type String list
+			
+			set list = $$partial(FID)		// Partial
+			if 'list.isNull() set index(FID) = list
+		}
+	}
+
+	quit
+
+
+onerun(String index(),	// Files to create indexes for
+       Number REBUILD)	// Rebuild option
+
+	/*
+	Create single collating logic for files ACN, DEP and LN
+	*/
+	
+	type String code, fid
+	
+	quit:$$rdb^UCDBRT("ACN")				// Don't do it if in RDB
+
+	for fid = "ACN", "DEP", "LN" if index(fid).exists() do {
+		
+		type String filer, fsn(), list
+		
+		do fsn^DBSDD(.fsn(), fid)
+		
+		set filer = fsn(fid).piece("|", 6)
+		
+		// Possibly remapped index section
+		set code = "set filer=$$VIDXPGM^"_filer
+		
+		#ACCEPT Date=12/16/05; Pgm=RussellDS; CR=18400
+		xecute code
+		
+		set list = index(fid)				// Index names
+		if (list = "*") set list = ""			// All index files
+		do DROP(fid, list, REBUILD)			// Delete it first
+		
+		if (fid '= "ACN"), list.isNull() do {
+		
+			type ResultSet rs = Db.select("INDEXNM", "DBTBL8", "%LIBS='SYSDEV' AND FID=:fid AND PARFID IS NULL", "INDEXNM ASC")
+			
+			while rs.next() set list = list_rs.getCol("INDEXNM")_","
+			
+			set list = list.extract(1, list.length() - 1)
+		}
+		
+		if list.isNull() set list = "VINDEX"
+		
+		set code(fid) = "VIDXBLD1^"_filer_"(.acn,"""_list_""")"
+		
+		kill index(fid)
+	}
+	
+	// NOTE that this used knowledge of the PSL object structure
+	set code = "new acn,CID,vcls,vobj set CID="""" for  set CID=$order(^ACN(CID)) quit:CID=""""  kill acn,vobj" 
+	if (code("DEP").exists() ! code("LN").exists()) set code = code_" set vcls=$piece($get(^ACN(CID,50)),""|"",2) "
+	set code = code_" set acn=1,vobj(1,-3)=CID,vobj(1,-2)=1"
+	set code = code_",vobj(1,50)=$get(^ACN(CID,50))"	// Load defined node
+	if code("ACN").exists() set code = code_" do "_code("ACN")
+	if code("DEP").exists() set code = code_" do:vcls=""D"" "_code("DEP")
+	if code("LN").exists() set code = code_" do:vcls=""L"" "_code("LN")
+	
+	#ACCEPT Date=12/16/05; Pgm=RussellDS; CR=18400
+	xecute code
+	
+	quit
+	
+	
+partial(String FID)	// Table name
+
+	/*
+	Return a list of selected index files for file FID
+	*/
+	
+	type List return
+	type Boolean zindex()
+	type Number %FRAME, OLNTB, SEQ
+	type String %CTPRMT, %READ, %TAB(), IDXNAM(), msg, VFMQ
+	
+	set %READ = "@msg/REV/CEN"
+	
+	type RecordDBTBL1 dbtbl1 = Db.getRecord("DBTBL1", "%LIBS='SYSDEV',FID=:FID")
+	
+	// Select Index Option
+	set msg = dbtbl1.des_" - "_$$^MSG(7999)
+	
+	set SEQ = 0
+	
+	type DbSet ds = Db.selectDbSet("DBTBL8", "%LIBS='SYSDEV' AND FID=:FID AND PARFID IS NULL", "INDEXNM ASC")
+	
+	while ds.next() do {
+		
+		type String desc, indexnm
+		
+		type RecordDBTBL8 dbtbl8 = ds.getRecord("DBTBL8")
+		
+		set indexnm = dbtbl8.indexnm
+		set desc = dbtbl8.idxdesc
+		
+		if desc.isLike("%/%") set desc = desc.addQuotes()
+		
+		set SEQ = SEQ + 1
+		set zindex(SEQ) = 0
+		set %TAB("zindex("_SEQ_")") = "/DES="_desc_"/TYP=L/LEN=1"
+		set %READ = %READ_",zindex("_SEQ_")/NOREQ"
+		set IDXNAM(SEQ) = indexnm
+	}
+
+	set %ProcessMode = 1
+	set OLNTB = 34
+	set %CTPRMT = "2|38"
+	set %FRAME = 2
+	
+	do ^UTLREAD
+	
+	set return = Class.new("List")
+	
+	if (VFMQ '= "Q") do {
+	
+		for SEQ = 1:1 quit:'zindex(SEQ).exists()  do {
+		
+			if zindex(SEQ) set return = return.add(IDXNAM(SEQ))
+		}
+	}
+	
+	quit return
+
+
+buildtab(String FID,		// Table name
+	 Boolean INDEX(),	// Build index?
+	 String INDEXFL(),	// Index names
+	 String %READ,		// %READ for UTLREAD
+	 String %TAB())		// %TAB entries for UTLREAD
+
+	/*
+	Build prompts - build %TAB for each index
+	*/
+	
+	type Number SEQ
+	type String desc
+	
+	type RecordDBTBL1 dbtbl1 = Db.getRecord("DBTBL1", "%LIBS='SYSDEV',FID=:FID")
+	
+	set desc = dbtbl1.des.extract(1, 31)
+	if desc.isLike("%/%") set desc = desc.addQuotes()
+	
+	set SEQ = INDEX("").order(-1) + 1			// Next entry
+	set %TAB("INDEX("_SEQ_")") = "/DES="_desc_"/TYP=N/LEN=1/TBL=[STBLIDXRB]"
+	
+	set INDEX(SEQ) = 0
+	set INDEXFL(SEQ) = FID
+
+	set %READ = %READ_"INDEX("_SEQ_")/NOREQ,"
+	
+	quit
+	
+	
+RUNLOG(String fid)	// Table name
+
+	/*
+	Display file name and current time
+	*/
+	
+	if '$$rdb^UCDBRT(fid) do {
+	
+		use $P
+		write !, fid, ?20, $$TIM^%ZM(%CurrentTime)
+	}
+	
+	quit
+	
+	
+public EXT(List files)	// Files list
+
+	/*
+	Rebuild index files based on a list of files
+
+	EXAMPLE:
+	
+		do EXT^DBSINDXZ("DEP,CIF")
+	*/
+	
+	type Number I
+	
+	for I = 1:1:files.count() do {
+		
+		type String fid = files.piece(",", I)
+		
+		do RUNLOG(fid)
+		do ADD(fid, "", 1)
+	}
+	
+	quit
+
+vSIG()	quit "60849^55185^Dan Russell^14817"	// Signature - LTD^TIME^USER^SIZE

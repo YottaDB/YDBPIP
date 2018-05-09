@@ -1,0 +1,224 @@
+LNCL3	 /*
+    ORIG: GRAY - 01/17/2000
+    DESC: Transfer Commitment Amounts
+    
+    ---- Comments --------------------------------------------------------
+    
+    ---- Revision History ------------------------------------------------
+	
+	08/02/05 - KUMARB - CR16684
+		Modified section CID1, changed the table name LNLCOM 
+		to LN in Db.select
+	
+	06/09/03 - CARROLLJ - 51349
+		   Removed use of Transet class methods and replace with call
+		   to TRNDRV.
+
+
+	05/08/02 - GRAY - 43583
+		   Added ln object in the call to UNPPRN^LNPTS4 in section
+		   PPTAMT.
+	
+		   Removed use of getOneRow method since it is no longer
+		   supported.
+	
+		   Incorporated changes done on 06/03/02 in V6.3 under 
+		   ARQ# 50760 as follows:
+		   Removed the re-instantiation of the tran set object
+		   in the SET sub-routine.  It has already been instantiated
+		   prior to the call into that label.  Also, removed the
+		   newing of object names since it's no longer necessary.
+	
+
+ */
+	
+	quit
+	
+	
+Public VER	// Verification of accounts and amount
+	
+	new X
+	set X=FCID
+	do CID1
+	
+	set X=TCID
+	// Function available for loans linked to the same commitment. Account ~p1 is invalid.
+	if '$D(TBL(X)) set ER=1,RM=$$^MSG(2043,X) quit 
+	do CID
+	
+	set X=TAMT
+	do PPTAMT
+
+	set X=%EffectiveDate
+	
+	// Value above maximum range ~p1
+	if %EffectiveDate>%SystemDate set ER=1,RM=$$^MSG(2919,X)
+	
+	set %EffectiveDate=""
+	
+	quit
+	
+ERR	//
+	
+	do ^UTLERR
+	// Commitment amounts not transferred
+	set RM=$$^MSG(583)
+	quit
+	
+CID1	//  From Account Verification
+
+	new CCL,N
+	
+	do CID if 'X!ER quit
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+	set CCL=ln.ccl
+	
+	// Function available for loans linked to the same commitment. Account ~p1 is invalid.
+	if 'CCL set ER=1,RM=$$^MSG(2043,CID) quit
+	
+	type ResultSet rs=Db.select("CID","LN","CCL=:CCL")
+	if rs.isEmpty() quit
+	while rs.next() do {
+		set N=rs.getCol(1)
+		if N=CID quit
+		// Determine if a Contra Account
+		type RecordACN acn=Db.getRecord("ACN","CID=:N")
+		set TRB=acn.trb
+		if TRB set TBL(N)=acn.title1
+		}
+	
+	quit
+	
+	
+CID	//  Account Verification
+	
+	set %EXT=1 do ^UACN if 'X!ER quit
+	set CID=X 
+	
+	new TRB
+	type RecordACN acn=Db.getRecord("ACN","CID=:CID")
+	set TRB=acn.trb
+	
+	// Function available for debit balance loans only. Account ~p1 is invalid.
+	if 'TRB set ER=1,RM=$$^MSG(2529,CID) quit
+	
+	quit
+	
+SET(RecordLN ln)	//
+	
+	type Public Cache %CACHE()
+
+	type RecordTTX ttx=Class.new("RecordTTX")
+	
+	type RecordTRN trn=%CACHE("TRN").getRecord("TRN","ETC=:ETC")
+	set ITC=trn.itc
+	set ITC=$$ITC^TTXEXT(ITC,7,1)
+
+	set ttx.cid=CID
+	set ttx.itc=ITC
+	set ttx.etc=ETC
+	set ttx.tamt=TAMT
+	set ttx.efd=EFD
+	set ttx.tlo=%UserStation
+	set ttx.tcmt=TCMT
+	if $G(TPD)="" set TPD=%SystemDate
+	if $G(BRCD)="" set BRCD=CUVAR.bobr
+
+	do TRNSINGL^TRNDRV(.ttx,.ln,TPD,BRCD,4)
+
+	quit
+	
+PPTAMT	//  Verification of Amount
+	
+	if 'X quit
+	
+	// Value below minimum range ~p1
+	if X'>.01 set ER=1,RM=$$^MSG(2920,X)      
+	
+	type RecordLN ln=Db.getRecord("LN","FCID")
+	
+	set BALCMP=ln.bal if ln.aruf set BALCMP=BALCMP-ln.udbal
+	
+	// Transaction amount exceeds source account credit limit of ~p1.
+	if X>ln.crlmt set ER=1,RM=$$^MSG(1036,$$^SCARND(ln.crlmt,0,FCID)) quit
+	
+	// Transaction amount exceeds source account balance of ~p1.
+	if X>BALCMP set ER=1,RM=$$^MSG(1035,$$^SCARND(BALCMP,0,FCID)) quit
+	
+	// Transfer amount exceeds unbilled principal.
+	if TAMT>(BALCMP-$$UNPPRN^LNPTS4(.ln)) set ER="W",RM($O(RM(""),-1)+1)=$$^MSG(3938)
+	
+	type RecordLN tln=Db.getRecord("LN","TCID")
+
+	if tln.maxbal'="" set B=X+tln.crlmt if B>A set ER=1,ET="LCRLMT" do ERR quit
+
+	quit
+	
+Public FILE	; File data
+	
+	type Public Cache %CACHE()
+	new FBP
+	set UPDATE=1
+	
+	type RecordLN ln=Db.getRecord("LN","CID=:FCID")
+	set CRCD=ln.crcd
+	if CRCD="" set CRCD=%SystemCurrency
+	
+	type RecordPRODCTL prodctl=%CACHE("PRODCTL").getRecord("PRODCTL","TYPE=:ln.type")
+	set FBP=prodctl.fbp
+	
+	if FBP do { quit:ER
+		do FCID
+		do TCID
+		}
+	
+	else  do { quit:ER
+		do TCID
+		do FCID
+		}
+	
+	quit
+	
+	
+FCID	//
+	
+
+	type Public Cache %CACHE()
+	set CID=FCID
+	// Transfer to ~p1
+	set TCMT=$$^MSG(3940,TCID)
+	
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+	set TYPE=ln.type
+	set GRP=ln.grp
+	set CRCD=ln.crcd
+	
+	type RecordPRODCTL prodctl=%CACHE("PRODCTL").getRecord("PRODCTL","TYPE=:ln.type")
+	set ETC=prodctl.crtrrl
+	
+	if ETC="" set ETC=$S(GRP="COM":"CMCTO",GRP="DM":"DMCTO",GRP="LN":"LCTO",GRP="MTG":"MCTO",1:"RCTO")
+	
+	do SET(.ln)
+	quit
+	
+TCID	//
+	
+	type Public Cache %CACHE()
+
+	set CID=TCID
+	// Transfer from ~p1
+	set TCMT=$$^MSG(3939,FCID)
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+	set TYPE=ln.type
+	set GRP=ln.grp
+
+	type RecordPRODCTL prodctl=%CACHE("PRODCTL").getRecord("PRODCTL","TYPE=:ln.type")
+	set ETC=prodctl.drtrrl
+	if ETC="" set ETC=$S(GRP="COM":"CMCTI",GRP="DM":"DMCTI",GRP="LN":"LCTI",GRP="MTG":"MCTI",1:"RCTI")
+	
+	do SET(.ln)
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60114^38798^Balasubramonian Sankar^4575"	// Signature - LTD^TIME^USER^SIZE

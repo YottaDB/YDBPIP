@@ -1,0 +1,1304 @@
+BCHDARC //Batch BCHLNDARC - Delinquency Asset Reclassification
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 01/31/2007 12:46 - shetyes
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHLNDARC Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ set vBCHSTS=$$STATUS^BCHUTL("BCHLNDARC")
+ if vBCHSTS=1 set ER=1,RM=$$^MSG(3410) quit
+ if vBCHSTS=2 set ER=1,RM=$$^MSG(3414) quit
+ if vBCHSTS=0 set %BatchRestart=1
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit do EXIT^BCHUTL("BCHLNDARC") quit
+ do JOBMGR^BCHUTL(%FN,"BCHLNDARC",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ do EXIT^BCHUTL("BCHLNDARC")
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(NPDT,CID) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHLNDARC","*","",NPDT.get()_","_CID.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ if %BatchRestart,$$CHKLOG^BCHUTL(%SystemDate,%FN,"BCHLNDARC",NPDT.get()_","_CID.get()) do { quit
+ do LOG^BCHUTL(%SystemDate,%FN,"BCHLNDARC",NPDT.get()_","_CID.get(),"Record already processed")
+ }
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,NPDT,CID)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHLNDARC","*","",NPDT.get()_","_CID.get(),"",et)
+ }
+ do UPDLOG^BCHUTL(%SystemDate,%FN,"BCHLNDARC",NPDT.get()_","_CID.get(),vCONTEXT)
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,NPDT,CID) //
+	do NCID(CID,10,NPDT)
+	
+	quit
+
+public	RERUN(NPDT)	// Entry Point from function to rerun reclassification 
+
+	type public Boolean RERUN = 1
+
+	do ^BCHDARC
+	
+	quit
+
+	
+public	NCID(CID,CTL,NPDT)	// Process Account
+	
+	/*
+	 ARGUMENTS:
+	
+	. CID   Account Number		 /TYPE=N/REQ/MECH=VAL
+	
+	               Profile/IBS Account Number
+	
+	. CTL   Control Variable		/TYPE=N/NOREQ/MECH=VAL
+	
+		Control Variable
+			Position 1: 0 - do not file to disk
+				    1 - file to disk
+	
+			Position 2: 0 - LNDARC 
+				    1 - LNDARCS - Single account reclass
+	
+	*/
+
+	new ACN,BL,DARCEXPD,DARCLS,DARCPO,DARCOVR,DIST1ND,DSEQ,DUE,DUEARRAY,ER
+	new IAM,LDUESEQ,MBLDELQ,MBLSEQ,MBLSEQDT,OSEQ,OSEQDT,SUSPECT
+	
+	if $E(CTL,2) do { quit:ER
+		set ER=0
+		set DARCNPDT=NPDT
+		do INITS
+		}
+	set DARCPO=0
+	set ER=0
+	
+	type RecordLN ln=Db.getRecord("LN","CID")
+	
+	if ln.stat=4 quit
+
+ 	do ln.setAuditFlag(1)
+
+	set ACN=ln.acn
+	set DARCLS=ln.darcls		// Delinquency Asset Risk Class
+ 	set DARCOVR=ln.darcovr		// Delinquency Asset Class Override
+	set SUSPECT=ln.suspect		// Suspect Indicator
+	set DARCEXPD=ln.darcexpd	// Reclassifiction Expiration Date
+	
+	set OSEQ=ln.oseq		// Internal Bill Oldest Unsatisfied Seq Nbr
+	set DIST1ND=ln.dist1nd		// Distribution 1 Next Due
+	set DSEQ=ln.dseq		// Internal Bill Seq Nbr Next Due Date
+	set MBLDELQ=ln.mbldelq		// Mimumum Bill Amount for Deliquency
+
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:ln.type")
+	
+	if 'prodctl.darcpo quit		// Product not flagged for delinquency reclass
+
+	type RecordDAYENDDARCB darcb=Db.getRecord("DAYENDDARCB","NPDT=:NPDT,ACN=:ACN,CID=:CID", 1)
+
+	type RecordDAYENDDARCBF darcbf=Db.getRecord("DAYENDDARCBF","NPDT=:NPDT,ACN=:ACN,CID=:CID", 1)
+
+	do INIT1
+	
+	do BLRC(.ln,.darcb)
+	
+	do LNRC(.ln,.darcb)
+	
+	do FEELVL(.darcbf)
+	
+	do FILE(.ln,.darcb)
+	
+	if ER.get() do EXC 
+	
+	quit
+	
+	
+INIT1	// Initialize array by nulling out potentially existing FEETYP amounts
+	
+	type public Number DARCFEE()
+	type public String FEETYP
+
+	set FEETYP = ""
+	
+	for  set FEETYP = DARCFEE(FEETYP).order() quit:FEETYP.isNull()  set DARCFEE(FEETYP) = ""
+	
+	quit
+	
+
+BLRCAL(X,AC)	//	Calculate Bill Reclassification 
+	
+	new AMTD,ELE,FEE,FRAMT,PCE
+	set ELE=$P(X,"#",1)
+	if $$ESC^LNU(ELE) quit		// Escrow 
+
+	// Billed interest from add-on loan is in AM(arrary)
+	if IAM,ELE="I" set AMTD=$P($G(AM(SEQ)),"|",3)
+	else  set AMTD=$P(X,"#",4) 
+	quit:'AMTD
+
+	// Billed principal - Multiply by billed principal percentage
+	if ELE="P" set DBLPC(AC)=DBLPC(AC)+(AMTD*RBLPPCT(AC))
+
+	// Billed interest - Multiply by billed interest percentage
+	else  if ELE="I" set DBLIC(AC)=DBLIC(AC)+(AMTD*RBLIPCT(AC))
+
+	// Billed fees - Multiply by billed fee percentage
+	else  if $D(DARCFEE(ELE)) do {
+		set FRAMT=(AMTD*RBLFPCT(AC))
+		set DBLFC(AC)=DBLFC(AC)+FRAMT
+
+		// Update used for fee breakdown DAYENDDARCBF
+		set DARCFEE(ELE)=DARCFEE(ELE)+FRAMT
+		}
+	quit
+
+BLRC(RecordLN ln,RecordDAYENDDARCB darcb)	// Bill Reclassification
+	
+	
+	new BLDARCLS,DATE,DBLFC,DBLIC,DBLPC,SEQ
+	new billlist,lnbil1,lnbil5,x
+	
+	// Init billed fees, interest and principal by asset classification
+	// to null. These variables are used for accumulation.
+	for I=1:1:5 set DBLFC(I)="",DBLIC(I)="",DBLPC(I)=""
+
+	// Get outstanding bill records - Returns BL,DUE(DATE)=SEQ,DUEARRAY
+        type RecordLNBIL1 lnbil1()
+	type RecordLNBIL5 lnbil5()
+	
+	do LOADBIL(.lnbil1(),.lnbil5(),0)
+	
+	if LDUESEQ=0 quit		// If there aren't any bills due, quit
+
+ 	// Get due date of oldest outstanding bill.
+	if billlist(CID,OSEQ).data() set OSEQDT=lnbil1(OSEQ).cdpd
+	else  set OSEQDT=""
+
+	if DARCDEL=3,'MBLSEQ quit	// Bill min payment not outstanding
+
+	// Get due date of oldest bill for minimum payment amount due if
+	// delinquency is by oldest outstanding bill that meets min payment
+	if DARCDEL=3 set MBLSEQDT=lnbil1(MBLSEQ).cdpd
+	
+ 	set IAM=ln.iam         // Interest Amortization Method
+ 	
+    	if IAM do IAM(.ln,.lnbil1())
+	
+	// Loop through delinquent bill records, identify asset classification
+	// and calculate the reclassification of the bill record elements
+	set SEQ=0
+	for  set SEQ=billlist(CID,SEQ).order() quit:SEQ=""  do {
+		
+		if DARCOVR do { quit
+			
+			do getdata(.lnbil1())
+			
+			if billlist(CID,SEQ,1).data() do BLRCALSB(.lnbil5())
+			}
+		
+		set BLDARCLS=$$BLDEL(SEQ,lnbil1(SEQ).cdpd)
+		
+		if 'BLDARCLS.isNull() do {
+		
+			if 'lnbil1(SEQ).pe01.isNull() set x=lnbil1(SEQ).pe01 do BLRCAL(x,BLDARCLS) 
+			if 'lnbil1(SEQ).pe02.isNull() set x=lnbil1(SEQ).pe02 do BLRCAL(x,BLDARCLS) 
+			if 'lnbil1(SEQ).pe03.isNull() set x=lnbil1(SEQ).pe03 do BLRCAL(x,BLDARCLS) 
+			if 'lnbil1(SEQ).pe04.isNull() set x=lnbil1(SEQ).pe04 do BLRCAL(x,BLDARCLS) 
+			if 'lnbil1(SEQ).pe05.isNull() set x=lnbil1(SEQ).pe05 do BLRCAL(x,BLDARCLS) 
+			if 'lnbil1(SEQ).pe06.isNull() set x=lnbil1(SEQ).pe06 do BLRCAL(x,BLDARCLS) 
+			if 'lnbil1(SEQ).pe07.isNull() set x=lnbil1(SEQ).pe07 do BLRCAL(x,BLDARCLS) 
+			if 'lnbil1(SEQ).pe08.isNull() set x=lnbil1(SEQ).pe08 do BLRCAL(x,BLDARCLS) 
+			if 'lnbil1(SEQ).pe09.isNull() set x=lnbil1(SEQ).pe09 do BLRCAL(x,BLDARCLS) 
+			if 'lnbil1(SEQ).pe10.isNull() set x=lnbil1(SEQ).pe10 do BLRCAL(x,BLDARCLS) 
+			if 'lnbil1(SEQ).pe11.isNull() set x=lnbil1(SEQ).pe11 do BLRCAL(x,BLDARCLS) 
+			if 'lnbil1(SEQ).pe12.isNull() set x=lnbil1(SEQ).pe12 do BLRCAL(x,BLDARCLS) 
+			if 'lnbil1(SEQ).pe13.isNull() set x=lnbil1(SEQ).pe13 do BLRCAL(x,BLDARCLS) 
+			if 'lnbil1(SEQ).pe14.isNull() set x=lnbil1(SEQ).pe14 do BLRCAL(x,BLDARCLS) 
+			if 'lnbil1(SEQ).pe15.isNull() set x=lnbil1(SEQ).pe15 do BLRCAL(x,BLDARCLS) 
+			if 'lnbil1(SEQ).pe16.isNull() set x=lnbil1(SEQ).pe16 do BLRCAL(x,BLDARCLS) 
+			if 'lnbil1(SEQ).pe17.isNull() set x=lnbil1(SEQ).pe17 do BLRCAL(x,BLDARCLS) 
+			if 'lnbil1(SEQ).pe18.isNull() set x=lnbil1(SEQ).pe18 do BLRCAL(x,BLDARCLS) 
+			if 'lnbil1(SEQ).pe19.isNull() set x=lnbil1(SEQ).pe19 do BLRCAL(x,BLDARCLS) 
+			if 'lnbil1(SEQ).pe20.isNull() set x=lnbil1(SEQ).pe20 do BLRCAL(x,BLDARCLS)
+
+			if billlist(CID,SEQ,1).data() do BLRCALSB(.lnbil5())
+			}
+		}
+
+	// Update shortname with appropriate values from delinquent bill
+	// reclassification amounts by asset classification
+
+	set darcb.dblpc1=DBLPC(1)
+	set darcb.dblpc2=DBLPC(2)
+	set darcb.dblpc3=DBLPC(3)
+	set darcb.dblpc4=DBLPC(4)
+	set darcb.dblpc5=DBLPC(5)
+	set darcb.dblic1=DBLIC(1)
+	set darcb.dblic2=DBLIC(2)
+	set darcb.dblic3=DBLIC(3)
+	set darcb.dblic4=DBLIC(4)
+	set darcb.dblic5=DBLIC(5)
+	set darcb.dblfc1=DBLFC(1)
+	set darcb.dblfc2=DBLFC(2)
+	set darcb.dblfc3=DBLFC(3)
+	set darcb.dblfc4=DBLFC(4)
+	set darcb.dblfc5=DBLFC(5)
+	quit
+
+getdata(RecordLNBIL1 lnbil1())
+
+	type public Number DARCOVR, SEQ
+	
+	type String x
+
+	if 'lnbil1(SEQ).pe01.isNull() set x=lnbil1(SEQ).pe01 do BLRCAL(x,DARCOVR)
+	if 'lnbil1(SEQ).pe02.isNull() set x=lnbil1(SEQ).pe02 do BLRCAL(x,DARCOVR)
+	if 'lnbil1(SEQ).pe03.isNull() set x=lnbil1(SEQ).pe03 do BLRCAL(x,DARCOVR)
+	if 'lnbil1(SEQ).pe04.isNull() set x=lnbil1(SEQ).pe04 do BLRCAL(x,DARCOVR)
+	if 'lnbil1(SEQ).pe05.isNull() set x=lnbil1(SEQ).pe05 do BLRCAL(x,DARCOVR)
+	if 'lnbil1(SEQ).pe06.isNull() set x=lnbil1(SEQ).pe06 do BLRCAL(x,DARCOVR)
+	if 'lnbil1(SEQ).pe07.isNull() set x=lnbil1(SEQ).pe07 do BLRCAL(x,DARCOVR)
+	if 'lnbil1(SEQ).pe08.isNull() set x=lnbil1(SEQ).pe08 do BLRCAL(x,DARCOVR)
+	if 'lnbil1(SEQ).pe09.isNull() set x=lnbil1(SEQ).pe09 do BLRCAL(x,DARCOVR)
+	if 'lnbil1(SEQ).pe10.isNull() set x=lnbil1(SEQ).pe10 do BLRCAL(x,DARCOVR)
+	if 'lnbil1(SEQ).pe11.isNull() set x=lnbil1(SEQ).pe11 do BLRCAL(x,DARCOVR)
+	if 'lnbil1(SEQ).pe12.isNull() set x=lnbil1(SEQ).pe12 do BLRCAL(x,DARCOVR)
+	if 'lnbil1(SEQ).pe13.isNull() set x=lnbil1(SEQ).pe13 do BLRCAL(x,DARCOVR)
+	if 'lnbil1(SEQ).pe14.isNull() set x=lnbil1(SEQ).pe14 do BLRCAL(x,DARCOVR)
+	if 'lnbil1(SEQ).pe15.isNull() set x=lnbil1(SEQ).pe15 do BLRCAL(x,DARCOVR)
+	if 'lnbil1(SEQ).pe16.isNull() set x=lnbil1(SEQ).pe16 do BLRCAL(x,DARCOVR)
+	if 'lnbil1(SEQ).pe17.isNull() set x=lnbil1(SEQ).pe17 do BLRCAL(x,DARCOVR)
+	if 'lnbil1(SEQ).pe18.isNull() set x=lnbil1(SEQ).pe18 do BLRCAL(x,DARCOVR)
+	if 'lnbil1(SEQ).pe19.isNull() set x=lnbil1(SEQ).pe19 do BLRCAL(x,DARCOVR)
+	if 'lnbil1(SEQ).pe20.isNull() set x=lnbil1(SEQ).pe20 do BLRCAL(x,DARCOVR)
+	quit
+
+BLRCALSB(RecordLNBIL5 lnbil5())
+
+	// Fees due not in the bill record.
+	set FEE=""
+	for  set FEE=$O(billlist(CID,SEQ,1,FEE)) quit:FEE=""  do {
+
+		// Reclassification not allowed on fee plan
+		if '$D(DARCFEE(FEE)) quit	
+		set AMTD=lnbil5(billlist(CID,SEQ,1,FEE)).brfamt
+		quit:'AMTD
+		set FRAMT=(AMTD*RBLFPCT(AC))
+
+		// Billed fees - Multiply by billed fee percentage
+		set DBLFC(AC)=DBLFC(AC)+FRAMT
+
+		// Update used for fee breakdown DAYENDDARCBF
+		set DARCFEE(FEE)=DARCFEE(FEE)+FRAMT
+		}	
+	quit
+	
+BLDEL(SEQ,bil1cdpd)	// Find Bill Delinquency and return class
+	
+	new CDPD,DARC,PYMTS
+	set (AC,DARC)=""
+	for  set AC=$O(BLDEL(AC),-1) quit:AC=""  quit:DARC  do {
+		if BLDEL(AC)="" quit
+		// Bill asset class is determined by number of payments delinquent
+		if BLDEL(AC)["P" do { quit
+			set PYMTS=$E(BLDEL(AC),1,$L(BLDEL(AC))-1)
+			new BL
+			if $$DIFFBL^LNUBIL1(SEQ,LDUESEQ)'<PYMTS set DARC=AC
+			}
+		// Bill asset class is determined by number of days or months delinquent
+		else  do { quit
+			set CDPD=bil1cdpd	// Date Payment Due
+			if %SystemDate>$$EXT^UMDT(BLDEL(AC),CDPD) set DARC=AC
+			}
+		}
+	quit DARC
+	
+LNRC(RecordLN ln,RecordDAYENDDARCB darcb)
+
+	/*
+	Find Loan Reclassification - Loop backwards through LNDEL(asset class)
+	array to see if the loan either meets the reclassification parameters.
+	*/
+
+	new AC,DARC,PYMTS,SUS,TAG
+	
+	if DARCOVR do LNRCAL(DARCOVR,.ln,.darcb) quit  // Use override class
+	
+	// Account is current and customer variables has an expiration period
+	if DIST1ND'<%SystemDate do EXPPER(.ln,.darcb) quit
+	
+	if LDUESEQ=0 do EXPPER(.ln,.darcb) quit
+	
+	if DARCDEL=3,'MBLSEQ do EXPPER(.ln,.darcb) quit
+	
+	// Account is delinquent find delinquency asset reclassification
+	set (AC,DARC)=""
+	for  set AC=$O(LNDEL(AC),-1) quit:AC=""  quit:DARC  do {
+		if LNDEL(AC).isNull() quit
+		// Asset class is determined by a QUERY
+		if LNDEL(AC)="Q" do { quit
+			set TAG="raclsL"_AC
+			if $$@TAG^LNRCMP1(.ln) set DARC=AC
+			}
+		
+		// Asset class is determined by number of payments delinquent
+		else  if LNDEL(AC)["P" do { quit
+			set PYMTS=$E(LNDEL(AC),1,$L(LNDEL(AC))-1)
+			new BL
+			if $$DIFFBL^LNUBIL1($S(DARCDEL=3:MBLSEQ,2:OSEQ,1:DSEQ),LDUESEQ)'<PYMTS set DARC=AC
+			}
+		/*
+		Asset class is determined by number of months or days 
+		delinquent. Delinquency date is determined by [CUVAR]DARCDEL
+		*/
+		else  if %SystemDate>$$EXT^UMDT(LNDEL(AC),$S(DARCDEL=3:MBLSEQDT,2:OSEQDT,1:DIST1ND)) set DARC=AC
+		}
+	
+	/*
+	If the account is delinquent and an expiration date exist on the
+	account, this means the account was once current.  The account remains
+	in the asset classification assigned to the account.  If the new 
+	delinquency class is less than the delinquency class assigned 
+	to the loan while it is in the expiratio period, the higher 
+	delinquency class (worst) will be assigned.  If the delinquency 
+	determination flag is on in customer variables, the account 
+	remains in the asset calssification assigned to the account when 
+	the delinquency class was first assiged.  However, an account can 
+	be moved to a more servere delinquency class.
+	*/
+
+	if ('DARCEXPD.isNull()!DARCDFLG),(DARC < DARCLS) set DARC=DARCLS
+		
+	do ln.setAuditFlag(1)
+
+	if 'DARC.isNull() do LNRCAL(DARC,.ln,.darcb)
+	
+	if ln.darcls'=DARC set ln.darcls=DARC
+	if 'ln.suspect.isNull() set ln.suspect=""
+	if 'ln.darcexpd.isNull() set ln.darcexpd=""
+	
+	quit
+	
+	
+LNRCAL(Number AC,RecordLN ln,RecordDAYENDDARCB darcb)	
+
+	// Calculate Loan Reclassification 
+
+	type public Number CID, RFEEPCT(), RFPRPCT(), RINTPCT(), RLCHGPCT()
+	type public String FFCAL(), FICAL(), FLCAL(), FPCAL(), RM
+
+	type Number AMTD
+	
+	// Future principal calculation
+	if FPCAL(AC).data() do {
+		set AMTD=""
+		
+		// Execute principal extrinsic or DATA-QWIK expression
+		#accept pgm=spier;date=12/8/03
+		xecute FPCAL(AC)	
+		quit:'AMTD 
+		
+		// Multiply future principal by future principal percentage
+		set AMTD=$$^SCARND(AMTD*RFPRPCT(AC),,CID)
+		set darcb.dprin=AMTD
+		
+		/*
+		If computed balance is less than calculated amount, then
+		more principal than what is on the loan is being reclassified.
+		*/
+		// Reclassified principal is greater than computed balance
+		if ln.balcmp<AMTD set RM=$$^MSG(841) do EXC
+		}
+	
+	// Current interest calculation
+	if FICAL(AC).data() do {
+		set AMTD=""
+	
+		// Execute interest extrinsic or DATA-QWIK expression
+		if FICAL(AC)["INTBLS",FICAL(AC)'[".ln" set FICAL(AC)=FICAL(AC).piece("(",1)_"(.ln,"_FICAL(AC).piece("(",2,30)
+		#accept pgm=spier;date=12/8/03
+		xecute FICAL(AC) 
+		quit:'AMTD
+		
+		// Multiply current interest by interest percentage
+		set AMTD=$$^SCARND(AMTD*RINTPCT(AC),,CID)
+		set darcb.dint=AMTD
+ 	
+		/*
+		If accrual is less than calculated amount, then more future 
+		interest than what is on the loan is being reclassified.
+		*/
+		// Reclassified int/div is greater than accrued int/div
+		if $$^SCARND(ln.acr,,CID)<AMTD set RM=$$^MSG(842) do EXC
+		}
+	
+	// Current Fee Calculation
+	if FFCAL(AC).data() do {
+		set AMTD=""
+	
+		// Execute fee extrinsic or DATA-QWIK expression
+		#accept pgm=spier;date=12/8/03
+		xecute FFCAL(AC)
+		quit:'AMTD
+	
+		// Multiply current fees by fee percentage
+		set AMTD=$$^SCARND(AMTD*RFEEPCT(AC),,CID) 
+		set darcb.dfee=AMTD
+	
+		/*
+		If misc fees outstanding not due is less than calculate amount
+		then more fees than what is on the loan is being reclassified.
+		*/
+		// Reclassified fees are greater than miscellaneous fees
+		if ln.mcnd<AMTD set RM=$$^MSG(843) do EXC
+		}
+
+	// Late Charge Calculation
+	if FLCAL(AC).data() do {
+		set AMTD=""
+	
+		// Execute fee extrinsic or DATA-QWIK expression
+		#accept pgm=spier;date=12/8/03
+		xecute FLCAL(AC)
+		quit:'AMTD
+	
+		// Multiply current fees by fee percentage
+		set AMTD=$$^SCARND(AMTD*RLCHGPCT(AC),,CID) 
+		set darcb.dlchg=AMTD
+	
+		/*
+		If misc fees outstanding not due is less than calculate amount
+		then more fees than what is on the loan is being reclassified.
+		*/
+		// Reclassified late charge is greater than late charge
+		if ln.lchg<AMTD set RM=$$^MSG(844) do EXC
+		}
+	quit
+	
+	
+EXPPER(RecordLN ln,RecordDAYENDDARCB darcb)	// Current Loans in Expiration Period
+	
+	type public Date DARCEXPD
+	type public String DARCEXP(), LNDEL()
+	
+	type Number DARCLS
+	
+	set DARCLS=ln.darcls
+	
+	if DARCLS.isNull() quit
+	
+	do ln.setAuditFlag(1)
+
+	// Account just became current. Put in expiration waiting period if an
+	// expiration period exist for the current class.
+	if DARCEXPD.isNull(),DARCEXP(DARCLS).get() do { quit
+		
+		do LNRCAL(DARCLS,.ln,.darcb)
+		
+		set DARCEXPD=$$EXT^UMDT(DARCEXP(DARCLS),%SystemDate)
+		
+		if ln.darcexpd'=DARCEXPD set ln.darcexpd=DARCEXPD
+		if ln.suspect'=3 set ln.suspect=3
+		}
+
+	// Account remains in expiration period at same risk class.
+	if DARCEXPD>%SystemDate do LNRCAL(DARCLS,.ln,.darcb) quit
+	
+	// Account has been current for the expiration period
+	if DARCEXPD'>%SystemDate do { quit
+	
+		for  set DARCLS=LNDEL(DARCLS).order(-1) quit:DARCEXP(DARCLS).get()  quit:'DARCLS
+     	
+		// Account is no longer a risk.
+		if DARCLS.isNull() do {
+			
+			if 'ln.darcls.isNull() set ln.darcls=""
+			if 'ln.suspect.isNull() set ln.suspect=""
+			if 'ln.darcexpd.isNull() set ln.darcexpd=""
+			}
+
+		// Account will be placed in lesser risk class and expiration
+		// waiting period is recalculated from today's date
+		else  do {
+			
+			do LNRCAL(DARCLS,.ln,.darcb)
+			
+			set DARCEXPD=$$EXT^UMDT(DARCEXP(DARCLS),%SystemDate)
+			
+			if ln.darcls'=DARCLS set ln.darcls=DARCLS
+			if ln.suspect'=3 set ln.suspect=3
+			if ln.darcexpd'=DARCEXPD set ln.darcexpd=DARCEXPD
+			}
+		}
+	quit
+	 
+	
+FEELVL(RecordDAYENDDARCBF darcbf)	// Create short name for fee level DAYENDDARCB
+	
+	type public Number DARCFEE()
+
+	type Number X = 0
+	type String FEETYP = ""
+	
+	for  set FEETYP = DARCFEE(FEETYP).order() quit:FEETYP.isNull()  do {
+
+		if DARCFEE(FEETYP).isNull() quit
+		
+		set X = X + 1
+		
+		if X=1 set darcbf.feetyp1=FEETYP,darcbf.feeamt1=DARCFEE(FEETYP) quit
+		if X=2 set darcbf.feetyp2=FEETYP,darcbf.feeamt2=DARCFEE(FEETYP) quit
+		if X=3 set darcbf.feetyp3=FEETYP,darcbf.feeamt3=DARCFEE(FEETYP) quit
+		if X=4 set darcbf.feetyp4=FEETYP,darcbf.feeamt4=DARCFEE(FEETYP) quit
+		if X=5 set darcbf.feetyp5=FEETYP,darcbf.feeamt5=DARCFEE(FEETYP) quit
+		if X=6 set darcbf.feetyp6=FEETYP,darcbf.feeamt6=DARCFEE(FEETYP) quit
+		if X=7 set darcbf.feetyp7=FEETYP,darcbf.feeamt7=DARCFEE(FEETYP) quit
+		if X=8 set darcbf.feetyp8=FEETYP,darcbf.feeamt8=DARCFEE(FEETYP) quit
+		if X=9 set darcbf.feetyp9=FEETYP,darcbf.feeamt9=DARCFEE(FEETYP) quit
+		if X=10 set darcbf.feetyp10=FEETYP,darcbf.feeamt10=DARCFEE(FEETYP) quit
+		if X=11 set darcbf.feetyp11=FEETYP,darcbf.feeamt11=DARCFEE(FEETYP) quit
+		if X=12 set darcbf.feetyp12=FEETYP,darcbf.feeamt12=DARCFEE(FEETYP) quit
+		if X=13 set darcbf.feetyp13=FEETYP,darcbf.feeamt13=DARCFEE(FEETYP) quit
+		if X=14 set darcbf.feetyp14=FEETYP,darcbf.feeamt14=DARCFEE(FEETYP) quit
+		if X=15 set darcbf.feetyp15=FEETYP,darcbf.feeamt15=DARCFEE(FEETYP) quit
+		if X=16 set darcbf.feetyp16=FEETYP,darcbf.feeamt16=DARCFEE(FEETYP) quit
+		if X=17 set darcbf.feetyp17=FEETYP,darcbf.feeamt17=DARCFEE(FEETYP) quit
+		if X=18 set darcbf.feetyp18=FEETYP,darcbf.feeamt18=DARCFEE(FEETYP) quit
+		if X=19 set darcbf.feetyp19=FEETYP,darcbf.feeamt19=DARCFEE(FEETYP) quit
+		if X=20 set darcbf.feetyp20=FEETYP,darcbf.feeamt20=DARCFEE(FEETYP) quit
+		if X=21 set darcbf.feetyp21=FEETYP,darcbf.feeamt21=DARCFEE(FEETYP) quit
+		if X=22 set darcbf.feetyp22=FEETYP,darcbf.feeamt22=DARCFEE(FEETYP) quit
+		if X=23 set darcbf.feetyp23=FEETYP,darcbf.feeamt23=DARCFEE(FEETYP) quit
+		if X=24 set darcbf.feetyp24=FEETYP,darcbf.feeamt24=DARCFEE(FEETYP) quit
+		if X=25 set darcbf.feetyp25=FEETYP,darcbf.feeamt25=DARCFEE(FEETYP) quit
+		if X=26 set darcbf.feetyp26=FEETYP,darcbf.feeamt26=DARCFEE(FEETYP) quit
+		if X=27 set darcbf.feetyp27=FEETYP,darcbf.feeamt27=DARCFEE(FEETYP) quit
+		if X=28 set darcbf.feetyp28=FEETYP,darcbf.feeamt28=DARCFEE(FEETYP) quit
+		if X=29 set darcbf.feetyp29=FEETYP,darcbf.feeamt29=DARCFEE(FEETYP) quit
+		if X=30 set darcbf.feetyp30=FEETYP,darcbf.feeamt30=DARCFEE(FEETYP) quit
+		if X=31 set darcbf.feetyp31=FEETYP,darcbf.feeamt31=DARCFEE(FEETYP) quit
+		if X=32 set darcbf.feetyp32=FEETYP,darcbf.feeamt32=DARCFEE(FEETYP) quit
+		if X=33 set darcbf.feetyp33=FEETYP,darcbf.feeamt33=DARCFEE(FEETYP) quit
+		if X=34 set darcbf.feetyp34=FEETYP,darcbf.feeamt34=DARCFEE(FEETYP) quit
+		if X=35 set darcbf.feetyp35=FEETYP,darcbf.feeamt35=DARCFEE(FEETYP) quit
+		if X=36 set darcbf.feetyp36=FEETYP,darcbf.feeamt36=DARCFEE(FEETYP) quit
+		if X=37 set darcbf.feetyp37=FEETYP,darcbf.feeamt37=DARCFEE(FEETYP) quit
+		if X=38 set darcbf.feetyp38=FEETYP,darcbf.feeamt38=DARCFEE(FEETYP) quit
+		if X=39 set darcbf.feetyp39=FEETYP,darcbf.feeamt39=DARCFEE(FEETYP) quit
+		if X=40 set darcbf.feetyp40=FEETYP,darcbf.feeamt40=DARCFEE(FEETYP) quit
+		}
+		
+	// Do not file the record which has no data, except for primary keys
+	if 'darcbf.feetyp1.isNull() do darcbf.save()
+		
+	quit
+	
+FILE(RecordLN ln,RecordDAYENDDARCB darcb)
+
+	// File data into DAYENDARCB for posting/reports. File changed LN fields.
+
+	do ln.save()
+	
+	// Prevent filing "empty" DAYENDDARCB record
+	type Boolean DTFLG = 0
+	
+	do { quit:'DTFLG
+		
+		if 'darcb.dblpc1.isNull() set DTFLG = 1 quit
+		if 'darcb.dblpc2.isNull() set DTFLG = 1 quit
+		if 'darcb.dblpc3.isNull() set DTFLG = 1 quit
+		if 'darcb.dblpc4.isNull() set DTFLG = 1 quit
+		if 'darcb.dblpc5.isNull() set DTFLG = 1 quit
+		if 'darcb.dblic1.isNull() set DTFLG = 1 quit
+		if 'darcb.dblic2.isNull() set DTFLG = 1 quit
+		if 'darcb.dblic3.isNull() set DTFLG = 1 quit
+		if 'darcb.dblic4.isNull() set DTFLG = 1 quit
+		if 'darcb.dblic5.isNull() set DTFLG = 1 quit
+		if 'darcb.dblfc1.isNull() set DTFLG = 1 quit
+		if 'darcb.dblfc2.isNull() set DTFLG = 1 quit
+		if 'darcb.dblfc3.isNull() set DTFLG = 1 quit
+		if 'darcb.dblfc4.isNull() set DTFLG = 1 quit
+		if 'darcb.dblfc5.isNull() set DTFLG = 1 quit
+		if 'darcb.dprin.isNull() set DTFLG = 1 quit
+		if 'darcb.dint.isNull() set DTFLG = 1 quit
+		if 'darcb.dfee.isNull() set DTFLG = 1 quit
+		if 'darcb.dlchg.isNull() set DTFLG = 1 quit
+		}
+	
+	set darcb.timestmp = %CurrentDate	// Date and Time reclassified
+	set darcb.uid = %UserID
+	
+	// Loan asset class used for calculation - DARCOVR or DARCLS
+	set darcb.darcls = ln.darcls
+	set darcb.darcovr = ln.darcovr
+	set darcb.suspect = ln.suspect
+
+	do darcb.save()
+
+	quit
+	
+	
+EXC	// Log error to DAYEND	
+	
+	type public Number %ZTSEQ, CID
+	type public String DESC, RM
+
+	set RM = RM.get()
+	
+	do LOG^UTLEXC($T(+0),"*",DESC,CID.get(),%ZTSEQ.get(),RM)
+	
+	kill RM,%ZTSEQ
+	
+	quit
+	
+	
+FUTPR()	// Calculate Future Principal to be reclassified
+	
+	type public Number CID, LNSUSTP
+	
+	type RecordLN ln = Db.getRecord("LN", "CID = :CID")
+	
+	type Number COMVAL,FUTPRL,TOTDUE,TOTOBL
+	
+	set FUTPRL = 0
+	
+	set TOTDUE = ln.cupr + ln.unpr + ln.cuin + ln.unin
+
+	set TOTOBL = ln.balcmp + ln.cuin + ln.unin
+		
+	set COMVAL = TOTOBL * LNSUSTP
+	  
+	if (TOTDUE > COMVAL) set FUTPRL = ln.balcmp - ln.cupr - ln.unpr
+	
+	quit FUTPRL
+	
+	
+FUTFEE()	// Calculate Current Fees to be reclassified 
+	
+	type public Number CID, DARCFEE()
+
+	type Number FUTFEE, MCND(), TFRAMT
+	type String FEETYP
+
+	type RecordLN ln = Db.getRecord("LN", "CID = :CID")
+	
+	// Calculate Misc charges outstanding, not due
+	set TFRAMT = $$MCND^LNCO3("11",.ln,CID)		// CTL 11 Returns MCND(FEETYP)
+	
+	set FUTFEE = 0
+	set FEETYP = ""
+	
+	for  set FEETYP = MCND(FEETYP).order() quit:FEETYP.isNull()  do {
+		
+		if 'DARCFEE(FEETYP).data() quit
+		
+		set FUTFEE = FUTFEE + MCND(FEETYP)
+		
+		set DARCFEE(FEETYP) = DARCFEE(FEETYP) + MCND(FEETYP)
+		}
+		
+	quit FUTFEE
+	
+	
+CURPR()	// Calculate Current Loans
+	
+	type public Number LNSUSTP
+
+	type Number ACN,CID,COMVAL,DARCLS,TOTDUE,TOTOBL
+	
+	type ResultSet acnrs = Db.select("ACN","DAYENDDARCB","NPDT=:%SystemDate")
+	
+	while acnrs.next() do {
+		
+		type Number SUS()
+		
+		set ACN = acnrs.getCol("ACN")
+
+		set (DARCLS,TOTDUE,TOTOBL) = 0
+
+		type ResultSet cidrs = Db.select("CID","RELCIF","ACN=:ACN")
+		
+		while cidrs.next() do {
+			
+			set CID = cidrs.getCol("CID")
+			
+			type RecordLN ln = Db.getRecord("LN", "CID = :CID", 1)
+			
+			if 'ln.getMode() quit		// Not a loan account
+			
+			do CUPRCAL(.ln)
+			
+			if Db.isDefined("DAYENDDARCB","NPDT=:%SystemDate,ACN=:ACN,CID=:CID") quit
+			
+			if ln.balcmp set SUS(CID) = ln.balcmp
+			}
+		
+		set COMVAL = TOTOBL * LNSUSTP
+		
+		if (TOTDUE > COMVAL) do CURSUS(ACN,DARCLS,.SUS())
+		}
+	quit
+	
+	
+CUPRCAL(RecordLN ln1)	// Calculate Current Loans
+	
+	type public Number DARCLS, TOTDUE, TOTOBL
+
+	set TOTDUE = TOTDUE + ln1.cupr + ln1.unpr + ln1.cuin + ln1.unin
+
+	set TOTOBL = TOTOBL + ln1.balcmp + ln1.cuin + ln1.unin
+	 
+	if (ln1.darcls > DARCLS) set DARCLS = ln1.darcls
+	
+	quit
+	
+	
+CURSUS(Number ACN,		// Customer Number
+    Number DARCLS,		// Asset Class
+     Number SUS())		// Computed balances array
+	
+	// Update LN and create DAYENDDARCB records
+
+	type Number CID = 0
+
+	for  set CID = SUS(CID).order() quit:CID.isNull()  do {
+		
+		type RecordDAYENDDARCB darcb = Db.getRecord("DAYENDDARCB", "NPDT=:%SystemDate,ACN=:ACN,CID=:CID", 1)
+		
+		set darcb.dprin = SUS(CID)	// Reclassify Principal into BALCMP
+		
+		type RecordLN ln = Db.getRecord("LN", "CID = :CID")
+
+		do ln.setAuditFlag(1)
+
+		if (ln.darcls '= DARCLS) set ln.darcls = DARCLS
+		
+		if (ln.suspect '= 2) set ln.suspect = 2
+		
+		do FILE(.ln,.darcb)
+		}
+	quit
+	
+
+RERUNDR	// Called by function @LNDARCR for reclassification regeneration 
+	
+	type public Number %EXT, ER
+	type public String %READ, %TAB, VFMQ
+
+	type Date NPDT
+	
+	set %TAB("NPDT") = ".SCHND2/XPP=D POSNPDT^BCHDARC(X)"
+	
+	set %READ = "@@%FN,,NPDT/REQ"
+	
+	do ^UTLREAD
+	
+	if (ER ! ("Q"[VFMQ)) quit
+	
+	do RERUN^BCHDARC(NPDT)
+	
+	quit
+	
+	
+POSNPDT(Date DATE)	// Post processor for Next Posting Date prompt
+	/*
+	If TGL has been posted, bring up menu bar to continue
+        Only Inquiry of Posting Date less than system date allowed.
+        Creation, Modification, Deletion and Regeneration all must
+        be for a posting date that is equal to or greater than
+        than today's date.
+	*/
+        
+	type Public Number %OSAVE, ER
+	type Public String MSG
+
+	// Date must be today or future
+        if (%OSAVE.get() '= 2),(DATE < %SystemDate) do Runtime.setErrMSG("DAYENDDARC",6047) quit
+        
+	type RecordTGL1 tgl1 = Db.getRecord("TGL1", "TDT = :DATE, SRC = 7", 1)
+	
+	// Check Processing Complete Flag
+	if (tgl1.prcmp '= "*") quit
+        
+	// General Ledger is posted" " Continue?
+        set MSG = $$^MSG(730)_" "_$$^MSG(603)
+
+	 // Menu bar. Yes No Quit
+        if ($$^DBSMBAR(1) '= 1) set ER = 1
+
+        quit
+        
+	
+INTBLS(Number CID,
+    Number DPYMTS,
+    Number ADJACR,
+      RecordLN ln)
+
+	/*
+	Billed interest to be reclassified based on number of outstanding 
+	payments not to be included and the starting outstanding bill 
+	to be included.
+	
+	 ARGUMENTS:
+	
+	       . CID   Account Number		/TYPE=N/REQ/MECH=VAL
+	               Profile/IBS Account Number
+	
+	       . DPYMTS				/TYP=N/NOREQ/MECH=VAL
+	               The number of delinquent bill payments
+	               that should not be included when determining 
+	               billed interest to be reclassified.
+	       
+	       . ADJACR  Adjusted Accrual Calc- (ADD-ON/DISCOUNT)
+	       
+	       . ln	Loan Account Record
+	
+	 RETURNS:	AMTD
+			Billed interest amount to be reclassified.
+	*/
+
+	type Number ACR,AM,AMTD,BLCNT,DARCLS,DRBL,DUE,ER,IAM,LDUESEQ,OSEQ,SEQ,STOP
+	type Number billlist(,,,)
+	type String ELE,x
+	
+	do ln.setAuditFlag()
+	
+	if ADJACR.get() set ACR = $$ADJACR3^LNCDI(CID,%SystemDate)	
+	else  set ACR = ln.acr		// Accrued Interest
+		
+	set IAM = ln.iam		// Interest Amortization Method
+	set OSEQ = ln.oseq		// Internal Bill Oldest Unsatisfied Seq Nbr
+	set DRBL = ln.drbl		// Delinquency Reclassifiation Bill
+	set DARCLS = ln.darcls		// Current Delinquency Reclassification
+	
+	if DARCLS.isNull() set DRBL = ""	// Account has gone current
+	
+	type RecordLNBIL1 lnbil1()
+	type RecordLNBIL5 lnbil5()
+	
+	// Get bill records
+	do LOADBIL(.lnbil1(),.lnbil5(),1)
+	
+	if 'DUE.exists() quit ACR
+
+	/*
+	If the oldest outstanding bill record sequence is not less than the
+	bill sequence for reclassification, the entire accrual amount is
+	in suspense.
+	*/
+	if DRBL,(billlist(CID,SEQ).order() '< DRBL) quit ACR
+	
+	if IAM do IAM(.ln,.lnbil1())
+	
+	/*
+	Loop bill records and add interest amounts from the bill records
+	that are NOT greater than DPYMTS.  Subtract interest not to be
+        reclassified from current adjusted accrual to get interest in
+	suspense.
+	*/
+	set (AMTD,BLCNT,SEQ) = 0
+	
+	// Set stopping point
+	if DRBL.isNull() do {
+		
+		set STOP = OSEQ + DPYMTS.get()
+		set DRBL = STOP
+		set ln.drbl = DRBL 
+		}
+	else  set STOP = DRBL
+	
+	for  set SEQ = billlist(CID,SEQ).order() quit:SEQ.isNull()  quit:SEQ'<STOP  do {
+			if lnbil1(SEQ).pe01'="" set x=lnbil1(SEQ).pe01 do CALCAMTD(x) 
+			if lnbil1(SEQ).pe02'="" set x=lnbil1(SEQ).pe02 do CALCAMTD(x) 
+			if lnbil1(SEQ).pe03'="" set x=lnbil1(SEQ).pe03 do CALCAMTD(x) 
+			if lnbil1(SEQ).pe04'="" set x=lnbil1(SEQ).pe04 do CALCAMTD(x) 
+			if lnbil1(SEQ).pe05'="" set x=lnbil1(SEQ).pe05 do CALCAMTD(x) 
+			if lnbil1(SEQ).pe06'="" set x=lnbil1(SEQ).pe06 do CALCAMTD(x) 
+			if lnbil1(SEQ).pe07'="" set x=lnbil1(SEQ).pe07 do CALCAMTD(x) 
+			if lnbil1(SEQ).pe08'="" set x=lnbil1(SEQ).pe08 do CALCAMTD(x) 
+			if lnbil1(SEQ).pe09'="" set x=lnbil1(SEQ).pe09 do CALCAMTD(x) 
+			if lnbil1(SEQ).pe10'="" set x=lnbil1(SEQ).pe10 do CALCAMTD(x) 
+			if lnbil1(SEQ).pe11'="" set x=lnbil1(SEQ).pe11 do CALCAMTD(x) 
+			if lnbil1(SEQ).pe12'="" set x=lnbil1(SEQ).pe12 do CALCAMTD(x) 
+			if lnbil1(SEQ).pe13'="" set x=lnbil1(SEQ).pe13 do CALCAMTD(x) 
+			if lnbil1(SEQ).pe14'="" set x=lnbil1(SEQ).pe14 do CALCAMTD(x) 
+			if lnbil1(SEQ).pe15'="" set x=lnbil1(SEQ).pe15 do CALCAMTD(x) 
+			if lnbil1(SEQ).pe16'="" set x=lnbil1(SEQ).pe16 do CALCAMTD(x) 
+			if lnbil1(SEQ).pe17'="" set x=lnbil1(SEQ).pe17 do CALCAMTD(x) 
+			if lnbil1(SEQ).pe18'="" set x=lnbil1(SEQ).pe18 do CALCAMTD(x) 
+			if lnbil1(SEQ).pe19'="" set x=lnbil1(SEQ).pe19 do CALCAMTD(x) 
+			if lnbil1(SEQ).pe20'="" set x=lnbil1(SEQ).pe20 do CALCAMTD(x)
+		}
+	
+	quit (ACR - AMTD)
+
+CALCAMTD(X)	// Calculate Amount due
+
+	type public Number AMTD, CID, IAM, SEQ
+	type public String AM(), ELE
+
+	set ELE = X.piece("#",1)
+	
+	if (ELE '= "I") quit
+	
+	if IAM set AMTD = AMTD + $$^SCARND(AM(SEQ).get().piece("|",3),0,CID)
+	
+	else  set AMTD = AMTD + X.piece("#",4)
+	
+	quit
+	
+	 
+IAM(RecordLN ln,RecordLNBIL1 lnbil1())	// Calculate earned interest for add-on/discount loans
+	
+	type public Number CID, billlist(,,,)
+	type public String AM()
+
+	type Number %AMT,DPYMT,N,PYMT
+
+	set N=0
+	for  set N = billlist(CID,N).order() quit:N.isNull()  do {
+		
+		set PYMT=lnbil1(N).cpib
+		
+		set DPYMT=lnbil1(N).cpid
+		
+		if PYMT set AM(N)=PYMT_"|"_$S(PYMT-DPYMT:DPYMT,1:PYMT)
+		}
+
+	// Returns interest applied for each bill record in $P(AM(SEQ),"|",3)
+	do TP^LNAMOAO1(.ln,0,0,ln.cntcr,0)
+	
+	quit
+
+CUVARINI
+
+	type public Boolean DARCDFLG, RERUN
+	type public Date DARCNPDT, DARCLPDT, NPDT
+	type public Number DARCDEL, DARCOFF, LNSUSTP
+	type public String DARCFREQ
+
+	type RecordCUVAR cuvar = Db.getRecord("CUVAR")
+	
+	set DARCOFF = cuvar.darcoff
+	
+	if RERUN.get() set DARCNPDT = NPDT
+	else  set DARCNPDT = cuvar.darcnpdt
+	
+	set DARCFREQ = cuvar.darcfreq
+	set DARCLPDT = cuvar.darclpdt
+	set LNSUSTP = cuvar.lnsustp/100
+	set DARCDEL = cuvar.darcdel
+  	set DARCDFLG = cuvar.darcdflg
+  	
+	quit
+
+
+LOADBIL(RecordLNBIL1 lnbil1(),RecordLNBIL5 lnbil5(),Boolean LOADALL)
+
+	// Load all bill records from LN.OSEQ up to and including those bills
+	// which may have been created today.
+
+	type public Date MBLSEQDT
+	type public Number CID,DUE(),LDUESEQ,MBLDELQ,MBLSEQ,OSEQ,SEQ,billlist(,,,)
+
+	type Boolean DUEAMT
+        type Number bil5ptr
+        type String FEETYP
+        
+	set (bil5ptr,LDUESEQ,SEQ) = 0
+	set (MBLSEQ,MBLSEQDT) = ""
+
+	type ResultSet rs=Db.select("SCHSEQ,CDPD,CASD","LNBIL1","CID=:CID AND SCHSEQ>=:OSEQ")
+	if rs.isEmpty() quit 
+	while rs.next() do {
+
+		if 'LOADALL,(rs.getCol("CDPD") > %SystemDate) quit
+
+		set SEQ = rs.getCol("SCHSEQ")
+		set DUE(rs.getCol("CDPD")) = SEQ
+
+		if MBLSEQ.isNull(),(rs.getCol("CASD") > MBLDELQ) set MBLSEQ = SEQ
+		
+		set lnbil1(SEQ) = Db.getRecord("LNBIL1","CID = :CID, SCHSEQ = :SEQ")
+		
+                set billlist(CID,SEQ) = ""
+                
+		set LDUESEQ = SEQ
+		
+		// Load LNBIL5 sub-records
+		type ResultSet rs5 = Db.select("DUEAMT,FEETYP","LNBIL5","CID=:CID AND SCHSEQ=:SEQ")
+		while rs5.next() do {
+
+			set DUEAMT = rs5.getCol("DUEAMT")
+			set FEETYP = rs5.getCol("FEETYP")
+
+			set bil5ptr = bil5ptr + 1
+			
+			set lnbil5(bil5ptr) = Db.getRecord("LNBIL5","CID=:CID,SCHSEQ=:SEQ,DUEAMT=:DUEAMT,FEETYP=:FEETYP")
+
+			set billlist(CID,SEQ,DUEAMT,FEETYP) = bil5ptr
+			}
+        	}
+
+	set SEQ = billlist(CID,"").order(-1)
+	
+	quit
+	
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,NPDT,CID
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set NPDT=vRECORD.piece($C(9),1)
+ set CID=vRECORD.piece($C(9),2)
+ do vPROC(NPDT,CID)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,NPDT,CID
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>32767 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+24>32767 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+	type public Boolean RERUN
+	type public Date DARCNPDT
+	type public Number DARCOFF
+
+	do CUVARINI
+
+	// Do not execute in batch if Next Post Date minus offset days is not one 
+	// one less day than the current system date (BTTDRV already bumped it)
+	if 'RERUN.get(),(((DARCNPDT - DARCOFF) + 1) '= %SystemDate) set %BatchExit = 1 quit
+	
+	do Db.delete("DAYENDDARCB","NPDT=:DARCNPDT")
+
+	if 'RERUN.get() do CHECK
+
+
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("NPDT,CID","DAYENDDARC","DAYENDDARC.NPDT=:DARCNPDT")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	
+INITS	// Initialize Customer Variable reclassification fields for single account
+	
+	type public Number RBLIPCT(),RBLFPCT(),RBLPPCT(),RFEEPCT(),RFPRPCT(),RINTPCT()
+	type public Number RLCHGPCT()
+	type public String %FN,BLDEL(),DARCEXP(),DARCFEE(),DESC,FFCAL(),FICAL(),FLCAL()
+	type public String FPCAL(),LNDEL()
+
+	type Number I
+	type String AC, CLS, FEETYP
+
+	do CUVARINI
+
+	set %UserID="BATCH"		
+
+	type RecordSCATBL scatbl=Db.getRecord("SCATBL","FN=:%FN")
+	
+	set DESC=scatbl.desc
+	
+	for I=1:1:5 set BLDEL(I)="",LNDEL(I)=""
+		
+	// Loop through [UTBLACC] and define data items for reclassification
+	// for each asset class
+	set CLS = "L"
+	type ResultSet rs = Db.select("AC","UTBLACC","CLS=:CLS")
+	while rs.next() do {
+	
+		set AC = rs.getCol("AC")
+		
+		type RecordUTBLACC utblacc=Db.getRecord("UTBLACC","CLS=:CLS,AC=:AC")
+		
+		set DARCEXP(AC)=utblacc.darcexp		// Expiration Period
+		set RBLPPCT(AC)=utblacc.rblppct/100	// Bill Principal Percentage
+		set RBLIPCT(AC)=utblacc.rblipct/100	// Bill Interest Percentage
+		set RBLFPCT(AC)=utblacc.rblfpct/100	// Bill Fee Percentage
+		set RFPRPCT(AC)=utblacc.rfprpct/100	// Future Principal Percentage
+		set RINTPCT(AC)=utblacc.rintpct/100	// Interest Percentage
+		set RFEEPCT(AC)=utblacc.rfeepct/100	// Fee Percentage
+		set RLCHGPCT(AC)=utblacc.rlchgpct/100	// Late Charge Percentage
+
+		// Asset class bill delinquency by days, or months, or payments.
+		if 'utblacc.rbldy.isNull() set BLDEL(AC)=utblacc.rbldy_"D"
+		else  if 'utblacc.rbmth.isNull() set BLDEL(AC)=utblacc.rbmth_"M"
+		else  if 'utblacc.rbpay'="" set BLDEL(AC)=utblacc.rbpay_"P"
+
+		// Asset class loan delinquency by query, or days, or months, or payments.
+		if 'utblacc.rdprqry.isNull() set LNDEL(AC)="Q"
+		else  if 'utblacc.rddys.isNull() set LNDEL(AC)=utblacc.rddys_"D"
+		else  if 'utblacc.rdmths.isNull() set LNDEL(AC)=utblacc.rdmths_"M"
+		else  if 'utblacc.rdpymts.isNull() set LNDEL(AC)=utblacc.rdpymts_"P"
+
+		// Extrinsic function or Data QWIK expression used to 
+		// calculate future principal.
+		if 'utblacc.rfprext.isNull() do {
+			set FPCAL(AC)=utblacc.rfprext
+			if FPCAL(AC).extract(1,2)'="$$" set FPCAL(AC)="$$"_FPCAL(AC)
+			set FPCAL(AC)="S AMTD="_FPCAL(AC)
+			}
+		else  if 'utblacc.rfprdq.isNull() set FPCAL(AC)="S AMTD=$$dqpr"_AC_"^LNRCMP1(.ln)"
+		
+		// Extrinsic function or Data QWIK expression used to 
+		// calculate current interest.
+		if 'utblacc.rintext.isNull() do {
+			set FICAL(AC)=utblacc.rintext
+			if FICAL(AC).extract(1,2)'="$$" set FICAL(AC)="$$"_FICAL(AC)
+			set FICAL(AC)="S AMTD="_FICAL(AC)
+			}
+		else  if 'utblacc.rintdq.isNull() set FICAL(AC)="S AMTD=$$dqint"_AC_"^LNRCMP1(.ln)"
+		
+		//Extrinsic function or Data QWIK expression used to 
+		//calculate current fees.
+		if 'utblacc.rfeeext.isNull() do {
+			set FFCAL(AC)=utblacc.rfeeext
+			if FFCAL(AC).extract(1,2)'="$$" set FFCAL(AC)="$$"_FFCAL(AC)
+			set FFCAL(AC)="S AMTD="_FFCAL(AC)
+			}
+		else  if 'utblacc.rfeedq.isNull() set FFCAL(AC)="S AMTD=$$dqfee"_AC_"^LNRCMP1(.ln)"
+		
+		// Extrinsic function or Data QWIK expression used to 
+		// calculate current late charges.
+		if 'utblacc.rlchgext.isNull() do {
+			set FLCAL(AC)=utblacc.rlchgext
+			if FLCAL(AC).extract(1,2)'="$$" set FLCAL(AC)="$$"_FLCAL(AC)
+			set FLCAL(AC)="S AMTD="_FLCAL(AC)
+			}
+		else  if 'utblacc.rlchgdq.isNull() set FLCAL(AC)="S AMTD=$$dqlchg"_AC_"^LNRCMP1(.ln)"
+		}
+
+	// Identify loan fee plans that allow delinquency reclassification
+	type ResultSet rs1 = Db.select("FEETYP","LNFEEP","DARC=1")
+
+	while rs1.next() do {
+
+		set FEETYP = rs1.getCol("FEETYP")
+		
+		type RecordLNFEEP lnfeep = Db.getRecord("LNFEEP", "FEETYP = :FEETYP")
+		
+		set DARCFEE(FEETYP) = ""
+		}
+	quit
+
+CHECK
+
+	type ResultSet rs=Db.select("CID","DAYENDDARC","NPDT=:DARCNPDT")
+
+	// No records to process, we will not hit the code in SCHEXIT
+	// section that calls BUMP, but we still need to bump CUVAR dates
+ 	if rs.isEmpty() do BUMP
+
+	quit
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+	type public Boolean RERUN
+
+	if 'RERUN.get() do BUMP
+	
+	quit
+
+BUMP	// Bump Delinquency Dates in CUVAR
+
+	type public Date DARCNPDT
+	type public Number ER
+	type public String DARCFREQ
+	
+	type RecordCUVAR cuvar = Db.getRecord("CUVAR")
+	
+	set cuvar.darclpdt = DARCNPDT
+	set cuvar.darcnpdt = DARCNPDT.nextFreqDate(DARCFREQ) 
+	
+	if ER do EXC quit
+	
+	do cuvar.bypassSave()
+
+	// Suspect Calculation - Current Loans
+	if 'cuvar.lnsusext.isNull() do @cuvar.lnsusext
+	
+	quit
+	
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

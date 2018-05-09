@@ -1,0 +1,178 @@
+LNESTMT	
+	/*
+	   ORIG: ANJ - 02/24/95
+	   DESC: Int Esc Acct Disclosure Statement
+
+	---- Revision History -------------------------------------------------
+	02/09/06 - SWARNALP - 18338
+		   Procedure cleaned for DBI and corrected run time errors 
+		   while running REP510 function.
+		   
+	11/24/05 - Srinivar - 16890
+	           Modified the GEN section to move the condition
+	           quit:JD="" before the do statement in the for loop.
+
+	11/12/03 - CARROLLJ - 51630
+		   Modified call to ESCACT^BILFUNCS to pass the correct
+		   parameters.
+
+	04/12/02 - SHVACHKINAD/GRAY - 49794
+		   Converted to PSL.
+
+	*/
+        type Date DATE
+        type Number CID,CIDMAX,ELENUM,ES
+        type String ESC1,PMTTYP,X
+        type public String ESC,IO,%TAB(),%READ
+        type Boolean QUIT
+        type public Boolean ER,VFMQ
+        
+	set DATE=%SystemDate
+	set CID="ALL"
+	
+
+	set %TAB("IO")=$$IO^SCATAB($I)
+	set %TAB("DATE")=".DATE7"
+	set %TAB("CID")=".ACCOUNTS1/HLP=[LN]CID/TBL=[LN]CID/XPP=D EXT^DBSQRY"
+	set %READ="@@%FN,,,IO/REQ,DATE/REQ,CID/REQ"
+
+	do ^UTLREAD 
+	if VFMQ="Q" quit
+	do EXT^DBSQRYA
+	do ^DBSQRYA
+	do OPEN^SCAIO 
+	if ER quit  
+	use IO
+	
+	type ResultSet escstm
+	if CID="ALL" do {
+ 		set CID=-0.0001
+ 		set CIDMAX=10000000000000000000
+ 		set escstm=Db.select("CID","DAYENDESCSTM","TJD=:DATE AND CID>:CID AND CID NOT>:CIDMAX")
+ 		}
+ 	else  set escstm=Db.select("CID","DAYENDESCSTM","TJD=:DATE AND CID=:CID")
+	
+	if escstm.isEmpty() do CLOSE^SCAIO quit
+	while escstm.next() do { quit:ER
+		set CID=escstm.getCol(1)
+		type public String ESC
+		type RecordLN ln=Db.getRecord("LN","CID=:CID")
+		set QUIT=0
+		Type RecordLNBIL0 lnbil0=Db.getRecord("LNBIL0","CID=:CID",1)
+        	for ELENUM=1:1:20 do { quit:QUIT
+                	set X=$$ESCACT^BILFUNCS(.lnbil0,.ELENUM)
+			set PMTTYP=X.piece($C(9),2)
+			if PMTTYP.length()'>1 set QUIT=1 quit
+			set ES=X.piece($C(9),1)
+			if ES="" quit
+
+			type RecordDEP depesc=Db.getRecord("DEP","CID=:ES")
+			if depesc.stat=4 quit
+			set ESC1=PMTTYP
+			if ESC1["ESC" set ESC=ESC1
+			if 'ESC.isNull() do GEN(.ln,.depesc)
+			}
+		}
+
+	do CLOSE^SCAIO
+
+	quit
+
+GEN(RecordLN ln,RecordDEP depesc)	
+
+	type String DATA(),ET,LNEAM(),RID,SAVIO,X,%BLK,%NOCLOSE
+	type Date ASDT,AEDT,BEGBAL,DFP,JD
+	type Number CUSHA,INIDEP,LNPMT,LNPMTPI,SAVCID
+	type public String ESC,IO,PGM
+	type public Boolean ER
+	type public Date DATE
+	type public Number CID,ECID,ESCPMT
+
+	do Db.delete("LNEAM")
+	kill LNEAM,DATA
+
+	set DFP=ln.dfp
+
+	type RecordDAYENDESCSTM descstm=Db.getRecord("DAYENDESCSTM","TJD=:DATE,CID=:CID,ESC=:ESC",1)
+	if descstm.getMode()=0 quit
+
+	set ASDT=descstm.fd
+	set AEDT=descstm.td
+
+	do EXEC^LNEA(.ln,,CID,.LNEAM,ESC,ASDT,AEDT,"01",.DATA)
+	if '$D(LNEAM) quit
+	set BEGBAL=DATA.piece("|",3)
+	set INIDEP=DATA.piece("|",2)
+	set CUSHA=DATA.piece("|",7)
+	do Db.fastDelete("ESCINT")
+	set JD=""
+	for  set JD=LNEAM(JD).order() quit:JD=""  do { 
+
+		type RecordESCINT escint=Db.getRecord("ESCINT","CID=:CID,JD=:JD",1)
+
+		// ESC Payment
+		set escint.pmt=LNEAM(JD).piece("|",1)
+		// Remittance
+		set escint.remit=LNEAM(JD).piece("|",2)
+		// Running Balance
+		set escint.bal=LNEAM(JD).piece("|",3)
+		// Desc
+		set escint.desc=LNEAM(JD).piece("|",4)
+		do escint.bypassSave()
+		}
+
+	set %NOCLOSE=""
+	set SAVCID=CID
+	set SAVIO=IO
+
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+
+	set RID=cuvar.ieds
+
+	if RID="" set RID="SCA510"
+	set %BLK="/,"_IO_","_"Y"
+        do DRV^URID 
+
+	// Invalid report linkage <<RID>>
+	if PGM="" set ER=1,ET="INVLDRPT" do ^UTLERR quit
+
+	do Db.fastDelete("ESCINT")
+
+	set CID=SAVCID
+	set IO=SAVIO
+	set ln.ieasgf=2
+
+	set depesc.andt=ASDT
+
+	// Create entry in LNESTMT table to save projections for next analysis
+	set LNPMT=ln.pmt
+	set LNPMTPI=ln.pmtpi
+	
+	type RecordLNESTMT lnestmt=Db.getRecord("LNESTMT","ANDT=:ASDT,LCID=:CID",1)
+	set lnestmt.pmt=LNPMT
+	set lnestmt.pmtpi=LNPMTPI
+	set lnestmt.pmttrs=ESCPMT
+	set lnestmt.thrudt=AEDT
+	
+	do lnestmt.bypassSave()
+
+	type RecordLNESTMT2 lnestmt2=Db.getRecord("LNESTMT2","ANDT=:ASDT,LCID=:CID,ECID=:ECID",1)
+	set lnestmt2.inidep=INIDEP
+	set lnestmt2.begbal=BEGBAL
+	
+	do lnestmt2.bypassSave()
+	
+	set X="" 
+	for  set X=LNEAM(X).order() quit:X=""  do { 
+		type RecordLNESTMT3 lnestmt3=Db.getRecord("LNESTMT3","ANDT=:ASDT,LCID=:CID,ECID=:ECID,ACTJD=:X",1)
+		set lnestmt3.escpmt=X.piece("|",1)
+		set lnestmt3.remant=X.piece("|",2)
+		set lnestmt3.bal=X.piece("|",3)
+		set lnestmt3.desc=X.piece("|",4)
+		set lnestmt3.trtype=X.piece("|",5)
+		do lnestmt3.bypassSave()
+		}		
+
+	quit
+
+vSIG()	quit "60306^30446^P.R. Swarnalatha^4254"	// Signature - LTD^TIME^USER^SIZE

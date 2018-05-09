@@ -1,0 +1,607 @@
+Public PABOD
+	/*
+		ORIG:	Kathy Bradley (4646) - 12/06/88
+		Procedure ID: PABOD
+		DESC:	Loan Profitability Analysis Beginning of Day
+	
+	
+	  ---- Revision History ------------------------------------------------
+
+	02/13/06 - Carrie Baildon - CR16889
+		Made DAYS() a public function since this is called externally
+		from reports SCA287, SCA288 and SCA319.
+		
+		Made CMP a public function since this is called externally
+		from DEPCDI and LNCDI. Modified the call from CMP to rollback
+		database changes once the computed values have been set into
+		the expected return variables. The old M routine version of 
+		this procedure only computed the values and did not create a
+		PAA record. When this procedure was converted to PSL, it 
+		updated the database with the new PAA record. This should not
+		happen just because the computed column on the DEP or LN table
+		has been referenced.
+		
+		Made the top of the procedure a public function. The 7/15/02
+		change under ARQ 51349 brought in batch code so that this
+		procedure could replace the batch which had duplicate code.
+		Under this CR 16889, QUE037, which used to call into batch
+		BCHPABOD is also being modified to call this procedure from
+		the top.
+		
+		Restored public function SING to be called from LNBOD.
+		Previously this was removed and LNBOD was calling the top
+		of PABOD which would cause it to update all profitability
+		records on the last date. This is called from MRPC030 and
+		should only apply to a single account.
+		
+		Modified EXEC1 to use DEP.ANLTYP which replaced obsoleted
+		flag DEP.ANLSYS in determining whether the account is subject
+		to profitability analysis.
+		
+		General PSL clean-up including scoping variables, passing 
+		arguments, and replacing function calls with PSL methods
+		has been made throughout the code.
+
+	12/17/03 - CARROLLJ - CR7239
+		Modified call to CMP1 to pass correct parameters.
+
+	08/04/03 - CARROLLJ - 51629
+		Modified call to INIT^UAVB in EXEC1 section to remove the
+		second parameter that was passed.
+
+	07/15/02 - CARROLLJ - 51349
+		Moved batch code into procedure and did some PSL conversion
+		cleanup.
+
+	09/15/02 - YENDAPALLIS - 43583
+		PSL conversion clean up.	
+	
+	  ----------------------------------------------------------------------
+		
+	*/
+ 
+	type Public Cache %CUVAR
+	type Public String ER, ET
+	type Public Number CID
+	
+	type Date %JD, CPE, FINE, PPE, PYE
+	type Number DAYS, YDAYS
+	type String %DS
+ 
+	type RecordCUVAR cuvar = %CUVAR.getRecord("CUVAR") 
+	// Loan Profitability - Next Date
+	if cuvar.lpnd.isNull() quit
+	// Profitablility - Calc Offset
+	if cuvar.lpnd + cuvar.lpco + 1 '= %SystemDate quit
+ 
+	// Current period-end date
+	set CPE = Db.currVal("PAD")
+ 	// Current period-ending date not supported by profitability file
+	if cuvar.lpnd '= CPE set ET = "PACPED" do EXC("", ET, CID.get()), END(CPE) quit	
+
+	do INIT(.CPE, .PYE, .PPE, .DAYS, .YDAYS)
+	do CID(CPE, PYE, PPE, DAYS, YDAYS)	
+	
+	quit
+
+CID(Date CPE,		// Current period-end date	/MECH=VAL
+    Date PYE,		// Prior year-end date		/MECH=VAL
+    Date PPE,		// Prior period-end date	/MECH=VAL
+    Number DAYS,	// Days in current period	/MECH=VAL
+    Number YDAYS)	// Days in pd. since prior year	/MECH=VAL	
+
+	// Updates account profitability data for records with this date
+	
+	type Number CID
+	type RecordACN acn
+	type RecordPAA pcpe
+		
+	type ResultSet rs = Db.select("CID", "PAA", "EFD=:CPE")
+	if rs.isEmpty() do END(CPE) quit
+	while rs.next() do {
+		set CID = rs.getCol(1)
+		set acn = Db.getRecord("ACN", "CID=:CID")
+		if acn.stat = 4, acn.dtc < PPE quit
+		set pcpe = Db.getRecord("PAA", "EFD=:CPE,CID=:CID")
+		do EXEC(.acn, .pcpe, CID, CPE, PYE, PPE, DAYS, YDAYS)
+	}
+	do END(CPE)
+	quit
+	
+public SING 
+   
+	/*
+	 Single account for testing beginning of day - called from LNBOD
+	 must enter with an account and the current period ending date (CPE)
+
+	INPUTS:
+		. CID - Account Number
+		. CPE - Period End Date
+
+        */
+        type Public Date CPE
+        type Public Number CID
+        type Public String ER, RM
+        type Date PPE, PYE
+	type Number DAYS, YDAYS
+	
+	type RecordACN acn
+	type RecordPAA pcpe
+	
+	set ER = 0
+	set RM = ""
+	// Invalid account number
+	if CID.get().isNull() set ER = 1, RM = $$^MSG(7774) quit
+        do INIT(.CPE, .PYE, .PPE, .DAYS, .YDAYS)
+        if ER '= 0 quit
+        set acn = Db.getRecord("ACN", "CID=:CID")
+        set pcpe = Db.getRecord("PAA", "EFD=:CPE,CID=:CID")
+        do EXEC(.acn, .pcpe, CID, CPE, PYE, PPE, DAYS, YDAYS)
+        quit
+
+EXEC(RecordACN acn,
+     RecordPAA pcpe,
+     Number CID,
+     Date CPE,		// Current period-end date	/MECH=VAL
+     Date PYE,		// Prior year-end date		/MECH=VAL
+     Date PPE,		// Prior period-end date	/MECH=VAL
+     Number DAYS,	// Days in current period	/MECH=VAL
+     Number YDAYS)	// Days in pd. since prior year	/MECH=VAL	
+     
+     // Process single account
+	
+	type Public String ER, RM
+	// Set up error trapping
+	type String %ZTHANG, %ZTSEQ, ET
+	catch error {
+		// Log MUMPS error
+		if error.type.isLike("%GTM-%") do ZE^UTLERR   			
+	
+		// Error Log Sequence #~p1
+		if %ZTSEQ.exists() set %ZTSEQ = $$^MSG("3389",%ZTSEQ)_" "
+	
+		if error.description.isNull() set error.description = RM.get()
+		set RM = %ZTSEQ.get()_error.description
+		
+		// System processing error
+		set ET = $$^MSG("2575")
+		do EXC(RM, ET, CID.get())
+		quit	
+		}
+	do EXEC1(.acn, .pcpe, CID, CPE, PYE, PPE, DAYS, YDAYS)
+	if ER throw Class.new("Error", ","_RM.get())
+
+	quit
+
+EXEC1(RecordACN acn,	// Account Object		/MECH=REF
+      RecordPAA pcpe,	// Current Profitability Object	/MECH=REF
+      Number CID,	// Account Number		/MECH=VAL
+      Date CPE,		// Current period-end date	/MECH=VAL
+      Date PYE,		// Prior year-end date		/MECH=VAL
+      Date PPE,		// Prior period-end date	/MECH=VAL
+      Number DAYS,	// Days in current period	/MECH=VAL
+      Number YDAYS)	// Days in pd. since prior year	/MECH=VAL 
+
+	type Public String ER, RM
+
+ 	type Boolean NAI
+ 	type Number AVBP, AVBY, balance, IEP, IEY, IYP, IYY, NAIEP, NAIEY
+ 	type Number NEWYR, NFIP, NFIY, YEAR
+ 	type String UAVB()
+ 	
+ 	type RecordPAA ppye, pppe
+	
+	set ER = 0
+	if acn.cls = "D" do { if ER quit
+		type RecordDEP dep
+		set dep = Db.getRecord("DEP", "CID=:CID")
+		// Analysis flag not set. No analysis conducted
+		if 'dep.anltyp set ER = 1, RM = $$^MSG(4052)
+		// Date account closed'>PYE
+		// Account closed prior to start date
+		if dep.dtc, dep.dtc '> PYE set ER = 1, RM = $$^MSG(1455)
+		set balance = dep.bal
+	}
+ 
+	if acn.cls = "L" do { if ER quit
+ 		type RecordLN ln
+		set ln = Db.getRecord("LN", "CID=:CID")
+		// Analysis flag not set. No analysis conducted.
+ 		if 'ln.anlsys set ER = 1, RM = $$^MSG(4052)
+ 		// Date account closed'>PYE
+ 		// Account closed prior to start date
+		if ln.dtc, ln.dtc '> PYE set ER = 1, RM = $$^MSG(1455)
+ 		set balance = ln.bal
+		// Nonaccrual Indicator
+		set NAI = ln.nai
+ 	}
+ 
+ 	set pppe = Db.getRecord("PAA", "EFD=:PPE,CID=:CID", 1)
+	set ppye = Db.getRecord("PAA", "EFD=:PYE,CID=:CID", 1)
+ 
+	// Interest Earned - Period (accrued int + int collected)
+	set IEP = pcpe.acr + pcpe.ipl - pppe.ipl - pppe.acr
+	// Interest Earned - Year  Referring to project 27452.44
+	set NEWYR = CPE.year() - PPE.year()
+	
+	// Accrued Intrest Year/Non Accrual
+	if acn.cls = "L", 'NAI.get(), pppe.naiey set IEY = pppe.naiey + IEP
+	// Interest Earned - Year
+	else  set IEY = pppe.iey + IEP
+	
+	if NEWYR set IEY = IEP
+ 
+	/*
+	If an account is in non-accrual IEP and IEY will be set to zero
+	for Profitability purposes but will be stored in pieces 29 and 30
+	for computed data items.
+	*/
+ 
+	set (NAIEP, NAIEY) = ""
+	if acn.cls = "L", '(NAI) do {
+		// save interest earned period for non-accrual loans
+		set NAIEP = IEP
+		if 'pppe.iey, 'NEWYR set NAIEY = pppe.naiey + IEP
+		// save interest earned year for non-accrual loans
+		else  set NAIEY = IEY
+		
+		// Set IEP to zero for Profitability
+		set IEP = 0
+		if NEWYR set NAIEY = NAIEP, IEY = 0
+		else  set IEY = pppe.iey
+		quit
+	}
+ 
+	if acn.cls = "L", 'NAI set (IEP, IEY)=0     // Non-accrual indicator
+	set ER = ""
+	do INIT^UAVB(.acn, CID, PPE + 1, CPE, "00011111") if ER quit
+	set AVBP = UAVB(1).piece("|", 1)
+	
+	// Average Balance - Year
+	set AVBY=(((pppe.avby * (YDAYS - DAYS)) + (AVBP * DAYS)) / YDAYS).roundCur(acn.crcd)
+ 
+	// Leap year?
+	if CPE.isLeapYear() set YEAR = 366
+	else  set YEAR = 365
+ 
+	// Interest Yield - Period
+	if AVBP set IYP = (((IEP / DAYS) * YEAR) / AVBP * 100).roundDec(3, "", 0)
+	else  set IYP = 0
+ 
+	// Interest Yield - Year
+	if AVBY set IYY = (((IEY / YDAYS) * YEAR) / AVBY * 100).roundDec(3, "", 3)
+	else  set IYY = 0
+ 
+	// High Balance - Year and High Balance (date)
+	if pppe.hby < UAVB(1).piece("|", 3) do {
+		set pcpe.hby = UAVB(1).piece("|", 3)
+		set pcpe.hbyd = UAVB(1).piece("|", 4)
+	}
+	else  set pcpe.hby = pppe.hby, pcpe.hbyd = pppe.hbyd
+ 
+	// Low Balance - Year
+	if 'pppe.lby ! (pppe.lby '< UAVB(1).piece("|", 6)) do {
+		// Low Balance - Year
+		set pcpe.lby = UAVB(1).piece("|", 6)
+		// Low Balance - Year (date)
+		set pcpe.lbyd = UAVB(1).piece("|", 7)
+	}
+	else  set pcpe.lby = pppe.lby, pcpe.lbyd = pppe.lbyd
+ 
+	if acn.cls = "L" do {
+		// Loan Specific Code
+ 
+		// Net Fee Income - Period
+		if pppe.ndfb.isNull() S NFIP = 0
+		else  set NFIP = pppe.ndfb - pcpe.ndfb
+ 
+		// Net Fee Income - Year
+		if pppe.ndfb.isNull() set NFIY=0
+		else  set NFIY = ppye.ndfb - pcpe.ndfb
+ 
+		set pcpe.prpd = UAVB(2).piece("|", 4)
+		set pcpe.prpn = UAVB(2).piece("|", 5)
+		set pcpe.dpd = UAVB(2).piece("|", 6)
+		set pcpe.dpn = UAVB(2).piece("|", 7)
+	}
+ 
+	if acn.cls = "D" do {
+		// Deposit Specific Code
+		set (NFIP, NFIY) = 0
+		set pcpe.prpd = UAVB(1).piece("|", 8)
+		set pcpe.prpn = UAVB(1).piece("|", 10)
+		set pcpe.dpd = UAVB(1).piece("|", 9)
+		set pcpe.dpn = UAVB(1).piece("|", 11)
+	}
+ 
+	set pcpe.nfip = NFIP
+	set pcpe.nfiy = NFIY
+	set pcpe.iep = IEP
+	set pcpe.iey = IEY
+	set pcpe.avbp = AVBP
+	set pcpe.avby = AVBY
+	set pcpe.hbp = UAVB(1).piece("|", 3)
+	set pcpe.hbpd = UAVB(1).piece("|", 4)
+	set pcpe.lbp = UAVB(1).piece("|", 6)
+	set pcpe.lbpd = UAVB(1).piece("|", 7)
+	set pcpe.dod = UAVB(2).piece("|", 8)
+	set pcpe.cdod = UAVB(2).piece("|", 9)
+	set pcpe.iyp = IYP
+	set pcpe.iyy = IYY
+	set pcpe.naiep = NAIEP
+	set pcpe.naiey = NAIEY
+ 
+	// File data
+	do pcpe.save()
+	quit
+	
+Public days(String X)	// Column name (either DAYS or YDAYS)
+	
+	type Date CPE
+	type Number DAYS, YDAYS
+
+	do DAYS(.CPE, .DAYS, .YDAYS)
+
+	if X="DAYS" quit DAYS
+	quit YDAYS
+
+Public DAYS(Date CPE,		// Current period-end date	/MECH=REF:RW
+	    Number DAYS,		// Days in current period	/MECH=REF:W
+	    Number YDAYS)	// Days in pd. since prior year	/MECH=REF:W	
+	
+	/* 
+	 Days Elapsed in Period and Year. 
+	 Called by reports SCA287, SCA288 and SCA319
+	*/
+	type Public String ER
+	
+	type Date PPE, PYE
+	
+	do INIT(.CPE, .PYE, .PPE, .DAYS, .YDAYS)
+	
+	quit	
+
+
+INIT(Date CPE,		// Current period-end date	/MECH=REF:RW
+     Date PYE,		// Prior year-end date		/MECH=REF:RW
+     Date PPE,		// Prior period-end date	/MECH=REF:RW
+     Number DAYS,	// Days in current period	/MECH=REF:W
+     Number YDAYS)	// Days in pd. since prior year	/MECH=REF:W
+	// Initialize variables
+
+	type Public Cache %CUVAR
+	
+	type Date FINE
+	type String %DS, FEPY
+	type ResultSet rs
+	type RecordCUVAR cuvar = %CUVAR.getRecord("CUVAR") 
+	
+	// Current period-end date
+	if 'CPE.exists() set CPE = Db.currVal("PAD")
+	if 'PYE.exists() do {
+		set FINE = $$EOFY^SCADAT(CPE, 1)
+        	set FEPY = FINE.year() - 1
+        	set %DS = FINE.toString("MM/DD/")_FEPY
+       		 // Prior financial year-end date
+        	set PYE = %DS.toDate()
+        }
+	if 'PPE.exists() do {
+		// Prior period-end date
+		set rs = Db.select("EFD", "PAD", "EFD<:CPE", "EFD DESC")
+		if rs.next() set PPE = rs.getCol("EFD")
+		else  set PPE = ""
+	}
+	// Loan Profitability - Frequency
+ 
+	if PPE.isNull() ! (CPE = PPE) set PPE = CPE.nextFreqDate("-"_cuvar.lpfre)
+	set DAYS = CPE - PPE
+	set YDAYS = CPE - PYE
+
+	quit 
+	
+EXC(String ERMSG,	// Error Message			/NOREQ/MECH=VAL
+    String ET,		// Error Type				/NOREQ/MECH=VAL
+    Number CID)		// Account Number			/NOREQ/MECH=VAL
+	
+	// Log exceptions	
+
+	type Public String %ZTSEQ
+	type Number BAL
+	if 'CID.get().isNull() do {
+		type RecordACN acn = Db.getRecord("ACN","CID=:CID",1)
+		set BAL = acn.bal
+	}
+	// Profitability Analysis
+	do LOG^UTLEXC(%ProcessID, "*", $$^MSG(7053)_"|1", CID.get(), ERMSG.get(), ET.get(), $S(CID.get():+BAL, 1:""))       
+
+	kill ET, %ZTSEQ
+
+	quit 
+	
+
+LACR(RecordLN ln)     //
+ 
+	quit ln.acr
+ 
+
+DACR(RecordDEP dep)   //
+ 
+	quit dep.posacr
+
+
+public CMP
+	/* Loan (XLN22) and deposit (XDEP07) computed data item access
+	
+
+	  INPUTS:
+		. CID - Account Number  
+		                                                                            
+	  RETURNS:	
+		N/A
+	
+	  OUTPUTS:
+	  	. ER		- Error Indicator
+  		. PAF()		- Cached Array of Profitability Date Ranges
+	  	. XLN22 	- Profitability Analysis for Loan
+	  	. XDEP07	- Profitability Analysis for Deposit
+
+	  EXAMPLE:
+		do CMP^PABOD
+	*/
+	
+	type Public Number CID
+	type Public String ER, PAF(), RM, XLN22, XDEP07
+	
+	type Boolean PRODCTL
+	type Date %JD, CPE, FINE, PPE, PYE
+	type Number DAYS, FEPY, TYPE, YDAYS
+	type String %DS, %ZTSEQ, CRCD, ET, PCPE
+	
+	catch error {
+		do Runtime.rollback()
+		// Log MUMPS error
+		if error.type.isLike("%GTM-%") do ZE^UTLERR   			
+	
+		// Error Log Sequence #~p1
+		if %ZTSEQ.exists() set %ZTSEQ = $$^MSG("3389",%ZTSEQ)_" "
+	
+		if error.description.isNull() set error.description = RM.get()
+		set RM = %ZTSEQ.get()_error.description
+
+		// System processing error
+		set ET = $$^MSG("2575")
+		quit
+	}
+	set (XLN22, XDEP07, ER)=""
+	// Invalid account number
+	if CID.get().isNull() throw Class.new("Error", ","_$$^MSG(7774))
+
+	type RecordACN acn = Db.getRecord("ACN", "CID=:CID")	
+
+	set CRCD = acn.crcd 
+	set TYPE = acn.type
+
+	type RecordPRODCTL prodctl = Db.getRecord("PRODCTL","TYPE=:TYPE")
+
+	set PRODCTL = prodctl.pacf
+	set CPE = %SystemDate - 1	
+	if PAF(CPE).exists() do {
+		set PYE = PAF(CPE).piece("|", 1)
+		set PPE = PAF(CPE).piece("|", 2)
+	}
+	type RecordPAA pcpe = Class.new("RecordPAA")
+	set pcpe.efd = CPE
+	set pcpe.cid = CID
+	
+	// principal balance
+	set pcpe.bal = acn.bal 
+	    
+	// accrued interest balance
+	if acn.cls = "L" set pcpe.acr = $$LACR(.acn)
+	if acn.cls = "D" set pcpe.acr = $$DACR(.acn)
+			
+	// interest collected (life)
+	set pcpe.ipl = acn.ipl  
+	if acn.cls = "L" do CMP1(.acn, .pcpe, CID)
+	
+	do INIT(.CPE, .PYE, .PPE, .DAYS, .YDAYS) 
+	if ER quit
+	if 'PAF(CPE).exists() do {
+		set PAF(CPE).piece("|", 1) = PYE
+		set PAF(CPE).piece("|", 2) =  PPE
+	}
+	/*
+	 Wrap in TP. EXEC1 will update save the PAA record. However, when
+	 calling for computed columns, only the data derived on the PAA
+	 record should be returned. The PAA record should not be stored,
+	 so the database update is rolled back once it is copied to the PCPE
+	 variable.
+	*/
+	do Runtime.start("CS",,"SAVPTR")
+	do EXEC1(.acn, .pcpe, CID, CPE, PYE, PPE, DAYS, YDAYS)
+	if ER throw Class.new("Error", ","_RM.get())
+	
+	set pcpe = Db.getRecord("PAA", "EFD=:CPE,CID=:CID")
+	set PCPE.piece("|", 1) = pcpe.bal
+	set PCPE.piece("|", 2) = pcpe.acr 
+	set PCPE.piece("|", 3) = pcpe.ipl
+	set PCPE.piece("|", 4) = pcpe.ndfb
+	set PCPE.piece("|", 5) = pcpe.udbal
+	set PCPE.piece("|", 7) = pcpe.nfip
+	set PCPE.piece("|", 8) = pcpe.nfiy
+	set PCPE.piece("|", 9) = pcpe.iep
+	set PCPE.piece("|", 10) = pcpe.iey
+	set PCPE.piece("|", 11) = pcpe.avbp
+	set PCPE.piece("|", 12) = pcpe.avby
+	set PCPE.piece("|", 13) = pcpe.hbp
+	set PCPE.piece("|", 14) = pcpe.hbpd
+	set PCPE.piece("|", 15) = pcpe.hby
+	set PCPE.piece("|", 16) = pcpe.hbyd
+	set PCPE.piece("|", 17) = pcpe.lbp
+	set PCPE.piece("|", 18) = pcpe.lbpd
+	set PCPE.piece("|", 19) = pcpe.lby
+	set PCPE.piece("|", 20) = pcpe.lbyd
+	set PCPE.piece("|", 21) = pcpe.prpd
+	set PCPE.piece("|", 22) = pcpe.prpn
+	set PCPE.piece("|", 23) = pcpe.dpd
+	set PCPE.piece("|", 24) = pcpe.dpn
+	set PCPE.piece("|", 25) = pcpe.dod
+	set PCPE.piece("|", 26) = pcpe.cdod
+	set PCPE.piece("|", 27) = pcpe.iyp
+	set PCPE.piece("|", 28) = pcpe.iyy
+	set PCPE.piece("|", 29) = pcpe.naiep
+	set PCPE.piece("|", 30) = pcpe.naiey
+	do Runtime.rollback("SAVPTR")
+
+	set (XLN22, XDEP07) = PCPE       
+
+	quit 
+
+	
+CMP1(RecordLN ln,	// Loan Record				/MECH=REF:R
+     RecordPAA pcpe,	// Profitability Analysis Record	/MECH=REF:RW
+     Number CID)	// Account Number
+     // Loan Specific Code
+	
+	type String AMRTYP
+	type RecordLNAMOAO lnamoao
+	
+	//Increase int accrued by current capitalized deffered int amount
+	set pcpe.acr = pcpe.acr + ln.dic
+	
+	//Reduce interest collected by the current negative reduction amount
+	set pcpe.ipl = pcpe.ipl - ln.narl
+	
+	// undisbursed balance
+	set pcpe.udbal = ln.udbal   
+	
+	set AMRTYP = "PTS"
+	set lnamoao = Db.getRecord("LNAMOAO", "CID=:CID,TYP=:AMRTYP", 1)
+	if 'lnamoao.getMode() quit
+	set pcpe.ndfb = lnamoao.amt - lnamoao.caltd - lnamoao.npda
+	
+	quit 	
+
+END(Date CPE)	// Current Period End Date 	/MECH=VAL
+
+	type Public Cache %CUVAR
+	type Public String ER
+	
+	type Date NJD
+	type RecordCUVAR cuvar = %CUVAR.getRecord("CUVAR")
+	
+	set ER = 0
+	// Bump Next Date and Last Date
+	if cuvar.lpfre.isNull() quit	
+	set NJD = cuvar.lpnd.nextFreqDate(cuvar.lpfre) quit:ER
+	if NJD < 0 quit
+	set cuvar.lpld = CPE
+	set cuvar.lpnd = NJD
+ 
+	do cuvar.bypassSave()
+	quit
+
+
+	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60334^62053^Carrie Baildon^16473"	// Signature - LTD^TIME^USER^SIZE

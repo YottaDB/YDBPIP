@@ -1,0 +1,250 @@
+public LNPTS20( RecordLN ln,
+		RecordTTX ttx,
+		RecordTTX ttxreb())	// LOAN PAYOFF REBATE TRANSACTION FORMATING
+	/*
+	       ORIG:  David Caliendo (5527) - 07/14/86
+	
+	  ---- Revision History ------------------------------------------------
+
+	  11/02/06 - KELLYP - CR 23885
+	  	     Removed the setting of the AOI TSO field into TTX.TSO to 
+	  	     prevent the payoff transaction's TSO field from including 
+	  	     it.  This prevents a problem where payoff reversals were
+	  	     adjusting the LNCYC*.CALTD value by the amount of the
+	  	     payoff transaction instead of by the rebate amount.  Also 
+	  	     modified the change to INS section by CR 23160 below.  The
+	  	     LNCYC* records need to be updated in the INS section if
+	  	     there is no rebate due to the customer, otherwise they'll
+	  	     be updated by the rebate transactions.
+	
+	  09/25/06 - SANTHUMS - 23160
+	  	     . Modified INS section to change the logic when the 
+	  	       save is done to LNCYC* tables
+	  	     . Added ttxreb array as a new parameter to the top LNPTS20,
+	  	       RB2 and BINS sections.  
+	  	     . Modified BINS section to modify the else do condition
+	  	       for "paid by customer" to populate the ttxreb array. 	  	
+	 	
+	  11/28/05 - SATYANAS - 16994
+		     Declared TSO in the BINS section and set TSO="AOI#"_RBTYP,
+		     to avoid the "No add-on type is specified" warning in ^LNPTS4 
+		     procedure.
+		   
+	  12/10/03 - CARROLLJ - CR7239
+		     Variable TSO was undefined in GINS linetag.
+
+	  02/12/02 - MBUIM - 43583
+		     Converted to PSL.
+	
+	*/
+
+	new CID,GLX,RBTYP,SCID,TAMT
+
+	set CID=ln.cid
+	
+	// RB	
+	set TRBT=0 
+	set REBATE=0
+	if '$D(PREREB) set PREREB=0
+	if $D(RB(CID,"UNINT")) set REBATE=+RB(CID,"UNINT") kill RB(CID,"UNINT")
+	set TRBT=PREREB-REBATE
+	if REBATE<0 set REBATE=0
+	
+	// RB1 - Post rebate transactions (two per each RB array)
+	set RBTYP=""
+	set SCID=CID
+	do RB2(.ln,.ttx,.ttxreb())
+
+	quit
+
+RB2(RecordLN ln,
+    RecordTTX ttx,
+    RecordTTX ttxreb())	
+
+	type RecordTRN trn
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","ln.type")
+
+	for  set RBTYP=$O(RB(CID,RBTYP)) quit:RBTYP=""  do { quit:ER
+		if '+RB(CID,RBTYP) quit
+		set DCD=$P(RB(CID,RBTYP),"|",5) 
+		set CCD=$P(RB(CID,RBTYP),"|",3)
+		set GLD=$P(RB(CID,RBTYP),"|",4) 
+		set GLC=$P(RB(CID,RBTYP),"|",2)
+		// RB3	
+		if DCD set DCID=DCD do:'GLD VINS do:GLD VINS1 if ER quit
+		if CCD set DCID=CCD do:'GLC VINS do:GLC VINS1 if ER quit
+		if GLD,GLC do BINS(.ln,.ttx,.prodctl,.ttxreb()) set CID=SCID do INS quit
+		if 'GLD do PINS(.ln,.ttx,.trn,.prodctl) quit
+		if GLD do GINS(.ln,.ttx,.trn,.prodctl) 
+		}
+	set CID=SCID
+
+	quit
+	
+VINS	// Verify Wash account
+
+	// Amortized item wash account not set up
+	if 'Db.isDefined("ACN","DCID") do Runtime.setErrMSG("ACN",258) set ET="IWANSU" quit:ER       	
+
+       	quit 
+	
+VINS1	// Amortized item general ledger not set up
+
+	if 'Db.isDefined("GLAD","DCID") do Runtime.setErrMSG("GLAD",257) set ET="IGLNSU" quit:ER    
+
+	quit 
+	
+PINS(RecordLN ln,RecordTTX ttx,RecordTRN trn,RecordPRODCTL prodctl) // Process DR to WASH account CREDIT to Loan
+	
+	new CID,TAMT,TSO,X
+	
+	set X=RB(SCID,RBTYP) 
+	set TAMT=+X 
+	set CID=DCD  
+	set TSO="AOI#"_RBTYP
+
+	do POST^LNTRB(.ttx,CID,prodctl.drtrgp,TAMT,%EffectiveDate,%UserStation,TSO,,ln.crcd)
+	set CID=SCID  
+ 	set TSO="AOI#"_RBTYP
+	
+	do INS 
+	do POST^LNTRB(.ttx,CID,prodctl.crtrgp,TAMT,%EffectiveDate,%UserStation,TSO,,ln.crcd)
+	
+	set trn=Db.getRecord("TRN","LTC")
+
+	set X=trn.pcf 
+	set X=$E(X,1,4)_$E("0000",1,4-$L(X))_1_$E(X,6,99)  
+	set ttx.lnerc=X 
+	
+	quit 
+	
+GINS(RecordLN ln,RecordTTX ttx,RecordTRN trn,RecordPRODCTL prodctl) // Process DR to G/L account CR to Loan
+	
+	new CID,EXTC,TAMT,X
+	
+	set X=RB(SCID,RBTYP) 
+	set TAMT=+X 
+	set CID=DCD 
+	set EXTC=$P(RB(SCID,RBTYP),"|",8)
+	
+	if '$L(EXTC) set EXTC="MDR"
+	
+	do POST^LNTRB(.ttx,CID,EXTC,TAMT,%EffectiveDate,%UserStation,TSO,,ln.crcd,ln.cc)
+	set CID=SCID 
+	set TSO="AOI#"_RBTYP
+
+	do INS 
+	do POST^LNTRB(.ttx,CID,prodctl.crtrgp,TAMT,%EffectiveDate,%UserStation,TSO,,ln.crcd,ln.cc)
+
+	set trn=Db.getRecord("TRN","LTC")
+
+	set X=trn.pcf
+	set X=$E(X,1,4)_$E("0000",1,4-$L(X))_1_$E(X,6,99)
+	set ttx.lnerc=X 
+       
+	quit 
+	
+INS	
+
+	set X=+$G(RB1(SCID,$P(RB(SCID,RBTYP),"|",10)))
+	if $E(RBTYP)="I" do {
+		type RecordLNCYCINS lncycins=Db.getRecord("LNCYCINS","CID,RBTYP",1)
+		
+		// Rebate due to customer. Rebate transactions in ttxreb will
+		// update the caltd/reb/npda columns.
+		if RB(SCID,RBTYP).piece("|",7) quit
+
+		set lncycins.caltd=lncycins.caltd+X
+		set lncycins.reb=X
+		set lncycins.npda=0
+		do lncycins.bypassSave()
+		
+		}
+	if $E(RBTYP)="M" do {
+		type RecordLNCYCMSC lncycmsc=Db.getRecord("LNCYCMSC","CID,RBTYP",1)
+		
+		// Rebate due to customer. Rebate transactions in ttxreb will
+		// update the caltd/reb/npda columns.
+		if RB(SCID,RBTYP).piece("|",7) quit
+
+		set lncycmsc.caltd=lncycmsc.caltd+X
+		set lncycmsc.reb=X
+		set lncycmsc.npda=0
+			
+		do lncycmsc.bypassSave()
+			
+		}
+	if $E(RBTYP)="P" do {
+		type RecordLNCYCPTS lncycpts=Db.getRecord("LNCYCPTS","CID,RBTYP",1)
+		
+		// Rebate due to customer. Rebate transactions in ttxreb will
+		// update the caltd/reb/npda columns.
+		if RB(SCID,RBTYP).piece("|",7) quit
+
+		set lncycpts.caltd=lncycpts.caltd+X
+		set lncycpts.reb=X
+		set lncycpts.npda=0
+			
+		do lncycpts.bypassSave()
+			
+		}
+	if $E(RBTYP)="D" do {
+		type RecordLNCYCDLD lncycdld=Db.getRecord("LNCYCDLD","CID,RBTYP",1)
+		
+		// Rebate due to customer. Rebate transactions in ttxreb will
+		// update the caltd/reb/npda columns.
+		if RB(SCID,RBTYP).piece("|",7) quit
+		
+		set lncycdld.caltd=lncycdld.caltd+X
+		set lncycdld.reb=X
+		set lncycdld.npda=0
+			
+		do lncycdld.bypassSave()
+
+		}
+
+	quit 
+
+BINS(RecordLN ln,
+     RecordTTX ttx,
+     RecordPRODCTL prodctl,	// Process DR to G/L account CR to G/L Account
+     RecordTTX ttxreb()) 	
+
+	new CID,CNT,EXTC,TAMT
+	type String TSO
+	
+	set TAMT=+RB(SCID,RBTYP)
+	set CID=DCD
+	
+	set EXTC=$P(RB(SCID,RBTYP),"|",8)
+	if EXTC="" set EXTC="MDR"
+
+	do POST^LNTRB(.ttx,CID,EXTC,TAMT,%EffectiveDate,%UserStation,,,ln.crcd,ln.cc)
+	
+	set CNT=$P(RB(SCID,RBTYP),"|",10)
+
+	// Transaction Source of Funds
+	if '$P(RB(SCID,RBTYP),"|",7) do {
+		// Paid by bank - credit G/L account
+		set EXTC=$P(RB(SCID,RBTYP),"|",9)
+		set:EXTC="" EXTC="MCR"
+		set CID=CCD
+		}
+	else  do { quit // Paid by customer - credit the customer's account
+		type Number ND = ttxreb("").order(-1)+1
+		set ttxreb(ND) = ttx.copy()
+		set ttxreb(ND).etc = prodctl.crtrri
+		set ttxreb(ND).cid = SCID
+		set ttxreb(ND).tamt = TAMT
+		set ttxreb(ND).tso = "AOI#"_RBTYP
+		}
+	
+	// Transaction Source of Funds
+	set TSO="AOI#"_RBTYP
+	
+	do POST^LNTRB(.ttx,CID,EXTC,TAMT,%EffectiveDate,%UserStation,TSO,,ln.crcd,ln.cc)
+
+	quit 
+	
+
+vSIG()	quit "60571^66688^Pat Kelly^6370"	// Signature - LTD^TIME^USER^SIZE

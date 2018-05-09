@@ -1,0 +1,611 @@
+QUEMANT	// Job scheduler/batch maintenance
+	/*
+	       ORIG:  Michael Winigrad
+
+	---- Revision History ------------------------------------------------
+	
+	12/11/04 - RussellDS - CR13642
+		   Rewrite to get to work correctly.
+
+	12/18/03 - CARROLLJ - CR7239
+		   Correct parameter mismatch errors.
+
+	06/11/02 - TELIV - 49451
+		   Converted to PSL
+	 ----------------------------------------------------------------------
+	*/
+	
+CRE 	//
+	do MAIN(0)
+	quit
+
+
+UPD 	//
+	do MAIN(1)
+	quit
+
+
+DEL	//
+	do MAIN(3)
+	quit
+
+
+MAIN(Number %ProcessMode)
+
+	/*
+	Start of processing for batch/job maintenance
+	*/
+	
+	type Boolean DONE
+	type Number BCHNUM
+	
+	set BCHNUM=$$BATCH quit:(BCHNUM = 0)		// Batch data
+	
+	for  set DONE = $$JOB(BCHNUM) quit:DONE		// Job(s) data
+
+	quit
+
+
+BATCH()
+
+	/*
+	Batch level create/maintenance
+	
+	RETURNS:
+		. $$	Batch number			/TYP=N
+			0  = if quiting
+			>0 = valid batch number
+	*/
+	
+	type public Boolean ER = 0
+	
+	type Number %PAGE, %PG, BCHNUM
+	type String %NOPRMT, %READ, %TAB(), COMPMSG, VFMQ
+	
+	// First prompt for batch number
+
+	set %PAGE = 1
+	set %PAGE = 1
+	set BCHNUM = ""
+
+	// If maintenance, prompt for batch number.  If create, get next
+	// available batch number (may not be at end).
+	set %TAB("BCHNUM") = ".BCHNUM1/XPP=D BPOST^QUEMANT"
+	if (%ProcessMode > 0) set %TAB("BCHNUM") = %TAB("BCHNUM")_"/TBL=[QUEUEB]"
+	else  for BCHNUM=1:1 quit:'Db.isDefined("QUEUEB","BCHNUM=:BCHNUM")
+
+	set %READ="@@%FN,,,BCHNUM/REQ" 
+	set %NOPRMT="C"
+
+	do ^UTLREAD 
+
+	if VFMQ="Q" quit 0		// Done
+
+	type RecordQUEUEB fQUEUEB = Db.getRecord("QUEUEB", "BCHNUM=:BCHNUM", 1)
+
+	// Batch maintenance screen
+
+	set %PG=1 
+	set %PAGE=1
+	
+	if (fQUEUEB.lstat = 0) set COMPMSG = $$^MSG(4562)		// Successful completion
+	else  if (fQUEUEB.lstat = 1) set COMPMSG = $$^MSG(5528)		// Aborted on error
+	else  if (fQUEUEB.lstat = 2) set COMPMSG = $$^MSG(5753)		// Aborted on resubmission failure
+	else  if (fQUEUEB.lstat = 3) set COMPMSG = $$^MSG(4556)		// Aborted due to user request
+	else  if (fQUEUEB.lstat = 4) set COMPMSG = $$^MSG(4561)		// Resubmission pending
+	else  set COMPMSG = ""
+
+	do DRV^USID(%ProcessMode, "QUEUEB", .fQUEUEB) 
+	
+	if ER quit 0						// Done
+
+	if ((%ProcessMode = 0) & (VFMQ = "Q")) quit 0		// Done if quit on create
+	
+	// Delete
+	if (VFMQ = "D") do { quit 0				// Done
+		
+		type Number JOBNUM
+		type String QUEUE(), QUEUEP()
+		
+		type RecordQUEUED fQUEUED()
+		
+		// Display dependency screen, if dependencies
+		if $$DEPEND(BCHNUM, 0, .QUEUE()) do { quit:(ER ! (VFMQ = "Q"))
+			do DRV^USID(%ProcessMode, "QUEDEP")
+		}
+		
+		type ResultSet rs=Db.select("JOBNUM", "QUEUEJ", "BCHNUM=:BCHNUM", "JOBNUM")
+		
+		while rs.next() do {
+			
+			set JOBNUM = rs.getCol("JOBNUM")
+			
+			type RecordQUEUEJ fQUEUEJ = Db.getRecord("QUEUEJ", "BCHNUM=:BCHNUM,JOBNUM=:JOBNUM")
+			
+			do HIST(.fQUEUEJ, $$^MSG(805))				// Deleted 
+			do VLOD(BCHNUM, JOBNUM, .fQUEUED(), .QUEUEP())		// Load arrays
+			do DPKILL(BCHNUM, JOBNUM)
+			do CDKILL(BCHNUM, JOBNUM)
+		}
+
+		do Db.delete("QUEUEJ", "BCHNUM=:BCHNUM")
+		do Db.delete("QUEUEP", "BCHNUM=:BCHNUM")	
+		do Db.delete("QUEUED", "BCHNUM=:BCHNUM")
+		do Db.delete("QUEUEB", "BCHNUM=:BCHNUM")
+		do Db.delete("QUEUEC", "BCHNUM=:BCHNUM")
+	}
+	
+	// File the batch data
+	if (VFMQ = "F") do {
+		
+		// If new batch, assing vmstag.  Use lock to ensure get time
+		if (fQUEUEB.vmstag.isNull()) do {
+			
+			type String QUEMANT = ""
+			
+			lock +QUEMANT
+			
+			set fQUEUEB.vmstag = "Q"_BCHNUM_"_"_%CurrentDate_%CurrentTime
+			
+			hang 1
+			
+			lock -QUEMANT
+		}
+		
+		do fQUEUEB.save()
+	}
+		
+	quit BCHNUM				// Not done, do jobs next
+
+
+JOB(Number BCHNUM)	// Batch number
+
+	/*
+	Job level create/maintenance
+	
+	RETURNS:
+		. $$	Done flag			/TYP=L
+			0 = not done
+			1 = done
+	*/
+
+	type public Boolean ER = 0
+	
+	type Boolean DONE
+	type Number %PAGE, %PG, BATCH, JOB, JOBNUM, LIMIT, N, OLNTB
+	type String %NOPRMT, %READ, %TAB(), COMPMSG, HDG, QUEUEP(), UX, VFMQ
+	
+	type RecordQUEUED fQUEUED()
+	
+	set %PG = 0 
+	set %PAGE = 1
+	
+	// If creating, suggest job numbers in increments of 10 to leave room for future inserts
+	if (%ProcessMode = 0) do {
+		
+		type ResultSet rs = Db.select("MAX(JOBNUM)", "QUEUEJ", "BCHNUM=:BCHNUM")
+		
+		if rs.next() set JOBNUM = rs.getCol(1) + 10
+		else  set JOBNUM = 10
+	}
+	
+	// Get job number		
+	if (%ProcessMode < 3) set %TAB("JOBNUM") = ".JOBNUM1/TBL=[QUEUEJ]JOBNUM,DESC:QU ""[QUEUEJ]BCHNUM=<<BCHNUM>>""/XPP=S I(3)="""""
+	else  set %TAB("JOBNUM") = ".JOBNUM1/TBL=[QUEUEJ]JOBNUM,DESC:QU ""[QUEUEJ]BCHNUM=<<BCHNUM>>"""
+	
+	// Job Level Maintenance
+	set HDG = $$^MSG(4560).justify(80, 0)
+	set %READ = "@HDG,,JOBNUM/REQ"
+	set %NOPRMT = "C"
+
+	do ^UTLREAD
+	
+	if (VFMQ = "Q") quit 1			// Done
+
+	type RecordQUEUEJ fQUEUEJ = Db.getRecord("QUEUEJ","BCHNUM=:BCHNUM,JOBNUM=:JOBNUM", 1)
+
+	do VLOD(BCHNUM, JOBNUM, .fQUEUED(), .QUEUEP())	// Load arrays
+	
+	// Job maintenance screen - delete option
+	if (%ProcessMode = 3) do { quit 0 		// Not Done - reprompt for job number
+		set %PG = 1
+		set %PAGE = 1
+		
+		do DRV^USID(%ProcessMode, "QUEUEJ", .fQUEUEJ) 
+
+		if (VFMQ = "D") do {
+		
+			type String QUEUE()
+		
+			// Display dependency screen, if dependencies
+			if $$DEPEND(BCHNUM, JOBNUM, .QUEUE()) do { quit:(ER ! (VFMQ = "Q"))
+				do DRV^USID(%ProcessMode, "QUEDEP")
+			}
+		
+			do HIST(.fQUEUEJ, $$^MSG(805))					// Deleted 
+			do JOBDEL(BCHNUM, JOBNUM)
+		}
+	}
+		
+	// Job maintenance screen (create/update) - manage the three screens
+	
+	if (fQUEUEJ.lstat = 0) set COMPMSG = $$^MSG(4562)		// Successful completion
+	else  if (fQUEUEJ.lstat = 1) set COMPMSG = $$^MSG(4557)		// Aborted on error
+	else  if (fQUEUEJ.lstat = 2) set COMPMSG = $$^MSG(4561)		// Skipped
+	else  if (fQUEUEJ.lstat = 3) set COMPMSG = $$^MSG(5761)		// Aborted due to user request
+	else  if (fQUEUEJ.lstat = 4) set COMPMSG = $$^MSG(4558)		// Aborted on resubmission failure
+	else  if (fQUEUEJ.lstat = 5) set COMPMSG = $$^MSG(4559)		// Completed manually
+	else  set COMPMSG = ""
+	
+	set (DONE, VFMQ) = 0
+	set %PAGE = 3
+	
+	for  do { quit:(ER ! DONE)
+	
+		if VFMQ = 0 do { quit:ER
+			set %PG = 1
+			do DRV^USID(%ProcessMode, "QUEUEJ", .fQUEUEJ)
+		}
+		
+		if VFMQ = 1 do { quit:ER
+			set %PG = 2
+			do DRV^USID(%ProcessMode, "QUEUED", .fQUEUED(), .fQUEUEJ)
+		}
+		
+		if VFMQ = 2 do { quit:ER
+			set %PG = 3
+			do DRV^USID(%ProcessMode, "QUEUEP", .fQUEUEJ)
+		}
+		
+		if '((VFMQ = 0) !(VFMQ = 1) ! (VFMQ = 3)) set DONE = 1
+	}
+
+	if (ER ! (VFMQ '= "F")) quit 0				// Not Done - reprompt for job number
+		
+	// File the job data
+	
+	set BCHNUM = fQUEUEJ.bchnum
+	set JOBNUM = fQUEUEJ.jobnum
+	
+	if (fQUEUEJ.getMode() = 0) do HIST(.fQUEUEJ, $$^MSG(7131))		// Created
+
+	do fQUEUEJ.save()
+	
+	// Remove old dependency data
+	do DPKILL(BCHNUM, JOBNUM)
+		
+	// File new dependency data
+	set N = ""
+	for  set N = $O(fQUEUED(N)) quit:(N.isNull() ! (N > 14))  do {
+
+		set BATCH = fQUEUED(N).bchprmt
+		set JOB = fQUEUED(N).jobprmt
+		set LIMIT = fQUEUED(N).limit
+		
+		quit:(BATCH.isNull() ! JOB.isNull() ! LIMIT.isNull())
+		
+		type RecordQUEUED queued = Class.new("RecordQUEUED", "BCHNUM=:BCHNUM,JOBNUM=:JOBNUM,BATCH=:BATCH,JOB=:JOB")
+		
+		set queued.bchprmt = BATCH
+		set queued.jobprmt = JOB
+		set queued.limit = LIMIT
+		
+		do queued.save()
+		
+		type RecordQUEUEC queuec = Class.new("RecordQUEUEC", "BCHNUM=:BATCH,JOBNUM=:JOB,BATCH=:BCHNUM,JOB=:JOBNUM")
+		
+		do queuec.save()
+	}
+
+	// Delete existing parameters
+	do Db.delete("QUEUEP", "BCHNUM=:BCHNUM AND JOBNUM=:JOBNUM")
+
+	// File new parameters
+	set N = ""
+	for  set N = QUEUEP(N).order() quit:(N.isNull() ! (N > 18))  if 'QUEUEP(N).isNull() do {
+	
+		type RecordQUEUEP queuep = Class.new("RecordQUEUEP", "BCHNUM=:BCHNUM,JOBNUM=:JOBNUM,SEQ=:N")
+		
+		set queuep.param = QUEUEP(N)
+		
+		do queuep.save()
+	}
+
+	quit 0
+
+
+VLOD(Number BCHNUM,		// Batch number
+     Number JOBNUM,		// Job number
+     RecordQUEUED fQUEUED(),	// Dependency data [*]			/MECH=REFAFF:W
+     String QUEUEP())		// Parameters data [*]			/MECH=REFAFF:W
+     
+	/*
+	Load arrays for dependencies and parameters
+	
+	ARGUMENT NOTES:
+		. fQUEUED()	Input from screen QUEUED
+		. QUEUEP()	Input from screen QUEUEP
+	
+	*/
+	
+	type Number CNT = 0
+
+	type ResultSet rsp = Db.select("SEQ,PARAM", "QUEUEP", "BCHNUM=:BCHNUM AND JOBNUM=:JOBNUM AND SEQ <= 18", "SEQ")
+
+	while rsp.next() set QUEUEP(rsp.getCol("SEQ")) = rsp.getCol("PARAM")
+
+	set CNT=0
+
+	type DbSet rsd = Db.selectDbSet("QUEUED", "BCHNUM=:BCHNUM AND JOBNUM=:JOBNUM")
+
+	while rsd.next() do {
+		
+		set CNT=CNT+1
+		
+		// Accept to avoid warning on possible record exists
+		#ACCEPT DATE=12/30/04; PGM=Dan Russell
+		set fQUEUED(CNT) = rsd.getRecord("QUEUED")
+	}
+
+	quit
+	
+	
+Public JOBDEL(Number BCHNUM,	// Batch number
+	      Number JOBNUM)	// Job number
+	       
+	/*
+	Delete a job and related elements.  Called by ^QUEPGM.  Treat as private
+	to the job queuing system and do not call from other sources.
+	*/
+	              	
+	do DPKILL(BCHNUM, JOBNUM)
+	do CDKILL(BCHNUM, JOBNUM)
+		
+	do Db.delete("QUEUEJ", "BCHNUM=:BCHNUM AND JOBNUM=:JOBNUM")
+	do Db.delete("QUEUEP", "BCHNUM=:BCHNUM AND JOBNUM=:JOBNUM")
+	do Db.delete("QUEUEC", "BCHNUM=:BCHNUM AND JOBNUM=:JOBNUM")
+	
+	quit
+
+
+DPKILL(Number BCHNUM,	// Batch number
+       Number JOBNUM)	// Job number
+     
+	/*
+	Dependency Killer
+	*/
+	
+	do Db.delete("QUEUED", "BCHNUM=:BCHNUM AND JOBNUM=:JOBNUM")
+	do Db.delete("QUEUEC", "BATCH=:BCHNUM AND JOB=:JOBNUM")
+
+	quit
+
+
+CDKILL(Number BCHNUM,	// Batch number
+       Number JOBNUM)	// Job number
+
+	/*
+	Conditional killer
+	*/
+	
+	type Number BCH, JOB
+	
+	type ResultSet rs = Db.select("BATCH,JOB", "QUEUEC", "BCHNUM=:BCHNUM AND JOBNUM=:JOBNUM")
+
+	while rs.next() do {
+		
+		set BCH = rs.getCol("BATCH")
+		set JOB = rs.getCol("JOB")
+	
+		do Db.delete("QUEUED", "BCHNUM=:BCH AND JOBNUM=:JOB")
+	}
+
+	quit
+
+
+DEPEND(Number BCHNUM,	// Batch number
+       Number JOBNUM,	// Job number [*]
+       String QUEUE())	// Dependency array [*]		/MECH=REFARR:W
+
+	/*
+	Check if there are any jobs dependent upon jobs in this batch
+
+	ARGUMENT NOTES:
+		. JOBNUM	If zero, check entire batch,
+				otherwise, just this job
+		. QUEUE()	Used by screen QUEDEP
+				
+	RETURNS:
+		. $$	0 = No dependecies
+			1 = Dependencies
+	*/
+
+	type Number SEQ
+	
+	set SEQ = 0
+	
+	if (JOBNUM > 0) do {
+
+		type ResultSet rs = Db.select("BATCH,JOB", "QUEUEC", "BCHNUM=:BCHNUM AND JOBNUM=:JOBNUM", "BATCH,JOB")
+
+		while rs.next() do {
+			set SEQ = SEQ + 1 
+			set QUEUE(SEQ) = rs.getCol("BATCH")_"|"_rs.getCol("JOB")_"|"_BCHNUM_"|"_JOBNUM
+		}
+	}
+	
+	else  do {
+		
+		type ResultSet rsj = Db.select("JOBNUM", "QUEUEJ", "BCHNUM=:BCHNUM", "JOBNUM")
+
+		while rsj.next() do {
+			
+			set JOBNUM = rsj.getCol("JOBNUM")
+			
+			type ResultSet rsc = Db.select("BATCH,JOB", "QUEUEC", "BCHNUM=:BCHNUM AND JOBNUM=:JOBNUM", "BATCH,JOB")
+
+			while rsc.next() do {
+				set SEQ = SEQ + 1
+				set QUEUE(SEQ) = rsc.getCol("BATCH")_"|"_rsc.getCol("JOB")_"|"_BCHNUM_"|"_JOBNUM
+			}
+		}
+	}
+
+	quit (SEQ > 0)
+
+
+
+HIST(RecordQUEUEJ fQUEUEJ,	// QUEUEJ record
+     String MSG)		// Comment for history
+     
+	/*
+	Create queue history entry
+	*/
+
+	type Number SEQ
+	
+	type ResultSet rs = Db.select("MAX(SEQ)", "QUEUEHD", "TJD=:%SystemDate")
+	
+	if rs.next() set SEQ = rs.getCol(1) + 1
+	else  set SEQ = 1
+
+	type RecordQUEUEHD queuehd = Class.new("RecordQUEUEHD", "TJD=:%SystemDate,SEQ=:SEQ"))
+
+	set queuehd.bchnum = fQUEUEJ.bchnum
+	set queuehd.jobnum = fQUEUEJ.jobnum
+	set queuehd.fun = fQUEUEJ.fun
+	set queuehd.sdat = %CurrentDate
+	set queuehd.stim = %CurrentTime
+	set queuehd.ctim = %CurrentTime
+	set queuehd.cmt = "Job has been "_MSG
+	set queuehd.username = $$USERNAM^%ZFUNC
+
+	do queuehd.save()
+
+	quit
+
+
+	//======================= Screen Processors =========================
+	
+BPOST	
+	/*
+	Post Processor on Batch Number Prompt
+	*/
+
+	type public Boolean ER
+	type public Number %OSAVE
+	type public String RM, X
+
+	quit:X.isNull()
+
+	if '%OSAVE, Db.isDefined("QUEUEB","BCHNUM=:X") do {
+		set ER = 1
+		// Batch ~p1 already exists
+		set RM = $$^MSG(337,X)
+	}
+
+	if %OSAVE, 'Db.isDefined("QUEUEB","BCHNUM=:X") do {
+		set ER = 1
+		// Batch ~p1 does not exist
+		set RM = $$^MSG(338,X)
+	}
+
+	quit
+
+
+COND	
+	/*
+	Screen QUEUEB - mail on condition post processor
+	*/
+
+	type public Boolean ER
+	type public String RM, X
+	
+	quit:X.isNull()
+
+	if X.isLike("%0%"), (X.length() > 1) do {
+		set ER = 1
+		// Illegal combination
+		set RM = $$^MSG(1197)
+	}
+	else  do {
+		
+		type Number I
+		type String TEST
+
+		set TEST = X_","
+
+		for I = 1:2:X.length() if (TEST.extract(I, I+1) '? 1N1",") do { quit
+			set ER = 1
+			// Illegal combination.  Check the use of commas (e.g., 1,3,4).
+			set RM = $$^MSG(1198)
+		}
+
+		for I = 1:2:X.length() if ((TEST.extract(I) < 0) ! (TEST.extract(I) > 4)) do { quit
+			set ER = 1
+			// Range of numbers is from 0 to 4
+			set RM = $$^MSG(2307)
+		}
+	}
+
+	quit
+
+
+DESC	
+	/*
+	Screen QUEUEJ - DESC post processor
+	*/
+
+	type public Boolean ER
+	type public String RM, X
+
+	type RecordSCATBL scatbl = Db.getRecord("SCATBL", "FN=:X", 1)
+
+	if (scatbl.getMode() = 0) do {
+		set ER = 1
+		// Invalid function name
+		set RM = $$^MSG(1359)
+	}
+	else  if 'scatbl.queue do {
+		set ER = 1
+		// Function not valid for queuing
+		set RM = $$^MSG(1141)
+	}
+	
+	quit
+
+
+MAXR(RecordQUEUEJ fQUEUEJ)	// QUEUEJ record
+
+	/*
+	Screen QUEUEJ - MAXR post processor
+	*/
+	
+	type public Boolean ER
+	type public Number BCHNUM
+	type public String RM, X
+	
+	type Date JD, NJD
+	type Number TMAXR
+
+	// Resubmit Interval
+	quit:(+fQUEUEJ.reti = 0)
+
+	type RecordQUEUEB queueb = Db.getRecord("QUEUEB", "BCHNUM=:BCHNUM")
+
+	set JD = queueb.nrd
+
+	// Resubmit Interval
+	set NJD = $$NJD^UFRE(JD, queueb.fre)
+	
+	set TMAXR = ((NJD - JD) * 1440) \ fQUEUEJ.reti
+	
+	if (X > TMAXR) do {
+		set ER = 1
+		// Value must not exceed ~p1 resubmissions
+		set RM = $$^MSG(2922, TMAXR)
+	}
+	
+	quit
+
+vSIG()	quit "59899^64675^Dan Russell^12890"	// Signature - LTD^TIME^USER^SIZE

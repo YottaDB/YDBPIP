@@ -1,0 +1,305 @@
+PROCLNPS		/*
+	---------- Revision History ------------------------------------------
+
+	05/09/06 - Dhanalakshmi R - 21105
+		   Modified the section INSERT to use Db.getRecord with getmode 
+		   instead of Db.insert for DAYENDLNNOT.
+ 
+	08/25/99 - CARROLLJ - 33890
+		   Convert to PSL.	
+	
+	12/22/00 - VETSENM - 40359
+             Modified to to set an entry into the DAYENDLNNOT table with
+             the identifier "2 - Payment Adjustment Notice"and "4 -
+             Account Projected Activity Report".            	
+
+	*/
+	
+	quit
+
+INSERT(XPDD,RecordLNPS1	lnps1)
+	
+	new XCID,data,lbdd,datedisp,duedate,schnd
+	
+	set XCID=lnps1.cid
+	
+	// Make sure at least one element flagged
+	if '(lnps1.d2f!lnps1.d3f!lnps1.d4f) do { quit:ER 
+		set datedisp=$$DAT^%ZM(XPDD,%MSKD)
+	
+		// Indicate elements to collect for payment dated MM/DD/YY
+		do Runtime.setErrMSG("LNPS1",1352,datedisp) quit:ER 
+		}
+	
+	if %ProcessMode=2 quit
+	
+	/* 
+	Perform the following only during inserts, not in verify mode
+	Do only if LN record exists
+	*/
+
+	if 'Db.isDefined("LN","lnps1.cid") quit	
+
+	/* 
+	Return error if attempting to insert payment schedule date which is less
+	than the last date in the payment file (LNBIL1) and that date does not
+	equal a date already found in the payment file.
+	*/
+	
+	set data=Db.getOneRow("LBDD,SCHND","LN","XCID") quit:ER 
+	set lbdd=$P(data,$C(9),1)
+	set schnd=$P(data,$C(9),2)
+	
+	if XPDD'>lbdd do { quit:ER 
+		new duedate,quit,rs
+		set (duedate,match,quit)=""
+		type ResultSet rs=Db.select("CDPD","LNBIL1","CID=:XCID")
+		if rs.isEmpty() quit
+		while rs.next()  set duedate=rs.getRow()  do { quit:ER  quit:quit  
+			if duedate=XPDD set match=1
+			if duedate'<XPDD set quit=1 quit 
+	
+			}
+	
+		if 'match do {
+	
+			new datedisp
+			set datedisp=$$DAT^%ZM(XPDD,%MSKD)
+	
+			// Interim payment schedule date ~p1 has no corresponding payment record
+			do Runtime.setErrMSG("LNPS1",1261,datedisp) quit:ER 
+			}
+	
+		}
+	do Db.update("LN","AMBAS=AMBAS+1,ONP=ONP+1","CID=:XCID","/NOJOURNAL")
+
+	new CID
+        set CID=lnps1.cid
+        new relcnt
+        type ResultSet relcnt=Db.select("GENPRJREP,ODT","LN","CID=:CID")
+        for  quit:'relcnt.next()  do {
+
+                if (relcnt.getCol("GENPRJREP")=1),(relcnt.getCol("ODT")<%SystemDate) do { quit:ER
+
+                	type RecordDAYENDLNNOT lnnot=Db.getRecord("DAYENDLNNOT","DT=:%SystemDate,CID=:CID,ID=4",1)
+	                if 'lnnot.getMode() do lnnot.bypassSave()
+                }
+        }
+	
+	// Update loan record if appropriate
+	do LNPIUD(XCID)
+	quit 
+	
+DELETE(XPDD,RecordLNPS1	lnps1)
+	
+	new XCID,data,duedate,lbdd,match,schnd
+	
+	set XCID=lnps1.cid
+	
+	/* 
+	Return error if attempting to delete payment schedule date which is less
+	than the last date in the payment file (LNBIL1) and that date exists in
+	the payment file.
+	*/	
+	set data=Db.getOneRow("LBDD,SCHND","LN","XCID") quit:ER 
+	
+	set lbdd=$P(data,$C(9),1)
+	set schnd=$P(data,$C(9),2)
+	
+	if XPDD'>lbdd do { quit:ER 
+		new duedate,quit
+	
+		set (duedate,match,quit)=""
+	
+		// Invalid. Corresponding payment record exists for payment date ~p1
+		new rs 
+		type ResultSet rs=Db.select("CDPD","LNBIL1","CID=:XCID")
+		if rs.isEmpty() quit 
+		while rs.next()  set duedate=rs.getRow()  do { quit:ER  quit:quit  
+			if duedate=XPDD set match=1
+			if duedate'<XPDD set quit=1 quit 
+	
+			}
+	
+		if match do {
+	
+			new datedisp
+			set datedisp=$$DAT^%ZM(XPDD,$G(%MSKD))
+			do Runtime.setErrMSG("LNPS1",1262,datedisp) quit:ER 
+			}
+	
+		}
+
+	do Db.update("LN","AMBAS=AMBAS-1,ONP=ONP-1","CID=:XCID","/NOJOURNAL")
+	
+	// Update loan record if appropriate
+	do LNPIUD(XCID)
+	quit 
+	
+
+LNPIUD(XCID,RecordLNPS1	lnps1)	// Update LN table due to payment schedule changes
+	
+	// Called when inserting or deleting payment schedule record
+	
+	new bloff,bndt,bseq,data,dfp,dist1fre,dist1ld,dist1nd,dist2fre,dist2nd
+	new dist3fre,dist3nd,dist4fre,dist4nd,lbdd,newvals,schnd,updt,x,XDATE
+	
+	type RecordLN ln=Db.getRecord("LN","CID")
+
+	// Get loan record values to support next set of checks
+	set updt=""
+	set list="BSEQ,BLOFF,DIST1FRE,DIST1LD,DIST2FRE,DIST2ND,DIST3FRE"
+	set list=list_",DIST3ND,DIST4FRE,DIST4ND,DFP,SCHND,BNDT,DIST1ND"
+	new rs
+	type ResultSet rs=Db.select(list,"LN","CID=:XCID")
+	if rs.isEmpty() do {
+		set bseq=rs.getCol(1) 
+		set bloff=rs.getCol(2) 
+		set dist1fre=rs.getCol(3)
+		set dist1ld=rs.getCol(4) 
+		set dist2fre=rs.getCol(5)
+		set dist2nd=rs.getCol(6) 
+		set dist3fre=rs.getCol(7)
+		set dist3nd=rs.getCol(8) 
+		set dist4fre=rs.getCol(9)
+		set dist4nd=rs.getCol(10)
+		set dfp=rs.getCol(11)
+		set schnd=rs.getCol(12) 
+		set bndt=rs.getCol(13)
+		set dist1nd=rs.getCol(14)
+		do LNPS1A(XCID,.ln)
+		}
+
+	// Update the loan record
+	if updt=1 do ln.save()
+
+	quit 
+	
+
+LNPS1A(cid,RecordLN ln)
+
+	
+	new d2f,d3f,d4f,data,mcid,n,newbndt,newd1nd,newdfp,newdfre,newdnd
+	new newschnd,rs,pdd,start,sqlcnt
+	set XCID=cid
+	
+	type ResultSet rs=Db.select("PDD,D2F,D3F,D4F","LNPS1","CID=:XCID")
+	if rs.isEmpty() quit
+	while rs.next() do { 
+		set n=rs.getCol(1)
+		set pdd(n)=""
+		if rs.getCol(2) set d2f(n)=""
+		if rs.getCol(3) set d3f(n)=""
+		if rs.getCol(4) set d4f(n)=""
+		}
+	
+	if bseq do {
+		// LN.SCHND should be first payment schedule entry after TJD
+		set newschnd=$O(pdd(%SystemDate))
+		}
+		if newschnd="" do {
+			set newschnd=$O(pdd(""),-1)
+			for  set newschnd=$$NJD^UFRE(newschnd,dist1fre) quit:newschnd>%SystemDate!($G(ER)) 
+			}
+		if newschnd'=ln.schnd set ln.schnd=newschnd,updt=1
+	
+		/* 
+		LN.DIST1ND should be equal to new scheduled date, if
+		equal to old scheduled date and later than last due date
+		in payment file.
+		*/
+		if dist1nd=ln.schnd,newschnd'=ln.schnd set ln.dist1nd=newschnd,updt=1		
+
+		// Make sure LN.BNDT is earliest date where date>=today+LN.BLOFF
+		set newbndt=$O(pdd(%SystemDate+bloff-1))-bloff
+		if newbndt'>0 set newbndt=""
+		if newbndt'=ln.bndt set ln.bndt=newbndt,updt=1
+
+	else  do {
+		set newdfp=$O(pdd(""))                // Oldest date for LN.DFP
+		if newdfp'=ln.dfp set ln.dfp=newdfp,updt=1
+		if ln.schnd'=newdfp set ln.schnd=newdfp,updt=1
+		if ln.dist1nd'=newdfp set ln.dist1nd=newdfp,updt=1
+		}
+	
+	// Handle secondary frequencies
+	if bseq set start=%SystemDate+bloff-1
+	else  set start=""
+	do LNPS1B(2,dist2fre,dist2nd,.d2f)
+	do LNPS1B(3,dist3fre,dist3nd,.d3f)
+	do LNPS1B(4,dist4fre,dist4nd,.d4f)
+	quit 
+	
+
+LNPS1B(distno,fre,nd,array,RecordLNPS1 lnps1)
+
+	
+	new newdfre,newdnd
+	if '$D(array) set (newdfre,newdnd)=""
+	else  do {
+		set x=$O(array(start))                // Get next date
+		if x="" set x=$O(array(start+1),-1)   // Or last if no next
+		set newdnd=x
+		set newdfre="*"
+		}
+
+	if newdfre'=fre do {
+		set updt=updt_"DIST"_distno_"FRE='"_newdfre_"',"
+		if newdfre="" do LNPS1BIL(distno)
+		}
+
+	if newdnd'=nd set updt=updt_"DIST"_distno_"ND='"_newdnd_"',"
+	quit 
+	
+
+LNPS1BIL(distno)
+	
+	new lnbil0
+	type RecordLNBIL0 lnbil0=Db.getRecord("LNBIL0","CID")	
+	set x=lnbil0.pe01
+	if lnbil0.pe01pf=distno set $P(x,"#",4)="",lnbil0.pe01=x
+	set x=lnbil0.pe02
+	if lnbil0.pe02pf=distno set $P(x,"#",4)="",lnbil0.pe02=x
+	set x=lnbil0.pe03
+	if lnbil0.pe03pf=distno set $P(x,"#",4)="",lnbil0.pe03=x
+	set x=lnbil0.pe04
+	if lnbil0.pe04pf=distno set $P(x,"#",4)="",lnbil0.pe04=x
+	set x=lnbil0.pe05
+	if lnbil0.pe05pf=distno set $P(x,"#",4)="",lnbil0.pe05=x
+	set x=lnbil0.pe06
+	if lnbil0.pe06pf=distno set $P(x,"#",4)="",lnbil0.pe06=x
+	set x=lnbil0.pe07
+	if lnbil0.pe07pf=distno set $P(x,"#",4)="",lnbil0.pe07=x
+	set x=lnbil0.pe08
+	if lnbil0.pe08pf=distno set $P(x,"#",4)="",lnbil0.pe08=x
+	set x=lnbil0.pe09
+	if lnbil0.pe09pf=distno set $P(x,"#",4)="",lnbil0.pe09=x
+	set x=lnbil0.pe10
+	if lnbil0.pe10pf=distno set $P(x,"#",4)="",lnbil0.pe10=x
+	set x=lnbil0.pe11
+	if lnbil0.pe11pf=distno set $P(x,"#",4)="",lnbil0.pe11=x
+	set x=lnbil0.pe12
+	if lnbil0.pe12pf=distno set $P(x,"#",4)="",lnbil0.pe12=x
+	set x=lnbil0.pe13
+	if lnbil0.pe13pf=distno set $P(x,"#",4)="",lnbil0.pe13=x
+	set x=lnbil0.pe14
+	if lnbil0.pe14pf=distno set $P(x,"#",4)="",lnbil0.pe14=x
+	set x=lnbil0.pe15
+	if lnbil0.pe15pf=distno set $P(x,"#",4)="",lnbil0.pe15=x
+	set x=lnbil0.pe16
+	if lnbil0.pe16pf=distno set $P(x,"#",4)="",lnbil0.pe16=x
+	set x=lnbil0.pe17
+	if lnbil0.pe17pf=distno set $P(x,"#",4)="",lnbil0.pe17=x
+	set x=lnbil0.pe18
+	if lnbil0.pe18pf=distno set $P(x,"#",4)="",lnbil0.pe18=x
+	set x=lnbil0.pe19
+	if lnbil0.pe19pf=distno set $P(x,"#",4)="",lnbil0.pe19=x
+	set x=lnbil0.pe20
+	if lnbil0.pe20pf=distno set $P(x,"#",4)="",lnbil0.pe20=x
+
+
+	do lnbil0.bypassSave()
+	quit 
+	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60416^17694^Dhanalakshmi R^8039"	// Signature - LTD^TIME^USER^SIZE

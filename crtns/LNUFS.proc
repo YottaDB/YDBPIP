@@ -1,0 +1,462 @@
+LNUFS	
+	/*
+	   ORIG:  GORMAN - 31 MAR 1993
+	   Procedure ID - LNUFS
+	   DESC: Bill Record Maintenance / Unsatisfied Funds Status  
+		Displays payments due from borrowers.  Allows user
+		to modify component amounts due, or add a new
+		internal bill record.
+
+		Routine sets up and uses following arrays:
+
+	    1.  . lnbil1	lnbil1 object 
+
+	    2.  LNBLX
+		Payment Elements (PE) pointing back to the row
+		(subscript) of the LNB2 file.
+
+		LNBLX(PE) = LNB2_Sequence
+
+	    3.  LNBLX1
+		Payment due date (BLDU) pointing back to the column
+		(node) of the LNB1 file.
+
+		LNBLX1(BLDU) = node
+
+	    4.  LNB1
+		Screen data.  Contains information for top (static)
+		section of screen and for information not displayed on
+		screen but used for filing.
+
+			             |           |           |           |
+
+	                   Column 1    Column 2    Column 3    Column 4
+
+	        LNB1(0)=   ^BIL Seq    ^BIL Seq    ^BIL Seq    ^BIL Seq
+		LNB1(1)=   Amt Due     Amt Due     Amt Due     Amt Due
+		LNB1(2)=   Bill Date   Bill Date   Bill Date   Bill Date
+		LNB1(3)=   Due Date    Due Date    Due Date    Due Date
+		LNB1(4)=   Total Pmt   Total Pmt   Total Pmt   Total Pmt
+		LNB1(5)=   P&I Due     P&I Due     P&I Due     P&I Due
+		LNB1(6)=   P&I Total   P&I Total   P&I Total   P&I Total
+		LNB1(7)=   Comment     Comment     Comment     Comment
+		LNB1(12)=   Subsidy Due Subsidy Due Subsidy Due Subsidy Due
+
+	    5.  LNB2
+		Screen data for repeating region.
+
+		          Pmt-1 Pmt-2 Pmt-3 Pmt-4
+		LNB2(1)= $-Due $-Due $-Due $-Due $-Lmp Elemnt Loc
+		LNB2(2)= $-Due $-Due $-Due $-Due $-Lmp Elemnt Loc
+		LNB2(3)= $-Due $-Due $-Due $-Due $-Lmp Elemnt Loc
+		LNB2(4)= $-Due $-Due $-Due $-Due $-Lmp Elemnt Loc
+		          _____________________________
+	                  Repeating field $ columns 1-5
+
+		The amounts due are for the four internal bills on the
+		screen.  These may or may not be the first four internal bills
+		with amounts due in the Internal Bill Detail file [LNBIL1].
+		This depends on the date entered by the user at the "Payments
+		Due From" prompt.
+
+		The Lmp amount is the lump amount found in node 0 of the bill
+		file.
+
+		The Loc(ation) value indicates where (which piece) the element
+		appears in the ^BIL record.
+
+	--- Revision History -------------------------------------------------
+
+	07/31/06 - KELLYP - CR 22048
+		Modified ADD section to eliminate PRECEDENCE warning.
+
+	03/08/06 - KinI - CR 20012
+		Modified LOAD section to start looping through the very first 
+		element returned by GETFIELD^BILFUNCS so that "I"nterest 
+		payment element info is loaded for MRPC028.
+
+	12/12/05 - TELIV - CR 17961
+		In section Load the Record LNBIL1 was fetched without proper key values.
+		Rectified the same.
+		LN.OSEQ can be greater than BSEQ and hence cannot be a bill record for OSEQ if
+		no amounts have been paid, and no amounts are outstanding in payment file,
+		The 'oseq' is set equal to the first record after the last on file (refer COMPUTE 
+		section of LNBIL1)
+	
+	05/06/05 - KinI - 15524
+		Modified to directly reference lnbil1.bp1 sub-fields rather 
+		then process a piece of bp1 master field per DBI standards.
+		Removed UPD, INQ, ORG, NEW, INIT, VPG, VPG00, VPG01, ERR, VER,
+		FILE, END, POSCID and POSBLDU sections as the Internal Loan 
+		Bill Maintenance functionality has been obsolete from the host.
+		Deleted old revision history.
+		
+	11/17/03 - CARROLLJ - CR7239
+		Needed to instantiate lnbil0 before calling out to BILFUNCS.
+
+	09/20/02 - YENDAPALLIS -43583
+		PSL conversion clean up.
+	----------------------------------------------------------------------------
+	*/
+
+	quit
+
+POSSTDT	// Post Processor to Payments Due From prompt
+
+	// Called from LNFDS, Loan Fee Due Summary procedure
+
+	if X="" quit
+
+	new A
+
+	// Last bill due date
+	type RecordLN ln=Db.getRecord("LN","CID")
+
+	set A=ln.lbdd
+	set DATA=ln.hisctf
+	
+	if X>A do { quit
+		set ER=1
+		if A'="" set A=$$DAT^%ZM(A)
+	
+		// Date entered exceeds due date of last internal bill on file
+		set RM=$$^MSG("1518",A)
+		}
+	quit
+
+
+public LOAD	// Load information needed for processing by MRPC028
+
+	// Note: This section is also called by custom routines which create
+	// internal bill records outside of the billing process.
+	
+	type public Boolean ER=0, NEW, ORG
+	type public Number BSEQDAT, CID, OSEQDAT
+	type public Date STDT
+	type public String LNB1(), LNB2()
+	
+	type String CLSESC(), LINK, N, PE, ROW
+	type Number BSEQ, COL, CNT, I, IDP, LNBLX(), LNBLX1(), OSEQ, PIECE, SEQ
+	type Boolean Q
+	
+	type RecordLN ln=Db.getRecord("LN","CID")	
+
+	// Find all fees linked to payment string elements
+	do LOADLNK^LNFEEU(CID,.LINK)
+
+	// Store location of "P"rincipal and "I"nterest elements
+	type RecordLNBIL0 lnbil0=Db.getRecord("LNBIL0","CID=:CID",1)
+
+	// Incomplete Internal Bill Control file LNBIL0.  Process stopped.
+	if lnbil0.getMode()=0 do Runtime.setErrMSG("LNBIL0",1208) quit:ER
+
+	set ROW=$$BIL0ELE^BILFUNCS(.lnbil0)
+	for I=1:1:20 quit:ROW.piece($C(9),I)=""  do {
+		set N=ROW.piece($C(9),I)
+		if "I~P"'[N.piece("#",1) quit
+		set PIECE(N.piece("#",1))=I
+		}
+	
+	/*
+	Determine default IDP for screen. (Only one IDP allowed on screen. 
+	If IDP changes between bills on screen, bills with other than default 
+	IDP not displayed.)
+	*/
+
+	//Interest Determination Point
+	set IDP=$S('NEW:$$DIDP(.ln),1:ln.idp)
+
+	// Initialize all comment fields to a space so that a blank line does
+	// not appear if no comment displayed
+
+	for I=1:1:5 set LNB1(8).piece("|",I)=" "
+
+	// Track total number of payment (both in string and linked) elements
+	set CNT=0
+
+	set ROW=$$BIL0ELE^BILFUNCS(.lnbil0)
+	for I=1:1:20 quit:ROW.piece($C(9),I)=""  do {
+	
+		type String COM, FEE
+		type Number EACT
+		
+		// Pmt element
+		set COM=ROW.piece($C(9),I)
+		set PE=COM.piece("#",1)
+
+		// Quit if escrow element and escrow account is closed
+		if COM.piece("#",2) set Q=0 do { quit:Q
+			set EACT=COM.piece("#",2)
+			type RecordDEP dep=Db.getRecord("DEP","EACT")
+			if dep.stat'=4 quit
+			set CLSESC(PE)=""
+			set Q=1
+			}
+
+       		// Special processing if IDP=1 (at payment)
+
+		// P & I
+		if IDP quit:PE="P"  set:PE="I" PE=$$^MSG("4245")
+		
+		set CNT=CNT+1  			// Update counter		
+		
+		set LNBLX(PE)=CNT  		// Cross ref		
+		
+		set LNB2(CNT).piece("|",5)=+COM.piece("#",5)  // Lump amount		
+		
+		set LNB2(CNT).piece("|",6)=PE  	// Pmt element		
+		
+		set LNB2(CNT).piece("|",7)=I  	// Piece in Bill file
+
+		// Load information for linked fees
+		set FEE="" 
+		for  set FEE=LINK(CID,PE,FEE).order() quit:FEE=""  do {
+			set CNT=CNT+1
+			set LNBLX(FEE)=CNT
+			set LNB2(CNT).piece("|",6)=FEE
+			}
+
+		}
+
+	// Initialize COL variable to zero.  COL represents the screen column
+	// number.  4 columns of bills are displayed on one screen.
+
+	set COL=0
+
+	// If adding new bill record.
+	if NEW do ADD(.lnbil0,.ln) quit
+	
+	/*
+	Roll through internal bill file and create standard BL array used by
+	transaction processing, and LNB2 array used by repeating
+	region of screen.
+	*/
+
+	set Q=0 
+
+	type ResultSet rs=Db.select("SCHSEQ,CDPD","LNBIL1","CID=:CID")
+	while rs.next() do {
+		set SEQ=rs.getCol("SCHSEQ")
+	
+		type String FEE, PCE1, PCE2, PE
+		type Number NOD
+		
+		if Q quit
+
+		// Max 4 columns
+		if COL<4,rs.getCol("CDPD")'<STDT do {
+				
+			/*
+			Determine whether we can display this bill on the 
+			screen.  We can not if it has a different IDP than 
+			default screen IDP.
+			*/
+
+			type RecordLNBIL1 lnbil1=Db.getRecord("LNBIL1","CID=:CID,SCHSEQ=:SEQ")
+			if $$IDP(.lnbil1,IDP)'=IDP do { quit
+				set Q=1
+				// Int Meth Chg
+				set LNB1(7).piece("|",(COL+1))=$$^MSG("4244")
+				}
+				
+			set COL=COL+1
+			
+			// Bill sequence
+			set LNB1(0).piece("|",COL)=SEQ
+
+			set LNB1(1).piece("|",COL)=+lnbil1.casd
+			set LNB1(2).piece("|",COL)=+lnbil1.cbcd
+			set LNB1(3).piece("|",COL)=+lnbil1.cdpd
+			set LNB1(4).piece("|",COL)=+lnbil1.ctab
+			set LNB1(5).piece("|",COL)=+lnbil1.cpid
+			set LNB1(6).piece("|",COL)=+lnbil1.cpib
+			set LNB1(11).piece("|",COL)=lnbil1.csubamt
+			set LNB1(11).piece("|",COL)=lnbil1.csubdue
+		
+			set LNBLX1(lnbil1.cdpd)=COL
+
+			for I=1:1 set PCE2=$$GETFIELD^BILFUNCS(I,.lnbil1) quit:PCE2=""  do {
+			
+				// Pmt element
+				set PE=PCE2.piece("#",1)
+
+				// Quit if we've already determined escrow closed
+				if CLSESC(PE).exists() quit
+
+				// Special processing if IDP = at payment
+				if IDP quit:PE="P"  if PE="I" do { quit
+					// P & I
+					set PE=$$^MSG("4245")
+					set NOD=LNBLX(PE)
+					if ORG=0 set LNB2(NOD).piece("|",COL)=LNB1(5).piece("|",COL)
+					if ORG=1 set LNB2(NOD).piece("|",COL)=LNB1(6).piece("|",COL)
+					}
+
+				// Load amount due
+				if ORG=0 set LNB2(LNBLX(PE)).piece("|",COL)=+PCE2.piece("#",4)
+				if ORG=1 set LNB2(LNBLX(PE)).piece("|",COL)=+PCE2.piece("#",3)
+
+				// Load information for linked fees
+				set FEE=""
+				for  set FEE=LINK(CID,PE,FEE).order() quit:FEE=""  do {
+
+					type Number NODE
+
+					type RecordLNBIL5 lnbil5=Db.getRecord("LNBIL5","CID,SEQ,1,FEE",1)
+					if lnbil5.getMode()=1 do {
+						set NODE=LNBLX(FEE)
+						if ORG=0 set LNB2(NODE).piece("|",COL)=+lnbil5.brfamt
+						if ORG=1 set LNB2(NODE).piece("|",COL)=+lnbil5.bfamt
+						}
+					}
+				}
+			}
+		}
+
+	// Define variables OSEQDAT and BSEQDAT (displayed on screen)
+	
+	// Internal Bill Oldest Unsatisfied Seq Nbr
+	set OSEQ=ln.oseq
+	
+	// Billing - Last Sequence Number
+	set BSEQ=ln.bseq
+
+	set OSEQDAT="" 
+	if OSEQ'>BSEQ do {
+		type RecordLNBIL1 lnbil1=Db.getRecord("LNBIL1","CID,OSEQ")		
+		set OSEQDAT=lnbil1.cbcd
+	}
+	
+	type RecordLNBIL1 lnbil1=Db.getRecord("LNBIL1","CID,BSEQ")
+	
+	set BSEQDAT="" 
+	if BSEQ set BSEQDAT=lnbil1.cbcd
+
+	quit
+
+
+DIDP(RecordLN ln)	// Determine default screen IDP value
+
+	type Number CNT, IDP, SEQ
+	type Boolean Q
+
+	set Q = 0
+	set CNT = 0
+	
+	// Interest Determination Point
+	set IDP=ln.idp
+
+	type ResultSet rs=Db.select("SCHSEQ,CPID,CDPD","LNBIL1","CID=:CID")
+	while rs.next() do { quit:Q
+		
+		set SEQ=rs.getCol("SCHSEQ")
+		
+		if (rs.getCol("CDPD") < STDT) quit
+	
+		/*
+		Due date is not less than start date.  Therefore payment
+		may appear on screen.  We will grab IDP from first bill
+		which has a P&I total in piece 5.
+		*/
+
+		// Max of 4 bills on one screen
+		set CNT=CNT+1		 
+		if CNT>4 set Q=1 quit
+				
+		// No basis for check
+		if rs.getCol("CPID").isNull() quit		
+			
+		type RecordLNBIL1 lnbil1=Db.getRecord("LNBIL1","CID,SEQ")		
+		set IDP=$$IDP(.lnbil1,IDP)
+		set Q=1
+		
+		}
+
+	quit IDP
+
+
+IDP(RecordLNBIL1 lnbil1,IDP)	// Determine IDP associated with one bill record
+
+	new N,PCE2,TOT
+
+	// No P&I amount in this bill
+	if +lnbil1.cpid=0 quit IDP
+
+	set (TOT,N)="" 
+
+	for  set N=$O(PIECE(N)) quit:N=""  do {
+		set PCE2=$$GETFIELD^BILFUNCS(PIECE(N),.lnbil1)	
+		set TOT=TOT+$P(PCE2,"#",3)
+		}
+
+	// If TOT is 0, return 0 (Interest determined at billing)
+	// If TOT is other than 0, return 1 (Interest determined at payment)
+
+	quit 'TOT
+
+
+ADD(RecordLNBIL0 lnbil0,RecordLN ln)	
+
+	// Add new internal bill record (also called by custom processes)
+
+	new A,B,C,N,P,SAV,SEQ
+
+	set COL=1
+
+	// Amount fields
+	for N=1,4,5,6,11,12 set $P(LNB1(N),"|",1)=0
+
+	// Bill date
+	set $P(LNB1(2),"|",1)=%SystemDate
+
+	// Payment due
+	set $P(LNB1(3),"|",1)=BLDU
+
+	// Cross reference
+	set LNBLX1(BLDU)=1
+
+	// New internal bill
+	set $P(LNB1(7),"|",1)=$$^MSG("4067")
+
+	// Calculate new payment sequence
+	do { quit:ER
+
+		// Determine seq that precedes (LOW) and exceeds (HI)
+		set LOW=$O(SAV(BLDU+1),-1)
+		if LOW="" set LOW=0
+		else  set LOW=SAV(LOW)
+		set HI=$O(SAV(BLDU))
+
+		// Billing - Last Sequence Number
+		if HI="" set SEQ=ln.bseq+1 quit
+		set HI=SAV(HI)
+		set SEQ=(HI-LOW)/2+LOW
+		}
+
+	set $P(LNB1(0),"|",COL)=SEQ  	// Bill sequence
+
+	type RecordLNBIL1 lnbil1=Class.new("RecordLNBIL1")
+	
+	set lnbil1.cid=CID
+	set lnbil1.schseq=SEQ
+	set lnbil1.cbcd=TJD		// Cutoff date	
+	set lnbil1.cdpd=BLDU		// Due date
+	set lnbil1.copb=+ln.bal    	// Balance         
+	set lnbil1.cirn=ln.irn 		// Interest rate
+
+	set ROW=$$BIL0ELE^BILFUNCS(.lnbil0)
+	for P=1:1:20 quit:$P(ROW,$C(9),P)=""  do {
+		set A=$P(ROW,$C(9),P)
+		set C=$P(A,"#",1,2)
+
+		// Call to bill funcs to set
+		do SETELMT^BILFUNCS(.lnbil1,P,C)
+		}
+		
+	do lnbil1.bypassSave()	
+
+	quit
+
+	
+
+vSIG()	quit "60477^65456^Pat Kelly^11514"	// Signature - LTD^TIME^USER^SIZE

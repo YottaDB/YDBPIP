@@ -1,0 +1,1027 @@
+PROCLNB1	      	/*
+	---------- Revision History ------------------------------------------
+
+	03/03/06 - KUMARB - CR 19689
+		   Modified section COMPLN2^LNBIL1, by changing the "while"
+		   loop to "if" to get the prior and after sequence.
+
+	12/15/05 - TELIV - CR 17924
+		   Modified section COMPUTE, to check if Bill is generated for the coming 
+		   bill cycle
+	
+	05/04/05 - KinI - 15524 
+		   Modified BEFORE section to eliminate lnbil1.bp1 update since
+		   the master field is considered computed according to DBI 
+		   standards.
+		   Modified UPDLN calls to pass forth ctl parameter as zero 
+		   where it was not previously defined.
+		   Replaced deprecated Db.nextKey() method with Db.select in 
+		   loadAD section.
+		   
+	01/28/04 - CARROLLJ - CR7997
+		   Pass correct parameters to LNUBIL.
+
+	11/12/03 - CARROLLJ - 51630
+		   Correct call to LNFUNCS to pass correct parameters.
+
+	04/10/03 - CARROLLJ - 51349
+		   Modified the call to BALINT^LNFUNCS to only pass the ln
+		   object.
+
+	
+	Procedure is called at EXEC line tag by LNBIL1 and LNBIL5
+	filer triggers.
+	----------------------------------------------------------------------
+	*/
+
+	quit
+
+
+EXEC(String table,		// Payment File Table
+     String mode,		// Process Mode
+     String stage,		// Process Stage
+     Number XCID,		// Account Number
+     Number XSCHSEQ,		// Bill Sequence
+     RecordLNBIL1 lnbil1,
+     RecordLNBIL5 lnbil5)
+
+	/*
+	Argument Details:
+	
+	table	Payment file table
+		Value   Description
+		-----   -----------		
+		LNBIL1  Payment file detail	
+		LNBIL5  Linked fee detail	
+	
+	mode	Process mode	
+		Value   Description
+		-----   -----------		
+		insert  Create new row	
+		update  Modify existing row	
+		delete  Delete existing row	
+		compute Determine LN values based on current LNBIL1 rows.
+		
+	stage	Process stage	
+		Value   Source
+		-----   ------	
+		Before  Before insert or update trigger	
+		After   After insert or update trigger
+	*/
+	
+	type public String ER
+	
+	// LN table columns
+	type Boolean aruf
+	type Number bal, balint, bloff, bseq, cc, crlmt, cues, cuin, cupr, dic, dpmt
+	type Number dseq, extamt, iam, icpa, ipl, idp, iun, lchg, narl, oseq, ppa
+	type Number lnschseq, tba, tdue, teb, trb, type, udbal, unes, unin, unpr
+	type Date bldt, dfp, dist1nd, dist1ld, lbdd, odd, schld, schnd
+	type String bil(), crcd, dist1fre, glsc
+	
+	// LNBIL1 table columns
+	type Boolean casd, cpid, cpib, ctab
+	type Date cbcd, cdpd
+	
+	// Variables/arrays used by this process
+	type Number casdold, dseqold, dpmtold, oseqnew
+	type String element, lndata, param, rebuild, update, updln, where
+	
+	set stage=stage.get()
+
+	type RecordLN ln=Db.getRecord("LN","CID=:XCID")
+
+	if (stage = "before") do BEFORE(.ln,.lnbil1,.lnbil5,table,mode) quit:ER 
+
+	if (stage = "after")!(mode = "compute") do AFTER(.ln,.lnbil1,table,mode) quit:ER 
+	
+	// Update the loan record
+	if (updln.get() '= "") do {  quit:ER
+		set updln=$E(updln,1,$L(updln)-1)
+		set param="/NOJOURNAL/NOTRIGBEF/NOTRIGAFT"
+		do UPDATE^SQL("LN SET "_updln_" WHERE CID=:XCID",param)
+		}
+			
+	/*
+	 Added call to CALC^LNUBIL("1101") to avoid integs 
+	 with LN.PPA, LN.DIST1LD, LN.DSEQ and LN.DPMT or other possible
+	 distinctions between LN and BIL files after zeroing out unpaid 
+	 amount.
+	*/
+	
+	if (mode = "update") & (stage = "after") do CALC^LNUBIL(.ln,"1101")
+
+	quit
+
+
+BEFORE(RecordLN ln,
+       RecordLNBIL1 lnbil1,
+       RecordLNBIL5 lnbil5,
+       String table, 		// Payment file table
+       String mode)		// Process mode
+       		
+	// Row XSCHSEQ into XCID payment file - Before
+	
+	// Loan LN table columns
+	do LOADLN(.ln,1)
+	
+	// Payment file LNBIL1 table columns
+	do LOADBL(1,.lnbil1)
+	
+	// Update LNBIL1 summary columns based on detail data
+	if (table = "LNBIL1") do BLSUM1(.lnbil1,mode)
+	if (table = "LNBIL5") do BLSUM5^PROCLNB5(.lnbil5,.lnbil1,mode)
+	
+	// Compute values of various LN table columns
+	do COMPLN(casd-casdold,.lnbil1,mode,table)
+	
+	if table="LNBIL1" do {
+
+		set lnbil1.casd.journal = 0,lnbil1.casd = +casd
+		set lnbil1.ctab.journal = 0,lnbil1.ctab = +ctab
+		set lnbil1.cpid.journal = 0,lnbil1.cpid = +cpid
+		set lnbil1.cpib.journal = 0,lnbil1.cpib = +cpib
+		set lnbil1.cbcd.journal = 0,lnbil1.cbcd = cbcd
+		}
+	
+	if table="LNBIL5" do {
+		
+		do lnbil1.setAuditFlag(1)
+		set lnbil1.casd.journal = 0,lnbil1.casd = +casd
+                set lnbil1.ctab.journal = 0,lnbil1.ctab = +ctab
+		do lnbil1.save()
+		}
+			
+	
+	quit 
+
+	
+AFTER(RecordLN ln,
+      RecordLNBIL1 lnbil1,
+      String table,		// Payment file table
+      String mode) 		// Process mode
+
+	//Insert single row XSCHSEQ into XCID payment file - After	
+
+	type public String ER
+
+	// Loan LN table columns
+	do LOADLN(.ln,1)
+	
+	// Payment file LNBIL1 table columns
+	do LOADBL(1,.lnbil1)
+	
+	/* 
+	 Table LN values such as next due date are derived from the
+	 composition of the payment file.  If the payment file changes,
+	 corresponding changes must be made to the LN table.
+	*/
+	do { quit:ER
+		if (mode = "update") do COMPUTE(oseq,.lnbil1,table) quit  
+		if (mode = "delete") do COMPUTE(oseq,.lnbil1,table) quit 
+		if (mode = "insert") & (XSCHSEQ '> dseq) do COMPUTE(oseq,.lnbil1,table) quit 
+  		if (mode = "compute") do COMPUTE(0,.lnbil1,table) quit 
+
+		if (table = "LNBIL1") do PMTRECIC("") quit 
+		}
+	
+	// Recalculate LN.BALINT - Balance for Interest Calculation
+	set balint = $$UPDLN("BALINT",balint,$$BALINT^LNFUNCS(.ln),1)
+	
+	quit	
+
+
+LOADLN(RecordLN ln,
+       String ctl)	// Control variable
+
+	/*
+	 Called internally and by LNBIL5 procedure routine PROCLBL5
+	
+	 ctl argument details:
+	 Pos  Val  Desc
+	 ---  ---  ----
+	 1     0   Compute mode. Initialize some variable to LN table values 
+		  and others to 0.		  	
+	 1	  Initialize all LN column values equal their values from the 
+		  account record.
+	*/
+	
+	// Note:  The 'lndata' array is used by BALINT^LNFUNCS.  
+	// Only those columns used by the subroutine are stored in lndata.
+
+	set aruf = ln.aruf
+	set lndata("ARUF") = aruf
+	set bal = ln.bal
+	set lndata("BAL") = bal
+	set balint = ln.balint
+	set bldt = ln.bldt
+	set bloff = ln.bloff
+	set bseq = ln.bseq
+	set cc = ln.cc
+	set crcd = ln.crcd
+	set cues = ln.cues
+	set lndata("CUES") = cues
+	set cuin = ln.cuin
+	set lndata("CUIN") = cuin
+	set cupr = ln.cupr
+	set lndata("CUPR") = cupr
+	set dfp = ln.dfp
+	set dic = ln.dic
+	set lndata("DIC") = dic
+	set dist1fre = ln.dist1fre
+	set dist1ld = ln.dist1ld
+	set dist1nd = ln.dist1nd
+	set dpmt = ln.dpmt
+	set dseq = ln.dseq
+	set glsc = ln.glsc
+	set iam = ln.iam
+	set lndata("IAM") = iam
+	set icpa = ln.icpa
+	set idp = ln.idp
+	set ipl = ln.ipl
+	set lndata("IPL") = ipl
+	set iun = ln.iun
+	set lndata("IUN") = iun
+	set lbdd = ln.lbdd
+	set lchg = ln.lchg
+	set lndata("LCHG") = lchg
+	set narl = ln.narl
+	set lndata("NARL") = narl
+	set odd = ln.odd
+	set oseq = ln.oseq
+	set schld = ln.schld
+	set schnd = ln.schnd
+	set lnschseq = ln.schseq
+	set tba = ln.tba
+	set tdue = ln.tdue
+	set lndata("TDUE") = tdue
+	set teb = ln.teb
+	set lndata("TEB") = teb
+	set trb = ln.trb
+	set type = ln.type
+	set udbal = ln.udbal
+	set lndata("UDBAL") = udbal
+	set unes = ln.unes
+	set lndata("UNES") = unes
+	set unin = ln.unin
+	set lndata("UNIN") = unin
+	set unpr = ln.unpr
+	set lndata("UNPR") = unpr
+	set crlmt = ln.crlmt
+	set lndata("CRLMT") =crlmt
+	set extamt = ln.extamt
+	set lndata("EXTAMT") = extamt
+	set popt = ln.popt
+	set lchgnoto = ln.lchgnoto
+	set pmtgrc = ln.pmtgrc
+
+	if 'ctl.extract() set (bseq,cues,cuin,cupr,dseq,tba,tdue,unes,unin,unpr) = 0
+	
+	quit 
+
+
+LOADBL(String ctl,		// Control variable
+       RecordLNBIL1 lnbil1)
+	
+	/*
+	 ctl argument details:
+	 Pos  Val  Desc
+	 ---  ---  ----
+	 1     0   Initialize LNBIL1 column values to 0, but not to values from 
+		   LNBIL1 table.
+		   This is appropriate when inserting a new row, or when 
+		   rebuilding LN and LNBIL1 values from LNBIL1,5 table.		   
+	 1	   Initialize LNBIL1 column values equal to amounts from LNBIL1.	
+	*/
+	
+	set (casd,cpid,cpib,ctab) = ""
+	
+	if (table = "LNBIL1") do {
+	
+		set cdpd = lnbil1.cdpd
+		set cbcd = lnbil1.cbcd
+	
+		if 'ctl.extract() quit 
+	
+		set casd = lnbil1.casd
+		set cpid = lnbil1.cpid
+		set cpib = lnbil1.cpib
+		set ctab = lnbil1.ctab
+		}
+	
+	if (table = "LNBIL5") do {
+
+		set cdpd = lnbil1.cdpd
+		set cbcd = lnbil1.cbcd
+		set casd = lnbil1.casd		
+		set cpid = lnbil1.cpid
+		set cpib = lnbil1.cpib
+		set ctab = lnbil1.ctab
+		}
+		
+	// If billing cutoff date not defined, use system date
+	if (cbcd = "") set cbcd = %SystemDate	
+
+	set casdold = casd
+	
+	quit 
+
+	
+BLSUM1(RecordLNBIL1 lnbil1,
+       String mode)		// Process mode 
+
+	/*	
+	 Update pmt record summary columns from LNBIL1 detail.
+	 
+		Mode 	Processing
+		----	----------
+		insert 	Update summary columns based on total amounts billed
+	  		and due.
+		update 	Update summary columns based on change in amounts due
+	  		and billed.
+	*/
+	
+	type Boolean q = 0 
+	type String ad(,)
+	
+	// Update summary totals from total amounts due and billed
+	
+	do loadAD(XSCHSEQ,.ad)
+
+	if (mode = "insert") ! (mode = "delete") do {  quit
+		do {
+			do BLSUM(lnbil1.pe01ea,lnbil1.pe01ab,lnbil1.pe01ad,ad(lnbil1.pe01ea,1).get(),mode) quit:q 
+			do BLSUM(lnbil1.pe02ea,lnbil1.pe02ab,lnbil1.pe02ad,ad(lnbil1.pe02ea,2).get(),mode) quit:q 
+			do BLSUM(lnbil1.pe03ea,lnbil1.pe03ab,lnbil1.pe03ad,ad(lnbil1.pe03ea,3).get(),mode) quit:q 
+			do BLSUM(lnbil1.pe04ea,lnbil1.pe04ab,lnbil1.pe04ad,ad(lnbil1.pe04ea,4).get(),mode) quit:q 
+			do BLSUM(lnbil1.pe05ea,lnbil1.pe05ab,lnbil1.pe05ad,ad(lnbil1.pe05ea,5).get(),mode) quit:q 
+			do BLSUM(lnbil1.pe06ea,lnbil1.pe06ab,lnbil1.pe06ad,ad(lnbil1.pe06ea,6).get(),mode) quit:q 
+			do BLSUM(lnbil1.pe07ea,lnbil1.pe07ab,lnbil1.pe07ad,ad(lnbil1.pe07ea,7).get(),mode) quit:q 
+			do BLSUM(lnbil1.pe08ea,lnbil1.pe08ab,lnbil1.pe08ad,ad(lnbil1.pe08ea,8).get(),mode) quit:q 
+			do BLSUM(lnbil1.pe09ea,lnbil1.pe09ab,lnbil1.pe09ad,ad(lnbil1.pe09ea,9).get(),mode) quit:q 
+			do BLSUM(lnbil1.pe10ea,lnbil1.pe10ab,lnbil1.pe10ad,ad(lnbil1.pe10ea,10).get(),mode) quit:q 
+			do BLSUM(lnbil1.pe11ea,lnbil1.pe11ab,lnbil1.pe11ad,ad(lnbil1.pe11ea,11).get(),mode) quit:q 
+			do BLSUM(lnbil1.pe12ea,lnbil1.pe12ab,lnbil1.pe12ad,ad(lnbil1.pe12ea,12).get(),mode) quit:q 
+			do BLSUM(lnbil1.pe13ea,lnbil1.pe13ab,lnbil1.pe13ad,ad(lnbil1.pe13ea,13).get(),mode) quit:q 
+			do BLSUM(lnbil1.pe14ea,lnbil1.pe14ab,lnbil1.pe14ad,ad(lnbil1.pe14ea,14).get(),mode) quit:q 
+			do BLSUM(lnbil1.pe15ea,lnbil1.pe15ab,lnbil1.pe15ad,ad(lnbil1.pe15ea,15).get(),mode) quit:q 
+			do BLSUM(lnbil1.pe16ea,lnbil1.pe16ab,lnbil1.pe16ad,ad(lnbil1.pe16ea,16).get(),mode) quit:q 
+			do BLSUM(lnbil1.pe17ea,lnbil1.pe17ab,lnbil1.pe17ad,ad(lnbil1.pe17ea,17).get(),mode) quit:q 
+			do BLSUM(lnbil1.pe18ea,lnbil1.pe18ab,lnbil1.pe18ad,ad(lnbil1.pe18ea,18).get(),mode) quit:q 
+			do BLSUM(lnbil1.pe19ea,lnbil1.pe19ab,lnbil1.pe19ad,ad(lnbil1.pe19ea,19).get(),mode) quit:q 
+			do BLSUM(lnbil1.pe20ea,lnbil1.pe20ab,lnbil1.pe20ad,ad(lnbil1.pe20ea,20).get(),mode) quit:q 
+			
+			}
+	
+		/* 
+		Address amounts from LNBIL5 table.  This assumes that the
+		LNBIL5 rows were inserted before LNBIL1.  If not, they will
+		be addressed as each row is inserted.
+		*/
+		do LOADBL5
+		
+		// If LN.IDP is equal to 1, add in P+I totals
+		if (idp = 1),((mode = "insert")!(mode = "delete")) do BLSUM("P+I",cpib,cpid,,mode)
+		}
+	
+	// Update summary totals from changes in amounts due and billed
+	if (mode = "update") do {
+	
+		do BLSUM(lnbil1.pe01ea,lnbil1.pe01ab-lnbil1.pe01ab.oldVal,lnbil1.pe01ad-lnbil1.pe01ad.oldVal,,mode) quit:q 
+		do BLSUM(lnbil1.pe02ea,lnbil1.pe02ab-lnbil1.pe02ab.oldVal,lnbil1.pe02ad-lnbil1.pe02ad.oldVal,,mode) quit:q 
+		do BLSUM(lnbil1.pe03ea,lnbil1.pe03ab-lnbil1.pe03ab.oldVal,lnbil1.pe03ad-lnbil1.pe03ad.oldVal,,mode) quit:q 
+		do BLSUM(lnbil1.pe04ea,lnbil1.pe04ab-lnbil1.pe04ab.oldVal,lnbil1.pe04ad-lnbil1.pe04ad.oldVal,,mode) quit:q 
+		do BLSUM(lnbil1.pe05ea,lnbil1.pe05ab-lnbil1.pe05ab.oldVal,lnbil1.pe05ad-lnbil1.pe05ad.oldVal,,mode) quit:q 
+		do BLSUM(lnbil1.pe06ea,lnbil1.pe06ab-lnbil1.pe06ab.oldVal,lnbil1.pe06ad-lnbil1.pe06ad.oldVal,,mode) quit:q 
+		do BLSUM(lnbil1.pe07ea,lnbil1.pe07ab-lnbil1.pe07ab.oldVal,lnbil1.pe07ad-lnbil1.pe07ad.oldVal,,mode) quit:q 
+		do BLSUM(lnbil1.pe08ea,lnbil1.pe08ab-lnbil1.pe08ab.oldVal,lnbil1.pe08ad-lnbil1.pe08ad.oldVal,,mode) quit:q 
+		do BLSUM(lnbil1.pe09ea,lnbil1.pe09ab-lnbil1.pe09ab.oldVal,lnbil1.pe09ad-lnbil1.pe09ad.oldVal,,mode) quit:q 
+		do BLSUM(lnbil1.pe10ea,lnbil1.pe10ab-lnbil1.pe10ab.oldVal,lnbil1.pe10ad-lnbil1.pe10ad.oldVal,,mode) quit:q 
+		do BLSUM(lnbil1.pe11ea,lnbil1.pe11ab-lnbil1.pe11ab.oldVal,lnbil1.pe11ad-lnbil1.pe11ad.oldVal,,mode) quit:q 
+		do BLSUM(lnbil1.pe12ea,lnbil1.pe12ab-lnbil1.pe12ab.oldVal,lnbil1.pe12ad-lnbil1.pe12ad.oldVal,,mode) quit:q 
+		do BLSUM(lnbil1.pe13ea,lnbil1.pe13ab-lnbil1.pe13ab.oldVal,lnbil1.pe13ad-lnbil1.pe13ad.oldVal,,mode) quit:q 
+		do BLSUM(lnbil1.pe14ea,lnbil1.pe14ab-lnbil1.pe14ab.oldVal,lnbil1.pe14ad-lnbil1.pe14ad.oldVal,,mode) quit:q 
+		do BLSUM(lnbil1.pe15ea,lnbil1.pe15ab-lnbil1.pe15ab.oldVal,lnbil1.pe15ad-lnbil1.pe15ad.oldVal,,mode) quit:q 
+		do BLSUM(lnbil1.pe16ea,lnbil1.pe16ab-lnbil1.pe16ab.oldVal,lnbil1.pe16ad-lnbil1.pe16ad.oldVal,,mode) quit:q 
+		do BLSUM(lnbil1.pe17ea,lnbil1.pe17ab-lnbil1.pe17ab.oldVal,lnbil1.pe17ad-lnbil1.pe17ad.oldVal,,mode) quit:q 
+		do BLSUM(lnbil1.pe18ea,lnbil1.pe18ab-lnbil1.pe18ab.oldVal,lnbil1.pe18ad-lnbil1.pe18ad.oldVal,,mode) quit:q 
+		do BLSUM(lnbil1.pe19ea,lnbil1.pe19ab-lnbil1.pe19ab.oldVal,lnbil1.pe19ad-lnbil1.pe19ad.oldVal,,mode) quit:q 
+		do BLSUM(lnbil1.pe20ea,lnbil1.pe20ab-lnbil1.pe20ab.oldVal,lnbil1.pe20ad-lnbil1.pe20ad.oldVal,,mode) quit:q 
+	
+		}
+	
+	// If LN.IDP is equal to 1, add in P+I changes
+	if (idp = 1),(mode = "update") do BLSUM("P+I",lnbil1.cpib-lnbil1.cpib.oldVal,lnbil1.cpid-lnbil1.cpid.oldVal,,mode)
+
+	quit 
+
+
+public	BLSUM(String element,	// Payment Element Acronym
+      Number totchg,	// Change in amount billed
+      Number duechg,	// Change in amount due
+      String prevAD,	// Element Acronym Array
+      String mode)	// Process mode 
+      	
+	// Updates LNBIL1 (Payment Record) summary columns due to detail changes	
+
+	type Boolean q
+	
+	if (mode = "delete") do {
+		set duechg = duechg * (-1)
+		set totchg = totchg * (-1)
+		}
+
+	if (element = "") set q = 1 quit 
+	if ('prevAD.get()) set prevAD = 0
+	if (duechg+totchg = 0),(prevAD = 0) quit 
+	
+	set casd = casd + duechg                   		// Pmt due
+	set ctab = ctab + $S(mode="update":duechg,1:totchg)	// Pmt tot
+	
+	// Action if "I"nterest is modified
+
+	if (element = "I") do {
+	
+		set cpid = cpid + duechg                  	     // P+I due
+		set cpib = cpib + $S(mode="update":duechg,1:totchg)  // P+I tot
+	
+		// Current
+		if (XSCHSEQ = lnschseq) do {
+			if (mode = "delete") set unin = $$UPDLN("UNIN",unin,(prevAD*-1),0)
+			set cuin = $$UPDLN("CUIN",cuin,duechg,0)
+			if (cuin '> 0) set cuin = $$UPDLN("CUIN",cuin,prevAD,1)
+			}
+
+		// Overdue
+		if (XSCHSEQ < lnschseq) set unin = $$UPDLN("UNIN",unin,duechg,0)
+
+		// Advance
+		if (XSCHSEQ > lnschseq),(duechg-totchg > 0) set cuin = $$UPDLN("CUIN",cuin,(duechg-totchg),0)
+		if (XSCHSEQ > lnschseq),(duechg-totchg '> 0) do {
+			set cuin = $$UPDLN("CUIN",cuin,duechg,1)
+                        set unin = $$UPDLN("UNIN",unin,prevAD,0)
+			}
+		}
+	
+	// Action if "P"rincipal is modified
+
+	if (element = "P") do {
+	
+		set cpid = cpid + duechg               		      // P+I due
+		set cpib = cpib + $S(mode="update":duechg,1:totchg)   // P+I tot
+	
+		// Current
+		if (XSCHSEQ = lnschseq) do {
+			if (mode = "delete") set unpr = $$UPDLN("UNPR",unpr,(prevAD*-1),0)
+			set cupr = $$UPDLN("CUPR",cupr,duechg,0)
+			if (cupr '> 0) set cupr = $$UPDLN("CUPR",cupr,prevAD,1)
+			}
+
+		// Overdue
+		if (XSCHSEQ < lnschseq) set unpr = $$UPDLN("UNPR",unpr,duechg,0)
+
+		// Advance
+		if (XSCHSEQ > lnschseq),(duechg-totchg > 0) set cupr = $$UPDLN("CUPR",cupr,(duechg-totchg),0)
+		if (XSCHSEQ > lnschseq),(duechg-totchg '> 0) do {
+			set cupr = $$UPDLN("CUPR",cupr,duechg,1) 
+			set unpr = $$UPDLN("UNPR",unpr,prevAD,0)
+			}
+		}
+	
+	// Action if escrow element is modified
+
+	if ($$ESC^LNU(element)) do {
+	
+		// Current
+		if (XSCHSEQ = lnschseq) do {
+			if (mode = "delete") set unpr = $$UPDLN("UNPR",unpr,(prevAD*-1),0)
+			set cues = $$UPDLN("CUES",cues,duechg,0)
+			if (cues '> 0) set cues = $$UPDLN("CUES",cues,prevAD,1)
+			}
+
+		// Overdue
+		if (XSCHSEQ < lnschseq) set unes = $$UPDLN("UNES",unes,duechg,0)
+
+		// Advance
+		if (XSCHSEQ > lnschseq),(duechg-totchg > 0) set cues = $$UPDLN("CUES",cues,(duechg-totchg),0)
+		if (XSCHSEQ > lnschseq),(duechg-totchg '> 0) do {
+			set cupr = $$UPDLN("CUPR",cupr,duechg,1)
+			set unpr = $$UPDLN("UNPR",unpr,prevAD,0)
+			}	
+		}
+
+	// If changing the fee in either LNBIL5 or LNBIL1 
+	// update LNFEE.FEEREM by the amount in question
+	type RecordLNFEE lnfee = Db.getRecord("LNFEE","CID=:XCID,FEETYP=:element",1)
+	if lnfee.getMode() = 1 do {
+		set lnfee.feerem = lnfee.feerem + $S(mode="update":duechg,1:totchg)
+		do lnfee.save()
+		}
+	
+	quit 	
+
+
+LOADBL5 // Load and process LNBIL5 table columns
+
+	/*
+	Load information from fee support file LNBIL5.  Only interested in
+	values where LNBIL5.DUEAMT is equal to 1 which indicates that the fee
+	amount is included in the payment amount.
+	*/
+	
+	type public String ER
+
+	type ResultSet rs = Db.select("FEETYP,BFAMT,BRFAMT","LNBIL5","CID=:XCID AND SCHSEQ=:XSCHSEQ AND DUEAMT=1")
+	while rs.next() do { quit:ER  
+		do BLSUM(rs.getCol(1),rs.getCol(2),rs.getCol(3),,mode)	
+		}
+	
+	quit 
+	
+
+COMPLN(Number duechg,		// Change in amount due
+       RecordLNBIL1 lnbil1,
+       String mode,		// Processing Mode	
+       String table)		// Payment file table
+       
+	set tba = $$UPDLN("TBA",tba,duechg,0)      // Total bill amount
+	
+	if (XSCHSEQ '> lnschseq) set tdue = $$UPDLN("TDUE",tdue,duechg,0) // Amount due
+	
+	if (mode '= "delete") do COMPLN1(.lnbil1,table)
+	
+	if (mode = "delete"),(table = "LNBIL1") do COMPLN2
+	
+	quit 
+	
+
+COMPLN1(RecordLNBIL1 lnbil1,
+	String table)		// Payment file table
+	
+	// Modify LN table values for other than delete mode
+
+	type public String ER
+
+	// If amounts are due, consider whether OSEQ updated
+	if (casd > 0),(XSCHSEQ < oseq) set updt = $$UPDLN("OSEQ",oseq,XSCHSEQ,1)
+	
+	// Has next scheduled due date changed?
+	if (cdpd > %SystemDate),(cdpd < schnd) set schnd = $$UPDLN("SCHND",schnd,cdpd,1)
+	
+	// Has date of first payment changed?
+	if (table = "LNBIL1"),(lnbil1.cdpd.oldVal '= lnbil1.cdpd),(lnbil1.cdpd.oldVal = dfp) set dfp = $$UPDLN("DFP",dfp,lnbil1.cdpd,1)
+	
+	// Payment sequence is greater than last in file
+	if (XSCHSEQ > bseq) do {
+		set bseq = $$UPDLN("BSEQ","",XSCHSEQ,1)     // Last bill seq
+		set lbdd = $$UPDLN("LBDD","",cdpd,1)        // Last bill due
+		set lnschseq = $$UPDLN("SCHSEQ",lnschseq,XSCHSEQ,1) // Sch seq
+		set schld = $$UPDLN("SCHLD",schld,cdpd,1)   // Sch last dt
+		set tdue = $$UPDLN("TDUE",tdue,casd,)        // Amount due 
+		}
+	
+	// Zeroing out a payment sequence	
+	if (casd = 0),(XSCHSEQ < bseq),((XSCHSEQ = oseq)!(XSCHSEQ = dseq)) do {
+		if (XSCHSEQ = oseq) S oseq = $$UPDLN("OSEQ",oseq,1,0)	 // Old unsatis
+		if (XSCHSEQ = dseq) do {
+			set dseq = $$UPDLN("DSEQ",dseq,1,0)		 // Due sequence
+			set dpmt = $$UPDLN("DPMT",,dpmt,1)		 // Due payment
+			set dist1ld = $$UPDLN("DIST1LD",dist1ld,dist1nd,1) // Last due dt
+			set odist1nd = dist1nd
+			set dist1nd = $$NJD^UFRE(odist1nd,dist1fre) quit:ER
+			set dist1nd = $$UPDLN("DIST1ND",odist1nd,dist1nd,1) // Next due dt
+			}
+		}
+	
+	// Create 1st bill record on original disbursement date	
+	if (casd > 0),(XSCHSEQ = 1),(odd = %SystemDate) do {
+		set dfp = $$UPDLN("DFP",dfp,odd,1)	 // Date First Payment
+		set schld = $$UPDLN("SCHLD",schld,odd,1) // Scheduled Last Date
+		set schseq = $$UPDLN("SCHSEQ",,1,1)	 // Scheduled Sequence
+		set tdue = $$UPDLN("TDUE",tdue,casd,1)	 // Total Due
+		}
+		
+	quit 	
+	
+	
+COMPLN2		// Modify LN table values for delete mode
+
+	type public String ER
+	type Number afterseq, priorseq
+	type Date newlbdd, newschld, priorbdt
+	
+	// Find first sequences both before and after the deleted sequence
+	
+	type ResultSet rs = Db.select("SCHSEQ,CDPD,CBCD","LNBIL1","CID=:XCID AND SCHSEQ<:XSCHSEQ","CID,SCHSEQ DESC") 
+	if rs.next() do {
+		set priorseq = rs.getCol(1)
+		set priordue = rs.getCol(2)
+  		set priorbdt = rs.getCol(3) 
+		}
+
+	if (priorseq.get() = "") set priorseq = 0 set priordue = odd set priorbdt = odd
+	
+	type ResultSet rs1 = Db.select("SCHSEQ,CDPD","LNBIL1","CID=:XCID AND SCHSEQ>:XSCHSEQ","CID,SCHSEQ ASC") 
+	if rs1.next() do {
+		set afterseq = rs1.getCol(1)
+		set afterdue = rs1.getCol(2) 
+		}
+
+	/* 
+	If the deleted sequence was the last on file, then the
+	values of afterseq and afterdue will refer to:
+	- The deleted sequence if its corresponding cutoff
+	  date is not less than today.
+	- Or, otherwise, the first date after the deleted sequence.
+	*/
+
+	if (afterseq.get() = "") do {
+		set afterseq = XSCHSEQ
+		if (cdpd-bloff '< %SystemDate) set afterdue = cdpd
+		else  set afterdue = $$NJD^UFRE(cdpd,dist1fre) quit:ER
+		}
+	
+	// Change OSEQ if currently equal to deleted record
+	if (XSCHSEQ = oseq) set updt = $$UPDLN("OSEQ",oseq,afterseq,1)
+	
+	// Change scheduled due information
+	if (lnschseq = XSCHSEQ) do {
+		set lnschseq = $$UPDLN("SCHSEQ",lnschseq,priorseq,1)
+		set newschld = $S(lnschseq:priordue,1:odd)
+		set schld = $$UPDLN("SCHLD",schld,newschld,1)
+		}
+
+	if (schnd = cdpd) set schnd = $$UPDLN("SCHND",schnd,afterdue,1)
+	
+	// Last bill date
+	if (bldt = cbcd) set bldt = $$UPDLN("BLDT",bldt,priorbdt,1)
+	
+	// Has date of first payment changed?
+	if (dfp = cdpd) set dfp = $$UPDLN("DFP",dfp,afterdue,1)
+	
+	// Last bill sequence
+	if (XSCHSEQ = bseq) do {
+		set bseq = $$UPDLN("BSEQ","",priorseq,1)  // Last bill seq
+		set newlbdd = $S(priordue:priordue,1:"")
+		set lbdd = $$UPDLN("LBDD","",newlbdd,1)   // Last bill due
+		}
+	
+	// Due dates
+	if (XSCHSEQ = dseq) do {
+		set dist1nd = $$UPDLN("DIST1ND",dist1nd,afterdue,1)
+		set dseq = $$UPDLN("DSEQ",dseq,afterseq,1)
+		}
+
+	// Late charges update
+
+	type Date lcad,lcefd
+
+	// deleted sequence was the last on file
+	if (afterseq = XSCHSEQ) set lcefd = priordue
+
+	// deleted sequence was NOT the last on file
+	if (afterseq '= XSCHSEQ) do {
+		type Number maxseq, maxdue
+
+		type ResultSet rs2 = Db.select("SCHSEQ,CDPD","LNBIL1","CID=:XCID AND SCHSEQ>:XSCHSEQ","CID,SCHSEQ ASC")
+		for  quit:'rs2.next()  do {
+			set maxseq = rs2.getCol(1)
+			set maxdue = rs2.getCol(2)
+			}
+		set lcefd = maxdue
+		}
+
+	if (popt '= ""),(dist1fre '= "") do { quit:ER
+		if (lcefd.get() = "") quit
+		// If Late Charges driven by notices, don't worry about LCAD
+		if (lchgnoto = 1) quit
+		set lcad = lcefd + pmtgrc
+
+		type Number I
+		if (pmtgrc["P") set lcad = lcefd do { quit:ER
+			for I = 1:1:pmtgrc.extract() set lcad = $$NJD^UFRE(lcad,dist1fre) quit:ER
+			set lcad = lcad - pmtgrc.piece("-",2)
+			}
+
+		set lcad = $$UPDLN("LCAD","",lcad,1)
+		set lcefd = $$UPDLN("LCEFD","",lcefd,1)
+
+		}
+
+	quit 
+	
+COMPBL(RecordLNBIL1 lnbil1) // Derive LNBIL1 table values from LNBIL1 detail
+	
+	// If billing cutoff date not defined, use system date
+	if cbcd="" set cbcd=%SystemDate
+	
+	// If subsidy due column is updated, modify subsidy total by same amount
+	if lnbil1.csubdue.oldVal '= (lnbil1.csubdue) set lnbil1.csubamt = lnbil1.csubamt + lnbil1.csubdue - lnbil1.csubdue.oldVal
+	
+	quit 
+	
+	
+COMPUTE(Number START,		// Starting bill sequence
+	RecordLNBIL1 lnbil1,
+	String table)		// Payment file table
+
+	//Starting Sequence is either LN.OSEQ or 0 to start at beginning.)
+
+	type public String ER
+	type String bil()
+	type Number amtaply, amtpaid, casb, casd, dpmtold, dseqchg, dseqold, lstaply
+	type Boolean quitflg
+	
+	// Save LN.DSEQ and DPMT values before changed by this process
+	set dseqold = dseq 
+	set dpmtold = dpmt
+	
+	// Initialize variable 'amtpaid' which is the portion of the 
+	// outstanding payment records which has been satisfied.
+
+	set amtpaid = 0
+	
+	// Load information for the first sequence prior to START
+	if START do {
+		type ResultSet rs = Db.select("SCHSEQ,CDPD,CTAB,CASD","LNBIL1","CID=:XCID AND SCHSEQ<:START","CID,SCHSEQ DESC") 
+		while rs.next() do { 
+			do BLDBIL(.rs)
+			}
+		}
+	
+	type ResultSet rs = Db.select("SCHSEQ,CDPD,CTAB,CASD","LNBIL1","CID=:XCID AND SCHSEQ>=:START","SCHSEQ")
+	while rs.next() do { 
+		set schseq = rs.getCol(1)
+		do BLDBIL(.rs,.amtpaid)
+		}		
+	/* 
+	Apply amount satisfied to outstanding bills.  Our intent here is to
+	determine how the amount apid would have been applied to the payment
+	records if the funds had been applied to one complete payment record
+	before starting on the next payment record.
+	*/
+
+	/*
+	Variable 'lstaply' equals the first sequence which could not be fully
+	satisfied by the available funds.  Variable 'amtaply' is equal to
+	the portion of 'amtpaid' applied to the payment records.  Initialize
+	both to null.
+	*/
+
+	set (amtaply,lstaply,oseqnew,quitflg,ppa)=""
+	
+	if (amtpaid) for  set lstaply = bil(lstaply).order() quit:lstaply = ""  do { quit:quitflg 
+	
+		// Determine LN.OSEQ value
+		if ('oseqnew),(bil(lstaply).piece("|",3)) set oseqnew = lstaply
+	
+		/* 
+		All available payment funds have been exhausted.  Logic is
+		designed to quit after 'lstaply' has been incremented to
+		the first sequence after 'amtpaid' has been reduced to zero.
+		*/
+
+		if ('amtpaid) set quitflg = 1 quit 
+	
+		set ctab = bil(lstaply).piece("|",2)
+		set amtpaid = amtpaid - ctab
+	
+		/* 
+		Available funds have been exhausted before payment is fully
+		satisfied.  Logic is designed to quit now, while 'lstaply'
+		still has value of this unsatisfied payment record.
+		*/
+
+		if (amtpaid < 0) do {
+			set ppa = $$UPDLN("PPA","",(amtpaid+ctab),1)
+			set amtpaid = 0
+			set quitflg = 1
+			}
+		}
+	
+	// Payment record integrity checking
+	if (table = "LNBIL1") do PMTRECIC(.bil()) quit:ER 
+	
+	/* 
+	If no amounts have been paid, and no amounts are outstanding in
+	payment file, set 'oseq' equal to the first record after the last
+	on file.
+	*/
+
+	if ('oseqnew) , ('tba) set oseqnew = bseq+1
+	
+	// Replace OSEQ value if changed
+	if oseqnew set oseq  =$$UPDLN("OSEQ",oseq,oseqnew,1)
+	
+	// All payment records have been fully satisfied
+	if (lstaply = ""),('tba) do { quit:ER 
+	
+		if (lbdd '> schld) set dist1nd = schnd set dist1ld = schld
+		else  set dist1nd = $$NJD^UFRE(lbdd,dist1fre) set dist1ld = lbdd quit:ER 
+	
+		set dseq = oseq
+		if (dpmt) set dpmt = 0	
+		}
+	
+	// All payment records have not been fully satisfied
+	else  do { 
+		//If no amounts have been satisfied, then lstaply will be equal
+		//to null.  If so, set equal to the oldest sequence with money
+		set dseq = $S(lstaply:lstaply,1:oseq)
+		if '$D(bil(dseq)) quit
+		set dist1nd = bil(dseq).piece("|",1)
+		if bil(dseq).order(-1) set dist1ld = bil(bil(dseq).order(-1)).piece("|",1)
+		else  set dist1ld = odd
+	
+		set dpmt = bil(dseq).piece("|",2)
+		}
+	
+	set dist1nd = $$UPDLN("DIST1ND","",dist1nd,1)
+	set dist1ld = $$UPDLN("DIST1LD","",dist1ld,1)
+	set dpmt = $$UPDLN("DPMT",dpmtold,dpmt,1)
+	set dseq = $$UPDLN("DSEQ",dseqold,dseq,1)
+	
+	// Determine whether full payment counter columns should be adjusted
+	if (dseq-dseqold) do {
+		/*
+		Full payment counters will change by 1 unless either of the
+		following about the modified sequence XSCHSEQ are true:
+		a.	The total billed and amount remaining before the change 
+			was 0.	
+		b.	The total billed and amount remaining after the change
+			is 0.
+		*/
+	
+		if (lnbil1.ctab+lnbil1.casd=0)!(lnbil1.ctab.oldVal+lnbil1.casd.oldVal=0) quit 
+	
+		type Number x
+		type String column
+		
+		set x = $S(dseq>dseqold:1,1:-1)
+	
+		// Update full payment counter depending on current month
+		set column = "FPC"_$E(100+$$MON^SCADAT(%SystemDate,1),2,3)
+
+		set x = $$UPDLN(column,"",column_"+"_x,2)
+		}
+		
+	quit 	
+
+
+PMTRECIC(String bil(),		// Bill array
+	 RecordLNBIL1 lnbil1)
+	
+	type public String ER
+	
+	// Ensure that due dates are unique and consecutive
+	if XSCHSEQ.get() do { quit:ER 
+	
+		type Number after, before, subject
+	
+		if (bil.data() = 1) do {
+	
+			type Number x
+	
+			// Payment record before		
+			type ResultSet rs = Db.select("SCHSEQ,CDPD,CTAB,CASD","LNBIL1","CID=:XCID AND SCHSEQ<:XSCHSEQ") 
+			if rs.isEmpty() quit
+	    		set x = rs.next()
+			do BLDBIL(.rs)
+	
+			// Payment record after			
+			type ResultSet rs1 = Db.select("SCHSEQ,CDPD,CTAB,CASD","LNBIL1","CID=:XCID AND SCHSEQ>:XSCHSEQ") 
+			if rs1.isEmpty() quit
+	    		set x = rs1.next()
+			do BLDBIL(.rs1)
+	
+			// Modifified/Inserted record
+			set bil(XSCHSEQ) = cdpd_"|"_ctab_"|"_casd
+	
+			}
+	
+		set subject = bil(XSCHSEQ).get().piece("|",1) quit:subject="" 
+		set before = bil(XSCHSEQ).order(-1)
+		set before = $S(before:bil(before).get().piece("|",1),1:odd)
+		set after = bil(XSCHSEQ).order(1)
+		set after = $S(after:bil(after).get().piece("|",1),1:99999)
+	
+		if (before = odd) do {  quit
+			// Internal bill record due dates must be unique and consecutive
+			if (subject < before)!(after '> subject) do Runtime.setErrMSG("LNBIL1",1324) quit:ER
+			}
+	
+		if (subject '> before)!(after '> subject) do Runtime.setErrMSG("LNBIL1",1324) quit:ER 
+	
+		}
+	
+	quit 
+	
+
+BLDBIL(ResultSet rs,paid)
+	
+	type Number casd, ctab, schseq
+	type Date cdpd
+	
+	set schseq = rs.getCol(1)
+	set cdpd = rs.getCol(2)
+	set ctab = rs.getCol(3)
+	set casd = rs.getCol(4)
+	
+	if (schseq) set bil(schseq) = cdpd_"|"_ctab_"|"_casd
+	
+	// Accumulate portion of outstanding bills which has been satisfied
+	set paid = paid.get() + ctab - casd
+	
+	quit 
+	
+
+UPDLN(String column,	// Field
+      String oldval,	// Current value
+      String change,	// Delta, or New value
+      String ctl)	// Control variable
+
+	/*			
+	 ctl argument details:
+	 Pos  Val  Desc	
+	 ---  ---  ----
+	 1     0   Add change amount to old value to derive new value.
+   	       1   Replace old value with new value.	
+	       2   Replace old value with new arithmetic expression. 
+	           (New value will not be quoted.)
+	*/
+
+	type String newval, rawval
+	
+	set oldval = oldval.get()
+	set ctl = ctl.get()
+	
+	set rawval = $S(ctl.extract():change,1:oldval+change)
+	if (oldval '= rawval) do {
+	
+		set newval = rawval
+	
+		// Add quotes around new value unless arithmetic expression
+		if (ctl.extract() '= 2) set newval = "'"_newval_"'"
+	
+		set updln = updln.get()_column_"="_newval_","
+		}
+	
+	set lndata(column) = rawval
+	
+	quit rawval
+
+
+loadAD(Number XSCHSEQ,	// Bill Sequence
+       String ad)	// Unsatisfied Amount Dues Array
+
+	/* 
+	 Used for "insert" or "delete" mode.
+	 Loop through the LNBIL1 file from XSCHSEQ down find all unsatisfied 
+	 amount dues for all elements and put them into an array.
+	 
+	 Example: ad("I",1)=amount
+	*/
+  
+	type Number XKEY
+	type Boolean stop = 0
+
+	for  quit:stop = 1  do {
+
+		type ResultSet rs = Db.select("SCHSEQ","LNBIL1","CID=:XCID AND SCHSEQ<:XSCHSEQ","SCHSEQ DESC")
+		if rs.next() set XKEY = rs.getCol("SCHSEQ")
+		else  set XKEY = 0
+
+		if (XKEY = 0) set stop = 1 quit
+
+		type Number amt
+		type RecordLNBIL1 rec = Db.getRecord("LNBIL1","XCID,XKEY")
+
+		set amt = rec.pe01ad if (amt > 0) set ad(rec.pe01ea,1) = amt,stop = 1
+		set amt = rec.pe02ad if (amt > 0) set ad(rec.pe02ea,2) = amt,stop = 1 
+		set amt = rec.pe03ad if (amt > 0) set ad(rec.pe03ea,3) = amt,stop = 1 
+		set amt = rec.pe04ad if (amt > 0) set ad(rec.pe04ea,4) = amt,stop = 1 
+		set amt = rec.pe05ad if (amt > 0) set ad(rec.pe05ea,5) = amt,stop = 1 
+		set amt = rec.pe06ad if (amt > 0) set ad(rec.pe06ea,6) = amt,stop = 1 
+		set amt = rec.pe07ad if (amt > 0) set ad(rec.pe07ea,7) = amt,stop = 1 
+		set amt = rec.pe08ad if (amt > 0) set ad(rec.pe08ea,8) = amt,stop = 1 
+		set amt = rec.pe09ad if (amt > 0) set ad(rec.pe09ea,9) = amt,stop = 1  
+		set amt = rec.pe10ad if (amt > 0) set ad(rec.pe10ea,10) = amt,stop = 1 
+		set amt = rec.pe11ad if (amt > 0) set ad(rec.pe11ea,11) = amt,stop = 1 
+		set amt = rec.pe12ad if (amt > 0) set ad(rec.pe12ea,12) = amt,stop = 1 
+		set amt = rec.pe13ad if (amt > 0) set ad(rec.pe13ea,13) = amt,stop = 1 
+		set amt = rec.pe14ad if (amt > 0) set ad(rec.pe14ea,14) = amt,stop = 1 
+		set amt = rec.pe15ad if (amt > 0) set ad(rec.pe15ea,15) = amt,stop = 1 
+		set amt = rec.pe16ad if (amt > 0) set ad(rec.pe16ea,16) = amt,stop = 1 
+		set amt = rec.pe17ad if (amt > 0) set ad(rec.pe17ea,17) = amt,stop = 1 
+		set amt = rec.pe18ad if (amt > 0) set ad(rec.pe18ea,18) = amt,stop = 1 
+		set amt = rec.pe19ad if (amt > 0) set ad(rec.pe19ea,19) = amt,stop = 1 
+		set amt = rec.pe20ad if (amt > 0) set ad(rec.pe20ea,20) = amt,stop = 1 
+
+		if (amt = "") set stop = 1
+	}
+
+	quit
+	
+	
+
+vSIG()	quit "60327^18728^Balasubramonian Sankar^31004"	// Signature - LTD^TIME^USER^SIZE

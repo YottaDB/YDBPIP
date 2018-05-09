@@ -1,0 +1,949 @@
+public DBSRW3(RecordDBTBL5H dbtbl5h,String ddmap(),String RPTINFO())	/* Private - Part 3 of DBSRW
+	ORIG: CHIANG
+	PROCEDURE ID: DBSRW3
+	DESC: DATA-QWIK Report Compiler - Part 3
+	
+	** Change to private once that feature works in PSL
+	
+	---- Comments --------------------------------------------------------
+	ARGUMENTS:
+		. dbtbl5h	Report header		/REQ/NONULL/MECH=REF:R
+
+		. ddmap		Variable's used map	/NOREQ/MECH=REF:RW
+
+		. RPTINFO	Report attributes	/REQ/MECH=REF:W
+
+	------ Revision History ------------------------------------------------
+	11/23/05 - RussellDS - CR18065
+		   Correct problems with handling of groups.
+		   
+	11/14/05 - RussellDS - CR18193
+		   Remove deprecated .data() methods.  Prevents warnings in
+		   generated code, as well as when compiling this procedure.
+		   
+	10/20/05 - RussellDS - CR17882
+		   Fix problem related to line feed suppress.
+	
+	03/26/05 - RussellDS - CR15067
+		   Correct logic in generation of VOM1 section for repeat fields.
+		   Repeat fields were not working.
+		   
+	03/17/05 - RussellDS - CR14987
+		   Modified scoping and initialization of variables in generated
+		   code to break very long lines into multiple lines to avoid
+		   GT.M maxargcnt error.
+		   
+		   Modified BUILDSEC section for VSUMn to include I in new list.
+		   
+		   Modified BUILDPH section to avoid warning on duplicate typing
+		   of PN, V, and VO
+		   
+	01/19/05 - RussellDS - CR13817
+		   Add verror to newlist for VRSUM creation.
+		   
+		   Add handling for suppress line feed.
+		   
+	12/09/04 - RussellDS - CR13606
+		   Fix scope warnings in generated code as a result of new PSL
+		   compiler changes that perform tighter checking.
+		   
+	11/22/04 - RussellDS - CR13365
+		   Add public tag to DBSRW3 line to eliminate PSL warnings.
+		   
+	12/09/03 - Dan Russell - CR 7239
+                   Fix PSL warnings for operator precedence.
+
+	06/21/03 - Dan Russell - 51351
+		   Fixed scoping errors related to variables used in for loops.
+		   
+		   Added optimization for testing VL not being all spaces.
+	
+	05/08/03 - Dan Russell - 51351
+		   Fix problem with use of @TBL function to deal with the case
+		   where one of the keys for the table look-up is null.
+		   
+	03/10/03 - Dan Russell - 51351
+		   Correct various problems.
+
+	11/04/02 - Dan Russell - 49794
+		   Moved into PSL.  Removed old change history.
+
+		   This code was originally in routines DBSRWCLI, DBSRWCLJ,
+		   DBSRWBUF, and DBSRWSER.
+
+	------------------------------------------------------------------------
+
+	I18N=QUIT Excluded from I18N standards
+	*/
+
+	type Public Number I,PPNUM
+
+	type Number LVL,PGTRRGN
+	type String CODE,TABCHR
+
+	set TABCHR=$C(9)
+
+	// Key break logic
+	do {
+		type Number I
+		type String BRKCODE()
+
+		do addcode^DBSRWUTL(0,"VBREAK"_TABCHR_"//")
+		do addcode^DBSRWUTL(1,"type Public Number VD(),vh(),VH0,vs(),VT()")
+		do addcode^DBSRWUTL(1,"quit:'VT("_RPTINFO("LASTLVL")_")")
+
+		// Access keybreak and group header indicators
+		do BRKINFO(.dbtbl5h,.ddmap(),.RPTINFO,.BRKCODE)
+
+		for I=1:1 quit:'BRKCODE(I).exists()  do addcode^DBSRWUTL(1,BRKCODE(I))
+
+		if RPTINFO("REPEATSIZE") do addcode^DBSRWUTL(1,"if VH0.get() do VOM2"_TABCHR_"// Flush print buffer at page break")
+		do addcode^DBSRWUTL(1,"quit")
+		do addcode^DBSRWUTL(0,"")
+	}
+
+	/* Set up code for print report summary and accumulate stat
+
+	     EXAMPLE:
+		if 'vs(2) set vs(2)=1 do VSUM2 quit:VFMQ  do STAT(2)
+		if 'vs(3) set vs(3)=1 do STAT(3)
+	*/
+	if RPTINFO("LASTLVL")>1 do {
+		type Number LVL
+		type String CODE
+
+		do addcode^DBSRWUTL(0,"VSUM"_TABCHR_"// Report Group Summary")
+		do addcode^DBSRWUTL(1,"type Public Number VFMQ,vs()")
+		for LVL=RPTINFO("LASTLVL"):-1:2 do {
+			set CODE="if 'vs("_LVL_") set vs("_LVL_")=1"
+			if 'RPTINFO("DSP",LVL,"T","").order().isNull() set CODE=CODE_" do VSUM"_LVL_" quit:VFMQ "
+			set CODE=CODE_" do stat^DBSRWUTL("_LVL_")"
+			do addcode^DBSRWUTL(1,CODE)
+		}
+		do addcode^DBSRWUTL(1,"quit")
+		do addcode^DBSRWUTL(0,"")
+	}
+
+	// Set up code for data field statistics
+	do {
+		type Number FUNTYP,I,LINENO
+		type String DI,DINAM,FUN,GT,LE,NEWLIST,TYPE,v,V,Z
+
+		do addcode^DBSRWUTL(0,"VSTAT"_TABCHR_"// Data field statistics")
+
+		do addcode^DBSRWUTL(1,"// Placeholder for type Public",.LINENO)
+		do addcode^DBSRWUTL(1,"type Public String VSTATS")
+		do addcode^DBSRWUTL(0,"")
+		set NEWLIST="type Public Number VRWOPT(),VT(),"
+
+		// Deal with functions, @TOT, @MIN, @MAX
+		do addcode^DBSRWUTL(1,"set VT("_RPTINFO("LASTLVL")_")=VT("_RPTINFO("LASTLVL")_")+1")	// Group record cound
+		set DINAM=""
+		for I=1:1 set DINAM=$O(RPTINFO("FMT",0,DINAM)) quit:DINAM=""  do {
+			set DI=DINAM
+			if DI.extract(1,2)="<<" set DI=DI.piece(">>",1).piece("<<",2)
+			// Convert to internal format and add to data map
+			set V=$$map^DBSRWUTL(DI,.ddmap,1)
+			set TYPE="$"
+			if DINAM'["<<",V?1A.AN set TYPE=$$TYP^DBSDD(DINAM)
+			set FUN=""
+			for  set FUN=$O(RPTINFO("FMT",0,DINAM,FUN)) quit:FUN=""  do {
+				set FUNTYP=$S(FUN="TOT":1,FUN="MAX":2,FUN="MIN":3,FUN="AVG":4,1:5)
+				quit:FUNTYP=5
+				if FUNTYP=4,RPTINFO("FMT",0,DINAM,"TOT").exists() quit	// @AVG
+				if FUNTYP=4 set FUNTYP=1			// Use TOT logic
+				if V'?1A.AN set V="("_V_")"
+				else  if NEWLIST'[(","_V_",") set NEWLIST=NEWLIST_V_","
+				set v=V
+				// Great than and less than
+				if "TUF"[TYPE set GT="]",LE="']"
+				else  set GT=">",LE="<",v="+"_v
+				set CODE="VT("_RPTINFO("LASTLVL")_","_I_","_FUNTYP_")"
+				if FUNTYP=1 set Z="set "_CODE_"="_CODE_"+"_V
+				if FUNTYP=2 set Z="if "_CODE_"="_""""""_"!("_V_GT_CODE_") set "_CODE_"="_v
+				if FUNTYP=3 set Z="if "_CODE_"="_""""""_"!("_V_LE_CODE_") set "_CODE_"="_v
+
+				do addcode^DBSRWUTL(1,Z_TABCHR_"// @"_FUN_"("_DINAM_")")
+			}
+		}
+
+		//   RPTINFO("STAT",SEQ)=Source|fmt|Target|Increments
+		if $D(RPTINFO("STAT")) do {
+			type Number I
+			type String I,SOURCE,TARGET,X
+
+			// Suppress STAT flag
+			do addcode^DBSRWUTL(1,"if VRWOPT(""NOSTAT"").get() quit")
+			for I=1:1 quit:'$D(RPTINFO("STAT",I))  do {
+				set SOURCE=RPTINFO("STAT",I).piece("|",1)
+				set TARGET=RPTINFO("STAT",I).piece("|",3)
+				// Make sure in TABLE.COLUMN format
+				set X=$$validtcr^DBSRWUTL(SOURCE,.SOURCE)
+				set X=$$validtcr^DBSRWUTL(TARGET,.TARGET)
+				set CODE="do vstats^DBSRWUTL("_I_","_ddmap(SOURCE)_","_ddmap(TARGET)_","
+				set CODE=CODE_""""_RPTINFO("STAT",I)_""",.VSTATS)"
+				do addcode^DBSRWUTL(1,CODE)
+				if NEWLIST'[(","_ddmap(SOURCE)_",") set NEWLIST=NEWLIST_ddmap(SOURCE)_","
+				if NEWLIST'[(","_ddmap(TARGET)_",") set NEWLIST=NEWLIST_ddmap(TARGET)_","
+			}
+		}
+
+		do addcode^DBSRWUTL(1,NEWLIST.extract(1,NEWLIST.length()-1),LINENO)
+
+		// End of VSTAT section
+		do addcode^DBSRWUTL(1,"quit")
+	}
+
+	// Page trailer region
+	set PGTRRGN=0
+	if $O(RPTINFO("DSP",90,"T",0)) set PGTRRGN=RPTINFO("DSP",90).piece(",",3)+1
+
+	for LVL=1:1:RPTINFO("LASTLVL"),90,92 if $D(RPTINFO("DSP",LVL)) do {
+		
+		type Boolean SKIPLF = 0
+		type String SEC
+		
+		for SEC="H","D","T" if 'RPTINFO("DSP",LVL,SEC,"").order().isNull() do BUILDSEC(LVL,SEC,PGTRRGN,.RPTINFO,.ddmap,.SKIPLF)
+	}
+
+	// Page header without info
+	if $O(RPTINFO("DSP",90,""))="" do {
+		do BUILDPH(0,.RPTINFO,.ddmap),BUILDLC
+		do addcode^DBSRWUTL(0,"")
+		do addcode^DBSRWUTL(1,"quit")
+	}
+
+	do BLDPRNT(.RPTINFO)
+
+	// Report pre/post-processors
+	do addcode^DBSRWUTL(1,"// Pre/post-processors")
+	set PPNUM="" 
+	for  set PPNUM=$O(RPTINFO("VPSUBS",PPNUM)) quit:PPNUM=""  do {
+		do addcode^DBSRWUTL(0,"")
+		do addcode^DBSRWUTL(0,"VP"_PPNUM_RPTINFO("VPSUBS",PPNUM,0))
+		do addcode^DBSRWUTL(0,"")
+
+		set I=0
+		for  set I=$O(RPTINFO("VPSUBS",PPNUM,I)) quit:I=""  do addcode^DBSRWUTL(-1,RPTINFO("VPSUBS",PPNUM,I))
+		do addcode^DBSRWUTL(1,"quit")
+	}
+
+	do addcode^DBSRWUTL(1,"quit")
+
+	quit
+	
+
+BUILDSEC(Number LVL,	// Private - Build section code
+	 String SEC,
+	 Number PGTRRGN,
+	 String RPTINFO(),
+	 String ddmap(),
+	 Boolean SKIPLF)
+
+	type Number FLDOVF,LN,RGNSIZE
+	type String X
+
+	// Get region size
+	set X=$S(SEC="H":1,SEC="D":2,1:3)
+	set RGNSIZE=+RPTINFO("DSP",LVL).piece(",",X)
+
+	do addcode^DBSRWUTL(0,"")
+
+	if LVL<90 do {					// VHGn,VDTLn,VSUMn
+		type Number I
+		type String CODE,NEWLIST,SECVAR
+
+		if SEC="H" do {
+			set CODE="VHDG"_LVL_$C(9)_"// Group Header"
+			set NEWLIST="CONAM,ER,IOSL,%MSKD,RID,RN,%TIM,V,vcrt,verror,VFMQ,vh(),VL,VLC,VNEWHDR,VO,VOFFLG,VPN,VRG,vrundate"
+			set SECVAR="vh"
+		}
+		else  if SEC="D" do {
+			set CODE="VDTL"_LVL_$C(9)_"// Detail"
+			set NEWLIST="IOSL,V,VD(),verror,VFMQ,vh(),VL,VLC,VO,VOFFLG,VRG,VT()"
+			set SECVAR="VD"
+		}
+		else  do {
+			set CODE="VSUM"_LVL_$C(9)_"// Summary"
+			set NEWLIST="I,IOSL,VFMQ,V,verror,vh(),VL,VLC,VO,VOFFLG,VT(),VX()"
+		}
+		do addcode^DBSRWUTL(0,CODE)
+
+		set NEWLIST = $$newlist^DBSRWUTL("ALL",.RPTINFO,.ddmap,NEWLIST)
+		for  do { quit:NEWLIST.isNull()
+			do addcode^DBSRWUTL(1,"type public String "_NEWLIST.piece(",", 1, 100))
+			set NEWLIST = NEWLIST.piece(",", 101, NEWLIST.length())
+		}	
+		do addcode^DBSRWUTL(0,"")
+
+		if LVL=RPTINFO("LASTLVL"),SEC="D" quit		// Print last level data
+		if SEC="T" do { quit
+			do addcode^DBSRWUTL(1,"if 'VT("_LVL_") quit")	// Print if count>0
+		}
+		set CODE="quit:"_SECVAR_"("_LVL_")  set "_SECVAR_"("_LVL_")=1"
+		set CODE=CODE_$C(9)_"// Print flag"  
+		do addcode^DBSRWUTL(1,CODE)
+	}
+
+	if LVL=90 do {
+		if SEC="H" do BUILDPH(RGNSIZE,.RPTINFO,.ddmap)		// Page Header
+		if SEC="T" do {						// Page Trailer
+			type String NEWLIST,NUMTYPE
+			do addcode^DBSRWUTL(0,"VTRL0"_$C(9)_"// Page Trailer")
+			set NUMTYPE="IOSL,verror,vh,VFMQ,VLC,VT(),VX()"
+			do addcode^DBSRWUTL(1,"type Public Number "_NUMTYPE)
+			set NEWLIST=$$newlist^DBSRWUTL("ALL",.RPTINFO,.ddmap,"",NUMTYPE)
+			if NEWLIST'="" do addcode^DBSRWUTL(1,"type Public String "_NEWLIST)
+			do addcode^DBSRWUTL(1,"type Number I")
+			do addcode^DBSRWUTL(1,"type String VL")
+			do addcode^DBSRWUTL(0,"")
+			do addcode^DBSRWUTL(1,"set VL=""""")
+			// Bottom of the page
+			do addcode^DBSRWUTL(1,"for I=VLC:1:IOSL-"_PGTRRGN_" do VOM")
+		}
+	}
+			
+	if LVL=92 do {
+		type String NEWLIST,NUMTYPE
+		do addcode^DBSRWUTL(0,"VRSUM"_$C(9)_"// Report Summary")
+		set NUMTYPE="IOSL,verror,VFMQ,vh,VLC,VT(),VX()"
+		do addcode^DBSRWUTL(1,"type Public Number "_NUMTYPE)
+		set NEWLIST=$$newlist^DBSRWUTL("UD",.RPTINFO,.ddmap,"",NUMTYPE_",I,V,VL")
+		if NEWLIST'="" do addcode^DBSRWUTL(1,"type Public String "_NEWLIST)
+		do addcode^DBSRWUTL(1,"type Number I")
+		do addcode^DBSRWUTL(1,"type String V,VL")
+		do addcode^DBSRWUTL(0,"")
+		do addcode^DBSRWUTL(1,"set VL=""""")
+		if RPTINFO("REPEATSIZE") do addcode^DBSRWUTL(1,"do VOM2")
+		do addcode^DBSRWUTL(1,"if 'vh(0) do VHDG0 quit:VFMQ")
+	}
+	
+	if LVL'=90 do {						// Page overflow checking
+		type String CODE
+
+		if RPTINFO("REPEATSIZE"),SEC="H" do addcode^DBSRWUTL(1,"do VOM2")	// Flush buffer
+		if LVL'=92 do {
+			type Number X
+			set X=RGNSIZE+PGTRRGN				// Section size
+			if SEC="D","*"'[RPTINFO("SEQBY",LVL,"MINPNT").get() set X=RPTINFO("SEQBY",LVL,"MINPNT")
+			if SEC="T" set X=X-1
+			set CODE="if VLC+"_X_">IOSL do VHDG0 quit:VFMQ "
+		}
+		else  set CODE="if VLC+"_RGNSIZE_">IOSL do VHDG0 quit:VFMQ "
+
+		if (SEC'="H")&RPTINFO("SEQBY",LVL,"PNTHDR").get()&'RPTINFO("DSP",LVL,"H","").order().isNull() do {
+			// Print group
+			set CODE=CODE_" set vh("_LVL_")=0 do VHDG"_LVL_" quit:VFMQ"
+		}
+		do addcode^DBSRWUTL(1,CODE)
+		if RPTINFO("REPEATSIZE"), (RPTINFO("REPEATGRPLVL") = LVL), (SEC="D") do addcode^DBSRWUTL(1,"set VRG=1")
+	}
+
+	do addcode^DBSRWUTL(0,"")
+
+	set FLDOVF=RPTINFO("CUVAR","FLDOVF")		// Field overflow logic on
+	if LVL'<90 set FLDOVF=0				// Only on in detail sections
+
+	// Link fields located on the same line
+	for LN=1:1:RGNSIZE do {			// Loop through the region
+		type String CODE,L,ZBLK
+
+		if RPTINFO("DSP",LVL,SEC,LN,"").order().isNull() do { quit		// Blank line
+			do BUILDOF(.RPTINFO)				// overflow
+			do addcode^DBSRWUTL(1,"set VL="""" do VOM")
+		}
+
+		set L=""
+		for  set L=$O(RPTINFO("DSP",LVL,SEC,LN,L)) quit:L=""  do {
+			type Number ITEM1,LEN,PPFLG
+			type String FUN,X,X1,XFMT,Z
+			// Insert MUMPS code for this detail line
+			set Z=RPTINFO("DSP",LVL,SEC,LN,L)		// Get format code
+			set ITEM1=0
+
+			// First Item
+			if $O(RPTINFO("DSP",LVL,SEC,LN,L),-1)="" set ITEM1=1
+			set X=RPTINFO("FMT",LVL,SEC,(LN*1000)+L)
+			set XFMT=X.piece("|",1),LEN=X.piece("|",2),FUN=X.piece("|",3)
+			set PPFLG=X.piece("|",4)+X.piece("|",5),ZBLK=X.piece("|",6)
+
+			// Page Break <<#>>
+			if FUN="~#" do { quit
+				do addcode^DBSRWUTL(1,"do VHDG0 quit:VFMQ"_$C(9)_"// <<#>>")
+			}
+
+			// Convert Z to M code in CODE (was $$MUMPS())
+			do {
+				if Z.extract(1)="~" set Z=Z.extract(2,Z.length())
+
+				// First item on this line
+				if ITEM1 do {
+					
+					if 'PPFLG do { quit
+						if SKIPLF set CODE="set VL=VL_$J("""","_(L-1)_"-VL.length())_"_Z
+						else  if L=1 set CODE="set VL="_Z	// On column one
+						else  set CODE="set VL="""_$J("",L-1)_"""_"_Z
+					}
+					else  do {		// With pre/post proc
+						if SKIPLF set CODE=Z_"set VL=VL_$J("""","_(L-1)_"-VL.length())_V"
+						else  if L=1 set CODE=Z_"set VL=V"	// On column one
+						else  set CODE=Z_"set VL="""_$J("",L-1)_"""_V"
+					}
+					
+					set SKIPLF = 0
+				}
+
+				// Second - nth item on line - pad with spaces
+				else  do {
+					if 'PPFLG do {
+						set CODE="set VL=VL_$J("""","_(L-1)_"-VL.length())_"_Z
+						if FLDOVF set CODE=CODE_",VOFFLG=0"
+					}
+					else  set CODE=Z
+				}
+			}
+
+			// @function
+			if FUN.extract(1)="@" do STAT(FUN,LVL,.RPTINFO,.ddmap)
+
+			do addcode^DBSRWUTL(1,CODE)
+
+			if 'ITEM1,PPFLG do {			// PP flag on
+				if FLDOVF,$$OVFFMT(XFMT) set CODE="do VOFN(V,"_(L-1)_","_LEN_")"
+				else  do {
+					set CODE="set VL=VL_$J("_""""""_","_(L-1)_"-VL.length())_V"
+					if FLDOVF set CODE=CODE_",VOFFLG=0"
+				}
+				if "@["[FUN.extract(1) set CODE=CODE_$C(9)_"// "_FUN
+				do addcode^DBSRWUTL(1,CODE)
+			}
+		}
+													
+		do BUILDOF(.RPTINFO)
+		// Suppress BL (ZBLK=1) or LF (ZBLK=2) - if suppressing line feed
+		// just don't print buffer, i.e., no VOM
+		if 'ZBLK do {
+			set CODE="do VOM"
+			if FLDOVF set CODE=CODE_",VOMOF"
+			do addcode^DBSRWUTL(1,CODE)
+		}
+		else  if ZBLK=1 do {
+			set CODE="if 'VL.translate("" "").isNull() do VOM"
+			if FLDOVF set CODE=CODE_",VOMOF"
+			do addcode^DBSRWUTL(1,CODE)
+		}
+		else  if ZBLK=2 set SKIPLF=1
+	}
+
+	if '(LVL=90&(SEC="H")) do addcode^DBSRWUTL(1,"quit") quit
+
+	do BUILDLC
+
+	do addcode^DBSRWUTL(0,"")
+	do addcode^DBSRWUTL(1,"quit")
+	do addcode^DBSRWUTL(0,"")
+
+	quit
+
+
+OVFFMT(FMT)	// Private - Determine if overflow format, i.e., N, $, E, or RD
+
+	type Number I,OVFFMT
+	type String X
+
+	set OVFFMT=0
+	for I=1:1:FMT.length(",") do { quit:OVFFMT
+		set X=FMT.piece(",",I)
+		if X="N"!(X="$")!(X="E")!(X?1"RD".E) set OVFFMT=1
+	}
+	quit OVFFMT
+
+
+BUILDOF(String RPTINFO())	// Private - Page overflow logic
+
+	type Public Number LVL
+	type Public String SEC
+
+	if SEC="D",RPTINFO("SEQBY",LVL,"MINPNT").get() do {
+		do addcode^DBSRWUTL(1,"if VLC+"_RPTINFO("SEQBY",LVL,"MINPNT")_">IOSL do VHDG0 quit:VFMQ")
+	}
+	quit
+
+BUILDLC	// Private - Logic to lock report page header in VT mode
+
+	do addcode^DBSRWUTL(0,"")
+	do addcode^DBSRWUTL(1,"set VNEWHDR=0")
+	do addcode^DBSRWUTL(1,"if vcrt set PN=VPN do ^DBSRWBR(2,1)"_$C(9)_"// Lock report page heading")
+
+	quit
+
+
+BUILDPH(Number RGNSIZE,		// Private - Standard report page header logic
+	String RPTINFO(),
+	String ddmap())
+	
+	type String NEWLIST, NUMTYPE
+	
+	set NUMTYPE="ER,IOSL,vcrt,verror,VFMQ,vh(),VLC,VNEWHDR,VPN,VRG,VRWOPT()"
+
+	do addcode^DBSRWUTL(0,"")
+
+	do addcode^DBSRWUTL(0,"VHDG0"_$C(9)_"// Page Header")
+	do addcode^DBSRWUTL(1,"type Public Number "_NUMTYPE)
+	
+	set NEWLIST = $$newlist^DBSRWUTL("ALL",.RPTINFO,.ddmap,"CONAM,%MSKD,RID,RN,%TIM,VL,vrundate,vsysdate",NUMTYPE_",PN,V,VO")
+	for  do { quit:NEWLIST.isNull()
+		do addcode^DBSRWUTL(1,"type public String "_NEWLIST.piece(",", 1, 100))
+		set NEWLIST = NEWLIST.piece(",", 101, NEWLIST.length())
+	}
+	
+	do addcode^DBSRWUTL(1,"type Number PN,V,VO")
+	do addcode^DBSRWUTL(1,"if VRWOPT(""NOHDR"").get() quit"_$C(9)_"// Skip page header")
+	do addcode^DBSRWUTL(1,"set vh(0)=1,VRG=0")
+	do addcode^DBSRWUTL(1,"if VL'="_""""""_" do VOM")
+	if 'RPTINFO("DSP",90,"T","").order().isNull() do addcode^DBSRWUTL(1,"if VPN do VTRL0")
+	do addcode^DBSRWUTL(1,"if vcrt,VPN>0 do { quit:VFMQ!'VNEWHDR")
+	do addcode^DBSRWUTL(2,"type Number PN,X")
+	do addcode^DBSRWUTL(2,"set VL=""""")
+	do addcode^DBSRWUTL(2,"for X=VLC+1:1:IOSL do VOM")
+	do addcode^DBSRWUTL(2,"set PN=VPN")
+	do addcode^DBSRWUTL(2,"do ^DBSRWBR(2)")
+	do addcode^DBSRWUTL(2,"set VLC=0")
+	do addcode^DBSRWUTL(2,"quit:VFMQ")
+	do addcode^DBSRWUTL(2,"if VNEWHDR write $$CLEARXY^%TRMVT")
+	do addcode^DBSRWUTL(2,"else  set VLC=VLC+"_(+RGNSIZE)_",VPN=VPN+1")
+	do addcode^DBSRWUTL(2,"}")
+	do addcode^DBSRWUTL(0,"")
+	do addcode^DBSRWUTL(1,"set ER=0,VPN=VPN+1,VLC=0")
+	
+	quit
+
+
+STAT(	String REF,		// Private
+	String LVL,
+	String RPTINFO(),
+	String ddmap())
+
+	// Attempt to use V as often as possible for variable name.  When can't
+	// use VX(seq)
+
+	type Number VXCNT
+	type String NEWVAL,OLDVAL,ORIG,X
+
+	set ORIG=REF
+
+	set VXCNT=0				// Variable number for complex functions
+	for  set X=REF.piece("@",2) quit:X=""  do {
+		set VXCNT=VXCNT+1
+		set OLDVAL="@"_X.piece(")",1)_")"
+		set NEWVAL=$$STAT1(OLDVAL,LVL,.RPTINFO,.ddmap,.VXCNT) 
+		if NEWVAL="" set REF=""
+		else  set REF=REF.piece(OLDVAL,1)_NEWVAL_REF.piece(OLDVAL,2,99)
+	}
+
+	// If complex function involves divide, set up error handling to avoid
+	// divide by zero error
+	if REF["/" do {
+		do addcode^DBSRWUTL(1,"do {")
+		do addcode^DBSRWUTL(2,"// Continue with V="""" if divide by zero error")
+		do addcode^DBSRWUTL(2,"catch error {")
+		do addcode^DBSRWUTL(3,"if '(error.type[""DIV""&(error.type[""ZERO"")) throw error")
+		do addcode^DBSRWUTL(3,"set V=""""")
+		do addcode^DBSRWUTL(3,"}")
+		do addcode^DBSRWUTL(2,"set V="_REF_$C(9)_"// "_ORIG)
+		do addcode^DBSRWUTL(2,"}")
+	}
+
+	else  if REF'="V" do addcode^DBSRWUTL(1,"set V="_REF_$C(9)_"// "_ORIG)
+
+	quit
+
+
+STAT1(	String REF,	// Private
+	String LVL,
+	String RPTINFO(),
+	String ddmap(),
+	Number VXCNT)
+
+	type Number RPTLVL
+	type String CODE,DI,FOR,FUN,PARAMS,SEQ,X
+
+	set FUN=REF.extract(2,4)
+	set PARAMS=REF.piece("(",2).piece(")",1)
+	set DI=PARAMS.piece(",",1)
+
+	if DI?1A.AN set DI="["_ddmap.piece(",",1)_"]"_DI	// Convert @FUN(di) to @FUN([fid]di)
+
+	// Determine if group or report level
+	if LVL=92 set RPTLVL=1					// Report summary
+	else  if FUN="CNT" do {
+		if PARAMS.piece(",",1)="0" set RPTLVL=1
+		else  set RPTLVL=0
+	}
+	else  if LVL=90 set RPTLVL=1				// Page trailer always report level
+	else  do {
+		if PARAMS.piece(",",2)="0" set RPTLVL=1
+		else  set RPTLVL=0
+	}
+
+	if FUN="CNT",'RPTLVL quit "VT("_LVL_")"			// Group record count
+	if FUN="CNT" do { quit CODE				// Report record count
+		type Number I
+		set CODE="("
+		for I=0:1:RPTINFO("LASTLVL") set CODE=CODE_"VT("_I_")+"
+		set CODE=CODE.extract(1,CODE.length()-1)_")"
+	}
+
+	set SEQ=RPTINFO("FMT",0,DI)
+
+	// RPTLVL=1 => use report/running totals
+	if RPTLVL,FUN'="TBL" do { quit CODE
+
+		type String VX
+
+		if VXCNT=1 set VX="V"
+		else  set VX="VX("_VXCNT_")"
+
+		set CODE="for I=0:1:"_RPTINFO("LASTLVL")
+		if FUN="TOT" do {
+			do addcode^DBSRWUTL(1,"set "_VX_"=0"_$C(9)_"// "_REF)
+			set CODE=CODE_" set "_VX_"="_VX_"+VT(I,"_SEQ_",1)"
+			do addcode^DBSRWUTL(1,CODE)
+			set CODE=VX
+		}
+		else  if FUN="MAX" do {
+			do addcode^DBSRWUTL(1,"set "_VX_"="""""_$C(9)_"// "_REF)
+			set CODE=CODE_" if VT(I,"_SEQ_",2)'="""",(VT(I,"_SEQ_",2)>"_VX_")!("_VX_"="""")"
+			set CODE=CODE_" set "_VX_"=VT(I,"_SEQ_",2)"
+			do addcode^DBSRWUTL(1,CODE)
+			set CODE=VX
+		}
+		else  if FUN="MIN" do {
+			do addcode^DBSRWUTL(1,"set "_VX_"="""""_$C(9)_"// "_REF)
+			set CODE=CODE_" if VT(I,"_SEQ_",3)'="""",(VT(I,"_SEQ_",3)<"_VX_")!("_VX_"="""")"
+			set CODE=CODE_" set "_VX_"=VT(I,"_SEQ_",3)"
+			do addcode^DBSRWUTL(1,CODE)
+			set CODE=VX
+		}
+
+		else  if FUN="AVG" do {
+			type String VX2="VX("_(VXCNT+1)_")"
+
+			do addcode^DBSRWUTL(1,"set ("_VX_","_VX2_")=0")
+			set CODE=CODE_" set "_VX_"="_VX_"+VT(I,"_SEQ_",1),"_VX2_"="_VX2_"+VT(I)"
+			do addcode^DBSRWUTL(1,CODE)
+			set CODE="set "_VX_"=$S("_VX2_":"_VX_"/"_VX2_",1:0)"
+			do addcode^DBSRWUTL(1,CODE_$C(9)_"// "_REF)
+			set CODE=VX
+			set VXCNT=VXCNT+1
+		}
+		else  do {
+			write !!,"Invalid Function "_REF
+			set CODE="""?"""
+		}
+	}
+
+	if LVL=92 set LVL=1					// Report summary
+
+	if FUN="TOT" quit "VT("_LVL_","_SEQ_",1)"		// @TOT
+	if FUN="MAX" quit "VT("_LVL_","_SEQ_",2)"		// @MAX
+	if FUN="MIN" quit "VT("_LVL_","_SEQ_",3)"		// @MIN
+	if FUN="AVG" quit "$S(VT("_LVL_"):VT("_LVL_","_SEQ_",1)/VT("_LVL_"),1:0)"	//@AVG
+	if FUN="TBL" set X=$$TBL^DBSDD(DI) do { quit CODE
+		type Number LINENO,VALID
+		type String ACCKEYS,CALL1,CALL2,DESCCOL,DITC,ERROR,I,KEYS,PPNUM,TABLE,WHERE
+
+		if X'?1"["1E.E1"]" do { quit
+			write !!,"Invalid @TBL table reference "_REF
+			set CODE="""?"""
+		}
+
+		set VALID=$$validtcr^DBSRWUTL(DI,.DITC)
+
+		/* Set up code to retrieve table description.  For now, find
+		   the first column and use it.  If we eventually come up with
+		   a standard name for the description column for a table, then
+		   modify to use that.
+		*/
+
+		// First, get access keys
+		set TABLE=$TR(X,"[]"),KEYS=""
+		type RecordDBTBL1 dbtbl1=Db.getRecord("DBTBL1","%LIBS=""SYSDEV"",FID=:TABLE")
+		set ACCKEYS=$$TOKEN^%ZS(dbtbl1.acckeys)
+		for I=1:1:ACCKEYS.length(",") do {
+			type String KEY
+			set KEY=$P(ACCKEYS,",",I)
+			quit:KEY?1.N				// Ignore numeric keys
+			quit:KEY.extract()=$C(0)		// Ignore literal strings
+			set KEYS=KEYS_KEY_","
+		}
+
+		// Find description column
+		type ResultSet dbtbl1d=Db.select("DI","DBTBL1D","%LIBS='SYSDEV' AND FID=:TABLE AND POS=1")
+		if dbtbl1d.isEmpty() set CODE="No description column for "_REF quit
+		while dbtbl1d.next() do { quit		// Only care about 1st in case more
+			set DESCCOL=dbtbl1d.getCol("DI")
+		}
+
+		/* Build code to access description at runtime -- all values must
+		   be direct name maps from primary table, except last, which is
+		   the DI input.
+		*/
+
+		set KEYS=KEYS.extract(1,KEYS.length()-1)
+		set (CALL1,CALL2,ERROR,WHERE)=""
+		for I=1:1:KEYS.length(",") do { quit:ERROR
+			type String KEY,VAR
+			set KEY=KEYS.piece(",",I)
+			if I=KEYS.length(",") set VAR=ddmap(DITC)
+			else  do {
+				type Number J
+
+				set VAR=""
+				for J=1:1:ddmap(0) if ddmap(J).piece(".",2)=KEY set VAR=ddmap(ddmap(J)) quit
+			}
+			if VAR="" set ERROR=1
+			set CALL1=CALL1_VAR_","
+			set CALL2=CALL2_"KEY"_I_","
+			set WHERE=WHERE_KEY_"=:KEY"_I_","
+		}
+
+		if ERROR do { quit
+			write !!,"Invalid @TBL table reference "_REF
+			set CODE="""?"""
+		}
+
+		set WHERE=WHERE.extract(1,WHERE.length()-1)
+		set PPNUM=$O(RPTINFO("VPSUBS",""),-1)+1
+		set RPTINFO("VPSUBS",PPNUM,0)="("_CALL2.extract(1,CALL2.length()-1)_")"_$C(9)_"// "_REF
+		// Handle possibility that key may be null -- if so, just return
+		// null for description
+		set LINENO=1
+		for I=1:1:KEYS.length(",") do {
+			set RPTINFO("VPSUBS",PPNUM,LINENO)=$C(9)_"if KEY"_I_"="""" quit """""
+			set LINENO=LINENO+1
+		}
+		set RPTINFO("VPSUBS",PPNUM,LINENO)=$C(9)_"type Public Cache %CACHE()"
+		set RPTINFO("VPSUBS",PPNUM,LINENO+1)=$C(9)_"type Record"_TABLE_" tbl=%CACHE("""_TABLE_""").getRecord("""_TABLE_""","""_WHERE_""")"
+		set RPTINFO("VPSUBS",PPNUM,LINENO+2)=$C(9)_"quit tbl."_DESCCOL
+		set CODE="$$VP"_PPNUM_"("_CALL1.extract(1,CALL1.length()-1)_")"
+	}
+
+	write !!,"Invalid Function "_REF
+	quit """?"""
+
+
+BRKINFO(RecordDBTBL5H dbtbl5h,		// Private - Report GROUP BY logic
+	String ddmap(),
+	String RPTINFO(),
+	String BRKCODE())
+	/*
+	ARGUMENTS:
+		. dbtbl5h	DBTBL5H object		/REQ/MECH=REF:R
+
+		. RPTINFO	Report info from	/REQ/MECH=REF:RW
+				dbtbl5h
+
+		. BRKCODE	PSL code		/REQ/MECH=REFNAM:W
+	*/
+
+	type Number I,LASTLVL,LINENO
+	type String CODE,NEWLIST,TABCHR,VKEY(),VTYPE(),X
+
+	set TABCHR=$C(9)
+
+	set LASTLVL=RPTINFO("LASTLVL")			// Last key level
+	quit:'LASTLVL					// Not sure how this could happen
+
+	do addcode^DBSRWUTL(1,"// Placeholder for type Public",.LINENO)
+	set NEWLIST="type Public String "
+
+	if RPTINFO("SEQBY",LASTLVL,"PAGEBRK") do addcode^DBSRWUTL(1,"set VH0=1"_TABCHR_"// Page break")
+
+	// Get non-dummy key references
+	for I=1:1:LASTLVL do {
+		type String COLUMN,TABLE,TC
+
+		set X=RPTINFO("SEQBY",I,"COL") 
+		quit:'$$validtcr^DBSRWUTL(X,.TC) 
+		set VKEY(I)=ddmap(TC)		// Get map name
+		// Get data type
+		set TABLE=TC.piece(".",1),COLUMN=TC.piece(".",2)
+		type RecordDBTBL1D dbtbl1d=Db.getRecord("DBTBL1D","%LIBS=""SYSDEV"",FID=:TABLE,DI=:COLUMN")
+		set VTYPE(I)=dbtbl1d.typ
+	}
+
+	// Save keybreak variables in vb1,vb2,...
+	set CODE=""
+	for I=1:1:LASTLVL set CODE=CODE_"vb"_I_","
+	set CODE=CODE.extract(1,CODE.length()-1)
+	do addcode^DBSRWUTL(1,"type Number "_CODE)
+	do addcode^DBSRWUTL(1,"set ("_CODE_")=0")
+
+	// Generate code for keybreaks
+	set I="",BRKCODE=1
+	for  set I=$O(VKEY(I)) quit:I=""  do {
+		type Number K,NEXTLVL
+		type String V,VN
+
+		set V=VKEY(I)					// variable name
+		set VN="vo"_V					// key name - last value
+		set NEWLIST=NEWLIST_V_","_VN_","
+		// Plus if numeric
+		if "N$L"[VTYPE(I) set CODE="if vb"_I_"!(+"_VN_"'=+"_V_")"
+		else  set CODE="if vb"_I_"!("_VN_"'="_V_")"
+
+		set NEXTLVL=$O(VKEY(I))
+		quit:'NEXTLVL
+		set CODE=CODE_" set vs("_NEXTLVL_")=0,vh("_NEXTLVL_")=0,VD("_I_")=0"
+		for K=I+1:1:LASTLVL set CODE=CODE_",vb"_K_"=1"
+		if RPTINFO("SEQBY",I,"PAGEBRK") set CODE=CODE_",VH0=1"
+		set BRKCODE(BRKCODE)=CODE,BRKCODE=BRKCODE+1
+	}
+
+	do addcode^DBSRWUTL(1,NEWLIST.extract(1,NEWLIST.length()-1),LINENO)
+
+	quit
+
+
+BLDPRNT(String RPTINFO())	// Private - Build print section
+	// Was ^DBSRWBUF
+
+	type String CODE,TABCHR
+	
+	set TABCHR=$C(9)
+
+	do addcode^DBSRWUTL(0,"")
+	do addcode^DBSRWUTL(0,"VOM"_TABCHR_"// Output print line")
+
+	// Tape format - fixed length
+	if RPTINFO("FIXLEN") do { quit
+		do addcode^DBSRWUTL(1,"type Public Number VLC")
+		do addcode^DBSRWUTL(1,"type Public String IO,VL")
+		do addcode^DBSRWUTL(0,"")
+		do addcode^DBSRWUTL(1,"use IO")
+		do addcode^DBSRWUTL(1,"write VL_$J("""","_RPTINFO("RSIZE")_"-VL.length()),!")
+		do addcode^DBSRWUTL(1,"set VL="""",VLC=VLC+1")
+		do addcode^DBSRWUTL(1,"quit")
+		do addcode^DBSRWUTL(0,"")
+	}
+
+	// Continue only if report is not fixed length
+			
+	do addcode^DBSRWUTL(1,"type Public Number AUXPTR,vcrt,vlc,VLC,VRG")
+	do addcode^DBSRWUTL(1,"type Public String IO,VL")
+	do addcode^DBSRWUTL(0,"")
+	do addcode^DBSRWUTL(1,"use IO")
+	do addcode^DBSRWUTL(0,"")
+
+	if RPTINFO("REPEATSIZE") do {
+		do addcode^DBSRWUTL(1,"if VRG do VOM1 quit"_TABCHR_"// Store line image in print buffer")
+		do addcode^DBSRWUTL(0,"")
+	}
+
+	do addcode^DBSRWUTL(1,"// Advance to a new page")
+	if RPTINFO("PAGESIZE")>999 do addcode^DBSRWUTL(1,"use IO if 'VLC,'vcrt set $Y=1")
+	else  do {
+		do addcode^DBSRWUTL(1,"if 'VLC,'vcrt do {"_TABCHR_"// Non-CRT device (form feed)")
+		do addcode^DBSRWUTL(2,"if 'AUXPTR.get() write $C(12),!")
+		do addcode^DBSRWUTL(2,"else  write $$PRNTFF^%TRMVT,!")
+		do addcode^DBSRWUTL(2,"set $Y=1")
+		do addcode^DBSRWUTL(2,"}")
+		do addcode^DBSRWUTL(0,"")
+	}
+
+	do addcode^DBSRWUTL(1,"if vcrt<2 write VL,!"_TABCHR_"// Output line buffer")
+	do addcode^DBSRWUTL(1,"if vcrt set vlc=vlc+1 do VBRSAVE(vlc,VL)"_TABCHR_"// Save in BROWSER buffer")
+	do addcode^DBSRWUTL(1,"set VLC=VLC+1,VL="""""_TABCHR_"// Reset line buffer")
+	do addcode^DBSRWUTL(1,"quit")
+	do addcode^DBSRWUTL(0,"")
+
+	// Field overflow logic
+	if RPTINFO("CUVAR","FLDOVF") do {
+		do addcode^DBSRWUTL(0,"VOMOF"_TABCHR_"// Display overflow print line")
+		do addcode^DBSRWUTL(0,"")
+		do addcode^DBSRWUTL(1,"type Public String VL,VOFFLG,VLOF")
+		do addcode^DBSRWUTL(0,"")
+		do addcode^DBSRWUTL(1,"quit:VLOF.get()=""""")
+		do addcode^DBSRWUTL(1,"set VL=VLOF")
+		do addcode^DBSRWUTL(1,"do VOM")
+		do addcode^DBSRWUTL(1,"set VLOF="""",VOFFLG=0")
+		do addcode^DBSRWUTL(1,"quit")
+		do addcode^DBSRWUTL(0,"")
+		do addcode^DBSRWUTL(0,"VOFN(V,LOC,LN)"_TABCHR_"// Field Overflow Logic (Numeric or Currency)")
+		do addcode^DBSRWUTL(0,"")
+		do addcode^DBSRWUTL(1,"type Public String VL,VLOF,VOFFLG")
+		do addcode^DBSRWUTL(0,"")
+		do addcode^DBSRWUTL(1,"if V.length()'>LN!VOFFLG!(VL="""") do {")
+		do addcode^DBSRWUTL(2,"set VL=VL_$J("""",LOC+LN-VL.length()-V.length())_V")
+		do addcode^DBSRWUTL(2," set VOFFLG=0")
+		do addcode^DBSRWUTL(2,"}")
+		do addcode^DBSRWUTL(1,"else  do {")
+		do addcode^DBSRWUTL(2,"set VLOF=VLOF_$J("""",LOC+LN-V.length()-VLOF.length())_V")
+		do addcode^DBSRWUTL(2,"set VOFFLG=1")
+		do addcode^DBSRWUTL(2,"}")
+		do addcode^DBSRWUTL(1,"quit")
+		do addcode^DBSRWUTL(0,"")
+	}
+
+	// Deal with repeat regions, e.g., labels
+	if RPTINFO("REPEATSIZE") do {
+
+		if RPTINFO("LINECNT")>1 do {
+			// Box
+			do addcode^DBSRWUTL(0,"")
+			do addcode^DBSRWUTL(0,"VOM1"_TABCHR_"//")
+			do addcode^DBSRWUTL(1,"type Public Number vcrt,vlc,VLC,VR,VRF(),VRG,VSEQ")
+			do addcode^DBSRWUTL(1,"type Public String VL")
+			do addcode^DBSRWUTL(1,"type Number DONE,I")
+			do addcode^DBSRWUTL(1,"set DONE=0")
+			do addcode^DBSRWUTL(1,"for  do { quit:DONE")
+			do addcode^DBSRWUTL(2,"if VR<"_(RPTINFO("REPEATCNT")+1)_" do { quit")
+			do addcode^DBSRWUTL(3,"if VR>1 set VRF(VSEQ)=VRF(VSEQ)_$J("""",((VR-1)*"_RPTINFO("REPEATSIZE")_")-VRF(VSEQ).length())")
+			do addcode^DBSRWUTL(3,"set VRF(VSEQ)=VRF(VSEQ)_VL,VL="""",VSEQ=VSEQ+1")
+			do addcode^DBSRWUTL(3,"set DONE=1")
+			do addcode^DBSRWUTL(3,"}") 
+			do addcode^DBSRWUTL(2,"for I=1:1:"_RPTINFO("LINECNT")_" do {")
+			do addcode^DBSRWUTL(3,"if vcrt<2 write VRF(I),!")
+			do addcode^DBSRWUTL(3,"if vcrt set vlc=vlc+1 do VBRSAVE(vlc,VRF(I))")
+			do addcode^DBSRWUTL(3,"set VRF(I)=""""")
+			do addcode^DBSRWUTL(3,"}")
+			do addcode^DBSRWUTL(2,"set VLC=VLC+"_RPTINFO("LINECNT"))
+		}
+		else  do {
+
+			do addcode^DBSRWUTL(0,"VOM1"_TABCHR_"// Repeat group print logic")
+			do addcode^DBSRWUTL(1,"type Public Number vcrt,vlc,VLC,VR,VRG")
+			do addcode^DBSRWUTL(1,"type Public String VL,VRF")
+			do addcode^DBSRWUTL(1,"type Number DONE=0")
+			do addcode^DBSRWUTL(1,"for  do { quit:DONE")
+			do addcode^DBSRWUTL(2,"if VR<"_(RPTINFO("REPEATCNT")+1)_" do { quit")
+			do addcode^DBSRWUTL(3,"if VR>1 set VRF=VRF_$J("""",((VR-1)*"_RPTINFO("REPEATSIZE")_")-VRF.length())")
+			do addcode^DBSRWUTL(3,"set VRF=VRF_VL,VL=""""")
+			do addcode^DBSRWUTL(3,"set DONE=1")
+			do addcode^DBSRWUTL(3,"}")
+			do addcode^DBSRWUTL(2,"if vcrt<2 write VRF,!")
+			do addcode^DBSRWUTL(2,"if vcrt set vlc=vlc+1 do VBRSAVE(vlc,VRF)")
+			do addcode^DBSRWUTL(2,"set VLC=VLC+1,VRF=""""")
+		}
+
+		do addcode^DBSRWUTL(2,"if VR=999 set VR=0,VRG=0,DONE=1"_TABCHR_"// End of report")
+		do addcode^DBSRWUTL(2,"set VR=1"_TABCHR_"// Reset repeat field buffer")
+		do addcode^DBSRWUTL(2,"}")
+		do addcode^DBSRWUTL(0,"")
+		do addcode^DBSRWUTL(1,"quit")
+		do addcode^DBSRWUTL(0,"")
+		do addcode^DBSRWUTL(0,"")
+		do addcode^DBSRWUTL(0,"VOM2"_TABCHR_"// Flush print buffer")
+		do addcode^DBSRWUTL(1,"type Public Number VR,VRG")
+		do addcode^DBSRWUTL(1,"type Public String VL")
+		do addcode^DBSRWUTL(1,"if VL="""",'VR quit")
+		do addcode^DBSRWUTL(1,"if VR set VRG=1,VR=999")
+		do addcode^DBSRWUTL(1,"do VOM")
+		do addcode^DBSRWUTL(1,"quit")
+		do addcode^DBSRWUTL(0,"")
+	}
+		
+	quit
+
+vSIG()	quit "60233^64644^Dan Russell^29599"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,399 @@
+DEPARO(RecordDEP dep,RecordTTX ttx, RecordTRN trn)   // Automatic Rollover
+	/*
+	ORIG: Allan Mattson
+
+	---- Revision History ------------------------------------------------
+	
+	05/31/06 - PUTTASWH - CR 21511
+		   Modified section RRO5 to set the deposit maturity date
+		   irrespective of the interest rate change at the account,
+		   and the conditional check to update the interest rate to 
+		   reflect the product level rate is modified to check for 
+		   the old interest rate with the account's interest rate. 
+		   Removed the old revision history.
+		    
+	04/11/06 - SANTHUMS - CR 20635
+		   Modified section NOD49, to add if proddftd.trm is not null 
+		   and proddftd.trm not equal to dep.trm then only dep.trm 
+		   should reset with proddftd.trm value.
+		   
+	03/22/06 - TELIV - CR 20051
+		   Modified section NOD49, to add term and Principal Maturity
+		   Option in the list of New Product defaults to DEP.
+
+	02/22/06 - PUTTASWH - 19436
+		   Modified FILE section to save the account changes.
+		   
+	09/20/05 - Sahun - 16662
+		   Add one more parameter RecordTTX ttx in the Procedure and 
+		   removing all the unscoped variable warnings.
+		   
+	----------------------------------------------------------------------
+	*/
+
+	// Not matured
+	if %SystemDate<dep.mdt do Runtime.setErrMSG("DEP",2044) quit
+
+	// Balance required to renew
+	if +dep.bal=0 do Runtime.setErrMSG("DEP",316) quit
+
+	new CID,CRCD,GRCDYS,IPND,OIOPT,OIRN,OMDT,TYPE
+	type public Boolean ER
+
+	set CID=dep.cid
+	set TYPE=dep.type
+
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE")
+
+	set GRCDYS=prodctl.grcdys
+	if 'GRCDYS set GRCDYS=CUVAR.GRACE
+
+	// Exceeds renewal grace period
+	if dep.mdt+GRCDYS<%SystemDate do Runtime.setErrMSG("DEP",1034) quit
+
+	set OIRN=dep.irn
+	set OMDT=dep.mdt
+	set OIOPT=dep.iopt
+
+	do dep.setAuditFlag(1)
+
+	// Parameter Modification Option - Load new product parameters
+	if +dep.pmo=0 do NOD49(.dep)
+
+	// Renewal Default Group - Load maturity default group parameters
+	if dep.dftmdt'="" do DFTMDT(.dep)
+
+	// Load rollover information to account
+	if Db.isDefined("ROLLOVR","CID") do ROLLOVR(.dep)
+
+	// Rate Renewal Option
+	if dep.rro="" do RRO4(.dep)
+	if dep.rro=0 do RRO0(.dep)
+	if dep.rro=1 do RRO1(.dep)
+	if dep.rro=2 do RRO2(.dep)
+	if dep.rro=3 do RRO3(.dep,CUVAR.PBKIRN)
+	if dep.rro=4 do RRO4(.dep)
+	if dep.rro=5 do RRO5(.dep)
+
+	if ER quit
+
+	// Check IRN against the Interest Rate maximum and minimum
+        if dep.intmx'="",dep.irn>dep.intmx set dep.irn=dep.intmx
+        if dep.intmn'="",dep.irn<dep.intmn set dep.irn=dep.intmn
+
+	// Int/Div Compounding Frequency
+	if dep.icf="" set dep.inc=""
+	else  set dep.inc=$$NJD^UFRE(%SystemDate,dep.icf) if ER quit
+
+	// Interest paid - not disbursed
+	set IPND=0
+	if dep.ero,dep.iopt,ttx.tso'="" set IPND=$$FIELD^UTSO(ttx.tso,"IPND")
+
+	// Accumulated check amount
+	if 'dep.ero,dep.iopt set dep.intchkbkt=0
+
+	/*
+	Values and actions for dep.intavlr (Table STBLINTAVLR):
+		0 = Do Not Reset Available Interest/Dividend At Maturity
+                1 = Reset Available Interest/Dividend to Zero At Maturity
+                2 = Set Avail Interest/Dividend Equal to Prior Term Interest/Dividend At Maturity
+		3 = Post Avail Int Not Credited to Prin Bal At Maturity and Reset Avail Int to Zero
+	*/
+	// Interest Paid Credited
+	if dep.intavlr=1 set dep.intavl=0
+	if dep.intavlr=2 do {
+		set dep.intprior=dep.intavl
+		set dep.intavl=0
+		}
+	if dep.intavlr=3 set dep.intavl=0
+
+	// Original Amount
+	set dep.org=dep.bal
+
+	// Number of Times Renewed
+	set dep.ntr=dep.ntr+1
+
+	if dep.ero do {
+		// Antic Earnings/maturity Check Number
+		set dep.intchk=""
+
+		// Anticipated Amount
+		set dep.aecamt=""
+		}
+
+	// Int/Div Paid - Not Disbursed
+	set dep.ipnd=dep.ipnd+IPND
+
+	// Int/Div Paid - Last Date
+	set dep.ipld=%SystemDate
+
+	// Interest Rate At Last Maturity
+	set dep.irlm=OIRN
+
+	// Maturity - Last Date
+	set dep.mld=OMDT
+
+	if dep.ipf'="",dep.intchkfre'="",dep.intchknd'>%SystemDate do { if ER quit
+		// Int/Div Check Last Date
+		set dep.intchkld=dep.intchknd
+
+		// Int/Div Check Next Date
+		set dep.intchknd=$$NJD^UFRE(%SystemDate,dep.intchkfre)
+		}
+
+	// Int/Div Transfer Account
+	if OIOPT=2,dep.iopt'=2 set dep.itrf=""
+
+	// Partial Renewal Amount
+	if dep.rencd=0!(dep.rencd=3)!(dep.rencd=5)!(dep.rencd=6) set dep.prena=""
+
+	if dep.rencd=0 do FILE(.dep) quit
+
+	// Date Last Renewed
+	set dep.dlr=%SystemDate
+
+	// Int/Div Posting Frequency - Int/Div Next Posted
+	if dep.ipf'="",dep.inp'>%SystemDate set dep.inp=$$NJD^UFRE(%SystemDate,dep.ipf) if ER quit
+
+	// Negative Interest Posting Frequency - Negative Interest Next Posted Date
+	if dep.negipf'="",dep.neginp'>%SystemDate set dep.neginp=$$NJD^UFRE(%SystemDate,dep.negipf) if ER quit
+
+	do FILE(.dep)
+
+	quit
+
+
+FILE(RecordDEP dep)
+
+	type public String ET,RM
+	type public Boolean ER
+	
+	if $G(CTL)'="",'$E($G(CTL)) quit
+
+	// File the Journal entries and the account info.
+	do dep.save("NOTRIGBEF/NOVALREQ/NOVALDD/NOTRIGAFT/NOVALRI/NOINDEX/NOFKCHK/JOURNAL")
+
+	if ER do {
+		set ET=$G(RM)
+		do EXC(.dep)
+		}
+
+	quit
+
+
+NOD49(RecordDEP dep)	// Load new product parameters
+
+	do dep.setAuditFlag(1)
+
+	type RecordPRODDFTD proddftd=Db.getRecord("PRODDFTD","dep.type")
+
+	if dep.flg'=proddftd.flg set dep.flg=proddftd.flg
+	if dep.odsf'=proddftd.odsf set dep.odsf=proddftd.odsf
+	if dep.odo'=proddftd.odo set dep.odo=proddftd.odo
+	if dep.scc'=proddftd.scc set dep.scc=proddftd.scc
+	if dep.iacm'=proddftd.iacm set dep.iacm=proddftd.iacm
+	if dep.minopt'=proddftd.minopt set dep.minopt=proddftd.minopt
+	if dep.icf'=proddftd.icf set dep.icf=proddftd.icf
+	if dep.odsm'=proddftd.odsm set dep.odsm=proddftd.odsm
+	if dep.iaf'=proddftd.iaf set dep.iaf=proddftd.iaf
+	if dep.ircb'=proddftd.ircb set dep.ircb=proddftd.ircb
+	if dep.popt'=proddftd.popt set dep.popt=proddftd.popt
+	if dep.intgrc'=proddftd.intgrc set dep.intgrc=proddftd.intgrc
+	if dep.minbal'=proddftd.minbal set dep.minbal=proddftd.minbal
+	if dep.incdr'=proddftd.incdr set dep.incdr=proddftd.incdr
+	if dep.mincr'=proddftd.mincr set dep.mincr=proddftd.mincr
+	if dep.mindr'=proddftd.mindr set dep.mindr=proddftd.mindr
+	if dep.maxdrct'=proddftd.maxdrct set dep.maxdrct=proddftd.maxdrct
+	if dep.maxcr'=proddftd.maxcr set dep.maxcr=proddftd.maxcr
+	if dep.maxdr'=proddftd.maxdr set dep.maxdr=proddftd.maxdr
+	if dep.minacr'=proddftd.minacr set dep.minacr=proddftd.minacr
+	if dep.trb'=proddftd.trb set dep.trb=proddftd.trb
+	if dep.pdys'=proddftd.pdys set dep.pdys=proddftd.pdys
+	if dep.pdag'=proddftd.pdag set dep.pdag=proddftd.pdag
+	if dep.inccr'=proddftd.inccr set dep.inccr=proddftd.inccr
+	if dep.notmin'=proddftd.notmin set dep.notmin=proddftd.notmin
+	if dep.notmax'=proddftd.notmax set dep.notmax=proddftd.notmax
+	if dep.notice'=proddftd.notice set dep.notice=proddftd.notice
+	if dep.notnbc'=proddftd.notnbc set dep.notnbc=proddftd.notnbc
+	if dep.negacrpo'=proddftd.negacrpo set dep.negacrpo=proddftd.negacrpo
+	if dep.negipo'=proddftd.negipo set dep.negipo=proddftd.negipo
+	if dep.negbalop'=proddftd.negbalop set dep.negbalop=proddftd.negbalop
+	if dep.fnbodp'=proddftd.fnbodp set dep.fnbodp=proddftd.fnbodp
+	if dep.negminop'=proddftd.negminop set dep.negminop=proddftd.negminop
+	if dep.negminint'=proddftd.negminint set dep.negminint=proddftd.negminint
+	if dep.maxacr'=proddftd.maxacr set dep.maxacr=proddftd.maxacr
+	if '(proddftd.trm.isNull())&(dep.trm'=proddftd.trm) set dep.trm=proddftd.trm
+	if dep.rencd'=proddftd.rencd set dep.rencd=proddftd.rencd
+
+	quit
+
+
+DFTMDT(RecordDEP dep)	// Load maturity default group parameters, if applicable
+
+	do dep.setAuditFlag(1)
+
+	new DFID,DFTMDT,DINAM,VALUE
+
+	set DFTMDT=dep.dftmdt
+
+	type ResultSet rs=Db.select("DINAM,VALUE","UTBLDFT","DFTTYP='MDT' AND DFTGRP=:DFTMDT")
+
+	if rs.isEmpty() quit
+
+	while rs.next() do {
+
+		set DINAM=rs.getCol(1)
+		set VALUE=rs.getCol(2)
+
+		if DINAM["[" do {
+			set DFID=$P($P(DINAM,"]",1),"[",2)
+			set DINAM=$P(DINAM,"]",2)
+			}
+		else  set DFID="DEP"
+
+		// only file definition DEP is currently supported
+		if DFID'="DEP" quit
+
+		set dep.@DINAM=VALUE
+		}
+
+	quit
+
+
+ROLLOVR(RecordDEP dep)	// Load rollover information to dep and delete
+	
+	do dep.setAuditFlag(1)
+
+	do dep.renew("CID")
+
+	do Db.fastDelete("ROLLOVR","CID")
+
+	quit
+
+
+RRO0(RecordDEP dep)	// Renew
+	
+	do dep.setAuditFlag(1)
+
+	set dep.mdt=$$EXT^UMDT(dep.trm,%SystemDate,0,dep.busopt,dep.nbdc)
+
+	if dep.irn=OIRN,dep.sch'="" do SCH(.dep)
+
+	quit
+
+
+RRO1(RecordDEP dep)	// Renew with rate comparison
+	
+	type public Boolean ER
+	do dep.setAuditFlag(1)
+
+	set dep.mdt=$$EXT^UMDT(dep.trm,%SystemDate,0,dep.busopt,dep.nbdc)
+
+	if dep.irn=OIRN,dep.sch'="" do {
+
+		do SCH(.dep)
+
+		if ER quit
+
+		if dep.irn<OIRN set dep.irn=OIRN
+		}
+
+	quit
+
+
+RRO2(RecordDEP dep)	// Renew with one time rate comparison
+	
+	type public Boolean ER
+	do dep.setAuditFlag(1)
+
+	set dep.mdt=$$EXT^UMDT(dep.trm,%SystemDate,0,dep.busopt,dep.nbdc)
+
+	if dep.irn=OIRN do {
+
+		if dep.sch'="" do {
+
+			do SCH(.dep)
+
+			if ER quit
+
+			if dep.irn<OIRN set dep.irn=OIRN
+			}
+
+		set dep.rro=0
+		}
+
+	quit
+
+
+RRO3(RecordDEP dep,PBKIRN)	// Revert to psbk rate, inactive status, reclassify REGD category
+
+	do dep.setAuditFlag(1)
+
+	set dep.irn=+PBKIRN
+	set dep.stat=1
+	set dep.regd=4
+	set dep.mdt=""
+	set dep.trm=""
+
+	quit
+
+
+RRO4(RecordDEP dep)	// Retain existing rate
+
+	do dep.setAuditFlag(1)
+
+	set dep.mdt=$$EXT^UMDT(dep.trm,%SystemDate,0,dep.busopt,dep.nbdc)
+
+	quit
+
+
+RRO5(RecordDEP dep)	// Renew with rate in product skeleton
+	
+	do dep.setAuditFlag(1)	
+
+	set dep.mdt=$$EXT^UMDT(dep.trm,%SystemDate,0,dep.busopt,dep.nbdc)
+
+	if dep.irn=OIRN do {
+
+		type RecordPRODDFTD proddftd=Db.getRecord("PRODDFTD","TYPE")
+
+		set dep.irn=+proddftd.irn
+		}
+
+	quit
+
+
+SCH(RecordDEP dep) // Rate schedule
+	
+	type public Boolean ER
+	do dep.setAuditFlag(1)
+
+	new IRN
+
+	set IRN=$$RSCH^URSCH(dep.sch,+dep.bal,%SystemDate,dep.mdt,dep.rsintspr,dep.rsrndmtd)
+
+	if ER quit
+
+	// Invalid rate schedule ~p1
+	if IRN="" do Runtime.setErrMSG("DEP",8476,dep.sch) quit
+
+	set dep.irn=IRN
+
+	quit
+
+
+EXC(RecordDEP dep)	// Log errors into the standard exception file
+	
+	type public String ET
+	
+	if $G(CTL)'="",'$E(CTL),ET'="" do ^UTLERR quit
+	if $D(ITS) quit
+
+	// Automatic Rollovers
+	do LOG^UTLEXC($T(+0),"*",$$^MSG(4676),dep.cid,$G(%ZTSEQ),ET,dep.bal)
+
+	kill ET,%ZTSEQ
+
+	quit
+
+vSIG()	quit "60416^23526^Hema Puttaswamy^9657"	// Signature - LTD^TIME^USER^SIZE

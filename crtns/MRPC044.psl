@@ -1,0 +1,647 @@
+MRPC044(RETURN,VERSN,TYPE,CRCD,INPUT,ACN,BOO)
+	/*
+	   Procedure ID: MRPC044
+	   DESC: Loan Account Create
+	   ORIG: Marty Ronky (3623)
+	   DATE: 2/10/97
+	
+	   KEYWORDS: RPC
+	
+	   ARGUMENTS:
+	   . RETURN Loan Account Number		/TYP=T/REQ/MECH=REFNAM:W
+	
+	   . VERSN	version number		/TYP=N/REQ/MECH=VAL
+	     current version=1
+	
+	   . TYPE	Account Type		/TYP=N/REQ/MECH=VAL
+	
+	   . CRCD	Currency Code		/TYP=T/REQ/MECH=VAL
+
+	   . INPUT	Input String		/TYP=T/REQ/MECH=VAL
+	     See details below
+
+	   . ACN	Customer Number		/TYP=N/NOREQ/MECH=VAL
+
+	   . BOO	Branch of Ownership	/TYP=N/NOREQ/MECH=VAL
+	
+	   RETURNS:
+	   . $$     Error Message		/TYP=T
+	     Null= No Error
+	
+	   . RETURN Account Number		/TYP=N
+	
+	   RELATED:
+	   . $$^PBSMRPC - MRPC Service Class Driver
+	
+	   EXAMPLE:
+	   S RM=$$^MRPC044(.VAL,1,500,"USD",INPUT,ACN,BOO)
+	
+	   ACCOUNT CREATE
+	
+	   This RPC is a public RPC for loan account creation.
+	
+	   This MRPC will accept the product type and the currency code,
+	   and a comma separated string in the form FID.DI=VAL,
+	   FID.DI=VAL,... which will be used to create the account.
+	
+	   In order to handle more than 1 CIF on an account, and allow
+	   the account to be put into more than 1 statement group, an
+	   exception to the FID.DI=VAL must be used.  For files RELCIF,
+	   CMBSTM,DEPODP,LNCYCINS, and LNCYCMSC, since there can multiple 
+	   entries for each file, add a sequential number to the FID field.  
+	   For example, if there are 3 CIFs that should be attached to an 
+	   account, CIFs 544 (primary), 545 and 546, this should be set up as
+	   RELCIF1.ACN=544,RELCIF1.ROLE=1,RELCIF2.ACN=545,RELCIF2.ROLE=546,
+	   RELCIF3.ACN=546,RELCIF3.ROLE=3.
+	   
+	   This format should be used for the following files:
+		RELCIF (CIF-ACN Relationship File)
+		CMBSTM (Combined Statement Maintenance)
+		DEPODP (Overdraft Protection)
+		LNCYCINS (Loan Cycled Items - Insurance)
+		LNCYCMSC (Loan Cycled Items - Miscellaneous)
+		LNFEE (Loan Record - Fee Types)
+		COL & LNCOL (Collateral)
+		ACCTBENDTL (Account Beneficiary Details)
+	
+	   The same strategy is used for statement groups: CMBSTM1.ACN=544,
+	   CMBSTM1.STMGRP=1,CMBSTM2.ACN=545,CMBSTM2.STMGRP=5, etc. and
+	   overdraft account linkages: DEPODP1.CID=234,DEPODP1.PRI=1, etc.
+	   Add-on insurance items may also be added in this manner for files
+	   LNCYCINS and LNCYCMSC.
+	
+	   This form of input is used vs. individual parameters to provide
+	   the flexibility of changes on the input data without changes
+	   to this routine.
+	
+	
+	   ---- Revision History ------------------------------------------------
+	   
+	   04/23/07 - MbuiM - CR 26623
+	   	      Modified Account Address section to default missing 
+	   	      column acnaddr.mcounty.
+
+	   03/01/07 - MbuiM - CR 25106
+	   	      Modified section MAIN to add support for ACCTBENDTL.
+	   	      Made section EXIST public, referenced by MRPC043
+	   
+	   12/19/06 - SHRIRAM - CR 24547
+	   	      Modified MAIN section to log the restriction if vzrstflg is 
+	   	      not zero and restriction errors exist.	
+	   			
+	   08/22/06 - chhabris - CR22510
+	   	      Retrofit from P01DEV1 view as mentioned below.
+
+	        04/04/06 Ed Sigda - CR 20575
+		Retrofit changes into Profile01 view.
+		o Moved %STFHOST date logic to be in section MAIN as
+		  the top section should only be for handling the
+		  RPC message formatting logic.
+	   	o Removed getOneRow method calls
+		  Added the following changes made by Greg Yurkovic:
+		  03/12/04 - Greg Yurkovic (Chris Rickards) - PATCHED
+		  Modified section MAIN to properly truncate account titles
+		  using TITLE^MRPC043.
+	        o Added a call to EXTERN^LNKDISB from section MAIN.  This is
+	          a final step to bring the account current.
+
+	   11/10/03 - CARROLLJ - 51630
+		      Added #ACCEPT around code that reset %SystemDate 
+	
+	*/
+	
+	// Begin processing
+	
+	type public Boolean ER
+	type public String CO,ERRORMSG,RM
+	type public Number CID
+	type String GRP,STR,TCMT
+	type Number %EXT
+	
+	set ER=0
+	set RM=""
+	set ERRORMSG=""
+
+	// Version number of client message is not compatible with server
+	if VERSN.get()'=1 quit $$ERRMSG^PBSUTL($$^MSG(2951))     //Version number of client message is not compatible with server
+	
+	// Invalid Record
+	if INPUT.get().isNull() quit $$ERRMSG^PBSUTL($$^MSG(8097))     //Invalid record
+	
+	// Invalid Currency code
+	if CRCD.get().isNull() quit $$ERRMSG^PBSUTL($$^MSG(1293))      //Invalid currency code
+	
+	//Invalid currency code
+	set CO=%CompanyName
+	if 'Db.isDefined("CRCD",":CO,:CRCD") quit $$ERRMSG^PBSUTL($$^MSG(1293))
+	
+	//Invalid product type
+	if TYPE.get().isNull() quit $$ERRMSG^PBSUTL($$^MSG(1503))
+
+	// Get acct #, build account.
+	do MAIN(TYPE,CRCD)
+
+	if ER,$TLevel do Runtime.rollback()
+
+	if 'ERRORMSG.get().isNull() set ER=1 quit $$ERRMSG^PBSUTL(ERRORMSG)
+	if ER.get() quit $$ERRMSG^PBSUTL(RM.get())
+
+	set STR=CID_$C(13,10)
+
+	#if $$VALID^%ZRTNS("ZMRPC044") do FAPOUT^ZMRPC044
+	
+	// Return the account number
+	set RETURN=$$V2LV^MSG(STR)
+	quit ""
+
+
+MAIN(TYPE,CRCD)
+	/*
+	   Private
+	
+	   ARGUMENTS:
+	
+	   . TYPE  Product Type  /TYP=N/REQ/MECH=VAL
+	
+	   . CRCD  Currency Code  /TYP=T/REQ/MECH=VAL
+	
+	
+	   This subroutine is responsible for:
+	
+	   1) Determining the account number and locking the record.
+	
+	   2) Creating ACNADDR, RELCIF and CMBSTM records which will
+	      be used for the account create.
+	
+	   4) Building the account in the product type and
+	      currency specified.  Product type defaults will be used,
+	      by setting up an array to be used for SQL statements for
+	      all non-blank elements in the product type from node 49 on
+	      down.
+	*/
+
+	type public String BOO,DATA(),ERRORMSG,INPUT,RM,%STFHOST,verrors()
+	type public Number ACN,CID,%EXT,vzrstflg
+	type public Boolean ER
+	type Number I,ODCID,PCIF,QUIT
+	type String ARR,BRINGCUR,CLS,DATA,GRP,PGM,REL,ROLE,STMGRP,TMPDATA
+	
+
+	// If creating account during critical path set TJD to tomorrow
+	if %STFHOST.get() set %SystemDate=$$TTL^RCHK()+1
+	
+	// Extract out customer number if not defined
+        if ACN.get().isNull() do {  quit:ER
+		if INPUT'["LN.ACN=" set ER=1,RM=$$^MSG(1295)
+
+		type String EXT
+		set EXT=INPUT.piece("LN.ACN=",2)
+		set ACN=EXT.piece(",",1)
+		if ACN.extract()="'" set ACN=ACN.extract(2,(ACN.length()-1))
+
+		// Invalid Customer Account
+		if ACN.get().isNull() set ER=1,RM=$$^MSG(1295)
+		}
+
+	// Extract out branch of ownership if not defined
+	if BOO.get().isNull() do {  quit:ER
+		if INPUT["LN.BOO=" do {
+			type Number EXT
+
+			set EXT=INPUT.piece("LN.BOO=",2)
+			set BOO=EXT.piece(",",1)
+			if BOO.extract()="'" set BOO=BOO.extract(2,(BOO.length()-1))
+			}
+		else  do {
+			type RecordSCAU scau=Db.getRecord("SCAU",":%UserID")
+			set BOO=scau.brcd
+			}
+
+		//Invalid Branch of Ownership
+		if BOO.get().isNull() set ER=1,RM=$$^MSG(6654)
+		}
+
+	// Define array needed for market segmentation product extract
+	set ARR("TYPE")=TYPE
+	set ARR("CRCD")=CRCD
+	set ARR("ACN")=ACN
+	set ARR("BOO")=BOO
+	do ^UPRODDFT(.ARR,.DATA)
+
+	if ER.get() quit
+
+	// Convert input string to data array
+	do STR2ARR^UTLMRPC(INPUT,.DATA)
+	if ER.get() quit 
+
+	#if $$VALID^%ZRTNS("ZMRPC044") do FAPINP^ZMRPC044
+
+	set CLS="L"
+	set GRP=DATA("LN.GRP").get()
+
+	//  Validate product types for currency, expiration, etc...
+	set %EXT=1
+	do AVL^NEW(TYPE)
+	if ER.get() quit 
+
+	type RecordLN ln
+	set ln=Class.new("RecordLN")
+
+	do ln.default("TYPE")
+	do ln.overlay("DATA")
+	
+	//  Determine the account number.
+	type String VFMQ
+	type Number %NET
+	set VFMQ=""
+	set %NET=1
+
+	//  If CID is passed in, use it.  Otherwise, get a new one.
+	set CID=+DATA("LN.CID").get()
+
+	if CID=0 set CID=$$CID^NEW quit:ER.get()  set ln.cid=CID
+	else  do {  quit:ER.get()
+		type ResultSet rs=Db.select("CID","ACN","CID=:CID")
+
+		// Account Already Exists
+		if 'rs.isEmpty() set ER=1,RM=$$^MSG(53)
+		}
+
+	set ln.cid=CID
+	set ln.type=TYPE
+	set ln.crcd=CRCD
+	
+	// CIF/Account Relationship section
+	type Number count1,ecount1
+	type RecordRELCIF relcif()
+
+	set QUIT=0
+	set REL=DATA("LN.ACNRELC").get()
+	for ecount1=1:1 do { quit:ER.get()!(QUIT) 
+
+		type Number ACN
+		type String TMPDATA()
+
+		set ACN=DATA("RELCIF"_ecount1_".ACN").get()
+		if ACN.isNull() set QUIT=1,ecount1=ecount1-1 quit 
+
+		// Validate relationship & role
+		// STBLMSG: Invalid code
+		set ROLE=DATA("RELCIF"_ecount1_".ROLE").get()
+		if (REL.isNull())!(ROLE.isNull()) do Runtime.setErrMSG("RELCIF",1284) quit
+
+		// Create new RELCIF object from DATA array
+		set relcif(ecount1)=Class.new("RecordRELCIF")
+		set relcif(ecount1).acn=ACN
+		set relcif(ecount1).cid=CID
+		set relcif(ecount1).role=ROLE
+		do MOVEARR^UTLMRPC("RELCIF"_ecount1,"RELCIF",.DATA,.TMPDATA)
+		do relcif(ecount1).overlay("TMPDATA")
+
+		// Retrieve relationship code information
+		type RecordRELCODE relcode=Db.getRecord("RELCODE",":REL,:ROLE")
+
+		// Make sure primary customer is defined
+		if relcode.pcif=1 set ln.acn=ACN
+		}
+	
+	if ER.get() quit 
+
+	// File relationship error ... RELCIF
+	if 'relcif(1).exists() do Runtime.setErrMSG("RELCIF",1093,"RELCIF") quit
+
+	/*
+	 Default title values if not defined
+	 The default title logic will not be used if title1 contains a value.
+	 In other words, if the client application passes in title1, then no
+	 other title values will default.
+	*/
+	if ln.title1.isNull() do TITLE^MRPC043(.ln,.relcif())
+
+	if ln.cc.isNull() do {
+		type RecordUTBLBRCD utblbrcd=Db.getRecord("UTBLBRCD",":BOO")
+		set ln.cc=utblbrcd.ccdef
+	}
+
+	type Number count2,ecount2
+	type RecordCMBSTM cmbstm()
+	
+	// Statement Group Section
+	set QUIT=0
+	for ecount2=1:1 do { quit:ER.get()!(QUIT) 
+		type Number ACN
+
+		set ACN=DATA("CMBSTM"_ecount2_".ACN").get()
+		if ACN.isNull() set QUIT=1,ecount2=ecount2-1 quit
+		set STMGRP=DATA("CMBSTM"_ecount2_".STMGRP").get()
+		set cmbstm(ecount2)=Class.new("RecordCMBSTM")
+		set cmbstm(ecount2).acn=ACN
+		set cmbstm(ecount2).stmgrp=STMGRP
+		set cmbstm(ecount2).cid=CID
+		do cmbstm(ecount2).overlay("DATA")
+		}
+	
+	if ER.get() quit
+
+	// Overdraft Protection Section
+	type Number count3,ecount3
+	type RecordDEPODP depodp()
+
+	set QUIT=0
+	for ecount3=1:1 do { quit:ER.get()!(QUIT)
+
+		set ODCID=DATA("DEPODP"_ecount3_".CID").get()
+		if ODCID.isNull() set QUIT=1,ecount3=ecount3-1 quit
+
+		// Target account number is the same as account number
+		if ODCID=CID set ER=1,RM=$$^MSG(2601) quit
+
+		// Convert DEPODPn data items to DEPODP in temp array
+		do MOVEARR^UTLMRPC("DEPODP"_ecount3,"DEPODP",.DATA,.TMPDATA)
+		set depodp(ecount3)=Class.new("RecordDEPODP")
+		set depodp(ecount3).cid=ODCID
+		set depodp(ecount3).odacn=CID
+		do depodp(ecount3).overlay("TMPDATA")
+		kill TMPDATA
+		}
+
+	if ER.get() quit
+
+	// Loan Cycled Items - Insurance section
+	type Number count4,ecount4
+	type RecordLNCYCINS lncycins()
+
+	set QUIT=0
+	for ecount4=1:1 do { quit:ER.get()!(QUIT)
+		type String TYP
+
+		set TYP=DATA("LNCYCINS"_ecount4_".TYP").get()
+		if TYP.isNull() set ecount4=ecount4-1,QUIT=1 quit
+
+		// Convert LNCYCINSn data items to LNCYCINS in temp array.
+		do MOVEARR^UTLMRPC("LNCYCINS"_ecount4,"LNCYCINS",.DATA,.TMPDATA)
+		set lncycins(ecount4)=Class.new("RecordLNCYCINS")
+		set lncycins(ecount4).cid=CID
+		set lncycins(ecount4).typ=TYP
+		do lncycins(ecount4).overlay("TMPDATA")
+		kill TMPDATA
+		}
+
+	if ER.get() quit
+
+	// Loan Cycled Items - Miscellaneous section
+	type Number count5,ecount5
+	type RecordLNCYCMSC lncycmsc()
+	
+	set QUIT=0
+	for ecount5=1:1 do { quit:ER.get()!(QUIT)
+		type String TYP
+
+		set TYP=DATA("LNCYCMSC"_ecount5_".TYP").get()
+		if TYP.isNull() set ecount5=ecount5-1,QUIT=1 quit
+
+		// Convert LNCYCMSCn data items to LNCYCMSC in temp array.
+		do MOVEARR^UTLMRPC("LNCYCMSC"_ecount5,"LNCYCMSC",.DATA,.TMPDATA)
+		set lncycmsc(ecount5)=Class.new("RecordLNCYCMSC")
+		set lncycmsc(ecount5).cid=CID
+		set lncycmsc(ecount5).typ=TYP
+		do lncycmsc(ecount5).overlay("TMPDATA")
+		kill TMPDATA
+		}
+
+	if ER.get() quit
+
+	// Loan Record - Fee Types section
+	type Number count6,ecount6
+	type RecordLNFEE lnfee()
+
+	set QUIT=0
+	for ecount6=1:1 do { quit:ER.get()!(QUIT)
+		type String TYP
+
+		set TYP=DATA("LNFEE"_ecount6_".FEETYP").get()
+		if TYP.isNull() set ecount6=ecount6-1,QUIT=1 quit
+ 
+		// Convert LNFEEn data items to LNFEE in temp array
+		do MOVEARR^UTLMRPC("LNFEE"_ecount6,"LNFEE",.DATA,.TMPDATA)
+		set lnfee(ecount6)=Class.new("RecordLNFEE")
+		set lnfee(ecount6).cid=CID
+		set lnfee(ecount6).feetyp=TYP
+		do lnfee(ecount6).overlay("TMPDATA")
+		kill TMPDATA
+		}
+ 
+	if ER.get() quit
+
+	set QUIT=0
+
+        type RecordACNADDR acnaddr
+ 
+        // Account Address Section
+        set acnaddr=Class.new("RecordACNADDR")
+	set acnaddr.cid=CID
+        do acnaddr.overlay("DATA")
+
+        if acnaddr.ad1.isNull() do {
+		type Number ACN
+
+                set ACN=ln.acn
+		type RecordCIF cif=Db.getRecord("CIF","ACN=:ACN")
+		set acnaddr.ad1=cif.mad1
+		set acnaddr.ad2=cif.mad2
+		set acnaddr.ad3=cif.mad3
+		set acnaddr.ad4=cif.mad4
+		set acnaddr.city=cif.mcity
+		set acnaddr.mcounty=cif.mcounty
+		set acnaddr.state=cif.mstate
+		set acnaddr.mzip=cif.mzip
+		set acnaddr.cntry=cif.mcntry
+		set acnaddr.loc=cif.mloc
+                }
+			
+	// Set error trap
+	catch vERROR {
+		new ET
+		set ET=vERROR.type
+		set ERRORMSG=vERROR.description
+ 
+		if ET["%GTM-" do ZE^UTLERR quit
+		if $TLevel do Runtime.rollback()
+		set ET=ET_"-"_vERROR.thrownAt
+		}
+
+	type String vfkey
+	do ln.save("/NOFKCHK=1/VALDD/VALRI/VALREQ/KEEPVFKEY") if ER quit
+
+	set count1=ecount1
+	for ecount1=1:1:count1 do:relcif(ecount1).exists() relcif(ecount1).save("/NOFKCHK=1/VALDD/VALRI/VALREQ/KEEPVFKEY") if ER quit
+	if ER quit
+	set count2=ecount2
+	for ecount2=1:1:count2 do:cmbstm(ecount2).exists() cmbstm(ecount2).save("/NOFKCHK=1/VALDD/VALRI/VALREQ/KEEPVFKEY") if ER quit
+	if ER quit
+	set count3=ecount3
+	for ecount3=1:1:count3 do:depodp(ecount3).exists() depodp(ecount3).save("/NOFKCHK=1/VALDD/VALRI/VALREQ/KEEPVFKEY") if ER quit
+	do acnaddr.save("/NOFKCHK=1/VALDD/VALRI/VALREQ/KEEPVFKEY") if ER quit
+	set count4=ecount4
+	for ecount4=1:1:count4 do:lncycins(ecount4).exists() lncycins(ecount4).save("/NOFKCHK=1/VALDD/VALRI/VALREQ/KEEPVFKEY") if ER quit
+	if ER quit
+	set count5=ecount5
+	for ecount5=1:1:count5 do:lncycmsc(ecount5).exists() lncycmsc(ecount5).save("/NOFKCHK=1/VALDD/VALRI/VALREQ/KEEPVFKEY") if ER quit
+	if ER quit
+	set count6=ecount6
+	for ecount6=1:1:count6 do:lnfee(ecount6).exists() lnfee(ecount6).save("/NOFKCHK=1/VALDD/VALRI/VALREQ/KEEPVFKEY") if ER quit
+	if ER quit
+
+	if $$EXIST("COL") do { quit:ER
+		type RecordCOL col
+
+		set col=Class.new("RecordCOL")
+		do col.overlay("DATA")
+		set col.coll=Db.nextVal("COL")
+
+		type RecordLNCOL lncol
+		set lncol=Class.new("RecordLNCOL")
+		do lncol.overlay("DATA")
+
+		do col.save("/NOFKCHK=1/VALDD/VALRI/VALREQ/KEEPVFKEY") if ER quit
+		set lncol.coll=col.coll
+		set lncol.cid=CID
+		do lncol.save("/NOFKCHK=1/VALDD/VALRI/VALREQ/KEEPVFKEY") if ER quit
+		}
+
+	/*
+	  This version will be able to handle multiple entries for COL
+	  and LNCOL files.
+	*/
+	if $$EXIST("COL1") do { quit:ER
+		type Number CNT
+		type RecordCOL col()
+		type RecordLNCOL lncol()
+
+		set QUIT=0
+		for CNT=1:1 do { quit:ER!(QUIT)
+			type Number COLL,SCOLCD
+
+			// Secondary Collateral Code - required data item
+			set SCOLCD=DATA("COL"_CNT_".SCOLCD").get()
+			if SCOLCD.isNull() set CNT=CNT-1,QUIT=1 quit
+			set COLL=Db.nextVal("COL")
+
+			// Convert COLn data items to COL in temp array
+			do MOVEARR^UTLMRPC("COL"_CNT,"COL",.DATA,.TMPDATA)
+			set col(CNT)=Class.new("RecordCOL")
+			do col(CNT).overlay("TMPDATA")
+			set col(CNT).coll=COLL
+			kill TMPDATA
+			do col(CNT).save("/NOFKCHK=1/VALDD/VALRI/VALREQ/KEEPVFKEY") if ER quit
+
+			// Convert LNCOLn data items to LNCOL in temp array
+			do MOVEARR^UTLMRPC("LNCOL"_CNT,"LNCOL",.DATA,.TMPDATA)
+			set lncol(CNT)=Class.new("RecordLNCOL")
+			do lncol(CNT).overlay("TMPDATA")
+			set lncol(CNT).cid=CID
+			set lncol(CNT).coll=COLL
+			kill TMPDATA
+			do lncol(CNT).save("/NOFKCHK=1/VALDD/VALRI/VALREQ/KEEPVFKEY") if ER quit
+			}
+		if ER quit
+		}
+
+	/* 
+	  File Credit Insurance records after Collateral records for proper
+	  CRI tax calculation
+	*/
+
+	// Account Beneficiary Detail section
+	if $$EXIST("ACCTBENDTL1") do BENDTL^MRPC043(.DATA,ln.cid) quit:ER
+	
+	// Verify foreign keys
+	do vfkey^SQLBUF if ER quit
+	
+	/*
+	   If custom account assignment program used, call update section
+	   to update any necessarty tables. Call will be constructed as
+	   PGM=UPD^UCIDSCA("D","SAV",350,87438473), for example
+	*/
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+	set PGM=cuvar.ucid
+	set GRP=DATA("LN.GRP").get()
+	if 'PGM.isNull() set PGM="D UPD"_PGM_"(""L"","""_GRP_""","_TYPE_","_CID_")"
+	#ACCEPT DATE=11/10/00;PGM=John Carroll
+	if   xecute PGM
+	if ER quit
+
+	set BRINGCUR=$$EXTERN^LNKDISB(CID)
+	if ER quit
+
+	if 'vzrstflg.get(), verrors.data() do XBAD^DBSEXECU(.verrors)	// Log the restriction
+
+	quit 
+
+
+FAPINP	// Reformat input
+	/*
+	   This section can be used by creating ZMRPC044.  Any custom or
+	   additional input DATA array can be processing here.  Compile
+	   ZMRPC044 followed by MRPC044.  FAPINP in ZMRPC044 
+	   will be called directly from MRPC044 if it exists.
+
+	   Example:
+	   set DATA("LN.VALUE1")=Db.getOneRow("VALUE1","TEST","GRP=:GRP")
+	*/
+
+	quit
+
+FAPOUT	// Reformat output
+	/*
+	   This section can be used by creating ZMRPC044.  Output can be
+	   reformatted by adding custom code.
+
+	   Example:
+	   if GRP="CD" do {
+		new DATA
+		set DATA=Db.getOneRow("IRN,TRM,MDT","PRODDFTL","TYPE=:TYPE")
+		set STR=DATA_$C(9)_STR
+		}
+	*/
+
+	quit
+
+public EXIST(FID)
+	/*
+	   Check for the existence of entries in the array for the
+	   specified file ID.  This can be used to determine if an
+	   INSERT statement needs to be built for the file.
+	*/
+	
+	type public String DATA()
+	type Number Y
+	type String X
+
+	set Y=0
+	set X=DATA(FID).order()
+	if X.isNull() quit 0
+	if X.piece(".",1)=FID quit 1
+	quit 0
+		
+SPODBC(VERSN,TYPE,CRCD,INPUT)
+	/*
+	   This function is intended to provide a capability to invoke a
+	   true MRPC from the EXECUTE procedure facility within the PROFILE
+	   ODBC driver.  This is needed in order to get the normal response
+	   argument that is part of the MRPC structure returned to the calling
+	   ODBC client.
+	*/
+	type String PTR,RETURN
+	type public String RM
+	type public Boolean ER
+
+	set RM=$$^MRPC044(.RETURN,VERSN.get(),TYPE.get(),CRCD.get(),INPUT.get())
+	if RM.isNull() set PTR=$$LV2V^MSG(RETURN,.RETURN) quit RETURN(1).get()
+	set PTR=$$LV2V^MSG(RM,.RM)
+	set ER=1
+	set RM=RM(5).get()
+	quit ""
+	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60743^47286^Marie Mbui^17549"	// Signature - LTD^TIME^USER^SIZE

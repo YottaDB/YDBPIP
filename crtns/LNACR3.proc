@@ -1,0 +1,417 @@
+public	LNACR3
+
+	/*
+	      Accrual Calc-Pre-Calculated (Add-On/Discount)
+
+	       ORIG:  Neal E. Gorman (5053) - 09/03/86
+
+	---- Revision History ------------------------------------------------
+
+	  04/11/06 - KELLYP - CR 20232
+		     Modified RESTART section to remove reference to CUVAR.GLCC.
+		     This data item has been obsoleted and the system will 
+		     always operate as if CUVAR.GLCC="Y" (cost center reporting 
+		     enabled).	  
+
+	  08/11/05 - Radhika - CR 16725
+	  	     . Changed the scope of ER near the top to be public
+	             . Corrected SRC to LNACR in the first paramter of 
+	               do SOURCE^BCHSOURC.
+	             . The quit:ER after the SOURCE^BCHSOURC call is removed, 
+	               and replaced with  if ER do LOGERR quit.
+	       	                   
+	  06/06/05 - SmithCD - CR 15902
+	  	     . Corrected some problems with scoping of variables in 
+	  	       RESTART section
+	  	     . Replaced TCC section w/call to TCC^LNACR1 b/c sections 
+	  	       were idenitical
+		     . Brought NGRP section in-line
+		     . Cleaned up code, including removal of incorrect / 
+		       misleading documentation
+		     . Removed old revision history
+	
+	   11/16/04 - TITOVE - CR 13197
+		      Added back the %LNACR logic, to be used by ACRCLS^LNACRS.
+		      Modified logic in RESTART and PROC sections, cleaned up
+		      some errors made during initial conversion.
+	
+	----------------------------------------------------------------------
+	
+	*/
+
+	// Top called by LACRFE
+	
+	type public Boolean %ACM, %ANT, %PLDF, RESTART
+	type public String ACM(,,)
+
+	type Number BRCD, RCID, RTYPE, TCC(,,), TYPE
+	type String CC, GRP, RGRP, %UserClass, %UserID
+	type public Boolean ER
+	
+	set (TYPE, GRP) = ""
+
+	set CC = "*"
+
+	do SOURCE^BCHSOURC("LNACR", "LNACR", .%UserID, .BRCD, .%UserClass)
+	if ER do LOGERR quit
+
+	// Loan accrual adjustment source not defined
+	if BRCD.isNull() ! (%UserID.isNull()) do Runtime.setErrSTBLER("UTBLSRC", 8434) do LOGERR quit
+
+	if RESTART do RESTART
+	
+	// If restart occurred, processing starts with last filed GRP and TYPE
+	for  set GRP = ACM(%ACM, GRP).order() quit:GRP.isNull()  do {  
+		for  set TYPE = ACM(%ACM, GRP, TYPE).order() quit:TYPE.isNull()  do PROC(GRP, TYPE)
+		} 
+	
+	quit
+
+
+PROC(String GRP, Number TYPE)	// Process accounts within group / type
+
+	type public Number RCID, RTYPE, TCC(,,)
+	type public Boolean %ANT, RESTART
+	type public String RGRP
+	
+	type DbSet ds = Db.selectDbSet("LN", "GRP=:GRP AND TYPE=:TYPE")
+	
+	while ds.next() do {
+		
+		type RecordLN ln = ds.getRecord("LN")
+				
+		/* If before restart occurred we processed records of this 
+		   group and type only partially, make sure we start with 
+		   next CID
+		*/
+		if RESTART, GRP = RGRP, TYPE = RTYPE, ln.cid '> RCID quit
+
+		do NCID(.ln)
+	}
+	
+	if '%ANT do SAVTCC^LNACR1(.TCC(,,), TYPE, GRP)
+
+	quit
+
+
+NCID(RecordLN ln)	// Next loan account
+
+	type public Number %ACM, ACM(,,), TCC(,,), TYPE
+	type public String CC, GRP
+	type public Boolean %ANT, %PLDF
+
+	type String %LNACR, CRCD, ET, FROM, RM
+	type Number %ACR, %ZTSEQ, ACR, CID
+
+	catch error {
+		type Boolean %ZTHALT = 0
+
+		set ET = error.type
+		set RM = error.description
+		set FROM = error.thrownAt
+
+		do ZE^UTLERR
+
+		// Error in account, not processed
+		set ET = $$^MSG("3511")
+
+		// Loan Accrual Processing
+		do LOG^UTLEXC($T(+0), "*", $$^MSG("3812"), CID.get(), %ZTSEQ.get(), ET.get())
+		}
+
+	set CID = ln.cid
+	set CRCD = ln.crcd
+
+	// Make sure the currency-specific product type for this account's
+	// currency matches %ACM
+	if 'ACM(%ACM, GRP, TYPE).exists() quit
+
+	type RecordLNACR3 lnacr3 = Db.getRecord("LNACR3", "EFD=:%EffectiveDate,GRP=:ln.grp,TYPE=:ln.type,CID=:ln.cid", 1)
+	
+	do ACR(.ln, .lnacr3)
+	
+	if '%ANT do TCC^LNACR1(.ln, .TCC(,,), CRCD, GRP, .CC, CID, ACR, %ACR)
+
+	// Account Status = Closed
+	if ln.stat = 4 quit
+
+	do lnacr3.bypassSave()
+
+	quit
+
+	
+public OL(RecordLN ln, 		// Loan object			/REF:RW
+	  RecordLNACR3 lnacr3) 	// Loan Int Accrual-Meth 3 obj	/REF:RW
+
+	// On-line access (transaction processing, inquiry)
+
+	type public String %LNACR, PCM
+	type public Number %ACM, %ACR
+	type public Boolean %PLDF
+
+	do ACR(.ln, .lnacr3)
+
+	quit 
+
+	
+public ACR(RecordLN ln, 	// Loan object			/REF:RW
+	   RecordLNACR3 lnacr3)	// Loan Int Accrual-Meth 3 obj	/REF:RW
+	
+	// Determine accrual amount (%ACM) and %LNACR   
+
+	type public Boolean %PLDF
+	type public String %LNACR
+	type public Number %ACR, ACR = 0, CID, IPL
+	
+	type Date %PMERN, %PMTREM, %SCHERN, %SCHLD, %SCHND, %SCHNUM
+	type Number INT
+	type Date ND
+	type String PCM
+	
+	set (%SCHNUM, %PMTREM, %SCHERN, %ACR, %PMERN) = 0
+	set %LNACR = ""
+	
+	if ln.stat = 4 quit
+	
+	set PCM = ln.pcm 
+	type RecordSTBLPCM stblpcm = Db.getRecord("STBLPCM", "KEY=:PCM")
+	
+	set PCM = stblpcm.pcmp
+
+	if 'PCM.extract(2) do { quit
+		set lnacr3.%acr = ln.acr
+		set lnacr3.cacr = ACR
+		set %ACR = ln.acr
+		set %LNACR = "||||||||||"_%ACR_"||"_%ACR
+	}
+
+	set IPL = ln.ipl - ln.extamt
+	
+	if ln.cntdr '> 0 set %PMTREM = ln.onp do ACR2(.ln, .lnacr3, .%LNACR) quit
+	
+	set %SCHND = ln.schnd 
+	set %SCHLD = ln.schld
+	set %SCHNUM = ln.schnum
+	
+	if %EffectiveDate - %SystemDate do EFD(.ln)
+
+	set INT = 0
+	if %EffectiveDate > (15 + ln.mdt) do {
+		set ND = %EffectiveDate + %PLDF 
+		set INT = $$^UIC(ln.balint, ln.mdt, ND, ln.iacm, ln.irn, 0, ln.dist1af, ln.dist1fre, ln.icpf, ln.schnd, ln.schld)
+		}
+
+	set %PMERN = $$^SCARND(INT, 0, "", "", 3)
+
+	if ln.dist1fre.isNull() set %PMTREM = 1 do { quit
+		set (%ACR, %SCHERN) = ACR
+		do ACR2(.ln, .lnacr3, .%LNACR)
+		}
+	
+	set %SCHNUM = %SCHNUM + ((%EffectiveDate - %SCHLD + %PLDF) / (%SCHND - %SCHLD))
+	set %SCHNUM = %SCHNUM.justify(0, 5)
+	
+	if %SCHNUM > ln.onp set %SCHNUM = ln.onp
+	set %PMTREM = ln.onp - %SCHNUM + ln.exttot
+
+	// Amortization method undefined.  Account not processed.
+	if ln.iam.isNull() do Runtime.setErrSTBLER("LN", "LNAO5") do LOGERR quit 
+
+	if ln.iam = 0 do 0
+	if ln.iam = 1 do 1(.ln)
+	if ln.iam = 2 do 2(.ln)
+	if ln.iam = 3 do 3(.ln)
+	if ln.iam = 4 do 4(.ln)
+	
+	set %PMTREM = ln.onp - %SCHNUM
+	set %ACR = $$^SCARND(%PMERN + %SCHERN - IPL, 0, CID)
+	
+	quit
+	
+
+ACR2(RecordLN ln,               // Loan object                  /REF:RW
+     RecordLNACR3 lnacr3,       // Loan Int Accrual-Meth 3      /REF:RW
+     String %LNACR)		// Values for LNACR1 columns	/REF:W
+     
+     	type public Number %ACR, %PMERN, %PMTREM, %SCHERN, %SCHNUM, ACR, IPL
+
+	set ACR = ACR.justify(0, 2)
+
+	set lnacr3.odd = ln.odd
+	set lnacr3.onp = ln.onp
+	set lnacr3.iun = ln.iun
+	set lnacr3.iunc = IPL
+	set lnacr3.%schnum = %SCHNUM
+	set lnacr3.%pmtrem = %PMTREM
+	set lnacr3.%schern = %SCHERN
+	set lnacr3.mdt = ln.mdt
+        set lnacr3.pmtgrc = 15
+	set lnacr3.%pmern = %PMERN
+	set lnacr3.%acr = %ACR
+	set lnacr3.adj = (%ACR - ACR)
+	set lnacr3.cacr = ACR
+
+	set %LNACR = ln.odd_"|"_ln.onp_"|"_ln.iun_"|"_IPL_"|"_%SCHNUM_"|"_%PMTREM_"|"_%SCHERN
+	set %LNACR = %LNACR_"|"_ln.mdt_"|"_15_"|"_%PMERN_"|"_%ACR_"|"_(%ACR - ACR)_"|"_ACR
+
+	quit 
+
+
+public	0	// No amortization
+
+	type public Number %SCHERN
+	
+	set %SCHERN = 0
+	
+	quit
+	
+	
+public	1(RecordLN ln)	// Straight line
+
+	type public Number %PMTREM, %SCHERN
+
+	set %SCHERN=$$^SCARND(ln.iun - (ln.iun / ln.onp * %PMTREM), 0, "", "", 3)
+
+	quit 
+
+	
+public	2(RecordLN ln)	// Rule of 78ths
+
+	type public Number %PMTREM, %SCHERN
+
+	set %SCHERN = $$^SCARND(ln.iun - (ln.iun * %PMTREM * (%PMTREM + 1) / (ln.onp * (ln.onp + 1))), 0, "", "", 3)
+	
+	quit
+	
+	
+public	3(RecordLN ln)	// Actuarial
+
+	type public Number %PMTREM, %SCHERN, CID
+
+	type Number %ORG, %REM, DF, EXP, IR, N, NF, NR
+
+	set NR = %PMTREM 
+	set IR = ln.irn / (ln.dist1af * 100) 
+	set EXP = 1 + IR 
+	set N = (NR - 1)
+	
+	do POWER
+	
+	set %REM = EXP
+
+	set EXP = 1 + IR 
+	set N = ln.onp
+	
+	do POWER
+	
+	set %ORG = EXP
+	
+	set NF = ((1 / %REM) + (IR * (NR - 1))) - 1 
+	set DF = ((1 / %ORG) + (IR * ln.onp)) - 1
+	
+	set %SCHERN = $$^SCARND(ln.iun - (ln.iun * (NF / DF)), 0, CID)
+	
+	quit 
+
+	
+public	4(RecordLN ln)	// Declining balance
+
+	type public Number %PMTREM, %SCHERN, CID
+	
+	type Number B, DBF, F, I, RR
+
+	set DBF = 100
+	set RR = %PMTREM # 1 
+	set F = %PMTREM \ 1 
+	set B = ln.iun
+	
+	for I = 1:1:F set B = B - $$^SCARND(B*DBF / 100 / ln.onp, 0, CID)
+	
+	if RR set B = B - $$^SCARND(B * DBF / 100 / ln.onp * RR, 0, CID)
+	
+	set %SCHERN = $$^SCARND(ln.iun - B, 0, CID)
+	
+	quit 
+
+	
+EFD(RecordLN ln) // Effective dated file - determines scheduled info
+
+	type public Boolean ER
+	type public Date %SCHND, %SCHNUM
+
+	type Date NJD
+
+	set NJD = %EffectiveDate.nextFreqDate(ln.dist1fre) quit:ER 
+	set NJD = %SCHND.nextFreqDate("-"_ln.dist1fre) quit:ER 
+
+	set %SCHNUM = ln.schnum + $$^SCARND((%SCHND - ln.schnd) / (360 / ln.dist1af), 0, "", "", 0)
+	
+	quit 
+
+	
+POWER	// Increments to a positive power
+
+	type public Number EXP, N
+
+	set EXP = $$LNX^%ZFUNC(EXP) 
+	set EXP = EXP * N 
+	set EXP = $$EXP^%ZFUNC(EXP)
+
+	quit 
+	
+	
+LOGERR	// Log error in exception file
+
+	type public Number %ZTSEQ, CID, ET
+
+	// Loan Accrual Processing
+	do LOG^UTLEXC("LNPTSRV", "*", $$^MSG("3812"), CID.get(), %ZTSEQ.get(), ET.get())
+
+	quit 
+
+	
+RESTART // Reset key values in case processing was restarted
+
+
+	type public Number %MCP, ADJ, CID, RCID, RTYPE, TCC(,,), TYPE
+	type public String CC, CRCD, GLSC, GRP, RGRP
+
+	type DbSet ds = Db.selectDbSet("LNACR3", "EFD=:%EffectiveDate")
+
+	// Reset TCC
+	while ds.next() do {
+		type RecordLNACR3 lnacr3 = ds.getRecord("LNACR3")
+		
+		set GRP = lnacr3.grp
+		set TYPE = lnacr3.type
+		set CID = lnacr3.cid
+		set ADJ = lnacr3.adj
+			
+		type RecordLN ln = Db.getRecord("LN", "CID=:CID")
+		
+		set CRCD = ln.crcd
+		set GLSC = ln.glsc
+		if GLSC.isNull() do LOGERR quit
+			
+		set CC = ln.cc
+
+		set TCC(CRCD, GLSC, CC) = TCC(CRCD, GLSC, CC).get() + ADJ
+		}
+
+	// If any records were found in LNACR3 table, then after while() loop
+	// we have last GRP, TYPE and CID values to start with. Save them.
+	set RGRP = GRP
+	set RTYPE = TYPE
+	set RCID = CID
+
+	// Reset the key values for NGRP loop through ACM array
+	set TYPE = TYPE-.01
+	        
+        type ResultSet rs = Db.select("GRP", "LNACR3", "EFD=:%EffectiveDate AND GRP<:GRP", "GRP DESC")
+
+        if rs.next() set GRP = rs.getCol("GRP")
+        else  set GRP = ""
+	
+	quit
+
+vSIG()	quit "60366^60140^Pat Kelly^9620"	// Signature - LTD^TIME^USER^SIZE

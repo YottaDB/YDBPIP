@@ -1,0 +1,504 @@
+COMCALC //Batch BCHCOMCALC - Commission Calculation Processing
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 08/30/2007 15:07 - joynerd
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHCOMCALC Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ set vBCHSTS=$$STATUS^BCHUTL("BCHCOMCALC")
+ if vBCHSTS=1 set ER=1,RM=$$^MSG(3410) quit
+ if vBCHSTS=2 set ER=1,RM=$$^MSG(3414) quit
+ if vBCHSTS=0 set %BatchRestart=1
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit do EXIT^BCHUTL("BCHCOMCALC") quit
+ do JOBMGR^BCHUTL(%FN,"BCHCOMCALC",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ do EXIT^BCHUTL("BCHCOMCALC")
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(CID) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHCOMCALC","*","",CID.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ if %BatchRestart,$$CHKLOG^BCHUTL(%SystemDate,%FN,"BCHCOMCALC",CID.get()) do { quit
+ do LOG^BCHUTL(%SystemDate,%FN,"BCHCOMCALC",CID.get(),"Record already processed")
+ }
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,CID)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHCOMCALC","*","",CID.get(),"",et)
+ }
+ do UPDLOG^BCHUTL(%SystemDate,%FN,"BCHCOMCALC",CID.get(),vCONTEXT)
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,CID) //
+	
+	type public Date EFD
+	type public Number AGENT,AGNCY,AGNCYSKP,AGNTSKP,postoff
+	type public String CPLAN,X
+	type Date PSTDT
+	type Number agncyamt,AGNCYIND,AGNCYRT,CAMT,camt,INDEX,RATE
+	
+	set PSTDT=%SystemDate+postoff
+
+	// Check to see if this had already been processed
+	if Db.isDefined("DAYENDCOMPST","PSTDT=:PSTDT,AGENT=:AGENT,CPLAN=:CPLAN,CID=:CID,1") quit
+
+	// Call the portfolio process if the CID is *
+	if CID="*" set CAMT=$$EXT^COMPFT(CPLAN,AGENT,1) quit
+
+	type RecordACN acn=Db.getRecord("ACN","CID=:CID")
+
+	// BOO and AGENT are synonymous
+	set AGENT=acn.boo
+
+	// Process any adjustment amounts
+	do ADJUST
+
+	set (RATE,INDEX,AGNCYRT,AGNCYIND)=""
+
+	set X=$$EXT^COMCID(CPLAN,CID,AGENT,EFD,.INDEX,.RATE,.AGNCYIND,.AGNCYRT)
+	set camt=X.piece("|",1),agncyamt=X.piece("|",2)
+
+	// Check the skip commission payment option.  If the option is set,
+	// add everything that is in the agent's commission to the agency.
+	if AGNTSKP set agncyamt=agncyamt+camt
+
+	// File the agent's amount
+	if (camt>0) do FILE(AGENT,camt,RATE.get(),INDEX.get(),AGNTSKP,"",agncyamt)   
+
+	// File the agency's amount
+	if (AGNCY'=""),(agncyamt>0) do FILE(AGNCY,agncyamt,AGNCYRT.get(),AGNCYIND.get(),AGNCYSKP,AGENT,0)
+	quit
+
+
+CHECKCID()	// Check to see if account is in query
+
+	// Call to the correct line tag in COMQRY to check
+	// and see if the account is in the query.
+	type public String pgm,query,X
+		
+	; If no query is defined, then the CID is valid
+	if query="" quit 1
+
+	set pgm="$$"_query_"^COMQRY1"
+	if @pgm quit 1
+ 	quit 0
+
+
+FILE(agent,camt,rate,index,skppmt,orgagent,agncyamt)    // File camt to the dayend commission posting file
+  
+ 	//  Create new Dayend Commission Posting record
+ 	type public Date EFD
+ 	type public Number AGENT,CID,postoff,seq
+ 	type public String CPLAN
+ 	type Date pstdt
+	type String crcd
+	
+ 	type RecordDAYENDCOMPST compst=Class.new("RecordDAYENDCOMPST")
+
+	type RecordACN acn=Db.getRecord("ACN","CID=:CID")
+	set crcd=acn.crcd
+
+	set pstdt=EFD+postoff
+	set seq=Db.nextVal("DAYENDCOMPST","PSTDT=:pstdt,AGENT=:AGENT,CPLAN=:CPLAN,CID=:CID")
+
+	set compst.pstdt=pstdt		// Next commission posting date
+	set compst.agent=agent		// Set the agent
+	set compst.cplan=CPLAN		// Set the Commission Plan 
+	set compst.seq=seq		// Set the sequence to the next value
+ 	set compst.amt=camt		// Set the Commission Amount
+	set compst.cid=CID		// Set the account
+	set compst.crcd=crcd		// Set the currency code
+	set compst.rate=rate		// Set the rate
+	set compst.index=index		// Set the index
+	set skppmt=+skppmt
+	set compst.posted=skppmt	// Posted
+ 	set compst.orgagent=orgagent	// Set the original agent
+	set compst.agncyamt=agncyamt	// Set the agency's amount 
+
+	do compst.bypassSave()		// New Dayend entry
+
+	// File the rate into the COMPLNCID table
+
+	type RecordCOMPLNCID complncid=Db.getRecord("COMPLNCID","CID=:CID,CPLAN=:CPLAN")
+	set complncid.rate=rate
+	do complncid.bypassSave()
+	
+ 	quit
+
+
+ADJUST  // Process Commission Adjustments
+
+	// If there is any data in the commission adjustment file DAYENDCOMADJ,
+	// then call the effective dated commission process to correct
+	
+	type public Number AGENT,AGNTSKP,AGNCY,ADJ,CID,postoff,SEQ
+	type public String CPLAN,crcd
+	type Date DATE,PSTDT
+
+	set PSTDT=%SystemDate+postoff
+	if 'Db.isDefined("DAYENDCOMADJ","PSTDT=:PSTDT,AGENT=:AGENT,CPLAN=:CPLAN,CID=:CID") quit
+	type RecordDAYENDCOMADJ comadj=Db.getRecord("DAYENDCOMADJ","PSTDT=:PSTDT,AGENT=:AGENT,CPLAN=:CPLAN,CID=:CID")
+	set DATE=comadj.efd
+
+	set ADJ=$$CALC^PROCCOME(AGENT,CPLAN,CID,DATE)
+	
+        type RecordACN acn=Db.getRecord("ACN","CID=:CID")
+        set crcd=acn.crcd
+ 
+	// File the transaction to the dayendcomadj file
+	
+	set comadj.posted=0		// Posted=false
+	set comadj.crcd=crcd		// Set the currency code
+ 	set comadj.adjamt=ADJ.piece("|",1)	// Set the adjusted amount
+	do comadj.bypassSave()		// New Dayend entry
+
+	// File a transaction to the commission posting file
+	if +ADJ.piece("|",1) do {
+		type RecordDAYENDCOMPST compst=Class.new("RecordDAYENDCOMPST")
+	
+		set SEQ=Db.nextVal("DAYENDCOMPST","PSTDT=:PSTDT,AGENT=:AGENT,CPLAN=:CPLAN,CID=:CID")
+
+		set compst.pstdt=PSTDT		// Next commission posting date
+		set compst.agent=AGENT		// Set the agent
+		set compst.cplan=CPLAN		// Set the Commission Plan 
+		set compst.seq=SEQ		// Set the sequence to the next value
+ 		set compst.amt=ADJ.piece("|",1)	// Set the Commission Amount
+		set compst.cid=CID		// Set the account
+		set compst.crcd=crcd		// Set the currency code
+		set compst.posted=AGNTSKP	// Posted	
+		set compst.man=1		// Adjustment Flag
+		set compst.manuid=%UserID	// Set the user ID
+		do compst.bypassSave()		// New Dayend entry
+ 		}
+
+
+	// File the agency amount
+	if AGNCY="" quit
+	if 'AGNTSKP quit
+
+	// File a transaction to the commission posting file
+	if +ADJ.piece("|",2) do {
+ 		type RecordDAYENDCOMPST compst
+ 		set compst=Class.new("RecordDAYENDCOMPST")
+	
+		set SEQ=Db.nextVal("DAYENDCOMPST","PSTDT=:PSTDT,AGENT=:AGNCY,CPLAN=:CPLAN,CID=:CID")	
+
+		set compst.pstdt=PSTDT		// Next commission posting date
+		set compst.agent=AGNCY		// Set the agent
+		set compst.cplan=CPLAN		// Set the Commission Plan 
+		set compst.seq=SEQ		// Set the sequence to the next value
+ 		set compst.amt=ADJ.piece("|",2)	// Set the Commission Amount
+		set compst.cid=CID		// Set the account
+		set compst.crcd=crcd		// Set the currency code
+		set compst.posted=0		// Posted
+		set compst.manuid=%UserID	// Set the user ID
+		do compst.bypassSave()		// New Dayend entry
+ 		}
+
+  	quit
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+	
+	type Number AGENT,CID,postoff
+	type String CRCD,CPLAN,query
+	type Number AGNCY,AGNCYSKP,AGNTSKP
+	
+	set CPLAN=vINPUT.piece("~",1)
+	set AGENT=vINPUT.piece("~",2) if AGENT="" quit
+
+	type ResultSet rs=Db.select("CID","ACN","BOO=:AGENT")
+
+	// Quit if no accounts are linked to agent
+	if rs.isEmpty() quit
+
+ 	type RecordUTBLCOMPLN compln=Db.getRecord("UTBLCOMPLN","CPLAN=:CPLAN")
+	
+	set query=compln.query
+	set postoff=compln.postoff
+
+	type RecordAGENT agent=Db.getRecord("AGENT","AGENT=:AGENT")	
+
+	set CRCD=agent.crcd
+	set AGNCY=agent.agnum
+	set AGNTSKP=+agent.skppmt
+	set AGNCYSKP=0
+
+	if AGNCY'="" do {
+		type RecordAGENT agncy=Db.getRecord("AGENT","AGENT=:AGENT")
+		set AGNCYSKP=+agncy.skppmt
+	}
+
+	if compln.alc do {
+		while rs.next() do {
+			set CID=rs.getCol(1)
+			if '$$CHECKCID quit
+			if 'Db.isDefined("COMPLNCID","CID=:CID,CPLAN=:CPLAN") quit
+			do vPROC(CID)
+		}
+	}
+	
+	else  do vPROC("*")
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+	
+	type Number AGENT
+	type String CPLAN
+	type Public Date EFD
+	
+	set CPLAN=vINPUT.piece("~",1)
+	set AGENT=vINPUT.piece("~",2)
+
+	if AGENT="" set CPLAN=$$nxtpln(CPLAN) if CPLAN="" set vINPUT="" quit
+	set AGENT=$$nxtagt(CPLAN,AGENT)
+
+	set vINPUT=CPLAN_"~"_AGENT
+	quit
+
+
+nxtpln(String CPLAN)	
+
+	type public Date EFD
+	
+	type ResultSet rscomcal=Db.select("CPLAN","UTBLCOMPLN","NCALD=:EFD AND CPLAN>:CPLAN")
+	if 'rscomcal.next() quit ""
+	quit rscomcal.getCol("CPLAN")
+
+
+nxtagt(String CPLAN, Number AGENT)
+
+	type ResultSet rsagnt=Db.select("CPLAN,AGENT","AGENTCOM","CPLAN=:CPLAN and AGENT>:AGENT")
+	
+	if rsagnt.isEmpty() quit ""
+
+	while rsagnt.next() do {
+		set AGENT=rsagnt.getCol("AGENT")
+		type RecordAGENTCOM agentcom=Db.getRecord("AGENTCOM","AGENT=:AGENT,CPLAN=:CPLAN")
+		// Quit if plan is not applied
+		if 'agentcom.app quit
+		}
+	// Next agent to be processed
+	quit AGENT
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+	
+	type public Boolean ER
+	type public Number BRCD
+	type Date EFD,TPD
+	
+	set ER=0
+	set TPD=%SystemDate,EFD=TPD
+	do SOURCE^BCHSOURC("BOFF","COMM",.%UserID,.BRCD,.%UserClass)
+
+	// Set batch exit flag if error returned from above call
+	if ER s vEXIT=1
+ 
+
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("CID","ACN","")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	
+	type public Date EFD,TPD
+	type public Number BRCD,DAT,DIM,DIMPREV,M,MON,N
+	type public String DYS()
+	
+	set TPD=%SystemDate,EFD=TPD
+	do SOURCE^BCHSOURC("BOFF","COMM",.%UserID,.BRCD,.%UserClass)
+ 
+	// Load in current and previous month's data
+        set MON=$$MON^SCADAT(EFD,1)
+	set DAT=$$ADDMJD^SCADAT(EFD,-1)
+        set DIMPREV=$$NODM^SCADAT(DAT,1)
+
+	// Set up months and days in months array
+	for N=0:1:12  do {
+		set DAT=$$ADDMJD^SCADAT(TJD,-N)
+		set M=$$MON^SCADAT(DAT,1)
+        	set DIM=$$NODM^SCADAT(DAT,1)
+		set DYS(N)=DAT_"|"_M_"|"_DIM
+		}
+	
+	
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+		
+	type Number CID,AGENT
+	type String CPLAN
+	
+	// Call code to recompile commission querys, portfolios, and
+	// commission calculation routines
+
+	do EXT^COMQRY
+	set vINPUT=""
+
+	// Look into dayend table DAYENDCOMCID to determine if any
+	// commission plans need to be added/removed from an account level
+
+	type ResultSet rscomcid=Db.select("AGENT,CPLAN,DELOPT","DAYENDCOMCID","PROCDT=:%SystemDate")
+	
+	while rscomcid.next() do {
+		
+		set AGENT=rscomcid.getCol("AGENT")
+		set CPLAN=rscomcid.getCol("CPLAN")
+		
+		type ResultSet rsxbrcd=Db.select("CID","ACN","BOO=:AGENT")
+		
+		while rsxbrcd.next() do {
+			
+			set CID=rsxbrcd.getCol("CID")
+			
+			if rscomcid.getCol("DELOPT") do DELPLAN(CID,CPLAN)
+			else  do ADDPLAN(CID,CPLAN)
+			}
+		}
+
+	quit
+
+
+DELPLAN(Number CID,   //  Remove plan from account level
+        String CPLAN)
+	
+	if 'Db.isDefined("COMPLNCID","CID=:CID,CPLAN=:CPLAN") quit
+	do Db.fastDelete("COMPLNCID","CID=:CID,CPLAN=:CPLAN")
+	quit
+
+
+ADDPLAN(Number CID,  // Insert new plan into account level
+        String CPLAN)
+	
+	type String query 
+	
+	if Db.isDefined("COMPLNCID","CID=:CID,CPLAN=:CPLAN") quit
+
+	type RecordUTBLCOMPLN utblcompln=Db.getRecord("UTBLCOMPLN","CPLAN=:CPLAN")
+	set query=utblcompln.intquery
+	if '$$CHECKCID() quit
+
+	type RecordCOMPLNCID complncid=Class.new("RecordCOMPLNCID")
+	
+	set complncid.cid=CID
+	set complncid.cplan=CPLAN
+	
+	do complncid.save()
+	
+	quit
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+	type public Date EFD
+	type String CPLAN
+	
+	type ResultSet rs=Db.select("CPLAN","UTBLCOMPLN","NCALD=:EFD")
+
+	while rs.next() do {
+		set CPLAN=rs.getCol(1)
+		do DAYEND(EFD,CPLAN)
+	}
+
+	quit
+
+
+DAYEND(Date EFD,	// Update DAYEND file
+       String CPLAN)
+	
+	type public Boolean ER	
+	type Date NJD
+	type String FRE
+	
+	set ER=0
+ 
+	type RecordUTBLCOMPLN compln=Db.getRecord("UTBLCOMPLN","CPLAN=:CPLAN")
+
+	set NJD=$$NJD^UFRE(%SystemDate,compln.calcfre) quit:ER
+	set compln.ncald=NJD
+	set compln.lcald=%SystemDate	
+
+        // reset the extra growth next change date
+        if compln.grthchnd'>%SystemDate do {
+                
+                set FRE=compln.grthfre
+                set compln.grthchnd=$$NJD^UFRE(%SystemDate,FRE)
+		}
+
+	do compln.bypassSave()
+
+	quit
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

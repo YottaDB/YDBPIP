@@ -1,0 +1,936 @@
+public	DEPINT(RecordDEP dep,		// Deposit account		/REF:RW
+	       RecordTTX ttx,		// Transaction			/REF:RW
+	       RecordTRN trn,		// Transaction code		/REF:R
+	       String CTL)		// Control indicators
+
+	/*
+	   Transaction Processing Call
+	   Called by deposit transaction codes to adjust interest paid amounts
+	   
+	   CALLED BY: ^LNPTS29, deposit interest posting adjustment tran codes
+
+	   Additional notes on ARGUMENTS:
+
+	       . CTL
+	               Position 1 - 0 = Prior Year
+	                            1 = Current Year
+	                        2 - 0 = Do not update interest on available int
+	                            1 = Update interest on available int
+
+	---- Revision History ------------------------------------------------
+
+	06/27/07 - KumarSS - CR 27867
+		   Modified EC and INIT sections to define NTAX and initialize
+		   with ttx.unapl (Tran Detail: D:N I Tax L:Una Funds), to
+		   prevent logging UNDEFINED errors, in FILE section, while 
+		   Error/Correcting the transaction.
+
+	04/10/07 - SmithCD - CR 24945
+		   Modified to subtract NTAX from interest amount when 
+		   updating interest life and YTD fields. Cleaned up to 
+		   standards.
+	
+	03/03/07 - Chaithra - CR24945
+		   Modified the FILE section to update VAT on Negative interest
+		   if specified in Tax on neg Int GL, based on dep.vatintopt 
+		   flag. Also changed the description of the procedure.
+	
+	02/01/06 - SmithCD - CR 19343 (16890)
+		   Made top public and added note about callling procedure.
+	*/
+
+	// Backdated transaction to a segmented account
+	if dep.segflg,%EffectiveDate,%EffectiveDate<%SystemDate do ^RECALSEG(.dep,.ttx) quit
+	
+	type public Boolean ER, RECALSEG
+
+	type Number AMT, BWA, CID, NTAX, SEGBAL, SEGMENT
+	type Boolean DC, EC, INTAI, NR, TYR, YR
+	type String TAMT
+	
+	set ER = 0
+	set BWA = ""
+
+	do INIT(.dep, .ttx)
+
+	/*
+	 If segment record is blank (as the case may be if called from RECALSEG)
+	 quit from posting routine
+	*/
+	if dep.segflg, 'SEGMENT.isNull(), SEGBAL.isNull() quit
+
+	do VER(.dep, .trn) quit:ER
+
+	if BWA.isNull(), 'trn.pcfd23 do BWA(.dep, .ttx, .trn)
+
+	do IAF(.dep, .ttx)
+
+	// Determine direction
+	if 'DC set AMT = -AMT, BWA = -BWA, NTAX = -NTAX
+
+	// IRA earnings adj
+	if 'INTAI, dep.ira do IRA(.dep, .ttx) quit:ER
+
+	// Do not perform authorizations if called from RECALSEG
+	if 'RECALSEG.get() do AUT(.dep, .trn) quit:ER
+
+	// Update nonresident backup withholding
+	if '(trn.pcfd23 & dep.negipo) do NRUPD^DEPBW(.dep, .trn)
+
+	// If Nonresident create 1042S tax file
+	if (trn.pcfd32 = 2) ! ('trn.pcfd32 & NR) do PROC^TAX1042(.dep, .ttx, AMT, BWA)
+
+	do FILE(.dep, .trn, .ttx)
+
+	quit
+
+
+FILE(RecordDEP dep,		// Deposit account		/REF:RW
+     RecordTRN trn,		// Transaction code		/REF:R
+     RecordTTX ttx)		// Transaction			/REF:RW
+
+	type public Number AMT, BWA, DSWA, DWA, NTAX
+	type public Boolean DC, EC, ER, NR, TYR, YR
+	type public String CTL, TAMT, TSO
+	
+	type Number INT
+	
+	// Update VAT on Negative interest if specified in Tax on neg Int GL
+	if dep.vatintopt, NTAX set dep.vatnegint = dep.vatnegint + NTAX
+	
+	// Setting TSO for Manual Interest Adjustments ;ccr 01/19/00
+	if ttx.tso.isNull() set ttx.tso = $$FIELDIN^UTSO(TSO, "INTADJ", TAMT)
+
+	// Call routine to update the average balance and dollar day balances
+	if 'ER, ((%EffectiveDate.isNull()) ! (%EffectiveDate = %SystemDate)), (CTL.extract(1) = 1) do {
+		type Date TPD = %SystemDate
+		do UPDAVB^DEPPO(.dep ,.ttx)
+		}
+
+	if dep.iaf'=2 do {
+		type String TRSQAM = ttx.tamt
+
+		set dep.bal = dep.bal + AMT
+		set dep.balcol = dep.balcol + AMT
+
+		// Update CNTDR (5) or CNTCR (6) if principal amount
+		if AMT do {
+			if 'EC do {
+				if 'DC do {
+					set dep.cntdr = dep.cntdr + 1
+					set dep.ldamt = $select('TRSQAM.isLike("%#%"):TRSQAM, TRSQAM.isLike("%#%"):TRSQAM.piece("#", 1))
+					set dep.lddt = %SystemDate
+					}
+				else  do {
+					set dep.cntcr = dep.cntcr + 1
+					set dep.lcamt = $select('TRSQAM.isLike("%#%"):TRSQAM, TRSQAM.isLike("%#%"):TRSQAM.piece("#", 1))
+					set dep.lcdt = %SystemDate
+					}
+				}
+			else  do {
+				if 'DC set dep.cntdr = dep.cntdr - 1
+				else  set dep.cntcr = dep.cntcr - 1
+				}
+			}
+		}
+
+	if dep.iaf = 1 set dep.intavl = dep.intavl + AMT
+
+	if dep.iaf = 2 do {
+		set dep.intavlncr = dep.intavlncr + AMT
+		if 'TAMT.piece("#", 8) set TAMT.piece("#", 8) = AMT, ttx.tamt = TAMT
+		}
+
+	set dep.tld = %SystemDate
+
+	if BWA do {
+		if YR set dep.bwy = dep.bwy + BWA
+		else  set dep.bwp = dep.bwp + BWA
+
+		if TYR,'trn.pcfd35 set dep.bwtytd = dep.bwtytd + BWA + DSWA.get()
+		if 'TYR,'trn.pcfd35 set dep.bwpty = dep.bwpty + BWA + DSWA.get()
+		}
+
+	if DWA.get() do {
+		if YR set dep.fwy = dep.fwy + DWA
+		else  set dep.fwp = dep.fwp + DWA
+		}
+
+	if DSWA.get() do {
+		if YR set dep.swy = dep.swy + DSWA
+		else  set dep.swp = dep.swp + DSWA
+		}
+
+	if dep.segflg do FILESEG(.dep)
+
+	
+	// If there's negative interest, and it's posted separately, use the negative interest fields
+	if dep.negipo = 2, trn.pcfd23 do {
+
+		set INT = AMT + NTAX
+
+		// fin neg int
+		if YR set dep.negiytd = dep.negiytd - INT
+		if 'YR set dep.negipy = dep.negipy - INT
+
+		// tax neg int
+		if TYR, 'trn.pcfd35 set dep.negitytd = dep.negitytd - INT
+		if 'TYR, 'trn.pcfd35 set dep.negipty = dep.negipty - INT
+
+		set dep.negipl = dep.negipl - AMT
+
+		if (trn.pcfd32 = 2) ! ('trn.pcfd32 & NR) do {
+			
+			set INT = AMT + BWA + NTAX
+		
+			// fin NR neg int
+			if YR set dep.nrnegicy = dep.nrnegicy - INT
+			else  set dep.nrnegipy = dep.nrnegipy - INT
+
+			// tax NR neg int
+			if TYR, 'trn.pcfd35 set dep.nrnegitytd = dep.nrnegitytd - INT
+			if 'TYR, 'trn.pcfd35 set dep.nrnegipty = dep.nrnegipty - INT
+			}
+		}
+
+	else  do {
+
+		set INT = AMT + BWA + NTAX
+		
+		// fin int/div
+		if YR set dep.iytd = dep.iytd + INT
+		if 'YR set dep.ipy = dep.ipy + INT
+
+		// tax int/div
+		if TYR, 'trn.pcfd35 set dep.itytd = dep.itytd + INT
+		if 'TYR, 'trn.pcfd35 set dep.ipty = dep.ipty + INT
+
+		set dep.ipl = dep.ipl + INT
+
+		if (trn.pcfd32 = 2) ! ('trn.pcfd32 & NR) do {
+			// fin NR pos int/div
+			if YR set dep.nrposicy = dep.nrposicy + INT
+			if 'YR set dep.nrposipy = dep.nrposipy + INT
+
+			// tax NR pos int/div
+			if TYR, 'trn.pcfd35 set dep.nrpositytd = dep.nrpositytd + INT
+			if 'TYR, 'trn.pcfd35 set dep.nrposipty = dep.nrposipty + INT
+			}
+		}
+	
+	if %EffectiveDate, (%EffectiveDate-%SystemDate), (ttx.tseq # 1 = 0), '$$FIELD^UTSO(ttx.tso, "NOADJ") do ENT^RECALC(.dep, .ttx)
+	
+	quit
+
+
+INIT(RecordDEP dep,		// Deposit account		/REF:R
+     RecordTTX ttx)		// Transaction			/REF:R
+
+	// Initialize data
+	
+	type public Number BWA, CID, INTAI, NTAX, SEGBAL, SEGMENT
+	type public Boolean DC, EC, NR, TYR, YR
+	type public String CTL, TSO
+
+	set CID = dep.cid
+	
+	// Pr.fin.year flag
+	set YR = $$PYFLAG(.dep, .ttx)
+	
+	// Pr.tax year flag
+	set TYR = $$PTYFLAG(.dep, .ttx)
+	
+	// Interest on Available Int Flag
+	set INTAI = CTL.extract(2)
+	set BWA = BWA.get()
+
+	set NTAX = ttx.unapl
+
+	// Nonresident Indicator
+	set NR = dep.nr
+
+	if 'dep.trb set DC = ttx.itc1
+	else  set DC = 'ttx.itc1
+
+	set EC = ttx.itc6 + ttx.itc12
+	set %EffectiveDate = ttx.efd
+
+	do INITRN(.dep,.ttx)
+
+	if dep.segflg do {
+		// Segment Number
+		set SEGMENT = $$FIELD^UTSO(TSO,"SEG")
+		if SEGMENT.isNull() quit
+
+		type RecordDEPSEG depseg = Db.getRecord("DEPSEG", "CID=:CID,SEGMENT=:SEGMENT")
+
+		set SEGBAL = depseg.bal
+		}
+
+	quit
+
+
+INITRN(RecordDEP dep,		// Deposit account		/REF:R
+       RecordTTX ttx)		// Transaction			/REF:R
+       
+	// Initialize transaction
+	
+	type public Number AMT, BWA
+	type public String TAMT, TSO
+
+	set TSO = ttx.tso
+	set TAMT = ttx.tamt
+
+	if 'TAMT.isLike("%#%") set AMT = +TAMT
+	else  do {
+		// # sign contained in TAMT; assume TAMT fully defined
+		set BWA = TAMT.piece("#", 5) + TAMT.piece("#", 15)
+		if dep.iaf = 2 set AMT = TAMT.piece("#", 8)
+		else  set AMT = TAMT.piece("#", 2)
+		}
+
+	quit
+
+
+public EC(RecordDEP dep,		// Deposit account		/REF:RW
+	  RecordTTX ttx,		// Transaction			/REF:RW
+	  RecordTRN trn,		// Transaction code		/REF:R
+	  String CTL)			// Control indicators
+
+	/*
+	   Called by deposit transaction codes to error correct interest paid
+	   amounts.
+
+	   Additional notes on ARGUMENTS:
+
+	       . CTL
+	               Position 1 - 0 = Prior Year
+	                            1 = Current Year
+	                        2 - 0 = Do not update interest on available int
+	                            1 = Update interest on available int
+
+	*/
+
+	// Backdated transaction to a segmented account
+	if dep.segflg, %EffectiveDate, (%EffectiveDate < %SystemDate) do ^RECALSEG(.dep, .ttx) quit
+	
+	type public Boolean ER = 0
+
+	type Number AMT, BWA, CID, INTAI, NTAX, SEGBAL, SEGMENT
+	type Boolean DC, EC, NR, TYR, YR
+	type String TAMT, TSO
+
+	do INIT(.dep, .ttx)
+
+	/*
+	 If segment record is blank (as the case may be if called from RECALSEG)
+	 quit from posting routine
+	*/
+	if dep.segflg, 'SEGMENT.isNull(), SEGBAL.isNull() quit
+
+	// Determine direction
+	if 'DC set AMT = -AMT, BWA = -BWA, NTAX = -NTAX
+
+	if TSO.isLike("%DEFINT#%") do DEFRESET(.ttx, trn.pcfd23, AMT) quit:ER
+
+	// IRA earnings adj
+	if dep.ira do IRA(.dep, .ttx) quit:ER
+
+	// Update nonresident int/whold info
+	do NRUPD^DEPBW(.dep, .trn)
+
+	// Update TAX1042 file
+	if (trn.pcfd32 = 2) ! ('trn.pcfd32 & NR) do REV^TAX1042(.ttx, dep.cid)
+
+	do FILE(.dep, .trn, .ttx)
+
+	quit
+
+
+AUT(RecordDEP dep,		// Deposit account		/REF:R
+    RecordTRN trn)		// Transaction code		/REF:R
+
+	// Authorization Verification
+	
+	type public String OVR(,,), TAMT
+	type public Boolean DC, TYR, YR
+	type public Number CID
+
+	if dep.rflg do ^UFLG(.dep)
+
+	if dep.stat set OVR(CID, "OVR", "STAT"_+dep.stat) = ""
+
+	if DC, 'dep.minint.isNull(), (dep.bal < dep.minint) set OVR(CID, "OVR", "MININT") = ""
+
+	if trn.pcfd23, dep.negipo = 2, DC do {
+
+		type Number INT, TINT
+
+		if YR do {
+			set INT = dep.negiytd - TAMT
+			if INT < 0 set OVR(CID, "OVR", "NEGIYTD") = INT.roundCur(dep.crcd)
+			}
+		else  do {
+			set INT = dep.negipy - TAMT
+			if INT < 0 set OVR(CID, "OVR", "NEGPYTD") = INT.roundCur(dep.crcd)
+			}
+		if TYR do {
+			set TINT = dep.negitytd - TAMT
+			if TINT < 0 set OVR(CID, "OVR", "NEGITYTD") = TINT.roundCur(dep.crcd)
+			}
+		else  do {
+			set TINT = dep.negipty - TAMT
+			if TINT < 0 set OVR(CID, "OVR", "NEGIPTY") = TINT.roundCur(dep.crcd)
+			}
+		}
+
+	if DC quit
+
+	if (dep.iaf = 1), (TAMT > dep.intavl) set OVR(CID, "OVR", "INTAVL") = dep.intavl.roundCur(dep.crcd)
+	if (dep.iaf = 2), (TAMT > dep.intavlncr) set OVR(CID, "OVR", "INTAVL") = dep.intavlncr.roundCur(dep.crcd)
+
+	quit
+
+
+VER(RecordDEP dep,		// Deposit account		/REF:R
+    RecordTRN trn)		// Transaction code		/REF:R
+    
+    	// Transaction validation
+    	
+    	type public String CTL, OVR(,,), TAMT, TSO
+    	type public Boolean DC, ER, INTAI, TYR, YR
+    	type public Number BWA, CID
+
+	// Backup withholding not allowed with negative interest
+	if BWA, trn.pcfd23 do Runtime.setErrMSG("DEP", 313) quit
+
+	// Cannot post prior year transaction on account opened in current year
+	if 'CTL, ($$YEAR^SCADAT(%SystemDate, 1) = $$YEAR^SCADAT(dep.odt, 1)) do Runtime.setErrMSG("DEP", 4748) quit
+
+	if INTAI do { quit:ER
+		// Segments in Use Flag must be on
+		if 'dep.segflg do Runtime.setErrMSG("DEP", 7893) quit
+
+		// Available Interest Option must be 2
+		if dep.iaf '= 2 do Runtime.setErrMSG("DEP", 7891) quit
+
+		// Available Interest Accrual Flag must be on
+		if 'dep.aiacrf do Runtime.setErrMSG("DEP", 7892) quit
+		}
+
+	/*
+	 Skip amount exceeds current/prior year interest checks if posting
+	 deferred interest.  This is necessary for year-end implications.
+	*/
+	if TSO.isLike("%DEFINT#%") quit
+
+	if 'trn.pcfd23, 'DC, 'dep.negipo do {
+
+		if dep.segflg do VERSEG(.dep) quit:ER
+
+		// Amount exceeds current-year int/div
+		if YR, (dep.iytd - TAMT) < 0 set OVR(CID, "OVR", "IPYADJCY") = ""
+
+		// Amount exceeds prior-year int/div
+		if 'YR, (dep.ipy - TAMT) < 0 set OVR(CID, "OVR", "IPYADJPR") = ""
+
+		// Amount exceeds current-year int/div
+		if TYR, (dep.itytd - TAMT) < 0 set OVR(CID, "OVR", "IPYADJCY") = ""
+
+		// Amount exceeds prior-year int/div
+		if 'TYR, (dep.ipty - TAMT) < 0 set OVR(CID, "OVR", "IPYADJPR") = ""
+		}
+	if ER quit
+
+	if trn.pcfd23, DC do {
+
+		// Amount exceeds current-year negative interest
+		if YR, (dep.negiytd - TAMT) < 0 set OVR(CID, "OVR", "IPYADJNC") = ""
+
+		// Amount exceeds prior-year negative interest
+		if 'YR, (dep.negipy - TAMT) < 0 set OVR(CID, "OVR", "IPYADJNP") = ""
+
+		// Amount exceeds current-year negative interest
+		if TYR, (dep.negitytd - TAMT) < 0 set OVR(CID, "OVR", "IPYADJNC") = ""
+
+		// Amount exceeds prior-year negative interest
+		if 'TYR, (dep.negipty - TAMT) < 0 set OVR(CID, "OVR", "IPYADJNP") = ""
+		}
+
+	quit
+
+
+IRA(RecordDEP dep,		// Deposit account		/REF:R
+    RecordTTX ttx)		// Transaction			/REF:R
+    
+	/*
+	Update IRA contribution/withholding info
+
+	   New value of SEQ to avoid redefinition of TSO in ^IRA.  Define TSO
+	   to specify the value of the IRA withholding distribution code.
+	*/
+	
+	type public Boolean ER
+	
+	type Number AMT, BWA, SEQ
+	type String TAMT, TSO
+
+	set BWA = ""
+
+	do INITRN(.dep, .ttx)
+
+	// IRA earnings adjustment
+	set TSO = "IRAC#"_CUVAR.IRAINT
+
+	do IRAINT(.dep, .ttx)
+	if ER quit
+
+	if BWA do IRAWTH(.dep, .ttx)
+
+	quit
+
+
+IRAINT(RecordDEP dep,		// Deposit account		/REF:R
+       RecordTTX ttx)		// Transaction			/REF:R
+       
+	// IRA earnings adjustment
+	
+	type public Boolean TYR
+	type public String TAMT
+
+	set TAMT = +TAMT
+
+	if TYR do CYRINT^IRA(.dep, .ttx, 1) quit
+	if 'TYR do PYRINT^IRA(.dep, .ttx, 1)
+
+	quit
+
+
+IRAWTH(RecordDEP dep,		// Deposit account		/REF:R
+       RecordTTX ttx)		// Transaction			/REF:R
+       
+	// IRA withholding
+	
+	type public String TAMT, TSO
+	type public Number BWA
+	type public Boolean TYR
+
+	set TSO = "IRAD#"_CUVAR.IRAIWH
+	set TAMT = BWA
+
+	if TYR do CYRWTH^IRA(.dep, .ttx)
+	if 'TYR do PYRWTH^IRA(.dep, .ttx)
+
+	quit
+
+
+BWA(RecordDEP dep,		// Deposit account		/REF:R
+    RecordTTX ttx,		// Transaction			/REF:R
+    RecordTRN trn)		// Transaction code
+
+	// Check for withholding - if the account has withholding, calculate and revise TAMT
+	
+	type public Boolean EC, ER
+	type public String TAMT
+	type public Number AMT, BWA, CID, DWA, IRAEXM
+
+	if EC quit
+
+	type Number INT
+
+	set IRAEXM = 0
+
+	/*
+	 Call into ^DEPBW if backup withholding (DEP.BWF) is selected and
+	 accrued withholding tax processing (DEP.AWTP) is not selected. If the
+	 accrued withholding tax index (DEP.AWTI) is defined then backup
+	 withholding amount (BWA) may be calculated using taxrate defined
+	 in accrued withholding tax index.
+	*/
+				 
+	if 'trn.pcfd23, dep.bwf, 'dep.awtp do { quit:ER
+
+		type Number TAXRATE
+
+		set INT = +TAMT
+		set TAXRATE = ""
+
+		do ^DEPBW(.dep, .ttx, INT, .BWA, ,CUVAR.BWAPGM, dep.awti, dep.irn, .TAXRATE) quit:ER
+
+		set BWA=$$^SCARND(BWA,0,CID)
+
+		if dep.awtr '= TAXRATE set dep.awtr = TAXRATE
+		}
+	if dep.ira do {
+
+		type Number STTAX
+
+		for STTAX=0:1:1 do ^IRAWH(.dep, .ttx)
+
+		set BWA = BWA + DWA
+		}
+
+	if 'BWA quit
+
+	set AMT = TAMT - BWA
+
+	quit
+
+
+IAF(RecordDEP dep,		// Deposit account		/REF:R
+    RecordTTX ttx)		// Transaction			/REF:R
+    
+	/*
+	 Check Interest Available Not Credited for a negative amount, if
+	 Negative, reduce principal.
+	*/
+	
+	type public Number AMT, BWA, DSWA
+	type public String TAMT
+	type public Boolean DC
+
+	if dep.iaf '= 2 do {
+		if AMT set TAMT.piece("#", 2) = AMT
+		if BWA, dep.ira set BWA = BWA - DSWA.get()
+		if BWA set TAMT.piece("#", 5) = $select('DC:-BWA, 1:BWA)
+		if BWA, dep.ira do {
+			set TAMT.piece("#", 15) = $select('DC:-DSWA.get(), 1:DSWA.get())
+			set BWA = BWA + DSWA.get()
+			}
+		}
+	else  do {
+		type Number PRINAMT = ""
+
+		if 'DC, (AMT > dep.intavlncr) do {
+			set PRINAMT = AMT - dep.intavlncr
+			set AMT = dep.intavlncr
+			set dep.bal = +dep.bal - PRINAMT
+			set dep.balcol = dep.balcol - PRINAMT
+			}
+
+		if PRINAMT set TAMT.piece("#", 2) = PRINAMT
+		if BWA,dep.ira set BWA = BWA - DSWA.get()
+		if BWA set TAMT.piece("#", 5) = $select('DC:-BWA, 1:BWA)
+		set TAMT.piece("#", 8) = AMT
+		if BWA,dep.ira do {
+			set TAMT.piece("#",15) = $select('DC:-DSWA.get(),1:DSWA.get())
+			set BWA = BWA + DSWA.get()
+			}
+		}
+
+	set ttx.tamt = TAMT
+
+	quit
+
+
+public PYFLAG(RecordDEP dep,		// Deposit account		/REF:R
+	      RecordTTX ttx)		// Transaction			/REF:R
+	      
+	/*
+	Prior Financial Year Flag
+	
+	   This section will return a flag indicating whether to update YTD
+	   financial fields (1) or prior financial year fields (0).
+
+	   Look to CUVAR.YEOFF if backdated transactions crossed over Financial
+	   Year-end. If CUVAR.IPYADJ=1!2!5 and transaction is within YEOFF
+	   period, the backdated transaction will update prior financial year
+	   fields; if not - current year fields.
+	   Current year fields will always be updated, regardless if the
+	   backdated transaction is within the Offset period, if IPYADJ=0!3!4
+	*/
+	
+	type public Number PYADJ
+	type public String OVR(,,)
+
+	type Number BFY, FINOFF, IPYADJ, NEWADJ, YEOFF
+
+	if 'PYADJ.get() set PYADJ = 0
+	
+	if '%EffectiveDate quit 1
+
+	set IPYADJ = CUVAR.IPYADJ
+	
+	// Beginning of Fin Year
+	set BFY = $$BOFY^SCADAT(%SystemDate, 1)
+	
+	// Fin offset period
+	set YEOFF = CUVAR.YEOFF
+
+	/*
+	 Modified section below to update prior year fields when IPYADJ =
+	 1,2 or 5, but require override when IPYADJ = 2 or 5
+	*/
+	set FINOFF = 0
+
+	if YEOFF.get(), %EffectiveDate < BFY, (%SystemDate '> (BFY + YEOFF)) set FINOFF = 1
+
+	if IPYADJ, (IPYADJ '= 4),(IPYADJ '= 3),(FINOFF = 1) do { quit 0
+		set NEWADJ = +ttx.tamt
+
+		if (dep.trb - ttx.itc1) = 0 set NEWADJ = -NEWADJ
+
+		set PYADJ = PYADJ + NEWADJ
+
+		if IPYADJ = 2 ! (IPYADJ = 5), PYADJ '= 0 set OVR(dep.cid, "OVR", "IPYADJ") = $$FN^SCARND(PYADJ , , dep.cid, , 2)
+
+		type String TCMT, MSG
+
+		set TCMT = ttx.tcmt
+		// Prior year adjustment
+		set MSG = TCMT_$select(TCMT.isNull():"", 1:"#")_$$^MSG(1796)
+		set ttx.tcmt = MSG
+		}
+
+	quit 1
+
+
+public PTYFLAG(RecordDEP dep,		// Deposit account		/REF:R
+	       RecordTTX ttx)		// Transaction			/REF:R
+
+	/*
+	   This section will return a TYR flag indicating whether to update
+	   YTD tax fields (1) or prior tax year fields (0).
+	   Look to CUVAR.TAXYEOFF if backdated transactions crossed over Tax
+	   Year-end. If CUVAR.IPYADJ=1!2!5 and transaction is within TAXYEOFF,
+	   the backdated transaction will update prior tax year fields;
+	   if not - current Tax year fields.
+	   Current Tax year fields will always be updated, regardless if the
+	   backdated transaction is within the Offset period, if IPYADJ=0!3!4.
+	*/
+	
+	type public Number PYADJ
+	type public String OVR(,,)
+
+	type Number BTY, IPYADJ, NEWADJ, TAXOFF, TAXYEOFF
+
+	if 'PYADJ.get() set PYADJ = 0
+	
+	if '%EffectiveDate quit 1
+
+	// Int/Div Paid Prior Year Adjustment Flag
+	set IPYADJ = CUVAR.IPYADJ
+	
+	// Beginning of Tax Year
+	set BTY = $$BOTY^SCADAT(%SystemDate, 1)
+	
+	// Tax offset period
+	set TAXYEOFF = CUVAR.TAXYEOFF
+
+	/*
+	 Section below updates prior year fields when IPYADJ =1,2 or 5,
+	 but require override when IPYADJ = 2 or 5
+	*/
+	set TAXOFF = 0
+
+	if TAXYEOFF.get(), %EffectiveDate < BTY, (%SystemDate '> (BTY + TAXYEOFF)) set TAXOFF = 1
+
+	if IPYADJ, (IPYADJ '= 4), (IPYADJ '= 3), (TAXOFF = 1) do { quit 0
+		set NEWADJ = +ttx.tamt
+
+		if (dep.trb - ttx.itc1) = 0 set NEWADJ = -NEWADJ
+
+		set PYADJ = PYADJ + NEWADJ
+
+		if (IPYADJ = 2) ! (IPYADJ = 5), (PYADJ '= 0) set OVR(dep.cid, "OVR", "IPYADJ") = $$FN^SCARND(PYADJ, , dep.cid, , 2)
+
+		type String TCMT,MSG
+
+		set TCMT = ttx.tcmt
+		// Prior year adjustment
+		set MSG = TCMT_$select(TCMT.isNull():"", 1:"#")_$$^MSG(1796)
+		set ttx.tcmt = MSG
+		}
+
+	quit 1
+
+
+public DEFRESET(RecordTTX ttx,		// Transaction			/REF:R
+		Number INTTYPE,		// Interest type
+		Number AMT,		// Interest amount
+		Number CID)		// Account number
+
+	/*
+	Reset current deferred int from paid deferred
+	
+	   Additional notes on ARGUMENTS:
+	   . INTTYPE
+	     0 - Positive interest bucket
+	     1 - Negative interest bucket
+	     2 - Residual interest bucket
+
+	   EXAMPLE:
+	   if TSO.isLike("%DEFINT#%" do DEFRESET(.ttx, INTTYPE, AMT, CID) quit:ER
+	*/
+	
+	type Number NEGINT, POSINT, RESINT
+	type Date ADJDT
+
+	set (POSINT, NEGINT, RESINT) = ""
+
+	if 'INTTYPE set POSINT = AMT
+	else  if INTTYPE = 1 set NEGINT = AMT
+	else  set RESINT = AMT
+
+	set ADJDT = +$$FIELD^UTSO(ttx.tso, "DEFINT")
+
+	type RecordDEFINP definp = Db.getRecord("DEFINP", "CID=:CID,INP=:ADJDT", 1)
+	if definp.getMode() = 0 quit
+
+	do DEFINADJ^DEPIADJ(.definp, POSINT, NEGINT, RESINT, "")
+
+	do definp.bypassSave()
+
+	quit
+
+
+VERSEG(RecordDEP dep)		// Deposit account		/REF:R
+
+	// Transaction validation - segment interest
+
+	type public Number SEGMENT
+	type public Boolean INTAI, YR
+	type public String TAMT
+
+	if (dep.segacr & 'INTAI) ! (SEGMENT > 0) do { quit
+
+		// Amount exceeds current year interest paid on non-matured principal
+		if 'INTAI, YR, (dep.ipnmpytd - TAMT) < 0 do Runtime.setErrMSG("DEP", 7900) quit
+
+		// Amount exceeds prior year interest paid on non-matured principal
+		if 'INTAI, 'YR, (dep.ipnmppy - TAMT) < 0 do Runtime.setErrMSG("DEP", 7901) quit
+
+		// Amount exceeds current year interest paid on interest on non-matured principal
+		if INTAI, YR, (dep.ipinmytd - TAMT) < 0 do Runtime.setErrMSG("DEP", 7896) quit
+
+		// Amount exceeds prior year interest paid on interest on non-matured principal
+		if INTAI, 'YR, (dep.ipinmpy - TAMT) < 0 do Runtime.setErrMSG("DEP", 7897) quit
+		}
+
+	// Amount exceeds current year interest (matured)
+	if 'INTAI, YR, (dep.ipmpytd - TAMT) < 0 do Runtime.setErrMSG("DEP", 7898) quit
+
+	// Amount exceeds prior year interest (matured)
+	if 'INTAI, 'YR, (dep.ipmpytd - TAMT) < 0 do Runtime.setErrMSG("DEP", 7899) quit
+
+	// Amount exceeds current year int on int (matured)
+	if INTAI, YR, (dep.ipimpytd - TAMT) < 0 do Runtime.setErrMSG("DEP", 7894) quit
+
+	// Amount exceeds prior year int on int (matured)
+	if INTAI, 'YR, (dep.ipimppy - TAMT) < 0 do Runtime.setErrMSG("DEP", 7895) quit
+
+	quit
+
+
+FILESEG(RecordDEP dep)		// Deposit account		/REF:RW
+
+	// File segment interest
+
+	type public Boolean INTAI, YR
+	type public Number AMT, CID, SEGMENT
+
+	if (dep.segacr & 'INTAI) ! (SEGMENT > 0) do { quit
+
+		if INTAI do { quit
+			// Int Paid on Int on Non-Matured Prin
+			if 'YR set dep.ipinmpy = dep.ipinmpy + AMT
+			else  set dep.ipinmytd = dep.ipinmytd + AMT
+			
+			set dep.ipinmpl = dep.ipinmpl + AMT
+
+			do TOTAVBAL(.dep, 1, AMT)
+			}
+
+		// Interest Paid on Non-Matured Principal
+		if 'YR set dep.ipnmppy = dep.ipnmppy + AMT
+		else  set dep.ipnmpytd = dep.ipnmpytd + AMT
+		
+		set dep.ipnmpl = dep.ipnmpl + AMT
+
+		if dep.iaf = 2 do TOTAVBAL(.dep, 1, AMT) quit
+
+		if 'SEGMENT.isNull() do {
+			type RecordDEPSEG depseg=Db.getRecord("DEPSEG", "CID=:CID,SEGMENT=:SEGMENT")
+
+			// Ledger Balance (segment)
+			set depseg.bal = depseg.bal + AMT
+
+			do depseg.bypassSave()
+
+			// Total Segment Matured Principal Balance
+			if SEGMENT = 0 set dep.tsmpb = dep.tsmpb + AMT
+			// Total Segment Non-Matured Prin Balance
+			else  set dep.tsnmpb = dep.tsnmpb + AMT
+			}
+
+		// Update DEP.TSNMPB if no segment (assume account level posting)
+		// Total Segment Non-Matured Prin Balance
+		else  set dep.tsnmpb = dep.tsnmpb + AMT
+		}
+
+	if INTAI do { quit
+		// Interest Paid on Interest on Matured Principal
+		if 'YR set dep.ipimppy = dep.ipimppy + AMT
+		else  set dep.ipimpytd = dep.ipimpytd + AMT
+		set dep.ipimrl = dep.ipimrl + AMT
+
+		do TOTAVBAL(.dep, 0, AMT)
+		}
+
+	// Interest Paid on Matured Principal
+	if 'YR set dep.ipmppy = dep.ipmppy + AMT
+	else  set dep.ipmpytd = dep.ipmpytd + AMT
+	set dep.ipmpl = dep.ipmpl + AMT
+
+	if dep.iaf = 2 do TOTAVBAL(.dep, 0, AMT) quit
+
+	if 'SEGMENT.isNull() do {
+		type RecordDEPSEG depseg = Db.getRecord("DEPSEG", "CID=:CID,SEGMENT=:SEGMENT")
+
+		// Ledger Balance (segment)
+		set depseg.bal = depseg.bal + AMT
+
+		do depseg.bypassSave()
+
+		// Total Segment Matured Principal Balance
+		if SEGMENT = 0 set dep.tsmpb = dep.tsmpb + AMT
+		// Total Segment Non-Matured Prin Balance
+		else  set dep.tsnmpb = dep.tsnmpb+AMT
+		}
+
+	quit
+
+
+TOTAVBAL(RecordDEP dep,		// Deposit account			/REF:RW
+	 Boolean NONMAT,	// Non-matured indicator
+	 Number AMT)		// Interest amount
+
+	/*
+	Update total available interest balance for segments
+	 
+	   NONMAT Non-matured flag
+	       0 - Matured segment
+	       1 - Non-matured segment
+	*/
+	
+	type public Number CID, SEGMENT
+
+	// Total Avail Int on Matured Segments
+	if 'NONMAT set dep.taims = dep.taims + AMT
+
+	// Total Avail Int on Non-Matured Segments
+	if NONMAT set dep.tainms = dep.tainms + AMT
+
+	// For actual segments only
+	if SEGMENT.isNull() quit
+
+	type RecordDEPSEG depseg = Db.getRecord("DEPSEG", "CID=:CID,SEGMENT=:SEGMENT")
+
+	// Available Interest Balance (segment)
+	set depseg.aibal = depseg.aibal + AMT
+
+	do depseg.bypassSave()
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60813^54483^Sudanthiran S. Kumar^23408"	// Signature - LTD^TIME^USER^SIZE

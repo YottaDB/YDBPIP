@@ -1,0 +1,618 @@
+UCXOBJ		/*
+	ORIG:	Frans S.C. Witte, 2005-11-30
+	DESC:	This unit contains subroutines and functions that deal with
+		interaction to the the Object tables OBJECT, OBJECTMET, and
+		OBJECTPROP. It belongs to the Object group of the compiler.
+
+	*************************************************************************
+	* IMPORTANT NOTE:							*
+	*	Although there are currently no rules pertaining to access to	*
+	*	the Object tables, this DQ procedure shall only access these	*
+	*	tables using Db.select() and the ResultSet methods.		*
+	*	This ensures that a future migration of the Object tables to	*
+	*	the set of data store dependent tables will only require the	*
+	*	addition of the "/PSLBOOT" qualifier to the Db.select() calls	*
+	*	in order to be able to obtain the Object definitions from the	*
+	*	associated .DAT file.						*
+	*************************************************************************
+
+	---- Comments ----------------------------------------------------------
+	Even though it is likely that the Object tables will reside in M for
+	some time, access to these tables will be grouped into units that are
+	clearly distinguishable by name.
+
+	Furthermore, in line with the rules for compiler upgrades, this unit
+	only uses Db.select() to access the object tables.
+
+	This procedure contains runtime functions.
+
+	Function Name Conventions
+	=========================
+	This unit provides assess to the three Object tables OBJECT, OBJECTMET,
+	and OBJECTPROP. The functions use the following prefix to denote the
+	table that they deal with:
+	* ocXyz - Object Classes, table OBJECT
+	* omXyz - Object Methods, table OBJECTMET
+	* opXyz - Object Properties, table OBJECTPROP
+
+	---- Revision History --------------------------------------------------
+	07/11/06 - Frans S.C. Witte - CRs: 22720 / 22274
+		* Added support for source-contained method definitions.
+		* All $$oxGet() functions now return a complete Row, including
+		  the "primary key". This allows callers to derive the correct
+		  spelling of names from the returned value.
+		* OMROW.RETURN will now contain "void" if the OBJECTMET.RETURN
+		  IS NULL.
+
+	05/18/06 - Frans S.C. Witte - CRs: 21394 / 21395
+		Added omAll and opAll, and WARNings now call warnGroup^UCGM().
+
+	11/30/05 - Frans S.C. Witte - CRs: 18163 / 18164
+		New unit. Contains $$opGet() and opRowDef
+	*/
+	// I18N=QUIT
+	// *******************************************************************
+	// * IMPORTANT NOTE:                                                 *
+	// * According to the rules that apply to PSL compiler upgrades,     *
+	// * the generated M routine associated with this procedure must be  *
+	// * checked into StarTeam and released with the procedure whenever  *
+	// * changes are made to this procedure.                             *
+	// *                                                                 *
+	// * The M routine will be loaded to the mrtns directory during      *
+	// * upgrades and will then be removed from that directory as part   *
+	// * of the upgrade process.  Therefore, other than during an        *
+	// * upgrade an mrtns version of this routine should not exist.      *
+	// *                                                                 *
+	// * Keep these comments as single line to ensure they exist in the  *
+	// * generated M code.                                               *
+	// *******************************************************************
+	quit
+
+	#OPTION ResultClass ON
+
+	/* ****************************************************************** */
+	/* OBJECT RELATED FUNCTIONS AND SUBROUTINES			      */
+	/* ****************************************************************** */
+
+	// ---------------------------------------------------------------------
+public void ocAll( public String caOC())	// class cache (*1)	/MECH=REFARR:RW
+	/* ---------------------------------------------------------------------
+	Load all class descriptors in cache.
+
+	OUTPUTS:
+	. caOC( class) = class descriptor
+		for all classes that occur in OBJECT.
+
+	NOTES:
+	. RecordXXX classes will only occur in the cache if they have an
+		explicit definition in the OBJECT table.
+	*/
+	type String dummy
+
+	type ResultSet rs = Db.select( "CLASS", "OBJECT")
+	while rs.next() set dummy = $$ocGet( .caOC(), rs.getCol(1), 0)
+	quit
+
+	// ---------------------------------------------------------------------
+public String ocAncestor( String cls)	// class name (*1)
+	/* ---------------------------------------------------------------------
+	Return the ancestor class of the supplied class.
+
+	ARGUMENTS:
+	(*1) cls = class name
+		Class shall be a valid class name.
+		The spelling of cls shall match the spelling in OBJECT* or the
+		record class spelling convention.
+
+	OUTPUTS:
+	. $$ = class name of ancestor or "" if the class has no ancestor
+	*/
+	type literal String RECORDCLASS = "Record"
+
+	if cls = "Object" quit ""
+
+	type String return = ""
+
+	if $$ocIsRecord( cls), cls '= RECORDCLASS do {
+		set return = cls.extract( RECORDCLASS.length()+1, cls.length())
+		type PSLTable td = PSL.getPSLTable( return)
+		set return = RECORDCLASS_ td.parentTable
+	}
+	else  do {
+		type ResultSet rs = Db.select( "SUPERTYPE", "OBJECT", "CLASS=:cls")
+		if rs.next() set return = rs.getCol(1)
+	}
+	if return="" set return = "Object"		// implied ancestor
+	quit return
+
+	// ---------------------------------------------------------------------
+public String ocClassName( String CLS)	// class name (*1)
+	/* ---------------------------------------------------------------------
+	Return if the class exists in OBJECT.
+
+	ARGUMENTS:
+	(*1) cls = class name
+
+	OUTPUTS:
+	. $$ = 1 if record class, 0 if not
+	*/
+	if Db.isDefined( "OBJECT", "CLASS=:CLS") quit CLS
+	if $$ocIsRecord( CLS) > 0 quit CLS
+
+	type ResultSet rs = Db.select( "CLASS", "OBJECT", "UPPER(CLASS) = :CLS.upperCase()")
+	if rs.next()
+
+	quit rs.getCol(1)
+
+	// ---------------------------------------------------------------------
+public String ocGet( public String caOC(),	// class cache (*1)	/MECH=REFARR:RW
+	local String CLS,			// class name (*2)
+	local Number nCase)			// case sensitive (0) or insensitive (1)
+	/* ---------------------------------------------------------------------
+	Find and return the class descriptor for the specified cls if it exists.
+
+	ARGUMENTS:
+	(*1) caOC() = OBJECT cache
+		caOC(class) = method descriptor
+		If caOC(cls).exists(), then it will be returned, and the array
+		is not modified.
+		Else if cls is found, its descriptor will have been added.
+	(*2) CLS = class name
+		If nCase=0, then the charactercase in CLS shall match the
+		character case in OBJECT, else the comparison will be case
+		insensitive.
+
+	OUTPUTS:
+	. $$ = class descriptor
+		as found in caOC(), possibly after adding it
+	*/
+	type literal String OCSEL = "CLASS,SUPERTYPE,CONSTRUCTOR,ABSTRACT,NOINSTANT,ISPRIMITIVE,ISNOPOINTER,PROPDELIM,PROPPROC"
+	type literal String OCDEL = "|"
+
+	if 'caOC( CLS).exists() do {
+		if nCase do {
+			type String UP = CLS.upperCase()
+			type ResultSet rs = Db.select( OCSEL, "OBJECT", "UPPER(CLASS) = :UP")
+
+			if 'rs.next(), $$ocIsRecord( CLS)=0 throw Class.new( "Error", "%PSL-E-CLASS,class '"_ CLS_ "' not found")
+
+			if CLS '= rs.getCol(1) do {
+				set CLS = rs.getCol(1)
+				do warnGroup^UCGM("MISMATCH","Classname is case sensitive: "_ CLS)
+			}
+			set caOC( CLS) = rs.getRow().toString( OCDEL)
+		}
+		else  do {
+			type ResultSet rs = Db.select( OCSEL, "OBJECT", "CLASS = :CLS")
+			if 'rs.next(), $$ocIsRecord( CLS)=0 throw Class.new( "Error", "%PSL-E-CLASS,class '"_ CLS_ "' not found")
+			set caOC( CLS) = rs.getRow().toString( OCDEL)
+		}
+	}
+	quit caOC( CLS)
+
+	// ---------------------------------------------------------------------
+public Number ocIsRecord( String cls)	// class name (*1)
+	/* ---------------------------------------------------------------------
+	Return if the class is a record class.
+
+	ARGUMENTS:
+	(*1) cls = class name
+
+	OUTPUTS:
+	. $$ =	0 if not a record class,
+		1 if class is Record,
+		2 if Record descendant
+	*/
+	type literal String RECORDCLASS = "Record"
+
+	if cls = RECORDCLASS quit 1
+
+	if cls.extract( 1, RECORDCLASS.length()) = RECORDCLASS, Db.isSchemaTable( cls.extract( RECORDCLASS.length()+1, cls.length())) quit 2
+	quit 0
+
+	// ---------------------------------------------------------------------
+public Boolean ocIsAncestor( local String a,	// Ancestor class
+			     local String d)	// Descendant class
+	/* ---------------------------------------------------------------------
+	*/
+	if d="Object" quit 0
+
+	for  set d=$$ocAncestor(d) quit:a=d!d.isNull()
+	quit 'd.isNull()
+
+	// ---------------------------------------------------------------------
+public Row ocRowDef()	// return Row.getColumns() for OBJECTMET data
+	/* ---------------------------------------------------------------------
+	*/
+	type literal String OCROWDEF = "CLASS,SUPERTYPE,CONSTRUCTOR,ABSTRACT,NOINSTANT,ISPRIMITIV,ISNOPOINTER,PROPDELIM,PROPPROC"
+	quit {Row}(OCROWDEF_ 9.char()_ 124)
+
+	/* ****************************************************************** */
+	/* OBJECTMET RELATED FUNCTIONS AND SUBROUTINES			      */
+	/* ****************************************************************** */
+
+	// ---------------------------------------------------------------------
+public void omAll( public String caOM(,),	// method cache (*1)
+	local String cls,			// class name, (*2)
+	public String caOC())			// class cache (*3)	/NOREQ
+	/* ---------------------------------------------------------------------
+	Load all methods of specified class.
+
+	ARGUMENTS:
+	(*1) caOM(,) = OBJECTMET cache
+		caOM(class,method) = method descriptor
+	(*2) cls = class name
+		The spelling of cls shall match the spelling in OBJECTMET
+
+	NOTES:
+	. This subroutine calls $$omLoad to (re)load the cache unconditionally.
+		Because $$omGet() will call $$omAll() for source-originating
+		classes, this subroutine shall not call $$omGet(). If it does
+		a call stack overflow may occur.
+	. The processing order in this subroutine is significant.
+		If a source-contained method declarations exist, the source is
+		read before calling omLoad(). Thus OBJECTMET rows may override
+		declarations derived from the source.
+	*/
+
+	// Step 1: Method declarations from source code
+	type Row clsRow = $$ocGet( .caOC(), cls, 0).toRow( "#$$ocRowDef^UCXOBJ")
+	if 'clsRow.constructor.isNull(),clsRow.constructor '[ "^" do omFromSrc( .caOM(,), cls, clsRow.constructor)
+
+	// Step 2: Method declarations from OBJECTMET
+	type String dummy
+	type ResultSet rs = Db.select( "METHOD", "OBJECTMET","CLASS = :cls")
+	while rs.next() set dummy = $$omLoad( .caOM(,), cls, rs.getCol(1))
+
+	quit
+
+	// ---------------------------------------------------------------------
+public void omFromSrc( public String caOM(,),	// method cache
+	local String cls,			// class name
+	local String proc)			// source unit name
+	/* ---------------------------------------------------------------------
+	load caOM(,) with all methods from cls that can be derived from the
+	specified source unit.
+	*/
+	quit:proc.isNull()
+
+	type PSLLabelRecord lbls()
+
+	type String src()
+	type String rtn = $$getSrc^UCXDT25( proc, .src(), 0)
+
+	quit:rtn'=proc
+
+	do getLblRec^UCPSLLR( src(), "", 0, .lbls())
+
+	type String mtd = ""
+	for  set mtd = lbls( mtd).order() quit:mtd.isNull()  do {
+		if mtd = rtn quit	// routine entry = constructor
+		type PSLLabelRecord lr = lbls( mtd)
+		type String cls1 = $$getFpClass^UCPSLLR( lr, 1)
+		if cls1'=cls quit
+
+		/* Found a label with class as the first parameter.
+		   The remaining parameters are the formal parameters to the
+		   method. */
+		type Number fpn
+		type String fpl = $$getFp^UCPSLLR( lr, 2)
+		for fpn = 3:1:$$getFpCount^UCPSLLR( lr) set fpl = fpl_ ","_ $$getFp^UCPSLLR( lr, fpn)
+
+		type Row rw = Class.new( "Row", "#$$omRowDef^UCXOBJ")
+		set rw.CLASS  = cls
+		set rw.METHOD = mtd
+		set rw.RETURN = lr.class
+		set rw.PARAMETERS = fpl
+		set rw.VALLIT = 0
+		set caOM( cls, mtd) = rw.toString()
+	}
+
+	quit
+
+	// ---------------------------------------------------------------------
+public String omGet( public String caOM(,),	// method cache (*1)
+	local String cls,		// class name (*2)
+	local String mtd,		// method name (*3)
+	local Number nCase,		// name case (*4)
+	public String caOC())		// class cache (*5)	/NOREQ
+	/* ---------------------------------------------------------------------
+	Find and return the method descriptor for the specified cls.mth if it
+	exists.
+
+	ARGUMENTS:
+	(*1) caOM(,) = OBJECTMET cache
+		caOM(class,method) = method descriptor
+		If caOM(cls,mtd).exists(), then it will be returned, and the
+		array is not modified.
+		Else if cls.mth is found, its descriptor will have been added,
+		using the spelling of mtd as it occurs in OBJECTMET.
+	(*2) cls = class name
+		The spelling of cls shall match the spelling in OBJECT*
+	(*3) mtd = method name
+		This value will be treated as a case-insensitive value.
+	(*4) nCase = name case
+		0 = case sensitive
+		1 = case insensitive
+	(*5) caOC() = OBJECT cache
+		Will be used in call to $$ocGet().
+
+	OUTPUTS:
+	. $$ = method descriptor
+		1 If caOM(cls,mtd) exists, then that value will be returned
+		2 Else if caOM(cls,mtd1) with mtd1.upperCase() = mtd.upperCase()
+		  exists, then that value will be returned
+		3 Else if (cls, mtd) is found in OBJECTMET, then that value is
+		  returned
+		4 Else steps 2 and 3 are repeated for all ancestors of cls
+		5 If no match is found, "" is returned
+	. ca0M(cls,allMet) = method descriptor
+		If the cache did not yet contain any method of this class, then
+		all methods of the class will have been added by a call to
+		omAll( .caOM(,), cls, .caOC()).
+	. caOC(acls) = class descriptor
+		This entry may have been added if it did not yet exist (for
+		cls and some of its ancestors), depending on where the method is
+		found).
+	*/
+	type String acls = cls			// ancestor class iterator 
+	type String amtd = mtd			// ancestor property iterator 
+	type String ret = ""			// return value
+	type String UPMTD = $S(nCase:mtd.upperCase(),1:mtd)	// cased values of property
+
+	while (ret.isNull() & 'acls.isNull()) do {
+		// step 1: try in cache, with mtd as supplied
+		if caOM( acls, amtd).exists() set ret = caOM( acls, amtd) quit
+
+		// step 2: ensure all methods for this class are present
+		if caOM( acls, "").order().isNull() do omAll( .caOM(,), acls, .caOC())
+
+		// step 3: try in cache, case as requested
+		set amtd = ""
+		for  set amtd = caOM( acls, amtd).order() quit:amtd.isNull()  if $$equals( amtd, UPMTD, nCase) set ret = caOM( acls, amtd) quit
+
+		// step 4: If not found try ancestor
+		if ret.isNull()  set acls = $$ocAncestor( acls), amtd = mtd
+	}
+
+	if 'ret.isNull() do {
+		if amtd '= mtd do {
+			set mtd = amtd
+			do warnGroup^UCGM( "MISMATCH","Methodname is case sensitive: "_ mtd)
+		}
+	}
+
+	quit ret
+
+	// ---------------------------------------------------------------------
+local String omLoad( public String caOM(,),	// method cache (*1)
+	local String CLS,			// class name (*2)
+	local String MTD)			// method name (*3)
+	/* ---------------------------------------------------------------------
+	Helper function that loads caOM(cls,mtd) from OBJECTMET and returns the
+	resulting descriptor.
+
+	ARGUMENTS:
+	(*1) caOM(,) = OBJECTMET cache
+		see $$omGet()
+	(*2) CLS = class name
+		exact spelling, see $$omGet()
+	(*3) MTD = method name
+		exact spelling
+
+	OUTPUTS:
+	. caOM(CLS,OBJMTD) = descriptor
+		if a case insensitve match is found, then the netry will be
+		added to the cache, using the spelling as it occurs in OBJECTMET
+	*/
+	type literal String OMSEL = "CLASS,METHOD,RETURN,PARAMETERS,ROU,VALLIT"
+	type literal String OMDEL = "|"
+
+	type ResultSet rs = Db.select( OMSEL, "OBJECTMET", "CLASS = :CLS and METHOD = :MTD")
+
+	if 'rs.next() quit ""
+
+	type Row rw = rs.getRow()
+	if rw.return.isNull() set rw.return = "void"
+	
+	set caOM( CLS, MTD) = rw.toString( OMDEL)
+
+	quit caOM( CLS, MTD)
+
+	// ---------------------------------------------------------------------
+public Row omRowDef()	// return Row.getColumns() for OBJECTMET data
+	/* ---------------------------------------------------------------------
+	*/
+	type literal String OMROWDEF = "CLASS,METHOD,RETURN,PARAMETERS,ROU,VALLIT"
+	quit {Row}(OMROWDEF_ 9.char()_ 124)
+
+	// ---------------------------------------------------------------------
+public String omTryPrim( public String caOM(,),	// method cache (*1)
+	local String cls,			// class name (*1)
+	local String mtd,			// method name (*1)
+	public String caOC())			// class cache (*1)	/NOREQ
+	/* ---------------------------------------------------------------------
+	Try to find the mehtod descriptor in one of the Primitive classes.
+
+	ARGUMENTS:
+	(*1) All arguments are the same as for $$omGet()
+
+	OUTPUTS:
+	. $$ = value of $$omGet(,cls,mtd) of the first matching
+		combination in the following order:
+		1) String, Number, Date, Time with case sensitive search
+		2) String, Number, Date, Time with case in-sensitive search
+
+	NOTES:
+	. This function is derived from tryMethA^UCGMCONV()
+	. Earlier versions of this function used the order in which rows were
+		returned by the underlying ResultSet, in combination with the
+		order of the classes returned by $$primNext^UCPRIM().
+		With the addition of class ByteString for Unicode support, that
+		class shares method names with class String and class Number,
+		and any processing based on ORDER becomes "arbitrary" with
+		respect to predictability (and programmer's expectation).
+		To deal with this, the current implementation uses a List that
+		specifies the order in which the classes are searched for a
+		matching method name.
+	*/
+	type literal List PRIMITIVE = "String,Number,Date,Time"
+
+	type Number elm, nCase
+	type String pcls, retval = ""
+
+	// try case sensitive before case in-sensitive for selected PRIMITIVEs
+	for nCase=0,1 do { quit:'retval.isNull()
+		for elm=1:1:PRIMITIVE.count() do { quit:'retval.isNull()
+			set pcls = PRIMITIVE.elementAt(elm)
+			set retval = $$omGet( .caOM(,), pcls, mtd, nCase, .caOC())
+		}
+	}
+
+	if 'retval.isNull() do warnGroup^UCGM( "MISMATCH", "Cast expression to class: "_pcls_"."_mtd)
+
+	quit retval
+
+
+	/* ****************************************************************** */
+	/* OBJECTPROP RELATED FUNCTIONS AND SUBROUTINES			      */
+	/* ****************************************************************** */
+
+	// ---------------------------------------------------------------------
+public void opAll( public String caOP(,),	// property cache (*1)
+	local String cls)			// class name, (*2)
+	/* ---------------------------------------------------------------------
+	Call opGet(,,) for all properties of specified class.
+
+	ARGUMENTS:
+	(*1) caOP(,) = OBJECTPROP cache
+		caOM(class,property) = property descriptor
+		If caOM(cls,prp).exists(), then it will be returned, and the
+		array is not modified.
+		Else if cls.prp is found, its descriptor will have been added,
+		using the spelling of prp as it occurs in OBJECTPROP.
+	(*2) cls = class name
+		The spelling of cls shall match the spelling in OBJECTPROP
+	*/
+	type String dummy
+
+	type ResultSet rs = Db.select( "PROPERTY", "OBJECTPROP","CLASS = :cls")
+	while rs.next() set dummy = $$opLoad( .caOP(), cls, rs.getCol(1))
+	quit
+
+	// ---------------------------------------------------------------------
+public String opGet( public String caOP(,),	// property cache (*1)
+	local String cls,			// class name, (*2)
+	local String prp,			// property name (*3)
+	local Number nCase)			// property case handling (*4)
+	/* ---------------------------------------------------------------------
+	Find and return the property descriptor for the specified cls.prp if it
+	exists.
+
+	ARGUMENTS:
+	(*1) caOP(,) = OBJECTPROP cache
+		caOM(class,property) = property descriptor
+		If caOM(cls,prp).exists(), then it will be returned, and the
+		array is not modified.
+		Else if cls.prp is found, its descriptor will have been added,
+		using the spelling of prp as it occurs in OBJECTPROP.
+	(*2) cls = class name
+		The spelling of cls shall match the spelling in OBJECTPROP
+	(*3) prp = property name
+		Case handling of the supplied value depends on nCase.
+	(*4) nCase = case handling of prp
+		0 = case sensitive
+		1 = case insensitive
+
+	OUTPUTS:
+	. $$ = property descriptor
+		1 If caOP(cls,prp) exists, then that value will be returned
+		2 Else if caOP(cls,prp1) with prp1.upperCase() = prp.upperCase()
+		  exists, then that value will be returned
+		3 Else if (cls, prp) is found in OBJECTPROP, then that value is
+		  returned
+		4 Else steps 2 and 3 are repeated for all ancestors of cls
+		5 If no match is found, "" is returned
+	*/
+	type String acls = cls			// ancestor class iterator 
+	type String aprp = prp			// ancestor property iterator 
+	type String ret = ""			// return value
+	type String UPPRP = $S(nCase:prp.upperCase(),1:prp)	// cased value
+
+	while (ret.isNull() & 'acls.isNull()) do {
+		// step 1: try in cache, with prp as supplied
+		if caOP( acls, aprp).exists() set ret = caOP( acls, aprp) quit
+
+		// step 2: ensure all methods for this class are present
+		if caOP( acls, "").order().isNull() do opAll( .caOP(,), acls)
+
+		// step 3: try in cache, case as requested
+		set aprp = ""
+		for  set aprp = caOP( acls, aprp).order() quit:aprp.isNull()  if $$equals(aprp, UPPRP, nCase) set ret = caOP( acls, aprp) quit
+
+		// setp 4: If not found try ancestor
+		if ret.isNull() set acls = $$ocAncestor( acls), aprp = prp
+	}
+
+	if 'ret.isNull() do {
+		if aprp '= prp do {
+			set prp = aprp
+			do warnGroup^UCGM("MISMATCH","Propertyname is case sensitive: "_prp)
+		}
+	}
+
+	quit ret
+
+	// ---------------------------------------------------------------------
+local String opLoad( public String caOP(,),	// property cache (*1)
+	local String CLS,			// class name (*2)
+	local String PRP)			// property name (*3)
+	/* ---------------------------------------------------------------------
+	Helper function that loads caOP(cls,prp) from OBJECTPROP and returns the
+	resulting descriptor.
+
+	ARGUMENTS:
+	(*1) caOP(,) = OBJECTPROP cache
+		see $$opGet()
+	(*2) CLS = class name
+		exact spelling, see $$opGet()
+	(*3) PRP = property name
+		exact spelling
+
+	OUTPUTS:
+	. caOP(CLS,PRP) = descriptor
+	*/
+	type literal String OPSEL = "CLASS,PROPERTY,RETURN,NOD,POS,ROUTINE,ISREADONLY,ARRAY"
+	type literal String OPDEL = "|"
+
+	type ResultSet rs = Db.select( OPSEL, "OBJECTPROP", "CLASS = :CLS and PROPERTY = :PRP")
+
+	if 'rs.next() quit ""
+
+	set caOP( CLS, PRP) = rs.getRow().toString( OPDEL)
+
+	quit caOP( CLS, PRP)
+
+	// ---------------------------------------------------------------------
+public Row opRowDef()	// return Row.getColumns() for OBJECTPROP data
+	/* ---------------------------------------------------------------------
+	*/
+	type literal String OPROWDEF = "CLASS,PROPERTY,RETURN,NOD,POS,ROUTINE,ISREADONLY,ARRAY"
+	quit {Row}(OPROWDEF_ 9.char()_ 124)
+
+	/* ****************************************************************** */
+	/* SUPPORT FUNCTIONS AND SUBROUTINES				      */
+	/* ****************************************************************** */
+
+	// ---------------------------------------------------------------------
+local Boolean equals( String s1, String s2, Number nCase)
+	/* ---------------------------------------------------------------------
+	Support function that does case sensitive or case insensitive compares.
+	*/
+	if 'nCase quit s1=s2
+	if nCase =  1 quit s1.upperCase() = s2.upperCase()
+	if nCase = -1 quit s1.lowerCase() = s2.lowerCase()
+	throw Class.new( "Error", "%PSL-E-Invalid case option "_nCase)
+	quit ""
+
+vSIG()	quit "60528^29025^Frans S.C. Witte^22661"	// Signature - LTD^TIME^USER^SIZE

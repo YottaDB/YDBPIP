@@ -1,0 +1,195 @@
+MRPC041(return,versn,cid,crcd,amount,feetype,feeconv,ccode,efttype,antrate,seq,ttype,rcvrchg,rcvrchgc)	//Public;Trans Anticipated Amounts Calc (Foreign Pmts)
+	/*
+	   ORIG: KARPIAKP - 01/10/97
+	   DESC: Transaction Anticipated Amounts and Fees Calc (Foreign Pmts)
+
+	   KEYWORDS: MRPC
+
+	   ARGUMENTS:
+	  	 . return   	 FEECRCD  - Fee Currency
+	    			 FEEAMT   - Total Fee Amount
+	    			 FEECRCD2 - Conversion Fee Currency
+	    			 FEEAMT2  - Total Conversion Fee Amount
+	    			 ANTAMT   - Anticiapted Payment Amount
+	    			 ANTFEE1  - Anticipated Fee Amount
+	    			 ANTFEE2  - Anticipated Conversion Fee Amount
+	    			 ANTRATE  - Anticipated Exchange Rate
+	    			 ANTTOTAL - Anticipated Total Payment
+	    			 ADDHLD   - Additional Hold Amount
+	    			 HLDSEQ   - Hold Sequence
+	    			 BALAVL   - Calc BALAVL
+	    			 ORGBAL   - Original BALAVL
+	                         RCVRCHG  - Receiver's Charge
+	                         RCVRCHGC - Receiver's Charge Currency
+
+	  	 . versn   	 MRPC041 version number 	 /TYP=T/REQ
+	        						 /MECH=VAL
+
+	  	 . params	 Input parameters tab separated	 /TYP=T/REQ
+	        						 /MECH=VAL
+	    			 - cid 		 Account Number
+	    			 - crcd 	 Payment Currency
+	    			 - amount	 Transaction Amount
+	    			 - feetype	 Fee Type (Calc Method)
+	    			 - feeconv	 Conversion Fee
+	    			 - ccode 	 Code
+	    			 - efttype	 Electronic Pmt Type
+	    			 - antrate	 Anticipated (custom) rate
+	    			 - ttype 	 Transaction Type:
+	       					 0 - customer -> customer
+	       					 1 - customer -> GL
+	       					 2 - GL -> customer
+	       					 3 - GL -> GL
+	                         - rcvrchg       Receiver's Charge
+	                         - rcvrchgc      Receiver's Charge Currency
+
+	   RETURNS:
+	  	 . $$	 Error message 		 /TYP=T
+	   		 Null = No error
+
+	   RELATED:
+	  	 . $$^PBSMRPC - MRPC Service Class Driver
+
+	   EXAMPLE:
+	  	 $$^MRPC041(.RET,1,300,"USD",1000,"FEEXX",1,1,"NDPO")
+
+	---- Revision History ------------------------------------------------
+
+	   11/10/03 - CARROLLJ - 51630
+		      Removed cuvar object from EXC^CRCDUTL call.
+
+	   05/29/02 - SRIVASTAVAN - 49794
+	   	      Converted To PSL
+
+	   02/01/02 - RICKARDSC - 48359
+	              Modified to use new EFTFCALC procedure
+
+	   04/06/01 - SPIER 44495
+	              Modified FETCH^SQL call to fix issue
+	       	      when calling stored procedure rather then cache code, sqlsta
+	       	      must be reviewed not sqlcnt.
+
+	   11/02/00 - KELLYP - 40847
+	              Added code to support receiver's charge and receiver's
+	              charge currency for NDPO's using an MT103.
+
+	   01/04/00 - KARPIAKP - 36154 (Orig. 35873/PBKG0576)
+	       	      Added code to support processing payments from other than
+	       	      deposit accounts. Corrected problem with setting/getting
+	       	      holds for GL accounts. Added new parameter to the function
+	              header: ttype.
+
+	----------------------------------------------------------------------
+	*/
+	// Version number of client message is not compatible with server
+	if $G(versn)'=1 quit $$ERRMSG^PBSUTL($$^MSG(2951))
+
+	new AAMT,ABALAVL,ACNF,AFEE,AHLD,ANTTOTAL,ARTE,BALAVL,CID,CNVAMT
+	new CNVCRCD,EXCAMT,FEEAMT,FEECRCD,HCID,HSEQ,MAXRATE,MINRATE,MULTIPLY
+	new RATE,RCVRCHG,RCVRCHGC,SEQ,STR
+
+	set ER=0
+	set RM=""
+
+	// Convert receiver charges to payment currency (no margins, non-cash, mid-rate)
+	set RCVRCHG=$G(rcvrchg)
+	set RCVRCHGC=$G(rcvrchgc)
+	set crcd=$G(crcd)
+	set ccode=$G(ccode)
+	if (RCVRCHG>0),(RCVRCHGC="") set RCVRCHGC=crcd
+	if (RCVRCHG>0),(RCVRCHGC'=crcd) do {
+		do EXC^CRCDUTL(RCVRCHGC,crcd,RCVRCHG,1,2,"00",ccode,"",1)
+		set RCVRCHG=$$^SCARND(EXCAMT,0,"",crcd)
+		set RCVRCHGC=crcd
+		}
+	
+	type RecordEFTPAY eftpay
+        set eftpay=Class.new("RecordEFTPAY")
+	
+	set eftpay.cid=$G(cid)
+	set eftpay.seq=$G(seq)
+	
+	// These variables need to be defined for this process.
+	set CID=$G(cid)
+	set SEQ=$G(seq)
+
+	// Related Reference Number
+	set eftpay.amount=$G(amount)
+	
+	// Transaction Reference Number
+	set eftpay.crcd=crcd
+
+	// Recipient's Correspondent
+	set eftpay.efttype=$G(efttype)
+
+	// Fee Currency
+	set eftpay.ttype=$G(ttype)
+
+	// Anticipated Payment Exchange Rate
+	set eftpay.antrate=$G(antrate)
+
+	// Fee Calculation Method
+	set eftpay.feetype=$G(feetype)
+	
+	// Conversion Fee
+	set eftpay.feeconv=$G(feeconv)
+
+	// Margin Code
+	set eftpay.ccode=ccode
+
+	// Receiver's Charge
+	set eftpay.rcvrchg=$G(RCVRCHG)
+
+	// Currency of Receiver's Charge
+	set eftpay.rcvrchgc=$G(RCVRCHGC)
+	
+	// Calculate fees and anticipated amounts associated with the outgoing
+	// foreign payment.
+	
+	do ^EFTFCALC(.eftpay,.FEEAMT,.FEECRCD,.CNVAMT,.CNVCRCD,.AAMT,.ARTE,.AFEE,.ACNF,.AHLD)
+
+	if ER quit $$ERRMSG^PBSUTL(RM)
+	
+	set FEEAMT=$$^SCARND(FEEAMT,0,"",FEECRCD)
+	set CNVAMT=$$^SCARND(CNVAMT,0,"",CNVCRCD)
+
+	// Outgoing payments have fees added to the hold total
+	set ANTTOTAL=AFEE+ACNF+AHLD
+
+	// Calculate payment account's available balance for non-GLs
+	set (ABALAVL,BALAVL)=""
+	if $G(ttype)<2 do {
+		set BALAVL=$$TOTBALAVL^EFTFUNCS(CID)
+		if ER quit
+
+		// Add holds placed for the payment to the available bal for 
+		// existing payments.
+		if SEQ'="" do {
+			set HCID=""
+ 			type ResultSet rs=Db.select("HCID,HSEQ","EFTHLD","CID=:CID AND SEQ=:SEQ")
+			if rs.isEmpty() quit
+			while rs.next()  do {
+       				set HCID=rs.getCol(1)
+				set HSEQ=rs.getCol(2)
+				type RecordPHLD phld=Db.getRecord("PHLD","CID=:HCID,SEQ=:HSEQ")
+				set BALAVL=BALAVL+phld.amt
+				}
+			}
+		set ABALAVL=BALAVL-ANTTOTAL
+		}
+	
+	if ER quit $$ERRMSG^PBSUTL(RM)
+
+	// Format return
+	set STR=FEECRCD_$C(9)_FEEAMT_$C(9)_CNVCRCD_$C(9)_CNVAMT
+	set STR=STR_$C(9)_AAMT_$C(9)_AFEE_$C(9)_ACNF_$C(9)_ARTE
+	set STR=STR_$C(9)_ANTTOTAL_$C(9)_AHLD_$C(9)_$C(9)_ABALAVL
+	set STR=STR_$C(9)_BALAVL
+	
+	if (RCVRCHG'=""),(RCVRCHG'=0) set STR=STR_$C(9)_RCVRCHG_$C(9)_RCVRCHGC
+	
+	set return=$$V2LV^MSG(STR)
+
+	quit ""
+
+vSIG()	quit "59886^43584^Sanchez SCM Administrator^5492"	// Signature - LTD^TIME^USER^SIZE

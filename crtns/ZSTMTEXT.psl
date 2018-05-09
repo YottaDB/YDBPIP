@@ -1,0 +1,1134 @@
+ZSTMTEXT		/*
+	 ORIG: shankk - 02/05/2007
+	 DESC: Creates Custom Statement Extract Files
+	
+	 ---- Comments -------------------------------------------------------
+	This procedure creates statement extracts from table LETSTMT.  Each
+	extract file is created from the form and variation that populated LETSTMT.
+	
+	Form STMTLNBILL Variation 100 - 	Loan/Billing Fixed
+	Form STMTCMB Variation 100 - 		Deposits/Checks 
+	
+	 ---- Revision History -----------------------------------------------
+	08/23/07 - SHANKK - CR28889
+		Section LNBILL:
+			Added Mother's maiden name to Card Holder's name in 
+			record D.
+			Add spaces between street, external address and external
+			address in record D.
+			Changed Payment Credit Term to number of payments 
+			instead of the actual term in record K.
+			Corrected mapping of Last Balance and Final Balance in 
+			record K.
+			Mapped Basic Balance Estimate to Account Balance at billing
+			date in record L.
+			Corrected record O not pulling messages because XGRP needed
+			spaces removed.
+	
+	08/15/07 - SHANKK - CR28787
+		Mail Flag size is 2 for deposit and 1 for loan. Added
+		extra parameter on RECE to determine what size Mail Flag
+		is supposed to be.
+		FSEQ was one update short on O record.
+		
+	08/06/07- SHANKK - CR28640
+		Section LNBILL:
+			Changed setting of prefix field Sequence Statement Number to show the number of each
+			individual record type.  Record "A" would always be an 1, etc.  Added record type "M".
+			Replaced LN.IFTAN with LN.AUPTCID in record type "B".  Added LN.ACCTNAME
+			to record type "K".  Added transaction code to record type "I".  Changed account length 
+			to 12 in record type "B".
+		Section DEPOSIT:
+			Changed setting of prefix field Sequence Statement Number to show the number of each
+			individual record type.  Record "A" would always be an 1, etc.  Changed the length of 
+			the Transaction Hour field in record type "G" to 6.  This allows seconds to be added.
+			Corrected Transaction Description not appearing for all transactions.
+	
+	07/31/07 - SHANKK - CR28475	
+		The variable ACTTRN was being set to null because of a typo with the variable assignment.
+		The mail flag size was reduced to 1 byte from 2.
+		Fixed payment amount on L record had incorrect extract parameters
+
+	05/18/07 - SHANKK- CR27303
+		Added items Transaction Concept 1,2 and FEA to Deposit extract.  Modified field lengths in record prefix. 
+		Changed setting of Sub-Product to a blank in record prefix.  Added item ITC1 to Loan/Billing extract.  
+		Corrected section SPCMSG, variable ENDDAY was mispelled.
+		
+	05/01/07 - SHANKK - CR26927
+		Added actual message to statement record 'O'.  Added new items VAT,Taxable Daily Average balance,
+		Withholding, Credit Card Number, Transaction Ref Number, RFC Commerce and RFC number 
+		of the check beneficiary to Deposit extract.  Modified filenames for extracts.
+	
+	04/04/07 - SHANKK - CR26547
+		In section LNBILL corrected the setting of OTHCHGS and PAYMENT DUE DATE .  Added messages to
+		statement record type "O".
+	
+	03/20/07 - SHANKK - CR26064
+		Removed all database hits during record creation.
+	
+	02/05/2007 - SHANKK - CR25917
+		Initial release.
+			
+	*/
+	type String BNKCNTRY,BNKRFC(),DCC,FEES(),CRCD(),FORM,MRKTCD(),MSGKEY(),MSKFLG,PRODCTL()
+	type String SPMNTHS,STATES(),VFMQ,WHERE,XCO,XIO,ZONES()
+	type String %EXT,%READ,%TAB
+	type Date XTJD
+		
+	set SPMNTHS="ENE,FEB,MAR,ABR,MAY,JUN,JUL,AGO,SEP,OCT,NOV,DIC"
+	set MSKFLG=0
+	if %MSKD'="YEAR-MM-DD" set MSKFLG=1
+	set XTJD=%SystemDate
+		
+	set %TAB("XTJD")=".EFD2/REQ"
+	set %TAB("XCO")=$$DI^SCATAB("[UTBLCO]CO",,,"[UTBLCO]")
+        set %TAB("FORM")="[UTBLFORMS]FORM/TBL=[UTBLFORMS]/XPP=D POST^ZSTMTEXT(X,XCO)/NOREQ"
+        set %TAB("XIO")=$$IO^SCATAB()
+	 
+	set %READ="@@%FN/CEN/REV,,XTJD,XCO,FORM,XIO/NOREQ/XPP=I X'="""" set %EXT=1 do ^SCAIO"
+	do ^UTLREAD quit:VFMQ="Q"
+	
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+	set BNKCNTRY=cuvar.ccntry
+	
+	//CR26064
+	type ResultSet rscrcd=Db.select("CRCD,CO,DESC","CRCD")
+	while rscrcd.next() set CRCD(rscrcd.getCol(1),rscrcd.getCol(2))=rscrcd.getCol(3)
+	
+	type ResultSet rsstate=Db.select("STATE,DESC","STBLCNTRY1","CNTRY=:BNKCNTRY")
+	while rsstate.next() set STATES(rsstate.getCol(1))=rsstate.getCol(2)
+	
+	type ResultSet rsbnkrfc=Db.select("CO,COMMENT1","UTBLCO")
+	while rsbnkrfc.next() set BNKRFC(rsbnkrfc.getCol(1))=rsbnkrfc.getCol(2)
+	
+	type ResultSet rszones=Db.select("ZONE,LOWEST,HIGHEST","ZUTBLZONE")
+	while rszones.next() set ZONES(rszones.getCol(1))=rszones.getCol(2)_"|"_rszones.getCol(3)
+	
+	set WHERE="(STARTDT=IS NULL AND ENDDT=IS NULL) OR (ENDDT=IS NULL AND STARTDT NOT>:%SystemDate)"
+	set WHERE=WHERE_" "_"OR (STARTDT=IS NULL AND ENDDT NOT<:%SystemDate)" 
+	set WHERE=WHERE_" "_"OR (STARTDT NOT>:%SystemDate AND ENDDT NOT<:%SystemDate)"
+	// CR26927
+	type ResultSet rsmrktcd=Db.select("ZONE,TYPE,BAL,MSGCODE,MESSAGE","ZUTBLSTMTMKT",WHERE)
+	while rsmrktcd.next() do {
+		set MRKTCD(rsmrktcd.getCol(1),rsmrktcd.getCol(2),rsmrktcd.getCol(3))=rsmrktcd.getCol(4)_"|"_rsmrktcd.getCol(5)
+	}
+	
+	// CR26927
+	type ResultSet rsmsgkey=Db.select("GRP,STMTKEY,MSGCODE,MESSAGE","ZUTBLSTMTMSG")
+	while rsmsgkey.next() set MSGKEY(rsmsgkey.getCol(1),rsmsgkey.getCol(2))=rsmsgkey.getCol(3)_"|"_rsmsgkey.getCol(4)
+	
+	if (FORM.isNull())!(FORM="STMTLNBILL") do {
+		type ResultSet rslnfee=Db.select("CID,FEEREM","LNFEE","FEETYP='GTOXCOB'")
+		while rslnfee.next() set FEES(rslnfee.getCol(1))=rslnfee.getCol(2)
+		type ResultSet rsprodctl=Db.select("TYPE,DCC1,DCC2,DCC3,DCC4,DCC5,DCC6,DCC7","PRODCTL","GRP='LN'")
+		while rsprodctl.next() do {
+			set DCC=rsprodctl.getCol(2)_"|"_rsprodctl.getCol(3)_"|"_rsprodctl.getCol(4)_"|"_rsprodctl.getCol(5)
+			set DCC=DCC_"|"_rsprodctl.getCol(6)_"|"_rsprodctl.getCol(7)_"|"_rsprodctl.getCol(8)
+			set PRODCTL(rsprodctl.getCol(1))=DCC
+		}
+	}
+	
+	do Db.fastDelete("ZSTMTEXT")
+	
+	if FORM.isNull() do ALLFRM(XTJD,XCO,XIO)  // Process records for all forms in LETSTMT
+	else  do PRCSSFRM(XTJD,FORM,XCO,XIO)  //Process Records for one form in LETSTMT
+	
+	quit
+	
+PRCSSFRM(Date XTJD,String XFORM,String CO,String XIO)	
+	
+	// Process one form in LETSTMT for a specific process date
+	
+	/*  Arguments
+		XTJD - 		Process Date      /REQ
+		XFORM - 	FORM		  /REQ
+		CO - 		Company Code   /NOT REQ
+		XIO-                Device		/NOT REQ
+	*/
+	
+	type String REC
+	type String ACCTINFO(),TRNINFO()
+	type Number DRCTRY,SEQ,STMGRP,TOTBILL,TOTCID,TOTREC,TOTSTM,TOTTRN,XVAR
+	set (DRCTRY,SEQ)=0
+	
+	// Prints builds records for one form from LETSTMT
+ 	type ResultSet rs=Db.select("DISTINCT CO","LETSTMT","SJD=:XTJD")
+	if 'rs.isEmpty() while rs.next() do {
+		set XCO=rs.getCol(1)
+		if 'CO.isNull(),XCO'=CO quit
+				
+		type RecordLETSTMT0 letstm=Db.getRecord("LETSTMT0","SJD=:XTJD,CO=:XCO,FORM=:XFORM",1) 
+		if letstm.getMode(),letstm.flg do Runtime.setErrMSG("LETSTMT0",4451) quit 
+		
+		new rs1
+		type ResultSet rs1=Db.select("DISTINCT VAR","LETSTMT","SJD=:XTJD AND CO=:XCO AND FORM=:XFORM")
+		if 'rs1.isEmpty() while rs1.next() do {
+			set XVAR=rs1.getCol(1)
+			set (TOTBILL,TOTSTM,TOTCID,TOTTRN,TOTREC)=0
+	
+			new rs2
+			type ResultSet rs2=Db.select("RECORD,RECTYPE,STMGRP","LETSTMT","SJD=:XTJD AND CO=:XCO AND FORM=:XFORM AND VAR=:XVAR")
+			if 'rs2.isEmpty() while rs2.next() do {
+				set REC=rs2.getCol(1)
+				set RTYP=rs2.getCol(2)
+				set STMGRP=rs2.getCol(3)
+					
+				// Save next account information
+				if RTYP>"798" quit
+				if (RTYP<300)!(RTYP="TRN") set ACCTINFO(RTYP)=REC
+				else  do {
+					if ((RTYP="300")!(RTYP="400")) do {
+						set TOTCID=TOTCID+1
+						set XCID=REC.extract(17,29)
+						set XCID=+XCID
+					}
+					if RTYP="710" set TOTTRN=TOTTRN+1
+					set I=""
+					set SEQ=TRNINFO(XCID,RTYP,I).order(-1)+1
+					set TRNINFO(XCID,RTYP,SEQ)=REC
+				}
+				if RTYP="769",XFORM="STMTCMB",XVAR="100" do {
+					set TOTSTM=TOTSTM+1
+					do DEPOSIT(ACCTINFO(),TRNINFO(),XCID,TOTSTM) //Deposits
+					kill TRNINFO
+				}
+				if RTYP="798",XFORM="STMTLNBILL",XVAR="100" do {
+					set TOTSTM=TOTSTM+1
+					do LNBILL(ACCTINFO(),TRNINFO(),XCID,TOTSTM)  //Loan/Billing Fixed
+					kill TRNINFO
+				}			
+				if (RTYP="798") kill ACCTINFO		
+			}
+		do TOT(TOTSTM,TOTCID,TOTTRN,TOTREC,.XIO,.DRCTRY,TOTBILL) // Save Totals
+		do EXTRACT(XFORM,XCO,XVAR,XIO,DRCTRY,TOTSTM,TOTREC) // Write Extracts
+		do LETZERO(XTJD,XCO,XFORM)
+		}
+	quit
+	
+ALLFRM(Date XTJD,String CO,String XIO)	
+	
+	// Process All forms in LETSTMT for a specific process date
+	
+	/*  Arguments
+		XTJD - Process Date  /REQ
+		CO - Company Code  /NOT REQ
+		XIO - Device  /Not REQ
+		
+	*/
+	
+	type String REC
+	type String ACCTINFO(),TRNINFO()
+	type Number DRCTRY,LEN,SEQ,STMGRP,TOTBILL,TOTCID,TOTREC,TOTSTM,TOTTRN,XVAR
+	set (DRCTRY,SEQ)=0
+	// Prints builds records for one form from LETSTMT
+ 	type ResultSet rs=Db.select("DISTINCT CO","LETSTMT","SJD=:XTJD")
+	if 'rs.isEmpty() while rs.next() do {
+		set XCO=rs.getCol(1)
+		if 'CO.isNull(),XCO'=CO quit
+		
+		type ResultSet rs1=Db.select("DISTINCT FORM","LETSTMT","SJD=:XTJD AND CO=:XCO")
+		if 'rs1.isEmpty() while rs1.next() do {
+			set XFORM=rs1.getCol("FORM")
+			set FLG=0
+		
+			type RecordLETSTMT0 letstm = Db.getRecord("LETSTMT0","SJD=:XTJD,CO=:XCO,FORM=:XFORM",1) 
+			if letstm.getMode(),letstm.flg do Runtime.setErrMSG("LETSTMT0",4451) quit 
+					
+			new rs2
+			type ResultSet rs2=Db.select("DISTINCT VAR","LETSTMT","SJD=:XTJD AND CO=:XCO AND FORM=:XFORM")
+			if 'rs2.isEmpty() while rs2.next() do {
+				set XVAR=rs2.getCol(1)
+				set (TOTBILL,TOTSTM,TOTCID,TOTTRN,TOTREC)=0
+	
+				new rs3
+				type ResultSet rs3=Db.select("RECORD,RECTYPE,STMGRP","LETSTMT","SJD=:XTJD AND CO=:XCO AND FORM=:XFORM AND VAR=:XVAR")
+				if 'rs3.isEmpty() while rs3.next() do {
+					set REC=rs3.getCol(1)
+					set RTYP=rs3.getCol(2)
+					set STMGRP=rs3.getCol(3)
+					
+					// Save next account information
+					if RTYP>"798" quit
+					if (RTYP<300)!(RTYP="TRN") set ACCTINFO(RTYP)=REC
+					else  do {
+						if ((RTYP="300")!(RTYP="400")) do {
+							set TOTCID=TOTCID+1
+							set XCID=REC.extract(17,29)
+							set XCID=+XCID
+						}
+						if RTYP="710" set TOTTRN=TOTTRN+1
+						set I=""
+						set SEQ=TRNINFO(XCID,RTYP,I).order(-1)+1
+						set TRNINFO(XCID,RTYP,SEQ)=REC
+					}
+					if RTYP="769",XFORM="STMTCMB",XVAR="100" do {
+						set TOTSTM=TOTSTM+1
+						do DEPOSIT(ACCTINFO(),TRNINFO(),XCID,TOTSTM) //Deposits
+						kill TRNINFO
+					}	
+					if RTYP="798",XFORM="STMTLNBILL",XVAR="100" do {
+						set TOTSTM=TOTSTM+1
+						do LNBILL(ACCTINFO(),TRNINFO(),XCID,TOTSTM)  //Loan/Billing Fixed
+						kill TRNINFO
+					}					
+					if (RTYP="798") kill ACCTINFO
+				}
+			do TOT(TOTSTM,TOTCID,TOTTRN,TOTREC,.XIO,.DRCTRY,TOTBILL) // Save Totals
+			do EXTRACT(XFORM,XCO,XVAR,XIO,DRCTRY,TOTSTM,TOTREC) // Write Extracts
+			do LETZERO(XTJD,XCO,XFORM)
+			}
+		}
+	quit
+
+
+DEPOSIT(String acctinfo,String trninfo,Number xcid,Number totstm)
+
+	// Create CHECKING or SAVINGS account statement records
+	type String ACT100,ACT200,ACT203,ACTTRN,ADDR1,BENRFC,CARDNUM,CDLVOFF,CITY,CLABE,CORFC,CONAME,CRFC,CURP
+	type String EXTNUM,FNLPRD,HOUR,INTNUM,INTPRD,ISSDAT,MSGCD(),MUNIC,PDATE,PHLD,PREFIX,REC950,SREC
+	type String STATE,STORRFC,SUBURB,TRANAMT,TRANDESC,TRANFAMT,TRN300,TRN301,TRN400,TTIME,XGRP
+	type String TRN402,TRN500,TRN700,TRN710,TRN713,TRN730,TSEQ(),XACN,XCRD,XCRCD,XNAM,XZIP
+	type Number ACNTZIP,AIR,BAL,BNUM,CHKNUM,CHRGS,CLABE,DAB,EXCHNGRT,FEA,FBAL,FSEQ,HIGHEST,IEP,INCTAXW,INTPD,IRN
+	type Number LBAL,LOWEST,MIR,NDAYS,PFLG,PTYPE,REFNUM,RUNBAL,STAT,TDAB,TOTCRBAL
+	type Number TOTCRED,TOTDEB,TOTDEBBAL,TRACE,VAT,WHLD
+	type Date DOB,FDATE,ODT
+	type public String CRCD(),MSKFLG,SPMNTHS,STATES(),XCO,XFORM
+	type public Number TOTBILL,TOTREC,XVAR
+	type public Date XTJD
+	
+	set ACTTRN=acctinfo("TRN").get()
+	set ACT100=acctinfo("100").get()
+	set ACT200=acctinfo("200").get()
+	set ACT203=acctinfo("203").get()
+	set TRN300=trninfo(xcid,"300",1).get()
+	set TRN301=trninfo(xcid,"301",1).get()
+	set TRN400=trninfo(xcid,"400",1).get()
+	set TRN402=trninfo(xcid,"402",1).get()
+	set TRN700=trninfo(xcid,"700",1).get()
+	set TRN710=trninfo(xcid,"710",1).get()
+	set TRN711=trninfo(xcid,"711",1).get()
+			
+	set XACN=ACT200.extract(5,16)
+	set CRFC=ACT200.extract(84,96)
+	
+	// Find TYPE,CRCD,BOO,GRP
+	set BNUM=+ACTTRN.extract(22,28)
+	if 'TRN300.isNull() do {
+		set PTYPE=TRN300.extract(194,198)
+		set XCRCD=TRN300.extract(401,403)
+		set XCRCD=XCRCD.trim(1)
+		set XGRP=TRN300.extract(190,193)
+		set BAL=+TRN300.extract(274,289)/100
+		set IRN=+TRN300.extract(343,351)/100000
+		set CLABE=TRN301.extract(362,379)
+		set STAT=TRN301.extract(361)
+		set ODT=TRN300.extract(264,273)
+	}
+	else  do {
+		set PTYPE=TRN400.extract(194,198)
+		set XCRCD=TRN400.extract(395,397)
+		set XCRCD=XCRCD.trim(1)
+		set XGRP=TRN400.extract(190,193)
+		set BAL=+TRN400.extract(308,323)/100
+		set IRN=+TRN400.extract(343,351)/100000
+		set CLABE=TRN402.extract(83,100)
+		set STAT=TRN402.extract(135)
+		set ODT=TRN400.extract(264,273)
+	}
+	// Check Date MASK
+	set INTPRD=TRN700.extract(4,13)
+	set FNLPRD=TRN700.extract(14,23)
+	set ISSDAT=ACTTRN.extract(44,53)
+	set DOB=ACT200.extract(104,113)
+	if MSKFLG do {
+		set INTPRD=$$CHGDT(INTPRD)
+		set FNLPRD=$$CHGDT(FNLPRD)
+		set ISSDAT=$$CHGDT(ISSDAT)
+		set DOB=$$CHGDT(DOB)
+		set ODT=$$CHGDT(ODT)
+	}
+	
+	set FSEQ=1
+	// Record  Type A
+	set SREC=$$RECA(ACT100,xcid,XACN,XGRP,1)
+	do FILEREC(XTJD,XCO,XFORM,XVAR,XACN,xcid,"A",SREC,FSEQ)
+	set TOTREC=TOTREC+1
+	set FSEQ=FSEQ+1
+	// B Record Superior Summary
+	set VAT=0
+	set SEQ=""
+	for  set SEQ=trninfo(xcid,"730",SEQ).order(1) quit:SEQ=""  do {	// CR26927
+		set TRN730=trninfo(xcid,"730",SEQ)
+		if TRN730.extract(4,15).trim()="VAT" set VAT=TRN730.extract(80,95)/100
+	}
+	set XCRD=CRCD(XCRCD,XCO).get().extract(1,20)
+	set CHRGS=TRN700.extract(164,179)/100
+	set SREC=$$RECPREFX("B",xcid,XGRP,1,XACN)
+	set SREC=SREC_xcid.zero(12)_CLABE.zero(18)_BNUM.zero(6)_XCRD.blank(20)_INTPRD_FNLPRD
+	set SREC=SREC_CHRGS.zero(16,2)_VAT.zero(16,2)_ISSDAT
+	set SREC=SREC.blank(400)
+	do FILEREC(XTJD,XCO,XFORM,XVAR,XACN,xcid,"B",SREC,FSEQ)
+	set TOTREC=TOTREC+1
+	set FSEQ=FSEQ+1
+	// C Record 1 Branch Information
+	set REC950=$$950^LETTERF(BNUM)
+	set SREC=$$RECPREFX^ZSTMTEXT("C",xcid,XGRP,1,XACN)
+	set SREC=SREC_BNUM.zero(6)_REC950.extract(10,49)_REC950.extract(50,89)_REC950.extract(90,129)
+	set SREC=SREC.blank(400)
+	do FILEREC(XTJD,XCO,XFORM,XVAR,XACN,xcid,"C",SREC,FSEQ)
+	set FSEQ=FSEQ+1
+	set TOTREC=TOTREC+1
+	// D Record 1 Customer Data
+	set XNAM=ACT200.extract(296,335)
+	set CDLVOFF=""		// Delivery Office
+	set CURP=ACT200.extract(349,366)
+	set FEA=ACT200.extract(369,388)   //Advanced Electronic Signoff  CR27303
+	set ADDR1=ACT203.extract(84,123)
+	set ADDR1=ADDR1.trim(1)
+	set EXTNUM=ACT203.extract(124,163)
+	set EXTNUM=EXTNUM.trim(1)
+	set INTNUM=ACT203.extract(164,203)
+	set INTNUM=INTNUM.trim(1)
+	set ADDR1=ADDR1_EXTNUM_INTNUM
+	if ADDR1.length()>40 set ADDR1=ADDR1.extract(1,40)
+	set SUBURB=ACT203.extract(278,317)
+	set MUNIC=ACT203.extract(204,243)
+	set CITY=ACT203.extract(244,263)
+	set STATE=ACT203.extract(264,265)
+	set STATE=STATES(STATE).get().extract(1,20)
+	set XZIP=ACT203.extract(266,270)
+	set ACCTNAM=TRN300.extract(239,263)
+	set SREC=$$RECPREFX^ZSTMTEXT("D",xcid,XGRP,1,XACN)
+	set SREC=SREC_XNAM_CRFC_CURP.blank(18)_FEA.zero(20)_XZIP_CDLVOFF.zero(5)
+	set SREC=SREC_ADDR1.blank(40)_SUBURB_MUNIC_CITY_STATE.blank(20)_ACCTNAM
+	set SREC=SREC.blank(400)
+	do FILEREC(XTJD,XCO,XFORM,XVAR,XACN,xcid,"D",SREC,FSEQ)
+	set FSEQ=FSEQ+1
+	set TOTREC=TOTREC+1
+	
+	// E Record Delivery Data
+	if +BAL=0,'TRN710.data() set PFLG=0
+	else  set PFLG=1
+	set SREC=$$RECE(ACT200,PFLG,xcid,XACN,XGRP,1,1) //CR28787
+	do FILEREC(XTJD,XCO,XFORM,XVAR,XACN,xcid,"E",SREC,FSEQ)
+	set FSEQ=FSEQ+1
+	set TOTREC=TOTREC+1
+	
+	// F Record - Financial Information
+	set SREC=$$RECPREFX^ZSTMTEXT("F",xcid,XGRP,1,XACN)
+	set DAB=+(TRN700.extract(180,195)/100)
+	if DAB<0 set DAB=DAB.zero(16,2,,1)
+	else  set DAB=DAB.zero(16,2)
+	set NDAYS=TRN700.extract(230,232)
+	set AIR=IRN
+	set MIR=IRN/12
+	set IEP=+TRN700.extract(214,229)/100
+	set INCTAXW=0
+	set SEQ=""
+	for  set SEQ=trninfo(xcid,"710",SEQ).order(1) quit:SEQ=""  do { // CR26927
+		set TRANSEQ=+trninfo(xcid,"713",SEQ).extract(36,44)
+		set WHLD=trninfo(xcid,"713",SEQ).extract(108,123)/100
+		if 'TSEQ(TRANSEQ).data() set INCTAXW=INCTAXW+WHLD
+		set TSEQ(TRANSEQ)=""
+	}
+	set SEQ=""	// CR26927
+	for  set SEQ=trninfo(xcid,"711",SEQ).order(1) quit:SEQ=""  do {
+		set WHLD=trninfo(xcid,"711",SEQ).extract(89,104)/100
+		set INCTAXW=INCTAXW+WHLD
+	}
+	set TDAB=TRN700.extract(180,195)/100 // CR26927
+	set LBAL=TRN700.extract(76,91)/100
+	set FBAL=TRN700.extract(92,107)/100
+	set TOTDEB=TRN700.extract(140,143)	
+	set TOTCRED=TRN700.extract(144,147)
+	set TOTDEBAL=TRN700.extract(108,123)/100
+	set TOTCRBAL=TRN700.extract(124,139)/100
+	set INTPD=TRN700.extract(148,163)/100
+	set SREC=SREC_DAB.zero(16,2)_NDAYS_MIR.zero(8,4)_AIR.zero(8,4)_IEP.zero(16,2)_INCTAXW.zero(16,2)_TDAB.zero(16,2)
+	set SREC=SREC_LBAL.zero(16,2)_FBAL.zero(16,2)_TOTDEB_TOTCRED_TOTDEBAL.zero(16,2)
+	set SREC=SREC_TOTCRBAL.zero(16,2)_INTPD.zero(16,2)
+	set SREC=SREC.blank(400)
+	do FILEREC(XTJD,XCO,XFORM,XVAR,XACN,xcid,"F",SREC,FSEQ)
+	set FSEQ=FSEQ+1
+	set TOTREC=TOTREC+1
+	if TRN710.data() do {
+		set SEQ=""
+		for  set SEQ=trninfo(xcid,"710",SEQ).order(1) quit:SEQ=""  do {
+			// G Record 1 Detail of Transactions
+			set TRN710=trninfo(xcid,"710",SEQ).get()
+			set TRN713=trninfo(xcid,"713",SEQ).get()
+			set TRANCODE=TRN713.extract(45,56)
+			set SPRAY=TRN710.extract(329,340)
+			set TRACE=+TRN713.extract(144,158)
+			set PDATE=TRN710.extract(121,130)
+			set FDATE=PDATE.toDate(%MSKD)
+			set MONTH=+FDATE.month()
+			set PDATE=FDATE.day()_"/"_SPMNTHS.piece(",",MONTH)
+			set TRANSEQ=TRN713.extract(36,44)
+			//CR28640
+			set TRANDESC=TRN710.extract(157,196)
+			set TRANDESC=TRANDESC.trim()
+			if TRANDESC="" set TRANDESC=trninfo(xcid,"710",SEQ).extract(197,236)
+			set TRANDESC=TRANDESC.justify(40,-1," ",0)
+			set TTIME=TRN713.extract(57,67)
+			set TTIME=TTIME.trim(1)
+			set CHKNUM=+TRN710.extract(317,328)
+			if CHKNUM=0 set CHKNUM=""
+			else  set CHKNUM=CHKNUM.zero(7)
+			//CR27303
+			set TRNCPT1=FDATE.day()_FDATE.month()_FDATE.year()_" "_$$TIM^%ZM(TTIME,"24:60")_" "
+			set TRNCPT1=TRNCPT1_TRACE.zero(7)_" "_CHKNUM
+			set TRNCPT2=TRN713.extract(159,198)
+			set PHLD=TRN713.extract(199,206)
+			if TRN713.extract(68,71).trim(1)="" set CARDNUM=""
+			else  set CARDNUM="****"_TRN713.extract(68,71) // CR26927
+			set STORRFC=TRN713.extract(95,107) // CR26927
+			set REFNUM=TRN713.extract(72,94) // CR26927
+			set XITC1=TRN710.extract(120)
+			set EXCHNGRT=TRN713.extract(28,35)/100000
+			set XCRCD=TRN710.extract(357,359)
+			set XCRCD=XCRCD.trim(1)
+			if XCRCD="MXN" do {
+				set TRANAMT=TRN710.extract(141,156)/100
+				set TRANFAMT=0
+			}
+			else  do {
+				set TRANFAMT=TRN710.extract(141,156)/100
+				// Convert transaction amount to MXN currency
+				if +EXCHNGRT=0 set TRANAMT=TRANFAMT
+				else  set TRANAMT=TRANFAMT*EXCHNGRT
+			}
+			set XCRD=CRCD(XCRCD,XCO).get().extract(1,15)
+			set RUNBAL=TRN710.extract(341,356)/100
+			set HOUR=$$TIM^%ZM(TTIME,"246060")   //CR 28640
+			set BENRFC=TRN713.extract(124,136)
+			set PREFIX=$$RECPREFX^ZSTMTEXT("G",xcid,XGRP,SEQ,XACN)  //CR 28640
+			set SREC=PREFIX_TRANCODE.blank(12)_SPRAY.zero(15)_PDATE_TRANSEQ.zero(9)_TRANDESC
+			set SREC=SREC_TRNCPT1.blank(40)_TRNCPT2.blank(40)_CARDNUM.blank(8)_XITC1_TRANAMT.zero(16,2)
+			set SREC=SREC_TRANFAMT.zero(16,2)_XCRCD.blank(15)_EXCHNGRT.zero(10,5)_RUNBAL.zero(16,2)
+			set SREC=SREC_STORRFC.blank(13)_REFNUM.zero(23)_PDATE_HOUR.blank(6)_BENRFC_PHLD
+			set SREC=SREC.blank(400)
+			do FILEREC(XTJD,XCO,XFORM,XVAR,XACN,xcid,"I",SREC,FSEQ)
+			set FSEQ=FSEQ+1
+			set TOTREC=TOTREC+1
+		}
+	}
+	
+	// Record Type L Special Information
+	set SREC=$$RECPREFX^ZSTMTEXT("L",xcid,XGRP,1,XACN)
+	set SREC=SREC_DOB_ODT_STAT
+	set SREC=SREC.blank(400)
+	do FILEREC(XTJD,XCO,XFORM,XVAR,XACN,xcid,"L",SREC,FSEQ)
+	set FSEQ=FSEQ+1
+	set TOTREC=TOTREC+1
+	
+	// Record O Messages
+	set MSGCNT=""
+	// Special Message
+	do SPCMSG(DOB,ODT,INTPRD,FNLPRD,XGRP,.MSGCD)
+	// Marketing Messages
+	set TRN500=$$500^LETTERF(xcid)
+	set ACNTZIP=TRN500.extract(198,202)
+	if 'ACNTZIP.isNull() do MRKTMSG(ACNTZIP,PTYPE,BAL,.MSGCD)
+	
+	for  set MSGCNT=MSGCD(MSGCNT).order(1)  quit:MSGCNT=""  do { 
+		set PREFIX=$$RECPREFX("O",xcid,XGRP,MSGCNT,XACN)
+		// CR26927
+		set SREC=PREFIX_MSGCD(MSGCNT).piece("|",1)_MSGCD(MSGCNT).piece("|",2).blank(80)
+		set SREC=SREC.blank(400)
+		do FILEREC(XTJD,XCO,XFORM,XVAR,XACN,xcid,"O",SREC,FSEQ)
+		set TOTREC=TOTREC+1
+		set FSEQ=FSEQ+1
+	}
+	
+	if 'MSGCD(1).get().isNull() quit
+	set PREFIX=$$RECPREFX("O",xcid,XGRP,1,XACN)
+	set SREC=PREFIX
+	set SREC=SREC.blank(400)
+	do FILEREC(XTJD,XCO,XFORM,XVAR,XACN,xcid,"O",SREC,FSEQ)
+	set TOTREC=TOTREC+1
+	quit
+			
+LNBILL(String acctinfo,String trninfo,Number xcid,Number totstm)
+
+	// Create loan/billing account statement records 
+	type String ACT100,ACT200,ACT203,ACTDOM,ACTNAM,ACTTRN,AINTR,BAL,BALINT,BEGTBAL
+	type String BLDTDAY,BLDTMNTH,BLDTYR,BNKCTY,BNKDOM,BNKNM
+	type String BNKST,BNKSTR,BNKSUB,BNKZIP,BNUM,BRFC,CAPAMOR,CCODE,CDLVOFF,CLLXPNS,CONAME,CONRT
+	type String CORFC,CRFC,CRLMT,CRPLN,DELDAYS,DIST,DKEY,DOBMNTH,DOBDAY,DOMDAT,EFDCMP,ENDTBAL,ETC,EXTNUM,FPA,GRP,HIGHEST
+	type String INTCRDT,INTNRRS,INTNUM,INVTBAL,LOWEST,MATAMT,MMNAME,MNTHINTS,MONINTR,MSGCD()
+	type String ONTMPMT,OTHCHGS,OTHCRTOT,PMTMIN,PREFIX,PYMNTNM,SBDTDAY,SBDTMNTH,SBDTYR,SHIPINST,SREC,SUB,TOT
+	type String TRANSDT,TRM,TRMC,TRN400,TRN401,TRN402,TRN500,TRN710,TRN790,VAT,XACN,XAPH,XBPH
+	type String XCRCD,XEMAIL,XFAXNUM,XGRP,XMAD1,XMCITY,XMCNTRY,XMSTATE,XNAM,XPHP,XTRM,XZIP
+	type public String BNKRFC(),CRCD(),FEES(),MSGKEY(),MSKFLG,PRODCTL(),SPMNTHS,STATES(),XCO,XFORM,ZONES()
+	type Date BILCUT,BILDT,DOB,FDATE,ODT,SCHND,SDATE
+	type public Date XTJD
+	type Number FSEQ,I,ITC1,MONTH,MSGCNT,ONP,PFLG,PTYPE,STAT,TOTDUE,x,ZONE
+	type public Number TOTBILL,TOTREC,XVAR
+		
+	set ACT100=acctinfo("100").get()
+	set ACT200=acctinfo("200").get()
+	set ACT203=acctinfo("203").get()
+	set TRN400=trninfo(xcid,"400",1).get()
+	set TRN401=trninfo(xcid,"401",1).get()
+	set TRN402=trninfo(xcid,"402",1).get()
+	set TRN500=trninfo(xcid,"500",1).get()
+	set TRN710=trninfo(xcid,"710",1).get()
+	set TRN790=trninfo(xcid,"790",1).get()
+	
+	// Check Date MASK
+	set SCHND=TRN400.extract(352,361)  //KS CR26547
+	set SDATE=TRN790.extract(240,249)
+	set BILDT=TRN790.extract(203,212)
+	set ODT=TRN400.extract(264,273)
+	set DOB=ACT200.extract(104,113)
+	if MSKFLG do {
+		set SCHND=$$CHGDT(SCHND)
+		set SDATE=$$CHGDT(SDATE)
+		set BILDT=$$CHGDT(BILDT)
+		set ODT=$$CHGDT(ODT)
+		set DOB=$$CHGDT(DOB)
+	}
+		
+	set TOTDUE=+TRN790.extract(250,261)/100
+	set TOTBILL=TOTBILL+TOTDUE
+	set XACN=ACT200.extract(5,16)
+	set PTYPE=TRN400.extract(194,198)
+	set XGRP=TRN400.extract(190,193)
+	set FSEQ=1
+	
+	// Record A Bank Data 
+	set SREC=$$RECA(ACT100,xcid,XACN,XGRP,1)
+	do FILEREC(XTJD,XCO,XFORM,XVAR,XACN,xcid,"A",SREC,FSEQ)
+	set TOTREC=TOTREC+1
+	set FSEQ=FSEQ+1
+	// B Record Superior Summary
+	set ONTMPMT=(TRN790.extract(250,261)/100)
+	set PMTMIN=0
+	set FPA=(TRN401.extract(223,235)/100)
+	set ACTDOM=TRN402.extract(136,147)  //CR 28640
+	set BNKDOM=""
+	set DOMDAT=""
+	set PREFIX=$$RECPREFX("B",xcid,XGRP,1,XACN)
+	//CR 28640     Reduced account number length to 12
+	set SREC=PREFIX_xcid.zero(12)_XACN_SCHND_ONTMPMT.zero(16,2)_PMTMIN.zero(16,2)_FPA.zero(16,2)_SDATE_BILDT
+	set SREC=SREC_ACTDOM_BNKDOM.blank(2)_DOMDAT.blank(10)
+	set SREC=SREC.blank(400)
+	set FSEQ=FSEQ+1
+	do FILEREC(XTJD,XCO,XFORM,XVAR,XACN,xcid,"B",SREC,FSEQ)
+	set TOTREC=TOTREC+1
+	set FSEQ=FSEQ+1
+	// D Record Customer Data
+	set BNUM=TRN402.extract(68,73)
+	if ACT200.extract(348)=1 do {	//Corporate
+		set XNAM=""
+		set XNAM=XNAM.blank(40)
+		set CONAME=ACT200.extract(296,335)
+		set CRFC=""
+		set CRFC=CRFC.blank(13)
+		set CORFC=ACT200.extract(84,95)
+	}
+	else  do {		// Personal
+		set XNAM=ACT200.extract(296,335)
+		set XNAM=XNAM.trim()
+		set MMNAME=ACT203.extract(318,337)
+		set MMNAME=MMNAME.trim()
+		set XNAM=XNAM_" "_MMNAME  //CR28889
+		set XNAM=XNAM.extract(1,40)
+		set XNAM=XNAM.blank(40)
+		
+		set CONAME=""
+		set CONAME=CONAME.blank(40)
+		set CRFC=ACT200.extract(84,96)
+		set CORFC=""
+		set CORFC=CORFC.blank(12)
+	}
+	set XZIP=ACT203.extract(266,270)
+	set CDLVOFF=""		// Delivery Office
+	set XMAD1=ACT203.extract(84,123)
+	set XMAD1=XMAD1.trim(1)
+	set EXTNUM=ACT203.extract(124,163)
+	set EXTNUM=EXTNUM.trim(1)
+	set INTNUM=ACT203.extract(164,203)
+	set INTNUM=INTNUM.trim(1)
+	set XMAD1=XMAD1_" "_EXTNUM_" "_INTNUM  //CR28889
+	set SUB=ACT203.extract(278,317)
+	set DIST=ACT203.extract(204,233)
+	set XMAD1=XMAD1.extract(1,40)
+	set XMCITY=ACT203.extract(244,263)
+	set XMSTATE=ACT203.extract(264,265)
+	set XMSTATE=STATES(XMSTATE).get().extract(1,20)
+	set XPHP=ACT200.extract(114,125)
+	set XPHP=XPHP.translate("-() ","")	
+	set XBPH=ACT200.extract(126,137)
+	set XBPH=XBPH.translate("-() ","")
+	set XAPH=ACT200.extract(336,347)	
+	set XAPH=XAPH.translate("-() ","")
+	set PREFIX=$$RECPREFX("D",xcid,XGRP,1,XACN)
+	set SREC=PREFIX_XACN_BNUM_XNAM_CONAME_CRFC_CORFC_XZIP_CDLVOFF.blank(5)
+	set SREC=SREC_XMAD1.blank(40)_SUB_DIST_XMCITY_XMSTATE.blank(20)
+	set SREC=SREC_XPHP.blank(12)_XBPH.blank(12)_XAPH.blank(12)
+	set SREC=SREC.blank(400)
+	do FILEREC(XTJD,XCO,XFORM,XVAR,XACN,xcid,"D",SREC,FSEQ)
+	set TOTREC=TOTREC+1
+	set FSEQ=FSEQ+1
+	
+	// E Record Delivery Data
+	set BAL=(TRN400.extract(308,323)/100)
+	if +BAL=0,'TRN710.data() set PFLG=0
+	else  set PFLG=1
+	set SREC=$$RECE(ACT200,PFLG,xcid,XACN,XGRP,1,0) //CR28787
+	do FILEREC(XTJD,XCO,XFORM,XVAR,XACN,xcid,"E",SREC,FSEQ)
+	set TOTREC=TOTREC+1
+	set FSEQ=FSEQ+1
+	
+	// K Record Credit Data
+	set XCRCD=TRN400.extract(395,397)
+	set XCRCD=XCRCD.trim(1)
+	set XCRD=CRCD(XCRCD,XCO).get().extract(1,15)
+	set CRLMT=(TRN400.extract(292,307)/100)
+	set INTCRDT=(TRN402.extract(101,116)/100)
+	if +INTCRDT=0 set INTCRDT=CRLMT
+	set INDEX=TRN401.extract(304,323)
+	set INDEX=INDEX.trim()
+	if INDEX="" set CONRT="01"  //Fixed
+	else  set CONRT="02"  
+	set MONINTR=(TRN400.extract(343,351)/100)
+	set AINTR=MONINTR
+	//CR28889   Changed term value to number of payments
+	set ONP=TRN402.extract(148,150)
+	set DIST1AF=+(TRN402.extract(74,82)/100000)
+	set CRPLN=""
+	if DIST1AF=12 set CRPLN="03"	//Monthly
+	else  if DIST1AF>50 set CRPLN="01"   //Weekly
+	else  if DIST1AF>23 set CRPLN="02"  //Fortnightly
+	set PYMNTNM=+TRN400.extract(411,414)
+	set INVTBAL=0
+	set BEGTBAL=(TRN790.extract(16,31)/100) //CR28889
+	if +BEGTBAL<0 set BEGTBAL=BEGTBAL.zero(16,2,,1)
+	else  set BEGTBAL=BEGTBAL.zero(16,2)
+	set ENDTBAL=(TRN790.extract(144,159)/100)  //CR28889
+	if +ENDTBAL<0 set ENDTBAL=ENDTBAL.zero(16,2,,1)
+	else  set ENDTBAL=ENDTBAL.zero(16,2)
+	set ACTNAM=TRN400.extract(239,263)  //CR28640
+	set PREFIX=$$RECPREFX("K",xcid,XGRP,1,XACN)
+	set SREC=PREFIX_XCRD.blank(15)_BILDT_ODT_CRLMT.zero(16,2)_INTCRDT.zero(16,2)_CONRT_MONINTR.zero(8,4)_AINTR.zero(8,4)
+	set SREC=SREC_ONP.zero(8)_CRPLN.blank(2)_PYMNTNM.zero(4)_INVTBAL.zero(16,2)_BEGTBAL_ENDTBAL_ACTNAM.justify(40,-1," ",0)
+	set SREC=SREC.blank(400)
+	do FILEREC(XTJD,XCO,XFORM,XVAR,XACN,xcid,"K",SREC,FSEQ)
+	set TOTREC=TOTREC+1
+	set FSEQ=FSEQ+1
+	
+	// L Record Period Calculation
+	set BSCBL=(TRN790.extract(144,159)/100)  //CR28889
+	if +BSCBL<0 set BSCBL=BSCBL.zero(16,2,,1)
+	else  set BSCBL=BSCBL.zero(16,2)
+	set MNTHINTS=(TRN790.extract(128,143)/100)
+	set COLLFEE=+FEES(xcid).get()
+	set CLLXPNS=(TRN790.extract(306,317)/100)+COLLFEE
+	set INTNRRS=(TRN401.extract(30,42)/100)
+	set OTHCHGS=(TRN401.extract(95,107)/100)-COLLFEE  //KS CR26547
+	set OTHCRTOT=0  
+	set VAT=(TRN402.extract(117,134)/100)
+	set CAPAMOR=(TRN790.extract(48,63)/100)
+	set FPA=(TRN401.extract(223,235)/100)  //CR 28475
+	set BALINT=(TRN400.extract(308,323)/100)+(TRN790.extract(128,143)/100)
+	set PREFIX=$$RECPREFX("L",xcid,XGRP,1,XACN)
+	set SREC=PREFIX_BSCBL_MNTHINTS.zero(16,2)_CLLXPNS.zero(16,2)_INTNRRS.zero(16,2)_OTHCHGS.zero(16,2)_OTHCRTOT.zero(16,2)_VAT.zero(16,2)
+	set SREC=SREC_CAPAMOR.zero(16,2)_FPA.zero(16,2)_BALINT.zero(16,2)
+	set SREC=SREC.blank(400)
+	do FILEREC(XTJD,XCO,XFORM,XVAR,XACN,xcid,"L",SREC,FSEQ)
+	set TOTREC=TOTREC+1
+	set FSEQ=FSEQ+1
+	// Transactions
+	if TRN710.data() do {
+		set SEQ=""
+		for  set SEQ=trninfo(xcid,"710",SEQ).order(1) quit:SEQ=""  do {
+			// I Record 1 Detail of Transactions
+			set EFDCMP=trninfo(xcid,"710",SEQ).extract(131,140)
+			set FDATE=EFDCMP.toDate(%MSKD)
+			set MONTH=+FDATE.month()
+			set EFDCMP=FDATE.day()_"/"_SPMNTHS.piece(",",MONTH)
+			set TRANDES=trninfo(xcid,"710",SEQ).extract(157,196) 
+			set TRANSDT=trninfo(xcid,"710",SEQ).extract(121,130)
+			set FDATE=TRANSDT.toDate(%MSKD)
+			set MONTH=+FDATE.month()
+			set TRANSDT=FDATE.day()_"/"_SPMNTHS.piece(",",MONTH)
+			set TOT=(trninfo(xcid,"710",SEQ).extract(141,156)/100)
+			if +TOT<0 set TOT=TOT.zero(16,2,,1)
+			else  set TOT=TOT.zero(16,2)
+			set ITC1=trninfo(xcid,"710",SEQ).extract(120)  //CR27303
+			set ETC=trninfo(xcid,"711",SEQ).extract(217,228)  //CR28640
+			set PREFIX=$$RECPREFX("I",xcid,XGRP,SEQ,XACN)
+			set SREC=PREFIX_EFDCMP_ETC_TRANDES_TRANSDT_TOT_ITC1
+			set SREC=SREC.blank(400)
+			do FILEREC(XTJD,XCO,XFORM,XVAR,XACN,xcid,"I",SREC,FSEQ)
+			set TOTREC=TOTREC+1
+			set FSEQ=FSEQ+1
+		}
+	}
+	
+	//CR 28640     Record M Special Information
+	set STAT=TRN402.extract(135)
+	set PREFIX=$$RECPREFX("M",xcid,XGRP,1,XACN)
+	set SREC=PREFIX_DOB_ODT_STAT
+	set SREC=SREC.blank(400)
+	do FILEREC(XTJD,XCO,XFORM,XVAR,XACN,xcid,"M",SREC,FSEQ)
+	set TOTREC=TOTREC+1
+	set FSEQ=FSEQ+1
+	
+	// CR26547
+	// Record O Messages
+	set MSGCNT=""
+	set DKEY=""
+	set XGRP=XGRP.trim(1)  //CR28889
+	// Arrears Message
+	if SCHND.toDate("YEAR-MM-DD")<%SystemDate do {
+		set DELDAYS=+TRN400.extract(399,410)
+		if DELDAYS=0 quit
+		for I=7:-1:1 if DELDAYS>PRODCTL(PTYPE).get().piece("|",I) set DKEY="D"_I quit
+		if DKEY.isNull() set DKEY="D1"
+	}
+	if 'DKEY.isNull() set MSGCD(MSGCD(MSGCNT).order(-1)+1)=MSGKEY(XGRP,DKEY).get()
+	// Special Message
+	do SPCMSG(DOB,ODT,SDATE,BILDT,XGRP,.MSGCD)
+	// Marketing Messages
+	set ACNTZIP=TRN500.extract(198,202)
+	if 'ACNTZIP.isNull() do MRKTMSG(ACNTZIP,PTYPE,BAL,.MSGCD)
+	set MSGCNT=""
+	for  set MSGCNT=MSGCD(MSGCNT).order(1)  quit:MSGCNT=""  do { 
+		set PREFIX=$$RECPREFX("O",xcid,XGRP,MSGCNT,XACN)
+		// CR26927
+		set SREC=PREFIX_MSGCD(MSGCNT).piece("|",1)_MSGCD(MSGCNT).piece("|",2)
+		set SREC=SREC.blank(400)
+		do FILEREC(XTJD,XCO,XFORM,XVAR,XACN,xcid,"O",SREC,FSEQ)
+		set TOTREC=TOTREC+1
+		set FSEQ=FSEQ+1
+	}
+	
+	if 'MSGCD(1).get().isNull() quit
+	set PREFIX=$$RECPREFX("O",xcid,XGRP,1,XACN)
+	set SREC=PREFIX
+	set SREC=SREC.blank(400)
+	do FILEREC(XTJD,XCO,XFORM,XVAR,XACN,xcid,"O",SREC,FSEQ)
+	set TOTREC=TOTREC+1
+	set FSEQ=FSEQ+1  //CR28787
+	quit
+	
+	
+RECPREFX(String rtype,Number xcid,String xgrp,Number seq,String xacn)
+	// Builds Record Prefix for each record.
+	
+	type String RECPREF
+	set RECPREF=8		// Bank Indicator
+	set RECPREF=RECPREF_xacn.zero(13)	// Customer Number
+	set RECPREF=RECPREF_xgrp.blank(4)    //SUBPRODUCT GRP
+	set RECPREF=RECPREF_" "   //SUB-PRODUCT 
+	set RECPREF=RECPREF_xcid.zero(13)	// Account Number
+	set RECPREF=RECPREF_rtype  // Record Type
+	set RECPREF=RECPREF_seq.zero(7)   //Sequence Statement Number
+	quit RECPREF
+	
+RECA(String act100,Number xcid,Number xacn,Number xgrp,Number totstm)
+	
+	// Returns record "A"
+	
+	type public String BNKRFC(),STATES()
+	type String BNKCTY,BNKNM,BNKST,BNKSTR,BNKSUB,BNKZIP,BRFC,CCODE,PREFIX,SREC
+		
+	// Record A Bank Data 
+	set CCODE=act100.extract(4,15)
+	set CCODE=CCODE.trim()
+	set BNKNM=act100.extract(16,55)
+	set BNKSTR=act100.extract(56,95)
+	set BNKSUB=act100.extract(96,135)
+	set BNKCTY=act100.extract(136,155)
+	set BNKST=act100.extract(156,157)
+	set BNKST=STATES(BNKST).get().extract(1,20)
+	set BNKZIP=act100.extract(163,167)
+	set BRFC=BNKRFC(CCODE)
+	set PREFIX=$$RECPREFX("A",xcid,xgrp,totstm,xacn)
+	set SREC=PREFIX_BNKNM_BNKSTR_BNKSUB_BNKCTY_BNKST.blank(20)_BNKZIP_BRFC.blank(12)
+	set SREC=SREC.blank(400)
+	quit SREC
+	
+RECE(String act200,Number pflg,Number xcid,Number xacn,Number xgrp,Number totstm,Number mflgfmt)
+
+	// Returns record "E"
+	type String PREFIX,SHIPINST,SREC,XFAXNUM
+	
+	// E Record Delivery Data
+	set XEMAIL=act200.extract(138,192)
+	if mflgfmt=0 set SHIPINST=act200.extract(292)  //CR28475
+	else  set SHIPINST=act200.extract(291,292)  //CR28787
+	set XFAXNUM=act200.extract(194,223)
+	set XFAXNUM=XFAXNUM.translate("-","")
+	set PREFIX=$$RECPREFX("E",xcid,xgrp,totstm,xacn)
+	set SREC=PREFIX_XEMAIL_SHIPINST_XFAXNUM.blank(30)_pflg
+	set SREC=SREC.blank(400)
+	quit SREC
+	
+FILEREC(Date xtjd,String xco,String xform,Number xvar,Number xacn,Number xcid,String xrectype,String srec,Number fseq)
+
+	// Save records into ZSTMTEXT
+	
+	 catch vERROR {
+                type String ET,RM
+                set ET=vERROR.type
+                if ET["%GTM-" do ZE^UTLERR quit
+                set ET=ET_"-"_vERROR.thrownAt
+                set RM=vERROR.description
+                do ^UTLERR
+          }
+                
+	type RecordZSTMTEXT zstmtext
+	set zstmtext=Class.new("RecordZSTMTEXT")
+	set zstmtext.ztjd=xtjd
+	set zstmtext.co=xco
+	set zstmtext.form=xform
+	set zstmtext.var=xvar
+	set zstmtext.cid=xcid
+	set zstmtext.acn=+xacn
+	set zstmtext.rectype=xrectype
+	set zstmtext.seq=fseq
+	set zstmtext.record=srec
+	do zstmtext.bypassSave()
+
+	quit
+	
+EXTRACT(String xform,String xco,Number xvar,String xio,Number drctry,Number TOTSTMT,Number TOTREC)
+
+	// Creates statement extract files
+	
+	type String FILENAM,HDR,TRL,XTIME,YEAR
+	type public Date XTJD
+	type IO io
+	type ResultSet rs
+	set io=Class.new("IO")
+	set HDR=""
+	
+	 catch vERROR {
+                type String ET,RM
+                set ET=vERROR.type
+                if ET["%GTM-" do ZE^UTLERR quit
+                set ET=ET_"-"_vERROR.thrownAt
+                set RM=vERROR.description
+                do ^UTLERR
+                }
+	
+	set XTIME=%CurrentTime.toString("2460")  // Time Format
+	
+	if xform="STMTCMB",xvar=100 do {
+		set HDR="WALSTMTPD"_XTJD.toString("YYMMDD")_XTIME_"01"_TOTREC.zero(7)_TOTSTMT.zero(7)
+		set HDR=HDR.blank(400)
+	}
+	if xform="STMTLNBILL",xvar=100 do {
+			set HDR="WALSTMTPF"_XTJD.toString("YYMMDD")_XTIME_"01"_TOTREC.zero(7)_	TOTSTMT.zero(7)
+			set HDR=HDR.blank(400)
+	}
+	if drctry set io.directory=""
+		
+	set io.fileName=xio
+	set io.openParams="WRITE/NEWV"
+	set io.recordSize=700  
+
+	do io.open()
+	
+	//Header Info
+	do io.write(HDR)
+	set rs=Db.select("RECORD","ZSTMTEXT","ZTJD=:XTJD AND FORM=:xform AND CO=:xco AND VAR=:xvar")
+	while rs.next() do {
+		set REC=rs.getCol(1)
+		do io.write(REC)
+	}
+	do io.close()
+		
+	quit
+	
+TOT(Number TOTSTM,Number TOTCID,Number TOTTRN,Number TOTREC,String XIO,Number DRCTRY,Number TOTBILL) // write totals to LETSTMTTOT
+
+	//Writes totals to table LETSTMTOT
+	
+	type public String XCO,XFORM
+	type public Date XTJD
+	type public Number XVAR
+	type String X,YEAR
+	type Number %EXT
+        type RecordLETSTMTTOT tot=Class.new("RecordLETSTMTTOT")
+        
+	set X=XIO
+	if XIO="" do {   //CR26927  
+        	if XFORM="STMTCMB",XVAR=100 set XIO="WALSTMTD"_XTJD.toString("YYMMDD")_"01"_TOTREC.zero(7)_".TXT" 
+		else  if XFORM="STMTLNBILL",XVAR=100 set XIO="WALSTMTF"_XTJD.toString("YYMMDD")_"01"_TOTREC.zero(7)_".TXT"
+		else  set XIO="WALSTMT"_"_"_XFORM_XVAR_XTJD.toString("YYMMDD")_"01"_TOTREC.zero(7)_".TXT"
+		set X=XIO
+		set %EXT=1
+		do ^SCAIO  // Add directory to filename for report
+	}
+	else  set DRCTRY=1	
+	set tot.sjd=XTJD
+        set tot.extract=X
+        set tot.co=XCO
+        set tot.form=XFORM
+        set tot.var=XVAR
+        set tot.totstm=TOTSTM
+	set tot.totcid=TOTCID
+	set tot.tottrn=TOTTRN
+        set tot.dat=+$H
+        set tot.tim=$P($H,",",2)
+        set tot.totrecs=TOTREC
+        set tot.totbill=TOTBILL
+
+	do tot.bypassSave()
+
+	quit
+	
+LETZERO(XTJD,XCO,XFORM) // Builds LETTER0 after each form
+ 
+        new letstmt0
+        type RecordLETSTMT0 letstmt0=Class.new("RecordLETSTMT0")
+ 
+        set letstmt0.sjd=XTJD
+        set letstmt0.co=XCO
+        set letstmt0.form=XFORM
+        set letstmt0.flg=1
+
+        do letstmt0.bypassSave()
+        quit
+        
+CHGDT(String xdate)
+	// Format Dates
+	type Date NDAT
+	set NDAT=xdate.toDate(%MSKD)
+	quit NDAT.toString("YEAR-MM-DD")
+	
+POST(String XFORM,String XCO)  // Check if form has been written today
+ 	
+ 	type public Date XTJD
+ 	type public String RM
+ 	type Number CVAR,FLG
+	type String ER
+	set FLG=0
+	
+	if (XCO.isNull())!(XFORM.isNull()) quit
+	
+	type RecordLETSTMT0 letstm = Db.getRecord("LETSTMT0","SJD=:XTJD,CO=:XCO,FORM=:XFORM",1)
+	//Form has already been printed today
+	if letstm.getMode() set FLG=letstm.flg
+	if FLG do Runtime.setErrMSG("LETSTMT0",4451) quit
+	
+	set CVAR=Db.currVal("LETSTMT","XTJD,XCO,XFORM")
+
+	// myersk 43728 - set ER to "W" to avoid "Abort" message in DAYEND
+        if CVAR.isNull() set ER="W",RM=$$^MSG(4452)
+        quit
+        
+CHKGRP(Number xtype)
+	
+	//Check GRP on product type for FORM  STMTLNBILL
+
+	type RecordPRODDFTL proddftl=Db.getRecord("PRODDFTL","TYPE=:xtype")
+	if proddftl.grp="LN" quit 1
+	quit 0
+	
+MRKTMSG(Number ACNTZIP,Number PTYPE,Number BAL,String MSGCD)
+
+	// Finds zones account's zipcode is located in
+	
+	type Number HIGHEST,LOWEST,ZONE
+	type public String ZONES()
+	if PTYPE.get().isNull() quit	
+	set ZONE=""
+	for  set ZONE=ZONES(ZONE).order(1) quit:ZONE=""  do {
+		set LOWEST=ZONES(ZONE).piece("|",1)
+		set HIGHEST=ZONES(ZONE).piece("|",2)
+		if LOWEST.isNull(),HIGHEST.isNull() do GTMKTMSG(ZONE,PTYPE,BAL,.MSGCD) quit
+		if LOWEST.isNull(),+ACNTZIP'>+HIGHEST do GTMKTMSG(ZONE,PTYPE,BAL,.MSGCD) quit 
+		if HIGHEST.isNull(),+ACNTZIP'<LOWEST do GTMKTMSG(ZONE,PTYPE,BAL,.MSGCD) quit
+		if +ACNTZIP'<LOWEST,+ACNTZIP'>HIGHEST do GTMKTMSG(ZONE,PTYPE,BAL,.MSGCD) quit
+	}
+	quit
+	
+GTMKTMSG(Number zone,Number ptype,Number bal,String MSGCD)
+
+	// Sets array MSGCD() for marketing messages
+	type Number MSGCNT,PROD,SEQ,XBAL
+	type public String MRKTCD()
+			
+	set ptype=+ptype
+	set MSGCNT=""
+	set XBAL=""
+	for  set XBAL=MRKTCD(zone,ptype,XBAL).order(1) quit:XBAL=""  do {
+		if +bal<XBAL quit
+		set MSGCD(MSGCD(MSGCNT).order(-1)+1)=MRKTCD(zone,ptype,XBAL).get()
+	}
+	quit
+	
+SPCMSG(Date DOB,Date ODT,Date STARTDT,Date ENDDT,String XGRP,String MSGCD)
+
+	// Populates array MSGCD() with special message codes (Birthday,Open Date,Anniversary)
+	
+	type Number MSGCNT
+	type String ENDDAY,ENDMNTH,ENDYR,ODTDAY,ODTMNTH,ODTYR,SDTDAY,SDTMNTH,SDTYR
+	type public String MSGKEY()
+	
+	set MSGCNT=""
+	set XGRP=XGRP.trim(1)
+	set ENDDT=ENDDT.toDate("YEAR-MM-DD")  //End Date
+	set STARTDT=STARTDT.toDate("YEAR-MM-DD")  // Start Date
+	set ENDMNTH=+ENDDT.month()
+	set ENDDAY=+ENDDT.day()
+	set ENDYR=ENDDT.year()
+	set SDTMNTH=+STARTDT.month()
+	set SDTDAY=+STARTDT.day()
+	set SDTYR=STARTDT.year()
+	
+	
+	set DOB=DOB.toDate("YEAR-MM-DD")
+	if +DOB>0 do {
+		set DOBMNTH=+DOB.month()
+		set DOBDAY=+DOB.day()
+		if SDTMNTH=ENDMNTH do { quit
+			if DOBMNTH=SDTMNTH,DOBDAY'<SDTDAY,DOBDAY'>ENDDAY set MSGCD(MSGCD(MSGCNT).order(-1)+1)=MSGKEY(XGRP,"BIRTHDAY").get()
+		}
+		else  if DOBMNTH=SDTMNTH,DOBDAY'<SDTDAY set MSGCD(MSGCD(MSGCNT).order(-1)+1)=MSGKEY(XGRP,"BIRTHDAY").get() quit
+		else  if DOBMNTH=ENDMNTH,DOBDAY'>ENDDAY set MSGCD(MSGCD(MSGCNT).order(-1)+1)=MSGKEY(XGRP,"BIRTHDAY").get()
+	}
+	
+	// OpenDate
+	set ODT=ODT.toDate("YEAR-MM-DD")
+	set ODTYR=ODT.year()
+	set ODTMNTH=+ODT.month()
+	set ODTDAY=+ODT.day()
+	if (ODT'<STARTDT)&(ODT'>ENDDT) set MSGCD(MSGCD(MSGCNT).order(-1)+1)=MSGKEY(XGRP,"OPENDATE").get() 
+	// Anniversary
+	if ODTYR=ENDYR quit
+	// Same month
+	if SDTMNTH=ENDMNTH,ODTMNTH=SDTMNTH do { quit
+		if (ODTDAY<SDTDAY)!(ODTDAY>ENDDAY) quit  //CR27303
+		set MSGCD(MSGCD(MSGCNT).order(-1)+1)=MSGKEY(XGRP,"ANNVER").get()
+	}
+	
+	// Statement period in same year
+	if SDTYR=ENDYR,ODTYR'=SDTYR do { quit
+		if (ODTMNTH<SDTMNTH)!(ODTMNTH>ENDMNTH) quit 
+		if ODTMNTH=SDTMNTH,ODTDAY<SDTDAY quit
+		if ODTMNTH=ENDMNTH,ODTDAY>ENDDAY quit
+		set MSGCD(MSGCD(MSGCNT).order(-1)+1)=MSGKEY(XGRP,"ANNVER").get()
+	}
+		
+	// Statement period in two different years
+	if ODTYR'=SDTYR,ODTMNTH'<SDTMNTH do { quit
+		if ODTMNTH=SDTMNTH,ODTDAY<SDTDAY quit
+		set MSGCD(MSGCD(MSGCNT).order(-1)+1)=MSGKEY(XGRP,"ANNVER").get()
+	}
+	
+	if ODTMNTH'>ENDMNTH do {
+		if ODTMNTH=ENDMNTH,ODTDAY>ENDDAY quit
+		set MSGCD(MSGCD(MSGCNT).order(-1)+1)=MSGKEY(XGRP,"ANNVER").get()
+	}
+	quit
+	
+		
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60865^53362^Keith Shank^38546"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,187 @@
+RECONDF	// Compare teller and daily transaction files
+
+	/*
+	  ORIG:  Frank R. Sanchez (2497) - 01/28/86
+	  DESC:  Automatically reconciles the teller chronological file TTX
+	         with DTJ and DMJ. Differences initiate call to ^CHKINT.
+
+	  ---- Revision History ------------------------------------------------
+	  
+	   08/08/06 - Ravindra Rathi - CR 22528
+	              Modified the ENT section to remove the /PROT qualifier 
+	              from the DAT field when it's setup in the %TAB array to 
+	              add the :DISTINCT qualifier so that only one distinct date 
+	              is displayed.Removed the revision history for the last 
+	              change made to this procedure under CR 21571.
+
+	   10/20/05 - TITOVE - CR 17832
+	   	      Optimized code in SUM section to prevent record
+	   	      counter from being incorrectly incremented. Also
+	   	      corrected setting of DC (debit/credit flag).
+
+	   03/14/05 - SmithCD - CR 13782
+	   	      . Corrected undefined error on PPMCOUNT in the SUM 
+	   	        section
+	   	      . Added back call to CHKINT section at the end of RUN 
+	   	        section
+	   	      . Removed QUERY section, and all references to MAX(), 
+	   	        MIN(), and Q(,) (these arrays are intended for use in 
+	   	        ^CHKINT, but they are out-of-scope to ^CHKINT)
+	   	      . Removed old revision history
+	   	      . PSL cleanup
+	  
+	   01/15/05 - RussellDS - CR13817
+	   	      Correct reference to [SYSBAL] to [SYSBAL1].  Fix PSL
+	   	      warnings not related to scope.	   	      
+	   	      Added back call to report that was missing in RUN
+	   	      section.	   	      
+	   	      Fix use of %SystemDate when it should be input date.
+	
+
+	   Source      SRC    Accumulation Module
+
+	   DTJ, DMJ     1     ^RGLSUM (via ^TGLMON)
+	   TPRF         2     ^TTXGLA (via ^RECONDF)
+
+	   Source 1 (DTJ, DMJ)
+	   ^SYSBAL(TJD,1,CRCD,ETC) = cnt1|amt1|cnt2|amt2
+
+	                       where cnt1, amt1 = Primary transactions
+	                             cnt2, amt2 = Secondary transactions
+
+	   Source 2 (TPRF)
+	   ^SYSBAL(TJD,2,CRCD,ETC) = cnt1|amt1|cnt2|amt2|cnt3|amt3
+
+	                        where cnt1, amt1 = PMed onto today
+	                              cnt2, amt2 = Today's summary
+	                              cnt3, amt3 = PMed from today
+
+	*/
+	
+	do ENT
+	
+	quit
+	
+	
+public ENT	// External entry point
+
+	type public String VFMQ
+	type public Boolean ER
+
+	type Date DAT
+	type String %READ, %TAB(), IO
+
+	set %TAB("DAT") = ".XJD1/TBL=[SYSBAL1]TDATE:DISTINCT"
+	set %TAB("IO") = $$IO^SCATAB($I)
+
+	set DAT = %SystemDate - 1
+
+	set %READ = "@@%FN,,,DAT/REQ,IO/REQ"
+	
+	do ^UTLREAD
+	
+	if (VFMQ = "Q") set ER = 1 quit
+
+	if (IO '= $I) do OPEN^SCAIO 
+	
+	if ER set VFMQ = "Q" quit
+	
+	do RUN
+	
+	quit
+
+
+RUN	// Run accumulation and report
+
+	type public Date DAT
+
+	type String A(), ETC, PGM, RID
+	type Number PID, VRWOPT()
+
+	do Db.fastDelete("RECONDF", "PID=:%ProcessID")
+
+	do ^TTXGLA(DAT)
+
+	do SUM(DAT)
+
+	set VRWOPT("NOOPEN") = 1 
+	set RID = "RECONDF"
+	set PID = %ProcessID
+	set A(1) = DAT
+	
+	do ^URID
+	do V0^@PGM
+	
+	do Db.fastDelete("RECONDF", "PID=:%ProcessID")
+	
+	do CHKINT
+
+	quit
+
+
+SUM(Date DAT)	// Summarize transaction information
+
+	type public Cache %CACHE()
+	type public String ETC
+	
+	type String CRCD
+	type Boolean DC
+	
+	type DbSet ds1 = Db.selectDbSet("SYSBAL1", "TDATE=:DAT")
+
+	while ds1.next() do {
+		
+		type RecordSYSBAL1 sysbal1 = ds1.getRecord()
+		
+		set CRCD = sysbal1.crcd
+		set ETC = sysbal1.etc
+
+		type RecordTRN trn = %CACHE("TRN").getRecord("TRN", "ETC=:ETC")		
+		set DC = +trn.dc
+
+		if sysbal1.ppmcount, sysbal1.ppmamt do {
+			
+			type RecordRECONDF recondf = Db.getRecord("RECONDF", "PID=:%ProcessID,CRCD=:CRCD,DC=:DC,ETC=:ETC", 1)
+			
+			set recondf.scnte = recondf.scnte + sysbal1.ppmcount
+			set recondf.samtd = recondf.samtd + sysbal1.ppmamt
+			
+			do recondf.bypassSave()
+			}
+		}
+
+	type DbSet ds2 = Db.selectDbSet("SYSBAL2", "TDATE=:DAT")
+
+	while ds2.next() do {
+		
+		type RecordSYSBAL2 sysbal2 = ds2.getRecord()
+		
+		set CRCD = sysbal2.crcd
+		set ETC = sysbal2.etc
+		
+		type RecordTRN trn1 = %CACHE("TRN").getRecord("TRN","ETC=:ETC")		
+		set DC = +trn1.dc
+
+		type RecordRECONDF recondf = Db.getRecord("RECONDF", "PID=:%ProcessID,CRCD=:CRCD,DC=:DC,ETC=:ETC", 1)
+		
+		set recondf.cntc=recondf.cntc + sysbal2.ppmcount
+		set recondf.damt=recondf.damt + sysbal2.ppmamt
+		set recondf.cntd=recondf.cntd + sysbal2.tcount
+		set recondf.ttot=recondf.ttot + sysbal2.tamt
+		set recondf.scntd=recondf.scntd + sysbal2.tpmcount
+		set recondf.camt=recondf.camt + sysbal2.tpmamt
+		
+		do recondf.bypassSave()
+		}
+	quit
+
+
+CHKINT	// Calls ^CHKINT
+	
+	type Boolean %EXT = 1
+
+	do ^CHKINT
+
+	quit
+
+vSIG()	quit "60485^10956^Ravindra Rathi^4409"	// Signature - LTD^TIME^USER^SIZE

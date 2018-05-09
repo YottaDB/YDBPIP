@@ -1,0 +1,182 @@
+LNAIC		/*
+	   ORIG: SMITHC - 05/26/96
+	   DESC: Calculates the average interest for loans with an interest
+	         calculation method of 2.
+	
+	   KEYWORDS: Interest, Calculation, Average
+	
+	   EXAMPLE:
+	   do AVGINT^LNAIC(.ln)
+	
+	---- Revision History ------------------------------------------------
+	
+	02/09/06 - SmithCD - CR 19505
+		   . Moved ln.mdt to correct position in parameter list for 
+		     call to EXEC^UANTIC (was not in correct position prior to 
+		     last change)
+		   . Added Class.new() for ttx to avoid potential problems 
+		     with incremental loading of objects
+		   . Added Runtime transaction fence to rollback database 
+		     updates that UANTIC will cause as a result of account 
+		     projection
+		   . Cleaned up code
+	
+	10/07/05 - SmithCD - CR 16885
+		   . Removed 4th and 5th parameters in call to EXEC^UANTIC
+		   . Replaced deprecated feature Db.nextKey() in CALC section
+		   . Removed old revision history
+	
+	01/12/04 - CARROLLJ - CR7901
+		   Modified call to EXEC^UANTIC to pass correct parameters.
+
+	*/
+	
+	quit
+
+
+public AVGINT(RecordLN ln)	// Calculate/Recalculate average interest
+
+	/*
+	Arguments:
+	.  ln	Loan Object		/TYP=RecordLN/REQ/REF:RW
+
+	*/
+	
+	type public Boolean ER
+
+	type Number FIA,PMT,PMTS,TOTACR
+	type Date NJD,SJD
+	
+	do CALC(.ln) quit:ER 
+	
+	set FIA=(TOTACR/PMTS).roundCur()
+	set PMT=ln.fpa+FIA
+	
+	// Average interest recalc flag
+	set ln.air=""
+
+	// Payment amount - current
+	set ln.pmt=PMT
+
+	// Fixed interest amount
+	set ln.fia=FIA
+
+	// Average interest recalc date
+	set ln.lairdt=%SystemDate
+
+	quit 
+
+
+CALC(RecordLN ln)	// Calculate total unpaid interest
+
+	/*
+	   Use loan modeler for variable interest (teaser or index)
+	   or pre-payments.  Otherwise, calculate total interest here.
+	
+	*/
+
+	type public Boolean ER
+	type public Date NJD,SJD
+	type public Number PMTS,TOTACR
+
+	// Teaser rate in use
+	if ln.trexd>%SystemDate do COMCALC(.ln) quit
+	
+	type Number ACR,SBAL
+	type Boolean QUIT
+	
+	// Check for interest change next date in the future
+	if 'ln.index.isNull() do { quit:QUIT
+		type Date XTJD=%SystemDate-1
+		type ResultSet rs=Db.select("EFD","INDEX0","INDEX=:ln.index AND EFD>:XTJD")
+		if rs.next() do {
+			set QUIT=1
+			do COMCALC(.ln)
+			}
+		else  set QUIT=0
+		}
+
+	// Pre-payments have been made
+	if ln.dist1nd>ln.schnd do COMCALC(.ln) quit	
+
+	// Initialize total interest
+	set TOTACR=ln.acr-ln.unin-ln.cuin
+
+	// Starting balance for period
+	set SBAL=ln.balcmp-ln.cupr-ln.unpr
+	
+	// Adjust for any billing offset
+	if ln.schnd>%SystemDate do {
+		set ACR=$$^UIC(SBAL,%SystemDate,ln.schnd-1,ln.iacm,ln.irn,,ln.dist1af,ln.dist1fre,ln.icpf,ln.schnd,%SystemDate)
+		set TOTACR=TOTACR+ACR
+		}
+	
+	// Subtract current bill's fixed principal
+	set SBAL=SBAL-ln.fpa
+
+	set PMTS=1 
+	set SJD=ln.schnd 
+	set NJD=""
+	
+	for  do { quit:(SJD'<ln.mdt)!(SBAL'>0)!(ER)
+		set PMTS=PMTS+1
+	
+		// Get next date
+		set NJD=SJD.nextFreqDate(ln.dist1fre) quit:ER
+		set ACR=$$^UIC(SBAL,SJD,NJD-1,ln.iacm,ln.irn,,ln.dist1af,ln.dist1fre,ln.icpf,NJD,SJD)
+	
+		// Update total interest
+		set TOTACR=TOTACR+ACR
+
+		// Decrease working balance
+		set SBAL=SBAL-ln.fpa
+
+		// Start date for next period
+		set SJD=NJD
+		}
+	
+	quit 
+
+
+COMCALC(RecordLN ln)
+
+	/*
+	Calculate "complex" interest - teaser rate or interest index involved
+	
+	   ^UANTIC will update ln object through the life of the loan.  The 
+	   only piece of data we need from the updated object is IPL.  The 
+	   original IPL must be protected from these updates, and AIR must be 
+	   reset to avoid recalculating the average interest for each period 
+	   which would cause an infinite loop.  Additionally, the Preauthorized
+	   Transfer Flag is temporarily turned off to ensure that regularly 
+	   scheduled payments are projected correctly, regardless of PAT set-up.
+	*/
+	
+	type public Boolean ER
+	type public Number PMTS,TOTACR
+
+	type Number BRCD
+	
+	// Clear Avg int recalc flag
+	set ln.air=""
+	
+	do Runtime.start("CS",,"MDT")
+
+	// Clear PAT Flag
+	set ln.ptf=0
+
+	type RecordLN ln2=ln.copy()
+	type RecordTTX ttx=Class.new("RecordTTX")
+
+	// Project account to Maturity Date
+	do EXEC^UANTIC(.ln,.ttx,,ln.mdt)
+	
+	set TOTACR=ln2.ipl-ln.ipl-ln.cuin-ln.unin
+	set PMTS=ln.onp-ln.schseq
+	
+	// Reverse database updates resulting from account projection
+	do Runtime.rollback("MDT")
+	
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60306^38120^Chad Smith^4080"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,413 @@
+public	ARSUTL(OPT,CID,CKNO,ARSAMT,D,PNAME,PINFO,HSEQ)
+
+	/*
+	Account Reconciliation Filing Utility
+
+	       ORIG:  RONKY - 18 DEC 1989
+
+	  EXT ENTRY:  CID^ARSUTL (Called by ARSCID filer)	           
+
+	PARAMETERS :  OPT     =   "P"  - Paid Info
+	                          "I"  - Issue Info
+	                          "V"  - Void Info
+	                          "R"  - Reveral (EC) of check paid
+	      			  "D"  - Delete info
+
+	              CID     =   Account Number
+	              CKNO    =   Check Number
+	              ARSAMT  =   Check Amount (either issue, paid, etc.)
+	              D       =   Effective Date of activity
+	              PNAME   =   Payee Name (Informational)
+	              PINFO   =   Payee Information
+	              HSEQ    =   History Sequence (for paid)
+
+	-------Revision History------------------------------------------------
+
+	11/16/06 - PUTTASWH - 23310
+		   Modified to set the value of CKNO from the TSO array if 
+		   CKNO<0, since during error correction of a 'Paid Unissued'
+		   check the CKNO value obtained was -1.
+		   
+	06/19/06 - PUTTASWH - 21654
+		   Modified CID section to file the changes to ARS flag
+		   to the account history.
+		   	
+	06/16/06 - PUTTASWH - 21177	
+		   Modified ARSUTL section to pass the History Sequence 
+		   Number to PAY section and modified PAY section to update
+		   this value in the ARS file.
+		   
+	04/25/06 - KinI - 20743
+		   Cleaned up externally called CID section that is now 
+		   executed once an account is setup for reconciliation. 
+		   Before ARSB file was not updated at this point that might 
+		   have caused wrong initial ARSB.BALP balance. 
+		   Combined CIDNEW section with CID section removing CIDNEW 
+		   line tag. Eliminated %FRMFN unused flag references.
+		   Modified top section to call R section to handle E/C or 
+		   Reversal of paid check.
+	
+	04/07/06 - KumarSS - CR 20537
+		   Modified section P, to remove the instantiating ARS record 
+		   object since this is been passed as one of the parameters
+		   to the section.
+		   Also added do START at the begining of the procedure.
+		   Removed reference of CKR array from START and EXC sections, 
+		   since CKR array is used in the lower versions to store the 
+		   data. Now ARS record serves the purpose and the usage of 
+		   CKR array is no longer available.
+
+	02/01/06 - SmithCD - CR 19343 (16890)
+		   Made top public.
+
+	*/
+	
+	if "VDIRP"'[OPT quit
+	
+	type public String TSO()
+	type Number CHKAMT, EFLG=0
+	type Boolean EXC=0 
+	type Date ACTDT
+
+	set CKNO=+CKNO.get()
+	
+	if CKNO<0 set CKNO=TSO("CK")
+	
+	type RecordARS ars=Db.getRecord("ARS","CID=:CID,CKNO=:CKNO",1)
+	
+	if 'CKNO do {
+		do EXC(.ars,.EFLG,.EXC,CKNO,OPT,ARSAMT,D,0) 
+		do FILE(.ars,OPT,EXC,EFLG,CID,CKNO)	
+		}
+		
+	type RecordARSCID arscid=Db.getRecord("ARSCID","CID=:CID",1)
+
+	set ARSAMT=ARSAMT.get()
+	
+	do ACTDT(.arscid,D,.ACTDT)
+	
+	do EXC(.ars,.EFLG,.EXC,CKNO,OPT,ARSAMT,D,0)
+
+	// If the check is paying and an error is encountered, log the error 
+	// and file ARS, because the transaction will affect the account.	
+	
+	if OPT="P" do PAY(.ars,.arscid,ACTDT,D,CKNO,ARSAMT,EFLG,CID,HSEQ)
+
+	if (EXC=0) , (OPT="R") do REV(.ars,.arscid,ACTDT,D,CKNO,ARSAMT,EFLG,CID)
+			 
+	do FILE(.ars,OPT,EXC,EFLG,CID,CKNO)
+	
+	quit
+
+
+ACTDT(RecordARSCID arscid, 	// ARSCID record
+      Date D,			// Effective Date of Activity
+      Date ACTDT)		// Activity Date
+      
+	// Activity Date
+
+	set ACTDT=%SystemDate if 'D.get() quit
+	
+	if %SystemDate=D quit
+	
+	set ACTDT=D
+
+	if (arscid.arsldt+1 > ACTDT) set ACTDT=arscid.arsldt+1
+
+	quit
+
+
+PAY(RecordARS ars,		// ARS record
+    RecordARSCID arscid,	// ARSCID record
+    Date ACTDT,			// Activity Date
+    Date D,			// Effective Date of Activity
+    Number CKNO,		// Check Number
+    Number ARSAMT,		// Check Amount
+    Number EFLG,		// Exception Flag
+    Number CID,			// Account Number
+    Number SEQ)			// History Sequence Number
+         
+         // Paid Information
+
+	/*
+	When a withdrawal is made against a Check more than once, 
+	new Check records are to be created with the Check No in 
+	the increments of 0.01 with the original Check Number.
+	*/
+
+	set ars.ckno=CKNO
+
+	// Check Status
+	set ars.stat=3
+
+	// Check Paid Date
+	set ars.pdt=D
+
+	// Paid Activity Date
+	set ars.pactdt=ACTDT
+
+	// Check Paid Amount
+	set ars.pamt=ARSAMT
+
+	// Check Paid User ID
+	set ars.puid=%UserID
+	
+	// History Sequence Number
+	set ars.tseq=SEQ
+	
+	if EFLG.get()=4 do {
+		new PDT
+		set PDT=ars.pdt
+		
+		type Number I
+		
+                for I=1:1 do { quit:PDT="" 
+			set CKNO=CKNO+.01 
+			if 'Db.isDefined("ARS","CID=:CID,CKNO=:CKNO") do { quit
+				set PDT=""
+				}
+	
+			set PDT=ars.pdt
+			if PDT="" quit
+	
+			// Check Status
+			set ars.stat=3
+	
+			// Check Paid Date
+			set ars.pdt=D
+	
+			// Paid Activity Date
+			set ars.pactdt=ACTDT
+
+			// Check Paid Amount
+			set ars.pamt=ARSAMT
+
+			// Check Paid User ID
+			set ars.puid=%UserID
+
+			}
+		}
+
+	if 'Db.isDefined("ARS","CID=:CID,CKNO=:CKNO") do {
+		set ars=Db.getRecord("ARS","CID=:CID,CKNO=:CKNO",1)
+	
+		// Paid Date
+		set ars.pdt=D
+
+		// Activity Date
+		if ars.pactdt.isNull() set ars.pactdt=ACTDT 
+
+		// Paid Amount
+		set ars.pamt=ARSAMT
+
+		// Paid User ID
+		set ars.puid=%UserID
+		}
+	
+	quit
+
+
+REV(RecordARS ars,		// ARS record
+    RecordARSCID arscid,	// ARSCID record
+    Date ACTDT,			// Activity Date
+    Date D,			// Effective Date of Activity
+    Number CKNO,		// Check Number
+    Number ARSAMT,		// Check Amount
+    Number EFLG,		// Exception Flag
+    Number CID)			// Account Number
+ 
+	// Error Correct or Reversal of Paid check
+
+	// Check Paid Date
+	set ars.pdt=""
+
+	// Paid Activity Date
+	set ars.pactdt=""
+
+	// Check Paid Amount
+	set ars.pamt=""
+
+	// Check Paid User ID
+	set ars.puid=""
+
+	// If paid prior to today, then it's a reversal
+	if ars.pdt<%SystemDate do { quit
+
+		// Check Reversal Date
+		set ars.rdt=ACTDT
+
+		// Check Reversal User ID
+		set ars.ruid=%UserID
+
+		// Check Reversal Paid Date
+		set ars.rpdt=ars.pdt
+		}
+
+	quit
+
+
+FILE(RecordARS ars,	// ARS record	
+     String OPT,	// Action Indicator
+     Boolean EXC,	// Exception Flag
+     Number EFLG,	// Exception Indicator
+     Number CID,	// Account Number
+     Number CKNO)	// ARS Check Number
+     
+	// Filing sub-routine
+	
+	if ars.exists()&(ars.opt'=OPT) do {
+		do ars.setAuditFlag(1)
+		// Last Check Action 
+		set ars.opt=OPT
+		}
+
+	if EXC do FILEXC(EXC,EFLG,CID,CKNO) 
+	
+	do ars.save()
+	
+	quit
+
+
+FILEXC(Boolean EXC,	// Exception Flag
+       Number EFLG,	// Exception Indicator
+       Number CID,	// Account Number
+       Number CKNO) 	// ARS Check Number	
+
+	// Exception Filer
+
+	type Number SQ
+	
+	set SQ=Db.nextVal("DAYENDEXC","TJD=:%SystemDate,RTN='ARS',SORT='*'")
+
+	if SQ=1 do {		
+	
+		type RecordDAYENDEXCR dayendexcr=Class.new("RecordDAYENDEXCR")
+		set dayendexcr.tjd=%SystemDate
+		set dayendexcr.rtn="ARS"
+		// Account Reconciliation
+		set dayendexcr.desc=$$^MSG(6559) 
+		do dayendexcr.bypassSave()
+		}
+
+	type RecordSTBLARSEXC stblarsexc=Db.getRecord("STBLARSEXC","KEY=:EFLG")
+	
+	type RecordDAYENDEXC dayendexc=Class.new("RecordDAYENDEXC")
+	set dayendexc.tjd=%SystemDate
+	set dayendexc.rtn="ARS"
+	set dayendexc.sort="*" 
+	set dayendexc.seq=SQ
+	
+	set dayendexc.recid=CID
+	set dayendexc.misc="Ck # "_CKNO_" "_stblarsexc.desc
+	set dayendexc.et=EFLG
+	set dayendexc.time=$H
+	
+	do dayendexc.bypassSave()
+
+	quit
+
+
+public EXC(RecordARS ars,	// ARS record
+	   Number EFLG,		// Exception Indicator
+	   Boolean EXC,		// Exception Flag
+	   Number CKNO,		// ARS Check Number
+	   String OPT,		// Action Indicator
+	   Number ARSAMT,	// ARS Check Amount
+	   Date D, 		// Activity Date
+	   Boolean ARSFIL)	// ARS filer flag
+	   
+	// Check Paid Info for Exception filing
+
+	type Number A
+	
+	// 8 - CK not fond
+	if CKNO<0 set EXC=1 set EFLG=8 quit
+	
+	if OPT="R" quit
+	
+	// 0 - Missing CKNO
+	if 'CKNO set EXC=1 set EFLG=0 quit
+	
+	// 4 - CK Already Paid. This error is not set when coming from 
+	// ARS filer inserting new "paid" check.
+	if OPT="P",ars.pdt,ARSFIL=0 set EXC=1 set EFLG=4 quit
+
+	if OPT="I" set A=ars.pamt
+	if OPT="P" set A=ars.iamt
+	// 1 - PAMT'=IAMT
+	if  if A,A-ARSAMT set EXC=1 set EFLG=1 quit
+	
+	if OPT="I" set A=ars.pdt
+	// 2 - IDT>PDT
+	if  if A,A<D set EXC=1 set EFLG=2 quit
+	
+	// 2 - IDT>PDT or
+	if OPT'="I" set A=ars.idt	
+	// 3 - IDT>VDT
+	if  if A,A>D set EXC=1 set EFLG=$S(OPT="V":3,1:2) quit
+	
+	// 5 - CK Void
+	if OPT="P",ars.vdt set EXC=1 set EFLG=5 quit
+
+	// 6 - CK Not Issued
+	if OPT="V",'ars.idt set EXC=1 set EFLG=6 quit
+
+	// 6 - CK Not Issued
+	if OPT="D",'ars.idt set EXC=1 set EFLG=6 quit
+	
+	// 7 - Dup. Check
+	if OPT="I",ars.idt set EXC=1 set EFLG=7 quit
+	
+	quit
+
+
+public CID(RecordARSCID arscid)
+	
+	/*
+	This section is called by ARSCID filer to save information for 
+	starting a reconcilement.
+
+	Create beginning balance record for ARSB(CID,TJD-1) by calling
+	BCHARSEOD to net out today's activity.
+	  
+	If a new account is setup for reconcilement, ARSB.BALP initial balance
+	will be equal to zero. If account existed before with some financial 
+	activity, it will reflect the ledger balance minus todays activity, 
+	or yesterday's ending balance.
+	*/
+	
+	type public Number tot(), totdr
+	type String PGM, XECUTE
+
+	set tot(1)=0
+	set totdr=0
+
+        type RecordACN acn=Db.getRecord("ACN","CID=:arscid.cid")
+	
+	set PGM=$$GET^UBCHID("BCHARSEOD") 
+	if PGM'="" do {
+		set XECUTE="do HIST^"_PGM_"(.arscid)"
+		#ACCEPT DATE=12/02/03; PGM=John Carroll; CR=20743
+		xecute XECUTE
+		}
+
+	type RecordARSB arsb=Class.new("RecordARSB")
+
+	set arsb.cid=arscid.cid
+	// ARS Period End Date (same as arscid.arsldt)                         
+	set arsb.arsndt=%SystemDate-1    
+	set arsb.balp = acn.bal - tot(1) + totdr            
+
+	do arsb.bypassSave()        
+
+	type RecordDEP dep=Db.getRecord("DEP","CID=:arscid.cid") 
+	
+	do dep.setAuditFlag(1)	    
+	set dep.ars=1
+	do dep.save()
+
+	quit
+	
+	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60585^26055^Hema Puttaswamy^9280"	// Signature - LTD^TIME^USER^SIZE

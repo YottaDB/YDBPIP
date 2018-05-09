@@ -1,0 +1,183 @@
+public SWIFTDEL	//Private;SWIFT Message Deletion Routine
+	/*
+	   ORIG: YANGR - 04/18/94
+	   DESC: SWIFT Message Deletion Routine
+
+	---- Revision History -----------------------------------------------
+	
+	10/13/05 - KUMARB - CR 17050
+		   Modified the look up for %TAB("SEQ") in section VPG00.
+		   Added Db.delete to clear the tmp file.
+	
+	09/07/05 - KELLYP - CR 17118
+		   Modified entire procedure to remove references to the 
+		   MT100 which has been obsoleted by SWIFT.  Also removed
+		   pre-2003 revision history.
+	
+	01/12/04 - RussellDS - CR 7514
+		   Replaced use of table SWIFTTMP (obsoleted) with TMPRPT1.
+	
+	  ---------------------------------------------------------------------
+
+	*/
+
+	do DEL
+	
+	quit
+
+
+DEL	// Set to delete mode
+	
+	do INIT(3)
+	quit
+
+
+INIT(%ProcessMode)	//
+
+	new VFMQ,OLNTB
+	set ER=0
+	do VPG00
+	quit
+ 
+
+VPG00	//set up
+
+	new %TAB
+	set PID=%ProcessID
+	set QRY="I <<PID>>=%ProcessID"
+
+	// to build the temparary file SWIFTTM
+	do BUILDG
+
+	// %READ-data to be prompted; %TAB-data type,length,prompted
+	set %TAB("SEQ")=".SEQ5/TBL=[TMPRPT1]KEY1:QU ""[TMPRPT1]PID=<<PID>>""/REQ"
+	set %TAB("IO")=$$IO^SCATAB($I)
+
+	// Now prompt for SEQ for swift REP queue
+	set %READ="@@%FN,,,SEQ"
+	set %NOPRMT="N"
+
+	do ^UTLREAD
+
+	if VFMQ="Q" do ACT quit
+
+	// Set up current swiftq record for action (delete or quit)
+	type RecordTMPRPT1 fTMPRPT=Db.getRecord("TMPRPT1","PID=:%ProcessID,KEY1=:SEQ")
+	set TRREFNO=fTMPRPT.data.curVal.piece("|",1)
+	set MSG=fTMPRPT.data.curVal.piece("|",2)
+	set QUESEQ=fTMPRPT.data.curVal.piece("|",3)
+
+	// Record locked by another user
+	lock +SWIFT("OUT",TRREFNO,MSG):2 else  set ER=1 set RM=$$^MSG(2333) set VFMQ="Q" do ACT quit
+
+	// Record locked by another user
+	lock +SWIFTQ("REP",QUESEQ,TRREFNO,MSG):2 else  set ER=1 set RM=$$^MSG(2333) set VFMQ="Q" do ACT quit
+
+	do ACT
+	quit
+
+
+ACT	// display the SWIFT Msg (one of 300,210,202),prompt for DELETE or QUIT
+
+	// No Deletion Performed
+	if "Q"[VFMQ do { quit
+		set ER="W"
+		set RM=$$^MSG(7242)
+		do Db.delete("TMPRPT1","PID=:%ProcessID")
+		}
+
+	// for another locking
+	if ER quit
+	if "DF"[VFMQ do {
+		type RecordSWIFT fSWIFT=Db.getRecord("SWIFT","SWDIRECT='OUT',TRREFNO=:TRREFNO,MSG=:MSG")
+
+		// display to-be-deleted swift message
+		do DISPLAY(TRREFNO,MSG,.fSWIFT)
+
+		if ER quit
+
+		// No Deletion Performed
+		if "Q"[VFMQ do { quit
+			set ER="W"
+			set RM=$$^MSG(7242)
+			do Db.delete("TMPRPT1","PID=:%ProcessID")
+			}
+
+		// deleted status
+		set NEWSTAT=5
+
+		do fSWIFT.setAuditFlag(1)
+
+		// update to new del status
+		set fSWIFT.status=5
+
+		// update to new response date
+		set fSWIFT.date=%SystemDate
+
+		do fSWIFT.save()
+
+		do Db.delete("SWIFTQ2","QUE='REP' AND SEQ=:QUESEQ AND TRREFNO=:TRREFNO AND TYPE=:MSG")
+
+		type RecordSWQCNT fSWQCNT=Db.getRecord("SWQCNT","QUE='REP'",1)
+		set fSWQCNT.tot=fSWQCNT.tot-1
+		do fSWQCNT.bypassSave()
+
+		do Db.delete("TMPRPT1","PID=:%ProcessID")
+
+		// The ~p1 Reparing Queue ~p2 ~p3 Deleted
+		set ER="W"
+		set RM=$$^MSG(7328,"SWIFT",TRREFNO,MSG)
+		}
+
+	// unlock the record
+	lock -SWIFT("OUT",TRREFNO,MSG)
+	lock -SWIFTQ("REP",QUESEQ,TRREFNO,MSG)
+	quit
+
+
+BUILDG	/* to build the temprary file from SWIFTQ2 */
+
+	// clear tmp file
+	do Db.delete("TMPRPT1","PID=:%ProcessID")
+
+	set QUESEQ=""
+
+	// init temp global sequence number
+	set SEQ=0
+	set (TRREFNO,MSG)=""
+
+	type ResultSet rs=Db.select("SEQ,TRREFNO,TYPE","SWIFTQ2","QUE='REP'","SEQ,TRREFNO,TYPE")
+	while rs.next() do {
+		set QUESEQ=rs.getCol("SEQ")
+		set TRREFNO=rs.getCol("TRREFNO")
+		set MSG=rs.getCol("TYPE")
+		set SEQ=SEQ+1
+
+		type RecordTMPRPT1 fTMPRPT=Class.new("RecordTMPRPT1")
+		set fTMPRPT.pid=%ProcessID
+		set fTMPRPT.key1=SEQ
+		set fTMPRPT.data=TRREFNO_"|"_MSG_"|"_QUESEQ
+		do fTMPRPT.bypassSave()
+		}
+	quit
+
+
+DISPLAY(TRREFNO,MSG,RecordSWIFT fSWIFT)	//Display the swift message with ^SWIFT(SWDIRECT,TRREFNO,MSG)
+
+	//currently out server only deals with out msg
+	set SWDIRECT="OUT"
+
+	set SID=$S(MSG="103":"MT103DRV",MSG="192":"MT192DRV",MSG="199":"MT199PG1",MSG="200":"MT200DRV",MSG="202":"MT202DRV",MSG="210":"MT210",MSG="292":"MT292DRV",MSG="300":"MT300DRV",1:0)
+
+	// SWIFT message MT~p1 not supported
+	if SID=0 set ER=1,RM=$$^MSG(3866,MSG) quit
+
+	// deletion mode
+	set %ProcessMode=3
+
+	// with SWDIRECT,TRREFNO,MSG, display the swift message.
+	do DRV^USID(%ProcessMode,SID,.fSWIFT)
+
+	quit
+
+vSIG()	quit "60186^24331^Balasubramonian Sankar^4032"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,656 @@
+DEPBI		/*
+	---- Revision History -----------------------------------------------
+
+	03/03/06 - KELLYP - CR 19907
+		   Modified PROC section to return a more informative error
+		   message when the CIF doesn't exist.  Previously this would
+		   just log a %PSL-E-RECNOFL error.
+
+	10/12/05 - Srinivar - 16890
+		   Modified the section PROC to call BEFOREIN^PROCESC
+		   before initializing objects to prevent the undefined 
+		   error ACN.
+	
+	06/01/05 - KinI - 16153
+		   Removed GLFLTR^ACNFUNCS call as obsoleted. GLSC value is 
+		   defaulted from the product level.
+
+	02/19/05 - KELLYP - CR 13662
+		   Cleaned up procedure, modified to conform to current
+		   PSL standards, and removed pre-2003 revision history.
+		   Also moved XBAD checks and SWIFT MT942 logic to the 
+		   DEPAI procedure.
+		
+	03/18/03 - Allan Mattson - 51351
+		   Eliminated references to Membership Processing (obsoleted
+		   in V7.0).
+	*/
+
+	quit		// Dummy quit for compiler
+
+public PROC(RecordDEP dep)	// Entry point for BEFORE_INSERT of DEP trigger
+
+	type Public Boolean ER
+	type Public String ET,RM
+	
+	set %EffectiveDate=%EffectiveDate.get()
+
+	// Data required in data item ~p1
+	if dep.cid.isNull() do Runtime.setErrMSG("DEP",7531,"DEP.CID") if ER quit
+
+	// Data required in data item ~p1
+	if dep.type.isNull() do Runtime.setErrMSG("DEP",7531,"DEP.TYPE") if ER quit
+	
+	if dep.grp="ESC" do BEFOREIN^PROCESC(.dep) quit:ER 
+
+	// Initialize objects used throughout procedure
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:dep.type")
+	type RecordPRODDFTD proddftd=Db.getRecord("PRODDFTD","TYPE=:dep.type")
+	type RecordUTBLBRCD utblbrcd=Db.getRecord("UTBLBRCD","BRCD=:dep.boo")
+	type RecordCIF cif=Db.getRecord("CIF","ACN=:dep.acn",1)
+	
+	// Invalid customer number
+	if 'cif.getMode() do Runtime.setErrMSG("CIF",1295) quit:ER
+
+	/*
+	 If Accrued Withholding Tax Processing option is on and Accrued
+	 Withholding Tax Index is defined for a non-segmented account,
+	 call into AWT^DEPBW to get the tax rate.
+	*/
+	if dep.awtp,'dep.awti.isNull(),'dep.segflg set dep.awtr=$$AWT^DEPBW(dep.awti,,,dep.irn,%SystemDate) quit:ER
+
+	// Branch ~p1 is inactive
+	if utblbrcd.inactv do Runtime.setErrMSG("DEP",3830,dep.boo) quit:ER 
+	
+	if dep.crcd.isNull() set dep.crcd=%SystemCurrency
+	
+	// Deposit Asset Override defaults from CIF
+	if 'cif.depclovr.isNull() do {
+		set dep.darcovr=cif.depclovr 
+		set dep.suspect=1
+		}
+
+	// Company Code
+	if dep.co.isNull() set dep.co=cif.co
+
+	// Product class or group does not match product type
+	if proddftd.cls'="D" do Runtime.setErrMSG("DEP",8472) quit:ER
+
+	if dep.grp.isNull() set dep.grp=proddftd.grp
+	
+	// Product class or group does not match product type
+	else  if dep.grp'=proddftd.grp do Runtime.setErrMSG("DEP",8472) quit:ER
+	
+	// Set up general defaults
+	set dep.cls="D"
+
+	// Customer code
+	if dep.ccode.isNull() set dep.ccode=cif.ccode
+
+	// Personal/non-personal
+	if dep.pers.isNull() set dep.pers=cif.pers
+
+	// Date opened
+	if dep.odt.isNull() set dep.odt=%SystemDate
+
+	// Report short name
+	if dep.lnm.isNull() do {
+		type String SLN
+		set SLN=cif.lnm.piece("|",1)
+		if ('cif.pers),(SLN.length()<18),('cif.nam.piece(" ",2).isNull()) do {
+			set SLN=SLN_","_cif.nam.piece(" ",1)
+			set SLN=SLN.extract(1,20)
+			}
+		set dep.lnm=SLN
+		}
+
+	// Account Status
+	set dep.stat=0
+	
+	// Mail Option 
+	if dep.mf.isNull() set dep.mf=cif.mf
+
+	// Transaction to Reduce Balance
+	if dep.trb.isNull() set dep.trb=proddftd.trb
+
+	// CIF Officer Code
+	if dep.off2.isNull() set dep.off2=cif.cifoff
+
+	// ACS - Set Accrual Processed Date
+	set dep.acs=%SystemDate-1
+		
+	// STMDSCD - Statement Description (Detail)
+	if dep.stmdscd.isNull() set dep.stmdscd=prodctl.stmdscd
+	
+	// GCRS - Good Customer Recognition Status
+	if dep.gcrs,('dep.mscrtbl.isNull()) do { quit:ER 
+
+		// Update GCR date last and previous maintained
+		set dep.gcrlmnt=%SystemDate
+
+		// IF GCRS status is Revoked, set the GCR code to null and quit
+		if dep.gcrs=3 set dep.gcrcd="" quit 
+
+		if dep.gcrcd.isNull() quit
+		
+		type RecordUTBLGCRBAL ugcrbal=Db.getRecord("UTBLGCRBAL","TBLNM=:dep.mscrtbl,GCRCD=dep.gcrcd")
+		
+		set dep.sddepcvr=ugcrbal.sddepcvr
+		set dep.gcrcv=ugcrbal.gcrcv+dep.inicvopt
+		}
+	
+	// NSDATE - Next Scoring Date
+	if 'dep.scrfreq.isNull(),dep.nsdate.isNull() set dep.nsdate=$$FRSTDATE^ACNFUNCS(dep.odt,dep.scrfreq,1) quit:ER
+	
+	// TRM/MDT - Maturity Date
+	if 'dep.segflg,'dep.trm.isNull(),dep.mdt.isNull() set dep.mdt=$$EXT^UMDT(dep.trm,dep.odt,0,dep.busopt,dep.nbdc) quit:ER 
+
+	// TRM/TERM - Compute TERM
+	if 'dep.segflg,dep.trm.isNull(),'dep.mdt.isNull() do { quit:ER
+
+		// Invalid maturity date
+		if 'dep.busopt.isNull(),dep.busopt'="A",'$$BD^UNBD(dep.mdt,dep.nbdc) do Runtime.setErrMSG("DEP",6933) quit:ER
+
+		type String TRM
+		set TRM=$$TERM^UCO(dep.odt,dep.mdt)
+		set dep.trm.journal=0
+		if 'TRM.isNull() set dep.trm=TRM
+		}
+
+	// VOSNSDT - Vostro Next Statement Date
+	if dep.vostro,dep.voselec,dep.vosnsdt.isNull(),'dep.vosfreq.isNull() set dep.vosnsdt=$$FRSTDATE^ACNFUNCS(%SystemDate,dep.vosfreq,1) quit:ER 
+	
+	// Get Promotional Rate using PROIND,PROBAL or ORG
+	if 'dep.proind.isNull(),dep.trate.isNull() do { quit:ER 
+
+		type Number BASE,RATE,RRATE,SRATE,URATE
+		type String PAR()
+
+		if 'dep.probal.isNull() set BASE=dep.probal
+		else  set BASE=dep.org
+
+		set PAR("INDEX")=dep.proind
+		set PAR("IXLOAD")=0	
+		set PAR("NOTSER")=1		
+		set PAR("IPMODE")=0
+		set PAR("ROUND")=1	
+		set PAR("LIMIT")=1
+
+		do CTL^UINDX(.dep,%EffectiveDate,BASE,.PAR)
+
+		// Use ET error message
+		if ER,'ET.get().isNull() do Runtime.setErrSTBLER("DEP",ET) quit:ER
+
+		// Use RM error message
+		if ER,'RM.get().isNull() quit 
+
+ 		if 'ER set dep.trate=RATE
+		}
+	
+	// TREXDT - Teaser Rate Expiration Date
+	if 'dep.trate.isNull(),dep.trexd.isNull(),prodctl.trtrm set dep.trexd=$$EXT^UMDT(prodctl.trtrm,dep.odt,0,dep.busopt,dep.nbdc) quit:ER
+
+	// INC - Interest Next Compounded , ILC - Interest Last Compounded
+	if 'dep.icf.isNull() do { quit:ER
+		set dep.inc=$$FRSTDATE^ACNFUNCS(dep.odt,dep.icf,1) quit:ER 
+		set dep.ilc=%SystemDate
+		}
+		
+	type Number INTPOS
+	
+	// if CUVAR.INTPOS=0 or 2 then INTPOS=0 o/w INTPOS=1
+	set INTPOS=CUVAR.intpos#2
+
+	if 'dep.ipf.isNull() do { quit:ER
+	
+		type Date NJD
+		type Number AF
+	
+		// Determine Int/Div - Annual Factor
+		set NJD=$$NJD^UFRE(dep.odt,dep.ipf,.AF,"00001")
+
+		/* Int/Div Next Posted and Int/Div Paid - Last Date not 
+		   applicable if segmented account accruing at seg level */
+		if dep.segflg,'dep.segacr do { quit
+			set dep.inp=""
+			set dep.ipld=""
+			if dep.intaf.isNull() set dep.intaf=AF
+			}
+
+		/* Int/Div Next Posted not defined by user, calculate it 
+		   and use calculated annual factor */
+		if dep.inp.isNull() do { quit:ER
+			set NJD=$$FRSTDATE^ACNFUNCS(dep.odt,dep.ipf,INTPOS) quit:ER
+			set dep.inp=NJD
+			set dep.intaf=AF
+			}
+
+		/* Int/Div Next Posted is defined by user, but annual 
+		   factor is not, so use calculated value */
+		else  if dep.intaf.isNull() set dep.intaf=AF
+
+		/* Always calculate Int/Div Paid - Last Date (cannot be 
+		   prior to account opening) on account creation, 
+		   regardless of whether or not user specifies */
+		set NJD=$$NJD^UFRE(dep.inp,dep.ipf,,"10001") quit:ER
+		if NJD<dep.odt set NJD=dep.odt
+		set dep.ipld=NJD
+		}
+
+	// Initialize values for scheduled deposit accounts.
+	if 'dep.schdepf.isNull() do { quit:ER
+
+		type Boolean QUIT
+		type Date JD,NJD,NTJD
+		type Number CSCHDEPN,TOTNOSDP
+		type String BUSOPT,IACM,NBDC
+
+		// Calculate Int/Div - Annual Factor, regardless of whether
+		// or not user specifies
+		set BUSOPT=""
+		set NBDC=""
+		set IACM=11
+		set TOTNOSDP=$$TRMC^DEPMOD(dep.schdepf,dep.trm,dep.odt,BUSOPT,NBDC)
+		set TOTNOSDP=$$^SCARND(TOTNOSDP,"","","",0,"")
+		set dep.totnosdp=TOTNOSDP
+		
+		// Scheduled Deposit Next Date not defined by user, calculate it
+		if dep.schdepnd.isNull() set dep.schdepnd=$$FRSTDATE^ACNFUNCS(dep.odt,dep.schdepf,"1") quit:ER
+
+		/*
+		 Always calculate Scheduled Deposit - Last Date (cannot be prior to
+		 account opening) on account creation, regardless of whether or not
+		 user specifies.
+		*/
+		set NJD=$$NJD^UFRE(dep.schdepnd,dep.schdepf,,"10001") quit:ER
+		if NJD<dep.odt set NJD=dep.odt
+		set dep.schdepld=NJD
+
+		/*
+		 Set the Scheduled Deposit Number to be 1 for the first deposit. If
+		 the opening date is in the past, calculate scheduled deposit number
+		 accordingly.
+		*/
+		set CSCHDEPN=0
+		set QUIT=0
+		set NTJD=%SystemDate
+		if dep.schdepn.isNull(),dep.odt'<%SystemDate set CSCHDEPN=1
+		if dep.schdepn.isNull(),dep.odt<%SystemDate  do { quit:ER
+			if dep.mdt<%SystemDate set NTJD=dep.mdt
+			for  set JD=$$NJD^UFRE(NTJD,dep.schdepf,,1) quit:ER!(QUIT)  do { 
+	                    	if JD<dep.odt set QUIT=1 quit
+	                	set CSCHDEPN=CSCHDEPN+1
+				set NTJD=JD
+				}
+				
+			set dep.schdepn=CSCHDEPN
+			
+			// Next Scheduled Deposit Due Date needs to be calculated
+			if dep.nscdepdd.isNull() set dep.nscdepdd=dep.odt
+			}
+		}
+	
+	if 'dep.aiipf.isNull() do { quit:ER
+		
+		type Date NJD
+	
+		/* Avail Int/Div Next Posted and Avail Int/Div Paid - 
+		   Last Date not applicable if segmented account 
+		   accruing at seg level */
+		if dep.segflg,'dep.segacr do { quit
+			set dep.aiinp=""
+			set dep.aiipld=""
+			}
+
+		/* Avail Int/Div Next Posted not defined by user, 
+		   calculate it */
+		if dep.aiinp.isNull() do { quit:ER
+			set NJD=$$FRSTDATE^ACNFUNCS(dep.odt,dep.aiipf,INTPOS) quit:ER
+			set dep.aiinp=NJD
+			}
+
+		/* Always calculate Avail Int/Div Paid - Last Date 
+		   (cannot be prior to account opening) on account 
+		   creation, regardless of whether or not user 
+		   specifies */
+		set NJD=$$NJD^UFRE(dep.aiinp,dep.aiipf,,"10001") quit:ER
+		if NJD<dep.odt set NJD=dep.odt
+		set dep.aiipld=NJD
+		}
+
+	if 'dep.negipf.isNull(),dep.negipo=2 do { quit:ER
+
+		type Date NJD
+
+		/* Neg Int/Div Next Posted not defined by user, 
+		   calculate it */
+		if dep.neginp.isNull() set dep.neginp=$$FRSTDATE^ACNFUNCS(dep.odt,dep.negipf,INTPOS) quit:ER
+
+		/* Always calculate Neg Int/Div Paid - Last Date 
+		   (cannot be prior to account opening) on account 
+		   creation, regardless of whether or not user 
+		   specifies */
+		set NJD=$$NJD^UFRE(dep.neginp,dep.negipf,,"10001") quit:ER
+		if NJD<dep.odt set NJD=dep.odt
+		set dep.negipld=NJD
+		}
+
+	if 'dep.intchkfre.isNull() do { quit:ER
+
+		type Date NJD
+
+		/* Int/Div Check Next Date not defined by user, 
+		   calculate it */
+		if dep.intchknd.isNull() set dep.intchknd=$$FRSTDATE^ACNFUNCS(dep.odt,dep.intchkfre,INTPOS) quit:ER
+
+		/* Always calculate Int/Div Check last Date (cannot be 
+		   prior to account opening) on account creation, 
+		   regardless of whether or not user specifies */
+		set NJD=$$NJD^UFRE(dep.intchknd,dep.intchkfre,,"10001") quit:ER
+		if NJD<dep.odt set NJD=dep.odt
+		set dep.intchkld=NJD
+		}
+
+	if 'dep.intfre.isNull() do { quit:ER
+
+		type Date NJD
+
+		/* Int/Div Change - Next Date and Int/Div Change - Last 
+		   Date not applicable if segmented account accruing at 
+		   segment level */
+		if dep.segflg,'dep.segacr do { quit
+			set dep.ichnd=""
+			set dep.ichld=""
+			}
+
+		/* Int/Div Change - Next Date not defined by user, 
+		   calculate it */
+		if dep.ichnd.isNull() set dep.ichnd=$$FRSTDATE^ACNFUNCS(dep.odt,dep.intfre,1) quit:ER
+
+		/* Always calculate Int/Div Change - Last Date (cannot 
+		   be prior to account opening) on account creation, 
+		   regardless of whether or not user specifies */
+		set NJD=$$NJD^UFRE(dep.ichnd,dep.intfre,,"10001") quit:ER
+		if NJD<dep.odt set NJD=dep.odt
+		set dep.ichld=NJD
+		}
+
+	if 'dep.aiintfre.isNull(),dep.airdet do { quit:ER
+
+		type Date NJD
+
+		// Avail Interest Next Change Date not defined by user,
+		// calculate it
+		if dep.aiichnd.isNull() set dep.aiichnd=$$FRSTDATE^ACNFUNCS(dep.odt,dep.aiintfre,1) quit:ER
+
+		/* Always calculate Avail Interest Next Change Date 
+		   (cannot be prior to account opening) on account 
+		   creation, regardless of whether or not user 
+		   specifies */
+		set NJD=$$NJD^UFRE(dep.aiichnd,dep.aiintfre,,"10001") quit:ER
+		if NJD<dep.odt set NJD=dep.odt
+		set dep.aiichld=NJD
+		}
+	
+	//  ANLSYS Set up anltyp based on alysys (alysys has been obsoleted)
+	if (dep.anlsys),'(dep.anltyp) set dep.anltyp=1
+	if '(dep.anlsys),'(dep.anltyp) set dep.anltyp=0
+	
+	/* SCND - Service Charge Next Date
+           If frequency is defined and analysis type is a sub or other
+           account used in analysis, set the scheduled next date to 
+	   the lead account's scheduled next date */
+	if ('dep.scfre.isNull()),(dep.anltyp>1),(dep.anlcid) do {
+		type RecordDEP depanl=Db.getRecord("DEP","CID=:dep.anlcid")
+		set dep.scnd=depanl.scnd
+		}
+
+	/* If frequency is defined and analysis type is a lead or not an 
+	   analysis account */
+	if ('dep.scfre.isNull()),(dep.anltyp<2),'(dep.scnd) set dep.scnd=$$FRSTDATE^ACNFUNCS(dep.odt,dep.scfre,1) quit:ER
+
+ 	// Set - Budget Review Date, Budget Year Start date and Budget Year next date
+	if dep.bgtpro do { quit:ER
+		
+		// Budget frequency must have a value for a budget account.
+		if dep.bgtfreq.isNull() do Runtime.setErrMSG("DEP",4314) quit:ER
+
+		set dep.bgtyrsd=dep.odt
+	 		
+	 	// Default first Budget Year Next Date
+		set dep.bgtyrnd=$$FRSTDATE^ACNFUNCS(dep.odt,dep.bgtfreq,1) quit:ER
+		set dep.bgtrvudt=(dep.bgtyrnd-dep.bgtoffst)
+		}
+
+	// BGTNCDT - Next Scheduled Contribution Date
+	if dep.bgtpro,'dep.bgtcontr.isNull() do { quit:ER
+		
+		type Date NJD
+
+		if dep.bgtncdt.isNull() set dep.bgtncdt=$$FRSTDATE^ACNFUNCS(dep.odt,dep.bgtcontr,0) quit:ER
+
+		// Default BGTLCDT - Last Scheduled Contribution Date
+		set NJD=$$NJD^UFRE(dep.bgtncdt,dep.bgtcontr,,"10001") quit:ER
+		if NJD<dep.odt set NJD=dep.odt
+		set dep.BGTLCDT=NJD
+		}
+	
+	// PBI - Passbook Flag
+	if dep.pbi do {
+		set dep.pbkbal=0
+		set dep.pbkld=%SystemDate
+		set dep.pbkseq=0
+		set dep.pbklin=0
+		set dep.pbksn=1
+		}
+        
+	// Lease Security Processing
+	if (dep.lsp=1) do { quit:ER
+
+		// Specify Lease Administrative Fee Method if Lease Security Processing flag is set to Yes
+ 		if dep.lafm.isNull() do Runtime.setErrMSG("DEP",4218) quit:ER
+
+		// Specify % of Opening Bal/Int Rate if Lease Administrative Fee Method is 1, 2, 4, or 5
+        	if (dep.lafm=1)!(dep.lafm=2)!(dep.lafm=4)!(dep.lafm=5),(dep.oborirp.isNull()) do Runtime.setErrMSG("DEP",4198) quit:ER
+
+		// Specify % of Interest Earned if Lease Administrative Fee Method is 1, 2, 4, or 5
+        	if (dep.lafm=3)!(dep.lafm=4)!(dep.lafm=5),(dep.iep.isNull()) do Runtime.setErrMSG("DEP",4195) quit:ER
+ 
+ 		if dep.laftfr.isNull() quit
+
+                type RecordDEP deplaftf=Db.getRecord("DEP","CID=:dep.laftfr",1)
+
+		// Invalid account ~p1
+        	if (deplaftf.stat.isNull())!(deplaftf.stat=4) do Runtime.setErrMSG("DEP",1259,dep.laftfr) quit:ER
+		}
+	
+	if 'dep.intmat.isNull() do { quit:ER
+
+		// Do not perform check if segmented account accruing at segment level
+		if dep.segflg,'dep.segacr quit 
+
+		type Boolean ERFLAG
+		type Number MATCOL,ROW
+
+		// set INTMAT=dep.intmat
+		type RecordUTBLMATATT umatatt=Db.getRecord("UTBLMATATT","NAME=:dep.intmat")
+
+		set ROW=umatatt.row
+		set MATCOL=umatatt.matcol
+		set ERFLAG=1
+
+		type ResultSet rs=Db.select("ITEM","STBLMATATT","DEP NOT LIKE 'DEPSEG%'")
+		if rs.isEmpty() quit
+		while rs.next() do { quit:'ERFLAG     
+			// Checks if ROW or MATCOL have non segment data items
+			if (ROW=rs.getCol(1))!(MATCOL=rs.getCol(1)) set ERFLAG=0 quit 
+			}
+
+		// Matrix must reference non segment data items
+		if ERFLAG do Runtime.setErrMSG("DEP",3999) if ER quit
+		}
+	
+	/* If Index is present find the Rate according to index, and 
+	   place it in IRN, and IRO if IRO is null.  Then check for 
+	   teaser rates.  If error and DIAUTH is set, load rate from 0 
+	   balance tier of the IX array.  */
+	if 'dep.index.isNull(),dep.irn.isNull() do { quit:ER
+
+		type Number RATE,RRATE,SRATE,URATE
+		type String PAR()
+
+		// accruing at segment level
+		if dep.segflg=1,'dep.segacr quit 
+
+		set PAR("INDEX")=dep.index
+		set PAR("SPREAD")=dep.intspr
+		set PAR("RNDFC")=dep.rndmtd
+		set PAR("IXLOAD")=0
+		set PAR("NOTSER")=1
+		set PAR("IPMODE")=0
+		set PAR("ROUND")=1	
+		set PAR("LIMIT")=0
+		set PAR("MATRIX")=dep.intmat
+
+		do CTL^UINDX(.dep,dep.ichld,dep.bal,.PAR)
+
+		//Use ET error message
+		if ER,'ET.get().isNull() do Runtime.setErrSTBLER("DEP",ET) quit:ER
+
+		//Use RM error message
+		if ER,'RM.get().isNull() quit
+
+		if 'ER set dep.irn=RATE
+		}
+
+	if dep.irn.isNull(),'dep.sch.isNull() set dep.irn=$$RSCH^URSCH(dep.sch,dep.org,dep.odt,dep.mdt,dep.rsintspr,dep.rsrndmtd) quit:ER
+	
+	// IRO - Original Interest Rate
+	if dep.iro.isNull() set dep.iro=dep.irn
+	
+	// If teaser rate is active, change Original Rate to Teaser Rate.
+	if 'dep.trate.isNull(),dep.trexd>%SystemDate set dep.irn=dep.trate
+	else  set dep.irn=dep.iro
+	
+	// Enter a date after the current system date
+	if 'dep.trexd.isNull(),dep.trexd'>%SystemDate do Runtime.setErrMSG("DEP",914) quit:ER
+	
+	// Default AIIRN if null and AIINDEX exists
+	if 'dep.aiindex.isNull(),dep.aiirn.isNull(),dep.airdet do { quit:ER
+
+		type Number RATE,RRATE,SRATE,URATE
+		type String PAR()
+
+		set PAR("INDEX")=dep.aiindex
+		set PAR("SPREAD")=dep.aiintspr
+		set PAR("RNDFC")=dep.airndmtd
+		set PAR("IXLOAD")=0
+		set PAR("NOTSER")=1
+		set PAR("IPMODE")=0
+		set PAR("ROUND")=1
+		set PAR("LIMIT")=0
+		set PAR("MATRIX")=dep.aiintmat
+
+		do CTL^UINDX(.dep,dep.aiichld,dep.intavlncr,.PAR)
+
+		// Use ET error message
+		if ER,'ET.get().isNull() do Runtime.setErrSTBLER("DEP",ET) quit:ER
+
+		// Use RM error message
+		if ER,'RM.get().isNull() quit
+
+		if 'ER set dep.aiirn=RATE
+		}
+ 
+	// Overdraft Option
+	if dep.odo.isNull() set dep.odo=proddftd.odo
+
+	// Employer number
+	if dep.emplno.isNull() set dep.emplno=cif.emplno
+
+        // Set Signature Card Change Date to create XSGNCRD entry
+        if dep.sgncrdchgdt.isNull() set dep.sgncrdchgdt=%SystemDate
+	set dep.sgncrd=+dep.sgncrd
+	set dep.psgncrdr=+dep.psgncrdr
+	set dep.osgncrdc=+dep.osgncrdc
+
+	// Swift defaults from customer
+	if cif.mt320=1 set dep.mt320=1
+	if cif.mt900=1 set dep.mt900=1
+	if cif.mt910=1 set dep.mt910=1
+	if cif.mt940=1 set dep.mt940=1
+	if cif.mt942=1 set dep.mt942=1
+
+	// Field Staff Code
+	if dep.fldstaff.isNull() do {
+		type RecordAGENT agent=Db.getRecord("AGENT","AGENT=:dep.boo",1)
+		if 'agent.getMode() quit
+		set dep.fldstaff.journal=0
+		set dep.fldstaff=agent.fldstaff
+		}
+
+	// UPFRE -  Usage Credit Plan Next Date
+	if 'dep.upfre.isNull(),dep.upndt.isNull() set dep.upndt=$$FRSTDATE^ACNFUNCS(dep.odt,dep.upfre,1) quit:ER
+
+	// Regulation D frequency required if REGD=5
+ 	if dep.regd=5,(dep.mmda4.isNull()) do Runtime.setErrMSG("DEP",4295) quit:ER
+
+ 	// Regulation D processing - Set next cycle date
+ 	if (dep.regd=5),(dep.mmda4),'(dep.mmda3) set dep.mmda3=$$FRSTDATE^ACNFUNCS(TJD,dep.mmda4,1) quit:ER
+
+	// Is this Segmented Account not in use?
+	if 'dep.segflg do BININUSE(.dep) quit:ER
+	
+	// Is this Segmentmented Account in use?
+	if dep.segflg=1 do BIINUSE(.dep) quit:ER
+
+	quit 
+	
+BININUSE(RecordDEP dep)  
+
+	type Public String ER
+
+	// If segments not in use flag is set then check for the following
+	
+	// Segment Penalty Method may only be used for segmented accts
+	if 'dep.segpopt.isNull() do Runtime.setErrXBAD("DEP",228) quit:ER 
+
+	// Segment Accrual Option may only be used for segmented accts
+	if 'dep.segacr.isNull() do Runtime.setErrXBAD("DEP",226) quit:ER
+ 
+	// Max Employee Contr may only be used for segmented accts
+	if 'dep.maxempc.isNull() do Runtime.setErrXBAD("DEP",213) quit:ER
+ 
+	// Max Employer Contr may only be used for segmented accts
+	if 'dep.maxemprc.isNull() do Runtime.setErrXBAD("DEP",214) quit:ER
+ 
+	// Premium Ratio may only be used for segmented accounts
+	if 'dep.pratio.isNull() do Runtime.setErrXBAD("DEP",220) quit:ER 
+	
+	quit 
+	
+BIINUSE(RecordDEP dep)
+
+	type Public String ER
+
+	// This section handles Segmented Accounts that are presently in use
+	
+	// Penalty Method must be null for segmented accounts
+	if 'dep.popt.isNull() do Runtime.setErrXBAD("DEP",218) quit:ER
+ 
+	// Segment Accrual Option is required for segmented accounts
+	if dep.segacr.isNull() do Runtime.setErrXBAD("DEP",225) quit:ER
+ 
+	// Retirement processing may not be used for segmented accounts
+	if dep.ira'=0 do Runtime.setErrXBAD("DEP",223) quit:ER
+ 
+	// Int Check Frequency is not supported for segmented accts
+	if 'dep.intchkfre.isNull() do Runtime.setErrXBAD("DEP",209) quit:ER
+ 
+	// Int Compounding is not supported for segmented accts
+	if 'dep.icf.isNull() do Runtime.setErrXBAD("DEP",210) quit:ER
+
+	quit 
+	
+
+vSIG()	quit "60327^62599^Pat Kelly^19613"	// Signature - LTD^TIME^USER^SIZE

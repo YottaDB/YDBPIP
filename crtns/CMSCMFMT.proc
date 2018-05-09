@@ -1,0 +1,464 @@
+CMSCMFMT	//Public;CMS/PROFILE Card Management Format Routine
+	/*
+	   ORIG: BAILDONC - 12/05/97
+	   CALLED BY: QUE087
+	   DESC: CMS/PROFILE Card Management Format Routine
+
+	   KEYWORDS:
+
+	   INPUTS:
+	   . System
+
+	   . Data [ddfile]di
+
+	   . v1 desc of variable /TYP=T
+
+	   RETURNS:
+	   . XX desc of return  /TYP=T
+
+	   RELATED:
+	   . $$func^rtn - description of how related
+
+	   EXAMPLE:
+	   Text of example (line one)
+
+	  ------------ Revision History -----------------------------------------
+	   
+	   07/25/06 - Pete Chenard - 22385
+	   
+	   	      Modified to not pass the 'DELETE' parameter into the
+	   	      io.close method.  The method does not support parameters.
+	   	      
+	   12/12/05 - SPR - 18555
+		      Card Management - General DBI3 system area cleanup.
+			   
+           07/25/05 - SkariahV- CR16679
+	              Removed #WARN and #OPTIMIZE directives.
+	    
+	  
+	  -----------------------------------------------------------------------
+
+	*/
+
+	quit
+	
+
+BEGIN	/*  Opens the file that will contain the customer information
+	    value, and establishes the initial conditions.
+	*/
+
+	
+	type Date DATE=%SystemDate
+	type Number CNT=0
+	type public Number FLSEQ
+	type public String ER
+	type ResultSet rs1,rs2,rs3,rs4
+	type IO io 
+
+	set rs1=Db.select("SEQ","CMSRECACN")
+	set rs2=Db.select("SEQ","CMSRECCID")
+	set rs3=Db.select("SEQ","CMSRECCRD")
+	set rs4=Db.select("CMSTYP","CMSRECTOP")
+
+	if rs1.isEmpty(),rs2.isEmpty(),rs3.isEmpty(),rs4.isEmpty() quit
+
+	set io=Class.new("IO")
+	
+	set ER=$$BEGIN^CMSOUT("STAT",.io)
+
+	if ER quit
+	
+	do HEADER(.io)
+	do START(.io)
+	do NXTCRD(.io,.CNT)
+	do TRAILER(.io,FLSEQ,DATE,CNT)
+	do END(.io)
+		
+	quit
+
+
+HEADER(IO io)	//  File Header
+	/*
+	    This is the hard coded header record.  In the future, there may be
+	    enhancements to use a general record type writer based upon the
+	    contents in the CMSFILE user table.
+	*/
+
+	type public String RM
+	type public Number FLSEQ
+	type public Date DATE
+	type String HEADER
+
+	// Tests if this function has already been run today
+	type RecordCMRUN cmrun=Db.getRecord("CMRUN","RUNDT=:%SystemDate",1)
+	if 'cmrun.lastseq set cmrun.lastseq=0
+
+	// File sequence number
+	set cmrun.lastseq=cmrun.lastseq+1
+	set FLSEQ=cmrun.lastseq
+
+	do cmrun.bypassSave()
+
+	// "Maximum file sequence exceeded for today"
+	if FLSEQ>9 set FLSEQ=9 set RM=$$^MSG(2952) do EXC
+
+	set HEADER="FHCD"_DATE_FLSEQ_"000000"
+
+	do io.write(HEADER)
+
+	quit
+	
+
+START(IO io)	//
+
+	type public Number CRDSEQNCE,CIFSEQNCE,ACNSEQNCE,CRDPRV,CIFPRV,ACNPRV
+	type public Number CRDSEQ,CIFSEQ,ACNSEQ
+
+	type RecordCMSRECTOP cmsrectop=Db.getRecord("CMSRECTOP","CMSTYP='ACN'",1)
+	if 'cmsrectop.seq set CIFSEQ=0
+	else  set CIFSEQ=cmsrectop.seq
+	
+	type RecordCMSRECTOP cmsrectop1=Db.getRecord("CMSRECTOP","CMSTYP='CRD'",1)
+	if 'cmsrectop1.seq set CRDSEQ=0
+	else  set CRDSEQ=cmsrectop1.seq
+
+	type RecordCMSRECTOP cmsrectop2=Db.getRecord("CMSRECTOP","CMSTYP='CID'",1)
+	if 'cmsrectop2.seq set ACNSEQ=0
+	else  set ACNSEQ=cmsrectop2.seq
+
+	set CRDSEQNCE=CRDSEQ 
+	set CIFSEQNCE=CIFSEQ 
+	set ACNSEQNCE=ACNSEQ
+	set CRDPRV=CRDSEQNCE 
+	set CIFPRV=CIFSEQNCE 
+	set ACNPRV=ACNSEQNCE
+
+	quit
+	
+
+Public NXTCRD(IO io,Number CNT)	//
+
+	/*
+	
+	. io	File handle			/REQ/NONULL/MECH=REF	
+	. CNT	Count for records written	/REQ/NONULL/MECH=REF
+
+
+
+	This gets the cards, accounts and customers that are tied to cards
+	that have data critical to ING's CMS that have changed.
+	This calls into CMSOUT where the values of the critical data items
+	are extracted from the database so that they can be sent to the CMS
+	in the Card Management File.
+
+	CMSOUT will build the file based on the set up defined in the CMSFILE
+	user table.
+
+	*/
+
+	type public String ACN,CRDNUM,CRDTYP,ET,RECTYP,ZTFLAG,%LOCK
+	type public Number CRDSEQ,CRDPRV,MOD,ACNSEQ,ACNPRV,CID,ER,ACCTFLG
+	type public Number ACNSEQNCE,CIFPRV,CIFSEQ,CIFSEQNCE,CRDSEQNCE
+	type public Number CUSTFLG
+
+	catch vERROR {
+
+		type String ET,RM
+		
+		do ZE^UTLERR
+
+		// Error extracting card data
+		set ET=$$^MSG(3024)
+
+		set RM=vERROR.description
+
+		do EXC
+		}
+
+	set RECTYP="DR"
+	set ZTFLAG="CRD"
+
+	type DbSet ds=Db.selectDbSet("CMSRECCRD","SEQ>:CRDSEQ") 
+	while ds.next() do {
+		type RecordCMSRECCRD cmscrd=ds.getRecord("CMSRECCRD")
+		set CRDSEQ=cmscrd.seq
+		set CRDPRV=CRDSEQ
+		set CRDNUM=cmscrd.crdnum
+		set CRDTYP=cmscrd.crdtyp
+		set MOD=cmscrd.mode	
+
+		do GVALCRD^CMSOUT(CRDTYP,CRDNUM,MOD,.io,.CNT,"")
+
+		if ER set ER=0 quit
+
+		if MOD=0 do {
+			type RecordCRD crd=Db.getRecord("CRD","CRDTYP=:CRDTYP,CRDNUM=:CRDNUM",1)
+			do crd.setAuditFlag(1)
+			set crd.stat=3
+			// Record locked by another user
+			if '$$LOCK(CRDTYP,CRDNUM,.%LOCK) set ER=1,ET="RECLOC" quit
+
+			do crd.save()
+			
+			do UNLOCK(%LOCK,.%LOCK)
+
+			/* 
+			This will set the CMSFLG which indicates that 
+			information for this account has been sent to the CMS 
+			and should appear in their database once the batch 
+			file has been loaded
+			*/
+
+			if ACCTFLG.get()'=1 do {
+				type RecordDEP dep=Db.getRecord("DEP","CID=:CID")
+				do dep.setAuditFlag(1)
+		
+				// CMS Existing Customer Flag
+				set dep.cmsflg=1
+				do dep.save()
+				}
+
+			/* 
+			This will set the CMSFLG for this customer which 
+			indicates that information for this customer has been 
+			sent to the CMS and should appear in their database 
+			once the batch file has been loaded
+			*/
+	
+			if CUSTFLG.get()'=1 do {
+				type RecordCIF cif=Db.getRecord("CIF","ACN=:ACN")
+				do cif.setAuditFlag(1)
+
+				// CMS Existing Customer Flag
+				set cif.cmsflg=1
+				do cif.save()
+				}
+			
+			}
+		}
+
+
+	if CRDPRV'=CRDSEQNCE do {
+
+		type RecordCMSRECTOP cmsrectop=Db.getRecord("CMSRECTOP","CMSTYP='CRD'",1)
+		set cmsrectop.seq=CRDPRV
+		do cmsrectop.bypassSave()
+	
+		set CRDSEQ=CRDPRV
+		}
+
+
+	set ZTFLAG="ACN"
+
+	type DbSet rs=Db.selectDbSet("CMSRECCID","SEQ>:ACNSEQ") 
+	while rs.next() do {		
+		type RecordCMSRECCID cmscid=rs.getRecord("CMSRECCID")
+
+		set ACNSEQ=cmscid.seq
+		set ACNPRV=ACNSEQ
+	
+		// account in journal file
+		set CID=cmscid.cid
+	
+		//indicates if CMS has this account
+		set ACCTFLG=cmscid.cmsflg
+	
+		do GVALACN^CMSOUT("",.io,.CNT,"")
+		if ER set ER=0
+		}	
+	
+
+	if ACNPRV'=ACNSEQNCE do {
+		type RecordCMSRECTOP cmsrectop=Db.getRecord("CMSRECTOP","CMSTYP='CID'",1)
+		set cmsrectop.seq=ACNPRV
+		do cmsrectop.bypassSave()
+	
+		set ACNSEQ=ACNPRV
+		}
+
+
+	set ZTFLAG="CIF"
+
+	type DbSet rs1=Db.selectDbSet("CMSRECACN","SEQ>:CIFSEQ") 
+	while rs1.next() do {
+		type RecordCMSRECACN cmsacn=rs1.getRecord("CMSRECACN")
+
+		set CIFSEQ=cmsacn.seq
+		set CIFPRV=CIFSEQ
+
+		// customer in journal file
+		set ACN=cmsacn.acn
+
+		// flag to indicate CMS customer exists
+		set CUSTFLG=cmsacn.cmsflg
+
+		do GVALCIF^CMSOUT(ACN,.io,.CNT,"")
+
+		if ER set ER=0
+		}
+		
+	
+	if CIFPRV'=CIFSEQNCE do {
+	
+		type RecordCMSRECTOP cmsrectop=Db.getRecord("CMSRECTOP","CMSTYP='ACN'",1)
+		set cmsrectop.seq=CIFPRV
+		do cmsrectop.bypassSave()
+	
+		set CIFSEQ=CIFPRV	
+		}
+	
+
+	quit
+
+
+
+TRAILER(IO io,Number FLSEQ,Date DATE,Number cnt)	//  Trailer Record
+
+	/*
+	    Like the header record, this has been hard coded to handle the
+	    trailer as expected by ING's CMS.  In the future, this may be
+	    enhanced to use the general record writer based on the values
+	    defined in the CMSFILE user table
+	*/
+
+	type String CNT,TRAILER
+	type Number I
+	
+	set CNT=cnt
+	
+	if CNT.length()<6 do {
+		for I=1:1:6-CNT.length() do {
+			set CNT=0_CNT
+			}
+		}
+		
+	set TRAILER="FTCD"_DATE_FLSEQ_CNT
+
+	do io.write(TRAILER)
+
+	quit
+
+
+END(IO io)	//  Closes, copies, and deletes the file and runs C code
+
+	type public Number CRDPRV,CRDSEQNCE,CIFPRV,CIFSEQNCE,ACNPRV,ACNSEQNCE
+
+	if (CRDPRV=CRDSEQNCE)&(CIFPRV=CIFSEQNCE)&(ACNPRV=ACNSEQNCE) do {
+		do io.close()
+		}
+
+	else  do {
+		type RecordCMSRECTOP cmsrectop=Db.getRecord("CMSRECTOP","CMSTYP='CRD'",1)
+		set cmsrectop.seq=CRDPRV	
+		do cmsrectop.bypassSave()
+
+		type RecordCMSRECTOP cmsrectop1=Db.getRecord("CMSRECTOP","CMSTYP='ACN'",1)
+		set cmsrectop1.seq=CIFPRV
+		do cmsrectop1.bypassSave()
+
+		type RecordCMSRECTOP cmsrectop2=Db.getRecord("CMSRECTOP","CMSTYP='CID'",1)
+		set cmsrectop2.seq=ACNPRV
+		do cmsrectop2.bypassSave()
+
+		do END^CMSOUT(.io)
+		do io.close()
+		}
+
+	quit
+	
+
+LOCK(String CRDTYP,Number CRDNUM,String %LOCK)	//
+
+	/*
+
+	   This sub-routine will incrementally LOCK the card record
+	   specified if it is not already contained in %LOCK.  If the
+	   lock is successful, %LOCK is updated to include the card
+	   number.
+
+	   ARGUMENTS:
+	       . CRDTYP    Card Type of Card to lock             /TYP=T/REQ
+	                                                         /MECH=VAL
+
+	       . CRDNUM    Card to lock                          /TYP=T/REQ
+	                                                         /MECH=VAL
+
+	       . %LOCK  Record lock string /TYP=T/NOREQ
+	       /MECH=REFNAM
+
+	   EXAMPLE:
+	       I '$$LOCK("DEBIT",123456,.%LOCK) S ER=1,ET="RECLOC" Q
+
+
+	*/
+	
+	type public String CARD(,)
+
+	set %LOCK=%LOCK
+	if ","_%LOCK_","[(","_CRDTYP_"|"_CRDNUM_",") quit 1
+
+	lock +CARD(CRDTYP,CRDNUM):2 else  quit 0
+
+	if %LOCK="" set %LOCK=CRDTYP_"|"_CRDNUM quit 1
+
+	set %LOCK=%LOCK_","_CRDTYP_"|"_CRDNUM
+
+	quit 1
+
+
+UNLOCK(String STR,String %LOCK)	//
+
+	/*
+	   This sub-routine will decrement the LOCK for the card record(s)
+	   specified by the character string 'STR' and remove it from
+	   %LOCK (if it is contained in %LOCK).
+
+	   ARGUMENTS:
+	       . STR    Card(s) to unlock, comma separated    /TYP=T/REQ
+	                                                      /MECH=VAL
+
+	   INPUTS:
+	       . %LOCK  Record lock string  /TYP=T/NOREQ
+	        /MECH=REFNAM
+
+	   EXAMPLE:
+	       D UNLOCK(%LOCK,.%LOCK)
+
+	*/
+	
+	type public String CARD(,),CRDNUM,CRDTYP,CRDREC,RM,ZE
+	type public Number I,J
+	
+	set %LOCK=%LOCK
+
+	for I=1:1:(STR.length(",")) do {
+		set CRDREC=STR.piece(",",I) quit:CRDREC=""
+		set CRDTYP=CRDREC.piece("|",1) 
+		set CRDNUM=CRDREC.piece("|",2)
+
+		lock -CARD(CRDTYP,CRDNUM)
+		
+		for J=1:1:%LOCK.length(",") if %LOCK.piece(",",J)=CRDREC do { quit
+			set %LOCK=%LOCK.piece(",",1,J-1)_","_%LOCK.piece(",",J+1,999)
+			}
+		}
+	
+	if %LOCK.extract(%LOCK.length())="," set %LOCK=%LOCK.extract(1,%LOCK.length()-1)
+	
+	quit
+
+
+
+EXC	//  Logs error in exception file
+
+	type public String CRDNUM,RM,ZE,ZTFLAG
+	type public Number ACN,CID
+
+	set ZE=$select(ZTFLAG.get()="ACN":CID,ZTFLAG.get()="CIF":ACN.get(),1:CRDNUM)
+
+	//CMS Data Extract,ACN or CID or CRD,Message
+	do LOG^UTLEXC(%RoutineName,"*",$$^MSG(3025),ZE,"",RM)
+
+	quit
+
+vSIG()	quit "60472^62254^Pete Chenard^9774"	// Signature - LTD^TIME^USER^SIZE

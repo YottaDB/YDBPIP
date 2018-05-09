@@ -1,0 +1,186 @@
+SRVCHKPR
+  /*
+ORIG: kellyp - 05/12/2005
+DESC: Check Item Purge Procedure
+
+---- Comments --------------------------------------------------------
+
+ Prompts user for criteria for check item purges, deletes check items
+ matching the purge critera, writes them to a file, and displays a
+ report of the purged check items.
+ 
+ Since the report writer was rewritten in Profile04, this procedure 
+ was created to handle the collating, file print, and file purge 
+ functionality previously handled by the SRVCHK007 report.
+
+---- Revision History ------------------------------------------------
+
+	08/02/06 - KELLYP - CR 22048
+		Modified the BLDTMP and PRINTREC sections to eliminate
+		DYNAMIC and obj.toString warnings.
+
+	05/12/05 - KELLYP - CR 15872
+		Initial revision.
+ */
+
+ quit
+ 
+public PROC	// Check item purge (SRVCHKITMP)
+
+	type public Boolean ER
+
+	type Boolean NOKIL
+	type Date CUTOFF
+	type String %READ,%TAB(),IO,SRVCAT,SRVID,SRVLOC,SRVTYP,VFMQ
+
+	set IO=$I
+	set NOKIL=1
+
+	// Set up query screen
+	set %TAB("IO")=$$IO^SCATAB
+	set %TAB("NOKIL")=".NOKIL1/LEN=1/TYP=L/DES=Anticipated/REQ=1"
+	set %TAB("SRVCAT")="[UTBLSRVCAT]SRVCAT/TBL=[UTBLSRVCAT]:QU ""[UTBLSRVCAT]CHKITM=1""/XPP=S SRVCAT=X"
+	set %TAB("SRVTYP")="[UTBLSRVTYP]SRVTYP/TBL=[UTBLSRVTYP]/XPP=S SRVTYP=X"
+	set %TAB("SRVLOC")="[UTBLSRVLOC]SRVLOC/TBL=[UTBLSRVLOC]/XPP=S SRVLOC=X"
+	set %TAB("SRVID")="[SRVITM]SRVID/NOREQ/TBL=[SRVITM]:QU ""[SRVITM]SRVCAT=<<SRVCAT>> & [SRVITM]SRVTYP=<<SRVTYP>> & [SRVITM]SRVLOC=<<SRVLOC>> & [SRVITM]SRVA=1"""
+	
+	set %READ=";@@%FN/REV/CEN;;IO;NOKIL;SRVCAT;SRVTYP;SRVLOC;SRVID"
+	
+	do ^UTLREAD
+
+	if VFMQ="Q" quit
+	
+	// This purge cannot be run to the terminal
+	if 'NOKIL,IO=$I do Runtime.setErrSTBLER("SRVITM","LNPURGE") quit:ER
+	
+	// Determine Cutoff Date
+	type RecordUTBLSRVCAT usrvcat=Db.getRecord("UTBLSRVCAT","SRVCAT=:SRVCAT")
+	set CUTOFF=%SystemDate-(+usrvcat.pdays)
+	
+	// Delete TMP records
+	do DELTMP
+	
+	// Build TMP records for purged check items
+	do BLDTMP quit:ER
+	
+	do REPORT
+	
+	// Delete TMP records
+	do DELTMP
+	
+	quit
+
+DELTMP	// Delete old temporary records
+
+	do Db.delete("TMPRPT4","PID=:%ProcessID")
+	
+	quit
+	
+BLDTMP	// Build temporary records of check items to be deleted
+
+	type public Boolean ER,NOKIL
+	type public Date CUTOFF
+	type public String SRVCAT,SRVID,SRVLOC,SRVTYP
+
+	type String WHERE
+	
+	type IO io=Class.new("IO")
+	if 'NOKIL do IOSETUP(.io) quit:ER
+
+	set WHERE="SRVCAT=:SRVCAT AND SRVTYP=:SRVTYP AND SRVLOC=:SRVLOC AND SRVA=1"
+	if 'SRVID.isNull() set WHERE=WHERE_" AND SRVID=:SRVID"
+	
+	#ACCEPT DATE=08/02/06;PGM=KELLYP;CR=22048
+	type DbSet ds=Db.selectDbSet("SRVITM",WHERE)
+	while ds.next() do { quit:ER
+		type RecordSRVITM srvitm=ds.getRecord("SRVITM")
+		type ResultSet rs=Db.select("TJD","SRVHIST","SRVCAT=:srvitm.srvcat AND SRVTYP=:srvitm.srvtyp AND SRVLOC=:srvitm.srvloc AND SRVID=:srvitm.srvid AND TJD>:CUTOFF")
+		if rs.next() quit	// SRVHIST records exist after cutoff date, don't delete it
+
+		// Build the TEMP record for the report
+		type RecordTMPRPT4 tmprpt4=Class.new("RecordTMPRPT4")
+		
+		set tmprpt4.pid=%ProcessID
+		set tmprpt4.key1=srvitm.srvcat
+		set tmprpt4.key2=srvitm.srvtyp
+		set tmprpt4.key3=srvitm.srvloc
+		set tmprpt4.key4=srvitm.srvid
+		set tmprpt4.data=srvitm.srvst_"|"_srvitm.srvnm_"|"_srvitm.itmgrp
+		
+		do tmprpt4.bypassSave()
+		
+		if NOKIL quit
+		
+		// Print the "global" structure and data to the output file
+		do PRINTREC(.srvitm,.io)
+		
+		// Delete the SRVITM and corresponding SRVHIST records
+		do DELREC(.srvitm)
+		}
+	
+	if 'NOKIL do io.close()
+
+	quit
+
+IOSETUP(IO io)	// Setup the output file to store the "global" structure and data
+
+	type public Boolean ER
+	type public String DIARR(,)
+
+	catch ioxcpt {
+        	if ioxcpt'["%PSL-E-IO" throw ioxcpt
+ 
+	        // Error opening ~p1 - Process aborted
+	        do Runtime.setErrMSG("SRVITM","7598",io.device) quit:ER
+	        }
+
+	set io.directory=CUVAR.spldir
+	set io.fileName="SAVE.SRVITM"
+	set io.openParams="WRITE/NEWV"
+
+	do io.open()
+
+	quit
+	
+	
+PRINTREC(RecordSRVITM srvitm,IO io)
+
+	type String OUTROW
+		
+        set OUTROW="^SRVITM("_srvitm.srvcat.addQuotes()_","_srvitm.srvtyp.addQuotes()_","
+        set OUTROW=OUTROW_srvitm.srvloc.addQuotes()_","_srvitm.srvid.addQuotes()_")"
+        do io.write(OUTROW)     // Write "global" structure to the file
+ 
+	set OUTROW=srvitm.acn_"|"_srvitm.fee_"|"_srvitm.srvfre_"|"_srvitm.nddt_"|"_srvitm.lddt
+	set OUTROW=OUTROW_"|"_srvitm.srvopt_"|"_srvitm.srvamt_"|"_srvitm.srvst_"|"_srvitm.srvsig
+	set OUTROW=OUTROW_"|"_srvitm.srvkeys_"|"_srvitm.srvcom_"|"_srvitm.srvladt_"|"_srvitm.srva
+	set OUTROW=OUTROW_"|"_srvitm.srvref_"|"_srvitm.srvnm_"|"_srvitm.itmgrp_"|"_srvitm.balavl
+
+        do io.write(OUTROW)     // Write "global" contents to the file
+
+	quit
+	
+	
+DELREC(RecordSRVITM srvitm)
+
+	do Db.delete("SRVITM","SRVCAT=:srvitm.srvcat AND SRVTYP=:srvitm.srvtyp AND SRVLOC=:srvitm.srvloc AND SRVID=:srvitm.srvid")
+	do Db.delete("SRVHIST","SRVCAT=:srvitm.srvcat AND SRVTYP=:srvitm.srvtyp AND SRVLOC=:srvitm.srvloc AND SRVID=:srvitm.srvid")
+	
+	quit	
+
+
+REPORT	// Display the purged records (stored in TMPRPT4)
+
+	type String RID,VRWOPT()
+	
+	set VRWOPT("NOOPEN")=1
+	do OPEN^SCAIO	// Need to open term/file for report output manually
+	
+	set RID="SRVCHK007"
+	
+	do RPT^URID
+
+	quit
+	
+
+vSIG()	quit "60479^60361^Pat Kelly^5012"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,440 @@
+public	LNPTS(RecordLN ln)
+
+	/*
+	
+	Determines ACN values using current BIL file
+	
+	   For a specified loan account number (CID), routine ^LNTPS returns
+	   account values based upon current amounts in the payment file (LNBIL1).
+
+	   It is most often used by payment file modification functions to
+	   guarantee the integrity between the payment and related account files.
+
+	   Arguments: 
+		      . ln	Loan Account Object		/REF=:RW
+
+	  ---- Revision History -----------------------------------------------
+	  
+	   06/06/06 - KUMARB - CR 21379
+	   	      Modified SECFRE section to add extra "quit (JD+1 > NJD)" 
+	   	      condition to avoid TIMEOUT error (infinite loop) while 
+	   	      calculating for third distribution.
+	  
+	   04/21/06 - KUMARB - CR 20824
+	   	      Modified section BILAMT, to remove the end value "2" from
+	   	      the for loop, so that in iterate all the elements.
+
+	   04/17/06 - KELLYP - CR 20735
+	   	      Modified CALC2 section to set ln.dpmt = 0 when the lnbill
+	   	      record specified by the SEQ variable does not exist.  This
+	   	      prevents integs from being reported on an account that has
+	   	      online bills generated because LN.DPMT does not equal the
+	   	      amount defined by lnbil1.casd.
+
+	   04/05/06 - KELLYP - CR 20606
+	   	      Modified CALC2 section to use ln.bal instead of ln.balint
+	   	      when setting the BALINT variable.  This matches the same
+	   	      logic in Profile01 and prevents problems with resetting 
+	   	      ln.balint for error corrects of backdated disbursements.  
+	   	      The system was previously leaving ln.balint set to the 
+	   	      unreversed value of ln.balint when the backdated disburs.
+	   	      did not cross over a scheduled date roll.
+	   	      
+	   03/21/06 - KELLYP - CR 20005
+		      Modified SECFRE section to remove extra "(JD+1 > NJD)"
+		      quit condition when unwinding secondary frequencies. This
+		      extra condition was causing secondary "next" frequency
+		      dates not to be rolled back during the LNUEFD process.
+		      Also modified EXEC section to initialize ln.lbdd="".  This
+		      corrects a problem where the interest adjustment for 
+		      backdated 13N loans w/ interest billed in advance was twice 
+		      as much as it should have been.
+
+	   02/08/06 - KELLYP - CR 19452
+	   	      Modified CALC2 section to update ln.dpmt.  Also modified 
+	   	      BILAMT section to use TDUE variable instead of updating 
+	   	      ln.tdue directly and modified CALC2 to update ln.tdue 
+	   	      from TDUE.  These changes were necessary to prevent 
+	   	      integrity errors from being returned during account 
+	   	      creation caused by incorrectly calculated values of 
+	   	      ln.dpmt and ln.tdue.
+	  
+	   01/31/06 - SmithCD - CR 19343 (16890)
+	   	      . Replaced public variable usage with ln object 
+	   	        references (the former method of only loading variables
+	   	        if not already loaded caused incorrect values to be 
+	   	        used when called iteratively)
+	   	      . Made top public
+	   	      . Removed LOAD and FILE sections, and moved the code 
+	   	        in-line
+	   	      . Removed references to DIST* variables, which were 
+	   	        serving no purpose b/c this code is no longer called 
+	   	        from teh loan filer
+	   	      . Otherwise cleaned up procedure
+
+	   05/06/06 - KinI - 15524
+	   	      Replaced lnbil1.bp1 master field pieces with direct 
+	   	      sub-field references per DBI standards.
+	   	      Modified to set starting OSEQ to zero instead of 1 
+	   	      to avoid account integrity error.
+	   	      Modified BILAMT section to loop from the first bill
+	   	      payment element through the second. Previously 
+	   	      erroneously started from the second element.
+
+	   04/18/05 - KELLYP - CR 13662
+	   	      Modified EXEC section to fix error on DIST1FRE length
+	   	      check.
+
+	   04/13/05 - KELLYP - CR 14452
+	   	      Recoded EXEC section to use a lnbil1 record array instead
+	   	      of hitting the disk excessively for LNBIL1 records.  Also
+	   	      modified EXEC section to conform to current PSL standards
+	   	      and removed pre-2003 revision history.  
+
+	*/	  
+
+	// Starts loop at beginning of the bill file
+	
+	type public Boolean ER
+	
+	type Number BSEQ
+
+	do EXEC(.ln, 0) quit:ER
+	
+	set ln.bseq = BSEQ
+
+	quit
+
+
+public B(RecordLN ln)	 	// Loan account			/REF:RW
+			
+	// Entry tag - starts loop at current OSEQ
+	
+	type public Boolean ER
+	
+	type Number BSEQ
+
+	// Internal Bill Oldest Unsatisfied Seq Nbr	
+	do EXEC(.ln, ln.oseq) quit:ER
+
+	quit
+
+
+EXEC(RecordLN ln,	// Loan account				/REF:RW
+     Number OSEQ)	// Internal bill oldest seq nbr
+     
+	type public Boolean ER
+	type public Number BSEQ
+	
+	type Number ORIGOSEQ, BALINT, DSEQ, CUIN, CUPR, CUES, TDUE
+	type Number UNIN, UNPR, UNES, AMT, BAMT, CID, LASTSEQ, LASTSEQ2
+	type Number TBA, TMPSEQ
+
+	set (AMT, BAMT, BSEQ, CUIN, CUPR, CUES, TBA, TDUE, UNIN, UNPR, UNES) = 0
+	set CID = ln.cid
+
+	// Adjusted Balance for Accrual Calculation
+	set BALINT = ln.balint
+
+	type RecordLNBIL1 lnbil1()
+	
+	set ORIGOSEQ = OSEQ
+		
+	// Initialize lnbil1 array to avoid excessive trips to disk
+	type ResultSet rs = Db.select("SCHSEQ", "LNBIL1", "CID=:ln.cid", "SCHSEQ ASC")
+	if rs.isEmpty() set OSEQ = ""
+	else  while rs.next() do {
+		set TMPSEQ = rs.getCol("SCHSEQ")
+		set lnbil1(TMPSEQ) = Db.getRecord("LNBIL1", "CID=:ln.cid,SCHSEQ=:TMPSEQ")
+		}
+
+	set LASTSEQ = OSEQ
+	
+	for  set OSEQ = lnbil1(OSEQ).order() quit:OSEQ.isNull()  set LASTSEQ = OSEQ if lnbil1(OSEQ).casd > 0 quit
+	
+	set BSEQ = LASTSEQ
+	if OSEQ.isNull() do {
+		set TMPSEQ = lnbil1(LASTSEQ).order()
+		if TMPSEQ.isNull() set TMPSEQ = LASTSEQ + 1
+		set LASTSEQ = TMPSEQ
+		}
+	set OSEQ = LASTSEQ
+	set LASTSEQ = +lnbil1(ORIGOSEQ).order(-1)
+	
+	for  set LASTSEQ = lnbil1(LASTSEQ).order() quit:LASTSEQ.isNull()  do {
+		set AMT = AMT + lnbil1(LASTSEQ).ctab - lnbil1(LASTSEQ).casd
+		set BSEQ = LASTSEQ
+		}
+	
+	set ln.lbdd=""
+	if BSEQ, lnbil1(BSEQ).exists() set ln.lbdd = lnbil1(BSEQ).cdpd
+	
+	set (LASTSEQ, LASTSEQ2) = +lnbil1(ORIGOSEQ).order(-1)
+	
+	for  set LASTSEQ = lnbil1(LASTSEQ).order() quit:LASTSEQ.isNull()  do {  quit:AMT<BAMT  set AMT=AMT-BAMT
+		set LASTSEQ2 = LASTSEQ
+		
+		do BILAMT(.ln, .lnbil1(LASTSEQ), LASTSEQ)
+
+		set BAMT = lnbil1(LASTSEQ).ctab
+		}
+	
+	if LASTSEQ.isNull(), 'AMT do {
+		set TMPSEQ = lnbil1(LASTSEQ2).order()
+		if TMPSEQ.isNull() set TMPSEQ = LASTSEQ2 + 1
+		set LASTSEQ2 = TMPSEQ
+		}
+	
+	set DSEQ = LASTSEQ2
+	set ln.ppa = AMT
+	
+	if ln.dist1fre.isNull() do { quit
+		set ln.dist1nd = ""
+		set ln.dist1ld = ""
+		do CALC2(.ln, LASTSEQ2)
+		}
+
+	if DSEQ '> BSEQ set ln.dist1nd = lnbil1(DSEQ).cdpd
+	else  do { quit:ER
+		set ln.dist1nd = ln.schnd
+		if BSEQ > ln.schseq, ln.lbdd do { quit:ER
+			type Date TMPDT
+			set TMPDT = ln.lbdd.nextFreqDate(ln.dist1fre) quit:ER
+			if TMPDT > ln.schnd set ln.dist1nd = TMPDT
+			}
+		}
+
+	if LASTSEQ2 > 1 do {
+		set TMPSEQ = lnbil1(LASTSEQ2).order(-1)
+		if TMPSEQ '> 0 set ln.dist1ld = ""
+		else  set ln.dist1ld = lnbil1(TMPSEQ).cdpd
+		}
+	else  set ln.dist1ld = ln.dist1nd.nextFreqDate(ln.dist1fre, , 1) quit:ER
+
+	if ln.dist1ld < ln.dfp set ln.dist1ld = ln.amodt
+	if ln.dist1nd < ln.dfp do { quit:ER
+		set ln.dist1nd = ln.dfp
+		set ln.dist1ld = ln.dist1nd.nextFreqDate(ln.dist1fre, , 1) quit:ER
+		}
+
+	do CALC2(.ln, LASTSEQ2)
+	
+	quit
+
+
+CALC2(RecordLN ln,		// Loan account				/REF:RW
+      Number SEQ)		// Sequence number 
+	
+	// Calculate the due payment amount and balance for interest
+	
+	type public Boolean ER, LPSWP
+	type public Number BALINT, CID, CUES, CUIN, CUPR, DSEQ, OSEQ
+	type public Number TBA, TDUE, UNES, UNIN, UNPR
+
+	type String IAM, PRIO
+	type Date DISTLD, DISTND
+	
+	// Update Due Payment Amount
+	type RecordLNBIL1 lnbil1=Db.getRecord("LNBIL1","CID,SCHSEQ=:SEQ",1)
+	if lnbil1.getMode()=1 set ln.dpmt=lnbil1.ctab
+	else  set ln.dpmt=0
+	
+	// Update bill total and due amounts for advance bills
+	set SEQ = DSEQ
+	
+	type DbSet ds = Db.selectDbSet("LNBIL1", "CID=:ln.cid AND SCHSEQ>:SEQ")
+	while ds.next() do { quit:ER
+		type RecordLNBIL1 lnbil1 = ds.getRecord("LNBIL1")
+		set SEQ = lnbil1.schseq
+		do BILAMT(.ln, .lnbil1, SEQ)
+		}
+	
+	// Interest Calc Principal Adjustments
+	type RecordUTBLICPA utblicpa = Db.getRecord("UTBLICPA", "KEY=:ln.icpa")
+	
+	set PRIO = utblicpa.prio
+	set IAM = ln.iam
+	set BALINT = ln.bal - $select(IAM.extract(1) = 1:ln.iun - (ln.ipl - ln.extamt), 1:0) 
+
+	// Advances to Reduce Undisbursed Flag
+	if ln.aruf set BALINT = ln.bal - ln.udbal
+	if PRIO.extract(1) set BALINT = BALINT + UNIN
+	if PRIO.extract(2) set BALINT = BALINT - UNPR
+	if PRIO.extract(3) set BALINT = BALINT + UNES
+	if PRIO.extract(4) set BALINT = BALINT - ln.teb		
+	if PRIO.extract(5) set BALINT = BALINT + $$MCNB^LNCO3(.ln)
+	if PRIO.extract(6) set BALINT = BALINT + ln.lchg
+	if PRIO.extract(7), CUIN > 0 set BALINT = BALINT + CUIN
+	if PRIO.extract(8), CUPR > 0 set BALINT = BALINT - CUPR
+	if PRIO.extract(9), CUES > 0 set BALINT = BALINT + CUES
+	if PRIO.extract(10) set BALINT = BALINT - ln.dic + ln.narl
+	if PRIO.extract(11), CUPR < 0 set BALINT=BALINT-CUPR
+	if PRIO.extract(12), ln.crlmt < BALINT set BALINT = ln.crlmt
+
+	if PRIO.extract(13) do {
+		set BALINT = BALINT - ln.ifda
+		if BALINT < 0 set BALINT = 0
+		}
+
+	// Add extenstion payments
+	set BALINT = BALINT + ln.extamt
+	
+	if BALINT < 0, ln.iam, 'ln.tdr set BALINT = 0
+
+	// Second distribution
+	set DISTND = ln.dist2nd
+	set DISTLD = ln.dist2ld
+	do SECFRE(2, ln.schnd, ln.lbdd, ln.dist2fre, .DISTND, .DISTLD)
+	set ln.dist2nd = DISTND
+	set ln.dist2ld = DISTLD
+
+	// Third distribution
+	set DISTND = ln.dist3nd
+	set DISTLD = ln.dist3ld
+	do SECFRE(3, ln.schnd, ln.lbdd, ln.dist3fre, .DISTND, .DISTLD)
+	set ln.dist3nd = DISTND
+	set ln.dist3ld = DISTLD
+	
+	// Fourth distribution
+	set DISTND = ln.dist4nd
+	set DISTLD = ln.dist4ld
+	do SECFRE(4, ln.schnd, ln.lbdd, ln.dist4fre, .DISTND, .DISTLD)
+	set ln.dist4nd = DISTND
+	set ln.dist4ld = DISTLD
+	
+	// Adjusted Balance for Accrual Calculation
+	set ln.balint = BALINT
+
+	// Current Interest
+	set ln.cuin = CUIN
+
+	// Current Principal
+	set ln.cupr = CUPR
+
+	// Current Escrow
+	set ln.cues = CUES
+
+	// Uncollected Escrow
+	set ln.unes = UNES
+
+	// Uncollected Interest
+	set ln.unin = UNIN
+
+	// Uncollected Principal
+	set ln.unpr = UNPR	
+
+	// Internal Bill Oldest Unsatisfied Seq Nbr
+	set ln.oseq = OSEQ
+
+	// Internal Bill Seq Nbr Next Due Date
+	set ln.dseq = DSEQ
+
+	// Total Outstanding Due Amount
+	set ln.tba = TBA
+	
+	// Total Due
+	set ln.tdue = TDUE
+
+	if LPSWP.get() do CHECKDD^LNPTS1
+
+	quit
+
+
+BILAMT(RecordLN ln,		// Loan account			/REF:RW
+       RecordLNBIL1 lnbil1,	// Bill record
+       Number SEQ)		// Bill sequence
+
+	// Update bill total and due amounts
+	
+	type public Number CUES, CUIN, CUPR, TBA, TDUE, UNES, UNIN, UNPR
+
+	type Number ADV, AMT, P, TYP, UNCOL
+	type String ELMT
+
+	set (ADV, UNCOL) = 0
+	
+	// Outstanding Due Amount for this bill
+	set TBA = TBA + lnbil1.casd 
+
+	// Uncollected
+	if SEQ < ln.schseq set UNCOL = 1
+
+	// Advance
+	if SEQ > ln.schseq set ADV = 1
+
+	set AMT = lnbil1.casd 	
+			
+	//If advance, subtract Total Amount Due per Payment
+	if ADV set AMT = AMT - lnbil1.ctab	
+	
+	// Total Outstanding Due Amount for the account		
+	set TDUE = TDUE + AMT		 
+
+	/* 
+	Loop through the entire bill starting from piece 2.  First, retrieve 
+	PE* element based on element number, then retrieve Element Acronym, 
+	Total Amount Billed, and Amount Still Due. Using this information, 
+	recalculate UNPR, UNIN and CUIN.
+	*/
+	for P = 1:1 set ELMT = $$GETFIELD^BILFUNCS(P, .lnbil1) quit:ELMT.isNull()  do {
+		set TYP = ELMT.piece("#", 1) 
+		set AMT = ELMT.piece("#", 4)
+		if ADV set AMT = AMT - ELMT.piece("#", 3)
+
+		if UNCOL do { quit
+			if $$ESC^LNU(TYP) set UNES = UNES + AMT quit
+			if TYP = "P" set UNPR = UNPR + AMT quit
+			if TYP = "I" set UNIN = UNIN + AMT quit
+			}
+
+		if 'UNCOL do { quit
+			if $$ESC^LNU(TYP) set CUES = CUES + AMT quit
+			if TYP = "P" set CUPR = CUPR + AMT quit
+			if TYP = "I" set CUIN = CUIN + AMT quit
+			}
+		}
+
+	quit
+
+
+SECFRE(Number DISTNUM,		// Distribution number
+       Date SCHND,		// Next scheduled date
+       Date LBDD,		// Last bill - loan due date billed
+       String DISTFRE,		// Distribution frequency
+       Date DISTND,		// Next distribution date		/REF:W
+       Date DISTLD)		// Last distribution date		/REF:W
+	
+	// Reset secondary frequencies	
+	
+	type public Boolean ER
+
+	type String FRE, SFRE
+	type Date JD, NJD
+
+	// Distribution PC Frequency
+	set SFRE = DISTFRE
+	if SFRE = "*" set SFRE = "*"_DISTNUM
+
+	set (JD, NJD) = ""
+
+	if DISTND > LBDD do {
+		if LBDD.isNull() set NJD=SCHND set FRE = SFRE
+		else  set NJD = DISTND set FRE = SFRE
+
+		for  quit:NJD '> LBDD  set JD = NJD set NJD = JD.nextFreqDate(FRE, , 1) quit:ER ! (JD+1 > NJD)
+
+  		set DISTND = JD
+		set DISTLD = NJD	
+		}
+	else  if DISTND do {
+		set JD = DISTND
+
+		for  set NJD = JD.nextFreqDate(SFRE) quit:NJD > LBDD  quit:ER ! (JD = NJD)  set JD = NJD
+
+		set DISTND = NJD
+		set DISTLD = JD
+		}
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60422^17178^Balasubramonian Sankar^12409"	// Signature - LTD^TIME^USER^SIZE

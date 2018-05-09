@@ -1,0 +1,307 @@
+BCHGCRMS //Batch BCHGCRMS - GCR Monthly Scoring
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 01/31/2007 12:45 - shetyes
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHGCRMS Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ set vBCHSTS=$$STATUS^BCHUTL("BCHGCRMS")
+ if vBCHSTS=1 set ER=1,RM=$$^MSG(3410) quit
+ if vBCHSTS=2 set ER=1,RM=$$^MSG(3414) quit
+ if vBCHSTS=0 set %BatchRestart=1
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit do EXIT^BCHUTL("BCHGCRMS") quit
+ do JOBMGR^BCHUTL(%FN,"BCHGCRMS",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ do EXIT^BCHUTL("BCHGCRMS")
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(CID) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHGCRMS","*","",CID.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ if %BatchRestart,$$CHKLOG^BCHUTL(%SystemDate,%FN,"BCHGCRMS",CID.get()) do { quit
+ do LOG^BCHUTL(%SystemDate,%FN,"BCHGCRMS",CID.get(),"Record already processed")
+ }
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,CID)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHGCRMS","*","",CID.get(),"",et)
+ }
+ do UPDLOG^BCHUTL(%SystemDate,%FN,"BCHGCRMS",CID.get(),vCONTEXT)
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,CID) //
+ 
+	// Initialize account
+	type Public Boolean ER
+
+	type RecordDEP dep
+	set dep=Db.getRecord("DEP","CID")
+
+	do TODCNT(.dep)	// Bump overdraft counters for the period prior to proc
+
+	do PROC(.dep)
+
+	do BUMP(.dep)
+
+	if ER quit	// Batch files to exception if ER
+
+	do FILE(.dep)
+	
+	quit
+
+	
+PROC(RecordDEP dep)	// Process monthly scoring for account
+
+	type Number AGE,GCRCD,NGCRCD,TODCNT
+	type String TBL
+
+	// Verify account still qualifies for monthly scoring
+	if dep.stat'=0!(dep.gcrs'=1) quit
+
+	set NGCRCD=""
+	set TBL=dep.mscrtbl
+
+	// Find account age in monthly scoring table
+	set AGE=dep.acctage+1
+	type ResultSet rs1=Db.select("MINAGE","UTBLGCROD","TBLNM=:TBL AND MINAGE<:AGE","MINAGE DESC")
+	if 'rs1.isEmpty() if rs1.next() set AGE=rs1.getCol("MINAGE")
+
+	// Minimum age not define in monthly scoring table
+	if AGE="" quit
+
+	// OD period 24 past periods
+	set TODCNT=dep.odcnt1+dep.odcnt2+dep.odcnt3+dep.odcnt4+dep.odcnt5
+	set TODCNT=TODCNT+dep.odcnt6+dep.odcnt7+dep.odcnt8+dep.odcnt9+dep.odcnt10
+	set TODCNT=TODCNT+dep.odcnt11+dep.odcnt12+dep.odcnt13+dep.odcnt14+dep.odcnt15
+	set TODCNT=TODCNT+dep.odcnt16+dep.odcnt17+dep.odcnt18+dep.odcnt19+dep.odcnt20
+	set TODCNT=TODCNT+dep.odcnt21+dep.odcnt22+dep.odcnt23+dep.odcnt24
+
+	/* Find records in UTBLGCROD where the maximum number of overdrafts
+	   allowed is greater than or equal to the actual number of overdrafts
+	   in the account for the last 24 months.
+	*/
+	type ResultSet rs=Db.select("GCRCD","UTBLGCROD","TBLNM=:TBL and MINAGE=:AGE and MAXODNBR>=:TODCNT","GCRCD DESC")
+ 
+	if rs.isEmpty() quit
+ 
+	for  quit:NGCRCD'=""  quit:'rs.next()  do {  
+
+		set GCRCD=rs.getCol(1)
+
+		type RecordUTBLGCRBAL gcrbal=Db.getRecord("UTBLGCRBAL","TBL,GCRCD")
+
+		if dep.gcrlbal'<gcrbal.gcrlbal set NGCRCD=$$MSCR(.dep,.gcrbal)
+
+		}
+	
+	quit
+
+
+MSCR(RecordDEP dep,RecordUTBLGCRBAL gcrbal)
+
+	type Public Number NGCRCD
+	type Number odcnt,I
+	do dep.setAuditFlag(1)
+	
+	set NGCRCD=gcrbal.gcrcd
+
+	/* Do Not Lower Condition
+	   Accounts are not adjusted to a lower level if there were no overdraft
+	   occurrences during a user-defined number of period.
+	*/
+	if dep.lsovrdm,(NGCRCD<dep.gcrcd) do {
+		set odcnt=dep.odcnt
+		F I=1:1:(dep.lsovrdm-1) set odcnt=odcnt+dep.odcnt_I  
+		if 'odcnt set NGCRCD=dep.gcrcd 
+		}
+
+	/* Do Not Raise Condition
+	   Accounts are not adjusted to a higher level if there were overdraft
+	   occurrences in a user-defined number of periods.
+	*/
+	else  if dep.hsovrdm,(NGCRCD>dep.gcrcd) do {
+		set odcnt=dep.odcnt
+		F I=1:1:(dep.hsovrdm-1) set odcnt=odcnt+dep.odcnt_I
+		if odcnt set NGCRCD=dep.gcrcd 
+		}
+	
+	// Update dep with new code and coverages
+	set dep.gcrcd=NGCRCD
+	set dep.gcrcv=gcrbal.gcrcv+dep.inicvopt
+	set dep.sddepcvr=gcrbal.sddepcvr
+
+	quit NGCRCD
+
+
+BUMP(RecordDEP dep)	// Always bump Next Scoring Date based on account's scoring frequency
+
+	type Date NJD
+	type Public Boolean ER
+	
+	do dep.setAuditFlag(1)
+
+	// Only set last scoring date if dynamic
+	if dep.gcrs=1 set dep.lsdate=dep.nsdate
+	
+	set NJD=$$NJD^UFRE(dep.nsdate,dep.scrfreq) quit:ER
+	set dep.nsdate=NJD
+
+	quit
+
+
+TODCNT(RecordDEP dep)	// Bump OD counters for the past periods
+	
+	do dep.setAuditFlag(1)
+
+	set dep.odcnt36=dep.odcnt35
+	set dep.odcnt35=dep.odcnt34
+	set dep.odcnt34=dep.odcnt33
+	set dep.odcnt33=dep.odcnt32
+	set dep.odcnt32=dep.odcnt31
+	set dep.odcnt31=dep.odcnt30
+	set dep.odcnt30=dep.odcnt29
+	set dep.odcnt29=dep.odcnt28
+	set dep.odcnt28=dep.odcnt27
+	set dep.odcnt27=dep.odcnt26
+	set dep.odcnt26=dep.odcnt25
+	set dep.odcnt25=dep.odcnt24
+	set dep.odcnt24=dep.odcnt23
+	set dep.odcnt23=dep.odcnt22
+	set dep.odcnt22=dep.odcnt21
+	set dep.odcnt21=dep.odcnt20
+	set dep.odcnt20=dep.odcnt19
+	set dep.odcnt19=dep.odcnt18 
+	set dep.odcnt18=dep.odcnt17
+	set dep.odcnt17=dep.odcnt16
+	set dep.odcnt16=dep.odcnt15
+	set dep.odcnt15=dep.odcnt14
+	set dep.odcnt14=dep.odcnt13
+	set dep.odcnt13=dep.odcnt12
+	set dep.odcnt12=dep.odcnt11
+	set dep.odcnt11=dep.odcnt10
+	set dep.odcnt10=dep.odcnt9
+	set dep.odcnt9=dep.odcnt8
+	set dep.odcnt8=dep.odcnt7
+	set dep.odcnt7=dep.odcnt6
+	set dep.odcnt6=dep.odcnt5
+	set dep.odcnt5=dep.odcnt4
+	set dep.odcnt4=dep.odcnt3
+	set dep.odcnt3=dep.odcnt2
+	set dep.odcnt2=dep.odcnt1
+	set dep.odcnt1=dep.odcnt
+	set dep.odcnt=0
+
+	quit
+
+
+FILE(RecordDEP dep)	// Save dep changes using filer
+	
+	do dep.save()                          // call DEP filer
+	quit
+
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,CID
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set CID=vRECORD.piece($C(9),1)
+ do vPROC(CID)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,CID
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>32767 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+13>32767 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("CID","DEP","DEP.NSDATE=:TJD-1")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	set %UserID="BATCH"
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

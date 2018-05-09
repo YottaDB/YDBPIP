@@ -1,0 +1,1098 @@
+PBSAGMSG(String agmhdr(), String vzrecord(), String vzreply)	
+		 
+	/*
+	Aggregate Message Service Class Driver
+	
+	An aggregate message acts as a container to present to the Profile
+	Banking Server a set of messages at one time.  This procedure is
+	called by PBSSRV to process an aggregate service class message.  It
+	handles each message individually, building a message containing the
+	individual message and then calling back into PROC^PBSSRV to process
+	it.
+	
+	There are three error handling options, contained in the grp_recs field:
+	
+		1 - if a sub-record fails, roll back all prior updates, stop
+		    processing, and mark previously processed sub-records as
+		    rolled-back. This fails the entire set.
+		    
+		2 - if a sub-record fails, stop processing, but retain the
+		    updates already done and treat those sub-records as successful.
+		    
+		3 - if a sub-record fails, mark it failed, but continue processing.
+		    This allows some successes and some failures within a set.
+		    
+	ARGUMENTS:
+		. agmhdr	Main message header array	/MECH=REFAFF:R
+		
+		. vzrecord	Sub-records			/MECH=REFARR:R
+		
+		. vzreply	Reply			/MECH=REF:W
+	
+	RETURNS:
+		. $$	Master status			/TYP=N
+			Status of the entire message set.
+			Values are:
+			
+			  0 = all records successful
+			  1 = all records failed
+			  2 = message in process
+			  3 = at least one, but not all, messages failed
+			
+	 
+	---- Revision History -------------------------------------------------
+	07/10/06 - RussellDS - CR22121
+		   Modified maximum length checking to use PSL.maxStringLength
+		   and consider bytes, not characters, in order to be Unicode
+		   compliant.
+	
+	06/05/06 - RussellDS - CR21637
+		   Modified construction of SV_ROLLBACK error message to include
+		   the original error description so as to provide information
+		   as to the failure that caused the rollback.
+		   
+		   Fix error in parsing reply message based on upbar delimiter.
+		   
+		   Added code to deal with possibility of message exceeding
+		   maximum message size.
+	
+	01/19/06 - RussellDS - CR19136
+		   Correct message logging to use mini-header message ID to
+		   avoid unique constraint violation.
+		   
+		   Change error handling in TEST section to not re-throw the
+		   error, just display it.
+		   
+		   Fix PSL warnings.
+	
+	05/30/05 - RussellDS - CR16138
+		   Corrected error in XML syntax in TESTREPL section - missing
+		   > at end of element.
+	
+	02/16/05 - RussellDS - CR14553
+		   Created
+
+	-----------------------------------------------------------------------
+	*/
+
+	// I18N=OFF
+	
+	type public Boolean vzlogmsg, vzlogrep, vzsvsec
+	type public Number vzstfflg
+	type public String vzcltokn, vzfaps, vzmssgid, vzmsgpgm, vzsav, vzsvfap
+	
+	type Boolean isDone
+	type Number agmlen, erhopt, failures, I, num, vzstatus
+	type String fap, reply()
+	
+	set isDone = 0
+	set erhopt = agmhdr(5)			// Error handling option
+	set agmhdr(5) = 0			// Set to non-group option
+	set agmlen = 50				// Total message length (header estimate)
+	
+	for num = 2:1:vzrecord("").order(-1) do { quit:isDone
+		
+		type Number vzptr, vzstart
+		type String minihdr(), msg, submsg()
+		
+		// Transaction start time
+		set vzstart=$$GETTIM^%ZFUNC
+			
+		/* If error handling option allows individual messages
+		   to post, i.e., not all or nothing, need to rollback
+		   and start new transaction for this record.
+		*/
+		if (erhopt '= 1) do Runtime.rollback()
+		if (erhopt '= 1) do Runtime.start("CS")
+		
+		// Parse sub-msg into mini-header and message
+		set vzptr = $$LV2V^MSG(vzrecord(num), .submsg())
+		
+		// Parse mini-header
+		set vzptr = $$LV2V^MSG(submsg(1), .minihdr())
+		
+		// Save service class for FAP usage
+		set reply(num, 0) = minihdr(1)
+		
+		// Service class NMSP and AGMSG not allowed
+		if ((minihdr(1) = 0) ! (minihdr(1) = 7)) do {
+			
+			set reply(num, 1) = 1
+			
+			// Server Error - the service class requested is not valid
+			set reply(num, 2) = $$CSERR^PBSUTL("SV_INVLDSRV")
+			
+			// Formatted message for logging
+			set reply(num, 3) = $$FMTREPLY(1, reply(num, 2))
+		}
+		
+		else  do {
+			
+			type String field(), hdr(), msgreply, vzagmrep
+			
+			// Build standard messge
+			set hdr(1) = minihdr(1)		// Service class
+			set hdr(3) = minihdr(2)		// Message ID
+			
+			// Remaining fields stay same as master header
+			for I = 2, 4:1:8 set hdr(I) = agmhdr(I)
+			
+			set field(1) = $$V2LV^MSG(.hdr(), "", 0)
+			set field(2) = submsg(2)
+			set msg = $$V2LV^MSG(.field(), "", 0)_$C(0,0)
+			
+			do {
+				// Protect variables used here from abuse elsewhere
+				type Boolean isDone, vzlogmsg, vzlogrep
+				type Number agmlen, erhopt, num, vzstatus
+				type String agmhdr, agmhdr(), reply(), vzcltokn, vzfaps
+				type String vzmssgid, vzrecord, vzrecord()
+			
+				// Process the client message (sub-message)
+				set msgreply = $$PROC^PBSSRV(msg, vzsvfap, vzsvsec, .vzsav, vzmsgpgm, 1, .vzagmrep)
+			}
+			
+			/* If we're processing with error handling option 1 (all or nothing)
+			   and there was a rollback while processing this transaction, set
+			   an error, since all prior transaction just got rolled back.
+			*/
+			if ((erhopt = 1) & '$TLevel) do {
+			
+				set reply(num, 1) = 1
+			
+				// Server Error - rollback error
+				set reply(num, 2) = $$CSERR^PBSUTL("SV_ROLLBACK")
+				
+				// If original reply is an ER, get description and append
+				// to the ROLLBACK description
+				do {
+					
+					type Number vzptr
+					type String L1(), L2(), L3(), R2()
+					
+					set vzptr = $$LV2V^MSG(msgreply, .L1())
+					quit:'L1(2).exists()
+					
+					set vzptr = $$LV2V^MSG(L1(2), .L2())
+					quit:'L2(2).exists()
+					
+					set vzptr = $$LV2V^MSG(L2(2), .L3())
+					quit:(L3(1).get() '= "ER")
+					
+					set vzptr = $$LV2V^MSG(reply(num, 2), .R2())
+					set R2(5) = R2(5)_": "_L3(5).get()
+					set R2(5) = R2(5).extract(1, 254)
+					
+					set reply(num, 2) = $$V2LV^MSG(.R2(), "", 0)
+				}
+				
+				
+				// Formatted message for logging
+				set reply(num, 3) = $$FMTREPLY(1, reply(num, 2))
+			}
+			
+			else  do {		// Get reply components
+				
+				set reply(num, 1) = vzagmrep.piece("|", 1)		// Status
+				set reply(num, 2) = vzagmrep.piece("|", 2, 99999)	// Reply message
+				set reply(num, 3) = msgreply				// Formatted reply
+			}
+		}
+		
+					
+		/* Check to be sure we're not going to exceed the maximum
+		   string length with this reply.  If we do, do a rollback
+		   and change this last reply to an error.
+			   
+		   Approach is an estimate.  50 bytes for the header and
+		   10 bytes for length info for each reply element.
+		*/
+		set agmlen = agmlen + 10 + reply(num, 2).toByteString().length()
+		if (agmlen > PSL.maxStringLength) do {
+			
+			do Runtime.rollback()
+			
+			set reply(num, 1) = 1
+			
+			// Message exceeds length of ~p2
+			set reply(num, 2) = $$ERRMSG^PBSUTL($$^MSG(3037, $$^MSG(3737), PSL.maxStringLength))
+			
+			set reply(num, 3) = ""
+		}
+		
+		// If error and error handling option is all or nothing, roll back earlier results
+		if (reply(num, 1) '= 0), (erhopt = 1) do {
+				
+			do Runtime.rollback()
+				
+			/* Change all earlier replies to rollback status, set reply to null
+			   Set formatted reply info to null so don't log -- for rolled back
+			   transactions, don't log, since they were, effectively, never
+			   processed.  The aggregate message will be logged and will show
+			   the rollback.
+			*/
+			for I = 2:1:num-1 do {
+					
+				set reply(I, 1) = 2
+				set reply(I, 2) = ""
+				set reply(I, 3) = ""
+			}
+		}
+
+		
+		// If error, determine if keep going or done
+		if (reply(num, 1) '= 0), (erhopt '= 3) set isDone = 1
+
+		// Log the result
+		
+		// TRollback occured in application, issue new TStart
+		if $TLevel=0 do Runtime.start("CS")
+
+		// Log message in message log
+		if 'reply(num, 3).isNull() do LOG^PBSUTL(vzcltokn.get(), minihdr(2), msg, reply(num, 3), reply(num, 1), minihdr(1), "PBSSRV", vzlogmsg.get(),vzlogrep.get())
+	
+		/* If error handling options is not 1 (all or nothing), or there was
+		   an error, commit transaction.  Error handling option 1 will commit
+		   in PBSSRV once all is done.
+		*/
+		if ((erhopt '= 1) ! (reply(num, 1) '= 0)) do Runtime.commit()
+	}
+	
+	// Determine master status
+	set failures = 0
+	
+	// Number of replies may be less than records if quit early
+	set num = reply("").order(-1)
+	for I = 2:1:num if (reply(I, 1) '= 0) set failures = failures + 1
+	if (failures = (num - 1)) set vzstatus = 1	// All failed
+	else  if (failures > 0) set vzstatus = 3	// Some, but not all, failed
+	else  set vzstatus = 0				// All succeeded
+	
+	// Build master reply
+	set vzreply = ""
+	for I = 2:1:num do {
+		
+		type String fld(), repmsg
+		
+		set fld(1) = reply(I, 1)		// Status
+		set fld(2) = reply(I, 2)		// Reply
+		
+		set repmsg = $$V2LV^MSG(.fld(), "", 1)
+		
+		// Execute service class layer exit FAP
+		set fap = vzfaps.piece("~", reply(I, 0))
+		set vzreply = vzreply_$$FAPOUT^PBSSRV(repmsg, fap, 7, vzstfflg)
+	}
+	
+	quit vzstatus
+
+
+FMTREPLY(Number status,
+	 String reply)
+	 
+	 /*
+	 Create formatted message for logging
+	 */
+	 
+	 type String x()
+			
+	set x(1) = status
+	set x(2) = reply
+	
+	quit $$REPLY^PBSSRV($$V2LV^MSG(.x(), "", 1), status)
+		
+		
+TEST(String DIR,	// Directory name
+     String FILE,	// Input file name
+     Number UID)	// User ID - needed for sign-on if no token
+     
+	/*
+	Aggregate message test funciton
+	
+	This function allows input from a specially formatted file (XML-like)
+	to be used to test an aggregate message.  See spec for details.
+	*/
+	
+	type Date TJD
+	type Boolean ER, isEOF
+	type Number CNT
+	type String %SVCHNID, AGMSG, INPUT(), SRVCLSES
+	
+	if DIR.isNull() set ER = $$TESTERR("DIR parameter is null", 0) quit
+	if FILE.isNull() set ER = $$TESTERR("FILE parameter is null", 0) quit
+	if UID.isNull() set ER = $$TESTERR("UID parameter is null", 0) quit
+	
+	if 'Db.isDefined("SCAU", "UID=:UID") set ER = $$TESTERR("Invalid user ID", 0) quit
+	
+	type IO INFILE = Class.new("IO")
+	
+	set INFILE.directory = DIR
+	set INFILE.fileName = FILE
+	set INFILE.openParams = "READ"
+	
+	// Catch error on open
+	
+	catch openerr {
+		
+		if openerr.type.isLike("%IOOPEN%") write "Open failed", !
+		else  do {
+			
+			write "Error:  "
+			write openerr.thrownAt, " - "
+			write openerr.type, " - "
+			write openerr.description, !
+		}
+	}
+	
+	do INFILE.open()
+	
+	set (ER, isEOF) = 0
+	set CNT = 1
+	
+	for  do { quit:(isEOF ! ER)
+		
+		type String X
+		
+		catch readerr {
+     
+			do INFILE.close()
+			
+			if readerr.type.isLike("%IOEOF%")  set isEOF = 1
+			else  throw readerr
+		}
+
+	
+		set X = INFILE.read() quit:isEOF
+		
+		set X = X.trim(1, $C(11))		// Remove trailing <LF>
+		set X = X.trim(1, $C(13))		// Remove trailing <CR>
+		set X = X.trim(0, $C(9))		// Remove leading/trailing tabs
+		set X = X.trim(0)			// Remove leading/trailing spaces
+		
+		if '(X.isNull() ! X.isLike("<%")) do {
+
+			do INFILE.close()
+			set ER = $$TESTERR("All non-blank lines must begin with '<'", 0)
+		}
+		
+		// Don't save blank lines or comment lines
+		else  if '(X.isNull() ! X.isLike("<?xml%") ! X.isLike("<!--%")) do {
+			set INPUT(CNT) = X
+			set CNT = CNT + 1
+		}
+	}
+	
+	type RecordCUVAR cuvar = Db.getRecord("CUVAR")
+	
+	set TJD = cuvar.tjd
+	
+	set %SVCHNID = "AGMSG"				// Needed for PBSNMSP
+	
+	if 'ER do {
+	
+		do TESTBLD(.INPUT(), UID, .AGMSG, .SRVCLSES)
+	
+		if 'AGMSG.isNull() do TESTPROC(AGMSG, SRVCLSES)
+	}
+	
+	quit
+	
+	
+TESTBLD(String INPUT(),		// Input file data
+	Number UID,		// User ID
+	String AGMSG,		// LV aggregate message returned	/MECH=REFNAM:W
+	String SRVCLSES)	// Service classes for sub messages	/MECH=REFNAM:W
+	
+	/*
+	Build the test message from the data input
+	
+	AGMSG will be returned as null if there is a failure in the build process
+	*/
+	
+	type Boolean ER, isDONE, stfflag
+	type Number CNT, erhopt, MAXCNT, msgid, submsgno, svclass
+	type String clntvrsn, field(), msgbody, msghdr, token, srvchnid, webid
+	
+	set ER = 0
+	set AGMSG = ""
+	
+	set MAXCNT = INPUT("").order(-1)
+	
+	// Work through the input and build a message
+	if (INPUT(1) '= "<PBSMessage>") set ER = $$TESTERR("<PBSMessage>", 1) quit
+	if (INPUT(2) '= "<MessageHeader>") set ER = $$TESTERR("<MessageHeader>", 1) quit
+	
+	// Initialize header fields
+	set (svclass, token, msgid, stfflag, erhopt, clntvrsn, webid, srvchnid) = ""
+	
+	set isDONE = 0
+	for CNT = 3:1:MAXCNT do { quit:isDONE
+		
+		type String FIELD, VALUE
+		
+		do TESTPARS(INPUT(CNT), .FIELD, .VALUE)
+		
+		if (FIELD = "/MessageHeader") set isDONE = 1
+		else  do {
+			if (FIELD = "ServiceClass") set svclass = VALUE
+			else  if (FIELD = "Token") set token = VALUE
+			else  if (FIELD = "MessageID") set msgid = VALUE
+			else  if (FIELD = "STFFlag") set stfflag = VALUE
+			else  if (FIELD = "ErrorHandlingOption") set erhopt = VALUE
+			else  if (FIELD = "ClientVersion") set clntvrsn = VALUE
+			else  if (FIELD = "WebUserID") set webid = VALUE
+			else  if (FIELD = "ServerChannelID") set srvchnid = VALUE
+		}
+	}
+	
+	if 'isDONE set ER = $$TESTERR("</MessageHeader>", 1) quit
+	if svclass.isNull() set svclass = 7
+	if (svclass '= 7) set ER = $$TESTERR("Only service class 7 currently supported", 0) quit
+	if msgid.isNull() set msgid = ({String}%CurrentDate).extract(3,5)_%CurrentTime
+	if stfflag.isNull() set stfflag = 0
+	if erhopt.isNull() set ER = $$TESTERR("No error handling option specified", 0) quit
+	
+	if token.isNull() do { quit:token.isNull()		// Generate token
+		
+		type Number ptr
+		type String fld(), record, reply
+		
+		set fld(1) = 1			// Sign-on
+		set fld(2) = UID
+		set fld(3) = "AGMSG Test"	// Station ID
+		
+		set record = $$V2LV^MSG(.fld(), "", 0)
+		kill fld
+		
+		set ER = $$^PBSNMSP(.reply, 0, .record, 0, "/TRUST=1")
+		
+		set ptr = $$LV2V^MSG(reply, .fld())
+		
+		if ER do {
+			
+			type String ERMSG
+			
+			set ERMSG = "Error trying to generate token - "
+			set ERMSG = ERMSG_fld(3).get()_" - "_fld(5).get()
+			set ER = $$TESTERR(ERMSG, 0)
+		}
+		
+		else  do {
+			
+			set token = fld(1).get()
+			if token.isNull() set ER = $$TESTERR("Token generation failed", 0)
+		}
+	}
+	
+	// OK ... we've got our header data, build the header
+	set field(1) = svclass
+	set field(2) = token
+	set field(3) = msgid
+	set field(4) = stfflag
+	set field(5) = erhopt
+	set field(6) = clntvrsn
+	set field(7) = webid
+	set field(8) = srvchnid
+	
+	set msghdr = $$V2LV^MSG(.field(), "", 1)
+	
+	// Now build message body, add sub-records
+	
+	set CNT = CNT + 1
+	set msgbody = ""
+	set isDONE = 0
+	set submsgno = 0
+	
+	for  do { quit:(ER ! isDONE)
+		
+		type String body, subhdr, submsgid
+		
+		if ((CNT = MAXCNT) & (INPUT(CNT) '= "</PBSMessage>")) set ER = $$TESTERR("</PBSMessage>", 1) quit
+		
+		if (INPUT(CNT) '= "<MessageBody>") set ER = $$TESTERR("<MessageBody>", 1) quit
+		
+		set CNT = CNT + 1
+		set (submsgid, svclass) = ""
+		set submsgno = submsgno + 1
+		
+		// Mini-header first		
+		if (INPUT(CNT) '= "<MiniHeader>") set ER = $$TESTERR("<MiniHeader>", 1) quit
+		
+		for CNT = CNT+1:1:MAXCNT do { quit:(ER ! isDONE)
+		
+			type String FIELD, VALUE
+		
+			do TESTPARS(INPUT(CNT), .FIELD, .VALUE)
+			
+			if ((FIELD = "Body") ! (FIELD = "MessageBody")) set ER = 1
+			else  if (FIELD = "/MiniHeader") set isDONE = 1
+			else  do {
+				if (FIELD = "ServiceClass") set svclass = VALUE
+				else  if (FIELD = "MessageID") set submsgid = VALUE
+			}
+		}
+		
+		if 'isDONE set ER = $$TESTERR("</MiniHeader>", 1) quit
+		
+		set isDONE = 0
+		
+		if svclass.isNull() set ER = $$TESTERR("Missing sub-record service class - record "_submsgno, 0) quit
+		
+		if submsgid.isNull() set submsgid = msgid_"."_submsgno
+		
+		kill field
+		set field(1) = svclass
+		set field(2) = submsgid
+		set subhdr = $$V2LV^MSG(.field(), "", 1)
+		
+		// Save service class by sub-message so can de-code replies
+		set SRVCLSES.extract(submsgno) = svclass
+		
+		// Build sub-record body
+		set CNT = CNT + 1		
+		set body = $$TESTBODY(.INPUT(), .CNT)
+		
+		if body.isNull() set ER = 1 quit
+		
+		kill field
+		set field(1) = subhdr_body
+		set msgbody = msgbody_$$V2LV^MSG(.field(), "", 0)
+		
+		set CNT = CNT + 1
+		
+		if (INPUT(CNT) '= "</MessageBody>")) set ER = $$TESTERR("</MessageBody>", 1) quit
+		
+		set CNT = CNT + 1
+		
+		if (INPUT(CNT) = "</PBSMessage>") set isDONE = 1
+	}
+	
+	if 'ER set AGMSG = msghdr_msgbody_$C(0,0)
+	
+	quit
+	
+	
+TESTBODY(String INPUT(),	// Input data		/MECH=REFARR:R
+	 Number CNT)		// Input array pointer	/MECH=REFNAM:RW
+	 
+	/*
+	Read sub-message <Body> data and build into LV message.
+	
+	Build structures to manage XML without using indirection.
+	 
+	RETURNS:
+		. $$	LV body, null if error		/TYP=T
+	*/
+	 
+	type Boolean ER, isDONE
+	type Number SEQ
+	type String body, DATA(), field()
+	 
+	set body = ""
+	 
+	if (INPUT(CNT) '= "<Body>") set ER = $$TESTERR("<Body>", 1) quit ""
+
+	// Get all fields into DATA and make sure they are correctly ordered
+	set SEQ = 1
+	set (ER, isDONE) = 0
+	for CNT = CNT+1:1:INPUT("").order(-1) do { quit:(ER ! isDONE)
+		
+		type String FIELD, VALUE
+		
+		do TESTPARS(INPUT(CNT), .FIELD, .VALUE)
+		
+		if (FIELD.isLike("/Field%")) quit	// Ignore complex field end markers
+		
+		if (FIELD = "MessageBody") set ER = 1
+		else  if (FIELD = "/Body") set isDONE = 1
+		else  do {
+			
+			type Number LASTNUM, NUMPCES
+			type String fieldid, PRIORIS, PRIORSB
+			
+			if 'FIELD.isLike("%Field_%") set ER = $$TESTERR("Bad/missing '<Field_' field", 0) quit
+			
+			set fieldid = FIELD.piece("_", 2)
+			
+			// Make sure in correct order
+			if (((SEQ = 1) & (fieldid '= 1)) ! ((fieldid = 1) & (SEQ '= 1))) set ER = $$TESTERR("Sequence 1 must be first", 0) quit
+			
+			if (fieldid '= 1) do { quit:ER
+			
+				set NUMPCES = fieldid.length(".")
+				set LASTNUM = fieldid.piece(".", NUMPCES)
+				set PRIORIS = DATA(SEQ - 1).piece("|", 1)
+				
+				// Determine what prior should be
+				if (LASTNUM = 1) set PRIORSB = fieldid.piece(".", 1, NUMPCES - 1)
+				else  if (NUMPCES = 1) do {
+					set PRIORSB = LASTNUM - 1
+					set PRIORIS = PRIORIS.piece(".", 1)
+				}
+				else  do {
+					set PRIORSB = fieldid.piece(".", 1, NUMPCES - 1)_"."_(LASTNUM - 1)
+					set PRIORIS = PRIORIS.piece(".", 1, NUMPCES)
+				}
+				
+				if (PRIORIS '= PRIORSB)  set ER = $$TESTERR("Field "_PRIORSB_" does not preceed field "_fieldid, 0)
+			}
+				
+			set DATA(SEQ) = fieldid_"|"_VALUE
+			set SEQ = SEQ + 1
+		}
+	}
+	
+	if ER quit ""
+	
+	if 'isDONE set ER = $$TESTERR("</Body>", 1) quit ""
+	
+	// Have it all in DATA(), build it into an LV record
+	
+	set SEQ = 1
+	for  set body = body_$$TESTADD(.DATA(), .SEQ) quit:SEQ.isNull()
+	
+	set field(1) = body
+	
+	quit $$V2LV^MSG(.field(), "", 0)
+	
+	
+TESTADD(String DATA(),		// Data array		/MECH=REFARR:R
+	Number SEQ)		// Working sequence	/MECH=REFNAM:RW
+	
+	/*
+	Format (LV) and return a field from the DATA array.
+	
+	This sub-routine is recursive, since a field may be complex, which
+	requires building the sub-fields into the returned field.  In the
+	implementation for this function a field cannot both have a value
+	and have sub-fields.
+	
+	RETURNS:
+		. $$	LV formatted field		/TYP=T
+	*/
+	
+	type String field, FIELD, NXTFIELD, return, VALUE
+	
+	set return = ""
+	
+	set FIELD = DATA(SEQ).piece("|", 1)
+	set VALUE = DATA(SEQ).piece("|", 2, 999999)
+	
+	set SEQ = SEQ + 1
+	if 'DATA(SEQ).exists() do {			// On last field
+		set SEQ = ""
+		set NXTFIELD = ""
+	}
+	else  set NXTFIELD = DATA(SEQ).piece("|", 1)
+	
+	// Not a complex field, i.e., sub-fields don't follow
+	if (SEQ.isNull() ! (FIELD.length(".") '< NXTFIELD.length("."))) set return = VALUE
+	
+	// Complex, so build sub-fields
+	else  do {
+		type Boolean isDONE = 0
+		type Number SUBFLDLN
+		
+		// Sub-field size, so know when done
+		set SUBFLDLN = DATA(SEQ).piece("|", 1).length(".")
+		
+		for  do { quit:isDONE
+			set return = return_$$TESTADD(.DATA(), .SEQ)
+			if SEQ.isNull() set isDONE = 1
+			else  if (SUBFLDLN '= DATA(SEQ).piece("|", 1).length(".")) set isDONE = 1
+		}
+	}
+	
+	set field(1) = return
+		
+	quit $$V2LV^MSG(.field(), "", 0)
+	
+	
+TESTPROC(String AGMSG,		// Test message
+	 String SRVCLSES)	// Service classes for sub messages
+
+	/*
+	Call PBSSRV to process the test message.
+	
+	Need to initialize variables required by PBSSRV.
+	*/
+	
+	type Boolean ER, vzlogmsg, vzlogrep, vzsvsec
+	type Number vzmaxtim
+	type String vzmsgpgm, vzreply, vzsav, vzsvfap, vzsvtyp, vzx
+	
+	set vzsvtyp = "SCA$IBS"
+	
+	type RecordCTBLSVTYP svtyp = Db.getRecord("CTBLSVTYP","vzsvtyp", 1)
+	if (svtyp.getMode() = 0) set ER = $$TESTERR("SCA$IBS not set up as server type", 0) quit
+
+	set vzsvfap = svtyp.fap				// Server FAP ID
+	set vzsvsec = svtyp.trust			// Security level
+	set vzlogmsg=svtyp.logmsg			// Log client messages
+	set vzlogrep=svtyp.logreply			// Log server replies
+	set vzmaxtim=svtyp.timeout			// Transaction TP timeout
+		
+	if 'vzmaxtim set vzmaxtim=45			// (default is 45 seconds)
+	
+	set vzx="s $zmaxtptime="_vzmaxtim
+	
+	#ACCEPT PGM=Dan Russell; DATE=02/23/05; CR=14553
+	xecute vzx
+	
+	set vzmsgpgm = svtyp.msgpgm			// Non-std message handler
+
+	set vzsav = $$INIT^PBSUTL
+
+	// Process the message
+	
+	do Runtime.start("CS")
+
+	// If transaction is restarted, clean-up symbol table
+	if $TRestart do {
+		
+		do XKILL^PBSUTL 
+		if vzsav.get().isNull() set vzsav = $$INIT^PBSUTL 
+		do VLOD^PBSUTL(vzsav)
+	}
+
+	set vzreply = $$PROC^PBSSRV(AGMSG, vzsvfap, vzsvsec, .vzsav, vzmsgpgm, 0)
+	
+	do Runtime.commit()
+	
+	// Parse and output reply message
+	do TESTREPL(vzreply, SRVCLSES)
+	
+	quit
+	
+	
+TESTREPL(String reply,		// Reply message
+	 String SRVCLSES)	// Service classes for sub messages
+
+	/*
+	Parse the LV reply and output it in the test reply XML format
+	*/
+	
+	type Number ptr, recnum
+	type String header(), records(), TAB
+	
+	set TAB = $C(9)
+	
+	set ptr = $$LV2V^MSG(reply, .records())
+	set ptr = $$LV2V^MSG(records(1), .header())
+	
+	write !,"<?xml version=""1.0"" encoding=""UTF-8""?>",!
+	write "<!-- Reply from PBS Server test message -->",!
+	write "<PBSReply>",!
+	
+	write "<ReplyHeader>",!
+	write TAB, "<Token>", header(1).get(), "</Token>",!
+	write TAB, "<MessageID>", header(2).get(), "</MessageID>",!
+	write TAB, "<MessageStatus>", header(3).get(), "<MessageStatus>",!
+	write TAB, "<VersionID>", header(4).get(), "<VersionID>",!
+	write "</ReplyHeader>",!
+	
+	for recnum = 2:1:records("").order(-1) do {
+		
+		type Number I, N	
+		type String fields(), LAST, NEXT, subrecs()
+		
+		set ptr = $$LV2V^MSG(records(recnum), .subrecs())
+		
+		do TESTREPF(.subrecs(), .fields(), SRVCLSES.extract(recnum - 1))
+	
+		write "<ReplyBody>",!
+		write TAB, "<Status>", subrecs(1), "</Status>", !
+		write TAB, "<Reply>", !
+		
+		set (LAST, N) = ""
+		for  set N = fields(N).order() quit:N.isNull()  do {
+			
+			type Boolean noCLOSE = 0
+			
+			// Open nested XML section
+			set NEXT = fields(N).order()
+			if (NEXT.length(".") > ({String}N).length(".")) set noCLOSE = 1
+			
+			// Close nested XML
+			if (({String}N).length(".") < LAST.length(".")) do {
+				
+				type String X
+				
+				set X = LAST.piece(".", 1, LAST.length(".") - 1)
+				
+				write TAB
+				for I = 1:1:X.length(".") write TAB
+				
+				write "</Field", X, ">", !
+			}
+			
+			write TAB
+			for I = 1:1:({String}N).length(".") write TAB
+			
+			write "<Field", N, ">", $$TESTCHR(fields(N))
+			if 'noCLOSE write "</Field", N, ">"
+			write !
+			
+			set LAST = N
+			
+			// Close last field(s)
+			if NEXT.isNull() do {
+				
+				type Number J
+				type String X
+				
+				if 'noCLOSE set LAST = LAST.piece(".", LAST.length(".") - 1)
+				
+				if 'LAST.isNull() for I = LAST.length("."):-1:1 do {
+					
+					set X = LAST.piece(".", 1, I)
+				
+					write TAB
+					for J = 1:1:X.length(".") write TAB
+				
+					write "</Field", X, ">", !
+				}
+			}
+		}
+		
+		write TAB, "</Reply>",!
+		write "</ReplyBody>",!
+	}
+	
+	write "</PBSReply>",!
+	
+	quit
+	
+	
+TESTREPF(String subrecs(),	// Sub-records - Status and Body	/MECH=REFAFF:R
+	 String fields(),	// Fields from sub-record body		/MECH=REFARR:W
+	 Number SRVCLASS)	// Service class for this message
+	 
+	/*
+	Break sub-record body into field IDs and values
+	*/
+	 
+	type Number N, ptr
+	type String lvlone()
+	 
+	// Break down level one body fields
+	if 'subrecs(2).get().isNull() set ptr = $$LV2V^MSG(subrecs(2), .lvlone())
+	else  set lvlone(1) = ""
+	
+	// Success formats depend on service class
+	if (subrecs(1) = 0) do {		// Success
+		
+		/* NMSP - Flat - only one level
+		   Note - although NMSP not supported by aggregate message
+		   service class, this is here for future use.
+		*/
+		if ((SRVCLASS = 0)) do {
+			
+			for N = 1:1:lvlone("").order(-1) set fields("_"_N) = lvlone(N)
+		}
+		
+		// TSSP top record contains one sub-record per transaction
+		else  if (SRVCLASS = 1) do {
+			
+			for N = 1:1:lvlone("").order(-1) do {
+				
+				type Number J
+				type String values()
+				
+				set fields("_"_N) = ""
+				
+				set ptr = $$LV2V^MSG(lvlone(N), .values())
+				
+				for J = 1:1:values("").order(-1) if (J '= 2) set fields("_"_N_"."_J) = values(J)
+			
+				// Break TAMT - complex field
+				set fields("_"_N_".2") = ""
+				if 'values(2).isNull() do {
+			
+					type Number K
+					type String tamt()
+				
+					set ptr = $$LV2V^MSG(values(2), .tamt())
+					for K = 1:1:tamt("").order(-1) set fields("_"_N_".2."_K) = tamt(K)
+				}
+			}
+		}
+		
+		// FSSP - One Record at top, then complex single level
+		else  if ((SRVCLASS = 2)) do {
+			
+			type String lvltwo()
+			
+			set fields("_1") = ""
+			
+			set ptr = $$LV2V^MSG(lvlone(1), .lvltwo())
+			
+			for N = 1:1:lvltwo("").order(-1) set fields("_1."_N) = lvltwo(N)
+		}
+				
+		/* MRPC and BBSSP - data is in the sub-record.
+		   Note that the field for an MRPC may be complex, but
+		   we don't know that -- it varies by MRPC, so will just
+		   return as a single field.
+		*/
+		else  if ((SRVCLASS = 3) ! (SRVCLASS = 6)) set fields("_1") = subrecs(2)
+		
+		// PSQL - Flat, with one complex field
+		else  if (SRVCLASS = 5) do {
+			
+			for N = 1:1:lvlone("").order(-1) if (N '= 5) set fields("_"_N) = lvlone(N)
+			
+			// Break colattrib - complex field
+			if 'lvlone(5).isNull() do {
+				
+				type String colatt()
+				
+				set fields("_5") = ""
+				
+				set ptr = $$LV2V^MSG(lvlone(5), .colatt())
+				for N = 1:1:colatt("").order(-1) set fields("_5."_N) = colatt(N)
+			}
+		}
+		
+		else  set fields("_1") = "TEST^PBSAGMSG message - unknown service class reply format"
+	}
+	 
+	else  if (subrecs(1) = 1) do {		// Failure
+		
+		if lvlone(1) = "ER" do {	// Basic error
+			
+			for N = 1:1:lvlone("").order(-1) if (N '= 4) set fields("_"_N) = lvlone(N)
+			
+			// Break parameters - complex field
+			set fields("_4") = ""
+			if 'lvlone(4).isNull() do {
+			
+				type String params()
+				
+				set ptr = $$LV2V^MSG(lvlone(4), .params())
+				for N = 1:1:params("").order(-1) set fields("_4."_N) = params(N)
+			}
+		}
+		
+		else  if lvlone(1) = "AU" do {	// Authorization restriction
+		
+			type String aurecs()
+		
+			set fields("_1") = "AU"
+			set fields("_2") = lvlone(2)
+			
+			// Break down AUINFO field - one record per transaction
+			set ptr = $$LV2V^MSG(lvlone(3), .aurecs())
+			
+			// Handle each transaction's restriction sub-records
+			for N = 1:1:aurecs("").order(-1) do {
+				
+				type Number J, K
+				type String rest()
+				
+				set fields("_3."_N) = ""
+				
+				set ptr = $$LV2V^MSG(aurecs(N), .rest())
+				
+				// Break down the individual fields
+				for J = 1:1:rest("").order(-1) do {
+					
+					type String values()
+					
+					set fields("_3."_N_"."_J) = ""
+					
+					set ptr = $$LV2V^MSG(rest(J), .values())
+					
+					for K = 1:1:values("").order(-1) set fields("_3."_N_"."_J_"."_K) = values(K)
+				}
+			}
+		}
+			
+		else  set fields("_1") = "TEST^PBSAGMSG message - unknown error reply format"
+	}
+	 
+	else  do {				// Rollback
+		
+		// Will only have single field, should be null 
+		set fields("_1") = lvlone(1)
+	}
+	
+	quit
+	
+	
+TESTCHR(String X)	// Input string
+
+	/*
+	Return ZWR format output if there are control characters.
+	
+	This deals with LV packed fields where we can't/don't detect them.
+	
+	RETURNS:
+		. $$	ZWR formatted version of X
+	*/
+	
+	type String return = ""
+	
+	if X '? .E1C.E set return = X
+	else  do {
+		
+		type Boolean isCTRL = 0
+		type Number I
+		type String CHR
+		
+		for I = 1:1:X.length() do {
+			
+			set CHR = X.extract(I)
+			if CHR?1C do {
+				if 'isCTRL do {
+					if 'return.isNull() set return = return_"""_"
+					set return = return_"$C("_CHR.ascii()
+					set isCTRL = 1
+				}
+				else  set return = return_","_CHR.ascii()
+			}
+			else  do {
+				if isCTRL do {
+					set return = return_")_"""_CHR
+					set isCTRL = 0
+				}
+				else  do {
+					if return.isNull() set return = """"
+					set return = return_CHR
+				}
+			}
+		}
+			
+		if isCTRL set return = return_")"
+		else  set return = return_""""
+	}
+			
+	quit return
+
+
+TESTPARS(String INPUT,		// Input string
+	 String FIELD,		// Field name		/MECH=REFNAM:W
+	 String VALUE)		// Field value		/MECH=REFNAM:W
+	 
+	set FIELD = INPUT.piece("<", 2).piece(">", 1)
+	 
+	if FIELD.isLike("/%") set VALUE = ""				// </abc>
+	else  if (FIELD.extract(FIELD.length()) = "/") set VALUE = ""	// <abc/> syntax
+	else  set VALUE = INPUT.piece("<"_FIELD_">", 2).piece("</"_FIELD_">", 1)
+	 
+	quit
+	
+	
+TESTERR(String MSG,		// Error message
+	Boolean isMISING)	// Use missing record message
+	
+	/*
+	Display error, return error flag
+	*/
+
+	if isMISING write "Missing ", MSG, " record", !!
+	else  write MSG, !!
+	
+	quit 1
+
+vSIG()	quit "60461^55036^Dan Russell^27602"	// Signature - LTD^TIME^USER^SIZE

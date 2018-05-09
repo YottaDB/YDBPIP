@@ -1,0 +1,249 @@
+LNEAB2(RecordLN ln)	// Part 3 Escrow Analysis
+	/*
+	       ORIG:  Chuck Hardy (6721) - 03/13/87
+	  CALLED BY:
+	      CALLS:  ^LNEAB1,^UFRE
+	   PROJ #'S:
+	       DESC:
+	   GLOBALS -  ^ACN,^DAYEND,^RAMT,^STBL,^UTBL
+	       READ:
+	        SET:
+	      INPUT:
+	     OUTPUT:
+
+	---- Revision History -------------------------------------------------
+ 
+        03/30/06 - Srinivar - CR 20188
+        	   Modified the SETEAB section by rounding-off
+        	   several variables whose datatype is defined as Number.
+        	   The above change will prevent the errors being
+        	   logged while trying to insert these values in to 
+        	   LNAPCHG and LNAPCHGE tables respectively. 
+        	   
+        	         
+        02/13/06 - Srinivar - CR 19137
+        	   Modified the section SHT to change the scope of
+        	   variable OPT to public inorder to prevent the undefined 
+        	   error.
+        
+        11/10/05 - Srinivar - CR16890
+         	   Modified the section LNEAB2 to pass additional NULL 
+         	   parameter as a second parameter for lnapchge record
+         	   while calling EXEC^LNEA.
+         	   
+        07/26/05 - SkariahV- CR16679
+	           Removed #WARN and #OPTIMIZE directives.
+	              
+	05/13/03 - GRAY - 51351
+		   Converted to PSL.
+
+
+	*/
+
+	type Public Date FROMDT,THRUDT
+	type Public Number ECID,LCID
+	type Public String EBAL
+
+	// Process escrow accounts individually.
+
+	for  set ECID=EBAL(ECID).order() quit:ECID=""  do {
+		type Number AMTB,AMTD,AMTL,AMTS,BEGBAL,DDA,ENDBAL,ESCPMT
+		type Number LOWBAL,REMTOT,REQBAL,SDA
+		type String DATA,ESC
+		type Public String EAB(,)
+
+		set DATA=""
+		
+		type RecordDEP dep=Db.getRecord("DEP","CID=:ECID")
+		if dep.stat=4 quit
+
+		set ESC=dep.esc
+
+		do EXEC^LNEA(.ln,,LCID,,ESC,FROMDT,THRUDT,,.DATA)
+
+		// required payment
+		set ESCPMT=DATA.piece("|",1)
+
+		// required balance
+		set REQBAL=DATA.piece("|",2)
+
+		// beginning balance
+		set BEGBAL=DATA.piece("|",3)
+
+		// low balance
+		set LOWBAL=DATA.piece("|",4)
+
+		// ending balance
+		set ENDBAL=DATA.piece("|",5)
+
+		set REMTOT=DATA.piece("|",6)
+
+		// Initialize amount to bill, lump, debit, spread
+		set (AMTB,AMTL,AMTD,AMTS)=0
+		set EAB(LCID,ECID)=""
+
+		// SDO=0 = use escrow payment amount for comparisons
+		if '$$VAL^LNEA(dep.sdo,ln.sdo) set (SDA,DDA)=ESCPMT
+		else  do {
+			// SDO=1 use flat amounts
+			set SDA=$$VAL^LNEA(dep.sda,ln.sda)
+			set DDA=$$VAL^LNEA(dep.dfda,ln.dfda)
+			}
+
+		// overage
+		if REQBAL<BEGBAL do OVR(.ln) do DISPO
+		if BEGBAL<REQBAL do {
+			// shortage
+			do SHT(.ln) do DISPS
+			// deficiency
+			if BEGBAL<0 do DEF(.ln) do DISPS
+			}
+
+		do SETEAB(dep.bal)
+		}
+	
+	quit
+
+
+
+SETEAB(Number EBAL)	// Set EAB array
+
+
+	type Number ADJ,I
+	type String X
+	type Public Number ANAF,BEGBAL,CUSH,ECID,ENDBAL,ESCPMT,LCID,LOWBAL
+	type Public Number REMTOT,REQBAL
+	type Public String EAB(,),ESC
+
+	set X=EAB(LCID,ECID).get()
+
+	set ADJ=0
+	for I=22,23,24 set ADJ=ADJ+X.piece("|",I)
+
+	set ADJ=ADJ-X.piece("|",27)
+
+	set X.piece("|",1)=ESC
+	set X.piece("|",2)=ESCPMT
+
+	// esc pmt AF
+	set X.piece("|",5)=$$ELEFRE^LNU(LCID,ESC).piece("|",3).roundDec(0)
+
+	set X.piece("|",7)=+EBAL
+	set X.piece("|",8)=BEGBAL
+	set X.piece("|",9)=BEGBAL+ADJ
+	set X.piece("|",10)=ESCPMT
+	set X.piece("|",19)=$$ELEFRE^LNU(LCID,ESC).piece("|",4).roundDec(2)
+
+	// proration basis (normally 12 (pmts/analysis period))
+	set X.piece("|",20)=(X.piece("|",5)/ANAF).roundDec(0)
+
+	// cushion amt
+	set X.piece("|",28)=CUSH
+
+	// actual low bal
+	set X.piece("|",29)=LOWBAL
+
+	// ending balance
+	set X.piece("|",30)=ENDBAL
+
+	// remit total
+	set X.piece("|",37)=REMTOT
+
+	set EAB(LCID,ECID)=X
+
+	quit
+
+
+OVR(RecordLN ln)	// Overage
+
+	type Number AMT,OPT
+	type Public Number BEGBAL,ECID,LCID,REQBAL
+	type Public String EAB(,)
+
+	set AMT=BEGBAL-REQBAL
+
+	if AMT<ln.oda set OPT=ln.odml
+	else  set OPT=ln.odmg
+
+	set EAB(LCID,ECID).piece("|",31)=AMT
+	set EAB(LCID,ECID).piece("|",34)=OPT
+
+	quit
+
+
+SHT(RecordLN ln)	// Shortage
+
+
+	type Number AMT
+	type Public Number BEGBAL,ECID,LCID,REQBAL,SDA,OPT
+	type Public String EAB(,)
+
+	set AMT=REQBAL-BEGBAL
+
+	if BEGBAL<0 set AMT=AMT+BEGBAL
+
+	if AMT<SDA set OPT=ln.sdml
+	else  set OPT=ln.sdmg
+
+	set EAB(LCID,ECID).piece("|",32)=AMT
+	set EAB(LCID,ECID).piece("|",35)=OPT
+
+	quit
+
+
+DEF(RecordLN ln)	// Deficiency
+
+
+	type Number AMT,OPT
+	type Public Number BEGBAL,DDA,ECID,LCID,REQBAL
+	type Public String EAB(,)
+
+	set AMT=-BEGBAL
+
+	if AMT<DDA set OPT=ln.ddml
+	else  set OPT=ln.ddmg
+
+	set EAB(LCID,ECID).piece("|",33)=AMT
+	set EAB(LCID,ECID).piece("|",36)=OPT
+
+	quit
+
+
+DISPO	// Overage disposition method
+
+
+	type Public Number AMT,ECID,LCID,OPT
+	type Public String EAB(,)
+
+	if 'OPT.get() quit
+
+	// Generate check
+	if OPT=1 set EAB(LCID,ECID).piece("|",27)=EAB(LCID,ECID).piece("|",27)+AMT
+
+	// Spread overage
+	if OPT=2 set EAB(LCID,ECID).piece("|",25)=EAB(LCID,ECID).piece("|",25)-AMT
+
+	quit
+
+
+DISPS	// Shortage disposition method
+	
+	   
+	// AMT is shortage/deficiency amount
+	
+	type Number PC
+	type Public Number AMT,ECID,LCID
+	type Public String EAB(,),OPT
+
+	if OPT="BIL" set PC=23
+	if OPT="SPD" set PC=25
+	if OPT="DEB" set PC=22
+	if OPT="LUMP" set PC=24
+
+	if 'PC.get() quit
+
+	set EAB(LCID,ECID).piece("|",PC)=EAB(LCID,ECID).piece("|",PC)+AMT
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60355^29406^Srinivasan, Rajesh^4889"	// Signature - LTD^TIME^USER^SIZE

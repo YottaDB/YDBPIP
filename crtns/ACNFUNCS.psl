@@ -1,0 +1,376 @@
+ACNFUNCS
+ 	/*
+ 	 PROCEDURE ID:	ACNFUNCS
+ 	     Original:	GOLATOS
+		 Date:	8/27/2002 - 3:01:12 PM
+ 	         Desc:	ACN Filer Functions
+ 
+	ACN Filer Functions, including shared DEP and LN functions
+	Note that this functions are for private use by ACN, DEP, and LN
+	filers only.
+
+	KEYWORDS: Loans, Deposits
+
+	LIBRARY:
+		. EFDCMT   - Comment field for EFD transactions
+		. FMLD     - Update File Maintenance Last Date field (DEP or LN)
+		. FRSTDATE - First processing dates
+		. GLFLTR   - GL set code filter
+		. HISTBLD  - Common call to file history
+		. TCMTFM   - Comment field for maintenance
+
+	------ Revision History ------------------------------------------------
+
+	12/21/06 - SWARNALP - CR 24539
+		   Modified TCMTFM section to get FmTable as the 8th
+                   argument from the journal mapping. Also changed the logic
+                   to set the values in appropriate places delimited by ":" 
+                   in TCMT variable in case if any of the parameter is passed 
+                   as null.
+                   
+	04/01/06 - BHOLT - CR19735
+		   Modified ROLL section to quit with NULL if rs.isEmpty() 
+		   as it is an extrinsic section.	
+
+	03/31/06 - chhabris - CR20258
+		   Added new section ROLE which will take care of fetching
+		   the correct role (old and new) if the same is modified
+		   for an account. This change was done as the history comment
+		   was not updated with the proper role values.
+
+	06/01/05 - KinI - 16153
+		   Removed GLFLTR section as GL filter functionality has been 
+		   obsoleted. Added GLCHK section to verify that the class and 
+		   group of GL set code match the class and group of the 
+		   account.
+
+	05/03/05 - KELLYP - CR 13662
+		   Modified GLFLTR section to remove "ORDER BY" text from the
+		   corresponding Db.select parameter to prevent SQL issues. 
+		   Also removed pre-2003 revision history.
+
+	08/14/03 - CARROLLJ - 51630
+		   Modified HISTBLD section to correct undefined errors being
+		   returned when setting effective date and tso into history.
+
+	*/
+	// Do not enter from top
+	quit	
+
+EFDCMT(%ProcessMode,SQL,%EffectiveDate)	// Private; Return comments
+
+	/*
+	   ARGUMENTS:
+	
+	   	. %ProcessMode 	Processing mode  	/TYP=N/REQ/MECH=VAL
+	    			(0=create 3-delete)
+	
+	   	. SQL   	SQL UPDATE statement 	/TYP=T/REQ/MECH=VAL
+	
+	   	. %EffectiveDate   Effective date  	/TYP=D/REQ/MECH=VAL
+	
+	   OUTPUT:
+	   	$$ History comment field
+	
+	   EXAMPLE:
+	
+	   	$$EFDCMT(1,"BOO=1,IRN=12.5",56797)
+	
+	    	SET BOO=1,IRN=12.5
+	
+	  ----------------------------------------------------------------------
+	  I18N=OFF     
+	
+	*/
+	new v                                 
+	if '%ProcessMode quit "SET "_SQL       // Create EFD transaction
+	quit "SET "_SQL_$$^MSG(3202)           // Remove EFD transaction
+	
+	//I18N=ON     
+
+public FMLD(CID)	// Update File Maintenance Last Date field
+	/*
+	   ARGUMENTS:
+	
+	         . CID   Account number              /TYP=N/REQ/MECH=VAL
+	
+	   EXAMPLE:
+	
+	    D FMLD^ACNFUNCS(CID)
+	*/
+
+	new TDATE
+	set TDATE=%SystemDate
+	type RecordACN acn=Db.getRecord("ACN","CID=:CID")
+	set acn.fmld=TDATE
+	do acn.save("NOJOURNAL")
+	quit 
+
+public FRSTDATE(SDT,FRE,CTL,OFP,OFD,CFR,CDT,CAL)	// Return first processing dates
+
+	/*
+	
+	   SDT Start Date  /TYP=D/REQ/MECH=VAL
+	   The start date for frequency calculations.  It is the date
+	   that processing begins for the account.  For deposits, the
+	   date is usually [DEP]ODT.  For loans, [LN]AMODT.
+	
+	   FRE Frequency  /TYP=F/REQ/MECH=VAL
+	   How often the event occurs.
+	
+	   CTL Processing Control /TYP=T/REQ/MECH=VAL
+	         Position Value
+	
+	       	1  0 Beginning-of-day function
+	       	   1 End-of-day function
+	
+	       	2  0 Lower date limit: system date
+	     	   1 Lower date limit: opening date
+	
+	   OFP Offset Period in Days /TYP=N/NOREQ/MECH=VAL
+	   The number of days prior to this event that a preliminary
+	   event runs to establish values needed for this event.  An
+	   example is loan interest change offset processing which
+	   determines the new rate filed by the interest change process.
+	
+	   OFD Offset Date  /TYP=D/NOREQ/MECH=REFNAM
+	   This value, returned by reference, is the date the "preliminary
+	   event" referred to in the documentation for OFP will occur.
+	
+	   CFR Corresponding Frequency /TYP=F/NOREQ/MECH=VAL
+	   Used if the date returned should be equal to another date in
+	   the account record if the frequencies agree.  This could be
+	   used, for example, if seeking the next loan payment change
+	   date which should be equal to the next interest change date
+	   if the frequencies agree.  If a value for CFR is passed, CFD
+	   should also have a value.
+	
+	   CDT Corresponding Date /TYP=D/NOREQ/MECH=VAL
+	   The date associated with CFR.  See CFR documentation.
+	
+	   CAL   Interest Review Offset Calendar   
+	         The non-business date calendar that will be used to determine
+	         the  offset date. When a calendar is defined, the numeric value
+	         entered in the Interest review offset days field will be
+	         considered business days. If a Interest Review Offset Calendar
+	         is not defined, the value of the Interest review offset days
+	         will be considered calendar days.
+	
+	   This subroutine is designed to give the programmers control over the
+	   date returned, based upon the peculiarities of each process associated
+	   with a frequency.  It also provides a call from new account screens
+	   to default dates based upon frequencies entered by the users.
+	
+	   System requires indication of whether process is a beginning of an
+	   end of day function to determine first date if the result of the
+	   calculation is the limit date.  For example, if account is
+	   opened of February 1, with a [DEP]ODT value of January 1, and a
+	   frequency of 1MA1, the system will calculate a first posting date
+	   of March 1 for beginning-of-day functions and February 1 for
+	   end-of-day functions.
+	
+	*/
+	new AF,JD,limit,quit
+	
+	// If no frequency provided, quit with no return value
+	if FRE="" quit ""
+	
+	if FRE="*2" quit SDT                   
+	
+	// First, ensure that the frequency is valid
+	set ER=$$NJD^UFRE(SDT,FRE,.AF,"01") quit:ER ""         
+	
+	// Define lower date limit depending on CTL instruction
+	set limit=$S($E($G(CTL),2):SDT,1:%SystemDate)
+	
+	// If corresponding frequency defined, use corresponding date
+	// Otherwise, derive action date which is not earlier than limit date
+	if $G(CFR)'="",CFR=FRE,$G(CDT)'<limit set JD=CDT
+	else  do {
+		new xjd
+		set JD=SDT
+		for  set JD=$$NJD^UFRE(JD,FRE) quit:ER  if JD'<limit quit 
+	
+		if AF<365 quit                        
+	
+		// Ensure that start date itself is not a hit on the frequency
+		set xjd=$$NJD^UFRE(JD,FRE,,1) quit:ER 
+		if xjd=limit set JD=xjd
+		}
+	
+	// Then, bump by one more dates if action date is equal to the limit date
+	// and process is run beginning-of-day
+	if '$E(CTL,1),JD=limit set JD=$$NJD^UFRE(JD,FRE) quit:ER 
+	
+	/*
+	If offset days defined, calculate the offset date corresponding to
+	action date JD.  Calculate offset date, and bump the action date if
+	the offset will occur before limit date.
+	*/
+	if $G(OFP)'="" set quit=0 for  do { quit:quit 
+	
+		// if Interest Review Offset Calendar exists, calculate 
+		// the offset date using $$INTOFFDT^LNCDI function
+	
+		if $G(CAL)'="" set OFD=$$INTOFFDT^LNCDI(JD,OFP,CAL)
+		
+		// The offset process will occur the specified number
+		// of days before the action date
+		
+		else  set OFD=JD-OFP
+	
+		/*
+		 	The dates, as currently derived, are correct if:
+	
+		   	1. the offset date occurs before the limit date, or,
+	
+		   	2. the offset date is equal to the limit date and
+		     	the process is scheduled to run at end-of-day
+	
+		 	Otherwise, advance the action date
+		*/
+		if OFD>limit!($E(CTL,1)&(OFD=limit)) set quit=1
+		else  set JD=$$NJD^UFRE(JD,FRE) quit:ER 
+		}
+	
+	quit JD
+	
+
+public	GLCHK(String CLS, 	// Account Class
+	      String GRP, 	// Account Group
+	      String GLSC)	// Account GL Set Code
+	      
+	// Verify that GL set code class/group match the account class/group 	      
+
+	type RecordUTBLGLSC utblglsc = Db.getRecord("UTBLGLSC","GLSC=:GLSC",1)
+
+	// If no value in the UTBLGLSC, return fatal STBLER error.
+	// If class/group don't match, return XBAD error.
+	
+	// Invalid GL set code
+	if utblglsc.getMode() = 0 do Runtime.setErrSTBLER("ACN","INVGLSC") quit:ER
+
+	// Invalid G/L Set Code
+	if (utblglsc.grp '= GRP) ! (utblglsc.cls '= CLS) do Runtime.setErrXBAD("ACN","GLSC") quit:ER
+
+	quit
+
+	
+public HISTBLD(tcmt,boo,tso,vpar)	// Common call to history filer
+
+	/*
+	   This code provides a common interface to applications that must
+	   file into the account history file
+	
+	   ARGUMENTS:
+	   	. tcmt  Comment   /TYP=T/REQ
+	
+	   	. boo  Account's branch /TYP=T/NOREQ
+	
+	   	. tso  Trans Source of Funds /TYP=T/NOREQ
+	
+	   	. vpar  Filer switches  /NOREQ/MECH=REFARR:R
+	
+	   INPUTS:
+	   	. SYSTEM TJD,EFD,%UID
+	
+	   	. CID  Account number  /TYP=N/REQ
+	
+	   	. TRIGBRF,VALREQ,VALDD,TRIGAFT,UPDATE,VALRI,INDEX,JOURNAL
+	
+	   EXAMPLE:
+	   	D HISTBLD^ACNFUNCS($$^MSG(1234),BRCD,TSO,"/NOVALDD/NOVALRI")
+	
+	*/
+	type RecordHIST hist=Class.new("RecordHIST")
+	set hist.cid=CID
+	set hist.tseq=Db.nextVal("HIST","CID")
+	set hist.tjd=%SystemDate
+	set hist.efd=%EffectiveDate.get()
+	set hist.tlo=%UserStation
+	set hist.tso=tso.get()
+	set hist.tcmt=tcmt.get()
+	set hist.cdt=%CurrentDate
+	set hist.time=%CurrentTime
+	set hist.brcd=boo.get()
+	set hist.spr=$G(SPR)
+	do hist.save($G(vpar))
+
+	quit 
+	
+
+public TCMTFM(keys,table,column,old,new,efd,comment,fmtable)	// Comment field for file maint
+	/*
+	   Returns appropriate comment field (TCMT) for file maintenance
+	   activity for use by the ACN, DEP, or LN file journal for DTJFM
+	
+	   ARGUMENTS:
+	   . keys     Key list  /TYP=T/NOREQ
+	     Comma separated list of keys
+	     Only provide key(s) when they are not
+	     the same as the primary key(s) of the
+	     history table where this comment is
+	     to be stored.
+	
+	   . table    Table name  /TYP=T/REQ
+	
+	   . column   Column name  /TYP=T/REQ
+	
+	   . old      Old value  /REQ
+	
+	   . new      New value  /REQ
+	
+	   . efd      Effective date  /TYP=D/NOREQ
+	
+	   . comment  Addition comments  /TYP=T/NOREQ
+	   
+	   . fmtable  File Maintenance Table  /TYP=T/NOREQ      
+	
+	   RETURNS:
+	   . $$  Comment field  /TYP=T
+	
+	   EXAMPLE:
+	   S X=$$TCMTFM^ACNFUNCS(CID,"LN","STAT",1,4,56565,,"STBLSTATL")
+	
+	*/
+	type String TCMT
+	
+	if table="REL",column["ROLE",new.isNull() set new=$$ROLE(keys.piece(",",1),old)
+
+	if table="REL",column["ROLE",old.isNull() set old=$$ROLE(keys.piece(",",2),new)
+
+	set TCMT=$G(keys)_"["_table_"]"_column_":"_old_":"_new
+	if %EffectiveDate.get()>%SystemDate do {
+		set TCMT=TCMT_":"_$$DAT^%ZM(%EffectiveDate.get())
+		set TCMT.piece(":",5)=comment.get()
+		}
+	set TCMT.piece(":",6)=fmtable.get()
+	quit TCMT
+
+
+ROLE(Number CID,Number ROLE)
+	/*
+	   Returns appropriate role for file maintenance (Loan and Deposit)
+	
+	   ARGUMENTS:
+	   . CID   Account Number  		/TYP=N/REQ
+	  	
+	   . ROLE  Role Code for Relationship  /TYP=N/REQ
+	
+	   RETURNS:
+	   . $$  Previous role for the account /TYP=N
+	
+	   EXAMPLE:
+	   S X=$$ROLE^ACNFUNCS(CID,2)
+	*/
+
+	type Number retval
+	set retval=""
+
+	type ResultSet rs = Db.select("ROLE","RELCIF","CID=:CID","ROLE DESC")
+	if rs.isEmpty() set retval="" quit ""
+	if rs.next() if rs.next() set retval=rs.getCol("ROLE")
+
+	quit retval
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60635^57112^P.R. Swarnalatha^10929"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,189 @@
+MRPC108(String RETURN,Number VERSION,Number CID,Number SEQ,String FLD,String TXT)
+ /*
+ ORIG:	KELLYP - 10/28/00
+ DESC:	SWIFT Free Format Field Filer
+ 
+ This MRPC stores free format and repeating field text for fields
+ 23E (Instruction Codes) and 77T (extended Remittance) of a SWIFT
+ MT103 message in the SWFREE global.
+
+ KEYWORDS:	
+
+ ARGUMENTS:
+     . RETURN	Standard return MRPC parameter	/REQ/MECH=REF:W
+     . VERSION	MRPC Version number		/NOREQ/MECH=VAL
+     . CID	Account number			/REQ/MECH=VAL
+     . SEQ	EFTPAY sequence for account	/REQ/MECH=VAL
+     . FLD	Free Format Field ID		/REQ/MECH=VAL
+     
+     		"23E"	Instruction Code
+     		"77T"	Extended Remittance Info
+     		
+ 			
+     . TXT	Text of free format field	/REQ/MECH=VAL
+
+ ---- Revision History ------------------------------------------------
+      
+ 07/26/05 - SkariahV- CR16679
+	    Removed #WARN directive.
+	
+ 09/10/03 - GRAY - 51349
+	    Prevented %GTM-E-NULSUBSC,vDb8+4^EFTFILE error from occurring
+	    when an EFTPAY record does not exist and the free format text
+	    pointer is updated.  At this point, all the required fields 
+	    for EFTPAY are not defined, which results in a null subscript
+	    error when calling the EFTPAY filer.
+
+ 03/25/03 - Allan Mattson - 51351
+ 	    Converted to PSL.
+ 			  
+ 	    Eliminated the use of M locks (Profile server processes
+ 	    now use TP).
+ 			  
+ 	    Replaced the use of getting the next sequence pointer
+ 	    from the top-level key of SWFREE with DB.nextKey().
+ 			  
+ 10/18/01 - YURKOVICG - 47428
+	    Added code to section INSTCD:
+ 		o  Call SORTINST^EFTPAY1 prior to saving instruction
+		   codes.  Codes must appear in specific order.
+		o  Added verification logic to ensure that instruction 
+		   codes do not violate any SWIFT network usage rules.
+		o  Rewrote error handling to allow for multiple
+		   parameters to $$^MSG function.
+				   
+ */
+	
+
+	// Version number of client message is not compatible with server 
+	if VERSION.get()'=1 quit $$ERRMSG^PBSUTL($$^MSG(2951))
+
+	type Number ER,PTR
+	type String RM
+	
+	type RecordEFTPAY eftpay=Db.getRecord("EFTPAY","CID=:CID,SEQ=:SEQ",1)
+
+	set PTR=eftpay.freeptr
+	
+	if PTR="" do {
+		set PTR=Db.prevKey("SWFREE","SWDIRECT='OUT',SEQ=999999999999")+1
+		set eftpay.freeptr=PTR
+		do eftpay.bypassSave()			// SPG 09/10/03
+		}
+		
+	// Instruction Codes
+	if FLD="23E" set ER=$$INSTCD(.eftpay,.RM,TXT)
+
+	// Extended Remittance
+	if FLD="77T" set ER=$$EXTREM(.eftpay,.RM,TXT)
+	
+	if ER quit $$ERRMSG^PBSUTL(RM)
+	
+	set RETURN=$$V2LV^MSG(1)
+	quit ""	
+	
+
+INSTCD(RecordEFTPAY eftpay,String RM,TXT)	// File Instruction Codes (field 23E) into ^SWFREE
+	
+	type Number ER,I,J,SEQ
+	type String CODE,CODES,INSTRCD,STR
+
+	set ER=0
+	set CODES=""
+	
+	// Verify validity of Instruction Codes
+	for I=1:1 set STR=TXT.piece($C(13,10),I)  quit:STR=""  do { quit:ER
+
+		// Extract instruction code
+		set INSTRCD=STR.extract(1,4)
+
+		// Invalid format ~p1
+		if INSTRCD'?4A set ER=1,RM=$$^MSG(1350,STR) quit
+
+		type RecordSTBLSWINSTR stbl=Db.getRecord("STBLSWINSTR","INSTRCD=:INSTRCD",1)
+
+		// Invalid table value ~p1
+		if stbl.getMode()=0 set ER=1,RM=$$^MSG(1485,INSTRCD) quit
+
+		// Additional Information not permitted for this instruction code
+		if stbl.addinfo'=1,STR.extract(5,STR.length())'="" set ER=1,RM=$$^MSG(4614) quit
+
+		// Only Instruction Codes SDVA, TELB, PHOB, and INTC permitted
+		if eftpay.bankop="SPRI",((INSTRCD'="SDVA")!(INSTRCD'="TELB")!(INSTRCD'="PHOB")!(INSTRCD'="INTC")) set ER=1,RM=$$^MSG(4615) quit
+
+		// Field 59 account subfield must not be present if Instruction code=CHQB
+		if eftpay.benacn'="",INSTRCD="CHQB" set ER=1,RM=$$^MSG(4619) quit
+
+		// If field 56A is not present, field 23E may not contain TELI or PHOI
+		if eftpay.inter="",((INSTRCD="TELI")!(INSTRCD="PHOI")) set ER=1,RM=$$^MSG(5081,"56A","23E","TELI","PHOI") quit
+
+		// If field 57A is not present, field 23E may not contain TELE or PHON
+		if eftpay.beninst="",((INSTRCD="TELE")!(INSTRCD="PHON")) set ER=1,RM=$$^MSG(5081,"57A","23E","TELE","PHON") quit
+
+		// Instruction codes must not be repeated
+		if CODES[(INSTRCD_",") set ER=1,RM=$$^MSG(5080) quit 
+
+		set CODES=CODES_INSTRCD_","
+
+		// Illegal combination of Instruction codes: ~p1 and ~p2
+		for J=1:1 set CODE=CODES.piece(",",J) quit:CODE=""  if stbl.disallow[(CODE_",") set ER=1,RM=$$^MSG(5079,CODE,INSTRCD) quit
+		}
+	
+	if ER quit 1
+
+	do SORTINST^EFTPAY1(.TXT)
+	
+	do DELETE(eftpay.freeptr,"23E")
+
+	set SEQ=1
+	for I=1:1 set STR=TXT.piece($C(13,10),I)  quit:STR=""  do {
+		do INSERT(eftpay.freeptr,"23E",SEQ,STR)
+		set SEQ=SEQ+.001
+		}
+		
+	quit 0
+	
+
+EXTREM(RecordEFTPAY eftpay,String RM,TXT)	// File Extended Remittance Information (field 77T) into ^SWFREE
+
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+
+	// Institution not part of a SWIFT Extended Remittance MUG
+	if cuvar.extrem'=1 set RM=$$^MSG(4612) quit 1
+
+	type Number SEQ
+	type String STR
+
+	do DELETE(eftpay.freeptr,"77T")
+
+	set SEQ=1
+	for  set STR=TXT.extract(1,80)  quit:STR=""  do {
+		do INSERT(eftpay.freeptr,"77T",SEQ,STR)
+		set TXT=TXT.extract(81,TXT.length())
+		set SEQ=SEQ+.001
+		}
+
+	quit 0
+
+	
+DELETE(PTR,FLD)	// Delete existing records from SWFREE
+
+	type ResultSet rs=Db.select("SEQ","SWFREE","SWDIRECT='OUT' AND PTR=:PTR AND FLD=:FLD")
+	while rs.next() do Db.delete("SWFREE","SWDIRECT='OUT' AND PTR=:FREEPTR AND FLD=:FLD AND SEQ=:rs.getCol(""SEQ"")")
+	quit
+	
+	
+INSERT(PTR,FLD,SEQ,STR)	// Insert new record into SWFREE
+
+	type RecordSWFREE swfree=Class.new("RecordSWFREE")
+
+	set swfree.swdirect="OUT"
+	set swfree.ptr=PTR
+	set swfree.fld=FLD
+	set swfree.seq=SEQ
+	set swfree.fldtxt=STR
+	
+	do swfree.save()
+	quit
+
+vSIG()	quit "60107^17765^Viji Skariah^5294"	// Signature - LTD^TIME^USER^SIZE

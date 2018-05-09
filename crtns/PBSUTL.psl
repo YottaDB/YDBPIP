@@ -1,0 +1,1560 @@
+PBSUTL	//Public;PROFILE Client/Server Utilities
+	/*
+	    ORIG: MATTSON - 28 MAY 1991
+
+	KEYWORDS: Client/Server
+
+	   Title: PROFILE Open Banking Server Architecture
+	Document: RUSSELL::E:\DAN\WORD\COR9284.DOC
+
+	LIBRARY:
+	       . EXEC Issue executable message
+	       . LINK Link program into image
+	       . $$VSAV Save variables to LV string
+	       . VLOD Load variables from LV string
+
+	----- Revision History ---------------------------------------------
+	 06/06/06 - RussellDS - CR21617
+	 	    Modified INIT section to protect %UserClass, %UserID, and
+	 	    %UserStation variables as were getting modified
+	 	    incorrectly.
+	 	    
+	 	    Fixed call to %ZPID to call $$VALID.
+	
+	 05/25/06 - GIRIDHAL - CR21297
+	 	    Removed %SPLTDY from INIT section.
+	 	    
+	 03/22/06 - RussellDS - CR20142
+	 	    Corrected error in getdata section where row was not
+	 	    being fetched before reference to it.
+	
+	 03/06/06 - RussellDS - CR19927
+	 	    Modified getdata section to make sure it gets a valid
+	 	    return from the Db.select, otherwise, returns an error
+	 	    in order to prevent an undefined.
+	
+	 12/05/05 - RussellDS - CR18400
+	 	    Eliminate use of RETREC^DBSDB.  DBSDB will eventually be
+	 	    obsoleted.
+	 	    
+	 	    Replace $ZVN reference with $ZVERSION.
+	 	    
+	 	    Replace use of justify() method with roundDec() in STATS.
+
+	 09/23/05 - KELLYP - CR 17235
+	 	    Modified JOB section to get the beginning SVID from 
+	 	    SVCTRLT instead of SVCTRL to prevent RDBSAVEFAIL errors 
+	 	    in PBSSRV.  SVCTRL is for control messages, which may be
+	 	    empty, resulting in the beginning SVID being set to 1.
+	 	    When this happens, PBSSRV may cause an RDBSAVEFAIL error
+	 	    (unique constraint violated) when trying to save the 
+	 	    SVCTRLT record because a record with the same SVID may
+	 	    already exist.  Also added SVCTRL to the list of tables
+	 	    deleted in the JOB section when a server's process is
+	 	    found to be no longer active.
+
+	 07/20/05 - KELLYP - CR 16659
+	 	    Added section STOP2 for stopping an individual (i.e., 
+	 	    interactive) server.
+
+	 05/22/05 - Erik Scheetz - 15676
+		    Modified STOP section to issue a STOP interrupt when 
+		    stopping a server process.
+	
+		    Added CTRLSTOP section to remove ^SVCTRL & ^SVSTAT tables
+		    and to unregister server process prior to halting.
+	
+		    Added %INTRPT to XKILL section in order to preserve
+		    interrupt information between server messages.
+		    
+		    Modified SHUTDOWN section to call CLOSE^IPCMGR to 
+		    unregister process.
+
+
+	05/20/05 - CARROLLJ - CR 16052
+		   Modified %STFHOST section to quit while loop when 
+		   %STFHOST is not set to three.
+		   
+
+	03/08/05 - KELLYP - CR 13664
+		   Modified %STFHOST section to prevent a compilation error
+		   from occurring because the key was not defined for 
+		   STFHOST1.
+
+	02/02/05 - KELLYP - CR 14210
+		   Modified LOG section to save vzstart, formatted in M time 
+		   (seconds after midnight), in the new VZSTART data item in 
+		   the MSGLOG table.  Also modified the LOG section to conform 
+		   to current PSL standards and removed pre-2003 revision history.
+
+	11/24/04 - GEORGES - CR 13392
+		   Corrected procedure PBSUTL, to convert all variables 
+		   with prefix "vz" in uppercase to lowercase.
+		   Also added code to section LINK so that when an invalid
+		   routine is linked an error message is returned.
+	
+	12/18/03 - CARROLLJ - CR7239
+		   Corrected precedence errors.
+
+	05/21/03 - Allan Mattson - 51351
+                   Modified subroutine CTRL to resolve a <NULLSUB> error
+                   if the server received a "PROF" (M-Profiling) command.
+
+	---------------------------------------------------------------------
+
+	I18N=QUIT
+	*/
+
+	quit
+
+public LINK(SVTYP,PGM)	//ZLink  program 'PGM'
+	/*
+	This function ZL[inks] a specified program into the image running
+	for all servers of a specified server type.
+
+	KEYWORDS: Client/Server
+
+	ARGUMENTS:
+	       .SVTYP	Server type		/TYP=T/REQ/MECH=VAL
+	       .PGM		Program name	/TYP=T/REQ/MECH=VAL
+
+	EXAMPLE:
+	       do LINK^PBSUTL("SCA$IBS","DEPSTS")
+	*/
+
+	type Number SVID
+	type String CMD="ZL """_PGM_""""
+		
+	if '$$VALID^%ZRTNS(PGM) write $$^MSG(5424) quit
+	  
+	type ResultSet rs=Db.select("SVID","SVCTRLT","SVTYP=:SVTYP")
+	if rs.isEmpty() quit
+	
+	while rs.next() do {
+		set SVID=rs.getCol("SVID")		
+		do EXEC(SVTYP,SVID,CMD)
+		}
+		
+	quit
+
+
+public EXEC(vzsvtyp,vzsvid,code)	//Issue an executable message
+	/*
+
+	This function issues an executable control message to a specified
+	server ID.  It is used as a mechanism to communicate instructions
+	to PROFILE/IBS servers.
+
+	KEYWORDS: Client/Server
+
+	ARGUMENTS:
+	       .vzsvtyp	Server type		/TYP=T/REQ/MECH=VAL
+	       .vzsvid	Server ID		/TYP=N/REQ/MECH=VAL
+
+	EXAMPLE:
+	       D EXEC^PBSUTL("SCA$IBS",1,"D tag^rtn")
+	*/
+
+	type Public Number vzerror
+	type Public String vzrmsg
+	type Number vzsvseq
+
+	type RecordSVCTRLT svctrlt = Db.getRecord("SVCTRLT","SVTYP=:vzsvtyp,SVID=:vzsvid",1)
+	if svctrlt.getMode() = 0 do {  quit
+		set vzerror=1
+		set vzrmsg=$$^MSG(1467)		//Invalid server ID
+		}
+
+	set vzsvseq=Db.nextVal("SVCTRL","SVTYP=:vzsvtyp,SVID=:vzsvid")
+	if vzsvseq="" set vzsvseq=1
+
+	type RecordSVCTRL svctrl=Class.new("RecordSVCTRL")
+	set svctrl.svtyp=vzsvtyp
+	set svctrl.svid=vzsvid
+	set svctrl.svseq=vzsvseq
+	set svctrl.svexpr="EXEC "_code
+		
+	do svctrl.bypassSave()
+	
+	// Invoke CTRL Interrupt to server process
+	do SIGNAL^IPCMGR($$HEXDEC^%ZHEX(svctrlt.pid),"CTRL")
+
+	quit
+
+
+private START	// Start PROFILE/IBS server(s)
+
+	type Public String %LOGID,ER,RM,SVCNT,SVTYP,VFMQ
+
+	// Invalid network function
+	if %LOGID.get() set ER=1,RM=$$^MSG(1409) quit
+	
+	do PRMT(1)
+	quit:VFMQ="Q"
+	
+	do JOB(SVTYP,SVCNT)
+	set ER="W"
+	quit
+
+
+public JOB(SVTYP,SVCNT)	//External entry point to start servers
+	/*
+	KEYWORDS: Client/Server
+
+	ARGUMENTS:
+	       . SVTYP Server type					/TYP=T/REQ/MECH=VAL
+	       . SVCNT Number of servers to start	/TYP=N/NOREQ/MECH=VAL/DFT=1
+
+	EXAMPLE:
+	       D JOB^PBSUTL("SCA$IBS",5)
+	*/
+
+	type Public String params,RM()
+	
+	type String JOBNAM,PID,PRCNAM,RMSEQ,SVID,vzsvpgm
+
+	set SVTYP=SVTYP.get() 
+	if SVTYP="" set SVTYP="SCA$IBS"
+	
+	set SVCNT=SVCNT.get() 
+	if 'SVCNT set SVCNT=1
+
+	type RecordCTBLSVTYP ctbl=Db.getRecord("CTBLSVTYP","SVTYP=:SVTYP")
+	set vzsvpgm=ctbl.svrpgm
+	if vzsvpgm="" set vzsvpgm="SVCNCT^PBSSRV"
+
+	// Delete entries in control table no longer active (i.e., via stop/id)
+
+	type String vzsexpr,X
+
+	type ResultSet rs=Db.select("SVID,PID","SVCTRLT","SVTYP=:SVTYP")
+	if 'rs.isEmpty() while rs.next() do {
+		set SVID=rs.getCol("SVID")
+		set PID=rs.getCol("PID")
+
+		if $$VALID^%ZPID(PID,1) quit
+		do Db.delete("SVCTRLT","SVTYP=:SVTYP AND SVID=:SVID")
+		do Db.delete("SVCTRL","SVTYP=:SVTYP AND SVID=:SVID")
+		do Db.delete("SVSTAT","SRVTYP=:SVTYP AND SRVID=:SVID")
+		do Db.delete("SVSTATZ","SRVTYP=:SVTYP AND SRVID=:SVID")
+		}
+
+	set SVID=Db.currVal("SVCTRLT","SVTYP")
+
+	while SVCNT do {
+		set SVID=SVID+1
+		set SVCNT=SVCNT-1
+		set PRCNAM=SVTYP_"_"_CUVAR.PTMDIRID_"_"_SVID
+		set JOBNAM=vzsvpgm_"("""_SVTYP_""","_SVID_")"
+
+		// Different MUMPS platforms support different parameters
+		set params=$$JOBPARAM^%OSSCRPT(PRCNAM)
+		set X=$$^%ZJOB(JOBNAM,params,1)
+		set RMSEQ=RM("").order(-1)+1
+		
+		// ~p1 submitted
+		if X set RM(RMSEQ)=$$^MSG(6800,PRCNAM)
+
+		// ~p1 not submitted
+		else  set RM(RMSEQ)=$$^MSG(6799,PRCNAM)
+		}
+	quit
+
+
+private STOP	// Issue a stop message to PROFILE/IBS server(s)
+
+	type Public String MTMID,SVTYP,VFMQ
+	type Number SVCNT
+
+	do PRMT(0)
+	quit:VFMQ="Q"
+
+	set MTMID=$$SCA^%TRNLNM("CS_ST_"_SVTYP)
+
+	type ResultSet rs=Db.select("PID","SVCTRLT","SVTYP=:SVTYP and MTMID=:MTMID")
+	if rs.isEmpty() quit
+	while rs.next() do { quit:SVCNT=0
+
+		// Signal Interrupt to STOP
+		do SIGNAL^IPCMGR($$HEXDEC^%ZHEX(rs.getCol("PID")),"STOP")
+
+		set SVCNT=SVCNT-1
+		}
+	
+	quit
+
+
+PRMT(OPT)	// Prompt for service type and number of servers
+	/*
+
+	   ARGUMENTS:
+	       . OPT Option (0=Stop, 1=start)		/TYP=N/LEN=1/REQ
+	*/
+
+	type Public String VFMQ
+	type Number %PG
+	type String OLNTB
+
+	set %PG=1
+	kill VFMQ
+	do VPG00
+	quit
+
+
+VPG00	// Screen set up
+
+	type Public String ET,ID,RM,SVCNT,SVTYP,VFMQ
+	type Public Number ER,OPT
+	type String %READ,%TAB() 
+
+	// /DES=Service Type/TYP=U/LEN=20
+	set %TAB("SVTYP")=".SVTYP/TBL=[CTBLSVTYP]"
+
+	// /DES=Number of Servers/TYP=N/LEN=2
+	set %TAB("SVCNT")=".SVCNT/MIN=1"
+
+	// Default service type
+	if 'SVTYP.exists() set SVTYP="SCA$IBS"
+	set %READ="@@%FN,,,SVTYP/REQ,SVCNT/REQ"
+	do ^UTLREAD if VFMQ="Q" quit
+	if 'OPT quit
+
+	/*
+	Attempt to connect to the message transport.  If unsuccessful,
+	set VFMQ="Q" to avoid jobbing any server processes that will in
+	all likelihood, also fail.  If successful, disconnect and quit.
+	*/
+
+	type String DATA,MTNAME,PGM
+
+	type RecordCTBLSVTYP svtyp=Db.getRecord("CTBLSVTYP","SVTYP=:SVTYP")	
+	set MTNAME=svtyp.mtname
+	set PGM=svtyp.svrpgm
+
+	if PGM=""!(PGM="SVCNCT^PBSSRV") do {
+		set ET=$$SVCNCT^%MTAPI(SVTYP,.ID,,MTNAME)
+		if ET="" set ET=$$SVDSCNCT^%MTAPI(ID)
+		if ET'="" do {
+			set ER=1 
+			set RM=$$ERRDES(ET) 
+			set VFMQ="Q" 
+			if RM="" set RM=ET
+			}
+		}
+	quit
+
+
+private CSERR(et)	// Client/server message format or transport error
+
+	type String RM
+
+	do ERRLOG(et,0)
+	quit $$ERRMSG(RM.get(),et)
+
+
+private ERRLOG(ET,rms)	// Log error
+	/*
+	If the server is in listener mode, the database cannot be updated.
+	In this case, the second argument specifies that the error should
+	be logged into a system file instead of the standard error log.
+	*/
+
+	if rms.get() do {
+		catch vError {
+			type String ET,RM
+			set ET=vError.type
+			set RM=vError.description
+			do ^UTLERR
+			}
+
+		type String LOG
+
+		set LOG=$$FILE^%TRNLNM("PROFILE_SERVER_ERROR.LOG","SCAU$DIR")
+		if '$$FILE^%ZOPEN(LOG,"WRITE/APPEND",2,1024) quit
+
+		use LOG
+		write !,"===================================================",!
+		write %CurrentDate,!
+		ZSHOW "*"
+		write !,"===================================================",!
+		close LOG
+		use 0
+		}
+
+	else  do ^UTLERR
+	quit
+
+
+private ERRMSG(rm,et,erptr,fldps)	//Return standard error reply message
+	/*
+
+	This function formats a standard Server Failure Message.  Because
+	PROFILE is somewhat inconsistent with its error handling, this
+	function must account for two different types of error messages;
+	one returned by variable RM, the other returned by ET.
+
+	KEYWORDS: Client/Server, Formatting
+
+	ARGUMENTS:
+	       . rm Return message		/TYP=T/COND/MECH=VAL
+	        						/TBL=[STBLMSG]
+
+	       . et Error type			/TYP=T/COND/MECH=VAL
+	        						/TBL=[STBLER]
+
+	       . erptr Error pointer	/TYP=N/NOREQ/MECH=VAL
+	        						/DFT=1
+			
+	       . fldps Field position	/TYP=N/NOREQ/MECH=VAL
+
+	INPUTS:
+	       . System %MSGID (returned from $$^MSG)
+
+	RETURNS:
+	       . $$ Server Failure Message		/TYP=T
+
+	EXAMPLE:
+	       . S ermsg=$$ERRMSG^PBSUTL($$^MSG(1191,%ZTSEQ))
+	       . S ermsg=$$ERRMSG^PBSUTL("","RECLOC",1)
+	       . S ermsg=$$ERRMSG^PBSUTL($G(RM),$G(ET))
+
+	If 'et' is null and 'rm' has a value, assume the error message was
+	constructed from the system message table (via a call to $$^MSG).
+	In this case, %MSGID should contain the message id and any input
+	parameters passed into $$^MSG.
+
+	Otherwise, assume the error message was constructed from the system
+	error table (via a call to ^UTLERR).  If et and rm are both null,
+	a default error message is built ("SV_ERRUNDEF") that identifies
+	the error message as one that could not be constructed with the
+	information available.
+	*/
+
+	type Public String %MSGID=%MSGID.get()
+	type String descr,ercode,param
+	type String fld()
+
+	if erptr.get()="" set erptr=1
+	set et=et.get()
+	set rm=rm.get()
+
+	if et="",rm'="" do {
+		set ercode="MSG_"_%MSGID.piece("|",1)
+		set param=%MSGID.piece("|",2)
+		set descr=rm
+		}
+
+	else  do {
+		if et="" set et="SV_ERRUNDEF"
+		set ercode="ER_"_et
+		if rm'="" set descr=rm
+		else  set descr=$$ERRDES(et)
+		}
+
+	set fld(1)="ER"				// Error category
+	set fld(2)=erptr			// Sub-record number
+	set fld(3)=ercode			// Error code
+	set fld(4)=param.get()		// Parameters
+	set fld(5)=descr			// Full description
+	set fld(6)=fldps.get()		// Field position
+
+	quit $$V2LV^MSG(.fld)
+
+
+ERRDES(et)	// Return error description
+
+	type String desc
+	
+	type RecordSTBLER stbler=Db.getRecord("STBLER","et",1)
+	set desc=stbler.rm
+	if desc="" set desc=et
+	quit desc
+
+
+param(x)	// Build parameter list from array
+
+	type Number i
+	type String y,z
+
+	set y=""
+	for i=1:1 quit:'x(i).data()  do {
+		if x(i)?.e1c.e do {
+			set z="vzpar"_i 
+			set @z=x(i)
+			set y=y_z
+			}
+
+		else  set y=y_$$quote(x(i))
+		set y=y_$C(44)
+		}
+
+	quit y.extract(1,y.length()-1)
+
+
+quote(x)	// Quote input parameters
+
+	if x.extract()="." quit x		// Pass by reference
+	if x'?.e1a.e,x=(+x) quit x		// Numeric field
+	quit $$QADD^%ZS(x)				// Literal  SSV
+
+
+public VSAV(vzsav)	//Extrinsic function to save specified variables
+
+	/*
+
+	This subroutine saves the variables specified in string 'vzsav'
+	into a single character string in a length/value format which
+	can be later restored.  (See subroutine VLOD)
+
+	If an array name is specified, all descendants will be included
+	in the string.  '*' indicates that all variables should be saved.
+
+	Note:  Variables starting with a 'vz' are used by this routine
+	       and are excluded from the save set.
+
+	KEYWORDS: Formatting
+
+	ARGUMENTS:
+	       . vzsav Variable name(s)		/TYP=T/REQ
+					comma separated
+
+	RETURNS:
+	       . $$ Save string				/TYP=T
+
+	RELATED:
+	       . VLOD^PBSUTL - Load variables from save string
+
+	EXAMPLE:
+	       S X=$$VSAV^PBSUTL("CID,TR")
+
+	*/
+
+	type Public String %
+	
+	if vzsav.get()="" quit ""
+
+	type Number vzi
+	type String vzd,vznam,vzstr
+
+	set vzstr=""
+
+	if vzsav="*" do {
+		set vznam="%" 
+		if %.exists() do SAVE(vznam)
+		#ACCEPT PGM=Erik Scheetz;DATE=11/22/02;CR=unknown
+		for  set vznam=@vznam.order() quit:vznam=""  do SAVE(vznam)
+		}
+
+	else  for vzi=1:1 do { quit:vznam="" 
+		set vznam=vzsav.piece(",",vzi)
+		if vznam="" quit
+		do SAVE(vznam)
+		}
+
+	quit vzstr
+
+
+SAVE(vznam)	// Save 'VZNAM' and descendants
+
+	type Public String vzd,vzstr
+	
+	quit:vznam.extract(1,2)="vz"
+	
+	#ACCEPT PGM=Erik Scheetz;DATE=11/22/02;CR=unknown 
+	set vzd=@vznam.data()
+
+	if vzd#2 set vzstr=vzstr_$$LV(vznam)
+	if vzd=1 quit
+
+	#ACCEPT PGM=Erik Scheetz;DATE=11/22/02;CR=unknown
+	for  set vznam=@vznam.query() quit:vznam=""  set vzstr=vzstr_$$LV(vznam)
+	quit
+
+
+private LV(vznam)	// Build vzref=vzval expression
+
+	#ACCEPT PGM=Erik Scheetz;DATE=11/22/02;CR=unknown
+	quit $$V2LV^MSG(vznam)_$$V2LV^MSG(@vznam)
+
+
+public VLOD(vzstr)	//Subroutine to load variables saved
+	/*
+
+	   This subroutine restores the variables contained in the character
+	   string 'vzstr'.  (See subroutine VSAV)
+
+	   KEYWORDS: Formatting
+
+	   ARGUMENTS:
+	       . vzstr 		Save string		/TYP=T/NOREQ/MECH=REFNAM:R
+	   RETURNS:
+	       . v1,v2.. 	Variables from save string
+
+	   RELATED:
+	       . $$VSAV^PBSUTL - Save variables
+
+	   EXAMPLE:
+	       D VLOD^PBSUTL(string)
+	*/
+
+	if vzstr.get()="" quit
+
+	type Number vzi,vzptr
+	type String vzfld()
+
+	set vzptr=$$LV2V^MSG(vzstr,.vzfld)
+	for vzi=1:2 quit:'vzfld(vzi).exists()  set @vzfld(vzi)=vzfld(vzi+1)
+	quit
+
+
+public getdata(frm,sel,cid,fsn,vdd,ext,dsc,sqlsp,prot)	// Get account data
+
+	/*
+	This utility will return data from the database manager and store
+	it in a local array for future use or display.  The calling program
+	is responsible for cleaning up the account array, ACNDTL.
+
+	ARGUMENTS:
+	       . frm List of valid files		/TYP=T/REQ/MECH=VAL/DEL=44
+
+	       . sel Select item list			/TYP=T/REQ/MECH=VAL/DEL=44
+
+	       . cid Account number			/TYP=N/REQ/MECH=VAL
+
+	       . fsn File attribute header		/TYP=T/NOREQ/MECH=REFARR:RW
+
+	       . vdd Data dictionary			/TYP=T/NOREQ/MECH=REFARR:RW
+
+	       . ext external format			/TYP=N/NOREQ/MECH=VAL
+
+	       . dsc Data item description		/TYP=T/NOREQ/MECH=REF:W
+
+	       . sqlsp Use stored procedure		/TYP=L/NOREQ/MECH=VAL
+
+	       . prot Data protection bitmap	/TYP=T/NOREQ/MECH=REFNAM:RW
+
+	RETURNS:
+	       . ER Error flag
+	       . RM Return message
+	       . $$ Select list values					/TYP=T/DEL=28
+
+	       . ACNDTL(cid)	Account detail			/TYP=T/NOREQ
+
+	       . ACNDTL(cid,"L"		Data Item List		/TYP=T/NOREQ/DEL=44
+
+	       . ACNDTL(cid,"V"		Data Item Values 	/TYP=T/NOREQ/DEL=28
+
+	       . ACNDTL(cid,"P"		Data Item Protection  /TYP=T/NOREQ
+
+
+	EXAMPLE:
+	   
+		S data=$$getdata^PBSUTL("DEP","BAL,LNM",1234,.fsn,.vdd,1)
+		S data=$$getdata^PBSUTL("DEP","BAL,LNM/RH=Name",1234,.fsn,.vdd,1)
+		S data=$$getdata^PBSUTL("DEP","BAL",1234,.fsn,.vdd,"","",1,.prot)
+	*/
+
+	type Public Number ER=0
+	type Public String %LOGID,ACNDTL(,),RM,zfil
+	
+	type Number i,j,n,num,pos
+	type String dftdes,di,p,par,pro,t,v,x,y,z,zz
+
+	set num=sel.length(",")
+	set x=ACNDTL("L",cid).get()
+	set y=ACNDTL("V",cid).get()
+	set p=ACNDTL("P",cid).get()
+	set pos=$select(x="":0,1:x.length(","))+1
+
+	set n=0
+	set z=""
+	for i=1:1:num do {
+		set di=sel.piece(",",i) 
+		if di="" quit
+
+		if di["/RH=" do {
+			set zz=di.piece("=",2)
+			set di=di.piece("/RH",1)
+			set dftdes(di)=zz
+			}
+
+		// Include only data items not yet fetched
+		if (","_x_",")'[(","_di_",") set n=n+1,z.piece(",",n)=di
+
+		// Accomodate bracket syntax for file names
+		if di["[" set zfil=di.piece("]",1).piece("[",2) do {
+			if (","_frm_",")'[(","_zfil_",") set frm=frm_","_zfil
+			}
+		}
+
+	if z'="" do { if ER quit ""
+		//Update temporary "master" list
+		set x.piece(",",pos)=z
+		set pro=""
+
+		//Only set on host, client defaults
+		if '%LOGID.get() set par = "/PROTECTION=1"
+		else  set par = ""
+
+		//Execute stored procedure
+		if sqlsp.get() do EXECSP(frm,cid,.pro) quit:ER
+
+		//Get from database
+		if 'sqlsp.get() do { quit:ER
+			
+			type Number CID = cid		// Needed for dynamic select
+			type String row
+			
+			#ACCEPT Date=12/05/05; Pgm=RussellDS; CR=18400
+			type ResultSet rs = Db.select(z, frm, "CID=:CID", , , par)
+			
+			if rs.isEmpty() do { quit
+				
+				set ER = 1
+				// Invalid account ~p1
+				set RM = $$^MSG(1259, cid)
+			}
+			
+			set row = rs.next()			// Fetch row
+			set row = rs.getRow().toString()
+			set row = row.translate($C(9), $C(28))
+			
+			set y.piece($C(28), pos) = row
+			set pro = rs.getRowProt()
+			}
+
+		//Append to master list
+		set p=p_pro.get()
+		}
+
+	set z=""
+
+	// Construct return value
+	for i=1:1:num set di=sel.piece(",",i) if di'="" do {
+		if di["/RH=" set di=di.piece("/RH",1)
+
+		for j=1:1:x.length(",") if x.piece(",",j)=di do { quit
+			set v=y.piece($C(28),j)
+			set prot=prot.get()_p.extract(j)
+			if ext.get() do fmt
+			set z.piece($C(28),i)=v
+			}
+		}
+
+	set ACNDTL("L",cid)=x		// Master select list
+	set ACNDTL("V",cid)=y		// Master values list
+	set ACNDTL("P",cid)=p		// Master protection list
+	quit z
+
+
+fmt	// Format data values
+
+	type Public String %LIBS,dftdes(),di,dsc,frm,i,v,vdd()
+	
+	type Number dec,k
+	type String des,dinam,distr,files,typ,x
+
+	// Load data item info from DBTBL1
+	set x=$$DI^DBSDD(di,frm,.vdd)     
+	set files=frm
+	set dinam=di
+
+	if di["[" do {
+		set files=di.piece("]",1).piece("[",2)
+		set dinam=di.piece("]",2)
+		}
+
+	for k=1:1:files.length(",") do { quit:x'=""
+		set distr=%LIBS_"."_files.piece(",",k)_"."_dinam
+		set x=vdd(distr).get()
+		quit:x'=""
+		
+		set distr="SYSDEV."_files.piece(",",k)_"."_dinam
+		set x=vdd(distr).get()
+		}
+
+	set des=x.piece("|",10)
+	set typ=x.piece("|",9)
+	set dec=x.piece("|",14)
+
+	if "TUF"'[typ set v=$$EXT^%ZM(v,typ,dec)
+
+	if dftdes(dinam).exists() set dsc.piece("|",i)=dftdes(dinam)
+	else  set dsc.piece("|",i)=des
+	quit
+
+
+private EXECSP(frm,cid,sqli)	//Execute the stored procedure
+	/*
+	This sub-routine will execute the SQL stored procedure.  It will
+	return the column attributes bit map that will be used for determining
+	data item protection.
+
+	ARGUMENTS:
+	   . frm	File definition(s) to select from	/TYP=T/REQ/MECH=VAL
+
+	   . cid	Account record						/TYP=N/REQ/MECH=VAL
+
+	   . sqli	Column attributes					/TYP=T/MECH=REFNAM
+
+	I18N=OFF
+	*/
+
+	type Public Number ER,pos,sqlsp
+	type Public String par(),y,z
+	type String expr,sqlsts,sqldta,sqlcnt
+
+	set expr="SELECT "_z_" FROM "_frm_" WHERE CID=:CID"
+	set expr=expr.translate("][",".")
+	set par("USING")="CID="_cid
+	set par("DQMODE")=1
+
+	set ER=$$SPCLI^SQLCACHE(expr,.par,.sqlsts,.sqldta,.sqlcnt,.sqli)
+	
+	//SP failed, try again with RETREC
+	if ER set sqlsp=0 quit
+
+	set y.piece($C(28),pos)=sqldta.translate($C(9),$C(28))
+
+	quit
+
+
+private STATS(vzsvstat,vzsrvcls,vzstart)	// Accumulate stats
+
+	type Number vztime
+
+	set vztime=($$GETTIM^%ZFUNC-vzstart)/100
+	set vztime=vztime.roundDec(3)
+	
+	// Incremement reply cnt/elapsed time
+	set vzsvstat(vzsrvcls)=vzsvstat(vzsrvcls).get()
+	set vzsvstat(vzsrvcls).piece("|",2)=vzsvstat(vzsrvcls).piece("|",2)+1
+	set vzsvstat(vzsrvcls).piece("|",3)=vzsvstat(vzsrvcls).piece("|",3)+vztime
+
+	// Minimum/maximum response times
+	if 'vzsvstat(vzsrvcls).piece("|",9) set vzsvstat(vzsrvcls).piece("|",9)=vztime
+	if vztime<vzsvstat(vzsrvcls).piece("|",9) set vzsvstat(vzsrvcls).piece("|",9)=vztime
+	if vztime>vzsvstat(vzsrvcls).piece("|",10) set vzsvstat(vzsrvcls).piece("|",10)=vztime
+	quit
+
+
+private ERSTAT(vzsvstat,vzsrvcls,vzrm)	//
+
+	type Public String %ZTPRIO
+	type Number vzsevere
+
+	// Severity level
+	set vzsevere=%ZTPRIO.get()
+
+	if 'vzsevere do {
+		type String er,ercat,x
+		type String fld()
+
+		set x=$$LV2V^MSG(vzrm,.fld)
+		set x=fld(3).get()
+		if x="" quit
+
+		set ercat=x.piece("_",1)
+		set er=x.piece("_",2,99)
+
+		if ercat="ER" set ercat="STBLER"
+		else  if ercat="MSG" set ercat="STBLMSG"
+		else  quit
+
+		// Get level of severity of the error
+		set vzsevere=$$ERRLOS^%ZFUNC(er,ercat)
+		}
+
+	if 'vzsevere set vzsevere=1
+	set vzsvstat(vzsrvcls).piece("|",vzsevere+3)=vzsvstat(vzsrvcls).get().piece("|",vzsevere+3)+1
+	quit
+
+
+public FILSTAT(vzsvtyp,vzsvid,vzsvstat,vztimer)	//
+
+	type Public String vzsttim
+	type RecordSVSTATZ svstatz=Db.getRecord("SVSTATZ","SRVTYP=:vzsvtyp,SRVID=:vzsvid",1)
+
+	 // Stats were zeroed out
+	if svstatz.svstatz do { quit
+		kill vzsvstat
+		do Db.delete("SVSTAT","SRVTYP=:vzsvtyp AND SRVID=:vzsvid")
+		do Db.delete("SVSTATZ","SRVTYP=:vzsvtyp AND SRVID=:vzsvid")
+		}
+
+	type Number time
+	type String srvcls
+
+	set time=$$TIM($h)
+	if vztimer>time quit
+	set vztimer=time+(vzsttim*60)
+
+	set srvcls=""
+	for  set srvcls=vzsvstat(srvcls).order() quit:srvcls=""  do {
+
+		type RecordSVSTAT svstat=Db.getRecord("SVSTAT","SRVTYP=:vzsvtyp,SRVID=:vzsvid,SRVCLS=:srvcls",1)
+		set svstat.reqcnt=vzsvstat(srvcls).piece("|",1)
+		set svstat.rescnt=vzsvstat(srvcls).piece("|",2)
+		set svstat.tottim=vzsvstat(srvcls).piece("|",3)
+		set svstat.errcnt1=vzsvstat(srvcls).piece("|",4)
+		set svstat.errcnt2=vzsvstat(srvcls).piece("|",5)
+		set svstat.errcnt3=vzsvstat(srvcls).piece("|",6)
+		set svstat.errcnt4=vzsvstat(srvcls).piece("|",7)
+		set svstat.errcnt5=vzsvstat(srvcls).piece("|",8)
+		set svstat.mintim=vzsvstat(srvcls).piece("|",9)
+		set svstat.maxtim=vzsvstat(srvcls).piece("|",10)
+		do svstat.bypassSave()
+		}
+	quit
+
+
+public TIM(x)	// Convert extended %CurrentDate to time stamp
+
+	quit (x*1E5)+x.piece(",",2)
+
+
+public CTRL(vzsvtyp,vzsvid,vzcsid,vzactive)    // Process control message(s)
+
+        /*
+ 
+	Control messages are primarily used to help test or debug messages
+	received by a server process from a client process.
+ 
+	Note:  This subroutine is also called by ^CGMSSRV.
+ 
+	Message Description   Example
+	------- -----------   -------
+	  STOP  Stop PROFILE Server  STOP
+	  PROF  Turn M-profiling on/off  PROF=0 or PROF=1
+	  TRAP  Last message trap on/off TRAP=0 or TRAP=1
+	  EXEC  Execute M procedural code EXEC ZB PROC^PBSSRV
+	  JRNL  Message journalling on/off JRNL=device or JRNL=OFF
+        */
+
+	catch vError {
+		type String ETL
+		set ETL=$$ETLOC^%ZT
+		do ERRLOG(ETL.piece(",",1),1)
+		}
+
+	type Public Number seq,SVSEQ
+	type Public String ET,vzjrnl,vztrap
+	type String cmd,msg,mx
+
+	type ResultSet rs=Db.select("SVEXPR,SVSEQ","SVCTRL","SVTYP=:vzsvtyp AND SVID=:vzsvid")
+	
+	while rs.next() do {
+		set msg=rs.getCol("SVEXPR")
+		set SVSEQ=rs.getCol("SVSEQ")
+
+		do Db.delete("SVCTRL","SVTYP=:vzsvtyp AND SVID=:vzsvid AND SVSEQ=:SVSEQ")
+
+		set cmd=msg.extract(1,4)
+	 
+		if cmd="ROLE" do { quit
+			type String role
+
+			set role=msg.piece("=",2)
+			if role="PRIMARY" set vzactive=1
+			if role="SECONDARY" set vzactive=0
+ 
+			type RecordSVCTRLT svctrlt=Db.getRecord("SVCTRLT","vzsvtyp,vzsvid")
+			set svctrlt.role=role
+			set svctrlt.datetime=$h
+
+			do svctrlt.bypassSave()
+			}
+
+		if cmd="JRNL" do { quit
+
+			type Number ER
+			type String IO
+ 
+			set ER=0
+			set IO=msg.piece("=",2)
+ 
+			if IO="" quit
+			
+			if IO="OFF" do {
+				set IO=vzjrnl.get()
+				if IO="" quit
+				do CLOSE^SCAIO
+				set vzjrnl=""
+				}
+
+			else  do {
+				set vzjrnl=IO
+				do OPEN^SCAIO
+				if ER set vzjrnl=""
+				}
+			}
+
+		if cmd="STOP" do CTRLSTOP
+
+		if cmd="PROF" do { quit
+		
+			// M Profiling is only written to an M database and is not
+			// supported to write to any other RDBMS
+			#ACCEPT Date=12/05/05; Pgm=RussellDS;CR=18400
+			#BYPASS
+			if $P($ZVERSION,"GT.M V",2)<4.2 quit
+			if '$P(msg,"=",2) view "TRACE":0 quit
+			set seq=$O(^SVPROF(vzsvtyp,vzsvid,""),-1)+1
+			view "TRACE":1:"^SVPROF("""_vzsvtyp_""","""_vzsvid_""","""_seq_""")"
+			#ENDBYPASS
+			}
+
+		if cmd="LINK" do RESET quit
+
+		#ACCEPT PGM=Erik Scheetz;DATE=11/21/02;CR=18400
+		if cmd="EXEC" xecute msg.piece(" ",2,9999) quit
+
+		if cmd="TRAP" set vztrap=msg.piece("=",2) quit
+		}
+
+	quit
+ 
+
+private CTRLSTOP
+
+	type Public String ET,vzactive,vzcsid,vzsvid,vzsvtyp
+	
+	set ET=$$SVDSCNCT^%MTAPI(vzcsid)
+	if 'ET.isNull() do ERRLOG(ET,'vzactive)
+
+	do Db.delete("SVCTRLT","SVTYP=:vzsvtyp AND SVID=:vzsvid")
+	do Db.delete("SVSTATZ","SRVTYP=:vzsvtyp AND SRVID=:vzsvid")
+
+	// Unregister M Process
+	do CLOSE^IPCMGR()
+	halt 
+	
+	quit
+
+public INIT(%SN)        //Private Initialize and save system variables
+ 
+ 	type Public Number %NET
+	type String %CO,%CRCD,%EMUCRCD,%ED,%IDENT,%LIBS
+	type String %LOGID,%MCP,%MSK,%ODP,%RESPROC
+	type String %SVCHNID,%UserClass,%UserID,%UserStation,%VN,%VNC
+
+	if %SN.get()="" set %SN="PBS"
+ 
+	// On-line
+	set %NET=1
+
+	do SYSVAR^SCADRV0()		// Init system variables
+	set %LOGID=$$LOGID^SCADRV	// Init login information
+
+	quit $$VSAV("*")
+
+
+private XKILL	// Exclusive kill
+
+	type String X
+
+	set X="(vzactive,vzclid,vzcsid,vzfaptbl,vzgbldir,vzident,"
+	set X=X_"vzjrnl,vzlogmsg,vzlogrep,vzmsgpgm,vzmtname,vzpkt,vzpktid,"
+	set X=X_"vzsav,vzsvchnl,vzsvfap,vzsvid,vzsvsec,vzstart,vzsvstat,"
+	set X=X_"vzsttim,vzsvtyp,vztime,vztimer,vztimout,vztrap,"
+	set X=X_"%INTRPT,%SVCNTXT)"
+
+	#ACCEPT Date=12/05/05; Pgm=RussellDS;CR=18400
+	#BYPASS
+	kill @X
+	#ENDBYPASS
+
+	quit
+
+
+public LOG(String token,String msgid,String clmsg,String reply,Number status,Number srvcls,String server,Boolean logmsg,Boolean logrep)	// Log message/reply in MSGLOG file
+
+	/*
+	ARGUMENTS:
+	       . token	Client token						/TYP=T/REQ/MECH=VAL
+	       
+	       . msgid	Message ID							/TYP=T/REQ/MECH=VAL
+	       
+	       . clmsg	Client message						/TYP=T/REQ/MECH=VAL
+	       
+	       . reply	Server reply						/TYP=T/REQ/MECH=VAL
+	       
+	       . status	Success/failure status				/TYP=N/REQ/MECH=VAL
+	       
+	       . srvcls	Service class of message			/TYP=N/REQ/MECH=VAL
+	       
+	       . server	Server identification				/TYP=T/REQ/MECH=VAL
+	       
+	       . logmsg	Log content of client message  		/TYP=L/REQ/MECH=VAL
+	       
+	       . logrep  Log content of server reply msg	/TYP=L/REQ/MECH=VAL
+	*/
+
+	type Public Time vzstart
+
+	if token.get().isNull() quit
+	if msgid.get().isNull() quit
+
+	type RecordMSGLOG msglog=Class.new("RecordMSGLOG")
+
+	set msglog.token=token
+	set msglog.msgid=msgid
+	set msglog.PID=%ProcessID
+	set msglog.datetime=$H
+	set msglog.status=status.get()
+	set msglog.srvcls=srvcls.get()
+	set msglog.server=server.get()
+
+	/*
+	 14210 - vzstart is converted here from the native OS
+	 64-bit format to seconds after midnight.
+	*/
+	
+	set msglog.vzstart=$$FTIM^%ZM(vzstart)
+
+	do msglog.bypassSave()
+
+	if logmsg.get() do LOGFILE(clmsg,1)
+	if logrep.get() do LOGFILE(reply,2)
+	quit
+
+
+LOGFILE(msg,typ)	//
+
+	type Public String msgid,token
+
+	// Log the messages/replies
+
+	type RecordMSGLOGSEQ msglogseq=Class.new("RecordMSGLOGSEQ")
+	
+	set msglogseq.token=token
+	set msglogseq.msgid=msgid
+	set msglogseq.msgtyp=typ
+	set msglogseq.msgrply=msg
+	do msglogseq.bypassSave()
+
+	quit
+
+
+public OK2PROC()	// Check if we can process this message
+
+	/*
+	This will determine what to do if the server is in listener mode and
+	a message is received - either reject it or, if failover is
+	in-process and it completes in time, process the message.
+
+	RETURNS:
+	    $$ Action 
+	    	0 - Reject message (system still SECONDARY)
+	    	1 - Process message (system is now PRIMARY)
+	*/
+
+	// Attempt to get lock within failover wait time (in seconds)
+	
+	#ACCEPT PGM=Erik Scheetz;DATE=11/22/02;CR=unknown
+	lock +FAILOVER:CUVAR.FAILWAIT
+	
+	#ACCEPT PGM=Erik Scheetz;DATE=11/22/02;CR=unknown
+	lock -FAILOVER
+
+	// If the role is now PRIMARY, client message can be processed
+	if $$ROLE="PRIMARY" quit 1
+
+	// Otherwise, do not process client message
+	quit 0
+
+
+public SHUTDOWN(SVTYP,SVID)	//Controlled shutdown
+
+	type String INIFIL,SCRIPT,X
+
+	type RecordSVCTRLT svctrlt=Db.getRecord("SVCTRLT","SVTYP=:SVTYP,SVID=:SVID")
+
+	if svctrlt.shtdwn do { halt
+		do Db.delete("SVCTRLT","SVTYP=:SVTYP AND SVID=:SVID")
+		do Db.delete("SVSTAT","SRVTYP=:SVTYP AND SRVID=:SVID")
+		do Db.delete("SVSTATZ","SRVTYP=:SVTYP AND SRVID=:SVID")
+		
+		// Unregister M process
+		do CLOSE^IPCMGR()
+		}
+
+	// Inform remaining servers that shutdown is already in process
+	type DbSet ds=Db.selectDbSet("SVCTRLT","SVTYP=:SVTYP")
+
+	while ds.next() do {
+		type RecordSVCTRLT svctrlt=ds.getRecord("SVCTRLT")
+
+		set svctrlt.shtdwn=1
+		do svctrlt.bypassSave()
+		}
+
+	// Define input params
+	set SCRIPT=$$SCAU^%TRNLNM("REPL_CONTROLLED")
+	set INIFIL=$$SCAU^%TRNLNM("REPL_CONTROLLED_INIT")
+	
+	// Execute controlled shutdown script
+	set X=$$FAILOVER^%OSSCRPT(SCRIPT,INIFIL,CUVAR.FAILWAIT)
+	
+	do Db.delete("SVCTRLT","SVTYP=:SVTYP AND SVID=:SVID")
+	do Db.delete("SVSTAT","SRVTYP=:SVTYP AND SRVID=:SVID")
+	do Db.delete("SVSTATZ","SRVTYP=:SVTYP AND SRVID=:SVID")
+
+	// Unregister M process
+	do CLOSE^IPCMGR()
+	
+	halt
+	quit
+
+
+public FAILOVER	//Failover startup (switch from SECONDARY to PRIMARY role)
+
+	// If lock does not succeed, failover startup is already in process.
+	#ACCEPT PGM=Erik Scheetz;DATE=11/22/02;CR=unknown
+	lock +FAILOVER:0 else  quit
+
+	// Role is no longer SECONDARY; failover startup script already run.
+	if $$ROLE'="SECONDARY" lock -FAILOVER quit
+
+	type String INIFIL,SCRIPT,X
+
+	set SCRIPT=$$SCAU^%TRNLNM("REPL_FAILOVER")
+	set INIFIL=$$SCAU^%TRNLNM("REPL_FAILOVER_INIT")
+
+	// Execute failover startup script
+	set X=$$FAILOVER^%OSSCRPT(SCRIPT,INIFIL,CUVAR.FAILWAIT)
+
+	// Release the FAILOVER lock
+	#ACCEPT PGM=Erik Scheetz;DATE=11/22/02;CR=unknown
+	lock -FAILOVER
+	quit
+
+
+public CTRLMSG(MSG)	//Send control message to all servers
+
+	type Number SVID,SVSEQ
+	type String SVTYP
+
+	type ResultSet rs=Db.select("SVTYP,SVID,PID","SVCTRLT")
+	if rs.isEmpty() quit
+
+	while rs.next() do {
+		set SVTYP=rs.getCol("SVTYP")
+		set SVID=rs.getCol("SVID")
+
+		set SVSEQ=Db.nextVal("SVCTRL","SVTYP=:SVTYP,SVID=:SVID")
+
+		type RecordSVCTRL svctrl=Class.new("RecordSVCTRL")
+		set svctrl.svtyp=SVTYP
+		set svctrl.svid=SVID
+		set svctrl.svseq=SVSEQ
+		set svctrl.svexpr=MSG
+		do svctrl.bypassSave()
+		
+		// Invoke CTRL interrupt to server process
+		do SIGNAL^IPCMGR($$HEXDEC^%ZHEX(rs.getCol("PID")),"CTRL")
+		}
+	quit
+
+
+public ROLE()	//Return system role from SCA_STATUS.DAT
+	/*
+	RETURNS:
+	       . $$ System role		PRIMARY/SECONDARY/UNKNOWN
+	  ---------------------------------------------------------------------
+
+	*/
+
+	type String IO,RM,X
+
+	// Default to PRIMARY if replication is not utilized
+	if $$TRNLNM^%ZFUNC("START_REPLICATION")="" quit "PRIMARY"
+
+	set IO=$$FILE^%TRNLNM("SCA_STATUS.DAT","SCAU_REPL_DIR")
+	if '$$FILE^%ZOPEN(IO,"READ",2) quit "UNKNOWN"
+	
+	set X=$$^%ZREAD(IO,.RM) 
+	close IO
+	use 0
+	if +RM quit "UNKNOWN"
+
+	if X["PRIMARY" quit "PRIMARY"
+	
+	if X["SECONDARY" quit "SECONDARY"
+	
+	quit "UNKNOWN"
+
+
+public CHKALL(opt,tim,srvs,mons)	//Check status of servers/monitors
+	/*
+
+	ARGUMENTS:
+	       . opt Option			/TYP=N/REQ/MECH-VAL
+			    For the specified servers/monitors, wait to see if...
+			    0 = all of the servers have been shut down
+			    1 = any of the servers are still up
+
+	       . tim Timeout		/TYP=N/REQ/MECH=VAL
+			    The amount of time in seconds that this function will
+			    continue to check if the option has been satisfied
+
+	       . srvs Servers		/TYP=T/NOREQ/MECH=VAL
+			    A list of servers to be checked
+
+	       . mons Monitors		/TYP=T/NOREQ/MECH=VAL
+			    A list of monitors to be checked
+	*/
+
+	type Number ACTIVE,exit,i
+	type String srv,typ
+
+	if +tim.get()=0 set tim=5
+	set exit=$$TIM($h)+tim
+	set srvs=srvs.get()
+	set mons=mons.get()
+
+	set ACTIVE=0
+	for i=1:1 do { quit:ACTIVE!(typ="")!($$TIM($h)>exit)
+		set typ=mons.piece(",",i)
+		if typ="" quit		
+		for  set ACTIVE=$$MONSTS(typ) quit:ACTIVE=opt!($$TIM($h)>exit)  hang 1
+		}
+
+	// If any server is ACTIVE, no need to check further
+	if ACTIVE quit 1
+
+	for i=1:1 do { quit:ACTIVE!(typ="")!($$TIM($h)>exit)
+		set typ=srvs.piece(",",i) if typ="" quit
+		for  set ACTIVE=$$SRVSTS(typ) quit:ACTIVE=opt!($$TIM($h)>exit)  hang 1
+		}
+
+	quit ACTIVE
+
+
+MONSTS(MON)	//Check monitor status
+
+	type Number ACTIVE
+
+	set ACTIVE=0
+
+	if MON="TGLMON" do {
+		type RecordTGLMONPA tglpa=Db.getRecord("TGLMONPA","PA='PA'")
+		if $$VALID^%ZPID(tglpa.pid,1) set ACTIVE=1
+		}
+
+	quit ACTIVE
+
+
+SRVSTS(SVTYP)	//Check server status
+
+	type Number ACTIVE
+	type String LIST()
+	type String PID
+
+	do ^%ZPID(.LIST)
+	set ACTIVE=0
+
+	type ResultSet rs=Db.select("PID","SVCTRLT","SVTYP=:SVTYP")
+	if rs.isEmpty() quit
+
+	while rs.next() do { quit:ACTIVE
+		set PID=$$HEXDEC^%ZHEX(rs.getCol("PID"))
+		if 'LIST(PID).exists() quit
+		set ACTIVE=1
+		}
+
+	quit ACTIVE
+
+
+public DSPSTS(io)	//Display server/monitor status to output file
+
+	type Public Number ER
+	type Public String RM
+	type String pid,x
+	type String list()
+
+	set x=$$FILE^%ZOPEN(io,"WRITE/NEWV")
+	if 'x set ER=1,RM=x.piece("|",2) quit
+	do ^%ZPID(.list)
+
+	use io write !!,"[Servers]"
+
+	type ResultSet rs=Db.select("SVTYP,SVID,MTMID,MTMSVRID,PID,ROLE","SVCTRLT")
+
+	if 'rs.isEmpty() while rs.next() do {
+		set pid=$$HEXDEC^%ZHEX(rs.getCol("PID"))
+
+		use io
+		write !,rs.getCol("SVTYP"),$C(9),rs.getCol("SVID"),$C(9),pid
+		write $C(9),rs.getCol("MTMID"),rs.getCol("MTMSVRID")
+		write $C(9),rs.getCol("ROLE")
+
+		if 'list(pid).exists() write $C(9),"[no such process]"
+		}
+
+	use io write !!,"[Monitors]"
+
+	type RecordTGLMONPA tglpa=Db.getRecord("TGLMONPA","PA='PA'")
+
+	if tglpa.pid'="" do {
+		set pid=$$HEXDEC^%ZHEX(tglpa.pid)
+		use io write !!,"TGLMON",$C(9),pid
+		if 'list(pid).exists() write $C(9),"[no such process]"
+		}
+
+	close io
+	use 0
+	quit
+
+
+private RESET   // Re-link programs into image (LINK control message)
+   
+	type Public Number ER
+	type Public String CMPERR
+	
+	catch vError {
+		type String RM
+
+		set ER=vError.type
+		set RM=vError.description
+		do ^UTLERR
+		}
+
+	type String CODE,PGM,rtn()
+       
+	do IMAGE^%ZRTNS(.rtn)
+	kill rtn("PBSUTL")
+        
+	set rtn=""
+	for  set rtn=rtn(rtn).order() quit:rtn=""  do {
+		
+		catch vError {
+			quit
+			}
+
+		// Replace % character with _ character prior to re-linking
+		set PGM=$select(rtn.extract()="%":"_"_rtn.extract(2,rtn.length()),1:rtn)
+
+		do ^ULODTMPL(PGM,"CODE")
+		do BUILDRTN^UCGM(.CODE,PGM,.CMPERR)
+		}
+	quit
+
+
+public %STFHOST()	// Define value of %STFHOST
+
+	/*
+	Define local variable %STFHOST and deal with all issues
+	related to Posting the Host Store and Forward file.
+
+	KEYWORDS: 24X7
+
+	INPUTS:
+	. ^STFHOST1("CTL")
+
+	RETURNS:
+	 . $$ 		Current value of %STFHOST			/TYP=N
+
+	 . %STFHOST 24x7 status							/TYP=N
+
+	 EXAMPLE:
+	 S %STFHOST=$$%STFHOST()
+
+
+	 %STFHOST=1 DB Updates not allowed store incomming updates in STFHOST
+	 %STFHOST=2 Routine STFMON is posting messages in STFHOST.
+	 %STFHOST=3 Routine STFMON has completing posting, all incomming
+	      messages must wait until STFHOST'=3 before continuing
+	*/
+
+	type Public String %STFHOST,%STFPID
+
+	type RecordSTFHOST1 host1=Db.getRecord("STFHOST1","STARKEY='*'",1)
+	set %STFHOST=host1.ctl
+
+	if %STFHOST do {
+		/* 
+		If this is the process that is posting the STFHOST file,
+		then let this process operate normally. %STFPID is
+		established in STFHOST^STFMON.
+		*/
+
+		if %STFPID.get()'="",%STFPID=$$PID^%ZFUNC set %STFHOST=0 quit
+
+		/*
+		if %STFHOST=3 then loop till ^STFHOST1("CTL") is clear
+		and reset %STFHOST and process normally.
+		*/
+
+		type ResultSet rs=Db.select("LAST","STFHOST1","CTL>0")
+		if rs.isEmpty() quit
+		while rs.next() quit:%STFHOST'=3  do {
+			set %STFHOST=rs.getCol("LAST")
+			hang 1
+			}
+		}
+
+	quit %STFHOST
+
+
+public PROF(svtyp,svid,seq,IO) ;Utility to copy M-profiling results to ASCII file
+	/*        
+
+	Move code from this procedure to TBXCDCV
+
+	 ARGUMENTS:
+             . svtyp   Server type			/TYP=T/REQ/MECH=VAL
+             . svid    Server ID			/TYP=N/REQ/MECH=VAL
+             . seq     M-profiling sequence	/TYP=N/REQ/MECH=VAL
+             . IO      Output file name		/TYP=T/NOREQ/MECH=VAL
+						/DFT=zmprof_svid_svid.dat in spool directory
+        ----------------------------------------------------------------------
+        */
+
+	if IO.get()="" set IO=$$FILE^%TRNLNM("zmprof_"_svtyp_"_"_svid_".dat","SCAU$SPOOL")
+	if '$$FILE^%ZOPEN(IO,"WRITE/NEWV",2,1024) quit
+	
+	use IO
+
+	write "Program|Label|Offset|Cnt|Usr Time|Sys Time"
+
+	#ACCEPT Date=12/05/05; Pgm=RussellDS;CR=18400
+	#BYPASS
+	N lbl,off,pgm,x
+	S (lbl,off,pgm)=""
+	F  S pgm=$O(^SVPROF(svtyp,svid,seq,pgm)) Q:pgm=""  D
+	.	F  S lbl=$O(^SVPROF(svtyp,svid,seq,pgm,lbl)) Q:lbl=""  D
+	..		F  S off=$O(^SVPROF(svtyp,svid,seq,pgm,lbl,off)) Q:off=""  D
+	...			S x=^SVPROF(svtyp,svid,seq,pgm,lbl,off)
+	...			W !,pgm_"|"_lbl_"|"_off_"|"
+	...			W $TR(x,":","|")
+	#ENDBYPASS
+	
+	use 0
+	do CLOSE^SCAIO
+	quit
+
+
+public STOP2	// Stops an Individual/Interactive Server
+
+	type Number SVID
+	type String %READ,%TAB(),SVTYP,VFMQ
+		
+	set SVTYP="SCA$IBS"
+	
+	set %TAB("SVTYP")="[SVCTRLT]SVTYP/TBL=[CTBLSVTYP]"
+	set %TAB("SVID")="[SVCTRLT]SVID/TBL=[SVCTRLT]:QU ""[SVCTRLT]SVTYP=<<SVTYP>>"""
+
+	set %READ="@@%FN,,,SVTYP/REQ,SVID/REQ"
+
+	do ^UTLREAD
+	
+	if VFMQ="Q" quit
+
+	type RecordSVCTRLT svt=Db.getRecord("SVCTRLT","SVTYP=:SVTYP,SVID=:SVID")
+
+	do SIGNAL^IPCMGR($$HEXDEC^%ZHEX(svt.pid),"STOP")
+
+	quit
+
+vSIG()	quit "60422^43969^Dan Russell^36423"	// Signature - LTD^TIME^USER^SIZE

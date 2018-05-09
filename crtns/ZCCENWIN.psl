@@ -1,0 +1,445 @@
+ZCCENWIN
+	/*
+	
+	6/1/2007 : Basavaraj K N
+	
+	Modified for 
+		- Debit offset records
+		- Using initial presentation date (from detail record) instead of presentation date from batch header
+		- Default reason for devolution		
+		
+	 ORIG: Basavaraj Kodgalli (1267) - 02/16/2007
+	 DESC: CCE Non-Walmart Incoming Return File - Checks
+	
+			    THIS ROUTINE IS TO BE COMPILED WITH TTXFMT
+	                        DO NOT RUN THIS ROUTINE STANDALONE
+	 ---- Comments --------------------------------------------------------
+	
+	 ---- Revision History ------------------------------------------------
+	
+	 ****** Consider using setAuditFlag for all objects in this procedure
+	   example :do dep.setAuditFlag(1)
+
+	08/01/2007 - Walton
+		     CR 28636
+		     Removed +'s from XECID and Reason of Devolution
+		     Removed check number from HIST SQL
+
+	07/27/2007 - Prabhu Reginald
+		     Added ZCKREJECTLN trancode
+
+	07/10/2007 - Prabhu Reginald
+		     Made changes to apply ZCKREJECT trancode. 
+		     Modified the code to match the Batch and File totals	
+	*/
+	
+	quit
+	
+RECCALL	//Record menu section
+	
+	if 'REC.isNull() set RECTYPE=REC.extract(TYPEPOS1,TYPEPOS2)
+		
+	if RECTYPE="01" do REC5 quit //Batch Header
+	if RECTYPE="02" do REC6 quit //Batch Detail
+	if RECTYPE="09" do REC8 quit //Batch Trailer
+	if RECTYPE="51" do REC9 quit //File Trailer	
+	set ERR=10 do RECERR(1)	
+	quit
+
+ALLREC	//All records section
+		
+	if RECCNT=1,RECTYPE'="01" set ERR=11 do RECERR(1)
+	
+	quit
+
+UFILINIT // File intialization
+
+	//Initialize file level counters
+	type public Number FTOTREC,FTOTBCH,FTOTAMNT,FIMGTRNC	
+	
+	set (FTOTREC,FTOTBCH,FTOTAMNT,FIMGTRNC)=0
+	
+	type public String BLOCK,EBCASC,KEY,LABEL,REC,RECORD
+	
+	//-- Removing this assignment would disable this procedure from reading CCE files - May,2007
+	//RECTYPE extract position
+	type public Number TYPEPOS2
+	//CCE header records are identified using 2 positions from left
+	set TYPEPOS2=2
+	
+	set KEY="ACN.INC"
+
+	type RecordUTBLTAPEFMT tapefmt=Db.getRecord("UTBLTAPEFMT","KEY=:KEY",1)
+	if 'tapefmt.getMode() quit
+
+	set (RECORD,TREC)=tapefmt.rsiz
+	set (BLOCK,TBLCK)=tapefmt.bsiz
+
+	if tapefmt.lab="L" set LABEL="LABEL"
+	else  set LABEL="UNLABEL"
+
+	if tapefmt.dtype="A" set EBCASC="ASCII"
+	else  set EBCASC="EBCDIC"
+
+	set TFMT=EBCASC_"/FIXED/"_LABEL_"/RECORD="_RECORD_"/BLOCK="_BLOCK
+	quit
+	
+REC1	//File header record
+	//The CCE file does not contain a file header record. No processing will be done.
+	quit
+	
+REC5	//Batch Header	
+	
+	type public Number TXCRCD
+	type public Date PRNTNTJD
+	//File level counters for batch verification
+	type public Number FTOTBCH
+	
+	//Initialize batch level counters for details verification
+	type public Number BTOTREC,BTOTAMNT,BIMGTRNC
+	
+	type String %DIR
+	type public String %INST
+	
+	do INT^%DIR
+	set %INST=%DIR
+	
+	set (BTOTREC,BTOTAMNT,BIMGTRNC)=0
+	//Batch counter	
+	set FTOTBCH=FTOTBCH+1
+	//Transaction Currency Code
+	set TXCRCD=+REC.extract(16)
+	
+	if TXCRCD=1 set %SystemCurrency="MXN"
+	else if TXCRCD=9 set %SystemCurrency="USD"
+
+	//Presentation Date
+	// Format found in file is 'MM/DD/YYYY'
+	//set PRNTNTJD=REC.extract(28,29)_"/"_REC.extract(30,31)_"/"_REC.extract(24,27)
+	set PRNTNTJD=REC.extract(24,31).toDate("YEARMMDD")
+	if (PRNTNTJD)<0 set ERR=52 do RECERR(1)
+	set (EFD,%EffectiveDate)=PRNTNTJD
+			
+	//These are the fields which will be used as the Transfer ID and mapped to the Formatting Log File field BCHID
+	//set BCHID=REC.extract(10,12)_REC.extract(13)_REC.extract(14,15)_REC.extract(16)_REC.extract(17,18)_REC.extract(19,23)	
+	set BCHID=REC.extract(10,23)
+
+	set BCHSEQ=BCHSEQ.get()+1
+	set DTLSEQ=0
+	
+	do BCHINIT
+	
+	quit	
+	
+REC6	//Batch Detail	
+
+	//Batch level counters
+	type Boolean FOUND,HISTF
+	type Date IPRNTTJD
+	type public Number BTOTREC,BTOTAMNT,BIMGTRNC,TXCRCD	
+	type Number ABANK,TRNCODE,XABANK,XCHKNUMB,XCHKAMNT,XCID,XRSNDVLN,XTRNCODE
+	type String CONTEXT,ET,RM,xtso()
+	type String INTRFACE,XAUTH,XECID,XGRP,XROUTING,XSEQ
+	type String REVETC=""
+	type ResultSet jrnlrs,hist
+	type RecordZCKJRNL zckjrnl
+	type RecordZUTBLCECTRN cectrn
+	type RecordTRN trn
+	type RecordACN acn
+	
+	set (FOUND,HISTF)=0	
+	//Assigner Bank 
+	set XABANK=+REC.extract(20,22)
+	
+	//Initial Presentation Date
+	//Use this date so that in case of any interest or dividend 
+	//is associated with the transaction will also get adjusted
+	set IPRNTTJD=REC.extract(107,114).toDate("YEARMMDD")
+	if (IPRNTTJD)<0 set ERR=52 do RECERR(1)
+	set BCHEFD=IPRNTTJD
+	set (EFD,TJD)=%SystemDate
+		
+	//Amount of check
+	set XCHKAMNT=+(REC.extract(26,40))/100
+	
+	//Transaction Code
+	set XTRNCODE=+REC.extract(63,64)
+	
+	//External Account Number
+	set XECID=REC.extract(70,80)
+	
+	//Check Number
+	set XCHKNUMB=+REC.extract(81,90)
+	
+	//SecretCode_PreMarketVerifierDigit
+	set XAUTH=REC.extract(93,95)_REC.extract(92)
+	
+	//Reason for Devolution
+	set XRSNDVLN=REC.extract(105,106)
+	
+	//Deposit Account Number in Profile
+	set XCID=+REC.extract(150,169)	
+	
+	//TransactionCode_ClearingPlace_AssignerBank_ExchangeDigit
+	set XROUTING=REC.extract(63,64)_REC.extract(65,67)_REC.extract(20,22)_REC.extract(91) 
+	
+	//Record detail records per batch
+	set BTOTREC=BTOTREC+1
+	
+	//Update batch level counters
+	//Total amount 
+	set BTOTAMNT=BTOTAMNT+XCHKAMNT	
+	//Total records truncated with image
+	if REC.extract(104)="0" set BIMGTRNC=BIMGTRNC+1
+	
+	set DTLSEQ=DTLSEQ+1
+	set FILCNT=FILCNT+1
+	set BCHCNT=BCHCNT+1
+
+	//Interface Name
+	set INTRFACE="ZCCENWIN"
+
+	//Find the transaction in the walmart check journal file
+	set jrnlrs=Db.select("SEQ", "ZCKJRNL","PTJD=:IPRNTTJD AND PCID=:XCID AND ECID=:XECID AND AUTH=:XAUTH AND ROUTING=:XROUTING AND CHKNUM=:XCHKNUMB","PTJD,SEQ DESC")
+	while jrnlrs.next()  do { quit:FOUND		
+		set XSEQ=jrnlrs.getCol(1)
+		set zckjrnl=Db.getRecord("ZCKJRNL","PTJD=:IPRNTTJD AND SEQ=:XSEQ")
+
+		//Verify the detail (register) with the journal record
+		if +zckjrnl.pcid'=XCID quit
+		if zckjrnl.ecid'=XECID quit
+		if +(zckjrnl.routing.extract(6,8))'=XABANK quit
+		if +(zckjrnl.routing.extract(1,2))'=XTRNCODE quit
+		if +zckjrnl.chknum'=XCHKNUMB quit
+		if +zckjrnl.amt'=+XCHKAMNT quit
+			
+		set FOUND=1
+	} //End of looping through check journal records
+	
+	set CID=XCID
+	set TAMT=XCHKAMNT
+	set TCMT="Debit offset for check return "_XCHKNUMB
+	
+	//Get account record, required for Cost Center	
+	set acn=Db.getRecord("ACN","CID=:XCID")
+	set XGRP=acn.grp
+	set cectrn=Db.getRecord("ZUTBLCECTRN","INTRFACE=:INTRFACE AND GRP=:XGRP AND CODE=:XTRNCODE")
+	set ETC=cectrn.dretc
+
+	if acn.cls="L" do {
+		set hist=Db.Select("TAMT,TSEQ,ETC,ITC,ITC6,ITC12","HIST","CID=:XCID AND TJD=:IPRNTTJD")
+		if 'hist.isEmpty() {
+			while hist.next() do { quit:HISTF
+				if +TAMT'=+hist.getCol(1) quit
+				if hist.getCol(5)+hist.getCol(6)>0 quit
+				set HISTF=1
+				set HSEQ=hist.getCol(2)
+				set TAMT=$$TAMT^TRNDRV(hist.getCol(1))
+				set TSO="REV#"_$G(HSEQ)
+				set TCMT="REVERSAL OF SEQ "_$G(HSEQ)
+				set ETC=hist.getCol(3)
+				set ITC=$$ITC^TTXEXT(hist.getCol(4),12,1)
+			}	
+		}
+	}
+	
+	//This should fail the transaction and appear on exception report
+	if acn.cls="D" do {
+		if 'FOUND set ETC="ZCKREJECT"
+	}
+	else  if 'HISTF!'FOUND set ETC="ZCKREJECTLN"
+
+	set xtso("PTJD")=IPRNTTJD
+	set xtso("CHKNUM")=XCHKNUMB
+	set xtso("RSNDEVLN")=XRSNDVLN	
+	
+	do IN^UTSO(.xtso,.TSO)	
+	
+	set BCHCR=BCHCR+TAMT
+	set FILCR=FILCR+TAMT
+	
+	//For debit offset
+	set (KEY2,KEY3)="*"	
+	do TTXFILE
+	
+	//kill as it is used again for fee posting
+	kill xtso
+	
+	//If record nod found in profile, fee transaction posting is not required
+	if 'FOUND quit
+	
+	//if transaction has been reversed fee posting not required
+	if acn.cls="L" quit
+			
+	//Fee Transaction
+	//Find ETC for fee based on reason for devolution
+	set cectrn=Db.getRecord("ZUTBLCECTRN", "INTRFACE=:INTRFACE AND GRP=:XGRP AND CODE=:XRSNDVLN",1)
+	
+	//If no ETC is mapped for the reason of devolution found in record, map to default reason of devolution which is '00'
+	//Assuming a default mapping is allways foundin ZUTBLCECTRN
+	if ('cectrn.getMode()) set cectrn=Db.getRecord("ZUTBLCECTRN","INTRFACE=:INTRFACE AND GRP=:XGRP AND CODE='00'")
+	
+	set trn=Db.getRecord("TRN","ETC=:cectrn.cretc")
+			
+	//Quit if the Fee amount is zero
+	if +trn.amt=0 quit
+	set CID=XCID
+	set TAMT=trn.amt
+	
+	//ETC for Debit
+	set ETC=cectrn.dretc
+	
+	set TCMT="Fee on returned check "_XCHKNUMB
+	
+	set xtso("PTJD")=IPRNTTJD
+	set xtso("CHKNUM")=XCHKNUMB
+	set xtso("FEETRNCODE")=ETC
+	set xtso("RSNDEVLN")=XRSNDVLN
+	
+	do IN^UTSO(.xtso,.TSO)
+	
+	set BCHCR=BCHCR+TAMT
+	set FILCR=FILCR+TAMT
+	
+	//set offset
+	set KEY2="FEE"
+	set KEY3=cectrn.code
+	if 'OFFSET(%CRCD,KEY2,KEY3,acn.cc).exists() do {
+		set OFFSET(%CRCD,KEY2,KEY3,acn.cc)="||"_cectrn.cretc_"|"_trn.acn
+	}
+	
+	do TTXFILE
+	
+	quit
+			
+REC8	// Batch trailer record
+
+	//Batch level count validations
+	type public Number BTOTREC,BTOTAMNT,BIMGTRNC
+	
+	//Detail Records = Only register type 02
+	//Validate running count of Detail Records in the current batch
+	if +REC.extract(12,18)'=+BTOTREC set ERR=82 do RECERR(0)	
+	//Validate running total of the Amount field in the Detail Records in the current batch
+	if +REC.extract(19,36)'=(+BTOTAMNT*100) set ERR=83 do RECERR(0)
+	//Validate running count of Detail Records. Where the Truncation field is equal to 0 in the current batch
+	if +REC.extract(37,43)'=+BIMGTRNC set ERR=82 do RECERR(0)	
+	
+	//Update file level counters with the current batch information
+	set FTOTREC=FTOTREC+BTOTREC
+	set FTOTAMNT=FTOTAMNT+BTOTAMNT
+	set FIMGTRNC=FIMGTRNC+BIMGTRNC
+	
+	do BCHEND
+	quit
+
+REC9	// File trailer record		
+
+	if '(ORECTYPE.get() = "09") set ERR = 91 do RECERR(1)
+	
+	//File level count validations
+	type public Number FTOTREC,FTOTBCH,FTOTAMNT,FIMGTRNC
+	//validate total detail records received in the incoming transaction file
+	if +REC.extract(6,12)'=+FTOTREC set ERR=92 do RECERR(1)		
+	//validate total numberof batch received in the incoming transaction file.
+	if +REC.extract(13,14)'=+FTOTBCH set ERR=92 do RECERR(1)
+	//validate running total of the Amount field in the Detail Records in the incoming transaction file
+	if +REC.extract(35,52)'=(+FTOTAMNT*100) set ERR=93 do RECERR(1)	
+	//validate running count of the Detail Records. where the Truncation field is equal to 0.
+	if +REC.extract(53,59)'=+FIMGTRNC set ERR=92 do RECERR(1)
+	
+	quit
+		
+UBCHINIT //User batch initialization			
+	quit
+	
+UBCHEND	//User batch end
+	quit
+		
+RECERR(ABORT)	// Record error
+	
+	set ABORT = ABORT.get()
+	set ERRMSG=" UNKNOWN ERROR "
+	
+	if ERR.get() do {					
+		
+		// Invalid record type code
+		if ERR = 10 set ERRMSG = $$^MSG("5136") quit
+		
+		// Missing file header record
+		if ERR = 11 set ERRMSG = $$^MSG("3038") quit
+		
+		// Improperly sequenced records
+		if ERR = 12 set ERRMSG = $$^MSG("5137") quit
+	
+		// Missing batch control record
+		if ERR = 51 set ERRMSG = $$^MSG("5138") quit
+		
+		// Invalid batch effective date
+		if ERR = 52 set ERRMSG = $$^MSG("5139") quit
+
+		// Detail record errors
+		// MISSING BATCH HEADER RECORD"
+		if ERR = 61 set ERRMSG = $$^MSG("5140") quit
+		
+		// DEATH NOTICE RECEIVED ACCOUNT p~
+		if ERR = 62 set ERRMSG = $$^MSG("5141",CID.get()) quit
+		
+		// MISSING POP TERMINAL CITY OR STATE p~
+		if ERR = 63 set ERRMSG = $$^MSG("5142",CID.get()) quit
+	
+		// Batch control record errors
+		// MISSING DETAIL RECORDS
+		if ERR = 81 set ERRMSG = $$^MSG("5143") quit
+		
+		// BATCH ITEM COUNT DOES NOT MATCH CONTROL RECORD
+		if ERR = 82 set ERRMSG = $$^MSG("5144") quit
+		
+		// BATCH DEBITS DO NOT MATCH CONTROL RECORD
+		if ERR = 83 set ERRMSG = $$^MSG("5145") quit
+		
+		// BATCH CREDITS DO NOT MATCH CONTROL RECORD
+		if ERR = 84 set ERRMSG = $$^MSG("5146") quit
+		
+		// BATCH HASH TOTALS DO NOT MATCH CONTROL RECORD
+		if ERR = 85 set ERRMSG = $$^MSG("5147") quit
+	
+		// File control record errors
+		// MISSING BATCH CONTROL RECORD
+		if ERR = 91 set ERRMSG = $$^MSG("5138") quit
+		
+		// FILE ITEM COUNT DOES NOT MATCH CONTROL RECORD
+		if ERR = 92 set ERRMSG = $$^MSG("5144") quit
+		
+		// FILE DEBITS DO NOT MATCH CONTROL RECORD
+		if ERR = 93 set ERRMSG = $$^MSG("5145") quit
+		
+		// FILE CREDITS DO NOT MATCH CONTROL RECORD
+		if ERR = 94 set ERRMSG = $$^MSG("5146") quit
+		
+		// FILE HASH TOTALS DO NOT MATCH CONTROL RECORD
+		if ERR = 95 set ERRMSG = $$^MSG("5147") quit		
+	}
+	
+	// Process error
+	if ABORT do ABORT^TPINERR quit	
+	do ^TPINERR
+	
+	quit
+	
+PREOPEN
+	quit	
+POSTREAD 
+	quit
+%STOPLOD //Stop ^ULODTMPL from this point on down
+	do BCHINIT
+	quit
+BCHINIT	
+	quit
+BCHEND
+	quit
+TTXFILE
+	quit
+		
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60849^37398^Jeff Walton^11837"	// Signature - LTD^TIME^USER^SIZE

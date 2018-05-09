@@ -1,0 +1,272 @@
+LNCONDIB	  /*
+	ORIG: kellyp - 02/11/2005
+	DESC: Manual Bill Create (Conversion)
+
+	---- Comments --------------------------------------------------------
+
+	---- Revision History ------------------------------------------------
+
+		02/16/05 - KELLYP - CR 14452
+			   Re-introduced procedure for creating/maintaining
+			   manual bill records for the manual loan conversion
+			   process.
+ */
+
+	type Public Boolean ER
+
+	type Date CEFD,DIST1ND
+	type Number CID,CNT,%PAGE,%PG
+	type String VFMQ
+	type RecordLNCONBIL lnconbil() 	// Dummy table used for screen input
+	
+	do VPG00		// Screen Setup
+	
+	if VFMQ="Q" do END quit
+	
+	do VPG01(.lnconbil())	// Screen
+
+	if VFMQ="F",'ER do FILE(.lnconbil())
+	
+	do END
+	
+	quit
+	
+
+VPG00	// Screen set up for %TAB prompts
+
+	type Public Date CEFD
+	type Public Number CNT
+
+	type String CLS,%READ,%TAB()
+
+        set %TAB("CID")=".CID3/HLP=[LN]CID/XPP=D PP^LNCONDIB"
+        set %TAB("CEFD")=".CEFD1"
+        set %TAB("DIST1ND")=".DIST1ND1/XPP=D DIST1ND^LNCONDIB"
+        set %TAB("CNT")=".CNT1/XPP=D CNT^LNCONDIB"	
+
+	set CEFD=%SystemDate-1
+	set CNT=""
+	set CLS="L"
+	
+	set %READ="@@%FN,,,CID/REQ,CEFD/REQ,DIST1ND/REQ,CNT/REQ"
+
+	do ^UTLREAD
+
+	quit
+
+PP	// Account number post-processor
+
+	type Public Boolean ER
+	type Public String X
+
+	type RecordLN ln=Db.getRecord("LN","CID=:X",1)
+	
+	// Account does not exist
+	if 'ln.getMode() do Runtime.setErrMSG("LN",57) quit:ER
+	
+	// Account has already been converted
+	if Db.isDefined("XCNVMAN","X"),ln.hisctf do Runtime.setErrSTBLER("LN","ACARC") quit:ER
+	
+	// Manual bills not valid for P&I loan
+	if ln.pcmval.extract(1)=1 do Runtime.setErrMSG("LN","1666") quit:ER
+	
+	type Number I
+
+	for I=1:1:ln.pmtdist.length("-") do { quit:ER
+		// Cannot manually create bills for accounts with escrow
+		if $$ESC^LNU(ln.pmtdist.piece("-",I)) do Runtime.setErrSTBLER("LN","LNCONE") quit:ER
+		}
+
+	quit
+	
+
+DIST1ND // Next Date Post Processor
+
+	type Public Boolean ER
+	type Public Number CID
+	type Public String X
+
+	if X.isNull() quit
+
+	type Date JD,JDSAV
+	
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+	
+	set JD=$$^SCAJD(X) quit:ER
+	set JDSAV=JD
+
+	// Must exceed amortization date of ~p1
+	if JD<ln.amodt do Runtime.setErrMSG("LN","1833",$$^%ZD(ln.amodt)) quit:ER
+
+	// Roll date forward and back one cycle to verify it's a valid freq. date
+	set JD=JD.nextFreqDate(ln.dist1fre) quit:ER
+	set JD=JD.nextFreqDate("-"_ln.dist1fre) quit:ER
+	
+	// Must correspond to payment frequency ~p1
+	if JD-JDSAV do Runtime.setErrMSG("LN","1826",ln.dist1fre) quit:ER
+
+	// Must be the same as or after the date of first payment (~p1)
+	if JDSAV<ln.dfp do Runtime.setErrMSG("LN","1820",$$^%ZD(ln.dfp)) quit:ER
+
+	quit
+
+
+CNT	// Bill Number Count Post Processor
+
+	type Public Boolean ER
+	type Public Date DIST1ND
+	type Public Number CID,X
+
+	// Minimum value is ~p1
+	if X<1 do Runtime.setErrMSG("LNCONBIL","1743","1") quit:ER
+
+	type Date LAST,NJD,TMPDT
+	type Number BLOFF,I
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+	
+	set NJD=DIST1ND
+
+	for I=1:1:X do { quit:ER
+		set LAST=NJD
+		set NJD=NJD.nextFreqDate(ln.dist1fre)
+		}
+
+	if ln.bloff="1P" set BLOFF=0
+	else  set BLOFF=ln.bloff
+
+	// Next earliest possible due date the system can generate a bill for
+	// E.g. TJD=1/19 BLOFF=10, system can only generate bills due 1/29 or later
+	set TMPDT=%SystemDate+BLOFF
+	
+	// Parameters entered will not generate payment record for due date ~p1
+	if NJD<TMPDT do Runtime.setErrMSG("LN","2132",$$^%ZD(NJD)) quit:ER
+	
+	quit
+
+	
+VPG01(RecordLNCONBIL lnconbil())	// Main screen input
+
+	type Public Boolean ER
+	type Public Date DIST1ND
+	type Public Number CID,CNT
+	
+	type Date NJD
+	type Number I
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+
+	set NJD=DIST1ND
+
+	// Initialize the lnconbil() array
+	for I=1:1:CNT do { quit:ER
+		set lnconbil(I)=Class.new("RecordLNCONBIL")
+		set lnconbil(I).due=NJD
+		set lnconbil(I).num=I
+		set NJD=NJD.nextFreqDate(ln.dist1fre)
+		}
+	
+	do DRV^USID("0","LNCONBIL",.lnconbil())
+
+	quit
+
+	
+FILE(RecordLNCONBIL lnconbil()) // Convert LNCONBIL records to LNCONBL1 records and save
+
+	type Public Date CEFD
+	type Public Number CID
+
+	type Date NJD
+	type Number J,K
+	type String B,BIL0,COL,I,KILLARR(),L,M,P,PC1,PE,X
+
+	// Delete any existing LNCONBL1 records
+	do Db.delete("LNCONBL1","CEFD=:CEFD AND CID=:CID")
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+	type RecordLNBIL0 lnbil0=Db.getRecord("LNBIL0","CID=:CID")
+	
+	set BIL0=lnbil0.pe01_"|"_lnbil0.pe02_"|"_lnbil0.pe03_"|"_lnbil0.pe04_"|"_lnbil0.pe05_"|"
+	set BIL0=BIL0_lnbil0.pe06_"|"_lnbil0.pe07_"|"_lnbil0.pe08_"|"_lnbil0.pe09_"|"
+	set BIL0=BIL0_lnbil0.pe10_"|"_lnbil0.pe11_"|"_lnbil0.pe12_"|"_lnbil0.pe13_"|"
+	set BIL0=BIL0_lnbil0.pe14_"|"_lnbil0.pe15_"|"_lnbil0.pe16_"|"_lnbil0.pe17_"|"
+	set BIL0=BIL0_lnbil0.pe18_"|"_lnbil0.pe19_"|"_lnbil0.pe20
+
+	/*
+	 The following code sets up variable names for a payment element
+	 with it's corresponding LNBIL0 value.  These variables are used
+	 and then killed in the inner for loop at the end of this section.
+	*/
+
+	for J=1:1 set X=BIL0.piece("|",J) quit:X.isNull()  do {
+		set B=X.piece("#")
+		set @B=B_"#"_X.piece("#",2,X.length())
+		}
+	
+	set L="L###"
+	set M="M###"
+
+	set J=""
+	for  set J=lnconbil(J).order() quit:J.isNull()  do {
+		
+		type RecordLNCONBL1 lnconbl1=Class.new("RecordLNCONBL1")
+		
+		set lnconbl1.cefd=CEFD
+		set lnconbl1.cid=CID
+		set lnconbl1.bseq=J
+		
+		// If not previous period billing, use bill date, o/w use prev. due date
+		if ln.bloff'="1P" set NJD=lnconbil(J).due-ln.bloff
+		else  set NJD=lnconbil(J).due.nextFreqDate("-"_ln.dist1fre)
+		
+		set PC1=(+lnconbil(J).trem)_"#"_NJD_"#"_lnconbil(J).due_"#"
+		set PC1=PC1_(+lnconbil(J).tdue)_"#"_(lnconbil(J).rem+lnconbil(J).prem)_"#"
+		set PC1=PC1_(+lnconbil(J).tdue)_"#"_+ln.balint_"#0"
+		
+		set lnconbl1.first=PC1
+		
+		set I="I##"_(+lnconbil(J).bld)_"#"_(+lnconbil(J).rem)
+		set P="P##"_(+lnconbil(J).pdue)_"#"_(+lnconbil(J).prem)
+
+		/*
+		 The following code collates through the loan's payment
+		 distribution string and populates the corresponding bill
+		 record's payment element field.  
+		*/
+		
+		for K=1:1 set PE=ln.pmtdist.piece("-",K) quit:'PE.length()  do {
+
+			if K<10 set COL="PE0"_K
+			else  set COL="PE"_K
+
+			set lnconbl1.@COL=@PE
+			
+			set KILLARR(PE)=""	// Indirection var to be killed later
+			}
+		
+		do lnconbl1.save()	// Finally, save the new manual bill record
+		}
+	
+	// Clean up variables created through indirection
+	set PE=""
+	for  set PE=KILLARR(PE).order() quit:PE.isNull()  kill @PE
+
+	quit
+
+
+END	// End processing
+
+	type Public Number CID
+	type Public String ER,RM,VFMQ
+
+	// Bills for account ~p1 not created
+	if VFMQ="Q" set RM=$$^MSG(357,CID.get())
+
+	// Bills for account ~p1 created
+        else  set RM=$$^MSG(356,CID.get())
+
+        set ER="W"
+
+        quit
+
+vSIG()	quit "59966^43526^Pat Kelly^6416"	// Signature - LTD^TIME^USER^SIZE

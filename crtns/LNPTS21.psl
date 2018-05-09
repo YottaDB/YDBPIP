@@ -1,0 +1,111 @@
+public	LNPTS21(RecordLN ln, RecordTTX ttx)
+
+	/*
+	       ORIG:  David Caliendo (5527) - 07/15/86
+	       
+	       DESC:  Generate secondary escrow closeout transactions to the 
+	              escrow accounts associated with the loan as part of a 
+	              loan closeout.
+	              
+	     OUTPUT:  ESCROW - Total escrow amount involved in payoff (used by 
+	     	               LNPTS23)
+	
+	---- Revision History -------------------------------------------------
+	
+	05/23/06 - SmithCD - CR 19732
+		   Modified instantiation hierarchy for dep object to prevent 
+		   GTM undefined error when called from backdated transaction 
+		   posting functionality.
+	
+	01/26/06 - SmithCD - CR 19343 (16890)
+		   Retrofitted several changes from p01, and cleaned up code.
+		   Modified to use dep() object, if it exists.
+		   Removed old revision history.
+		
+	*/
+
+	type public RecordDEP dep, dep()
+	type public Cache %CACHE()
+	type public Boolean ER
+	type public Number ESCROW = 0
+
+	type ResultSet rs = Db.select("CID", "DEP", "AREF=:CID")
+	while rs.next() do { quit:ER
+		type Number CID = rs.getCol("CID")
+		
+		// Ensure we're using the correct dep object
+		if 'dep.exists() ! (dep.exists() & (CID '= dep.cid)) do {
+			if dep(CID).exists() set dep = dep(CID)
+			else  set dep = Db.getRecord("DEP", "CID=:CID")
+			}
+
+		// Skip if the loan is in an active status, has a balance, and 
+		// Ignore When Calculating Loan Payoff is indicated
+		if dep.bal, 'ln.stat, dep.iwcp quit
+		
+		// Update Total Escrow Balance
+		set ln.teb = ln.teb - dep.bal
+
+		// Post interest to escrow accounts
+		do INTRDX^ESCFUNCS(.ln, .dep, .ttx, 0, dep.esc, 1) quit:ER
+	
+		set ESCROW = ESCROW + dep.bal
+				
+		// Close escrow account
+		do ECLOSE(.ln, .ttx, .dep) quit:ER
+		}
+
+	// Update Total Secondary Balance		
+	set ttx.tsb = ln.teb
+	
+	quit
+
+
+ECLOSE(RecordLN ln,		// Loan account			/REF:R
+       RecordTTX ttx,		// Loan transaction		/REF:R
+       RecordDEP dep)		// Deposit (escrow) account	/REF:RW
+
+	type public Cache %CACHE()
+	type public String TB()
+	type public Boolean ER
+
+	type String CLOETC, TSO
+	type Number PRIN, TAMT
+	
+	set TSO = "ESC#"_dep.esc
+	
+	type RecordPRODCTL prodctl = %CACHE("PRODCTL").getRecord("PRODCTL", "TYPE=:dep.type")
+
+	if dep.bal '< 0 do { quit:ER
+		// DR Closeout Tran Code
+		set CLOETC = prodctl.drtrci
+		if CLOETC.isNull() do ETCERR^TTXEXT(dep.type, "DRTRCI")
+		set TAMT = dep.bal
+		}
+	else  do { quit:ER
+		// CR Closeout Tran Code
+		set CLOETC = prodctl.crtrci
+		if CLOETC.isNull() do ETCERR^TTXEXT(dep.type, "CRTRCI")
+		set TAMT = -dep.bal
+		}
+
+	set TB(dep.esc) = (-TAMT)_","_dep.cid_","_(-TAMT)
+
+	// Escrow closeout transaction
+	do POST^LNTRB(.ttx, dep.cid, CLOETC, TAMT, %EffectiveDate, %UserStation, TSO, , dep.crcd) quit:ER
+
+	/*
+	Find the direction of the tran amount. Example:
+	For primary tran MPO, tran amount is negative
+	*/
+	set PRIN = $select((ln.trb - ttx.itc1):TAMT, 1:-TAMT)
+
+	// Escrow payment suspense
+	do GL^LNPTSU(.ttx, PRIN, 7)
+	
+	// Update the History Support record (lower level of HIST)
+	do %HSEQ^LNPTSU(.ttx, "*#"_dep.esc_"#"_PRIN)
+	
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60409^53151^Chad Smith^2914"	// Signature - LTD^TIME^USER^SIZE

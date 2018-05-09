@@ -1,0 +1,221 @@
+public IRAANAC( Date FROM, Date TO)	// ANNUAL ACTIVITY REPORT
+	/*
+	   ORIG:  Kathie Jalbuena (7070) - 12/11/86
+	  ---------Revision History----------------------------------------------
+
+	   02/22/06 - DHANALAKSHMI R - 19610
+		Added a line to kill DC to avoid update of IRAANAC2 with
+		incorrect amount.
+		Removed a line "lock +TMPIRA:1 else  set ER=1 quit".
+		Modified the parameter of the section SUMM1 by adding FROM.
+		Added lines to delete IRAANAC2 and IRAANAC3.
+		Corrected few warnings.
+		Modified the section SUMM1 to quit the current iteration of
+		the while loop, if both IRAC & IRAD are not defined and added
+		a condition TJD>=:FROM in a select statement of HIST table.
+
+	   11/15/05 - DHANALAKSHMI R - 16851
+		Corrected warnings.
+
+	   04/15/02 - GORDONT - 49794
+		Converted to PSL.
+                Removed Pre-2000 revision history.
+
+	   03/04/02 - MENYAJ - 46454
+	        Modified the EXEC2 section to include State Tax withheld
+	        in the Withholding calculation.
+	        Also modified section WRITE to handle IRAC, if undefined.
+
+	   06/18/01 - MAYLATHR - 43884
+	        Added RSEQ totals in section WRITE. Also added  W to END
+	        sections.  New END1 section was created.
+
+	   06/05/00 - MOHAMEDE - 36760
+	        Changed the IYTD-Int/Div Paid Financial Year-to-date with
+	        the equivalent ITYTD-Int/Div Paid Tax Year-to-date.
+	        Changed $O(^HIST(),-1) with $O(^HIST(),-1) in section SUMM.
+
+	*/
+
+	type public Number ACN,ER,RSEQ
+	type public String IRAC,ZTSO
+
+	type Number BB,BTSEQ,CID,CN,DC(),DS,EB,ERN,PEN,TSEQ,WHLD,YTDI
+	type String X
+	
+	set ER=0
+
+	do Db.fastDelete("IRAANAC1")
+	do Db.fastDelete("IRAANAC2")
+	do Db.fastDelete("IRAANAC3")
+
+	type ResultSet rs=Db.select("CID,IRA","DEP","IRA>0")
+
+        if rs.isEmpty() do END(ACN, IRAC,RSEQ) quit
+        
+        while rs.next() do {
+
+		set CID=rs.getCol(1)
+
+                type RecordDEP dep=Db.getRecord("DEP","CID=:CID")
+
+		set (ERN,CN,DS,PEN,WHLD)=0
+        	set ACN=dep.acn
+        	set YTDI=dep.itytd
+        	set RSEQ=+dep.rpaseq
+        	set IRAC=dep.ira
+
+        	//  Get Summary Information
+        	type ResultSet rs=Db.select("JD,BAL,SEQZERO","HIST0","CID=:CID AND JD<(:FROM+1)","JD DESC")
+        	
+		if 'rs.next() set (BB,EB)=0 set BTSEQ=0
+		else  do {
+			set (BB,EB)=rs.getCol("BAL")
+			set BTSEQ=rs.getCol("SEQZERO")
+			}
+
+		set TSEQ=BTSEQ set BTSEQ=TSEQ+1
+
+		kill DC
+		do SUMM1(CID,TSEQ,FROM,TO,.DC,.ZTSO)
+		do WRITE(ACN, .DC, IRAC, RSEQ)
+		}
+
+	quit
+
+
+SUMM1( Number CID, Number TSEQ, Date FROM, Date TO, Number DC(), String ZTSO)	//
+
+	type public Number EB,ERN,ICH,PEN,WHLD
+	type Number CNT,ITC,TAMT,ZCODE
+	type String CODE,ETC
+
+	type ResultSet rs=Db.select("TJD,ITC,ETC,TAMT,TSO","HIST","CID=:CID AND TSEQ>:TSEQ AND TJD>=:FROM AND TJD<=:TO")
+
+	if 'rs.isEmpty() while rs.next() do {
+
+		set ITC=rs.getCol(2)
+		set ETC=rs.getCol(3)
+		set TAMT=rs.getCol(4)
+		set CODE=rs.getCol(5)
+	
+		if (ETC="")!(ITC="")!(TAMT="")!(CODE="") quit
+	
+		set DC=$E(ITC)
+
+		kill ZTSO set ZTSO=""
+		do OUT^UTSO(.ZTSO,CODE)
+
+		if (ZTSO("IRAC").exists()) set ZCODE=ZTSO("IRAC")
+		else  if (ZTSO("IRAD").exists()) set ZCODE=ZTSO("IRAD")
+		else  quit
+
+		if $E(ITC,4) set CNT=0 do INT(.CNT, .DC, .EB, .ERN,, .TAMT) quit
+
+		if +TAMT=0 if $E(ITC,5,6)>0 quit
+
+		set ICH=$P(TAMT,"#",3)
+		set EB=EB+$S(DC:TAMT,1:-TAMT)
+
+		set DC=$S(DC:"C",1:"D")
+		if '(DC(DC,ZCODE).exists()) set DC(DC,ZCODE)=0
+		set DC(DC,ZCODE)=DC(DC,ZCODE)+TAMT
+
+		// If penalty assessed
+		if $P(TAMT,"#",4) set EB=EB-$P(TAMT,"#",4) set PEN=PEN+$P(TAMT,"#",4)
+
+		// If withholding assessed
+		if $P(TAMT,"#",5) set EB=EB-$P(TAMT,"#",5) set WHLD=WHLD+$P(TAMT,"#",5)
+		if $P(TAMT,"#",15) set EB=EB-$P(TAMT,"#",15) set WHLD=WHLD+$P(TAMT,"#",15)
+		
+		if ICH.exists() set CNT=1 do INT(.CNT, .DC, .EB, .ERN, ICH, .TAMT)
+		}
+	quit
+
+
+INT( Number CNT, Number DC(), Number EB, Number ERN, Number ICH, Number TAMT)	//  Interest
+
+	if CNT=1 set TAMT=ICH set DC=1
+	set TAMT=$S(DC:TAMT,1:-TAMT) set ERN=ERN+TAMT set EB=EB+TAMT
+	set CNT=0
+	quit
+
+
+WRITE( Number ACN, Number DC(), String IRAC, Number RSEQ)	//  Write first level
+	
+ 	type public Number BB,EB,ERN,PEN,TYPE,WHLD,YTDI
+
+	if IRAC'="" do { quit
+
+		type RecordIRAANAC1 iraanac1
+		set iraanac1=Db.getRecord("IRAANAC1","IRAC=:IRAC,ACN=:ACN",1)
+
+		set iraanac1.begbal=iraanac1.begbal+BB
+		set iraanac1.endbal=iraanac1.endbal+EB
+		set iraanac1.ytdi=iraanac1.ytdi+YTDI
+		set iraanac1.earn=iraanac1.earn+ERN
+		set iraanac1.pen=iraanac1.pen+PEN
+		set iraanac1.whld=iraanac1.whld+WHLD
+
+		do iraanac1.bypassSave()
+
+
+		type RecordIRAANAC3 iraanac3
+		set iraanac3=Db.getRecord("IRAANAC3","IRAC=:IRAC,ACN=:ACN,RSEQ=:RSEQ",1)
+
+		set iraanac3.begbal=iraanac3.begbal+BB
+		set iraanac3.endbal=iraanac3.endbal+EB
+                set iraanac3.ytdi=iraanac3.ytdi+YTDI
+                set iraanac3.earn=iraanac3.earn+ERN
+                set iraanac3.pen=iraanac3.pen+PEN
+                set iraanac3.whld=iraanac3.whld+WHLD
+
+		do iraanac3.bypassSave()
+	
+		for TYPE="C","D" do WRITE2(ACN, .DC, IRAC, RSEQ, TYPE)
+		
+		// Delete accounts that have no reportable information from ^TMPIRA
+		
+		type ResultSet rs=Db.select("AMT","IRAANAC2")
+		if rs.isEmpty() do Db.fastDelete("IRAANAC3","IRAC,ACN,RSEQ")
+		
+		}
+	quit
+
+
+WRITE2( Number ACN, Number DC(), String IRAC, Number RSEQ, String TYPE)	//  Write second level
+
+	type Number CODE
+	set CODE=""
+	
+	for  set CODE=$O(DC(TYPE,CODE)) quit:CODE=""  do {
+
+		type RecordIRAANAC2 iraanac2
+
+		set iraanac2=Db.getRecord("IRAANAC2","IRAC=:IRAC,ACN=:ACN,RSEQ=:RSEQ,TYPE=:TYPE,CODE=:CODE",1)
+
+		set iraanac2.amt=iraanac2.amt+DC(TYPE,CODE)
+	
+		do iraanac2.bypassSave()
+		}
+	
+        quit
+
+
+END( Number ACN, String IRAC, Number RSEQ)
+
+	type Number BBB,EEB	
+
+	type ResultSet rs=Db.select("BEGBAL,ENDBAL","IRAANAC3")
+
+	if 'rs.isEmpty() while rs.next() do {
+
+		set BBB=rs.getCol(1)
+		set EEB=rs.getCol(2)
+
+		if (BBB=0),(EEB=0) do Db.fastDelete("IRAANAC3","IRAC,ACN,RSEQ") 
+		}
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60324^35350^Dhanalakshmi R^5596"	// Signature - LTD^TIME^USER^SIZE

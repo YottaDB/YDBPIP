@@ -1,0 +1,272 @@
+MRPC061(return,versn,LNPPDATA)	//; - LN - V4.3 - INPUT PURCHASED LOANS REMITTANCES
+	/*
+	   	ORIG:  8/10/97 Mark Spier
+	   This MRPC is used to perform the function of LNHO8A purchased loans
+	   remittance from a client. Loans which are found in a common
+	   sellers pool are sent to this mrpc as a group and the remittance
+	   transactions posted together. Integrity checks which prevent the
+	   posting to individual accounts are returned to the client through
+	   normal error message return. There may however be multiple errors
+	   from different accounts. These messages are tab seperated, the first
+	   piece contains the number of errors.
+
+	   KEYWORDS: Client/Server, Loan Utilities
+
+	   ARGUMENTS:
+	   . return 	null value   			/TYP=T/REQ
+	         					/MECH=REFNAM:W
+
+	   . versn  	^MRPC061 version number 	/TYP=N/REQ
+	     		Current version = 1  		/MECH=VAL
+
+	   . LNPPDATA 	String of rows of data  	/typ=t/req
+	     		representing remittance  	/MECH=VAL
+	     		from  file LNPP8 The first three fields
+	   .   		are common information SLCD,PL,OFF stored
+	     		All fields are seperated by commas.
+
+	   .. SLCD  	Seller Code   			/typ=t/req
+	         					/TBL=[LNPP1]
+	   .. PL  	Seller pool   			/typ=t/req
+	         	/TBL=[LNPP2]
+	   .. OFF   	Offset Transaction Code  	/typ=t/req
+
+	   .. Repeating record representing information about
+	      individual loan accounts in the pool. These fields
+	      represent the data defined in file LNPP8. A record
+	      must contain values for all 9 columns.
+	   .. CID   	Account Number   		/TYP=N/REQ
+	   .. SFTH  	Satisfies Thru   		/TYP=D
+	   .. PTPMT 	Partial Payment   		/TYP=$
+	   .. PRIN  	Principal    			/TYP=$
+	   .. INT   	Interest    			/TYP=$
+	   .. FEE   	Service Fee   			/TYP=$
+	   .. PRINO 	Principal Only   		/TYP=$
+	   .. INTO  	Interest Only  	 		/TYP=$
+	   .. REMT  	Remittance   			/TYP=$
+
+
+	---- Revision History ------------------------------------------------
+	12/26/05 - chhabris - CR18008
+		   Replaced reference to index file LNPPX with LNPP6 in CPP
+		   section.
+
+	11/30/05 - chhabris - CR18008
+		   Replaced depricated methods. Also, removed the revision 
+		   history prior to 2004.
+
+	----------------------------------------------------------------------
+	*/
+
+
+	// Version number of client message is not compatible with server
+	if $G(versn)'=1 quit $$ERRMSG^PBSUTL("1"_$C(9)_$$^MSG(2951))
+
+	new DATA,ERR1,OFF,PL,SLCD
+
+	set (ER,%ProcessMode)=0 
+	set return=""
+
+	type RecordLNPP8 lnpp8() 
+	
+	// split the data into its components
+	do FMTINFO(.lnpp8())
+
+	// validate offset tran code
+	set X=OFF 
+	do PP^LNPP8
+
+	set ERR1="1"_$C(9)_$G(RM)
+	if ER quit $$ERRMSG^PBSUTL(ERR1)
+
+	type RecordLNPP2 lnpp2=Db.getRecord("LNPP2","SLCD=:SLCD,PL=:PL")
+
+	//I18N=OFF
+
+	// Invalid table value ~p1
+	if lnpp2.slcd="" do {
+		set ER=1 
+		set RM=$$^MSG(1485," SLCD "_SLCD)
+		}
+	// Invalid table value ~p1
+	else  if lnpp2.pl="" do {
+		set ER=1 
+		set RM=$$^MSG(1485," PL "_PL)
+		}
+
+	//I18N=ON
+	set ERR1="1"_$C(9)_$G(RM)
+	if ER quit $$ERRMSG^PBSUTL(ERR1)
+	set RMOP=lnpp2.rmop 
+	set PETC=lnpp2.fecd
+
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+	set BRCD=cuvar.bobr
+	set TPD=%SystemDate
+
+	set RETURNMSG=""
+	for I=1:1 quit:('lnpp8(I).exists())  do {
+		if lnpp8(I).cid="" quit
+		do ACCOUNTS(.lnpp8())
+		}
+
+	do FILE^LNPP8(.lnpp8())
+
+	if RETURNMSG'="" do { quit $$ERRMSG^PBSUTL(RETURNMSG)
+		set $P(RETURNMSG,$C(9),1)=$L(RETURNMSG,$C(9))-1
+		}
+	quit ""
+
+
+ACCOUNTS(RecordLNPP8 lnpp8())	//
+
+	set ER=0 
+	set RM=""
+	/* 
+	Get account number, then use it to return fields from the loan.
+	These fields are used to validate that the remittance should be 
+	performed for this loan. in the label CPP
+	*/
+	set CID=lnpp8(I).cid
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID",1)
+	if ln.getMode() set CRCD=ln.crcd 
+	else  set CRCD=""
+	
+	if CRCD.isNull() set CRCD=%SystemCurrency
+	set GLSC=ln.glsc
+	set BALCMP=ln.bal 
+	if ln.aruf set BALCMP=BALCMP-ln.udbal
+
+	//perform data checks
+	do CPP(CID,.ln,.lnpp8())
+
+	//do not process account with errors
+	if ER do {
+		//prevents processing
+		set lnpp8(I).cid=""
+
+		//setup error message for return
+		set RETURNMSG=RETURNMSG_$C(9)_$G(RM)
+		}
+	quit
+
+
+CPP(X,RecordLN ln,RecordLNPP8 lnpp8())	//processer to validate the account integrities and information
+	/*
+	Passed from client screen. This is called from the PROCESS section
+	after we have retrieved the loan information found in the DATA
+	variable
+	*/
+
+	new CID,PCMP
+	set CID=X
+	set (CLS,ZCLS)="L" 
+	do CID^UACN1
+
+	// Invalid account ~p1
+	if ER set RM=$$^MSG(1259,X) quit
+
+	type ResultSet rs=Db.select("CID","LNPP6","CID=:X and SLCD=:SLCD and PL=:PL")
+	if rs.isEmpty() quit
+
+	type RecordLNPP6 lnpp6=Db.getRecord("LNPP6","CID=:X")
+	set S1=lnpp6.slcd
+	set P1=lnpp6.pl
+	set RS=lnpp6.rfpf
+	if RS!(S1'=SLCD)!(P1'=PL) quit
+
+	// Account closed
+	if ln.stat=4 set ER=1 set RM=$$^MSG(55,CID) quit
+
+	// Account not disbursed
+	if 'ln.udbal set ER=1 set RM=$$^MSG(81,CID) quit
+
+	// Make sure there are outstanding bill amounts to be satisfied.
+	if 'ln.tba set ER=1 set RM=$$^MSG(8742,CID) quit
+
+	// [LNPP8]SFTH<[LN]DIST1ND
+	if '(lnpp8(I).sfth'<ln.dist1nd!(RMOP=2)) do { quit:ER
+		if lnpp8(I).ptpmt-(lnpp8(I).prin+lnpp8(I).int) set ER=1
+
+		// P&I must equal partial payment amount for account ~p1
+		if ER set RM=$$^MSG(2124,CID) quit
+
+		set Z=ln.dist1ld+ln.ppa
+		if Z'<lnpp8(I).ptpmt set ER=1
+
+		// Amount entered for account ~p1 must be a partial payment for this due date
+		if ER set RM=$$^MSG(260,CID) quit
+		}
+
+
+	//[LNPP8]PRIN+[LNPP8]PRIN0+[LNPP8]INT+[LNPP8]INT0-[LNPP8]FEE
+
+	set RT=lnpp8(I).prin+lnpp8(I).prino
+	set RT=RT+lnpp8(I).int+lnpp8(I).into-lnpp8(I).fee
+
+	// Remittance must equal PRIN + INT - FEE ($~p1) for account ~p2
+	// Total from above minus [LNPP8]REMT must equal 0
+	if RT-lnpp8(I).remt set ER=1 set RM=$$^MSG(2356,$$^SCARND(RT,0,CID),CID) quit
+
+	set PCM=ln.pcm
+
+	type RecordSTBLPCM stblpcm=Db.getRecord("STBLPCM","KEY=:PCM")
+	set PCMP=stblpcm.pcmp
+
+	//[LNPP8]PTPMT>>PMT
+	if '$E(PCMP),lnpp8(I).ptpmt>ln.pmt set ER=1
+
+	//[LNPP8]PTPMT>PMTPI
+	if $E(PCMP),lnpp8(I).ptpmt>ln.pmtpi set ER=1
+
+	// Partial payment amount greater than P&I payment for account ~p1
+	if ER set RM=$$^MSG(2134,CID) quit
+
+	/*
+	Post processor for [LNPP8]SFTH, verify that the date is not less then
+	the last payment date.
+	If SFTH is null then use DIST1ND from the account
+	*/
+	
+	if lnpp8(I).sfth="" set lnpp8(I).sfth=ln.dist1nd quit
+	set %DS=lnpp8(I).sfth 
+	set %JD=$$^SCAJD(%DS)
+
+	// Date precedes date through which paid
+	if %JD<ln.dist1ld do {
+		set ER=1 
+		set RM=$$^MSG(756,CID)
+		}
+	quit
+
+
+FMTINFO(RecordLNPP8 lnpp8()) 	// Reformat the information the LNPP8
+				// information passed into a workable format.
+
+	new I,DATA,REC
+	set SLCD=$P(LNPPDATA,",",1)
+	set PL=$P(LNPPDATA,",",2)
+	set OFF=$P(LNPPDATA,",",3)
+	set REC=1
+	for I=4:9 do { quit:$P(DATA,",",1)=""
+		set lnpp8(REC)=Class.new("RecordLNPP8")
+		set DATA=$P(LNPPDATA,",",I,I+8)
+		if $P(DATA,",",1)="" quit
+		set lnpp8(REC).cid=$P(DATA,",",1)
+		set lnpp8(REC).sfth=$P(DATA,",",2)
+		set lnpp8(REC).ptpmt=$P(DATA,",",3)
+		set lnpp8(REC).prin=$P(DATA,",",4)
+		set lnpp8(REC).int=$P(DATA,",",5)
+		set lnpp8(REC).fee=$P(DATA,",",6)
+		set lnpp8(REC).prino=$P(DATA,",",7)
+		set lnpp8(REC).into=$P(DATA,",",8)
+		set lnpp8(REC).remt=$P(DATA,",",9)
+
+		set lnpp8(REC).sfth=$$INT^%ZM(lnpp8(REC).sfth,"D","DD/MM/YEAR")
+
+		set REC=REC+1
+		}
+	quit
+
+vSIG()	quit "60260^9122^Sanjay Chhrabria^6954"	// Signature - LTD^TIME^USER^SIZE

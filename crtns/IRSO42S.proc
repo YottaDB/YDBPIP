@@ -1,0 +1,289 @@
+IRSO42S		/*
+	ORIG: titove - 10/25/2005
+	DESC: IRS Processing - Form 1042-S Original
+
+	---- Comments --------------------------------------------------------
+			  THIS PROCEDURE IS TO BE COMPILED
+			      DO NOT RUN STANDALONE
+
+	I18N=QUIT: Excluded from I18N standards.
+
+	---- Revision History ------------------------------------------------
+
+	09/05/06 - GIRIDHAL - CR 22607
+		   Modified section Q1042SL to set RFORCNTR to +FORCNTY instead
+		   FORCNTY to fix errors while running IRSTAPE function.
+		   
+	10/26/05 - TITOVE - CR 17287
+		   Converted into PSL. Modified logic to build "W" and "C-1042"
+		   records only once. Removed tags CNTRL2, FN, OACN, OMF,
+		   OTAXID and old revision history. Removed check on Correction
+		   Code, VDLFG and CRFLG from QRECBLD section: we already check
+		   for it in FRM1042S.
+
+	*/
+
+        // Accept "Dead code" warning during runtime of @IRSTAPE
+        #ACCEPT Date=10/26/2005;PGM=Eugene Titov
+        quit
+
+MTRCNTRL	// Master control
+
+	type public Number ER, OPT
+	
+	type Boolean CORR = 0
+	type Number ACN, CID, PASSFLG
+	type String CORRTN, TIPYD, TNBWA
+	
+	do Db.delete("Q1042S")
+	
+	if (OPT = 4)!(OPT = 5)!(OPT = 6) set CORR = 1
+	
+	// Create REP1042S records
+	do ^FRM1042S
+
+	set TIPYD.piece("|",2) = "Total Gross Amount Paid"
+	set TNBWA.piece("|",2) = "Total Tax Withheld"
+	
+	if CORR set PASSFLG = 1
+	else  set PASSFLG = 0
+	
+	set CORRTN = $S(PASSFLG=1:"1",1:"0")
+
+	// Build and write the "W" record
+	do WRECBLD quit:ER
+	
+	// Build and write the "Q" records
+	do QRECBLD quit:ER
+	
+	// Build and write the "C-1042" record
+	do C42RECBLD quit:ER
+	
+	// Build and write the "W", "Q", "C-1042" records again, for corrected entries
+	if CORR do {
+		
+		set PASSFLG = 2
+		set CORRTN = "2"
+		
+		do WRECBLD quit:ER
+		
+		do QRECBLD quit:ER
+		
+		do C42RECBLD quit:ER
+		}
+	
+	// Store the TTR report totals
+	do STORETOT
+	
+	quit
+	
+
+QRECBLD	// "Q" Record Builder
+
+	type public Boolean PASSFLG
+
+	type Number BWPCT, CID, IPYD, NBWA
+	type String CNTRYC, CNTRYN, CORRTN, INC, RCODE, WHEXR
+	
+	set CNTRYN = ""
+
+	type DbSet ds = Db.selectDbSet("REP1042S","JOB = :%ProcessID")
+	
+	while ds.next() do {
+		
+		type RecordREP1042S rep = ds.getRecord("REP1042S")
+		
+		do CIFAD(rep.acn,rep.taxid)		
+
+		set CID = rep.cid
+
+		set BWPCT = rep.%bwpct1			// Withholding Percentage
+		set WHEXR = rep.whexr1			// Exemption Reason
+		set CNTRYC = rep.nr1			// Country Code
+		set IPYD = rep.ipyd1 * 100		// Gross Income
+		set NBWA = rep.nbwa1 * 100		// Federal Income
+		set RCODE = rep.rcode1			// Recipient Code
+		if (rep.irsexm = 0),(CNTRYC = "CA") set INC = "29" // Income Code interest
+		if (rep.irsexm = 2) set INC = "06"	// Income Code dividend
+	
+		if 'CNTRYC.isNull() do {
+		
+			type RecordSTBLCNTRY cntry = Db.getRecord("STBLCNTRY", "CNTRY = :CNTRYC")
+		
+			set CNTRYN = cntry.desc
+			}	
+		
+		set CORRTN = $S(PASSFLG=1:"1",PASSFLG=2:"2",1:"0")
+		
+		// Create Q1042S table record for laser reporting (line 1)
+		do Q1042SL(.rep)
+		
+		do QRECWRT	// Write "Q" record (line 1)
+		
+		if rep.%bwpct2.isNull() quit	// No second line data
+		
+		set BWPCT = rep.%bwpct2			// Withholding Percentage
+		set WHEXR = rep.whexr2			// Exemption Reason
+		set CNTRYC = rep.nr2			// Country Code
+		set IPYD = rep.ipyd2 * 100		// Gross Income
+		set NBWA = rep.nbwa2 * 100		// Federal Income
+		if (rep.irsexm2 = 0),(CNTRYC = "CA") set INC = "29" // Income Code interest
+		if (rep.irsexm2 = 2) set INC = "06"	// Income Code dividend
+		
+		// If country code is different - get a new description
+		if (rep.nr2 '= rep.nr1),'CNTRYC.isNull() do {
+			
+			type RecordSTBLCNTRY cntry1 = Db.getRecord("STBLCNTRY", "CNTRY = :CNTRYC")
+		
+			set CNTRYN = cntry1.desc
+			}
+		
+		// Create Q1042S table record for laser reporting (line 2)
+		do Q1042SL(.rep)
+		
+		do QRECWRT	// Write "Q" record (line 2)
+		}
+	
+	quit
+	
+	
+CIFAD(Number ACN,		// Customer Number
+	String TAXID)		// Tax Identification
+	
+	// Build CIF name/address fields
+
+	type public Boolean W8REQ
+	type public String ADDR, CITY, CNTRY, FORCNTY, NAME
+	type public String STATE, TIN, TINTYPE, ZIP
+	
+	type RecordCIF cif = Db.getRecord("CIF","ACN = :ACN", 1)
+
+	set TIN = TAXID					// Tax-id number
+	set TINTYPE = $S(TIN?2N1"-"7N:2,TIN?3N1"-"2N1"-"4N:1,1:" ") // Type of TIN
+
+	set NAME = cif.nam	 			// Payee First Name
+	set ADDR = cif.pad1_" "_cif.pad2_" "_cif.pad3	// Payee address
+	set CITY = cif.pcity 				// Payee city
+	set STATE = cif.pstate 				// Payee state
+	set ZIP = cif.pzip.piece("-",1)_cif.pzip.piece("-",2) // Payee zip
+	set CNTRY = cif.pcntry	 			// Foreign country
+	set FORCNTY = $S(cif.pcntry="US":" ",1:1)  	// Foreign country indicator
+	set W8REQ = cif.w8req				// W-8 Required
+	
+	quit
+
+
+Q1042SL(RecordREP1042S rep)
+
+	// Populate Q1042S table for IRS 1042-S form laser reporting
+
+	type public Boolean W8REQ
+	type public Number BWPCT, CID, FAMT(), FCNT, IPYD, NBWA
+	type public String ADDR, CITY, CNTRY, CNTRYC, CNTRYN, CORRTN, FORCNTY, INC, NAME
+	type public String RCODE, STATE, TIN, TINTYPE, WHEXR, ZIP
+	
+	type String CNFDESC, CNRDESC, PRNAME, PRTIN, QRFIRST
+	type Number QSEQ
+	
+	set (CNFDESC,CNRDESC) = ""
+	
+	type RecordCIF cif = Db.getRecord("CIF","ACN = :rep.acn", 1)
+	
+	type RecordACN acn = Db.getRecord("ACN", "CID = :rep.cid", 1)
+	
+	if acn.type.isNull() set acn.type = 0
+	
+	// Recipient's Non-Res Country Name for Tax Purposes
+	if 'cif.nrcntry.isNull() do {
+	
+		type RecordSTBLCNTRY cntry = Db.getRecord("STBLCNTRY", "CNTRY = :cif.nrcntry")
+	
+		set CNRDESC = cntry.desc
+		}
+		
+	// Recipient's mailing country name
+	if 'CNTRY.isNull() do {
+	
+		type RecordSTBLCNTRY cntry1 = Db.getRecord("STBLCNTRY", "CNTRY = :CNTRY")
+		
+		set CNFDESC = cntry1.desc
+		}
+
+	// Dummy first name column that is required by 1042S software
+	set QRFIRST = ""	
+	
+	/*
+	   Payer's name (PRNAME) and Payer's TIN (PRTIN) fields in Q1042S table
+	   will not be populated. They were created for future enhancement.
+	   set PRNAME = PAYERNAM
+	   set PRTIN = INSTEIN
+	*/
+	set (PRNAME,PRTIN) = ""	
+	
+	// Sequence: number of entries per CID in the form
+	set QSEQ = Db.nextVal("Q1042S","JOB=:%ProcessID,TYPE=:acn.type,RTIN=:TIN,ACN=:rep.acn,CID=:rep.cid")
+	
+	if QSEQ.isNull() set QSEQ = 1
+	else  set QSEQ = QSEQ + 1	
+	
+	type RecordQ1042S q1042s = Db.getRecord("Q1042S","JOB=%ProcessID,TYPE=:acn.type,RTIN=:TIN,ACN=:rep.acn,CID=rep.cid,SEQ=:QSEQ", 1)
+	
+	set q1042s.rcode = RCODE
+	set q1042s.rfirstn = QRFIRST
+	set q1042s.rlastn = NAME
+	set q1042s.raddr = ADDR
+	set q1042s.rcity = CITY
+	set q1042s.rstate = STATE
+	set q1042s.rzip = ZIP
+	set q1042s.rcntryn = CNFDESC
+	set q1042s.nr = CNTRYC
+	set q1042s.inc = INC
+	set q1042s.ipyd = IPYD
+	set q1042s.bwpct = BWPCT
+	set q1042s.whexr = WHEXR
+	set q1042s.nbwa = NBWA
+	set q1042s.prname = PRNAME
+	set q1042s.prtin = PRTIN
+	set q1042s.w8req = W8REQ
+	set q1042s.crflg = CORRTN
+	set q1042s.rforcntr = +FORCNTY
+	set q1042s.rctrytax = CNRDESC
+	
+	do q1042s.save()	
+	
+	// Calculate number of records and tax form report totals
+	set FCNT = FCNT + 1
+	set FAMT(1) = FAMT(1) + (IPYD/100)		// Gross Income Paid
+	set FAMT(2) = FAMT(2) + (NBWA/100)		// U.S. Federal Tax Withheld
+	
+	quit
+
+
+WRECBLD	// "W" record builder
+	
+	do WRECWRT	// Write the record to tape
+
+	quit
+	
+	
+C42RECBLD	// "C-1042" record builder
+	
+	do C42RECWRT	// Write the record to tape
+	
+	quit
+	
+
+%STOPLOD	// Stop %ZRTNLOD from this point on down
+	quit
+T42RECWRT // Dummy line reference for GT.M
+	quit
+QRECWRT // Dummy line reference for GT.M
+	quit
+WRECWRT // Dummy line reference for GT.M
+	quit
+C42RECWRT // Dummy line reference for GT.M
+	quit
+STORETOT	// Dummy line reference for GT.M
+	quit
+
+vSIG()	quit "60513^52570^Lakshmi Giridharan^7205"	// Signature - LTD^TIME^USER^SIZE

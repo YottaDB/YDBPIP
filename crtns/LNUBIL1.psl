@@ -1,0 +1,338 @@
+LNUBIL1		/*
+	   Loan payment file utilities
+
+	   ORIG: GORMAN - 12/20/93
+	
+	   Utility is used to load, create, and/or maintain loan payment
+	   file bill records.
+	
+	   LIBRARY:
+	   . NEWBIL Follow all steps to creates new (or modifies
+	     existing) payment record.  Calls all functions
+	     which follow.
+	     
+	   . $$BLNEW Determines sequence number of new payment record
+	     
+	   . $$BLSEQ Build "skeleton" payment record, no amounts
+	   
+	   . $$BLADD Adds amounts to payment record built by BLSEQ
+	   
+	   . $$DIFFBL Determines number of payment record between
+	     two specified records
+	     
+	    . $$PDS  Computes accounts payment due status
+	     (delinquent, due, current, advance) based upon
+	     passed sequences OSEQ and SCHSEQ.
+	
+	---- Revision History ------------------------------------------------
+	
+	09/14/06 - KELLYP - 22181
+		   Modified DIFFBL section to remove change made under CR 
+		   21025 and modified entire section to work exactly like it
+		   did in P01.  This prevents a problem where the wrong pmt
+		   due status was returned in many cases, which in turned 
+		   caused serious problems (e.g., timeouts) during various
+		   types of payment application.
+	
+	05/24/06 - KinI - CR 21463
+		   Modified NEWBIL section to add third parameter "1" when 
+		   inserting assessment amount in the bill fees record to
+		   avoid "RECNOFL" error.
+	
+	05/10/06 - KinI - CR 21182 
+		   Modified NEWBIL section to change the call to 
+		   NEWBILL^BILFUNCS to extrinsic.
+		   
+	05/03/06 - KELLYP - CR 21025
+		   Modified DIFFBL section to initialize CNT to 1 (instead of
+		   0).  The same code in P01 acted in a way that would return
+		   1 more than the total number of bills.  This corrects a
+		   problem with payment due category calculation when the PDS
+		   section is called from PDC^LNPTS2 and online bills are 
+		   generated as a result of the transaction.
+	
+	02/26/06 - TITOVE - CR 19733
+		   Cleaned up logic in NEWBIL section:
+		   - removed LNBIL1 object from argument list; it should be
+		     instantiated inside this procedure.
+		   - optimized the Select statement from LNBIL1 table.
+		   - corrected CALC^LNUBIL call (accepts LN as argument now).
+		   - removed old revision history.
+		   Removed BLADD, BLSEQ sections and old revision history
+		   and brought procedure up to standards.
+
+	05/06/05 - KinI - 15524
+		   Modified BLSEQ and BLADD sections to update lnbil1 
+		   sub-fields directly rather then lnbil1.bp1 sub-pieces per 
+		   DBI standards. Removed lnbil1.bp1 update since it is 
+		   considered a special type of computed per DBI standards.
+	
+	*/
+	
+	quit
+
+
+public	NEWBIL(RecordLN ln,
+	       Date BLDU,
+	       String ELE,
+	       Number AMT)
+
+	/*	
+	   Used by miscellaneous charge assessment routines; this utility
+	   either creates a new payment record for the amount assessed, or
+	   updates an existing record with the same amount.
+	
+	   KEYWORDS: Loans
+	
+	   ARGUMENTS
+	   . ln		Loan Object			/TYP=RecordLN/REQ/REF:R
+
+	   . BLDU  Payment due date			/TYP=D/REQ
+	     The date the new (or existing
+	     payment) record is due.
+	
+	   . ELE  Payment element			/TYP=T/REQ
+	
+	   . AMT  Amount due				/TYP=$/REQ
+	     The element ELE amount assessed.
+	
+	   RETURNS
+	   . Payment record due BLDU
+	
+	   EXAMPLE
+	   Called by ^LNPTS8 to create a payment record when so
+	   indicated by value of [LNFEEP]APRF in fee plan.
+	
+	  ----------------------------------------------------------------------
+	
+	*/
+	type public Date DFP, SCHLD
+	type public Number BALINT, SCHNUM, SCHSEQ
+	
+	type Boolean NEW = 0, Q = 0
+	type Number SAV(), SEQ, X
+
+	// Build an array with bill sequences one later and one earlier than due date
+	type ResultSet rs = Db.select("SCHSEQ,CDPD","LNBIL1","CID=:ln.cid","SCHSEQ DESC")
+
+	while rs.next() do { quit:Q
+		
+		set SAV(rs.getCol("CDPD")) = rs.getCol("SCHSEQ")
+		
+		if (rs.getCol("CDPD") '> BLDU) , (rs.getCol("SCHSEQ") '> ln.oseq) set Q = 1
+		}
+	
+	// Return sequence number for a payment record. The NEW flag indicates
+	// whether this is a new or exisiting record.
+	set SEQ = $$BLNEW(.ln, BLDU, .NEW, SAV())
+	
+	// Create or update a payment record
+	type RecordLNBIL1 lnbil1 = Db.getRecord("LNBIL1", "CID = :ln.cid, SCHSEQ = :SEQ", 1)
+
+	type RecordLNBIL0 lnbil0 = Db.getRecord("LNBIL0", "CID = :ln.cid")
+	
+	// Cutoff date
+	set lnbil1.cbcd = %SystemDate
+
+	// Due date
+	set lnbil1.cdpd = BLDU
+
+	// Balance
+	set lnbil1.copb = $select(BALINT.exists():BALINT,1:ln.balint)
+
+	// Interest rate
+	set lnbil1.cirn = ln.irn
+
+	// Populate LNBIL1 payment elements with data from LNBIL0
+	set X=$$NEWBILL^BILFUNCS(.lnbil1,.lnbil0)
+	
+	// Save bill information before calling into CALC^LNUBIL to update account
+	do lnbil1.bypassSave()
+
+	// Insert the assessment amount in the bill fees record
+	type RecordLNBIL5 lnbil5 = Db.getRecord("LNBIL5","CID = :ln.cid,SCHSEQ = :SEQ,DUEAMT = '1',FEETYP = :ELE",1)
+
+	// Fee $ Total
+	set lnbil5.bfamt = lnbil5.bfamt + AMT
+
+	// Fee $ Remaining
+	set lnbil5.brfamt = lnbil5.brfamt + AMT
+
+	do lnbil5.bypassSave()
+	
+	// If creating new bill, update scheduled info before call to LNUBIL
+	if NEW do {
+		
+		// Increase scheduled payment number by 1
+		set SCHNUM = ln.schnum + 1
+		set ln.schnum = SCHNUM
+	
+		// Redefine date of first payment ([LN]DFP) if new
+		// due date is less than current value
+		if (BLDU < ln.dfp) do {
+			set DFP = BLDU
+			set ln.dfp = BLDU
+			}
+	
+		// Redefine schedule sequence and last date if sequence number
+		// of new bill is greater than the current value of [LN]SCHSEQ
+		if (SEQ > ln.schseq) do {
+
+			// Note: Variables SCHLD and SCHSEQ must be 
+			// redefined here. Used later in LNPTS* utilities.
+			set SCHLD = BLDU
+			set ln.schld = SCHLD
+	
+			set SCHSEQ = SEQ
+			set ln.schseq = SCHSEQ
+			}
+		}
+	
+	// Last, account array because new payment record added
+	do CALC^LNUBIL(.ln, "01001")
+	
+	quit 
+	
+
+BLNEW(RecordLN ln,
+      Date BLDU,
+      Boolean NEW,
+      Number SAV)
+
+	/*	
+	   If bill already out there with same due date, return the sequence
+	   number of that bill.  Otherwise find number half way between sequences
+	   one later and one earlier than due date.
+	
+	   ARGUMENTS:
+	   . BLDU  Payment due date				/TYP=D/REQ
+	     The date the new (or existing
+	     payment) record is due.
+	
+	   . NEW   New record indicator				/TYP=L/MECH=REFNAM:W
+	     Returns "0" if sequence number
+	     returned already exists in
+	     payment file, or "1" if a new
+	     sequence.
+	   
+	   . SAV() Array of bill dates and sequences		/TYP=N/NOREQ
+	
+	   RETURNS:
+	   . $$  Sequence number				/TYP=N
+
+	*/
+	type Number HI, LASTSEQ, LOW, N
+	
+	// Is sequence already out there in bill file?
+	if 'SAV(BLDU).get().isNull() quit SAV(BLDU)
+	
+	set NEW = 1
+
+	// Determine sequence that precedes (LOW) and exceeds (HI)
+	set LOW = SAV(BLDU + 1).order(-1)
+	
+	if LOW.isNull() set LOW = 0
+	else  set LOW = SAV(LOW)
+	
+	set HI = SAV(BLDU).order()
+	
+	if HI.isNull() do { quit N
+		
+		set N = ln.bseq
+		
+		set LASTSEQ = +Db.currVal("LNBIL1","ln.cid")
+		
+		if (N '> LASTSEQ) set N = LASTSEQ
+		
+		set N = N + 1
+		}
+	
+	set HI = SAV(HI)
+	
+	quit (HI - LOW) / (2 + LOW)
+
+
+public	DIFFBL(Number FROM,
+	       Number TO)	// Returns number of bills betweed two sequences
+
+	/*
+	
+	   ARGUMENTS:
+	   . FROM  From payment sequence	/TYP=N/REQ
+	
+	   . TO  To payment sequence		/TYP=N/REQ
+	
+	   INPUT
+	   . CID  Account number		/TYP=N/REQ
+	
+	   RETURNS:
+	   . $$  Records between FR-TO		/TYP=N
+	
+	   EXAMPLE
+	
+	   Assume sequences 1, 2, 3, and 4 are on file.
+	
+		FROM 	TO 	Difference	PDS
+		 2	 1	 1		 -2 (Delinquent)
+		 2	 2	 0		 -1 (Due)
+		 2	 3	 1		  0 (Current)
+		 2	 4	 2		  1 (Advance)
+	   
+	   Assume no sequences are on file.
+	   	FROM	TO	Difference	PDS
+	   	 0	 1	 1		  0 (Current)
+	   	
+	*/
+	type public Number CID
+	
+	type Number CNT,SEQ,TMP
+	type String BL(,)
+
+	set CNT = 0
+
+	if 'FROM set FROM = 0
+	if 'TO set TO = 999999	
+	
+	if (TO < FROM) set TMP = TO set TO = FROM set FROM = TMP
+
+	// Load bills from disk
+	type ResultSet rs = Db.select("SCHSEQ","LNBIL1","CID=:CID and SCHSEQ>:FROM and SCHSEQ<=:TO")
+	while rs.next() do {
+		set SEQ=rs.getCol("SCHSEQ")
+		set BL(CID,SEQ)=""
+		}
+		
+	// Collate through the bills, stop at TO bill
+	set SEQ=FROM
+	for  quit:SEQ'<TO  set CNT=CNT+1,SEQ=BL(CID,SEQ).order() quit:SEQ.isNull()
+
+	quit CNT
+
+
+public	PDS(Number DSEQ,
+	    Number SCHSEQ)	// Find Payment Due Status
+
+	/*
+	   Payment processing routines require a number which measures the
+	   distance between what the borrower has satisfied (DSEQ) and what
+	   should have been satisfied (SCHSEQ).  This value will be 1 less
+	   than the count returned by the DIFFBL subroutine.
+	
+	   ARGUMENTS
+	   . DSEQ  	Payment due sequence		/TYP=N/REQ
+	
+	   . SCHSEQ 	Scheduled due sequence		/TYP=N/REQ
+	
+	   RETURNS
+	   . $$  The payment due status			/TYP=N
+	
+	*/
+
+	type Number DIFF = $$DIFFBL(SCHSEQ, DSEQ)
+	
+	if (SCHSEQ > DSEQ) set DIFF = DIFF * (-1)
+	
+	quit (DIFF - 1)
+	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60522^71124^Pat Kelly^8496"	// Signature - LTD^TIME^USER^SIZE

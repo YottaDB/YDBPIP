@@ -1,0 +1,164 @@
+URSCH		/*
+	   DESC:  Rate Schedule Utilities
+	   ORIG:  SOMPALLI - 26 MAR 1991
+
+	---- Revision History -------------------------------------------------
+	
+	08/22/06 - PUTTASWH - 22712
+		   Modified EOM section to replace the reference of SCT
+		   with TTL file.
+	
+	11/24/05 - ALAGARSS - CR16677
+		   Added the section EOM from the Procedure SCARPTS.
+	           
+	11/14/02 - ZWITKOWITSM - 43583
+		   PSL clean-up.
+
+	06/13/02 - ZWITKOWITSM - 43583
+		   Converted to PSL.
+
+	06/12/01 - AHMEDS - 44645
+		   Modified the OPT0 section to quit if value of STRM is NULL.
+		   Previously, filing a new CD segmented account with
+		   DEP.SCH (New Account Rate Schedule) defined caused a null
+		   subscript error when STRM is NULL.
+
+	-----------------------------------------------------------------------
+	*/
+
+	quit
+
+
+Public RSCH(SCH,BAL,%EffectiveDate,MDT,SPREAD,RNDOPT)	// Returns rate (IRN) based upon rate schedule
+
+	type public Boolean ER
+	type public Number IRN,TRM
+
+	// These parameters must be defined
+	if $G(SCH)="" quit ""
+	if %EffectiveDate="" quit ""
+	if $G(MDT)="" quit ""
+
+	type RecordUTBLRATE utblrate=Db.getRecord("UTBLRATE","SCH",1)
+
+	// No rate schedule
+	if utblrate.getMode()=0 quit ""
+
+	// Define parameters
+	set BAL=+BAL
+	set SPREAD=$G(SPREAD)
+	if $G(RNDOPT)="" set RNDOPT=utblrate.ropt
+
+	// Define term based upon term definition option TINT
+	if utblrate.tint="M" set TRM=$$NOM^SCADAT(%EffectiveDate,MDT,1)
+	else  if utblrate.tint="Y" set TRM=$$NOY^SCADAT(%EffectiveDate,MDT,1)
+	else  set TRM=MDT-%EffectiveDate
+
+	// Calculate rate
+	if utblrate.copt=1 set IRN=$$OPT1(SCH,%EffectiveDate,TRM,BAL)
+	else  set IRN=$$OPT0(SCH,%EffectiveDate,TRM,BAL)
+
+	// Do not round if rate is null
+	if IRN="" quit ""
+
+	new X
+
+	set X=SPREAD
+
+	// pattern check spread, uses variable X for spread.
+	do SPRPP^UINDX
+
+	if ER quit
+
+	// apply spread
+	if $E(SPREAD,1)="+" set IRN=IRN+$E(SPREAD,2,99)
+	else  if $E(SPREAD,1)="-" set IRN=IRN-$E(SPREAD,2,99)
+	else  if $E(SPREAD,1)="*" set IRN=IRN*$E(SPREAD,2,99)
+	else  if $E(SPREAD,1)="/" set IRN=IRN/$E(SPREAD,2,99)
+	else  set IRN=IRN+SPREAD
+
+	// Round according to rounding indicator
+	quit +$$^SCARND($$RND^UINDX(IRN,RNDOPT),0,"","",5)
+
+
+OPT0(SCH,JD,TRM,BAL)
+	/*
+	  Return rate corresponding to the term and balance tier values
+	  closest to but not greater than the account parameters.
+	*/
+
+	type ResultSet rs=Db.select("RATEXBAL","RATE1","SCH=:SCH AND EFD NOT >:JD AND TERM NOT >:TRM AND MBALTERM NOT >:BAL","EFD DESC, TERM DESC, MBALTERM DESC")
+
+	if rs.isEmpty() quit ""
+
+	if rs.next() quit +rs.getCol(1)
+
+	quit ""
+
+
+OPT1(SCH,JD,TRM,BAL)
+	/*
+	  Calculate interpolated rate based upon the term tier one
+	  greater and one less than the account's term.
+	*/
+
+	new RATE1,RATE2,TEFD,TERM1,TERM2
+
+	// find rate and term less than or equal to term and bal
+	type ResultSet rs=Db.select("RATEXBAL,EFD,TERM","RATE1","SCH=:SCH AND EFD NOT >:JD AND TERM NOT >:TRM AND MBALTERM NOT >:BAL","EFD DESC, TERM DESC, MBALTERM DESC")
+
+	if rs.isEmpty() quit ""
+
+	if rs.next() do {
+		set RATE1=rs.getCol(1)
+		set TEFD=rs.getCol(2)
+		set TERM1=rs.getCol(3)
+		}
+
+	// find rate and term above previous search for TEFD and bal
+	type ResultSet rs1=Db.select("RATEXBAL,TERM","RATE1","SCH=:SCH AND EFD=:TEFD AND TERM>:TERM1 AND MBALTERM NOT >:BAL","MBALTERM DESC")
+
+	if rs1.isEmpty() quit RATE1
+
+	if rs1.next() do {
+		set RATE2=rs1.getCol(1)
+		set TERM2=rs1.getCol(2)
+		}
+
+	quit RATE1+(((RATE2-RATE1)/(TERM2-TERM1))*(TRM-TERM1))
+	
+public	EOM	
+
+	// End of month post-processor for Monthly Effective Rate Report 
+	// (SCA243)
+	
+	type public String %MSKD, X
+	
+	type Date BOM, EOM, JD
+
+	quit:X.isNull()
+	
+	set JD = X.toDate(%MSKD.get())
+	if JD < 0 quit
+	
+	set EOM = $$EOMJD^SCADAT(JD, 1)
+	
+	// Not end-of-month
+	if JD '= EOM do Runtime.setErrMSG("TTL", 4859) quit
+	
+	set BOM = $$EOMJD^SCADAT(JD, 1)
+	
+	type ResultSet rs1 = Db.select("DISTINCT TJD", "TTL", "TJD=:BOM")
+	
+	// TTL file does not exist for beginning-of-month
+	if rs1.isEmpty() do Runtime.setErrMSG("TTL", 2762) quit
+	
+	type ResultSet rs2 = Db.select("DISTINCT TJD", "TTL", "TJD=:EOM")	
+	
+	// TTL file does not exist for end-of-month
+	if rs2.isEmpty() do Runtime.setErrMSG("TTL", 2763) quit
+	
+	quit
+	
+
+vSIG()	quit "60500^19513^Hema Puttaswamy^3996"	// Signature - LTD^TIME^USER^SIZE

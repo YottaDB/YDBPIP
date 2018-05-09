@@ -1,0 +1,262 @@
+LNEACLST	// Closed/Paidoff Loan Account Escrow History Statement
+
+	/*
+
+	---- Revision History ------------------------------------------------
+	
+	02/15/07 - RussellDS - CR25382
+		   Eliminated use of obsoleted routine DBSQRYA.
+
+	02/14/06 - SWARNALP - 18338
+		   Replaced the Q() array with dynamic sql statements in 
+		   sections LNEACLST and VQUERY9.
+		   Modified VKEYS section to call VEXITZ section even after 
+		   processing all the required closed/paidoff loan accounts.
+		   Corrected GETESC section to extract the Escrow 
+		   description and Escrow CID separately in distinct variables.
+		   Modified GETESC and PRANSTM sections to correct the report 
+		   calling functionality.  
+	
+	12/10/03 - CARROLLJ - CR7239
+		   Added #ACCEPT prior to setting %SystemDate.
+
+	11/12/02 - CARROLLJ - 43583
+		   PSL conversion cleanup.
+
+	04/15/02 - KRISHNAG - ARQ# 49794
+		      Converted to PSL
+
+	*/
+
+	kill %TAB,CID,CLS,GRP,OLNTB,QI,TYP,WHERE
+
+	set TJD=$$KEY^DBSREP("DTJCL","",1,"D")
+	
+	set (GRP,TYP,CID)="ALL"
+	
+	set OLNTB=31 
+	#ACCEPT DATE=12/10/03;PGM=John Carroll
+	set:'$D(%InputTimeOut) %InputTimeOut=300 
+	set:'$D(%LIBS) %LIBS="SYSDEV"
+
+	set SEQBY="[SYSDEV,DTJCL]TJD|[SYSDEV,DTJCL]CLS|[SYSDEV,DTJCL]GRP|[SYSDEV,DTJCL]TYP|[SYSDEV,DTJCL]CID|"
+	
+	set %TAB("TJD")=".XJD1/HLP=[DTJCL]TJD/TBL=[DTJCL]TJD:DISTINCT:QU/XPP=D EXT^DBSQRY"
+	set %TAB("GRP")=".LPG/HLP=[DTJCL]GRP/XPP=D EXT^DBSQRY"
+	set %TAB("TYP")=".QI1/HLP=[DTJCL]TYP/XPP=D EXT^DBSQRY"
+	set %TAB("CID")=".ACCOUNTS1/HLP=[DTJCL]CID/XPP=D EXT^DBSQRY"
+	
+	set %TAB("IO")=$$IO^SCATAB 
+	set:'$D(IO) IO=$I
+
+	set %READ="@@%FN,,,TJD/REQ,GRP/REQ,TYP/REQ,CID/REQ,IO"
+
+	if $D(%NOOPEN) set %READ=%READ.piece(",",2,99)
+	if $G(%MODE)="B",%READ="IO#1"
+
+	do ^UTLREAD 
+	kill zRN
+
+	if VFMQ="Q" quit
+
+VQUERY9	//
+
+	type public Date TJD
+	
+	type Number SEQ
+	type String DQQRY(), CID, CLS, GRP, TYP, WHERE
+	
+	set SEQ = 1
+	if 'TJD.get().isNull() do {
+		set DQQRY(SEQ) = "[DTJCL]TJD "_TJD
+		set SEQ = SEQ + 1
+	}
+	if 'GRP.get().isNull(), (GRP '= "ALL") do {
+		set DQQRY(SEQ) = "[DTJCL]GRP "_GRP
+		set SEQ = SEQ + 1
+	}
+	if 'TYP.get().isNull(), (TYP '= "ALL") do {
+		set DQQRY(SEQ) = "[DTJCL]TYP "_TYP
+		set SEQ = SEQ + 1
+	}
+	if 'CID.get().isNull(), (CID '= "ALL") do {
+		set DQQRY(SEQ) = "[DTJCL]CID "_CID
+		set SEQ = SEQ + 1
+	}
+	
+	set WHERE = $$WHERE^SQLCONV(.DQQRY(), "DTJCL")
+	if WHERE="" set WHERE="CLS='L'"
+	else  set WHERE="CLS='L' AND "_WHERE
+
+	do OPEN^SCAIO 
+
+	quit:ER  
+	use IO
+
+	
+VKEYS	// Record Access Routine
+	
+	set (STCNT,PCNT)=0
+	
+	#ACCEPT DATE=12/10/03;PGM=John Carroll
+	type ResultSet rs=Db.select("TJD,CLS,GRP,TYP,CID","DTJCL",WHERE)
+	if 'rs.isEmpty() do {
+		while rs.next() do {
+			new %SystemDate
+			#ACCEPT DATE=12/10/03;PGM=John Carroll
+			set %SystemDate=rs.getCol(1)
+			set CLS=rs.getCol(2)
+			set GRP=rs.getCol(3)
+			set TYP=rs.getCol(4)
+			set CID=rs.getCol(5)
+			do GETESC(CID)
+			}
+		}
+	do VEXITZ
+	
+	quit
+
+
+GETESC(CID)	// Record Access - Escrow Account
+	
+	new LCID
+	set LCID=CID
+	
+	type RecordLN ln=Db.getRecord("LN","CID=:LCID")	
+
+	// Not set up for analysis
+	if 'ln.aflg quit
+
+	for I=1:1:5 set NM(I)=""
+	set NM="NM"
+	do ^UTLADDR(,.NM,5,2,"ACN",LCID)
+
+	// Analysis Frequency
+	set APCND=ln.apcnd
+	set APCLD=ln.apcld
+	set ANFRE=ln.anfre
+
+	set EJD=%SystemDate
+	set HIT=0
+	set ECID=""
+		
+	// Return escrow account number
+	
+	new ESC,ESCINF
+
+	type RecordLNBIL0 lnbil0=Db.getRecord("LNBIL0","CID=:CID")
+
+	set ELENUM=0
+	for  set ESCINF=$$ESCACT^BILFUNCS(.lnbil0,.ELENUM) quit:ESCINF=""  do {
+
+		set ECID=ESCINF.piece($C(9),1)
+		if ECID="" quit
+		set ESC=ESCINF.piece($C(9),2)
+
+		// Self-pay flag
+	
+		if $$ESCSPF^LNU(ECID) quit
+
+		set BJD=APCLD
+		if 'BJD do {
+			set FRE="-"_ANFRE
+			set JD=APCND
+		
+			set BJD=$$NJD^UFRE(JD,FRE)
+	
+			set ODT=ln.odt
+
+			if BJD<ODT set BJD=ODT
+
+			if BJD>EJD set BJD=%SystemDate
+			}
+
+		// If the escrow account was closed prior to the last analysis a
+		// statement need not be printed.
+
+		type RecordDEP dep=Db.getRecord("DEP","CID=:ECID")
+
+		if dep.stat=4,dep.dtc<BJD quit
+	
+
+		//   Print Detail Information
+
+		if 'HIT set STCNT=STCNT+1,HIT=1,PGN=0
+		else  set HIT=1
+
+		set SAVTJD=%SystemDate
+		set SAVCLS=CLS
+		set SAVTYP=TYP
+		set SAVGRP=GRP
+		set SAVCID=CID
+
+		set %NOCLOSE=""
+		set %BLK="/,"_IO_","_CID
+		
+		type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+		set RID=cuvar.ehds
+
+		if RID="" set RID="SCA042C"
+
+		do DRV^URID
+		
+		if PGM="" set ER=1 set ET="INVLDRPT" do ^UTLERR quit
+
+		#ACCEPT DATE=12/10/03;PGM=John Carroll
+		set %SystemDate=SAVTJD
+		set CLS=SAVCLS
+		set TYP=SAVTYP
+		set GRP=SAVGRP
+		set CID=SAVCID
+
+		set ANDT=dep.andt
+	
+		// No previous projection
+		if 'ANDT quit     	
+	
+		do PRANSTM(ANDT,LCID,ECID)
+		}
+	quit
+
+PRANSTM(ANDT,LCID,ECID)	// Print Prior Analysis projection
+
+	
+	if 'Db.isDefined("LNESTMT2","ANDT=ANDT,LCID=:LCID,ECID=:ECID") quit
+
+	set %NOCLOSE=""
+	set %BLK="/,"_IO_","_ANDT_","_LCID_","_ECID
+
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+	set RID=cuvar.eapps
+
+	if RID="" set RID="SCA042B"
+
+	do DRV^URID 
+
+	if PGM="" set ER=1,ET="INVLDRPT" do ^UTLERR quit
+
+	#ACCEPT DATE=12/10/03;PGM=John Carroll
+	set %SystemDate=SAVTJD
+	set CLS=SAVCLS
+	set TYP=SAVTYP
+	set GRP=SAVGRP
+	set CID=SAVCID
+	
+	quit
+
+VEXITZ	//
+	
+	// I18N=OFF  Excluded from I18N Standards
+	
+	set ER=0
+	
+	write #!!!!!,$$^MSG("4992"),STCNT
+	write !,$$^MSG("4991"),PCNT,# do CLOSE^SCAIO
+
+	kill %NOOPEN,%NOCLOSE,%NOSORT,%ALTFID,%BPSTOCT,VBPSTOCT,VTOTREC
+
+	// I18N=ON   Included to I18N Standards
+	
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60712^46296^Dan Russell^5053"	// Signature - LTD^TIME^USER^SIZE

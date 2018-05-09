@@ -1,0 +1,377 @@
+LETTER		/* Walton 6/2000
+ 
+	   This procedure creates system generated letters to DocuCorp on
+	   a daily basis.  There are several batch definition calls which
+	   created a letter(s) based on established criteria, most of
+	   which stem from DAYEND tables produced through triggers.  All
+	   letter records are stored in the LETTER table keyed by date, 
+	   company code, form ID, and variation. This table is used to
+	   create the flat file which is sent to DocuCorp.
+
+	   The top of the routine is called by the function @LETTERONE
+	   to produce one form for extraction by a user.  This will
+	   create a single extract file in the spool with the naming
+	   convention co_LETTER_form_MMDDYY.EXT (where <form> is the Form ID
+	   selected for extraction).  Once a form is printed, the form
+	   will not be valid again for extraction until the next day. 
+
+	   The function @LETTERALL is to be placed in the dayend queue
+	   and calls the tagline %EXT.  This extracts all forms that have 
+	   not been produced by @LETTERONE.  This will create a single
+	   extract file in the spool with the naming convention
+	   co_LETTER_ALL_MMDDYY.EXT
+
+	   This will also file entries in the LETTERTOT table for total
+	   letters produced base on variations. 
+
+        ---Revision History---------------------------------------------
+
+	12/07/05 Radhika - CR 17423
+		 .Eliminated PSL deprecated features and warnings.
+		 .Removed revision history prior to 2004.
+		 .Removed commented code lines.
+        */
+ 
+        // Call top of procedure to create flat file for one form
+ 
+	type Date XTJD
+	type String CO,FORM,MSG,%READ,%TAB,VFMQ,XIO
+ 
+	set XTJD=%SystemDate
+
+	set %TAB("XTJD")=".EFD2"
+	set %TAB("XIO")=$$IO^SCATAB()
+
+	set %TAB("CO")="[UTBLCO]CO/TBL=[UTBLCO]/REQ"
+	set %TAB("FORM")="[UTBLFORMS]FORM/TBL=[UTBLFORMS]/XPP=D POST^LETTER(X,CO)/REQ"
+
+	set %READ="@@%FN/CEN/REV,,XTJD,CO,FORM,XIO/NOREQ/XPP=I X'="""" S %EXT=1 D ^SCAIO"
+        do ^UTLREAD quit:VFMQ="Q"
+ 	
+        do %EXT(CO,FORM,XIO,XTJD)
+        quit
+
+LETALL	//
+	
+	type public Date XTJD
+	type public String COMPANY,XFORM,XIO
+	type String %READ,%TAB,MSG,VFMQ
+	
+        set XFORM="ALL"
+	set XTJD=%SystemDate
+        set COMPANY=CUVAR.co
+	 
+	// 12/15/00 - myersk - set XTJD before calling POST^LETTER
+	set %TAB("XTJD")=".EFD2/XPP=set XTJD=X do POST^LETTER(XFORM,COMPANY)"
+        set %TAB("XIO")=$$IO^SCATAB("XIO")
+        set %READ="@@%FN/CEN/REV,,XTJD,XIO/NOREQ/XPP=I X'="""" set %EXT=1 do ^SCAIO"
+        do ^UTLREAD quit:VFMQ="Q"
+ 
+        do %EXT("",XFORM,XIO,XTJD)
+        quit
+
+%EXT(Number XCO,String XFORM,String XIO,Date XTJD)        // External entry call
+
+	type public String COMPANY,REC995(),R995
+	type public Number REJTOT,REJFEE
+	type Number del,REJCNT,SEQ,XVAR
+	type Boolean FIX
+	type Date Dt,TIME
+	type String REC
+		
+        catch vERROR {
+                type String ET,RM
+                set ET=vERROR.type
+                if ET["%GTM-" do ZE^UTLERR quit
+  
+                set ET=ET_"-"_vERROR.thrownAt
+                set RM=vERROR.description
+                do ^UTLERR
+                }
+ 
+	set FIX=CUVAR.letfix
+	set del=CUVAR.letdel
+
+	// 12/15/00 - myersk
+	// No longer newing XTJD; only set XTJD if it isn't already set
+	set:XTJD.get()="" XTJD=%SystemDate
+	set Dt=%CurrentDate.toString("MMDDYY")
+	set TIME=%CurrentTime.toString("2460")
+	set (REJCNT,REJTOT,REJFEE)=0
+      
+	type IO io=Class.new("IO")
+	set COMPANY=CUVAR.co
+
+	if XIO.get().isNull() set XIO=COMPANY_"_LETTER_"_XFORM_"_"_Dt_".EXT"
+	else  set io.directory=""
+
+	set io.fileName=XIO
+	set io.recordSize=1000
+	set io.openParams="WRITE/NEWV"
+	
+	set SEQ=0
+	do io.open()
+
+	if XFORM="ALL" do ALL(.io) if 1
+	else  do ONE(.io,XCO,XFORM)
+
+	// myersk/ofaltr 45845 - write 995 Records
+	set (R995,XCO,XFORM,XVAR)=""
+	for  set XCO=REC995(XCO).order() quit:XCO.isNull()  do {
+		for  set XFORM=REC995(XCO,XFORM).order() quit:XFORM.isNull()  do {
+			for  set XVAR=REC995(XCO,XFORM,XVAR).order() quit:XVAR.isNull()  do {
+				set R995=$$R995()
+				do io.write(.R995)
+				set SEQ=SEQ+1
+				}
+			}
+		}
+		
+	// Trailer record with number of lines including trailer record
+	if FIX set REC=$$ZERO^FIL(SEQ+1,13)_XTJD.toString("MMDDYEAR")
+	else  set REC=(SEQ+1)_del_XTJD.toString("MMDDYEAR") 
+	do io.write(.REC)
+
+        do io.close()
+
+	quit
+
+ALL(IO io)	// Prints all forms to extract file
+
+	type public Date XTJD
+	type public String XCO,XFORM
+	type public Number del,XCID,REJCNT,REJTOT,REJFEE,SEQ,XVAR
+	type public Boolean FIX
+	type Boolean ACNSORT,FLG
+	type String REC1,RECTYPES,REC
+	type Number FL625,TOTAL
+	
+	type ResultSet rs2=Db.select("DISTINCT CO","LETTER","SJD=:XTJD")
+	if 'rs2.isEmpty() while rs2.next() do {
+		set XCO=rs2.getCol("CO")
+		set ACNSORT=0		
+
+		type ResultSet rs3=Db.select("DISTINCT FORM","LETTER","SJD=:XTJD AND CO=:XCO")
+		if 'rs3.isEmpty() while rs3.next() do {
+			set XFORM=rs3.getCol("FORM")
+			
+			type RecordLETTER0 lett=Db.getRecord("LETTER0","SJD=:XTJD,CO=:XCO,FORM=:XFORM",1)
+			if lett.getMode() set FLG=lett.flg quit				
+			
+			type ResultSet rs4=Db.select("DISTINCT VAR","LETTER","SJD=:XTJD AND CO=:XCO AND FORM=:XFORM")
+			if 'rs4.isEmpty() while rs4.next() do {
+				set XVAR=rs4.getCol("VAR")
+				set TOTAL=0
+
+				type RecordUTBLFORMVAR frmvr=Db.getRecord("UTBLFORMVAR","CO=:XCO,FORM=:XFORM,VAR=:XVAR")
+				set ACNSORT=frmvr.acnsort
+				set RECTYPES=frmvr.rectypes
+				if (RECTYPES[625) set FL625=1
+				else  set FL625=0
+
+				type ResultSet rs5=Db.select("RECORD,CID","LETTER","SJD=:XTJD AND CO=:XCO AND FORM=:XFORM AND VAR=:XVAR")
+				if 'rs5.isEmpty() while rs5.next() do {
+					set REC=rs5.getCol("RECORD") 
+					if REC.extract(1,3)="TRN" do {
+						set TOTAL=TOTAL+1
+						if REJCNT'>0 quit
+						set REC1=$$625^LETTERF(XCID)
+						set SEQ=SEQ+1
+						if 'FIX set REC1=REC1.translate("~",del)
+						do io.write(.REC1)
+						set (REJCNT,REJTOT,REJFEE)=0
+						}
+					set XCID=rs5.getCol("CID")
+					if FL625=1,REC.extract(1,3)=620 do {
+						set REJCNT=REJCNT+1
+						set REJTOT=(REJTOT+REC.extract(44,56))/100
+						set REJFEE=(REJFEE+REC.extract(57,69))/100
+						}
+					if 'FIX set REC=REC.translate("~",del)
+					do io.write(.REC)
+                                        set SEQ=SEQ+1
+					}
+
+				if FL625,REJCNT>0 do {
+					set REC1=$$625^LETTERF(XCID)
+					set SEQ=SEQ+1
+					if 'FIX set REC1=REC1.translate("~",del)
+					do io.write(.REC1)
+					set (REJCNT,REJTOT,REJFEE)=0
+					}
+
+				do TOT(.io,TOTAL)
+				}
+
+		do LETZERO(XTJD,XCO,XFORM)
+		}
+	}
+
+	quit
+
+ONE(IO io,String XCO,String XFORM)	// Prints one form to an extract file
+	
+	type public Date XTJD
+	type public Number del,REJCNT,REJTOT,REJFEE,SEQ,XCID,XVAR
+	type public Boolean FIX
+	type Boolean ACNSORT
+	type String RECTYPES,REC,REC1
+	type Number FL625,TOTAL
+	
+	set ACNSORT=0
+	if XFORM="NEWACCT" set ACNSORT=1
+
+	type RecordLETTER0 letts=Db.getRecord("LETTER0","SJD=:XTJD,CO=:XCO,FORM=:XFORM",1)
+	if letts.getMode() quit				
+	
+	type ResultSet rs6=Db.select("DISTINCT VAR","LETTER","SJD=:XTJD AND CO=:XCO AND FORM=:XFORM")
+	if 'rs6.isEmpty() while rs6.next() do {
+		set XVAR=rs6.getCol("VAR")
+		set TOTAL=0
+		type RecordUTBLFORMVAR frmr=Db.getRecord("UTBLFORMVAR","CO=:XCO,FORM=:XFORM,VAR=:XVAR")
+		set ACNSORT=frmr.acnsort
+		set RECTYPES=frmr.rectypes
+                if (RECTYPES[625) set FL625=1
+		else  set FL625=0
+
+		type ResultSet rs7=Db.select("RECORD,CID","LETTER","SJD=:XTJD AND CO=:XCO AND FORM=:XFORM AND VAR=:XVAR")
+		if 'rs7.isEmpty() while rs7.next() do {
+			set REC=rs7.getCol("RECORD")
+			if REC.extract(1,3)="TRN" do {
+				set TOTAL=TOTAL+1
+				if REJCNT'>0 quit
+				set REC1=$$625^LETTERF(XCID)
+				set SEQ=SEQ+1
+				if 'FIX set REC1=REC1.translate("~",del)
+				do io.write(.REC1)
+				set (REJCNT,REJTOT,REJFEE)=0
+				}
+			set XCID=rs7.getCol("CID")
+			if FL625=1,REC.extract(1,3)=620 do {
+				set REJCNT=REJCNT+1
+				set REJTOT=(REJTOT+REC.extract(44,56))/100
+				set REJFEE=(REJFEE+REC.extract(57,69))/100
+				}
+ 			if 'FIX set REC=REC.translate("~",del)
+                        do io.write(.REC)
+                        set SEQ=SEQ+1
+			}
+
+			if FL625,REJCNT>0 do {
+				set REC1=$$625^LETTERF(XCID)
+				set SEQ=SEQ+1
+				if 'FIX set REC1=REC1.translate("~",del)
+				do io.write(.REC1)
+				set (REJCNT,REJTOT,REJFEE)=0
+				}
+
+		do TOT(.io,TOTAL)
+		}
+
+	do LETZERO(XTJD,XCO,XFORM)
+
+	quit
+
+
+LETZERO(Date XTJD,String XCO,String XFORM)	// Builds LETTER0 after each form 
+	
+        type RecordLETTER0 let0=Class.new("RecordLETTER0")
+                        
+	set let0.sjd=XTJD
+        set let0.co=XCO
+        set let0.form=XFORM
+        set let0.flg=1
+                        
+	do let0.bypassSave()
+	quit
+
+POST(String XFORM,String XCO) 
+	
+	type public Date XTJD
+	type public String COMPANY
+	type Date Dt
+	type String CVAR,XIO
+	
+        if XTJD.get().isNull() set XTJD=%SystemDate
+        set Dt=XTJD.toString("MMDDYY")
+
+        if XFORM="ALL" set XIO=COMPANY_"_LETTER_ALL_"_Dt_".EXT"
+        else  set XIO=XCO_"_LETTER_"_XFORM_"_"_Dt_".EXT"
+
+	do DEFAULT^DBSMACRO("@XIO",XIO)
+	if XFORM="ALL" quit
+ 
+	type RecordLETTER0 letts=Db.getRecord("LETTER0","SJD=:XTJD,CO=:XCO,FORM=:XFORM",1)
+	//Form has already been printed today
+	if letts.getMode() do Runtime.setErrMSG("LETTER0",4451) quit
+					
+	set CVAR=Db.currVal("LETTER","XTJD,XCO,XFORM")
+	//No forms exist for today 
+	if CVAR.isNull() do Runtime.setErrMSG("LETTER",4452)
+	quit
+
+TOT(IO io,Number TOTAL)	//
+
+	type public Date XTJD
+	type public String REC995(),XCO,XFORM
+	type public Number XVAR
+	
+        type RecordLETTERTOT tot=Class.new("RecordLETTERTOT")
+        set tot.sjd=XTJD
+        set tot.extract=io.fileName
+        set tot.co=XCO
+        set tot.form=XFORM
+        set tot.var=XVAR
+        set tot.total=TOTAL
+        set tot.dat=%CurrentDate
+        set tot.tim=%CurrentTime
+
+	do tot.bypassSave()
+
+	// myersk/ofaltr 45845 - store total in local array
+	set REC995(XCO,XFORM,XVAR)=TOTAL
+
+	quit
+
+SORTACN(IO io,Date XTJD,String XCO,String XFORM,Number XVAR)	//
+
+	type public Boolean FIX
+	type public Number del,SEQ,TOTAL
+	type Number XACN
+	type String REC
+	// order by ACN then by RECTYP instead of ACN,CID,RECTYPE
+	type ResultSet rsACN=Db.select("DISTINCT ACN","LETTER","SJD=:XTJD AND CO=:XCO AND FORM=:XFORM AND VAR=:XVAR")
+	if rsACN.isEmpty() quit
+	while rsACN.next() do {
+		set XACN=rsACN.getCol("ACN")
+		type ResultSet rsACN1=Db.select("RECORD","LETTER","SJD=:XTJD AND CO=:XCO AND FORM=:XFORM AND VAR=:XVAR AND ACN=:XACN","RECTYPE")
+		if rsACN1.isEmpty() quit
+		while rsACN1.next() do {
+			set REC=rsACN1.getCol("RECORD")
+			if 'FIX set REC=REC.translate("~",del)
+                        do io.write(.REC)
+                        set SEQ=SEQ+1
+                        if REC.extract(1,3)="TRN" set TOTAL=TOTAL+1			
+			}
+		}
+	do TOT(.io,TOTAL)
+	quit
+
+
+R995(String REC)	//
+	
+	type public Boolean FIX
+	type public String REC995,XFORM,XCO
+	type public Number del,XVAR
+	type String R995
+	if FIX do {
+		set R995="995"_$$BLK^FIL(XCO,12)
+        	set R995=R995_$$BLK^FIL(XFORM,12)_$$ZERO^FIL(XVAR,3)
+        	set R995=R995_$$ZERO^FIL(REC995(XCO,XFORM,XVAR),13)
+		}
+
+	else  set R995=995_del_XCO_del_XFORM_del_XVAR_del_REC995(XCO,XFORM,XVAR)
+
+	quit R995
+
+vSIG()	quit "60298^29537^Radhika Panchanathan^10629"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,262 @@
+MRPC118(return,versn,TYPE,DES,INDEX,SCHEDULE)
+ 
+	/*
+	ORIG: ITIGIB - 01/09/2002
+
+	DESC: Interest Rate Displays
+	This procedure will return interest rates based on product type,
+	product description, interest index and rate schedule.
+	
+	ARGUMENTS:
+	
+	. return  length-value formatted string /TYP=T/REQ/MECH=REF
+	    	  containing $C(9) between columns
+	          and $C(13,10) between rows.  Columns
+	       	  returned are:
+
+		  - Product Type
+		  - Product Description
+		  - Term Interval
+		  - Rate Type ( "I"ndex or "R"ate Schedule)
+		  - Name of Index or Schedule
+		  - Sequence of Tier or Term
+		  - APY
+	          - Minimum Balance
+		  - Maximum Balance
+	          - Interest Rate
+		  - Tier
+		  - Term
+		  - Effective Date
+
+        . versn   version number           /TYP=N/REQ/MECH=VAL
+                  current version=1
+ 
+        . TYPE  comma-delimited string     /TYPE=T/REQ
+ 		of product types
+
+	. DES  comma-delimited string  	   /TYPE=T/NOREQ
+               of product descriptions
+
+        . INDEX   comma-delimited string   /TYPE=T/NOREQ
+                     of interest indexes
+ 
+        . SCHEDULE comma-delimited string  /TYPE=T/NOREQ
+                    of rate schedules
+ 	
+	RETURNS:
+                . $$      Error Message                 /TYP=T
+                          Null= No Error
+ 
+        RELATED:
+                . $$^PBSMRPC - MRPC Service Class Driver
+ 
+        EXAMPLE:
+	 S RM=$$^MRPC118(.ret,1,"300,310","sav,check","ind1,ind2","sch1,sch2") 
+
+	---- Revision History ------------------------------------------------
+	11/10/05 - Srinivar - 17989
+		   .Modified the RINDEX section by replacing
+		    the Db.prevKey() deprecated method and 
+		    replaced with Db.select().
+		  		     		   	
+	11/04/02 - JERUCHIMC - 51283 
+		   Modified section APY to pass TYPE rather than set it.
+
+	10/08/02 - JERUCHIMC - 51239 
+		   Retrofit of CR 1187. Modified APY section to set the 
+		   value of TYPE, as is expected by procedure DEPMOD.
+	
+	04/16/02 - ITIGIB - 48802:04
+	           Modified PTYPE section to get the values of
+		   IACM and ICF for each product type. 
+
+	03/28/02 - JERUCHIMC - 48802:03
+		   Newed IRN in section APY.  Prevents APY calculation
+	           from overriding IRN variable and causing this MRPC
+	           to return an invalid interest rate.  Also round
+		   APY to 2 decimal places for proper display.
+
+	03/14/02 - ITIGIB - 48802:02
+	           Modified section PTYPE to just return product
+		   type and description if both
+		   index and schedule are not passed in.
+		   Also, modified PTYPE to return blank row for 
+		   invalid product type. It will return all information for
+                   valid product type. Also, removed error messages for invalid
+		   index and schedule.
+
+	02/05/02 - ITIGIB - 48802:001
+		   Modified section PTYPE to return error
+		   messages if invalid or null input parameters are 
+		   passed in.	
+	*/
+	
+	
+ 
+	new DATA,DESCR,IACM,ICF,IND,L,PRODTYP,RM,SCH,TINT,TYPELEN
+	set (return,RM)=""
+
+	// Version number of client message is not compatible with server
+	if $G(versn)'=1 quit $$ERRMSG^PBSUTL($$^MSG(2951))
+ 
+	// Missing parameter
+	if $G(TYPE)="" quit $$ERRMSG^PBSUTL($$^MSG(8607))
+
+	// If no rate schedule, index, or description is passed
+	set INDEX=$G(INDEX),SCHEDULE=$G(SCHEDULE),DES=$G(DES)
+	
+	// Get number of product types
+	set TYPELEN=$L(TYPE,",")
+
+	// Loop through parameters to build return string
+	for L=1:1:TYPELEN  do {		
+		if RM'="" quit
+
+		set PRODTYP=$P(TYPE,",",L)
+		// Missing parameter
+		if PRODTYP="" set RM=$$^MSG(8607) quit
+
+		// Check for valid product type
+		if (PRODTYP'=""),(Db.isDefined("PRODDFTD","PRODTYP")) do {
+
+			set DESCR=$P(DES,",",L)
+			set IND=$P(INDEX,",",L)
+
+			// Get the values of IACM and ICF to calculate APY
+		        set DATA=Db.getOneRow("IACM,ICF","PRODDFTD","PRODTYP")
+        		set IACM=$P(DATA,$C(9),1)
+ 
+		        // Use 1YA if no compounding frequency is defined
+        		set ICF=$P(DATA,$C(9),2)
+        		if ICF="" set ICF="1YA"
+			
+			// Check for valid Index Name
+			if '(IND=""),Db.isDefined("INDEX","IND") do RINDEX(PRODTYP,IND) 
+
+			set SCH=$P(SCHEDULE,",",L)
+		
+			// Check if both IND and SCH are not passed in.
+			if (IND=""),(SCH="") set return=return_PRODTYP_$C(9)_DESCR_$C(9)_$C(9)_$C(9)_$C(9)_$C(9)_$C(9)_$C(9)_$C(9)_$C(9)_$C(9)_$C(9)_$C(13,10)
+					
+			if '(SCH="") do {
+				// Check for valid rate schedule 
+				if Db.isDefined("UTBLRATE","SCH") do {
+					// Need to define term interval for APY calculation
+					set TINT=Db.getOneRow("TINT","UTBLRATE","SCH")
+					do RSCH(PRODTYP,SCH)
+					}
+				}
+			}
+		}
+	if RM'="" set return="" quit $$ERRMSG^PBSUTL(RM)
+
+	set return=$$V2LV^MSG(.return)
+	quit "" 
+
+RINDEX(PRODTYP,IND) // Rate Index
+ 
+	new rs,APY,BALST,EFD,IRN,MAXBAL,MINEXP,NXTMAX,NXTMINBL
+	new RATENAME,RATETYPE,SEQ,TIER,TINT,TRM
+	set (BALST,EFD,SCH,TRM,TINT)=""
+
+	// Get the most recent effective date that is not in the future
+	type ResultSet rs1=Db.select("EFD","INDEX0","INDEX=:IND AND EFD NOT>:%SystemDate","EFD DESC")
+	
+	if rs1.next() set EFD=rs1.getCol("EFD")
+	 
+	// Get Index values	
+	type ResultSet rs=Db.select("RMIN,EXPDATE,SEQ,RATE","INDEX1","INDEX=:IND AND EFD=:EFD","RMIN")
+	set SEQ=0
+
+	// First create a comma delimited string for all minbal
+	while rs.next() do {
+		set NXTMINBL=rs.getCol(1)
+		set MINEXP=rs.getCol(2)
+		set TIER=rs.getCol(3)
+		set IRN=rs.getCol(4)
+		// Skip non numeric tiers and non numeric expiration date
+		if ((NXTMINBL'=(+NXTMINBL))!((MINEXP'="")&(MINEXP'=(+MINEXP)))) quit
+		// Skip expired tiers
+		if MINEXP>0,MINEXP<%SystemDate quit
+		// Add to BALST (Balance String)
+		set BALST(NXTMINBL)=MINEXP_","_TIER_","_IRN
+	}
+
+		// Loop through BALST array, get next minimum balance
+		set NXTMINBL=""
+		for  set NXTMINBL=$O(BALST(NXTMINBL)) quit:NXTMINBL=""  do {
+			set NXTMAX=$O(BALST(NXTMINBL))		
+			/* Calculate Maximum Balance which is next highest minbal 
+			minus 1 penny.  At the highest tier, use "+" string */
+			if '(NXTMAX="") set MAXBAL=NXTMAX-.01
+			else  set MAXBAL="+"
+			set SEQ=SEQ+1
+			set TIER=$P(BALST(NXTMINBL),",",2)
+			set IRN=$P(BALST(NXTMINBL),",",3)
+			set APY=$$APY(IACM,ICF,IRN,TRM)
+			set RATETYPE="I"
+			set RATENAME=IND
+		
+			// Return information
+			set return=return_PRODTYP_$C(9)_DESCR_$C(9)_TINT_$C(9)_RATETYPE_$C(9)_RATENAME_$C(9)_SEQ_$C(9)_APY_$C(9)_NXTMINBL_$C(9)_MAXBAL_$C(9)_IRN_$C(9)_TIER_$C(9)_TRM_$C(9)_EFD_$C(13,10)
+			}
+	quit
+
+RSCH(PRODTYP,SCH) // Rate Schedule
+ 
+	new rs,APY,EFD,IRN,MAXBAL,MBALS,MBALTERM,MINBAL,RATENAME,RATETYPE
+	new SEQ,TRM
+	set (IND,MAXBAL,TIER)=""
+	
+	type ResultSet rs=Db.select("EFD,MBALTERM","RATE1","SCH=:SCH")
+	if 'rs.isEmpty() while rs.next() do {
+		set EFD=rs.getCol(1)
+		set MBALTERM=rs.getCol(2)
+
+		/* Define most recent effective date that is not in the future
+		For each minimum balance and store in MBALS array */
+		if $G(MBALS(MBALTERM))<EFD,'(EFD>%SystemDate) set MBALS(MBALTERM)=EFD
+		}
+
+	set MBALTERM="",SEQ=0
+
+	// For each minimum balance, return all terms
+	for  set MBALTERM=$O(MBALS(MBALTERM)) quit:MBALTERM=""  do {
+		// Get effective date
+		set EFD=MBALS(MBALTERM)
+		type ResultSet rs=Db.select("RATEXBAL,TERM","RATE1","SCH=:SCH and EFD=:EFD and MBALTERM=:MBALTERM")
+		if 'rs.isEmpty() while rs.next() do {
+			set IRN=rs.getCol(1)
+			set TRM=rs.getCol(2)
+			set MINBAL=MBALTERM
+			set APY=$$APY(IACM,ICF,IRN,TRM_TINT)
+			set RATETYPE="R"
+			set RATENAME=SCH
+			set SEQ=SEQ+1
+			// Return information 
+			set return=return_PRODTYP_$C(9)_DESCR_$C(9)_TINT_$C(9)_RATETYPE_$C(9)_RATENAME_$C(9)_SEQ_$C(9)_APY_$C(9)_MINBAL_$C(9)_MAXBAL_$C(9)_IRN_$C(9)_TIER_$C(9)_TRM_$C(9)_EFD_$C(13,10)
+			}
+		}
+	quit
+
+APY(iacm,icf,rate,trm)   // Calculate APY
+	
+	// Return APY as calculated from MRPC045
+ 
+	// Make sure IRN is newed here.  We don't want
+	// MRPC045 to reset IRN - just get an APY.
+	// When returning from this section, IRN should be
+	// as it was set from the product type. - 48802:03 - CAJ 03/28/02
+	new ret,EFD,ER,IRN
+	set (EFD,ER)=""
+	if +rate=0 quit 0
+	if trm="" set trm="1Y"
+
+	// Use sample amount of 1000 and pass the product type
+	set ER=$$^MRPC045(.ret,1,%SystemDate,iacm,icf,"",0,1000,,rate,trm,,,PRODTYP)
+	if ER'="" quit ""
+	set ER=$$LV2V^MSG(ret,.ret)
+	// Return APY, round to 2 decimal places
+	quit $$^SCARND($G(ret(6)),,,,2)
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60243^27564^Srinivasan, Rajesh^7907"	// Signature - LTD^TIME^USER^SIZE

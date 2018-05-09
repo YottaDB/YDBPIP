@@ -1,0 +1,271 @@
+IRSO98E		/*
+	ORIG: titove - 10/25/2005
+	DESC: IRS Processing - Form 1098-E Original
+
+	---- Comments --------------------------------------------------------
+			  THIS PROCEDURE IS TO BE COMPILED
+			      DO NOT RUN STANDALONE
+
+	I18N=QUIT: Excluded from I18N standards.
+
+	---- Revision History ------------------------------------------------
+	
+	05/15/06 - DESHPANDE S K - CR 21167
+		   Modified WRITE section. Changed the address variables to use 
+		   mailing address instead of permanent address.
+		   		
+	10/26/05 - TITOVE - CR 17287
+		   Converted into PSL. Removed pre-2005 revision history.
+	 
+	02/23/05 - DHANALAKSHMI R - 14638
+		   Modified the section CID to include the Loan 
+		   Origination Amount Fee in the Interest Paid Prior 
+		   Year.
+		   Modified the section WRITE to set field
+		   position 547 (BINTIND variable) to 1, if Recognize 
+		   Paid Int During Capitalization is 1 or Loan
+		   Origination Fee – Amount is defined.
+		   Modified the sections BRECBLD,WRITE and B1098E 
+		   to process the records on account level instead 
+		   of customer level.
+
+	*/
+
+        // Accept "Dead code" warning during runtime of @IRSTAPE
+        #ACCEPT Date=10/26/2005;PGM=Eugene Titov
+        quit
+	
+	
+MTRCNTRL	// Master control
+	
+	type public Number ER
+
+	type Boolean CIFCTOF = CUVAR.ctof1098		// Apply 1098 Cutoff to CIF
+
+	do Db.delete("B1098E")
+	
+	do SORT
+	
+	do ARECBLD quit:ER	// Build and write the "A" record
+	
+	do BRECBLD quit:ER	// Build and write the "B" record
+	
+	do CRECBLD quit:ER	// Build and write the "C" record
+	
+	do STORETOT
+	
+	do Db.delete("TMPRPT2","PID=:%ProcessID")
+	
+	quit
+	
+	
+ARECBLD	// "A" record builder
+
+	type public String TAMT()
+
+	type Number AMTIND, FORMCODE
+
+	set FORMCODE = 2	// IRS form code
+	
+	set AMTIND = 1		// IRS amount type indicator
+	
+	set TAMT(1).piece("|",2) = "Student Loan Interest Statement"
+	
+	do ARECWRT		// Write the record to tape
+	
+	quit
+	
+	
+BRECBLD	// "B" record builder
+	
+	type Number ACN, CID
+	
+	set (ACN,CID) = 0
+
+	type DbSet ds = Db.selectDbSet("TMPRPT2","PID=:%ProcessID")
+	
+	while ds.next() do {
+		
+		type RecordTMPRPT2 tmp2 = ds.getRecord("TMPRPT2")
+		
+		type RecordCIF cif = Db.getRecord("CIF", "ACN = :tmp2.key1")
+		
+		do WRITE(.cif,.tmp2)		
+		}
+	
+	quit
+	
+	
+WRITE(RecordCIF cif,			// Customer Information record
+      RecordTMPRPT2 tmp2)		// Reportable Amounts record	
+
+	// Write and file a "B" record
+	
+	type public Number AMT(), ER, FAMT(), FCNT
+	
+	type Number BINTIND = 0
+	type String ADDR, CITY, CNTRY, CORRTN, DOCCODE, FORCNTY, LNAME, NAME
+	type String SPECIAL, STATE, TIN, TINTYPE, X, ZIP
+	
+	set TIN = cif.taxid
+	
+	set TINTYPE = $S(TIN?2N1"-"7N:1,TIN?3N1"-"2N1"-"4N:2,1:" ")	// Type of TIN
+	
+	// The rest of AMT() entries are initialized at the top of template routine
+	set AMT(1) = tmp2.data.piece("|",1)*100		// Student Loan Interest Received
+	
+	set DOCCODE = "  "
+	set CORRTN = " " 				// Corrected return indicator
+	set NAME = cif.nam	 			// Payee First Name
+	set LNAME = cif.lnm  				// Payee Last Name
+	set ADDR = cif.mad1_" "_cif.mad2_" "_cif.mad3	// Payee address
+	set CITY = cif.mcity 				// Payee city
+	set STATE = cif.mstate 				// Payee state
+	set ZIP = cif.mzip.piece("-",1)_cif.mzip.piece("-",2) // Payee zip
+	set CNTRY = cif.mcntry	 			// Foreign country
+	set FORCNTY = $S(cif.mcntry="US":" ",1:1)  	// Foreign country indicator	
+	
+	type RecordLN ln = Db.getRecord("LN", "CID = :tmp2.key2")
+	
+	// Recognize Paid Int During Capitalization / Loan Origination Fee – Amount
+	if ln.rpidc ! ln.orgfa set BINTIND = 1
+	
+	//; Blank|544|546
+	set SPECIAL = "".justify(3)
+	//; Origination Fees/Capitalized Interest Indicator|547
+	set SPECIAL = SPECIAL_(BINTIND_"".justify(1)).extract(1)
+	//; Special Data Entries|548|722
+	set SPECIAL = SPECIAL_"".justify(175)
+	//; Blank|723|750
+	set SPECIAL = SPECIAL_"".justify(28)
+	
+	do BRECWRT
+	
+	if (TINTYPE = 2) set X = LNAME
+	else  set X = NAME
+	
+	do NAMCNTRL^IRSTPMTR		// Format name
+	
+	// B Record-IRS 1098-E Form Data
+	type RecordB1098E b1098e = Db.getRecord("B1098E", "PDATE = :%SystemDate, KEY = :tmp2.key1, BSEQ = :tmp2.key2", 1)
+	
+	set b1098e.bnamecon = X
+	set b1098e.btintype = TINTYPE
+	set b1098e.btin = TIN.translate(" ","-")
+	set b1098e.bamt1 = AMT(1)/100
+	set b1098e.bname = NAME
+	set b1098e.baddr1 = cif.mad1
+	set b1098e.baddr2 = cif.mad2
+	set b1098e.baddr3 = cif.mad3
+	set b1098e.bcity = CITY
+	set b1098e.bstate = STATE
+	set b1098e.bzip = cif.mzip
+	set b1098e.bintind = BINTIND
+	
+	do b1098e.save()
+	
+	// Calculate number of records and tax form report totals
+	set FCNT = FCNT + 1   
+	set FAMT(1) = FAMT(1) + (AMT(1) / 100)
+	
+	quit
+	
+	
+SORT	// Sort all reportable accounts into a temporary global
+
+	type public Boolean CIFCTOF
+	type public Number CUTOFF
+
+	type Number ACN, CID, TOTINT
+	type String INTARR()
+	
+	type ResultSet rs = Db.select("ACN","CIF")
+	
+	while rs.next() do {
+		
+		set ACN = rs.getCol("ACN")
+
+		set TOTINT = 0
+		
+		kill INTARR
+		
+		type ResultSet rs1 = Db.select("CID","RELCIF","ACN=:ACN")
+		
+		while rs1.next() set CID = rs1.getCol("CID") do CID(ACN,CID)
+		
+		if CIFCTOF,(TOTINT < CUTOFF) kill INTARR	// Apply cutoff to CIF
+		
+		// Save account info into a temporary table
+		set CID = ""
+		for  set CID = INTARR(CID).order() quit:CID.isNull()  do {
+			
+			type RecordTMPRPT2 tmp2 = Class.new("RecordTMPRPT2")
+			
+			set tmp2.pid = %ProcessID
+			set tmp2.key1 = ACN
+			set tmp2.key2 = CID
+			set tmp2.data = INTARR(CID)
+			
+			do tmp2.save()
+			}
+		}
+	
+	quit
+	
+	
+CID(Number ACN,Number CID)	// Process a single account
+	
+	type public Boolean CIFCTOF
+	type public Number CUTOFF, TOTINT
+	type public String INTARR()
+
+	type Number IPY
+	
+	type RecordACN acn = Db.getRecord("ACN", "CID = :CID")
+	
+	// Not a primary owner or not a loan account
+	if (acn.acn '= ACN)!(acn.cls '= "L") quit
+	
+	type RecordLN ln = {RecordLN}acn
+	
+	if (ln.idpf '= 2) quit        		// Not Permanent Student Loan Status
+	
+	if ln.cipy98e set IPY = ln.cipy98e	// Corrected Interest Paid Prior Year
+	else  set IPY = $$IPY98E^PROC98E(CID)	// Interest Paid Prior Year
+	
+	if (IPY < 0) set IPY = 0		// Don't report negative amount
+	
+	set IPY = IPY + ln.orgfa		// Add Loan Origination Fee Amount to IPY
+	
+	if IPY = 0 quit				// Nothing to report
+	
+	set TOTINT = TOTINT + IPY
+	
+	// Apply cutoff to individual account
+	if 'CIFCTOF,(IPY '< CUTOFF) set INTARR(CID) = IPY       // Reportable account
+	else  set INTARR(CID) = IPY			// Possible reportable account
+	
+	quit
+
+
+CRECBLD	// "C" record builder
+
+	do CRECWRT	// Write the record to tape
+
+	quit
+
+
+%STOPLOD	// Stop %ZRTNLOD from this point on down
+	quit
+TRECWRT	// Dummy line reference for GT.M
+	quit
+ARECWRT	// Dummy line reference for GT.M
+	quit
+BRECWRT	// Dummy line reference for GT.M
+	quit
+CRECWRT	// Dummy line reference for GT.M
+	quit
+STORETOT	// Dummy line reference for GT.M
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60403^47751^Shriram Deshpande^6469"	// Signature - LTD^TIME^USER^SIZE

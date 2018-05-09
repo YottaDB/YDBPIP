@@ -1,0 +1,333 @@
+HSYNCFBD	
+	/*
+	
+	This procedure contains the labels that basically drive the creation of the output file.
+	Given a list of arrays keyed by table names, each table is processed through calls to
+	the DBSTLOAD routine passing the individual table name to be processed. Proper rebuilding of
+	a single table requires dropping foreign key relationships, and then the data. If the schema is 
+	being rebuilt, then the table is also deleted.
+	
+	The routine BUILD is called from other routines in the host sync set. No other labels in this
+	procedure are called from another routine.  It is responsible for calling those labels. 
+	  ---- Revision History ------------------------------------------------
+	
+	12/08/03 - Spier 7403
+		psl compiler cleanup
+		
+	02/07/02 -Spier -43583
+		Converted to PSL
+	
+	*/
+
+
+	quit
+
+
+
+BUILD	// This is the driver used to build full xfr's of an element(s)
+	
+	
+	//Create output files at the start of the process
+	new AINDEX,DATA,FILENAME,IO,LIB,MAPSENT,NEWFILE,%QN,QUOTE,RELFID,TABNAME,VER,X,Y
+
+	set QUOTE=$C(34)
+	
+
+	//set array of files changed by version
+	#if $$VALID^%ZRTNS("SCHEMCHG") do NEWFILE^SCHEMCHG
+	#if $$VALID^%ZRTNS("ZSCHEMCG") do NEWFILE^ZSCHEMCG
+	set VER=""
+	
+	// open files for all client versions
+	if '$D(IOLIST) for  set VER=$O(CLIENT(VER)) quit:VER=""  do { quit:ER 
+		set %QN=$$GETQUE^DDPXFR1()
+		set IOLIST(VER)=$$FILE^%TRNLNM("F"_%QN_".FEP",DDPDIR)
+		set IONUMB(VER)=%QN
+		set X=$$FILE^%ZOPEN(IOLIST(VER),"WRITE/NEWV",,4096)
+		if 'X set ER=1 set RM=$P(X,"|",2) do ZE^UTLERR quit 
+		}
+		
+	do XLOGINIT^DDPXFR1
+	
+	// Handle schema transfers
+	set %LIBS="SYSDEV"
+
+
+	if FLG(2) do {
+		set Y=""
+		for  set Y=$O(FID1(Y)) quit:Y=""  do {
+
+			set RELFID=$P(FID1(Y),"|",3)
+			if RELFID'="" for AINDEX=$L(RELFID,","):-1:1 do SNDFID($P($P(RELFID,",",AINDEX),"~",1),3)
+			if Y="TRN" do { 
+				set X=""
+				set FLG(10)=1
+				set TRAN1("*")=""
+				}
+			if RELFID'="" do {
+				for AINDEX=1:1:$L(RELFID,",") do SNDFID($P($P(RELFID,",",AINDEX),"~",1),0)
+				for AINDEX=1:1:$L(RELFID,",") do {
+					set DATA=$P(RELFID,",",AINDEX)
+					do DATAXFR(DATA,0)
+					}
+				}
+			}
+		}
+		
+	//Handle User table transfers
+	set X=""
+	if FLG(14) for  set X=$O(UTBL1(X)) quit:X=""  do {
+			set RELFID=$P(UTBL1(X),"|",3)
+			if RELFID="" quit
+			do TRANSFER(RELFID)
+			}
+
+	// Handle STBL transfers
+	if FLG(15) for  set X=$O(STBL1(X)) quit:X=""  do {
+			set RELFID=$P(STBL1(X),"|",3)
+			if RELFID="" quit
+			do TRANSFER(RELFID)
+			}
+	
+	// Handle CTBL transfers
+	
+	if FLG(16) for  set X=$O(CTBL1(X)) quit:X=""  do {
+			set RELFID=$P(CTBL1(X),"|",3)
+			if RELFID="" quit
+			do TRANSFER(RELFID)
+			}
+	
+	//Handle Miscelleneous transfers
+	if FLG(18) for  set X=$O(MISCT(X)) quit:X=""  do {
+			set RELFID=$P(MISCT(X),"|",3)
+			if RELFID="" quit
+			do TRANSFER(RELFID)
+			}
+	
+	//Handle Transaction code transfers
+	if FLG(10) do {
+		set Y=""
+		new CHARBASE,DDPLOG,FILENAME,%LIBS,Q,TABNAME
+		if $D(TRAN1("*")) do { quit 
+			set FILENAME="TRNAUT"
+			do BLDRMS^DBSTLOAD("TRNAUT",3)
+			
+			set FILENAME="TRN"
+			do BLDRMS^DBSTLOAD("TRN",3)
+			
+			set Q="TRN.ETC=UPPER(TRN.ETC)"
+			do BLDRMS^DBSTLOAD("TRN",0,.Q)
+			
+			set FILENAME="TRNAUT"
+			set Q="TRNAUT.ETC=UPPER(TRNAUT.ETC)"
+			do BLDRMS^DBSTLOAD("TRNAUT",0,.Q)
+			
+			set %G="^TRN(|TRAN1(""*"")|"_$G(TRAN1("*"))
+			do XLOG^DDPXFR1("GBL|"_%G)
+			}
+		for  set Y=$O(TRAN1(Y)) quit:Y=""  do {
+			set CHARBASE=$S(Y["@":1,1:0)
+			set (FILENAME,TABNAME)="TRNAUT"
+			set Q="TRNAUT.ETC=:Y"
+			do BLDRMS^DBSTLOAD(TABNAME,3,.Q,Y)
+			set (FILENAME,TABNAME)="TRN"
+			set Q="TRN.ETC=:Y"
+			do BLDRMS^DBSTLOAD(TABNAME,3,.Q,Y)
+			new DDPLOG
+			do BLDRMS^DBSTLOAD(TABNAME,0,.Q)
+			set %G="^TRN("""_Y_""""_"|TRAN1("_Y_")|"_$G(TRAN1(Y))
+			do XLOG^DDPXFR1("GBL|"_%G)
+			set TABNAME="TRNAUT"
+			set Q="TRNAUT.ETC=:Y"
+			do BLDRMS^DBSTLOAD(TABNAME,0,.Q)
+
+			}
+		}
+		
+	new VER
+	set VER=""
+	for  set VER=$O(IOLIST(VER)) quit:VER=""  close IOLIST(VER)
+	quit 
+
+TRANSFER(RELFID)
+
+	new AINDEX,DATA
+	for AINDEX=$L(RELFID,","):-1:1 do {
+		set DATA=$P(RELFID,",",AINDEX)
+		do DATAXFR(DATA,3)
+		}
+		
+	for AINDEX=1:1:$L(RELFID,",") do {
+		set DATA=$P(RELFID,",",AINDEX)
+		do DATAXFR(DATA,0)
+		}
+	quit
+		
+		
+DATAXFR(DATA,MODE)	// Private; Determine type of data and call apropiate transfer utility
+
+	new ACCKEYS,FILENAME
+	set FILENAME=$P(DATA,"~",1)
+	if Db.isDefined("STBLNOGUI","FILENAME") quit
+	set ACCKEYS=$P(DATA,"-",2)
+	
+	// update file with user table information
+	if $P($P(DATA,"-",1),"~",2)["UTBL" do SNDDATA(FILENAME,MODE,.UTBL1,"^UTBL("_ACCKEYS,"UTBL1")
+	// Send Code to remove or rebuild common table data
+	if $P($P(DATA,"-",1),"~",2)["CTBL" do SNDDATA(FILENAME,MODE,.CTBL1,"^CTBL("_ACCKEYS,"CTBL1")
+
+	// Send code to remove or rebuild system table data
+	if $P($P(DATA,"-",1),"~",2)["STBL" do SNDDATA(FILENAME,MODE,.STBL1,"^STBL("_ACCKEYS,"STBL1")
+
+	// SNDMISC must perform extra processing before sending the other tables
+	if $P($P(DATA,"-",1),"~",2)["MISCT" do SNDMISC($P(DATA,"~",1),MODE,ACCKEYS)
+	quit
+	
+SNDFID(FILENAME,MODE)	//Remove and then rebuild schema
+
+
+	new COLLIST,SORTFID,SPLIT,WIDEFILE
+	do MAP^DBSDDMAP(FILENAME,.WIDEFILE)
+	if $D(WIDEFILE) do RESORT^DDPXFR1(.WIDEFILE,.SORTFID,FILENAME)
+	if MODE=3 do KILKFID(FILENAME) quit 
+	
+	 //build array of fields changed by version
+	#if $$VALID^%ZRTNS("SCHEMCHG") do CHGFILE^SCHEMCHG(FILENAME)
+	#if $$VALID^%ZRTNS("ZSCHEMCG") do CHGFILE^ZSCHEMCHG(FILENAME)
+	if MODE=0 do REBLFID(FILENAME)
+	quit 
+	
+KILKFID(FILENAME)	// Remove schema elements
+
+
+	new DDPLOG
+	new Q
+	set Q="DBTBL1.FID=:FILENAME AND DBTBL1.%LIBS='SYSDEV'"
+	do BLDRMS^DBSTLOAD("DBTBL1",3,.Q,FILENAME)
+	quit 
+
+
+REBLFID(FILENAME)	// Rebuild schema definitions
+	/*
+
+	   Send a rebuild to the client for DBTBL1,
+	   DBTBL1D,DBTBLF and DBTBL8.
+
+	*/
+	new DDPLOG,%G,NI,X,VER
+	set NL=$$LOGGING^DBSTLOAD(FILENAME)
+	kill Q
+	set %G="^DBTBL("""_%LIBS_""",1,"""_FILENAME_""""_"|FID1("""_FILENAME_""")|"_$G(FID1(FILENAME))
+
+	if '$D(SORTFID) do {
+		set Q="DBTBL1.FID=:FILENAME AND DBTBL1.%LIBS='SYSDEV'"
+		do BLDRMS^DBSTLOAD("DBTBL1",0,.Q,,FILENAME,FILENAME)
+
+		set Q="DBTBL1D.FID=:FILENAME AND DBTBL1D.%LIBS='SYSDEV'"
+		do BLDRMS^DBSTLOAD("DBTBL1D",0,.Q,,FILENAME,FILENAME)
+
+		//foreign keys and index's are not required if the data 
+		//does not exist on the client
+		if NL=0 quit
+
+		set Q="DBTBL1F.FID=:FILENAME AND DBTBL1F.%LIBS='SYSDEV'"
+		do BLDRMS^DBSTLOAD("DBTBL1F",0,.Q,,FILENAME,FILENAME)
+
+		set Q="DBTBL8.FID=:FILENAME AND DBTBL8.%LIBS='SYSDEV' AND DBTBL8.ORDERBY NOT LIKE '%.%'"
+		do BLDRMS^DBSTLOAD("DBTBL8",0,.Q,,FILENAME,FILENAME)
+	
+		}
+	if $D(WIDEFILE),'$D(MAPSENT(FILENAME)) do { 
+		do XFR^DBSDDMAP(FILENAME)
+		set MAPSENT(FILENAME)=""
+		}
+	if $D(SORTFID) do SPLITBLD^HSYNCSPT(NL)
+	
+	set VER=""
+	for  set VER=$O(CLIENT(VER)) quit:VER=""  set DDPLOG(VER)=""   
+	do XLOG^DDPXFR1("GBL|"_%G)
+	quit 
+	
+
+
+SNDMISC(FILENAME,MODE,LIB)	// Send code to remove or rebuild miscellaneous table data
+
+	new COLLIST,DDPLOG,%G,SORTFID,SPLIT,WIDEFILE
+
+	type RecordDBTBL1 dbtbl1=Db.getRecord("DBTBL1","%LIBS='SYSDEV',FID=:FILENAME")
+	if +dbtbl1.filetyp=7 quit  
+
+	do MAP^DBSDDMAP(FILENAME,.WIDEFILE)
+	if $D(WIDEFILE) do RESORT^DDPXFR1(.WIDEFILE,.SORTFID,FILENAME)
+	set %G="^"_dbtbl1.global
+	if $D(MISCT(FILENAME)) set %G=%G_"|MISCT("""_FILENAME_""")|"_$G(MISCT(FILENAME))
+
+	//build array of fields changed by version
+	#if $$VALID^%ZRTNS("SCHEMCHG") do CHGFILE^SCHEMCHG(FILENAME)     
+	#if $$VALID^%ZRTNS("ZSCHEMCG") do CHGFILE^ZSCHEMCG(FILENAME)
+	if MODE=3 do BLDRMS^DBSTLOAD(FILENAME,3) quit 
+	if MODE=0 do BLDRMS^DBSTLOAD(FILENAME,0,,,FILENAME)
+	do XLOG^DDPXFR1("GBL|"_%G)
+	quit 
+
+
+SNDDATA(FILENAME,MODE,ARRAY,DATASENT,DATATYPE)	// Perform the actual transfer of data for STBL,CTBL and utbl data
+
+	new DDPLOG
+
+	if $D(ARRAY(FILENAME)) set DATASENT=DATASENT_"|"_DATATYPE_"("""_FILENAME_""")|"_$G(ARRAY(FILENAME))
+	if '$D(SORTFID) do {
+		if MODE=3 do BLDRMS^DBSTLOAD(FILENAME,3) quit 
+		new COLLIST
+
+		//build array of fields changed by version
+	
+		#if $$VALID^%ZRTNS("SCHEMCHG") do CHGFILE^SCHEMCHG(FILENAME)
+
+		
+		#if $$VALID^%ZRTNS("ZSCHEMCG") do CHGFILE^ZSCHEMCG(FILENAME)
+		if MODE=0 do BLDRMS^DBSTLOAD(FILENAME,0)
+		S DDPLOG=""
+		do XLOG^DDPXFR1("GBL|"_DATASENT)
+		}
+	quit
+
+
+SNDFKEYS(MODE,FID)	//  Send foreign keys for a table
+	/*
+	 Send foreign keys from other files which point
+	 to this file
+	*/
+
+	new Q,SFID,X
+	if $$LOGGING^DBSTLOAD(FID)=0 quit
+
+
+	type ResultSet rsfkeys=Db.select("FID,FKEYS","DBTBL1F","TBLREF=:FID and %LIBS='SYSDEV'")
+	if rsfkeys.isEmpty() quit
+	while rsfkeys.next() do {
+		new FORKEY,Q,FILENAME,SORTFID,WIDEFILE
+		set FILENAME=rsfkeys.getCol(1)
+
+		//keys will have been sent already
+		if $D(FID1(FILENAME)),MODE=0 quit     
+		do MAP^DBSDDMAP(FILENAME,.WIDEFILE)
+		if $D(WIDEFILE) do RESORT^DDPXFR1(.WIDEFILE,SORTFID,FILENAME)
+		set FORKEY=rsfkeys.getCol(2)
+		set Q="DBTBL1F.FID=:FILENAME AND DBTBL1F.%LIBS='SYSDEV' AND DBTBL1F.FKEYS=:FORKEY and DBTBL1F.TBLREF=:FID"
+		if MODE=3 do { quit 
+			do BLDRMS^DBSTLOAD("DBTBL1F",MODE,.Q,FILENAME,FORKEY,FILENAME,1)
+			set SFID=""
+			if $D(SORTFID) for  set SFID=$O(SORTFID(SFID)) quit:SFID=""  do {
+				do BLDRMS^DBSTLOAD("DBTBL1F",MODE,.Q,"W_"_FILENAME_"_"_SFID,FORKEY,SFID,1)
+				}
+			}
+		do BLDRMS^DBSTLOAD("DBTBL1F",MODE,.Q,FILENAME)
+		set SFID=""
+		if $D(SORTFID) for  set SFID=$O(SORTFID(SFID)) quit:SFID=""  do BLDRMS^DBSTLOAD("DBTBL1F",MODE,.Q,,FILENAME,SFID)
+		}
+	
+	quit 
+
+ #OPTION ResultClass ON
+Public String vSIG()	quit "59886^43519^Sanchez SCM Administrator^8937"	// Signature - LTD^TIME^USER^SIZE

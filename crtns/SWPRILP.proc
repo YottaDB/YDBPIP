@@ -1,0 +1,218 @@
+SWPRILP	//PBS Utility; Loan Payment Sweep Product Priority Setup
+	/*
+	   ORIG: Vince Arpa   2/6/98
+	   DESC: Loan Payment Sweep Product Priority Setup
+
+	   KEYWORDS: Deposit, Loan, Sweep, Linkage
+
+	   EXAMPLE:
+	   D ^SWPRILP
+
+	  ---- Revision History ------------------------------------------------
+	   03/23/06 - RussellDs - CR16892
+	   	      Replace use of obsolete TYPE table with PRODCTL.
+	   	      
+	   	      Cleaned up non-scope related PSL warnings.
+	  
+	   22/09/05 - SAHUN - 16663
+	   	      Modified the TABLE section to comply with updated in P04
+	   	      DBSTBL utility by assigning "typtbl" lookup values array
+	   	      to vREF variable.  	
+	   
+	   10/14/02 - CHHABRIAS - 49451
+	   	      Converted to PSL
+
+	  ----------------------------------------------------------------------
+	
+	*/
+
+	new CNT,DUEDEL,LPSWP,MAX,ORDER,PRI
+
+	type RecordUTBLSWPRILP fUTBLLPS
+	do SETUP
+
+	if ER quit
+	for  do ENTRY(.fUTBLLPS) quit:"DFQ"[VFMQ!ER
+
+	if "DF"[VFMQ do FILE(.fUTBLLPS)
+	do END
+	quit
+
+
+SETUP	// Set up screen
+
+	new DESC,PRI,TYPE
+	set %ProcessMode=1
+	set %PG=0
+	set MAX=15
+
+	// Loop through the UTBLSWPRILP file to create the array LPSWP
+
+	set TYPE=""
+	set CNT=0
+
+	type ResultSet rs=Db.select("TYPE,PRI","UTBLSWPRILP")
+	while rs.next() do {
+		set TYPE=rs.getCol("TYPE")
+		set PRI=rs.getCol("PRI")
+
+		type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:TYPE")
+		set DESC=prodctl.des
+
+		set CNT=CNT+1
+		set LPSWP(PRI)=PRI_"|"_TYPE_"|"_DESC
+		}
+
+	set %PAGE=10
+	quit
+
+
+ENTRY(RecordUTBLSWPRILP fUTBLLPS)	// Data entry
+
+	set %PG=%PG+1
+	if CNT<MAX set CNT=MAX
+
+	// Full page
+	set %REPEAT=MAX
+
+	// Starting array offset
+	set %MODS=(MAX*(%PG-1))+1
+
+	set fUTBLLPS=Class.new("RecordUTBLSWPRILP")
+
+	do DRV^USID(%ProcessMode,"SWPRILP",.fUTBLLPS)
+
+	quit
+
+
+FILE(RecordUTBLSWPRILP fUTBLLPS)	// File data
+
+	new LSEQ
+
+	do PREFILE
+
+	// Loop through the LPSWP array and set each priority accordingly
+	set CNT=""
+	for  set CNT=$O(LPSWP(CNT)) quit:CNT=""  do {
+		new TYPE,PRI
+		set PRI=+LPSWP(CNT)
+		set TYPE=$P(LPSWP(CNT),"|",2)
+		if TYPE="" quit
+
+		set fUTBLLPS=Db.getRecord("UTBLSWPRILP","TYPE=:TYPE",1)
+		set fUTBLLPS.pri=PRI
+
+		// Remove record
+		if PRI=0 do Db.delete("UTBLSWPRILP","TYPE=:TYPE") quit
+
+		// Update Record
+		do fUTBLLPS.bypassSave()
+		}
+
+	do REMOVE
+	quit
+
+
+PREFILE	// Check for multiple product types with same priority
+
+	/*
+	   The main purpose of this sub-routine is to detect and handle
+	   situations in which the user has assigned the same priority to
+	   multiple product types.  This is not done as a screen post-processor
+	   because the screen has repeating fields.  DQ executes the
+	   screen post-processor after every screen instead of at filing
+	   for screens with repeating fields.
+
+	*/
+
+	new CNT,LSEQ,NPRI,NUM,OSEQ,PRI,REPAINT
+	set REPAINT=0
+	set OSEQ=""
+	set NPRI=0
+
+	// Loop through the LPSWP array to get an accurate count
+	set CNT=0
+	set NUM=""
+	for  set NUM=$O(LPSWP(NUM)) quit:NUM=""  set CNT=CNT+1
+
+	for LSEQ=1:1:CNT do BORDER
+
+	for  set OSEQ=$O(ORDER(OSEQ)) quit:OSEQ=""  do {
+		set NPRI=NPRI+1
+ 		set LSEQ=ORDER(OSEQ)
+	        set PRI=+LPSWP(LSEQ)
+
+		// Reassign priority
+		if PRI'=NPRI set $P(LPSWP(LSEQ),"|",1)=NPRI
+		}
+
+	if REPAINT do DISPLAY^DBSMACRO("ALL","","0")
+
+	quit
+
+
+BORDER	// Sort priorities (Build ORDER array)
+
+	set PRI=+LPSWP(LSEQ)
+	if PRI=0 quit
+
+	if '$D(ORDER(PRI)) set ORDER(PRI)=LSEQ
+	else  do {
+		set ORDER($O(ORDER(PRI+1),-1)+.001)=LSEQ
+		set REPAINT=1
+		}
+	quit
+
+
+REMOVE	// Remove any entries still in the user table that are not in array
+
+	new CNT,PRI,TYPE,ZLPSWP
+	set CNT=""
+	for  set CNT=$O(LPSWP(CNT)) quit:CNT=""  do {
+		set PRI=+LPSWP(CNT)
+		if (PRI=0)!(PRI="") quit
+		set TYPE=$P(LPSWP(CNT),"|",2)
+		if TYPE="" quit
+		set ZLPSWP(TYPE)=PRI
+		}
+
+	set TYPE=""
+	type ResultSet rs=Db.select("TYPE","UTBLSWPRILP")
+	while rs.next() do {
+        	set TYPE=rs.getCol("TYPE")
+		if '$D(ZLPSWP(TYPE)) do Db.delete("UTBLSWPRILP","TYPE=:TYPE")
+		}
+	quit
+
+
+TABLE	// Lookup table for type
+	
+	kill typtbl
+	type public String vREF
+	type ResultSet rs=Db.select("TYPE,DES,PMCRCD","PRODCTL","CLS='L'")
+	while rs.next() do {
+		if '$D(typtbl(rs.getCol("TYPE"))) set typtbl(rs.getCol("TYPE"))=rs.getCol("DES")_$J("",40-$L(rs.getCol("DES")))
+
+		// Add currency code
+		set typtbl(rs.getCol("TYPE"))=typtbl(rs.getCol("TYPE"))_" "_rs.getCol("PMCRCD")
+		}
+
+	if '$D(typtbl) set typtbl=""
+
+	// Define local table
+	set vREF="typtbl("
+	quit
+
+
+END	// End processing
+
+	// Loan payment sweep priorities not modified
+	if VFMQ="Q" set RM=$$^MSG(3003)
+
+	// Loan payment sweep priorities modified
+	else  set RM=$$^MSG(3009)
+
+	set ER="W"
+	quit
+
+vSIG()	quit "60347^55747^Dan Russell^4292"	// Signature - LTD^TIME^USER^SIZE

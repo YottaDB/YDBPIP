@@ -1,0 +1,1337 @@
+DBSRWUTL	/* Library - Miscellaneous Report Writer Utilities
+	ORIG: CHIANG
+	PROCEDURE ID: DBSRWUTL
+	DESC: DATA-QWIK Report Compiler Utilities
+
+	These utilities are used by the DBSRW* procedures, or for DBTBL5D and
+	DBTBL5H computeds.
+	
+	---- Comments --------------------------------------------------------
+	LIBRARY:
+		. addcode  - add code to PSLCODE array
+		. addqts   - add quotes, if necessary, to wild-card input
+		. addtomap - give data item a variable name and add to ddmap
+		. coldefs  - get column information for report browser
+		. direfs   - convert report or screen data items to ddmap
+		. fmtstr   - generate formatting code around variable V
+		. format   - generate code to format a reference
+		. isdi     - is reference a data item?
+		. map      - map table column references to variables
+		. newlist  - generate list of variables to new (type)
+		. rwopt    - run-time .RWOPT. macro handler
+		. RPTSEQ   - computed code for DBTBL5D.RPTSEQ
+		. SORTFLG  - computed code for DBTBL5H.SORTFLG
+		. stat     - run-time gather statistics by level
+		. validtcr - is reference a valid table column reference and
+		             convert to T.C format
+		. vstat0   - run-time 
+
+	------ Revision History ------------------------------------------------
+	07/30/07 - RussellDS - CR28507
+		   Modified the BLDFMT section to eliminate use of LAST().  This
+		   code attempted to generate a bit shorter code for formatting
+		   in specific cases.  However, there turn out to be situations
+		   where that code resulted in incorrect alignment of the
+		   result.  Eliminate this code and allow the normal formatting
+		   to occur.
+	
+	08/01/06 - RussellDS - CR22447
+		   Fixed problem in BLDFMT section in handling of elements that
+		   contain multiple variable insertion.
+		   
+	02/16/06 - RussellDS - CR19065
+		   Fix error in checking for "type Public" variables - need to
+		   consider both upper and lower case version of "P" in public.
+		   
+		   Change all type Public references to type public.
+		   
+	01/09/06 - RussellDS - CR18906
+		   Remove unused section SORTFLG1 and make SORTFLG private.
+	
+	11/14/05 - RussellDS - CR18193
+		   Remove deprecated .data() methods.  Prevents warnings in
+		   generated code, as well as when compiling this procedure.
+		   
+	10/04/05 - RussellDS - CR17401
+		   Modify TOVARNAME section to handle complex variables when
+		   saving names to RPTINFO for scoping.
+	
+	09/02/05 - RussellDS - CR17021
+		   Fixed problem with expressions (e.g., $$ABC^XYZ, $P(abc,",",2),
+		   etc. not picking up correct formatting.
+	
+	03/26/05 - RussellDS - CR15067
+		   Fixed text packing section in BLDFMT to use TAG instead of VAR
+		   for data to prevent error in generated code.
+		   
+	01/19/05 - RussellDS - CR13817
+		   Correct error in variable name in VAR section.
+		   
+	12/09/04 - RussellDS - CR13606
+		   Fix scope warnings in generated code as a result of new PSL
+		   compiler changes that perform tighter checking.
+		   
+	11/22/04 - RussellDS - CR13365
+		   Add public tag to various functions to eliminate PSL warnings.
+		   
+	10/25/04 - RussellDS - CR12855
+		   Fixed call to COMPLEX that wasn't passing FILES() parameter.
+	
+	12/09/03 - Dan Russell - CR 7239
+                   Fix PSL warnings for operator precedence.
+
+	07/28/03 - Dan Russell - 51351
+		   Modified addcode section to prevent duplicate quit lines in
+		   order to avoid compiler dead code warnings.
+	
+	06/21/03 - Dan Russell - 51351
+		   Fixed scoping errors related to variables used in for loops.
+		   	
+	05/09/03 - Dan Russell - 51351
+		   Fix problem with line formatting in addcode section.
+	
+	04/30/03 - Dan Russell - 51351
+		   Replaced call to SCAVHDG in rwopt section with DBSRWBR.
+	
+	04/15/03 - Dan Russell - 51351
+		   Added section addvars to deal with system key words.
+
+	12/02/02 - Dan Russell - 51351
+		   Moved into PSL.  Removed old change history.
+
+	------------------------------------------------------------------------
+
+	I18N=QUIT Excluded from I18N standards
+	*/
+
+	quit		// Don't call from top
+
+
+public addcode(Number TABS,	// Add new line to PSLCODE array
+	String LINE,
+	Number LINENO)
+	
+	// Change to private once that feature works in PSL
+
+	/* If LINENO not null, use it.  Return used line number in LINENO.
+	   If TABS<0, assume line already formatted and don't remove or add
+	   tabs or left spaces.
+	*/
+
+	type public String PSLCODE()
+	type Boolean ADDLINE
+	
+	if TABS'<0 do {
+		// Remove any leading tabs
+		if LINE.extract(1)=$C(9) for  set LINE=LINE.extract(2,LINE.length()) quit:LINE.extract(1)'=$C(9)
+		// Remove leading and trailing spaces
+		set LINE=$$TRIM^%ZS(LINE)
+		}
+
+	// Space comments to standard location on right of line
+	if TABS>0 do {
+		type Number I,LEN
+		type String CMT
+
+		set CMT=LINE.piece($C(9)_"//",2,99)
+		set LINE=LINE.piece($C(9)_"//",1)
+		set LEN=(TABS*8)+LINE.length()
+
+		for I=1:1:TABS set LINE=$C(9)_LINE
+		if CMT'="" do {
+			if LEN<55 set LINE=LINE_$E($C(9,9,9,9,9,9,9,9,9,9),1,((63-LEN)\8)-1)
+			set LINE=LINE_$C(9)_"//"_CMT
+			}
+		}
+
+	if LINENO.get()="" set LINENO=PSLCODE("").order(-1)+1
+	
+	// If LINE is quit, check to make sure not extra in order to avoid dead code warnings from compiler
+	set ADDLINE=1
+	if $$ISQUIT(LINE) do {
+		type Number DONE,I
+		type String CODE
+		
+		set DONE=0
+		for I=LINENO-1:-1 quit:'PSLCODE(I).exists()  do { quit:DONE
+			set CODE=PSLCODE(I).piece("//",1)		// Ignore comment
+			quit:CODE.translate($C(9,32)).isNull()		// Ignore blank lines
+			if $$ISQUIT(CODE) set ADDLINE=0			// Preceeding quit
+			set DONE=1
+			}
+		}
+	
+	if ADDLINE set PSLCODE(LINENO)=LINE
+	quit
+	
+	
+ISQUIT(String LINE)	// Private - determine if line is a quit command
+
+	if $C(9.32)'[LINE.extract() quit 0		// No, if has tag
+	set LINE=LINE.piece("//",1)			// Strip comment
+	set LINE=LINE.translate($C(9)," ")		// Replace tabs with space
+	set LINE=LINE.trim()
+	set LINE=LINE.piece(" ",1)			// Command portion
+	if LINE.lowerCase()'="quit" quit 0		// No -- not just quit
+	quit 1
+
+
+public addqts(String INPUT)	/* Add quotes if input is not a number
+
+	This is called at run time by compiled reports that use single wild-card
+	queries.
+	*/
+	
+	if $$isNum^UCGM(INPUT) quit INPUT
+
+	quit $$QADD^%ZS(INPUT)
+
+
+public addtomap(String ITEM,	// Add a new entry in ddmap(dinam) list
+	 String ddmap())
+	 
+	 // Change to private once that feature works in PSL
+	 
+	 /*
+
+	ARGUMENTS:
+		. ITEM		Column name			/REQ/NULL/MECH=VAL
+				TABLE.COLUMN or [TABLE]COLUMN
+
+		. ddmap		Map array			/REQ/MECH=REFNAM:RW
+				ddmap(ITEM)="vc"_SEQ
+				ddmap(SEQ)=ITEM
+	*/
+
+	type Number SEQ
+	type String COLUMN
+
+	quit:ITEM=""
+
+	if ITEM.extract(1)="[" do {
+		type String TABLE
+		set TABLE=ITEM.piece("[",2).piece("]",1)
+		if TABLE["," set TABLE=TABLE.piece(",",2)	// Drop library
+		set COLUMN=ITEM.piece("]",2)
+		set ITEM=TABLE_"."_COLUMN
+		}
+
+	set COLUMN=ITEM.piece(".",2)
+	quit:'(COLUMN?1.AN!(COLUMN?1"%"1.AN))			// Invalid or dummy
+
+	quit:ddmap(ITEM).exists()					// Already in map
+
+	if 'ddmap(0).get() set ddmap(0)=1
+	set SEQ=ddmap(0)
+	set ddmap(0)=SEQ+1
+	set ddmap(SEQ)=ITEM
+	set ddmap(ITEM)="vc"_SEQ				// Assign internal name
+
+	quit
+	
+	
+public addvars(String LIST,	// Add/delete variables to/from specified list
+	String VAR,
+	String RPTINFO(),
+	Number REMOVE)
+	
+	// Change to private once that feature works in PSL
+
+	// Load keywords, ignoring those that are $vars or complex, e.g., $P
+	if RPTINFO("SYSKEYWORDS","").order().isNull() do {
+		type DbSet ds=Db.selectDbSet("STBLSYSKEYWD")
+		while ds.next() do {
+			type RecordSTBLSYSKEYWD syskeywd=ds.getRecord("STBLSYSKEYWD")
+			if syskeywd.des?1"%".AN!(syskeywd.des?1.AN) set RPTINFO("SYSKEYWORDS",syskeywd.keyword)=syskeywd.des
+			}
+		}
+		
+	// If a keyword, use the variable name, not keyword
+	if RPTINFO("SYSKEYWORDS",VAR).exists() set VAR=RPTINFO("SYSKEYWORDS",VAR)
+	
+	if REMOVE.get() kill RPTINFO(LIST,VAR)
+	else  set RPTINFO(LIST,VAR)=""
+	
+	quit
+	
+	
+public coldefs(RecordDBTBL5H dbtbl5h,String RPTINFO())	/* Report column definitions
+
+	Get info on report columns in detail section for report browser.
+
+	This code was previously in DBSEXE8C.
+	
+	---- Comments --------------------------------------------------------
+	OUTPUT:
+		. $$		Column definitions	/TYP=T
+				in format:
+
+				[FID]DI#column location,[FID]DI#location,...
+
+				Example:  [LN]CID#1,[LN]BAL#15,[LN]LNM#31 | ....
+				                
+				<----------- line 1 -----------> <-- line 2 -->
+	*/
+	
+	// Change to private once that feature works in PSL
+
+	type Number LVL
+	type String COLUMNS
+
+	// No page header defined for this report
+	
+	if 'Db.isDefined("DBTBL5D","LIBS=""SYSDEV"",RID=:dbtbl5h.rid,GRP='@PH',ITMSEQ='101'") quit ""
+
+	// Look for detail definition from the lowest key level
+
+	set COLUMNS=""
+	for LVL=10:-1:1 do { quit:COLUMNS'=""
+		type Number LN,LN1,LN2,SEQ
+		type String KEY,REGINFO,TC
+
+		set KEY=RPTINFO("SEQBY",LVL,"COL")
+		quit:KEY=""
+
+		quit:'$$validtcr(KEY,.TC)	// Ignore if dummy key
+
+		// See if detail info defined for this level
+		type RecordDBTBL5DGC dbtbl5dg=Db.getRecord("DBTBL5DGC","LIBS=""SYSDEV"",RID=:dbtbl5h.rid,GRP=:KEY",1)
+		set REGINFO=dbtbl5dg.reginfo
+		quit:REGINFO=""!(REGINFO.piece(",",2)>3)
+
+		// Detail region
+		set LN1=REGINFO.piece(",",1)+1,LN2=REGINFO.piece(",",2)+LN1
+		set LN=0
+
+		type DbSet ds=Db.selectDbSet("DBTBL5D","LIBS='SYSDEV' AND RID=:dbtbl5h.rid AND GRP=:KEY")
+		while ds.next() do { quit:COLUMNS.length("\")=3!(COLUMNS.length()>400)
+			type Number LINE,TAB
+			type String COL,X
+
+			type RecordDBTBL5D dbtbl5d=ds.getRecord("DBTBL5D")
+			set LINE=dbtbl5d.status\1000
+			set TAB=dbtbl5d.status#1000
+			quit:LINE<LN1!(LINE>LN2)
+
+			set COL=dbtbl5d.name
+			quit:COL.extract(1)="@"
+
+			if COL'?1"["1E.E1","1E.E1"]"1E.E set X=dbtbl5d.prompt	// Function
+			else  set X="["_COL.piece(",",2)
+			if X["," set X=X.piece(",",1)
+			if X["<<" set X="var"
+			set X=X_"#"_TAB_"#"_(+dbtbl5d.size)
+
+			if LN=0 set LN=LINE
+			else  if LINE>LN set COLUMNS=COLUMNS_"\",LN=LINE
+
+			if COLUMNS'="",COLUMNS.extract(COLUMNS.length())'="\" set COLUMNS=COLUMNS_","
+			set COLUMNS=COLUMNS_X
+			}
+		}
+
+	quit COLUMNS
+
+
+public direfs(RecordDBTBL5H dbtbl5h,			// Return DINAM references
+	String RPTINFO(),
+	String ddmap())
+	
+	// Change to private once that feature works in PSL
+	
+	/*
+	Find all [FID]DI references for this report and build up ddmap.  Will add
+	to whatever is already in ddmap.
+	*/
+
+	type Number I
+	type String FILES,X
+
+	set ddmap=RPTINFO("TABLES")			// Access files
+	quit:ddmap=""					// All variables
+	for I=1:1:ddmap.length(",") do {
+		type String X
+		set X=ddmap.piece(",",I)
+		if Db.isDefined("DBTBL1","%LIBS=""SYSDEV"",FID=:X") set FILES(X)=""
+		}
+
+	// Step through each table and get possible column references
+	for I=1:1:10 do {
+		type String TC
+		if $$validtcr(RPTINFO("SEQBY",I,"COL"),.TC) do addtomap(TC,.ddmap)
+		}
+
+	do addtomap(dbtbl5h.statsrc1,.ddmap),addtomap(dbtbl5h.stattrgt1,.ddmap)
+	do addtomap(dbtbl5h.statsrc2,.ddmap),addtomap(dbtbl5h.stattrgt2,.ddmap)
+	do addtomap(dbtbl5h.statsrc3,.ddmap),addtomap(dbtbl5h.stattrgt3,.ddmap)
+	do addtomap(dbtbl5h.statsrc4,.ddmap),addtomap(dbtbl5h.stattrgt4,.ddmap)
+	do addtomap(dbtbl5h.statsrc5,.ddmap),addtomap(dbtbl5h.stattrgt5,.ddmap)
+	do addtomap(dbtbl5h.statsrc6,.ddmap),addtomap(dbtbl5h.stattrgt6,.ddmap)
+	do addtomap(dbtbl5h.statsrc7,.ddmap),addtomap(dbtbl5h.stattrgt7,.ddmap)
+	do addtomap(dbtbl5h.statsrc8,.ddmap),addtomap(dbtbl5h.stattrgt8,.ddmap)
+	do addtomap(dbtbl5h.statsrc9,.ddmap),addtomap(dbtbl5h.stattrgt9,.ddmap)
+	do addtomap(dbtbl5h.statsrc10,.ddmap),addtomap(dbtbl5h.stattrgt10,.ddmap)
+	do addtomap(dbtbl5h.statsrc11,.ddmap),addtomap(dbtbl5h.stattrgt11,.ddmap)
+	do addtomap(dbtbl5h.statsrc12,.ddmap),addtomap(dbtbl5h.stattrgt12,.ddmap)
+	do addtomap(dbtbl5h.statsrc13,.ddmap),addtomap(dbtbl5h.stattrgt13,.ddmap)
+	do addtomap(dbtbl5h.statsrc14,.ddmap),addtomap(dbtbl5h.stattrgt14,.ddmap)
+	do addtomap(dbtbl5h.statsrc15,.ddmap),addtomap(dbtbl5h.stattrgt15,.ddmap)
+	do addtomap(dbtbl5h.statsrc16,.ddmap),addtomap(dbtbl5h.stattrgt16,.ddmap)
+	do addtomap(dbtbl5h.statsrc17,.ddmap),addtomap(dbtbl5h.stattrgt17,.ddmap)
+	do addtomap(dbtbl5h.statsrc18,.ddmap),addtomap(dbtbl5h.stattrgt18,.ddmap)
+	do addtomap(dbtbl5h.statsrc19,.ddmap),addtomap(dbtbl5h.stattrgt19,.ddmap)
+	do addtomap(dbtbl5h.statsrc20,.ddmap),addtomap(dbtbl5h.stattrgt20,.ddmap)
+
+	type DbSet ds1=Db.selectDbSet("DBTBL5D","LIBS='SYSDEV' AND RID=:dbtbl5h.rid")
+	while ds1.next() do {
+		type String TC
+		type RecordDBTBL5D dbtbl5d=ds1.getRecord("DBTBL5D")
+		if $$validtcr(dbtbl5d.name,.TC) do addtomap(TC,.ddmap)
+		do COMPLEX(dbtbl5d.prompt,.FILES,.ddmap)
+		}
+
+	type DbSet ds2=Db.selectDbSet("DBTBL5D1","LIBS='SYSDEV' AND RID=:dbtbl5h.rid")
+	while ds2.next() do {
+		type RecordDBTBL5D1 dbtbl5d1=ds2.getRecord("DBTBL5D1")
+		do COMPLEX(dbtbl5d1.data,.FILES,.ddmap)
+		}		
+
+	// Additional variables
+	for I=1:1 set X=$P(dbtbl5h.variable,",",I) quit:X=""  do addtomap("<<"_X_">>",.ddmap)
+	quit
+
+
+COMPLEX(String DATA, 	// Private - Map all [FID]DI references in DATA to variable names
+	String FILES(),
+	String ddmap())
+
+	type Number PTR,RPTR
+	type String TOK
+
+	set DATA=$$TOKEN^%ZS(DATA,.TOK)		// Tokenize to eliminate "'s
+
+	set (PTR,RPTR)=0
+	for  do { quit:'PTR!'RPTR
+		type String COLUMN,TABLE
+
+		if DATA.extract(2,3)="//" set RPTR=0 quit	// Comments
+		set PTR=DATA.find("[",PTR)			// Find next [
+		quit:'PTR
+		set RPTR=DATA.find("]",PTR)
+		quit:'RPTR
+		set TABLE=DATA.extract(PTR,RPTR-2)
+		if TABLE["," set TABLE=TABLE.piece(",",2)	// Drop library
+		// Ignore invalid tables
+		quit:TABLE=""
+		quit:'FILES(TABLE).exists()
+		// Get column - if not valid, ignore it and move on
+		set PTR=RPTR-1
+		set COLUMN=$$ATOM^%ZS(DATA,.PTR,"[]+-*/\#_'=><\*(),!&:?")
+		if '(COLUMN?1.AN!(COLUMN?1"%"1.AN)) set PTR=RPTR-1 quit
+		do addtomap("["_TABLE_"]"_COLUMN,.ddmap)
+		}
+	quit
+
+
+public fmtstr(Number LEN,	// Generate format code around V
+	String TYP,
+	Number DEC)
+	
+	// Change to private once that feature works in PSL
+	
+	/*
+	EXAMPLES:
+		LEN=12,TYP="$",DEC=2     Returns: $J(V,12,2)
+		LEN=12,TYP="E",DEC=2              $J($FN(V,",",2),12)
+		LEN=12,TYP="D"                    $J($$DAT^%ZM(V),12)
+
+	Note that this simply provides an interface to ^DBSEXEP for now to
+	manage better parameter passing.  Once DBSEXEP is rewritten to PSL
+	this can be modified or eliminated.
+	*/
+
+	type Number ER=0
+	type String RM=""
+	
+	type Number L
+	type String P3
+
+	set L=LEN
+	set P3=""
+
+	do ^DBSEXEP
+
+	if ER set P3="V format error "_RM
+
+	quit P3
+
+
+public format(RecordDBTBL5H dbtbl5h,	// Return run-time format information
+	String RPTINFO(),
+	String ddmap())
+	
+	// Change to private once that feature works in PSL
+
+	/* Returns format information in RPTINFO("FMT" as follows:
+
+		RPTINFO("FMT",0)=total levels | total unique data item functions
+		RPTINFO("FMT",0,DINAM)=stat
+		RPTINFO("FMT",level,section,linecol)=fmt|size|variable
+						    [fid]di
+						    ~var
+						    @function(...)
+	*/
+
+	type public Number ER
+
+	type Number LVL
+	type String KEY,N
+
+	// ORDER BY information
+	for LVL=1:1:10 do { quit:KEY=""!ER
+		set KEY=RPTINFO("SEQBY",LVL,"COL")
+		if KEY'="" do BLDFMT(LVL,KEY,.RPTINFO,.ddmap)
+		}
+	quit:ER
+
+	set RPTINFO("FMT",0)=RPTINFO("LASTLVL")
+
+	do BLDFMT(90,"@PH",.RPTINFO,.ddmap) quit:ER
+	do BLDFMT(91,"@PT",.RPTINFO,.ddmap) quit:ER
+	do BLDFMT(92,"@RS",.RPTINFO,.ddmap) quit:ER
+
+	set N=""
+	for LVL=1:1 set N=RPTINFO("FMT",0,N).order() quit:N=""  set RPTINFO("FMT",0,N)=LVL
+	set RPTINFO("FMT",0)=RPTINFO("FMT",0)_"|"_(LVL-1)
+	quit
+
+
+BLDFMT(Number LVL,	// Private - Build FMT code
+	String KEY,
+	String RPTINFO(),
+	String ddmap())
+
+	type public Number ER
+
+	type Number BLNKSUPR(),D,H,T
+	type String REGINFO
+
+	type RecordDBTBL5DGC dbtbl5dg=Db.getRecord("DBTBL5DGC","LIBS=""SYSDEV"",RID=:RPTINFO(""RID""),GRP=:KEY",1)
+	quit:'dbtbl5dg.getMode()		// This level doesn't exist
+
+	set REGINFO=dbtbl5dg.reginfo
+	set H=REGINFO.piece(",",1)+1		// Header
+	set D=H+1+REGINFO.piece(",",2)		// Detail
+	set T=H+D				// Trailer
+	set RPTINFO("FMT",LVL)=REGINFO
+
+	set H=H*1000,D=D*1000,T=T*1000
+
+	// Get any blank lines to suppress (may be line numbers or ranges, A-B)
+	if dbtbl5dg.blnksupr do {
+		type Number I,J
+		type String X
+		for I=1:1 set X=$P(dbtbl5dg.blnksupr,",",I) quit:X=""  do {
+			if X'["-" set BLNKSUPR(X)=""
+			else  for J=+X:1:X.piece("-",2) set BLNKSUPR(J)=""
+			}
+		}
+
+	// Get each column element
+	type DbSet ds1=Db.selectDbSet("DBTBL5D","LIBS='SYSDEV' AND RID=:RPTINFO(""RID"") AND GRP=:KEY")
+	while ds1.next() do { quit:ER
+		type Number LN,LNCOL,PPSEQ,PRESEQ,SIZE
+		type String BLANK,FORMAT,ORIGTAG,PP,PPID,PRE,PREV,SEC,TAG,VAR
+		type RecordDBTBL5D dbtbl5d=ds1.getRecord("DBTBL5D")
+
+		set (PPSEQ,PRESEQ)=""
+
+		set LNCOL=dbtbl5d.status,LN=LNCOL\1000
+		set SIZE=dbtbl5d.size
+		set FORMAT=dbtbl5d.fmt if FORMAT="" set FORMAT="T"
+		set TAG=dbtbl5d.name
+		set VAR=dbtbl5d.prompt
+		set PRE=dbtbl5d.prepflg
+		set PP=dbtbl5d.postflg
+
+		set BLANK=""
+		if BLNKSUPR(LN).exists() set BLANK=1	// Suppress blank
+		if dbtbl5dg.lfsupr=LN set BLANK=2	// Suppress line feed
+		set PPID=TAG 
+		if PPID.extract(1)="@" set PPID=VAR	// line indicator
+
+		// Convert <<$J(...>> to TEXT format type for report page numbers
+		if VAR?1"<<$J(".E set FORMAT="T"
+
+		// Group sections
+		if LNCOL'>H set SEC="H"
+		else  if LNCOL'>D do {
+			set SEC="D"
+			set LNCOL=LNCOL-H		// Line number offset
+			}
+		else  do {
+			set SEC="T"
+			set LNCOL=LNCOL-D
+			quit:TAG'?1"["1E.E1"]"1E.E		// Not [lib,fid]di syntax
+			set VAR="<<"_TAG.piece("]",2)_">>"	// Convert to <<key>>
+			set TAG="@"
+			}
+
+		// Field pre/post-processors
+		if PRE set PRESEQ=$$GETCPPS(dbtbl5d.rid,dbtbl5d.grp,dbtbl5d.itmseq,1,PPID,.RPTINFO,.ddmap) quit:ER
+		if PP set PPSEQ=$$GETCPPS(dbtbl5d.rid,dbtbl5d.grp,dbtbl5d.itmseq,21,PPID,.RPTINFO,.ddmap) quit:ER
+
+		set ORIGTAG=TAG
+		if TAG.extract(1)'="@" do {
+			
+			if TAG?1"["1E.E1"]"1E.E do {
+				type String ZD,ZF,ZFMT
+				set ZF=TAG.piece(",",2).piece("]",1)
+				set ZD=TAG.piece("]",2)
+				set ZFMT=$$TYP^DBSDD(ZF_"."_ZD)
+				if "UTF"[ZFMT,ZFMT'=FORMAT,"T,JR"'[FORMAT do {
+					write !,TAG," in section ",KEY," - Format Changed From (",FORMAT,") To (JR)",!
+					set FORMAT="JR"		// Convert to text
+					}
+				}
+			}
+
+		else  do {
+			
+			// If single variable and doesn't contain FORMAT,SIZE, add them to allow formatting
+			if VAR.beginsWith("<<"), VAR.endsWith(">>"), 'VAR.isLike("%,"_SIZE_">>"), (VAR'="<<#>>") set VAR = VAR.piece(">>", 1)_","_FORMAT_","_SIZE_">>"
+			
+			set TAG=$$VAR(VAR,SEC,.RPTINFO,.ddmap)
+			if TAG?1"~"1A.AN do {			// User defined variable
+				if SEC="H",LNCOL<3000 quit	// Skip report header
+				quit:PRE!PP			// User code will init
+				quit:TAG.extract(1,3)="~vc"	// Access key
+				}
+			}
+
+		set RPTINFO("FMT",LVL,SEC,LNCOL)=FORMAT_"|"_SIZE_"|"_TAG_"|"_PRESEQ_"|"_PPSEQ_"|"_BLANK
+
+		if ORIGTAG.extract(1)="@" do {
+			type String X
+			// Pack text string
+			set X=RPTINFO("FMT",LVL,SEC,LNCOL).order(-1)	// First item
+			quit:X=""
+			quit:X\1000'=LN					// Different line
+			set PREV=RPTINFO("FMT",LVL,SEC,X)		// Last object
+			quit:PREV.piece("|",1)'="T"			// Non-text
+			quit:"[@~"[PREV.piece("|",3).extract(1)		// DI or FUN
+			quit:PREV.piece("|",4)!PREV.piece("|",5)	// Pre or Post processor
+			if FORMAT="T","[@~"'[TAG.extract(1),'PRESEQ,'PPSEQ do {
+				type String Z1
+				set Z1=LNCOL-X-PREV.piece("|",2)
+				set PREV.piece("|",3)=PREV.piece("|",3)_$J("",Z1)_TAG
+				set PREV.piece("|",2)=PREV.piece("|",3).length()
+				set RPTINFO("FMT",LVL,SEC,X)=PREV
+				kill RPTINFO("FMT",LVL,SEC,LNCOL)
+				}
+			}
+		}
+	quit
+
+
+GETCPPS(String RID,		// Private - Deal with column pre/post-processor code
+	String GRP,
+	String ITMSEQ,
+	Number SEQ,
+	String PPID,
+	String RPTINFO(),
+	String ddmap())
+
+	/*
+	Build code into RPTINFO("VPSUBS",seq)=code.  "VPSUBS" is used to store column
+	pre- and post-processor code.
+
+	Note that code must be PSL, including any code pulled in from pre/post
+	processor libraries.
+	*/
+
+	type public Number ER
+
+	type Number CNT,END,N,START,VPNUM
+	type String DESC,PPIN(),PPOUT()
+
+	set START=SEQ-.001,END=SEQ+20
+	set CNT=1
+
+	type ResultSet rs=Db.select("DATA","DBTBL5D1","LIBS='SYSDEV' AND RID=:RID AND GRP=:GRP AND ITMSEQ=:ITMSEQ AND SEQ>:START AND SEQ<:END","SEQ ASC")
+	quit:rs.isEmpty() 0
+
+	while rs.next() do {
+		type String DATA
+		set DATA=rs.getCol("DATA")
+		set PPIN(CNT)=DATA
+		set CNT=CNT+1
+		if DATA.isLike("%type public", 1) do {
+			type Number I
+			
+			set DATA=DATA.piece("ublic ",2, 999).piece(" ",2)
+			if DATA'="" for I=1:1:DATA.length(",")  set RPTINFO("V0TYPE",DATA.piece(",",I))=""
+			}
+		}
+
+	// Translate, if necessary, pre/post-processor code
+	do PPCODE^DBSRW(.PPIN,.PPOUT,0,.ddmap,.RPTINFO)
+	if ER quit ""
+
+	if SEQ=1 set DESC="Column pre-processor"
+	else  set DESC="Column post-processor"
+	if PPID.extract(1,2)="<<" do {
+		set PPID=$TR(PPID,"<>")
+		set DESC=DESC_" - Variable: "_PPID.piece(",",1)
+		}
+	else  set DESC=DESC_" - "_PPID
+
+	set VPNUM=RPTINFO("VPSUBS","").order(-1)+1
+	set RPTINFO("VPSUBS",VPNUM,0)=$C(9)_"// "_DESC
+	set CNT=2,N=""
+	for  set N=PPOUT(N).order() quit:N=""  do {
+		set RPTINFO("VPSUBS",VPNUM,CNT)=PPOUT(N)
+		set CNT=CNT+1
+		}
+
+	quit VPNUM
+
+
+VAR(String VAR,	// Private - Convert variables and functions syntax to code
+	String SEC,
+	String RPTINFO,
+	String ddmap())
+	/*
+	Example:	Input			Output
+
+			<<abc>>			abc
+			<<xyz,$,12>>		$J(xyz,12,2)
+			<<[fid]di>>		vcn
+			<<RN>>  (<<RID>>)	RN_"  ("_RID_")"
+
+			@FUN(DINAM,level,fmt,size)
+	*/
+
+	if VAR?1"@"3A.E do { quit VAR				// @FUN(...)
+		quit:VAR.extract(1,4)="@CNT"
+		if VAR.extract(1,4)="@CHR" do {			// @CHR(v,cnt)
+			type Number I,LEN
+			type String C,X
+
+			set X=VAR.piece("(",2).piece(")",1)
+			set C=X.piece(",",1)
+			set LEN=+X.piece(",",2)
+			if 'LEN set LEN=RPTINFO("RSIZE")
+			set VAR=""
+			for I=1:1:LEN set VAR=VAR_C
+			}
+
+		// @FUN(di)   @FUN([fid]di)   @FUN(<<var>>)
+		else  do {
+			type Number I
+			type String C,P,X
+
+			for I=2:1 set P=VAR.piece("@",I) quit:P=""  do {
+				set X=P.piece("(",2).piece(")",1)
+				set C=X.piece(",",1)
+				// Convert @FUN(di) to @FUN([fid]di)
+				if C?1A.AN do {
+					type String C1
+					write !,VAR,"  --> "
+					set C1=ddmap.piece(",",1)	// Primary file
+					do addtomap(C1_"."_C,.ddmap)
+					set C="["_C1_"]"_C
+					write C,!
+					}
+				set RPTINFO("FMT",0,C,P.extract(1,3))=P.piece(",",3,9)
+				}
+			if VAR["," set VAR=VAR.piece(",",1,2)_")"
+			}
+		}
+
+	if VAR'["<<" quit VAR			// Constant with vc1,vc2,...
+
+	quit "~"_$$VARS(VAR,SEC,.RPTINFO,.ddmap)
+
+
+VARS(String VAR,	// Private - Convert mixed string and variables into code
+	String SEC,
+	String RPTINFO(),
+	String ddmap())
+	/*
+	EXAMPLE:
+		$$VARS("ACCOUNT TYPE <<TYP>>")   returns   "ACCOUNT TYPE "_TYP
+		$$VARS("Total <<TSUM,$,10>>")              "Total "_$J(TSUM,10,2)
+		$$VARS("Branch <<BR>> count")              "Branch "_BR_" count"
+		$$VARS("ACCOUNT:<<[DEP]CID>>")             "ACCOUNT:"_$J(vc1,12,0)"
+		$$VARS("BALANCE:<<[DEP]BAL>>")             "BALANCE:"_$J(vc2,12,2)"
+	*/
+
+	type String STR=""
+
+	quit:VAR'[">>" """"_VAR_""""				// Pure string
+
+	for  do { quit:VAR=""
+		type String P1,X
+
+		set P1=VAR.piece("<<",1)
+		set X=VAR.piece("<<",2).piece(">>",1)
+		if P1'="" set STR=STR_""""_P1_""""_"_"		// Text portion
+		if X'="" do {
+			// <<var,fmt,len>>
+			if X'["$E",X'["$G",X'["$P",X'["$L",X'["$$",X'["$S",X'["$J",X.length(",")>2 set X=$$VARFMT(X,SEC,.RPTINFO,.ddmap)
+			else  set X = $$OTHFMT(X)
+			if X?1"["1E.E1"]"1E.E set X=$$VARFMT(X,SEC,.RPTINFO,.ddmap)	// [fid]di
+			if X.extract(1)="&" set X=X.extract(2,99)
+			if X?1A.AN set X=$$TOVNAME(X,SEC,.RPTINFO,.ddmap)
+			if X?1A.AN1"(".E1")" set X=$$TOVNAME(X,SEC,.RPTINFO,.ddmap)
+			set STR=STR_X_"_"			// "text"_var
+			}
+		set VAR=VAR.piece(">>",2,99)			// Continue process
+		}
+
+	quit STR.extract(1,STR.length()-1)			// Remove trailing _
+
+
+VARFMT(String INVAR,	// Private - Deal with <<var,fmt,len>> format elements
+	String SEC,
+	String RPTINFO(),
+	String ddmap())
+	/*
+	EXAMPLE:
+		$$VARFMT("ABC,N,10")          return   $J(ABC,10)
+		$$VARFMT("ABC(X,Y),$,15")              $J(ABC(X,Y),12,5)
+		$$VARFMT("[DEP]BAL")                   $J(vc2,12,2)
+	*/
+
+	type Number CNT,DEC,LEN
+	type String CODE,TYP,VAR
+
+	set VAR=INVAR.piece(",",1)
+	if VAR["(" set VAR=INVAR.piece(")",1)_")"
+	set VAR=$$TOVNAME(VAR,SEC,.RPTINFO,.ddmap)	// Map to vc or vo
+	set INVAR=INVAR.piece(VAR,2,99)
+	set CNT=INVAR.length(",")
+	set LEN=INVAR.piece(",",CNT)
+	set TYP=INVAR.piece(",",2,CNT-1)
+	set DEC=0
+
+	if VAR.extract(1)="[",LEN="",TYP="" do {
+		set TYP=$$TYP^DBSDD(VAR)		// Format Type	
+		set DEC=+$$DEC^DBSDD(VAR)		// Decimal Precision
+		set LEN=+$$LEN^DBSDD(VAR)		// Field Length
+		if "$N"[TYP set LEN=0			// Pack data
+		if TYP="N",DEC set TYP="RD"_DEC		// RDn
+		}
+
+	if TYP["$",'DEC set DEC=2			// Currency
+	I TYP["RD" set DEC=+TYP.piece("RD",2)		// RDn
+	set CODE=$$fmtstr(LEN,TYP,DEC)
+	quit $$replace(CODE,"V",VAR)
+	
+	
+OTHFMT(String VAR)	// Deal with <<var,fmt,len>> elements that aren't basic
+
+	type Boolean isDone
+	type Number CNT, DEC, I, LASTUSED, LEN
+	type String CODE, P, TYP
+
+	if VAR'?.e1","1.N quit VAR	// No ,fmt,len
+	
+	set CNT = VAR.length(",")
+	set LEN = VAR.piece(",", CNT) quit:LEN'?1N.N	// Not length
+	
+	// Find type - may be more than one element
+	set TYP = ""
+	set isDone = 0
+	for I = CNT-1:-1:2 do { quit:isDone
+		
+		set P = VAR.piece(",", I)
+		if (P = "$") ! (P ? 1.U) !(P ? 1"RD".N) do {
+			set TYP = P_","_TYP
+			set LASTUSED = I
+		}
+		else  set isDone = 1
+	}
+	set TYP = TYP.extract(1, TYP.length() - 1)
+	set VAR = VAR.piece(",", 1, LASTUSED - 1)
+	
+	if TYP.isLike("%$%") set DEC = 2
+	else  if TYP["RD" set DEC = +TYP.piece("RD", 2)
+	else  set DEC = 0
+	
+	set CODE=$$fmtstr(LEN,TYP,DEC)
+	quit $$replace(CODE, "V", VAR)
+
+
+TOVNAME(String VARNAME,		// Private - Convert variable to internal field name 
+	String SEC,
+	String RPTINFO(),
+	String ddmap())
+
+	type Number I
+	type String FILE,X,V
+
+	set V=VARNAME
+
+	// Deal with possibility of variable format including T.C of [T]C
+	if $$validtcr(VARNAME,.X) set V=$$map(X,.ddmap,1)
+
+	else  for I=1:1 set FILE=ddmap.piece(",",I) quit:FILE=""  do {
+		type String X
+		set X=FILE_"."_VARNAME
+		// Save variable name for newlist, unless already in it by default
+		if 'ddmap(X).exists() do {
+			if ((VARNAME?1A.AN) ! (VARNAME?1"%".AN)) do {
+				quit:{List}"CONAM,RID,RN".contains(VARNAME)
+				set RPTINFO("V0TYPE",VARNAME) = ""
+			}
+			// Otherwise, more complex "variable", e.g, (ABC+XYZ)
+			else  do {
+				
+				type Number ptr
+				type String tok, VAR, VARSTR
+				
+				set VARSTR = $$TOKEN^%ZS(VARNAME, .tok)
+				set ptr = 0
+				for  do { quit:(ptr = 0)
+					
+					set VAR = $$ATOM^%ZS(VARSTR, .ptr, "()+-/*#\=_.,!&@", tok)
+					if ((VARNAME?1A.AN) ! (VARNAME?1"%".AN)) do {
+						quit:{List}"CONAM,RID,RN".contains(VAR)
+						set RPTINFO("V0TYPE",VAR) = ""
+					}
+				}
+			}
+		}
+		else  set V=ddmap(X)
+	}
+	
+	quit V
+
+
+public replace(STRING,OLD,NEW)    // Replace OLD with NEW in STRING
+
+	/*
+	Note that this is only public because it is called from generated reports.
+	Other code should not call this function.
+	*/
+	
+	type Number PTR=0
+
+	for  set PTR=$F(STRING,OLD,PTR) quit:PTR=0  set STRING=STRING.extract(1,PTR-OLD.length()-1)_NEW_STRING.extract(PTR,STRING.length()),PTR=PTR+NEW.length()-OLD.length()
+	quit STRING
+
+
+public isdi(String X)	// Return 1 if X contains a valid [fid]dinam
+
+	// Change to private once that feature works in PSL
+
+	type Number ISDI=0
+
+	if X?.E1"["1A.AN1"]"1A.E set ISDI=1			// [fid]dinam
+	else  if X?.E1"["1A.AN1"]%"1A.E set ISDI=1		// [fid]%dinam
+	else  if X?.E1"["1A.AN1","1A.AN1"]"1A.E set ISDI=1	// [lib,fid]dinam
+	else  if X?.E1"["1A.AN1","1A.AN1"]%"1A.E set ISDI=1	// [lib,fid]%dinam
+
+	quit ISDI
+
+
+public map(	String INPUT,	// Map data items to variables
+	String ddmap,
+	Number REPLACE)
+
+	// Change to private once that feature works in PSL
+
+	/* Map any data items ([FID]DI or TABLE.COL syntax) to variable
+	   names.  If REPLACE=1, then replace with the variable name as well.
+
+	   Returns INPUT if 'REPLACE, else, returns new string with variables.
+
+	Examples:
+		set X=$$REF("[DEP]BAL",.ddmap,1)	Create new ddmap() entry
+							and return vn
+		set X=$$REF("[DEP]BAL*[DEP]IRN/36500",.ddmap,1)
+							Returns v1*v2/36500
+	*/
+
+	type Number PTR=0
+	type String ATOM,BLDTC,DELS,RETURN,STRING,TCREF,TOK()
+
+        set DELS="[]+-*/\#_'=><\*(),!&:?",(RETURN,BLDTC)=""
+	set STRING=$$TOKEN^%ZS(INPUT,.TOK)	// Tokenize to eliminate "'s
+
+	for  do { quit:PTR=0
+		set ATOM=$$ATOM^%ZS(STRING,.PTR,DELS,TOK,1)
+
+		// Handle pattern match operations
+		if ATOM="?" do { quit
+			type Number ORIGPTR
+			type String PATTERN,Z
+
+			set ORIGPTR=PTR
+			for PTR=PTR+1:1 quit:PTR>STRING.length()  set Z=STRING.extract(PTR) quit:'(Z?1N!(Z=".")!(Z?1A)!($A(Z)=0))
+			set PTR=PTR-1
+			set PATTERN=STRING.extract(ORIGPTR,PTR)
+			set RETURN=RETURN_PATTERN
+			}
+
+		// May be [LIB,TAB]COL syntax
+		if ATOM="[" do { quit
+			if BLDTC'="" set RETURN=RETURN_BLDTC	// Old wasn't []DI syntax, start new
+			set BLDTC=ATOM				// Restart
+			}
+
+		if ATOM="]",BLDTC'="" set BLDTC=BLDTC_ATOM quit
+
+		// May be library, table, or column -- add to BLDTC and check
+		if ATOM?1A.AN!(ATOM?1"%"1.AN),BLDTC'="" do { quit
+			set BLDTC=BLDTC_ATOM
+			quit:BLDTC'["]"				// No ] yet - not done
+			// Should be done - see if valid
+			if $$validtcr(BLDTC,.TCREF) do {
+				do addtomap(TCREF,.ddmap)
+				set RETURN=RETURN_ddmap(TCREF)
+				}
+			else  set RETURN=RETURN_BLDTC
+			set BLDTC=""
+			}
+
+		if ATOM=",",BLDTC'="" do { quit
+			if BLDTC?1"["1A.AN!(BLDTC?1"[%"1.AN) set BLDTC=BLDTC_ATOM
+			else  set RETURN=RETURN_BLDTC_ATOM
+			}
+
+		// If get here with BLDTC, then it's not a potential reference
+		if BLDTC'="" set RETURN=RETURN_BLDTC,BLDTC=""
+
+		if DELS[ATOM set RETURN=RETURN_ATOM quit
+		if $A(ATOM)=0 set RETURN=RETURN_$$UNTOK^%ZS(ATOM,TOK) quit
+		if ATOM.extract()="$" set RETURN=RETURN_ATOM quit
+		if $$isNum^UCGM(ATOM) set RETURN=RETURN_ATOM quit
+
+		// Shoud be TABLE.COLUMN reference at this point.  If not leave as is.
+		if '$$validtcr(ATOM,.TCREF) set RETURN=RETURN_ATOM quit
+
+		// Add to ddmap
+		do addtomap(TCREF,.ddmap)
+		set RETURN=RETURN_ddmap(TCREF)
+		}
+
+	if REPLACE.get() set RETURN=$$UNTOK^%ZS(RETURN,TOK)
+	else  set RETURN=INPUT
+
+	quit RETURN
+
+
+public newlist(String OPT,	// Private - Return list of variables to be typed
+	String RPTINFO(),
+	String ddmap(),
+	String MOREVARS,
+	String EXCLVARS)
+	
+	// Change to private once that feature works in PSL
+
+	type Number I
+	type String LIST(),N,NEWLIST
+
+	if OPT="ALL"!(OPT="DDMAP")!(OPT="V0") do {
+		for I=1:1:ddmap(0)-1 do {
+			type String TC
+			set TC=ddmap(I)
+			set LIST(ddmap(TC))=""
+			}
+		}
+
+	// Get variable names for V0 section
+	if OPT="ALL"!(OPT="UD")!(OPT="V0") do {
+		set N=""
+		for  set N=RPTINFO("V0TYPE",N).order() quit:N=""  do {
+			if OPT'="V0" set LIST(N)=""
+			else  if 'RPTINFO("V0EXCLUDE",N).exists(),'RPTINFO("INCOMING",N).exists() set LIST(N)=""
+			}
+		}
+
+	// Get protection variable names
+	if OPT="ALL"!(OPT="V0") do {
+		set N=""
+		for  set N=RPTINFO("VPTYPE",N).order() quit:N=""  set LIST(N)=""
+		}
+
+	// Variables from report pre-processor (before query)
+	if OPT="ALL"!(OPT="MAINVARS") do {
+		set N=""
+		for  set N=RPTINFO("MAINVARS",N).order() quit:N=""  do {
+			quit:N="IO"		// RW variable, don't include
+			set LIST(N)=""
+			}
+		}
+
+	// Incoming variables from report pre-processor (before query)
+	if OPT="ALL"!(OPT="INCOMING") do {
+		set N=""
+		for  set N=RPTINFO("INCOMING",N).order() quit:N=""  set LIST(N)=""
+		}
+		
+	// If more variables to add to the list (MOREVARS), add them
+	if 'MOREVARS.get().isNull() for I=1:1:MOREVARS.length(",") do {
+		set N=MOREVARS.piece(",",I)
+		if 'N.isNull() set LIST(N)=""
+		}
+	
+	// If variables to exclude (e.g., previously typed), drop them
+	if 'EXCLVARS.get().isNull() for I=1:1:EXCLVARS.length(",") do {
+		set N=EXCLVARS.piece(",",I)
+		if 'N.isNull() kill LIST(N)
+		}
+
+	set (N,NEWLIST)=""
+	for  set N=LIST(N).order() quit:N=""  set NEWLIST=NEWLIST_N_","
+
+	quit NEWLIST.extract(1,NEWLIST.length()-1)
+
+
+public rwopt(String OPT,	// Support for .RWOPT. macro command
+	String VALUE)
+
+	// This code is called at run time if the .RWOPT. option is used
+
+	type public Number PN,vcrt
+	type public String V,VL,VRWOPT
+
+	if OPT="LINKRPT" do {
+		if vcrt.get() set PN=-1 do ^DBSRWBR(2)	// End of report message
+		quit:VALUE.get()=""			// No report name
+
+		type String RID,VWROPT
+		set VRWOPT("NOOPEN")=1			// Suppress Open
+		set VRWOPT("NOCLOSE")=1			// Suppress Close
+		set RID=VALUE
+		do RPT^URID				// Run report
+		}
+
+	else  if OPT="BLKLINE" set (V,VL)=""		// Current line to blank
+	else  if OPT="BLKFLD" set V=""			// Current field to blank
+	else  if VALUE.get() set VRWOPT(OPT)=VALUE
+	else  set VRWOPT(OPT)=1
+
+	quit
+
+
+RPTSEQ(String RID,	// Private - Computed operation to calculate report order
+	String GRP)
+
+	/* Used by  DBTBL5D.RPTSEQ to provide report DBSRPTLST the correct ordering
+	   for GRP level.  Without this sort order, the groups sort alphabetically.
+	*/
+
+	type Number RPTSEQ
+
+	if GRP="@PH" quit 1
+
+	type RecordDBTBL5H dbtbl5h=Db.getRecord("DBTBL5H","LIBS=""SYSDEV"",RID=:RID")
+
+	if GRP=dbtbl5h.seq quit 2
+	if GRP=dbtbl5h.seq2 quit 3
+	if GRP=dbtbl5h.seq3 quit 4
+	if GRP=dbtbl5h.seq4 quit 5
+	if GRP=dbtbl5h.seq5 quit 6
+	if GRP=dbtbl5h.seq6 quit 7
+	if GRP=dbtbl5h.seq7 quit 8
+	if GRP=dbtbl5h.seq8 quit 9
+	if GRP=dbtbl5h.seq9 quit 10
+	if GRP=dbtbl5h.seq10 quit 11
+
+	set RPTSEQ=99
+	if GRP="@RS" do {
+		if dbtbl5h.seq10'="" set RPTSEQ=12
+		else  if dbtbl5h.seq9'="" set RPTSEQ=11
+		else  if dbtbl5h.seq8'="" set RPTSEQ=10
+		else  if dbtbl5h.seq7'="" set RPTSEQ=9
+		else  if dbtbl5h.seq6'="" set RPTSEQ=8
+		else  if dbtbl5h.seq5'="" set RPTSEQ=7
+		else  if dbtbl5h.seq4'="" set RPTSEQ=6
+		else  if dbtbl5h.seq3'="" set RPTSEQ=5
+		else  if dbtbl5h.seq2'="" set RPTSEQ=4
+		else  set RPTSEQ=3
+		}
+
+	quit RPTSEQ
+
+
+private SORTFLG(RecordDBTBL5H dbtbl5h)	/* Private - Computed operation to calculate sort flag
+
+	Used by DBTBL5H.SORTFLG	
+
+	Was previously contained in ^DBSEXESO
+	*/
+
+	type Number I,SORTFLG
+	type String FILEKEYS,PFID,RPTSEQ,X
+
+	// Get report sequence
+	set RPTSEQ=dbtbl5h.seq_"|"_dbtbl5h.seq2_"|"_dbtbl5h.seq3_"|"_dbtbl5h.seq4_"|"
+	set RPTSEQ=RPTSEQ_dbtbl5h.seq5_"|"_dbtbl5h.seq6_"|"_dbtbl5h.seq7_"|"
+	set RPTSEQ=RPTSEQ_dbtbl5h.seq8_"|"_dbtbl5h.seq9_"|"_dbtbl5h.seq10
+	set RPTSEQ=$$RTBAR^%ZFUNC(RPTSEQ)
+
+	// Get primary file sequence
+	set PFID=dbtbl5h.pfid
+	set PFID=PFID.piece(",",1)		// Primary file
+
+	type RecordDBTBL1 dbtbl1=Db.getRecord("DBTBL1","%LIBS=""SYSDEV"",FID=:PFID")
+
+	set FILEKEYS=""
+	set X=dbtbl1.acckeys
+	for I=1:1:X.length(",") set FILEKEYS=FILEKEYS_"[SYSDEV,"_PFID_"]"_X.piece(",",I)_"|"
+	set FILEKEYS=$$RTBAR^%ZFUNC(FILEKEYS)
+
+	set SORTFLG=0				// Same order, i.e., no sort
+
+	// Remove dummy keys from table then compare
+	if RPTSEQ'=FILEKEYS do {
+		type String TC,Z
+		set Z=""
+		for I=1:1:FILEKEYS.length("|") do {
+			quit:'$$validtcr(FILEKEYS.piece("|",I),.TC)
+			set Z=Z_"[SYSDEV,"_TC.piece(".",1)_"]"_TC.piece(".",2)_"|"
+			}
+		set Z=$$RTBAR^%ZFUNC(Z)
+		if RPTSEQ'=Z set SORTFLG=1	// Difference order, i.e., sort
+		}
+
+	quit SORTFLG
+
+
+public stat(Number LVL)	/* Accumulate report statistics
+
+	Called at report run time to accumlate statistics for a given report
+	group level.
+	
+	Note that this is only public because it is called from generated reports.
+	Other code should not call this function.
+	*/
+
+	type public Number VT()
+	type Number N=""
+
+	// @TOT
+	for  set N=VT(LVL-1,N).order() quit:N=""  do {
+		set VT(LVL-1,N,1)=VT(LVL-1,N,1)+VT(LVL,N,1)
+		set VT(LVL,N,1)=""
+		}
+
+	// @MAX
+	for  set N=VT(LVL-1,N).order() quit:N=""  do {
+		if VT(LVL-1,N,2)=""!(VT(LVL-1,N,2)<VT(LVL,N,2)) set VT(LVL-1,N,2)=VT(LVL,N,2)
+		set VT(LVL,N,2)=""
+		}
+
+	// @MIN
+	for  set N=VT(LVL-1,N).order() quit:N=""  do {
+		if VT(LVL-1,N,3)=""!(VT(LVL-1,N,3)>VT(LVL,N,3)) set VT(LVL-1,N,3)=VT(LVL,N,3)
+		set VT(LVL,N,3)=""
+		}
+	
+	// @CNT
+	set VT(LVL-1)=VT(LVL-1)+VT(LVL)
+	set VT(LVL)=0
+	quit
+
+
+public validtcr(String TCREF,		// Validate table column reference
+	 String RETURN)
+	 
+	// Change to private once that feature works in PSL
+	 
+	/* Determine if a reference is valid and return TABLE.COLUMN form in
+	   RETURN, if valid.
+
+	ARGUMENTS:
+		. TCREF		Table/column reference	/REQ/NONULL/MECH=VAL
+		. RETURN	If valid, return in	/NOREQ/MECH=REF:W
+				TABLE.COLUMN format
+
+	RETURNS:
+		. $$		0 = invalid, 1 = valid
+
+	   Valid references are:
+		TABLE.COLUMN
+		TABLE.%COLUMN
+		[FID]DINAM
+		[FID]%DINAM
+		[LIB,FID]DINAM
+		[LIB,FID]%DINAM
+	*/
+
+	type Number OK=0
+	type String COLUMN,TABLE
+
+	if TCREF.extract()="[" do {
+		set TABLE=TCREF.piece("[",2).piece("]",1)
+		set COLUMN=TCREF.piece("]",2,99)
+		if TABLE["," set TABLE=TABLE.piece(",",2)
+		}
+	else  do {
+		set TABLE=TCREF.piece(".",1)
+		set COLUMN=TCREF.piece(".",2,99)
+		}
+
+	if TABLE?1A.AN&(COLUMN?1A.AN!(COLUMN?1"%"1A.AN)) do {
+		set RETURN=TABLE_"."_COLUMN
+		set OK=1
+		}
+
+	quit OK
+
+
+public vstats(Number SEQ,	// Accumulate report statistics
+	String SRCVAL,
+	String TRGTVAL,
+	String STATINFO,
+	String VSTATS())
+	
+	/*  STATINFO = Source | Format | Target | Increments 
+
+	OUTPUTS:
+		VSTATS() = Count|Total|Low|High|Source|Format|Target|Increments
+		
+	Note that this is only public because it is called from generated reports.
+	Other code should not call this function.
+	*/
+
+	type String FORMAT,INC1,INC2,SOURCE,TARGET,X
+
+	set SOURCE=STATINFO.piece("|",1)
+	set FORMAT=STATINFO.piece("|",2)
+	set TARGET=STATINFO.piece("|",3)
+	set INC1=STATINFO.piece("|",4)
+	set INC2=STATINFO.piece("|",5)
+	if FORMAT="T",'INC1 set X=SRCVAL
+	else  if TARGET'=SOURCE set X=SRCVAL
+	else  if INC2="" set X=SRCVAL\INC1
+	else  do {
+		type Number I
+		type String Y
+
+		for I=4:1 set Y=STATINFO.piece("|",I) quit:Y=""!(SRCVAL<Y)
+		set X=I-3
+		}
+
+	if X="" set X=" "
+
+	if '(VSTATS(SEQ).exists() ! 'VSTATS(SEQ,"").order().isNull()) set VSTATS(SEQ)="0|0|"_SRCVAL_"|"_SRCVAL_"|"_STATINFO
+	else  if FORMAT'="T"  do {
+		if SRCVAL<VSTATS(SEQ).piece("|",3) set VSTATS(SEQ).piece("|",3)=SRCVAL	// Low
+		if SRCVAL>VSTATS(SEQ).piece("|",4) set VSTATS(SEQ).piece("|",4)=SRCVAL	// High
+		}
+
+	set VSTATS(SEQ).piece("|",1)=VSTATS(SEQ).piece("|",1)+1			// Count
+	set VSTATS(SEQ).piece("|",2)=VSTATS(SEQ).piece("|",2)+TRGTVAL		// Total
+
+	if 'VSTATS(SEQ,X).exists() set VSTATS(SEQ,X)=""
+	set VSTATS(SEQ,X).piece("|",1)=VSTATS(SEQ,X).piece("|",1)+1
+	set VSTATS(SEQ,X).piece("|",2)=VSTATS(SEQ,X).piece("|",2)+TRGTVAL
+	quit
+
+vSIG()	quit "60842^35370^Dan Russell^36510"	// Signature - LTD^TIME^USER^SIZE

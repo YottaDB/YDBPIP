@@ -1,0 +1,848 @@
+LNB		/*
+	ORIG: kini - 04/26/2005
+	DESC: Loan Bill Format Template Routine
+
+	---- Comments --------------------------------------------------------
+	This procedure formats information for standard loan bills.
+	See procedures LNB1 (non R/C) and LNB2 (Revolving) for sample use.
+	
+	HST array - returned by UAVB, Average Balance Utility when $E(CTL,14)=1
+	
+	Top Level - History transaction from ^HIST
+	
+	"1" Level - Piece 1 - Balance after transaction
+	            Piece 2 - Principal portion 
+	            Piece 3 - Type (0 = monetary, 1 = interest FM)
+	                            0 = monetary
+	 	                    1 = interest FM where upper level will be:  \
+	 	                         old rate "|" new rate
+	
+	I18N=QUIT: Excluded from I18N standards.
+	
+	---- Revision History ------------------------------------------------
+	
+	09/12/05 - Mugilvannan - 16732
+		Changes made to align the display of the report.
+		
+	04/26/05 - KinI - 15524
+		Created procedure based on LNB.m routine.
+	*/
+	
+	quit
+
+
+public	INIT(RecordLN ln)	// Initialize Data
+
+	// Called from LNB1, LNB2 procedures
+	
+	type public String ER, ET, HST(), WIRN()
+	type public Number BLSQ, PG, SCHSEQ
+	type public Date %FD, FD, TD
+	type Number B, INT
+	type Date A
+	
+	set PG = 0
+	set FD = %FD+1
+	set BLSQ = SCHSEQ  // expected in LNB1 procedure
+		
+	// Calculate average balance and create print array
+	if (TD < FD) set ET = "EXCFD" do EXC quit
+
+	// History Cut-Off Date
+	if (FD '> ln.hisctf) set FD = ln.hisctf + 1
+
+	/*
+	 The following CTL pieces are passed to UAVB utility:
+	- (1)  Calculate weighted interest rate and several other "low 
+	       overhead" calculations
+	- (8)  Effective date reset option
+ 	- (14) Calculate the total scheduled principal payments. 
+	- (15) Specifies whether (1) or not (0) the system should ignore the 
+	       fact that the history cut-off date precedes the value of FD.  
+	- (16) Loan bill history option.  If 1, create HST(TJD,SEQ) array.
+	- (17) Recalculate loan account rates.                               
+	*/
+	do INIT^UAVB(,ln.cid,.FD,.TD,"10000001000001111",,,,.WIRN()) if ER do EXC quit
+	
+	// Loop through all dates in WIRN array to compare the rates
+	// If rate has changed, add rate changes to history array HST
+
+	set INT = +WIRN(WIRN("").order())  // Starting Rate
+	set A = FD 
+
+	for  set A = WIRN(A).order() quit:A=""  do {
+        	if (+WIRN(A) = INT) quit
+        
+		// Rate has changed, update HST array
+        	type Number CNT = 1
+        	type Date PDT
+        
+		for  set B = HST(A,"").order() + CNT do {  quit:'HST(A,B).data()
+			if HST(A,B).data() set CNT = CNT + 1 quit
+			}
+        
+		// Get the posting date from the piece 28 of the WIRN
+		set PDT = WIRN(A).get().piece("|",28)
+
+		set HST(A,B) = INT_"|"_ + WIRN(A)_"|"_PDT 
+		set INT = +WIRN(A)
+
+		// Indicates that entry is a rate change
+		set HST(A,B,1).piece("|",3) = 1
+		}
+		
+	quit
+
+	        
+public	S1(Number PO,	// Print Option
+	   String HDG,	// Header
+	   RecordLN ln)	
+	
+	/*
+	Section 1 - Page Header
+	
+	Called from ^LNB1, ^LNB2
+	PO = Print Option  0   = Plain Paper Format, Print Bank Name (Default)
+	                   1-n = Bank name pre-printed on form. 
+	                         Lines to skip before printing. Defaults to 11.
+	*/
+	
+	type public Number PG
+	type public Date TD
+	type public String BLNK, LINE, %MSKD
+	type Number N
+	type String A, L
+
+	kill LINE
+	
+	set HDG = HDG.get()
+	set:'$L(PO.get()) PO = 11
+
+	if HDG = "" set HDG = "LOAN BILLING STATEMENT"
+	set N = 56 - ($L(HDG)\2)
+	set HDG = $J("",N-3)_HDG_$J("",N+3)
+	if PO do PNT("Date: "_$$DAT^%ZM(TD,%MSKD.get())_HDG_" Page: "_PG,2,PO)
+	if 'PO do S1A
+	
+	set L = BLNK.extract(1,11)_"Customer: "
+	
+	set A = $$FULL(ln.lnm,19)
+
+	set L = L_A_BLNK.extract(1,32-A.length())_"Account: "_ln.grp_"-"_ln.cid
+
+	do PNT(L,2)
+
+	quit
+	
+	
+S1A	// Plain paper page heading with bank name
+
+	type public String BLNK, CONAM(), LINE, %MSKD
+	type public Date TD
+	type public Number PG
+
+	do PNT($$CTR($$UPPER^%ZFUNC(CONAM(1))),2)
+
+	do PNT($$CTR("Loan Billing Statement"),3)
+
+	set LINE = "Date: "_$$DAT^%ZM(TD,%MSKD.get())_BLNK.extract(1,56)_" Page: "_PG
+
+	do PNT(LINE,2)
+	
+	quit
+	
+	
+public	S2A(String P,	// Prompt
+	    String D,	// Data
+	    String C,	// Column (1 or 2)
+	    String F,	// Data Format ($,D,T)
+	    Number W)	// Write line (Defaulting to "Y" (1) if column 2. 
+	    		// Will be set to 1 if column 1 but no information for 
+	    		// column 2)
+
+	// Format information in section 2
+	
+	type public String BLNK, LINE, %MSKD
+	type public Number CID
+	type Number A
+	
+	set A = $S(C=1:21,1:25)
+	set P = $J($S('P.length():BLNK,1:P_": ").extract(1,A),A)
+	set F = F.get()
+	set D = $E($S('D.length():BLNK,F="$":$J($$FN^SCARND(D,",",CID.get()),13),F="D":$$DAT^%ZM(D,%MSKD.get()),1:D)_BLNK,1,16)
+	if (C = 2) set W = 1 if '$L(LINE.get()) set P = BLNK.extract(1,37)_P
+	
+	set LINE = LINE.get()_P_D
+	if W.get() do PNT(LINE) kill LINE
+	
+	quit
+	
+	
+public	S3H	// Section 3 - Account History - Header
+
+	do PNT($$CTR("Transaction Summary"),1,1)
+	do PNT(" Post  Eff")
+	do PNT(" Date  Date Transaction          Amount      Interest      Other     Principal")
+	do PNT("----- ----- ------------- ------------- ------------- ---------- -------------")
+	
+	quit
+
+	
+S3H1    // Print a separate header section for when there is a change in bal or int.
+
+	do PNT("-------------------------------------------------------------------------------")
+	do PNT($$CTR("VARIABLE RATE LOAN - RATE MAY VARY"),1,1)
+	do PNT($$CTR("Finance Charge Summary"),1,1)
+	do PNT("-------------------------------------------------------------------------------")
+	do PNT("                        Daily                                            Annual")
+	do PNT("From       To        Periodic                                        Percentage")
+	do PNT("Date       Date          Rate        Balance    Interest       Fees        Rate")
+	do PNT("---------  --------   -------   ------------    --------   --------     -------")
+
+        quit
+	
+	
+public	S3D(String TR1,  // Section(s) to print before advance to new page (if page 1)
+	    String HDR,	 // Sections to print on top of new page
+	    String MSG)	 // Fixed message to print after variable marketing message
+	    
+	// Section 3 Detail
+
+	type public Date FD, TD
+	type public String HST(), UAVB()
+	type Date TDT
+	type Number SEQ
+
+	// Beginning Balance
+	do S3DF(1,FD,"","Balance","","","",+UAVB(1).piece("|",21),,TR1)
+	
+	// Transaction History
+	set TDT = "" 
+	for  set TDT = HST(TDT).order() quit:TDT=""  do S3D1(TDT,TR1)
+	
+	// Ending Balance
+	do S3DF(1,TD,"","Balance","","","",+UAVB(1).piece("|",22),,TR1)
+
+	do PNT("")
+
+	quit
+
+
+public	S3FS(RecordLN ln)    
+	
+	// called from LNB2 procedure
+	
+	type public String BLNK, LINE, UAVB(), WIRN()
+	type public Date TD
+	
+	type Number %DY, APR, CURRENT, DPR, IRN, MINFIN, RGZCHG, RGZFEES
+	type Number BALINT, CURINT, DAYS, DIST1AF, TOTFIN, YEAR1, YEAR2
+	type String %MSKD, DIST1FRE, IACM, ICPF, TSINF()
+	type Date BEGJAN, DATE, ENDDEC, NEXTDT
+	type Boolean LEAP1, LEAP2, PIACM
+	
+	// Initialize Data
+	set DATE = ""
+	set RGZCHG = UAVB(2).piece("|",2)  // Sum of Reg Z loan tran charges
+	set TOTFIN = 0   // Total Finance Charges
+		
+	set DIST1FRE=ln.dist1fre
+	set DIST1AF=ln.dist1af
+	set ICPF=ln.icpf
+	set PIACM=ln.piacm
+	set IACM=ln.iacm
+	set MINFIN=ln.mfcb
+        
+	/*
+	 Condense the WIRN array into the TSINF array to get periods containing
+	 unique balance or interest rate.  The TSINF array is created here
+	 to store the lines that we will display.  It will contain date ranges,
+	 balance, interest amount, daily periodic rate, and APR.
+	*/
+	
+	set CURRENT=1
+	/*
+	 Compare WIRN Balance and Interest to previous entry in WIRN
+	 If the same, expand current entry to TSINF to include new enddate
+	 If different, create new TSINF entry.
+	*/
+	for  set DATE = WIRN(DATE).order() quit:DATE = ""  do {
+		set NEXTDT = WIRN(DATE).order()
+		if (NEXTDT = "") set NEXTDT = TD
+		else  set NEXTDT = NEXTDT - 1
+
+		// Compare piece 5 of WIRN array entries to check if 
+		// they are the same
+		if WIRN(DATE).piece("|",5) = (WIRN(WIRN(DATE).order(-1)).get()).piece("|",5) , +(WIRN(DATE).piece("|",1)) = +(WIRN(WIRN(DATE).order(-1)).get()).piece("|",5) set TSINF(CURRENT).piece("|",2) = NEXTDT
+		else  set CURRENT = CURRENT + 1 set TSINF(CURRENT) = DATE_"|"_NEXTDT_"|"_WIRN(DATE).piece("|",5)_"|"_WIRN(DATE).piece("|",1)
+		}
+	/*	
+	 Now break up all periods that might overlap from a leap
+	 year to a non-leap year or visa-versa.  This is because the difference
+	 in days will affect the daily period rate if we are using an IACM
+	 that uses actual days in the year (11 or 01)
+	*/
+	if (IACM.extract(2) = 1) do {
+		set CURRENT = 0
+		
+		for  set CURRENT = TSINF(CURRENT).order() quit:CURRENT = ""  do {
+			set YEAR1 = $$YEAR^SCADAT(TSINF(CURRENT).piece("|",1),1)
+			set %DY = YEAR1
+			set LEAP1 = $$LEAP^UFRE()
+			set YEAR2 = $$YEAR^SCADAT(TSINF(CURRENT).piece("|",2),1)
+			set %DY = YEAR2
+			set LEAP2 = $$LEAP^UFRE()
+			
+			// Is start date leap and end date non-leap or visa-cersa ?
+			if (LEAP1 '= LEAP2) do {
+			
+				// If so, break entry into two entries.
+				set ENDDEC = $$EOYJD^SCADAT(TSINF(CURRENT).piece("|",1),1)
+				set BEGJAN = $$BOYJD^SCADAT(TSINF(CURRENT).piece("|",2),1)
+
+				set TSINF(CURRENT+.1) = TSINF(CURRENT)
+				set TSINF(CURRENT).piece("|",2) = $$DSJD^SCADAT(ENDDEC)
+				set TSINF(CURRENT+.1).piece("|",1) = $$DSJD^SCADAT(BEGJAN)
+
+				set CURRENT = CURRENT+.1
+				}
+			}
+		}
+				
+	// Calculate Daily Period Rate, Current Interest, and APR.  Print results.
+	set CURRENT = 0
+	for  set CURRENT = TSINF(CURRENT).order() quit:CURRENT = ""  do {
+
+		set BALINT = +(TSINF(CURRENT).piece("|",3))
+		set IRN = +(TSINF(CURRENT).piece("|",4))
+		
+		// Calculating Daily Periodic Date
+		// Round to 6 places and make sure 6 places are used for display
+		set DPR = $$^SCARND(IRN/$$DY^UIC(IACM,TSINF(CURRENT).piece("|",1)),6,"","",6)
+		set TSINF(CURRENT).piece("|",5) = DPR
+		
+		// Calculate number of days
+		set DAYS = TSINF(CURRENT).piece("|",2) - TSINF(CURRENT).piece("|",1) + 1
+		
+		// Calculate interest finance charges for this time period
+		set CURINT = $$CURINT(IACM,BALINT,IRN,TSINF(CURRENT).piece("|",2),DAYS,DIST1FRE,DIST1AF,ICPF)
+		set TSINF(CURRENT).piece("|",6) = CURINT
+		set TOTFIN = TOTFIN + CURINT  // Calculating Finance Charge
+
+		// Calculate the periodic APR
+		set APR = $$APR(DAYS,RGZCHG,.RGZFEES,BALINT,CURINT,PIACM,IACM,TSINF(CURRENT).piece("|",1),TSINF(CURRENT).piece("|",2))
+
+		if (RGZFEES '= 0) set TSINF(CURRENT).piece("|",8) = RGZFEES
+		set TSINF(CURRENT).piece("|",7) = APR
+		}
+		
+	// If there is a minimum finance charge on the account, and it is
+	// greater than the accrued charges, then don't display anything.
+	if (MINFIN > TOTFIN) quit
+	
+	// Print header
+	do S3H1
+	
+	// Print data
+	set %MSKD = "MM/DD/YY"
+
+	set CURRENT = 0
+	for  set CURRENT = TSINF(CURRENT).order() quit:CURRENT = ""  do {
+
+		type String ENDDT, STRDT
+
+		set STRDT = TSINF(CURRENT).piece("|",1)
+		set STRDT = $S(STRDT:$$DAT^%ZM(STRDT,"MM/DD/YY"),1:BLNK.extract(1,5))
+		
+		set ENDDT = TSINF(CURRENT).piece("|",2)
+		set ENDDT = $S(ENDDT:$$DAT^%ZM(ENDDT,"MM/DD/YY"),1:BLNK.extract(1,5))
+		
+		// Eliminate leading 0, display APR
+		set DPR = TSINF(CURRENT).piece("|",5)
+		set DPR = "."_DPR.piece(".",2)
+		
+		set LINE = STRDT_" -" 
+	
+		do S3DF1(0,ENDDT,10)
+
+		do S3DF1(0,DPR,8)
+
+		set LINE = LINE_"%"
+		
+		// Balance
+		do S3DF1(1,TSINF(CURRENT).piece("|",3),15)
+
+		// Interest amount
+		do S3DF1(1,$$^SCARND(TSINF(CURRENT).piece("|",6),2,,,2),12)
+
+		// Reg Z Fees
+		do S3DF1(1,$$^SCARND(TSINF(CURRENT).piece("|",8),2,,,2),11)
+
+		// APR
+		do S3DF1(1,$$^SCARND(TSINF(CURRENT).piece("|",7),2,,,2),11)
+		set LINE = LINE_"%"
+
+		do PNT(LINE)
+		}
+	
+	do PNT("")
+	
+	set LINE = "                             Finance Charge"
+
+        do S3DF1(1,TOTFIN,13)
+
+	do PNT(LINE)
+	
+	quit
+	
+	
+CURINT(String IACM,	// Interest Accrual Calculation Method
+       Number BALINT,	// Balance for interest accrual calculations
+       Number IRN,	// Interest Rate of the account
+       Date TD,		// To Date
+       Number DAYS,	// Number of days for which to calculate interest
+       String DIST1FRE,	// Distribution 1 Frequency
+       Number DIST1AF,	// Distribution 1 Annual Factor
+       String ICPF)	// Interest Calculation Period Frequency	
+       
+	// Return amount of interest accrued during a certain time period	
+	/*
+ 	 ARGUMENTS:
+         	IACM:   The IACM defined on the loan account.
+        	BALINT: The balance (BALINT) at any given time during the 
+        	        life of the loan account.
+		IRN:    The interest rate used at any given time during the 
+		        life of the loan account.
+		TD:     The date on which to calculate the interest. This is 
+	                neccessary when determining the next and last schedule 
+	                days to find the number of days in the period.
+	*/
+	
+	type Number DENOM
+	type Date DIP, SCHND, SCHLD
+	
+	// Calculate Interest Amount
+	if $$YEAR^SCADAT(TD,1)#4 set DENOM = 36500
+	else  set DENOM = 36600
+	
+	// Actual number days in period
+	if (IACM = 10) quit DAYS*(BALINT)*IRN/36000
+	if (IACM = 11) quit DAYS*(BALINT)*IRN/DENOM
+	if (IACM = 13) quit DAYS*(BALINT)*IRN/36500
+	
+	set SCHND = ""
+	set SCHLD = ""
+
+	// If using standard days, we need to get next and last date scheduled date
+	do IM0(IACM,ICPF,DIST1FRE,.SCHND,.SCHLD,DIST1AF,TD)
+
+	set DIP = SCHND - SCHLD
+	
+	// Standard number of days in period
+	if (IACM = "00") quit DAYS*((BALINT)*IRN/DIST1AF/100/DIP)
+	if (IACM = "01") quit DAYS*((BALINT)*IRN*360/DIST1AF/DENOM/DIP)
+	if (IACM = "03") quit DAYS*((BALINT)*IRN*360/DIST1AF/36500/DIP)
+
+	quit
+	
+	
+APR(Number DAYS,	// Number of days for which to calculate interest
+    Number RGZCHG,  	// Loan fees or other charges appear for reg Z
+    Number RGZFEES,	// Loan fees
+    Number BALINT,	// Balance for Accrual Calculation
+    Number CURINT,	// Interest accrued
+    Boolean PIACM,	// Calculate P&I Based on IACM
+    String IACM,	// Interest Accrual Method
+    Date TSINFDT1, 	// Date from TSINF array piece 1
+    Date TSINFDT2)	// Date from TSINF array piece 2
+    
+	/*
+	 Return periodic APR.
+	
+	 Set up cash flow array so $$UIRR can calculate a rate of return as the
+	 periodic APR.  The 0 level is the balance and the 1 level is the 
+	 balance plus the interest plus any regulation Z charges.
+	
+	 Note:  The APR is calculated here by considering the amount of finance
+	 charge over a period of time plus any reg Z charges.  This is very 
+	 similar to how BCHLNBLDB calculates a periodic APR, except that the 
+	 finance charge is always calculated manually here, whereas in the 
+	 batch definition, we sometimes retrieve the finance charge from the 
+	 bill file, depending on the interest determination point (IDP).
+	 If no reg Z charges appear, the APR should be the same as the interest 
+	 rate. If the institution wants to consider certain kinds of loan fees 
+	 into the periodic APR, they need to flag the transactions using loan 
+	 processing control flag 19 (LN.PCFL19).
+	*/
+	
+	type public Number CID
+	type String CF(), UAVB()
+	
+	set RGZFEES = 0
+	
+	// If loan fees or other charges appear for reg Z, we need to consider 
+	// them.
+	if (RGZCHG '= "") do {
+		do INIT^UAVB(,CID,TSINFDT2,TSINFDT1,"01")	
+		set RGZFEES = UAVB(2).piece("|",2)
+		}
+		
+	// Build the Cash Flow array
+	set CF(0) = -BALINT
+
+	// RGZFEES should be negative coming out of UAVB, so subtract the negative 
+	// which will add its value to the cash flow.
+	set CF(1) = (BALINT - RGZFEES + CURINT)_"|"_1
+
+	if (+CF(1) = 0) quit 0
+
+	// Change to positive number for displaying
+	set RGZFEES = -RGZFEES
+
+	// Pass EFD into UIRR so that UIRR considers this date instead of 
+	// the calendar date when determining annual factor (AF) or BASIS.
+	quit $$^UIRR(.CF,DAYS_"DA",PIACM,IACM,,,,TSINFDT2)
+
+
+IM0(String IM,	// Interest Accrual Method
+    String IP,	// Int Calc Period Freq
+    String IF,	// Interest Posting Freq 
+    Date SN,	// Int Next Posting Date
+    Date SL,	// Int Last Posting Date
+    Number AF,	// Annual Factor
+    Number ED)  // Execute Date 
+    	
+	/*
+	 Interest methods with first character "0"
+	 
+         Processing associated with Interest Accrual Method that indicates the
+         standard number of days in a month (30) should be used for accrual
+         calculations.
+	*/
+        
+        type public Boolean ER
+        type Date NJD
+        
+        // Use override parameters if IP defined
+        if (IP '= "") do {  quit
+        	set IF = IP
+        	set SN = $$NJD^UFRE(ED,IP,.AF) quit:ER
+        	set SL = $$NJD^UFRE(SN,"-"_IP) quit:ER
+        	}
+  	
+        if (IF.isNull()) set IM = 1_IM.extract(2) quit
+ 	
+        // Define next date if not defined
+        if (SN.isNull()) set SN = $$NJD^UFRE(ED,IF,.AF) quit:ER
+	
+	// Define last date if not defined
+        if (SL.isNull()) set SL=$$NJD^UFRE(SN,"-"_IF,.AF) quit:ER
+ 	
+        // Ensure that last date is before today
+        for  quit:SL '> ED  set SN = SL set SL = $$NJD^UFRE(SN,"-"_IF) quit:ER
+	
+        // Ensure that next date is after last
+        if (SN '> SL) set SN = $$NJD^UFRE(SL,IF) quit:ER
+ 	
+	// Define annual factor if needed
+        if (AF.isNull()) set NJD = $$NJD^UFRE(ED,IF,.AF) quit:ER
+ 	
+        quit
+
+	
+S3D1(Date TDT,
+     String TR1)
+     	
+     	type public String DSC(), HST()
+     	type Date EFD
+     	type Number I, O, P, SEQ, T
+     	type String D, ITC, HST1(), TAMT
+
+	set SEQ = ""
+	for  set SEQ = HST(TDT,SEQ).order() quit:SEQ.isNull()  do {
+	
+		set HST = HST(TDT,SEQ).get()
+		set HST1 = HST(TDT,SEQ,1).get()
+	
+		if (HST1.piece("|",3) = 1) do S3D1A(TDT,TR1) quit
+	
+		// Monetary Transaction
+		set ITC = HST.piece("|",2)
+		set TAMT = HST.piece("|",4)
+
+		set T = +TAMT if (T.isNull()) quit   // Transaction Amount
+
+		// Principal and Affect on Balance
+		if (HST1.piece("|",2) < 0) set D = "-" set P = HST1.piece("|",2) * (-1)
+		else  set P = +HST1.piece("|",2) set D = $S(P:"+",1:"")
+
+		set I = TAMT.piece("#",3) + TAMT.piece("#",8)    // Interest
+
+		set O = T - I - P if (T < 0) set O = T + I + P   // Other
+
+		// Effective Date
+		set EFD=$S(HST.piece("|",5):HST.piece("|",5),1:TDT)
+	
+		// Skip transaction if no principal portion and skip flag is on
+		if P.isNull() , ITC.extract(5) quit
+	
+		// Statement Description
+		type String ETC = HST.piece("|",3)
+		type RecordTRN trn=Db.getRecord("TRN","ETC=:ETC",1)		
+		if ('DSC(HST.piece("|",3)).data()) set DSC(HST.piece("|",3)) = trn.prdes
+
+		do S3DF(1,TDT,EFD,DSC(HST.piece("|",3)),T,I,O,P,D,TR1)
+		}
+	quit
+	
+	
+S3D1A(Date TDT,
+      String TR1)	
+
+	// Rate Change Transaction
+	// Get the posting date from the HST record 
+	
+	type public String LINE, HDR, HST()
+	type public Number PG
+	type Date PDT 
+	
+	set PDT = (HST.get()).piece("|",3) 
+
+	set LINE = $$DAT^%ZM(PDT,"MM/DD")_" "_$$DAT^%ZM(TDT,"MM/DD")
+	set LINE = LINE_" "_"Rate Change From: "_+HST_"% To: "_+$P(HST,"|",2)_"%"
+
+	do PNT(LINE,1,"","",$S(PG=1:33,1:42),HDR,"S3T,S4(MSG)",TR1)
+
+	quit
+	
+S3DF(Boolean F1,  //Flag to determine whether to re-format per standard.  (columns 4 though 7 in dollar format)
+     String C1,	  // Column 1
+     String C2,	  // Column 2
+     String C3,	  // Column 3	
+     String C4,	  // Column 4		
+     String C5,	  // Column 5
+     String C6,	  // Column 6	
+     String C7,   // Column 7
+     String C8,   // Column 8
+     String TR1)  // History Records - Format and Print
+	
+	type public String BLNK, HDR, LINE
+	type public Number PG
+	
+	set F1 = F1.get()
+	set TR1 = TR1.get()
+	
+	// Date Fields
+        set LINE = $S(C1:$$DAT^%ZM(C1,"MM/DD"),1:BLNK.extract(1,5))
+        set LINE = LINE_" "_$S(C2:$$DAT^%ZM(C2,"MM/DD"),1:BLNK.extract(1,5))
+	
+	// Description
+	do S3DF1(0,C3.get(),14)
+	
+	// Dollar Fields
+	do S3DF1(F1,C4.get(),14)
+	do S3DF1(F1,C5.get(),14)
+	do S3DF1(F1,C6.get(),11)
+	do S3DF1(F1,C7.get(),14)
+	do S3DF1(0,C8.get(),2)
+	
+	do PNT(LINE,1,"","",$S(PG=1:33,1:42),HDR,"S3T,S4(MSG)",TR1)
+
+	quit
+
+	
+S3DF1(Boolean F1,	// Flag (from above)
+      String VAL,	// Value
+      Number SIZ)	// Maximum Size
+	
+	type public String BLNK, LINE
+	type public Number CID
+	
+	if (VAL = "") set LINE = LINE_BLNK.extract(1,SIZ) quit
+	if ('F1) set LINE = LINE_" "_(VAL_BLNK).extract(1,SIZ-1) quit
+
+	set LINE = LINE_$J($$FN^SCARND(VAL,",",CID.get()),SIZ) 
+
+	quit
+
+		
+S3T	// Section 3 Trailor - If need to go to multiple pages.
+
+	type public String BLNK
+
+	do PNT(BLNK.extract(1,66)_"Continues")
+
+	quit
+	
+	
+public	S4(String MSG)	// Single line message always printed on statement after mktg msg 
+	
+	// Marketing Messages
+	
+	type public String BMSG
+	type Number J
+	
+	do BLN(36)
+	
+	for J = 1:1:BMSG do PNT(BMSG(J))
+	do PNT($$CTR(MSG),3,1)
+
+	quit
+
+	
+public	S6(Boolean OPT,  // Print "Amount Enclosed" prompt flag
+	   RecordLN ln)	 // Loan Record
+	   
+	// Bottom section of remittance advice
+	// Called from LNB1, LNB2 procedures
+
+	type public String LINE, TDES()
+	type public Number TYPE
+	type String A, B
+
+	do BLN(51)
+	
+	set LINE = $$CTR(ln.grp_"-"_ln.cid,37)
+	
+	set (A,B) = "" if OPT set A = "Amount Enclosed",B="-------------"
+	do S2A(A,B,2)
+	
+	if ('TDES(TYPE).data()) do TDES(TYPE)
+	do PNT(TDES(TYPE))
+
+	quit
+
+	
+public	S7(Boolean OPT)	// SUPPRESS bank name and address flag
+
+	// Name and address info
+	
+	type public String BLNK, CONAM(), NM()
+	type Number zz
+	
+	do BLN(59)
+	
+	// Use this line if bank name and address is NOT pre-printed on form
+	if 'OPT for zz = 1:1:5 do PNT("   "_(NM(zz).get()_BLNK).extract(1,38)_"             "_$$FULL(CONAM(zz).get(),37))
+	
+	// Use this line if bank name and address IS pre-printed on form
+	if OPT for zz = 1:1:5 do PNT("   "_(NM(zz).get()).extract(1,40))
+
+	quit
+
+	
+TDES(Number TYPE)	// Product Type
+	
+	// Find product type description
+
+	type public String TDES()
+
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:TYPE")
+	
+	set TDES(TYPE) = $S(prodctl.stmdscd'="":prodctl.stmdscd,1:prodctl.des)
+	set TDES(TYPE) = $$CTR(TDES(TYPE),36)
+
+	quit
+
+	
+CTR(String A,	// Text
+    Number B)	// Text size	
+	
+	// Center text A in field size B (defaults to 80)
+
+	type public String BLNK
+
+	if 'B.get() set B = 80
+
+	quit (BLNK.extract(1,(B-(A.get().length()))/2)_A.get()_BLNK).extract(1,B)
+
+	
+public	FULL(String S,	// String to modify
+	     Number L)	// Maximum length of field
+
+	// Return full words of string that can fit in designated space
+	
+	type Number A
+	
+	set A = S.length(" ") 
+	for  quit:'A  set A = A - 1 quit:S.length() '> L  set S = S.piece(" ",1,A)
+
+	if (S.length() > L) set S = S.extract(1,L)
+	if (S.extract(S.length()) = ",") set S = S.extract(1,S.length()-1)
+
+	quit S
+
+
+public	PNT(Number LIN, // Line to be printed
+	    Number SKA, // Lines to skip after printing, defaulting to 1
+	    Number SKB, // Lines to skip before printing, defaulting to 0
+	    Number FOL, // Number of lines to follow which must appear on same page. (Therefore skip to next page if will not fit.)
+	    Number FLR, // Last print line ($Y) which may be used for this section
+	    String HDR, // Section to print (on new page) if forced to new pg before print
+	    String TRL, // Section to print before jumping to a new page to print line
+	    String TR1)	// Special trailor section if on page 1 only
+	    
+	// Print a Single Line
+	// HDR, TRL, and TR1 may contain multiple sections (separated by commas)
+	
+	type Number I
+	
+	for I = 1:1:SKB.get() write !         // Skip blank lines before print
+	
+	// New page required?
+	if (FLR.get().length()) , ($Y > (FLR - FOL.get())) do PNT1(TR1)
+
+	write LIN.get()                                 // Print line
+
+	// Skip blank lines after print
+	set:'SKA.get().length() SKA = 1 for I = 1:1:SKA write !  
+
+	quit
+	
+	
+public	PNT1(String TR1)	
+
+	// New page required
+	
+	type public String HDR, TRL
+	type public Number PG
+	type Number i, TPG
+	type String A
+	
+	set TR1 = TR1.get()
+	
+	// Print before jump
+	if (TRL.get().length()) for i = 1:1 set A = TRL.piece(",",i) quit:A = ""  do @A
+	
+	// On first page, print remittance advice
+	if (PG = 1) , (TR1.get().length()) for i = 1:1 set A = TR1.piece(",",i) quit:A = ""  do @A
+	
+	// Jump to new page
+	write #                  	// Jump
+	set PG = PG + 1          	// Page number
+	set TPG = TPG.get() + 1  	// Total pages
+
+	// Print after jump
+	if (HDR.get().length()) for i = 1:1 set A = HDR.piece(",",i) quit:A = ""  do @A
+
+	quit
+	
+	
+public	BLN(Number L)	// Print blank lines until reach specified line ($Y) on page
+
+	if ($Y < L) do PNT("",L-$Y)	
+
+	quit
+
+	
+EXC	// Exception Conditions
+
+	type public Boolean ER
+
+	set ER = 1
+
+	quit
+	
+	
+
+vSIG()	quit "60155^31074^Saravanamuthu Mugilvannan^23363"	// Signature - LTD^TIME^USER^SIZE

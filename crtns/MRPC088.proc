@@ -1,0 +1,370 @@
+MRPC088(RETURN,VERSN,SRVCAT,INPUT)
+
+	/*
+	 ORIG: RICKARDSC - 08/31/2000
+	 DESC: Memo Account Create
+
+	 KEYWORDS: RPC
+
+	 ARGUMENTS:
+		RETURN		Master/Float		/TYP=T/REQ/MECH=REFNAM:W
+				Account numbers
+
+		VERSN		Version number		/TYP=N/REQ/MECH=VAL
+				Current version=1
+
+		SRVCAT		Service Category	/TYP=T/REQ/MECH=VAL
+
+		INPUT		Input string		/TYP=T/REQ/MECH=VAL
+
+	 RETURNS:
+		$$		Error message		/TYP=T
+				Null= no error
+
+		RETURN		Account number		/TYP=N
+
+         RELATED:
+		$$^PBSMRPC - MRPC service class driver
+
+	 EXAMPLE:
+		set RM=$$^MRPC088(.VAL,1,"CREDIT","MEMOCC.ACN=62303,MEMOCC.SERVICE=AMEXCC,MEMOCC.ACCKEY=123456789^9087654321,MEMOCC.IDENTIFIER=123456789^9087654321")
+
+	 ---- Comments --------------------------------------------------------
+
+	 The RPC is a public RPC for external account creation. The RPC
+	 accepts a service category and a comma separated string in the
+	 form FID.DI=VAL,FID.DI=VAL,... which is used to create the account.
+	 The service category will be one of the standard service categories
+	 found in Service Categories Table (STBLSRVCAT).
+
+	 PROFILE's memo* filers will validate the data before filing, and any
+	 errors encountered will be passed to the client.  This MRPC returns
+	 the memo number created. In all cases the customer will pass PROFILE
+	 the memo account number using the FID.ACCKEY tag, where FID will
+	 equal the appropriate Service table.
+
+	 The following columns are required to be passed in the INPUT string
+	 for the service table:
+		ACN		Primary Owner
+		SERVICE		Service Name
+		ACCKEY		Composite Access Key
+		IDENTIFIER	Account Identifier
+
+	 For memo accounts with a single ownership, MRPC088 will default in
+	 the following CIFACCTS column values:
+		ACN		Primary Owner
+		SRVCAT		Service Category
+		SERVICE		Service Name
+		ACCKEY		Composite Access Key
+		IDENTIFIER	Account Identifier
+
+	 Because there can be multiple CIFACCTS records per memo account, these
+	 will be distinguished by including a counter in the table name, such
+	 as: CIFACCTS1.ACN=100001234,CIFACCTS2.ACN=100004367,CIFACCTS1.ROLE=1,
+	 CIFACCTS2.ROLE=2,
+
+	 When creating a joint ownership memo account the following CIFACCTS
+	 columns are required to be passed in the INPUT string:
+		ACN		Customer Number
+		ROLE		Role Code for Relationship
+
+	 FAPINP and FAPOUT are the sections that allow custom code to reformat
+	 the input and output.
+
+	---- Revision History ------------------------------------------------
+ 	     
+	09/22/05  - SREERAM - 16682
+		   Initialized Unscoped Variables and Cleanup for DBI3.
+		   
+	11/10/03 - CARROLLJ - 51630
+		   Added #ACCEPT above %STFHOST check to stop compile errors.
+
+	11/30/00 - CARROLLJ - 42558
+		   Modified MAIN section to remove TP logic.    
+		
+
+	*/
+
+
+	// Process
+	
+	do PROC(VERSN,SRVCAT,INPUT,.RETURN)
+	type Public Boolean ER
+	type Public String RM
+	if ER quit $$ERRMSG^PBSUTL($G(RM))
+	else  set RETURN=$$V2LV^MSG(RETURN)
+
+	quit ""
+
+
+PROC(VERSN,SRVCAT,INPUT,RETURN)
+
+	/*
+	 Process the input
+	*/
+
+		
+	type Public Boolean ER
+	type Boolean ERV
+	type Public String RM
+	type Number ACCKEY
+	type String ERRMSG
+	
+	set ER=0
+	set RM=""
+
+	// Version number of client message is not compatible with server
+	if 'VERSN.get()=1 set ER=1,RM=$$^MSG(2951) quit
+
+	// Invalid record
+	if (SRVCAT.get()="")!(INPUT.get()="") set ER=1,RM=$$^MSG(8097) quit
+
+	// If during critical path set TJD to tomorrow
+	#ACCEPT DATE=03/10/00;PGM=Erik Scheetez
+	if %STFHOST.get() new %Systemdate set %SystemDate=$$TTL^RCHK()+1
+
+	// Process input
+	do MAIN(INPUT,SRVCAT,.ACCKEY)
+	if ER,$TLevel do Runtime.rollback() quit
+
+	if 'ERRMSG.get()="" set ER=ERV,RM=ERRMSG
+	if ER quit 
+
+	// Return the account number
+	set RETURN=ACCKEY.get()_$C(13,10)
+
+	#if $$VALID^%ZRTNS("ZMRPC088") do FAPOUT^ZMRPC088
+
+	quit
+
+
+MAIN(INPUT,SRVCAT,ACCKEY)
+
+	/*
+	 Main processing section
+	*/
+	
+	type Public Boolean ER,ERV
+	type Public String ERRMSG
+	type Number I
+	
+	catch vERROR {
+
+                new ET
+                set ET=vERROR.type
+		set ERV=1,ERRMSG=vERROR.description
+ 
+                if ET["%GTM-" do ZE^UTLERR quit
+		if $TLevel do Runtime.rollback()
+                set ET=ET_"-"_vERROR.thrownAt
+		}
+
+	type String ARR(),DATA,MEMO,SERVICE,TMP
+	type Boolean QUIT
+	type RecordCIFACCTS accts()
+
+	// Parse account information into an array
+	do STR2ARR^UTLMRPC(INPUT,.DATA,",")
+
+	#if $$VALID^%ZRTNS("ZMRPC088") do FAPIN^ZMRPC088
+	if ER quit
+
+	type ResultSet rs=Db.select("DATATBL","STBLSRVCAT","SRVCAT=:SRVCAT")
+	if rs.next() do {
+		set MEMO=rs.getCol("DATATBL")
+		set SERVICE=DATA(MEMO_".SERVICE").get()
+		set ACCKEY=DATA(MEMO_".ACCKEY").get()
+
+		// Memo account section
+		if MEMO="MEMOBILLPAY" do BILLPAY(SERVICE,ACCKEY,.DATA)
+		if MEMO="MEMOBROKER" do BROKER(SERVICE,ACCKEY,.DATA)
+		if MEMO="MEMOCC" do CC(SERVICE,ACCKEY,.DATA)
+		if MEMO="MEMODEP" do DEP(SERVICE,ACCKEY,.DATA)
+		if MEMO="MEMOECOM" do ECOM(SERVICE,ACCKEY,.DATA)
+		if MEMO="MEMOLN" do LN(SERVICE,ACCKEY,.DATA)
+		if MEMO="MEMOPYMTS" do PYMTS(SERVICE,ACCKEY,.DATA)
+		}
+
+	if '$D(DATA("CIFACCTS1.ACN")) do {
+		set DATA("CIFACCTS1.ACN")=DATA(MEMO_".ACN").get()
+		set DATA("CIFACCTS1.ROLE")=1
+		}
+
+	set QUIT=0
+	for I=1:1 quit:QUIT  do { quit:ER
+		if '$D(DATA("CIFACCTS"_I_".ACN")) set QUIT=1 quit
+
+		set TMP="CIFACCTS"_I
+		for  set TMP=DATA(TMP).order() quit:(TMP="")!('TMP.piece(".",1)=("CIFACCTS"_I))  set ARR("CIFACCTS."_TMP.piece(".",2))=DATA(TMP)
+
+		set accts(I)=Class.new("RecordCIFACCTS")
+		do accts(I).overlay("ARR")
+
+		set accts(I).acn=ARR("CIFACCTS.ACN").get()
+		set accts(I).srvcat=SRVCAT
+		set accts(I).service=SERVICE
+		set accts(I).acckey=ACCKEY
+		set accts(I).identifier=ARR(MEMO_".IDENTIFIER").get()
+
+		do accts(I).save() if ER quit
+		}
+	if ER quit
+
+	// Verify foreign keys
+	do vfkey^SQLBUF
+
+	quit
+
+
+BILLPAY(SERVICE,ACCKEY,DATA)
+
+	/*
+	 Create MEMOBILLPAY entry
+	*/
+
+	type Public Boolean ER
+	type RecordMEMOBILLPAY billpay=Class.new("RecordMEMOBILLPAY")
+
+	do billpay.overlay("DATA")
+
+	set billpay.service=SERVICE
+	set billpay.acckey=ACCKEY
+
+	do billpay.save() if ER quit
+
+	quit
+
+
+BROKER(SERVICE,ACCKEY,DATA)
+
+	/*
+	 Create MEMOBROKER entry
+	*/
+
+	type Public Boolean ER
+	type RecordMEMOBROKER broker=Class.new("RecordMEMOBROKER")
+
+	do broker.overlay("DATA")
+
+	set broker.service=SERVICE
+	set broker.acckey=ACCKEY
+
+	do broker.save() if ER quit
+
+	quit
+
+
+CC(SERVICE,ACCKEY,DATA)
+
+	/*
+	 Create MEMOCC entry
+	*/
+
+	type Public Boolean ER
+	type RecordMEMOCC cc=Class.new("RecordMEMOCC")
+
+	do cc.overlay("DATA")
+
+	set cc.service=SERVICE
+	set cc.acckey=ACCKEY
+
+	do cc.save() if ER quit
+
+	quit
+
+
+DEP(SERVICE,ACCKEY,DATA)
+
+	/*
+	 Create MEMODEP entry
+	*/
+
+	type Public Boolean ER
+	type RecordMEMODEP dep=Class.new("RecordMEMODEP")
+
+	do dep.overlay("DATA")
+
+	set dep.service=SERVICE
+	set dep.acckey=ACCKEY
+
+	do dep.save() if ER quit
+
+	quit
+
+
+ECOM(SERVICE,ACCKEY,DATA)
+
+	/*
+	 Create MEMOECOM entry
+	*/
+
+	type Public Boolean ER
+	type RecordMEMOECOM ecom=Class.new("RecordMEMOECOM")
+
+	do ecom.overlay("DATA")
+
+	set ecom.service=SERVICE
+	set ecom.acckey=ACCKEY
+
+	do ecom.save() if ER quit
+
+	quit
+
+
+LN(SERVICE,ACCKEY,DATA)
+
+	/*
+	 Create MEMOLN entry
+	*/
+
+	type Public Boolean ER
+	type RecordMEMOLN ln=Class.new("RecordMEMOLN")
+
+	do ln.overlay("DATA")
+
+	set ln.service=SERVICE
+	set ln.acckey=ACCKEY
+
+	do ln.save() if ER quit
+
+	quit
+
+
+PYMTS(SERVICE,ACCKEY,DATA)
+
+	/*
+	 Create MEMOPYMTS entry
+	*/
+
+	type Public Boolean ER
+	type RecordMEMOPYMTS pymts=Class.new("RecordMEMOPYMTS")
+
+	do pymts.overlay("DATA")
+
+	set pymts.service=SERVICE
+	set pymts.acckey=ACCKEY
+
+	do pymts.save() if ER quit
+
+	quit
+
+
+SPODBC(VERSN,SRVCAT,INPUT)
+
+	/*
+	 This function is intended to provide a capability to invoke a
+	 true MRPC from the EXECUTE procedure facility within the PROFILE
+	 ODBC driver. This is needed in order to get the normal response
+	 argument that is part of the MRPC structure returned to the calling
+	 ODBC client.
+	*/
+
+	type Public Boolean ER
+	type Number RETURN
+	// Process
+	do PROC(VERSN,SRVCAT,INPUT,.RETURN)
+	if 'ER quit RETURN.get()
+
+	quit ""
+
+vSIG()	quit "60165^30818^Panyaram, Sreeram^7504"	// Signature - LTD^TIME^USER^SIZE

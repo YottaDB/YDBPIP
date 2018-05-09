@@ -1,0 +1,209 @@
+CMSBAL	//CMS/PROFILE Changed Balances Routine
+
+	/*
+	   ORIG: BAILDONC - 12/05/97
+	   DESC: CMS/PROFILE Changed Balances Routine
+
+	   This creates a file of available balances for accounts to which
+	   cards are attached if the available balance has changed that
+	   day. This code is specific to the balance file defined by ING
+	   Hungary's Card Management System, RS/2.  It uses a general
+	   outgoing file generation routine CMSOUT.M.
+
+
+	  ------------ Revision History -----------------------------------------
+
+	  12/12/05 - SPR - 18555
+		   Card Management - General DBI3 system area cleanup.
+		
+           07/25/05 - SkariahV- CR16679
+	              Removed #WARN and #OPTIMIZE directives.
+
+	 
+         --------------------------------------------------------------------------
+
+	*/
+
+	quit
+	
+	 
+public BEGIN	/* Opens the file that will contain the customer information
+		   value, and establishes the initial conditions.
+		*/
+
+	type public String ER
+	type String VALLIST
+	type Number CNT
+	
+	set CNT=0
+	set VALLIST=""
+	
+	type IO io=Class.new("IO")
+	
+	set ER=$$BEGIN^CMSOUT("BAL",.io)
+
+	if ER quit
+
+	do HEADER(.io)
+	do EXEC(.io,.CNT,VALLIST)
+	do TRAILER(.io)
+
+	//  Close, copy, and delete the file and run C code
+	do io.close()
+
+	if CNT>0 do END^CMSOUT
+
+	quit
+
+
+HEADER(IO io)	// Header Record
+
+	/* 
+
+	This is the hard coded header record that may or may not be used.
+
+	ARGUMENTS:
+	. io		File Handle Object		/REQ/NONULL/MECH=REF
+
+	RETURNS
+	. NONE
+
+	*/
+
+	type String HEADER
+	type Date DATE,TIME
+
+	set DATE=$$^CMSCONV(%SystemDate,3)
+
+	// Hard coded seconds
+	set TIME=$$TIM^%ZM(%CurrentTime,"2460")_"00"
+
+	set HEADER="FHCRDBAL"_DATE_TIME
+
+	do io.open()
+
+	do io.write(.HEADER)
+
+	quit
+	
+
+EXEC(IO io,Number CNT,String VALLIST)	// This uses the card/acct cross reference file
+
+	/*
+	This calls into GVALACN^CMSOUT to get the value of the fields in
+	the file layout defined by the CMSFILE user table.
+
+	ARGUMENTS:
+	. io		File Handle Object			/REQ/NONULL/MECH=REF
+	. CNT		Count for number for records written	/REQ/NONULL/MECH=REF
+
+	RETURNS
+	. NONE
+
+	*/
+
+
+	type String CRDTYP,RECTYP,STP
+	type public String CRCD,CRDNUM,ET,RM
+	type public Number BALAVL,CID,HUFTOT,TLD,USDTOT,%ZHALT
+	
+	set RECTYP="DR"
+	set USDTOT=0
+	set HUFTOT=0
+	
+	
+	//  Setup Error trapping.
+	catch vERROR {
+
+		set ET=vERROR.type
+		set %ZHALT=0
+		set ET=ET_"-"_vERROR.thrownAt
+		set RM=vERROR.description
+
+		do ^UTLERR
+		
+		// Error retrieving account balance
+		set ET=$$^MSG(3015)
+
+		do EXC^CMSBAL
+		}
+
+
+	type DbSet rs=Db.selectDbSet("ACNCRD")
+	while rs.next() do {
+		type RecordACNCRD acncrd=rs.getRecord("ACNCRD")
+		set CID=acncrd.cid
+
+		do GVALACN^CMSOUT(CID,.io,.CNT,VALLIST)
+
+		if CRCD="USD" set USDTOT=USDTOT+BALAVL.get()
+		if CRCD="HUF" set HUFTOT=HUFTOT+BALAVL.get()
+		}
+
+	quit
+
+
+TRAILER(IO io)	// Trailer Record
+
+	/* 
+
+	This is the hard coded header record that may or may not be used.
+
+	ARGUMENTS:
+	. io		File Handle Object		/REQ/NONULL/MECH=REF
+
+	RETURNS
+	. NONE
+
+	*/
+	type public String CNT,HUFTOT,USDTOT
+	type String AMT,EXP,SIGN,TRAILER
+	type Number DOLLAR,I
+	
+
+	if CNT.length()<15 for I=1:1:15-CNT.length() set CNT=0_CNT
+
+	set SIGN=$S(HUFTOT["-":"-",1:"+")
+	set AMT=$S(HUFTOT["-":HUFTOT.extract(2,HUFTOT.length()),1:HUFTOT)
+	set DOLLAR=$S(AMT[".":AMT.piece(".",1),AMT[",":AMT.piece(",",1),1:AMT)
+	set EXP=$S(AMT[".":AMT.piece(".",2),AMT[",":AMT.piece(",",2),1:"00")
+	
+	if EXP.length()<2 for I=1:1:2-EXP.length() set EXP=EXP_"0"
+
+	set HUFTOT=DOLLAR_EXP
+
+	if HUFTOT.length()<14 for I=1:1:14-HUFTOT.length() set HUFTOT=0_HUFTOT
+
+	set HUFTOT=SIGN_HUFTOT
+	set SIGN=$S(USDTOT["-":"-",1:"+")
+	set AMT=$S(USDTOT["-":USDTOT.extract(2,USDTOT.length()),1:USDTOT)
+	set DOLLAR=$S(AMT[".":AMT.piece(".",1),AMT[",":AMT.piece(",",1),1:AMT)
+	set EXP=$S(AMT[".":AMT.piece(".",2),AMT[",":AMT.piece(",",2),1:"00")
+
+	if EXP.length()<2 for I=1:1:2-EXP.length() set EXP=EXP_"0"
+
+	set USDTOT=DOLLAR_EXP
+
+	if USDTOT.length()<14 for I=1:1:14-USDTOT.length() set USDTOT=0_USDTOT
+
+	set USDTOT=SIGN_USDTOT
+
+	//  This is the hard coded trailer record.
+	set TRAILER="FT"_CNT_HUFTOT_USDTOT
+
+	do io.write(TRAILER)
+
+	quit
+
+
+EXC	//  Logs error in exception file
+
+	type public String RM
+	type public Number CID
+
+	// CMS account balance record,ACN,Message
+	do LOG^UTLEXC(%RoutineName,"*",$$^MSG(3021),CID.get(),"",RM)
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60254^32148^Renga SP^4012"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,326 @@
+SBNUTL	  /*
+ORIG: KELLYP - 03/12/2001
+DESC: Shared Branch Network Utilities
+
+---- Comments --------------------------------------------------------
+ This procedure contains utilities for converting PROFILE account and customer
+ data into SBN/ISO8583 format (and vice-versa).
+---- Revision History ------------------------------------------------
+
+	10/27/05 - KELLYP - CR 16880
+		Added TRN section for transaction-oriented calls from
+		TRNDRV (same as old SBN section in TTXP2).  Also
+		modified entire procedure to conform to current PSL
+		standards and removed pre-2003 revision history.  Also
+		changed EDCHK section to reference TRNSEQ instead of
+		SEQ.
+
+	06/02/03 - CARROLLJ - 51349
+		Modified EDCHK section to remove ETC array.
+ */
+
+ quit	// Dummy quit for compiler
+
+
+public EXCH(String msg)	// Connect, Exchange, and Disconnect as Client
+	/*
+	 DESCRIPTION
+		This section connects to a SBN message router defined in
+		gtmenv, exchanges an ISO8583 SBN message, and receives a
+		reply using client connect functionality available w/ MTM V2.0.
+		Client timeout value defaults to 30 seconds if CUVAR.SBACQTO
+		is not defined.  Message headers are also built and removed
+		in this section via calls to the ADDHDR and REMHDR sections.
+
+	 ARGUMENTS
+	 	. msg	Outgoing Request Message	REQ/MECH=VAL
+
+	 RETURNS
+		-1 if the host server connection w/ the message router is down
+		   or if the connect to the message router failed
+		0 if there was a problem in exchanging the message 
+		REPLY message if success
+	*/
+	
+	type public Boolean ER
+	type public String RM
+	
+	type Number ACQTO
+	type String id,INTRFACE,REPLY,X
+
+	set REPLY=""
+
+	type ResultSet rs=Db.select("SBSTAT","SBNET","INTRFACE='ISOSBN'")
+
+	// Host server down, do not attempt to send message
+	if rs.next(),rs.getCol("SBSTAT")=0 quit "-1"
+
+	do ADDHDR(.msg,0)	// Add SBN header
+
+	// 46293:033 - Retrieve SBN Acquirer Timeout from CUVAR
+	#IF CUVAR.sbacqto.isNull() 
+	set ACQTO=30
+	#ELSE 
+	set ACQTO=CUVAR.sbacqto
+	#END IF
+
+	// Connect to SBN Message Router
+	set X=$$CLCNCT^%MTAPI(.id,"","MTMSBN")
+	// Client/server connection failed
+ 	if 'X.isNull() do Runtime.setErrMSG("SBNET","554") quit "-1"
+ 
+	// Exchange Message with SBN Message Router
+ 	set X=$$EXCHMSG^%MTAPI(.msg,.REPLY,"",.id,ACQTO)
+ 	
+ 	// Timeout waiting for response from ~p1
+ 	if 'X.isNull() do Runtime.setErrMSG("SBNET","7332","PROFILE Server")
+ 	if X.extract(1,3)="CS_" set ER=1,RM=X
+
+	// 48909:001 - Protect ER
+	if ER.get()=1 quit "0"
+ 
+	// Disconnect from SBN Message Router
+ 	set X=$$CLDSCNCT^%MTAPI(id)
+
+	if 'ER.get() do REMHDR(.REPLY)		// Remove SBN header
+ 
+	quit REPLY
+
+
+public ADDHDR(String msg,String srvr)	// Add header to SBN message
+	/*
+	 DESCRIPTION
+		This section adds an SBN message header to an ISO8583 SBN
+		message.  The header takes the form X9999X where X indicates 
+		whether the message is being sent as a client request message 
+		(C) or as a server reply message (S) and where 9999 is the 
+		message length (not including the header).  
+
+	 ARGUMENTS
+	 	. msg	Message to add SBN header to	REQ/MECH=REF
+	 	. srvr	Client/Server Indicator		NOREQ/MECH=VAL
+
+	 RETURNS
+		. msg	Message passed w/ header attached
+	*/
+
+	type Number MSGLEN
+	type String char
+
+	set MSGLEN=msg.length()
+	set MSGLEN=MSGLEN.zero(4)
+
+	set srvr=srvr.get()
+	set char=$S(srvr:"S",1:"C")
+
+	set msg=char_MSGLEN_char_msg
+
+	quit
+
+
+public REMHDR(String msg)	// Strip header from SBN message
+	/*
+	 DESCRIPTION
+		This section removes the SBN header from an ISO8583
+		SBN message.  If the header is not in the correct format
+		(X9999X), it is not removed.
+
+	 ARGUMENTS
+	 	. msg	Message to add SBN header to    REQ/MECH=REF
+
+	 RETURNS
+		. msg	Message passed w/ header removed
+        */
+
+	if '(msg.extract(1,6)?1a4n1a) quit
+	set msg=msg.extract(7,msg.length())
+	
+	quit
+
+
+public CUVSTLDT(Date stlDate)	// Update CUVAR.STLDT
+	/*
+	 DESCRIPTION
+		Updates the CUVAR field with the settlement date if the 
+		settlement date in the message received from FSCC is greater 
+		than the existing value in CUVAR.  Returns settlement date in 
+		the julian format to be used in the transaction TSO field. 
+		This function is used by SBNOUT, ISOSBN, and the SBDAEMON 
+		procedures
+ 	
+	 ARGUMENTS
+		. stlDate  Date String in MMDD format	/TYP=T/REQ/MECH=VAL
+		
+	 RETURNS
+		. stlDate  Date string in Julian format	/TYP=N
+	*/
+
+	type Date STLDT
+
+	// Check required parameter
+	if 'stlDate.get() quit ""
+
+	// Append the Gregorian system year to the sttlement date (MMDD) 
+	// received from the message.
+ 	set stlDate=stlDate.extract(1,2)_"/"_stlDate.extract(3,4)
+	set stlDate=stlDate_"/"_%SystemDate.year()
+ 
+	// Check if message settlement date falls below TJD
+	// then chenge year to the next year.
+        if '$$VMIN^SCADAT(stlDate,%SystemDate,0) set stlDate=stlDate.extract(1,6)_((stlDate.piece("/",3))+1)
+	set stlDate=$$DSJD^SCADAT(stlDate)
+ 
+	// If settlement date from the message is > CUVAR.SBSTDT, update CUVAR
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+	if cuvar.sbstdt<stlDate do {
+		set cuvar.sbstdt=stlDate
+		do cuvar.save()
+		}
+
+	quit stlDate
+
+
+public EDCHK(RecordTRN trn)	// Shared Branch Network Transaction Edit Checks
+	/*
+	 DESCRIPTION
+		This section performs several edit checks related to
+		SBN transaction processing functionality.  
+
+	 ARGUMENTS
+		. ETC	Transaction code array		/TYPE=T/REQ/MECH=REFARR
+
+	 INPUTS
+		. NMFLG SBN Generate Message Flag
+			This flag indicates whether or not a transaction code
+			in the current transaction set had STBLSBTSD.GENMSG
+			enabled to indicate that a message should be generated.
+			Only one transaction per set may generate a message. 
+
+		. SBCHK	SBN Transaction array (internal use)
+			This array is used to store SBN-related information
+			for each transacstion sequence number (SEQ) in the
+			current transaction set.  It takes the following form:
+
+			SBCHK(SEQ)	"|" delimited array
+			  Piece 1	Transaction Code (ETC)
+			  Piece 2	Generate SBN Message
+			  Piece 3	ISO Processing Code
+			  Piece 4	SBN Transaction type
+
+		. TRNSEQ Transaction Sequence Number
+			The sequence number of the transaction in the current
+			transaction set.
+
+	 RETURNS
+		. ER and RM if any edit checks fail
+	*/
+
+	type public Boolean ER,NMFLG
+	type public Number TRNSEQ
+	type public String SBCHK()
+
+	type Boolean SBFL
+	type Number SBTYP
+
+	set SBFL=trn.sbtrn
+	set SBTYP=trn.sbtrntyp
+
+	// Invalid transaction type
+	if TRNSEQ'=1,SBFL'=1,SBCHK.data() do Runtime.setErrMSG("TRN",3103) kill NMFLG quit:ER
+
+	// Invalid transaction type
+	if TRNSEQ'=1,SBFL=1,'SBCHK.data(),'SBTYP.isNull() do Runtime.setErrMSG("TRN",3103) quit:ER
+
+	// Verify ISO code and SBN Message flag
+	type RecordSTBLSBTSD sbtsd=Db.getRecord("STBLSBTSD","TRNTYP=:SBTYP")
+
+	set SBCHK(TRNSEQ)=trn.etc_"|"_sbtsd.genmsg_"|"_sbtsd.isocd_"|"_SBTYP
+
+	// Verify that only one transaction has the message flag set to Y
+	if TRNSEQ=1 kill NMFLG
+
+	// Only one primary transaction allowed per teller screen
+	if (SBCHK(TRNSEQ).piece("|",2)=1),(NMFLG.exists()) do Runtime.setErrMSG("TRN",4893) quit:ER
+
+	if (SBCHK(TRNSEQ).piece("|",2)=1) set NMFLG=1
+
+	/*
+	 The following check is performed to ensure that every SBN transaction
+	 in the set has the same ISO processing code, excluding miscellaneous 
+	 fees (SBTYP=25).
+	*/
+
+	// Offset not allowed for primary transaction type
+	if (SBTYP'=25),(SBCHK(TRNSEQ).piece("|",3)'=SBCHK(1).piece("|",3)),(SBCHK(1).piece("|",4)'=25) do Runtime.setErrMSG("TRN",4894) quit:ER
+
+	quit
+
+
+public TRN(RecordTTX ttx())
+	/*
+	 This section calls FINTRN^SBNOUT for SBN-oriented transactions to
+	 generate and transmit a SBN 0200 Financial Transaction message or
+	 SBN 0220 Force Post message.  FINTRN will return one of the 
+	 following values:
+
+		0 - Transaction rejected (Stop processing)
+		1 - Transaction accepted (Continue processing as normal)
+		2 - No reply from host   (Generate Host not responding restr.)
+		
+	 If an 0200 message was sent and the host did not respond, we
+	 create a restriction (SBNR) for the teller to override so that
+	 an 0220 message can be generated and sent by the SBN Advice
+	 Daemon.  The SBN Advice Daemon acts like an STF Monitor for
+	 SBN transactions.
+	 
+	 RETURNS:
+	  1 if message was rejected by host institution, or if host
+	    did not respond and restriction has been defined.
+	  0 if 0200 message sent ok, or 0220 queued correctly, or if
+	    transaction is not an SBN transaction.
+	*/
+
+	type public Cache %CACHE()
+	type public Boolean ER
+	type public String OVR(,,),TSPV(,,,)
+
+	type Boolean FOUND	
+	type Number reply,PRISEQ
+	
+	set FOUND=0
+	set PRISEQ=0
+	
+	// Determine if we need to generate an SBN message
+	for  set PRISEQ=ttx(PRISEQ).order() quit:PRISEQ.isNull()  do { quit:FOUND
+		type RecordTRN trn=%CACHE("TRN").getRecord("TRN","ETC=:ttx(PRISEQ).etc")
+		if (trn.sbtrn),('trn.sbtrntyp.isNull()) set FOUND=1
+		}
+
+	// Not an SBN transaction
+	if 'FOUND quit 0
+
+	if TSPV.exists() do {
+		type Number I,NCID
+		set I=TSPV("").order()
+		set NCID=TSPV(I,"").order()
+		
+		// Add Force-Post flag to TSO if SBNR restriction
+		// has been authorized for override
+		if TSPV(I,NCID,"OVR","SBNR").exists() set ttx(PRISEQ).tso=$$FIELDIN^UTSO(ttx(PRISEQ).tso,"SBFPFLG",1)
+		}
+		
+	do FINTRN^SBNOUT(.ttx(),.reply)
+
+	if reply=0 quit 1		// Transaction rejected
+
+	if reply=1 quit 0		// Transaction successful
+
+	if reply=2 do {	quit:ER 1	// No reply from host, generate restriction
+		set OVR(ttx(PRISEQ).cid,"OVR","SBNR")=""
+		do OVERRIDE^TRNDRV(.ttx())
+		}
+
+	quit 0
+	
+
+vSIG()	quit "60200^45257^Pat Kelly^9054"	// Signature - LTD^TIME^USER^SIZE

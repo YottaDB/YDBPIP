@@ -1,0 +1,574 @@
+UCPSLLR		/*
+	ORIG: Frans S.C. Witte - 2005-04-07
+	DESC: PSL compiler, Insensitive Group - PSLLabelRecord related code
+
+	---- Comments ----------------------------------------------------------
+	The PSLLabelRecord class does not have a whole lot of methods yet.
+	All subroutines in this unit deal with general functionality for formal
+	and actual parameters, and subroutine declaration.
+
+	PSLLabelRecord has the following properties:
+	. Number codeLine
+		The PSL compiler uses codeLine.isNull() to indicate that the
+		label has been inserted by method generating code, and is still
+		to be compiled (or has been inserted as M code).
+	. Number accessType
+		Tells the access type of the label:
+		0 = local
+		1 = private
+		2 = public
+	. String className
+		The class name of the function result (if specified), or the
+		keyword void if explicitly listed as void.
+	. List formalList
+		A semi-colon delimited (!) List of the formal parameters of the
+		subroutine.
+		Each formalList element will consist of the following parts,
+		separated by a single SPACE:
+		- accessType (literal, local or public)
+		- datatype (a class name that occurs in OBJECT)
+		- variable (either name, name(), or name(,,,))
+		In the past, the individual formal parameters were separated by
+		a comma. Although this reflects the way in which the declaration
+		occurs in the source code, it has the disadvantage that the
+		retrieval of a single parameter declaration requires a complex
+		algorithm to deal with the comma in array dimensions versus the
+		comma as parameter separator.
+	. String comment
+		Free text, used by method generating code to look for a
+		matching subroutine (eg for Db.select()).
+
+	---- Revision History --------------------------------------------------
+	01/18/07 - Frans S.C. Witte - CRs:  25185 / 25186 / 25187
+		keyword 'local' no longer required if #OPTION ResultClass ON
+
+	07/11/06 - Frans S.C. Witte - CRs: 22720 / 22274
+		* Added support for source-contained method definitions
+
+	03/08/06 - Frans S.C. Witte - CRs: 20280 / 18164
+		* Initial procedure, derived from UCLABEL and UCGM.
+	*/
+	// I18N=QUIT
+	// *******************************************************************
+	// * IMPORTANT NOTE:                                                 *
+	// * According to the rules that apply to PSL compiler upgrades,     *
+	// * the generated M routine associated with this procedure must be  *
+	// * checked into StarTeam and released with the procedure whenever  *
+	// * changes are made to this procedure.                             *
+	// *                                                                 *
+	// * The M routine will be loaded to the mrtns directory during      *
+	// * upgrades and will then be removed from that directory as part   *
+	// * of the upgrade process.  Therefore, other than during an        *
+	// * upgrade an mrtns version of this routine should not exist.      *
+	// *                                                                 *
+	// * Keep these comments as single line to ensure they exist in the  *
+	// * generated M code.                                               *
+	// *******************************************************************
+	quit
+
+	#OPTION ResultClass ON
+
+	/* ================================================================== */
+	/* Static methods                                                     */
+	/* ****************************************************************** */
+
+	// ---------------------------------------------------------------------
+private String stripCmt( public String code,	// untokenized code string
+		public Boolean inCmt,		// in comment indicator	
+		public String  tsl)		// string literals
+	/* ---------------------------------------------------------------------
+	Strips comment from code.
+
+	ARGUMENTS:
+	. code	Untokenized String that may contain comment characters in any
+		sequence. The stripping algorithm follows the same rules as the
+		PSL compiler: the left-most comment character determins how the
+		remainder of the line is treated.
+		At return, all comment will have been stripped, all tabs will
+		have been replaced by spaces, and if 'inCmt=1' at entry, the
+		returned code line will be empty (because it can never contain
+		a label).
+	. inCmt	Boolean comment indicator.
+		If 1 at entry, code will be returned empty, regardless of the
+		the value returned for inCmt. In that case the algorithm will
+		prepend a begin-block-comment sequence to the code which
+		simplifies the detection algorithm.
+		At return this value indicates
+		0 = begin-block-comment and end-block-comment are balanced
+		1 = code lines following this line are part of comment block.
+
+	NOTES:
+	. The function mimics the tokenizing behavior of the PSL compiler:
+		If not in a comment block (inCmt=0 at entry), code will be
+		tokenized before chasing comment.
+		If in a comment block (inCmt=1 at entry), code will be
+		tokenized immediately after the first end-block-comment.
+	. The function uses String.find() to locate the comment delimiters.
+		This is needed to handle degenerate cases such as
+		'begin begin end', begin all end', 'all begin' etc.
+	. PSL does not support nested comment blocks
+	*/
+	type Number nAll	// positions of all-remaining-comment
+	type Number nBeg	// position of begin-block-comment
+	type Number nEnd	// position of end-block-comment
+
+	if inCmt,code'["*/" quit ""	// no end-of-block on this line
+
+	if inCmt set code = "/* "_code		// force comment state
+
+	if code [ """" set code = $$TOKEN^%ZS(code,.tsl)
+
+	for  do { quit:'nBeg!'nEnd
+		set nAll = code.find( "//")
+		set nBeg = code.find( "/*")
+		set nEnd = code.find( "*/", nBeg)
+
+		/* M comment, is only valid if '//' not found in this line.
+		   Note that the code below treats a semi-colon inside block
+		   comment as if a '//' occurs.
+		   If found, add one, because the next line expects a 2-char
+		   comment start.
+		   */
+		if 'nAll set nAll = code.find(";") if nAll set nAll=nAll+1
+
+		/* If all-remaining preceeds begin-block, it takes all.
+		   This terminates the comment handling. Note that setting
+		   nBeg=0 serves two purposes: terminate the for-loop, and
+		   ensure that inCmt will be returned as zero.
+		   */
+		if nAll>0,(nAll<nBeg)!(nBeg=0) set code = code.extract(1, nAll-3),nBeg=0 quit
+		
+		/* Otherwise, if complete block, remove from begin-block to
+		   end-block, and try again. Note that 'nEnd>0' is sufficient,
+		   because it represents the end-block FOLLOWING the begin-block.
+		   Since neither nBeg nor nEnd equals zero, the search will be
+		   repeated.
+		   */
+		if nBeg>0,nEnd>0 set code = code.extract(1, nBeg-3)_code.extract(nEnd,code.length())
+
+		/* The remaining cases will terminate the for-loop (since either
+		   nBeg=0 or nEnd=0):
+			* nAll=0, nBeg=0, nEnd=0 (no comment at all)
+			* nAll=0, nBeg=0, nEnd>0 (invalid end-block-comment)
+			* nAll=0, nBeg>0, nEnd=0 (start multi-line comment-block)
+			* nAll>nBeg, nBeg>0, nEnd=0 (idem with "//" enclosed)
+		   */
+		else  if nBeg>0 set code=code.extract(1, nBeg-3)
+	}
+
+	set inCmt = (nBeg>0)			// independent of nAll and nEnd
+	quit code.replace( 9.char(), " ")
+	
+	// ---------------------------------------------------------------------
+private void getLblRec( local String src(),	// source (*1)
+		local String rtn,		// routine (*2)
+		local Number valLvl,		// validation level (*3)
+		public PSLLabelRecord lblRec())	// labels (*4)	/MECH=REFARR:W
+	/* ---------------------------------------------------------------------
+	Extract subroutine declarations for routine rtn from PSL source in src()
+
+	ARGUMENTS:
+	(*1) src() = PSL source array
+		Like the other compiler subroutines, this subroutine will use
+		src().order() to access lines.
+	(*2) rtn = target routine name.
+		Will be used as first level subscript in srDecs()
+	(*3) valLvl = validation level.
+		This value is (unconditionally) passed to $$fromSubrou().
+	(*5) lblRec(label^rtn) = PSLLabelRecord
+		Each subroutine declaration found in src() will end up in this
+		array as a PSLLabelRecord.
+		The PSLLabelRecord.formalList will include the opening and
+		closing pararenthesis to distinguish a declaration with an empty
+		formalList from a declaration withot a formalList.
+		Individual parameter declarations are separated by semi-colons.
+
+	NOTES:
+	. In the past, the individual formal parameters were separated by a
+		comma. Although this reflects the way in which the declaration
+		occurs in the source code, it has the disadvantage that the
+		retrieval of a single parameter declaration requires a complex
+		algorithm to deal with the comma in array dimensions versus the
+		comma as parameter separator.
+	. Every non-empty line in src() that does not start with whitespace is
+		supposed to contain a label.
+	*/
+	type String code = ""		// source code line
+	type String cmdOpt(,)		// command options
+	type Boolean inCmt = 0		// inside comment block?
+	type Number lnr = ""		// line itererator
+	type String postfix		// label postfix ("" or ^RTN)
+	type String tsl = ""		// tokenized string literals
+
+	set cmdOpt("Options","ResultClass") = 0
+
+	if rtn.isNull() set postfix = ""
+	else  set postfix = "^"_rtn
+
+	for  set lnr = src(lnr).order() quit:lnr=""  do {
+		set code = code_ $$stripCmt( src(lnr), .inCmt, .tsl)
+
+		if code.isNull() quit	// nothing to deal with
+
+		if code.extract()'=" " do {	// found start of subroutine
+			/* Get the complete declaration */
+			set tsl = ""
+
+			/* Decompose and Store
+			   Note that the unconditional assignment may overwrite
+			   a duplicate label.
+			   Because $$getSrDec() may throw exceptions, even when
+			   valLvl=0, catch them here, and pass them only if the
+			   caller asked for validation. */
+			do {
+				catch lblEx {
+					if valLvl throw lblEx
+				}
+				type PSLLabelRecord lbl = {PSLLabelRecord}$$fromSubrou( $$getSrDec( src(), .lnr, .tsl), valLvl, cmdOpt("Options","ResultClass"))
+				set lblRec( lbl.label_ postfix) = lbl
+			} // end do-catch
+		} //end if code.extract()'=""
+		else  if code["#OPTION",code["ResultClass" do decode^UCGMC( code, .cmdOpt(,))
+
+		set code = "", tsl = ""
+	}
+	quit
+
+	// ---------------------------------------------------------------------
+private String getSrDec( local String src(),	// PSL source array (*1)
+		public Number lptr,		// line pointer	(*2)
+		public String tok)		// stringliterals (*3)
+	/* ---------------------------------------------------------------------
+	Return a complete PSL subroutine declaration.
+
+	ARGUMENTS:
+	(*1) src() = PSL source array
+		The subroutine starts at src(lptr).
+		The array is not modified.
+	(*2) lptr = line pointer
+		Shall address the current line in src().
+	(*3) tok = tokenized stringliterals
+		If the entire declaration is on a single line, then this
+		parameter will not be touched. However, when the declaration
+		uses multiple lines, then literals from the appended lines will
+		be inserted.
+
+	OUTPUTS:
+	. $$ = source code line containing a complete subroutine declaration
+		including access specificcation if present, and followed by the
+		source code that follows the closing parenthesis.
+
+	NOTES:
+	. This function accepts single line and multiple line declarations
+	*/
+	type String  expr = ""	// return value
+	type Boolean inCmt = 0
+	type Boolean inFpl = 1
+	type String  rec = ""	// line being decomposed
+
+	while inFpl do {
+
+ 		set expr = expr_ $$stripCmt(src(lptr), .inCmt, .tok).trim(1)
+
+		if expr.length("(") '> expr.length(")") set inFpl=0 quit
+
+		if 'expr.endsWith(",") throw Class.new( "Error", "%PSL-E-PARAMETER,Formal parameter declaration shall end with comma")
+
+		/* Check error conditions */
+		if expr.length() > 1024 throw Class.new("Error", "%PSL-E-PARAMETER,Formal parameter list is too long")
+		if lptr = "" throw Class.new("Error", "%PSL-E-PARAMETER,incomplete formal parameter list")
+
+		/* advance to next line */
+		set lptr=$O(src(lptr))
+	}
+
+	quit expr
+
+	/* ================================================================== */
+	/* Constructors                                                       */
+	/* ****************************************************************** */
+
+	// ---------------------------------------------------------------------
+private PSLLabelRecord fromSubrou( local String expr,	// PSL code
+				local Number valLevel,	// validation level
+				local Boolean bResCls)	// expect declaration of result class
+	/* ---------------------------------------------------------------------
+	Construct a new PSLLabelRecord from a PSL source code declaration.
+
+	ARGUMENTS:
+	*/
+	type Number ptr    = 0
+	type String atom   = $$ATOM^%ZS( expr, .ptr, "", , 1)
+	type String acctyp = atom.upperCase()
+	//type Number acclvl = -1
+	type Number acclvl = 0
+
+	if acctyp = "PUBLIC"        set acclvl = 2, atom = $$ATOM^%ZS( expr, .ptr, "", , 1)
+	else  if acctyp = "PRIVATE" set acclvl = 1, atom = $$ATOM^%ZS( expr, .ptr, "", , 1)
+	else  if acctyp = "LOCAL"   set acclvl = 0, atom = $$ATOM^%ZS( expr, .ptr, "", , 1)
+
+	type String cls = ""
+
+	type String lbl = atom.piece( "(")
+	type String fpl = ""
+
+	//if acclvl > -1 do {
+	if bResCls do {
+		/* ResultClass shall be specified.
+		   The following cases are valid:
+		   - keyword void, with correct case (i.e. all lowercase)
+		   - class name, with correct case e.g. ResultSet
+		   */
+		if 'bResCls quit			// not requested
+		if lbl'= atom  set cls = "void" quit	// lbl(... implies void
+		if lbl = "void" '! Class.isClass( lbl) quit
+
+		set cls = lbl
+		set atom = $$ATOM^%ZS( expr, .ptr, "", , 1), lbl = atom.piece( "(")
+	}
+	//else  set acclvl = 0
+
+	if atom '= lbl do {	// has parameters
+		set fpl = atom.extract( lbl.length()+2, atom.length()-1)
+		if 'fpl.isNull() set fpl = $$stdParms( fpl, valLevel)
+		set fpl = "("_ fpl_ ")"
+	}
+
+	type String cmt = ""
+	set atom = $$ATOM^%ZS( expr, .ptr, "/;", , 1)
+	if atom = "/", expr.extract(ptr) = "/" set ptr = ptr+1, atom=";"
+	if atom = ";" do {
+		set atom = expr.extract( ptr+1, expr.length()).trim(0)
+		if atom?1.ANP set cmt = atom
+	}
+
+	quit {PSLLabelRecord}(9.char()_ acclvl_ 9.char()_ cls_ 9.char()_ lbl_ 9.char()_ fpl_ 9.char()_ cmt)
+
+	/* ================================================================== */
+	/* non-static methods                                                 */
+	/* ****************************************************************** */
+
+	// ---------------------------------------------------------------------
+private String accessType( local PSLLabelRecord plr)
+	/* ---------------------------------------------------------------------
+	Runtime code for PSLLabelRecord.accessType()
+	*/
+	quit "local;private;public".piece( ";", plr.accessLevel+1)
+
+	// ---------------------------------------------------------------------
+private List getFp( local PSLLabelRecord plr,
+		local Number fp)
+	/* ---------------------------------------------------------------------
+	Runtime implementation of PSLLabelRecord.getFp( Number fp).
+
+	Returns the formal parameter declaration at position fp.
+	*/
+	type String fpl = plr.formalList
+	if (fp = 1)!(fp = fpl.length(";")),fpl.extract() = "(" set fpl = fpl.extract( 2, fpl.length()-1)
+	quit fpl.piece(";",fp)
+
+	// ---------------------------------------------------------------------
+private String getFpAccess( local PSLLabelRecord plr,
+			local Number fp)
+	/* ---------------------------------------------------------------------
+	Runtime implementation of PSLLabelRecord.getFpAccess( Number fp).
+
+	Returns the access type of the formal parameter at position fp.
+	*/
+	quit $$getFp(plr,fp).piece(" ")
+
+	// ---------------------------------------------------------------------
+private String getFpClass( local PSLLabelRecord plr,
+			local Number fp)
+	/* ---------------------------------------------------------------------
+	Runtime implementation of PSLLabelRecord.getFpClass( Number fp).
+
+	Returns the class of the formal parameter at position fp.
+	*/
+	quit $$getFp(plr,fp).piece(" ",2)
+
+	// ---------------------------------------------------------------------
+private Number getFpCount( local PSLLabelRecord plr)
+	/* ---------------------------------------------------------------------
+	Runtime implementation of PSLLabelRecord.getFpCount().
+
+	Returns the number of formal parameters of the label described by plr.
+
+	OUTPUTS:
+	. $$ = number of parameters, or -1 if no formal parameter list
+	*/
+	type String fpl = plr.formalList
+	if fpl.isNull() quit -1
+	if fpl = "()" quit 0
+	quit fpl.length(";")
+
+	// ---------------------------------------------------------------------
+private Number getFpPosition( local PSLLabelRecord plr,
+			local String sig)
+	/* ---------------------------------------------------------------------
+	Runtime implementation of PSLLabelRecord.getFpPosition( String sig).
+
+	Returns the position of the supplied formal parameter signature in the
+	labelrecord's formalList.
+
+	OUTPUTS:
+	. $$ = position of parameter name, or 0 if not found
+	*/
+	type String fpl = plr.formalList
+	if fpl.isNull() quit 0
+	if fpl = "()" quit 0
+
+	type Number p1 = 0
+	for   set p1 = fpl.find( " "_ sig, p1) quit:fpl.extract(p1)?1P  quit:p1=0
+
+	if p1=0 quit 0		// signature not found
+	quit fpl.extract(1, p1 - 1).length(";")
+
+	// ---------------------------------------------------------------------
+private PSLIdentifier getFpVsig( local PSLLabelRecord plr,
+				local Number fp)
+	/* ---------------------------------------------------------------------
+	Runtime implementation of PSLLabelRecord.getFpVsig( Number fp).
+
+	Returns the variable signature of the formal parameter at position fp.
+	*/
+	quit $$getFp(plr,fp).piece(" ",3)
+
+	// ---------------------------------------------------------------------
+private void setFormalList( local PSLLabelRecord plr,	// target record
+			local String fpl,		// formal list
+			local Number lvl)		// validation level
+	/* ---------------------------------------------------------------------
+	Runtime implementation of PSLLabelRecord.setFormalList( String fpl).
+
+	Fills plr.formalList with the standardized version of the supplied PSL
+	formallist. Note that an M formallist is a valid form of a PSL
+	formallist, in which accesstype and class take the defaults supplied by
+	$$stdParms().
+	*/
+	if fpl.isNull() set plr.formalList = ""
+	else  set plr.formalList = "("_ $$stdParms( fpl.extract( 2, fpl.length()-1), lvl)_ ")"
+	quit plr
+
+	// ---------------------------------------------------------------------
+private String toM( local PSLLabelRecord plr)
+	/* ---------------------------------------------------------------------
+	Runtime implementation of PSLLabelRecord.toM().
+
+	Returns the M code that corresponds to the declaration.
+	*/
+	type String code = plr.label
+	type String fpl = plr.formalList
+
+	if 'fpl.isNull() do {
+		type Number fp
+		set code = code_"(", fpl = fpl.extract(2, fpl.length()-1)
+		for fp=1:1:fpl.length(";") set code = code_ fpl.piece(";",fp).piece(" ",3).piece("(")_ ","
+		set code = code.extract( 1, code.length()-1)_ ")"
+	}
+	set code = code_" ; "_plr.comment
+	quit code
+
+	// ---------------------------------------------------------------------
+private String toPSL( local PSLLabelRecord plr)
+	/* ---------------------------------------------------------------------
+	Runtime implementation of PSLLabelRecord.toPSL().
+
+	Returns the PSL code that corresponds to the declaration.
+	*/
+	quit $$accessType(plr)_" "_plr.label_ plr.formalList.translate(";",",")_" // "_plr.comment
+
+	/* ================================================================== */
+	/* LOCAL FUNCTIONS AND SUBROUTINES				      */
+	/* ------------------------------------------------------------------ */
+
+	// ---------------------------------------------------------------------
+local List stdParms( local String rec,		// list of parameter
+		local Number validate)		// validation level
+	/* ---------------------------------------------------------------------
+	Standardize parameter list.
+
+	ARGUMENTS:
+	(*1) rec = parameter list
+		Each element of the comma separated list shall be either:
+		- empty (parameter absent)
+		- variable only (implied String, implied public)
+		- class and variable, separated by whitespace (implied public)
+		- access, class and variable, separated by whitespace
+		variable may specify array dimensions such as var() or var(,,)
+
+	RETURNS:
+	. $$	list of parameters separated by TABS
+	
+	NOTES:
+	*/
+	type String std = ""	// standardized return
+	type String par = ""	// current parameter
+	type String x		// atom
+	type Number mode = 0	// syntax check mode
+	type Number ptr = 0
+
+	for  set x=$$ATOM^%ZS(rec,.ptr,",",,-1) do { quit:ptr=0
+
+		if x.isNull() quit	// trailing spaces
+		/* if not comma, it is one of the up to three parts of a single
+		   parameter; Add it to the current parameter */
+		if x'="," set mode = mode+1, par=par_" "_x.translate(" ") quit:ptr>0
+
+		/* Must be comma that separates the parameters
+		   */
+		if mode=0 set std = std_ 9.char() quit	// missing parameter
+		if mode=1 set par = " public String"_par
+		else  if mode=2 set par = " public"_par
+		set par = par.extract( 2, par.length())
+		set par = $$stdParVl( par, validate)
+		set x = par.piece( " ",4)
+		set std=std_ ";"_ par
+		set mode=0,par=""
+	}
+
+	quit std.extract( 2, std.length())
+
+	// ---------------------------------------------------------------------
+local List stdParVl( local String x,
+		local Number md)
+	/* ---------------------------------------------------------------------
+	(*2) md = validation mode
+		0: standardize spelling of access type
+		1: 0 + validate access type
+		2: 1 + validate spelling of variable signature
+		3: 2 + validate class
+	*/
+	type String acc = x.piece(" ").lowerCase()
+	type String cls = x.piece(" ",2)
+	type String par = x.piece(" ",3)
+
+	if md>0,'{List}"literal,local,private,public".contains(acc) do PSL.error("unknown access type: "_ acc)
+
+	if md > 1 do {
+		if par.extract() = "%",par'["(" do {
+			type String kwds()
+
+			type String par2 = $$getSysKwd^UCDTAUTL( par, .kwds())
+			if par2.isNull() quit
+
+			/* Real System Keyword. Apply same rules as compiler.
+			   */
+			type Number gsc = kwds(par).piece("|",2)
+			if gsc = -1 do PSL.error( "SYSVAR: Assigning a value to a read-only system variable: "_par)
+			if gsc =  1 do warnGroup^UCGM( "SYSVAR", "Assigning system variable: "_par)
+			
+			type String cls2 = kwds(par).piece("|",3)
+			if cls'=cls2 do warnGroup^UCGM( "MISMATCH", "Cannot overwrite system variable class "_ cls2_ " in declaration "_ cls_ " "_ par)
+			set par = par2, cls = cls2
+		}
+
+		if '$$isVar^UCGM( par.piece("(")) do PSL.error("variable expected: "_par)
+		if par["(", par.translate("%","A")'?1A.AN1"(".","1")" do PSL.error("invalid array declaration: "_par)
+	}
+
+	if md > 2, 'Class.isClass( cls) do PSL.error( "Undefined class: "_cls)
+
+	quit acc_" "_cls_" "_par
+
+vSIG()	quit "60690^58589^Frans S.C. Witte^21946"	// Signature - LTD^TIME^USER^SIZE

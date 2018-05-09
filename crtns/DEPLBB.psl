@@ -1,0 +1,1015 @@
+public	DEPLBB(RecordDEP dep, Number ACR, Number IRCB, Number BI, Boolean BTTOPT, Boolean UNWIND)
+	       
+	/*
+		Low Balance Accruals
+		
+	       ORIG:  RONKY - 02 OCT 1992
+
+	       DESC: Calculate low balance accrual for a deposit account.
+	       This routine is called from both accruals and interest
+	       posting.
+	       
+	   ARGUMENTS:
+ 
+	   . dep       Deposit account object           /REQ/MECH=REF:RW
+ 
+	   . ACR       Accrual flag                     /REQ/MECH=REF:RW
+ 
+	   . IRCB      Int calc base                    /REQ/MECH=REF:RW
+ 
+	   . BI        Base index                       /REQ/MECH=REF:W
+ 
+	   . BTTOPT    Accrual flag                     /REQ/MECH=VAL
+
+	    This should be a 0 if called from interest posting
+	    so IPD can be checked to see if interest posting
+	    should perform the accrual, or a 1 if from the
+	    accruals, so if interest posting has already done
+	    the accrual, the accrual amount will be fed to the GL.
+	    If interest posting has not accrued, then when being
+	    called from the accruals, check to see if it's an
+	    accrual date.
+
+	   . UNWIND    Unwind indicator                 /NOREQ/MECH=VAL
+	   
+	    Indicates low balnce buckets should be shifted backward (default 
+	    is forward) if a shift is applicable.
+	   
+	   EXAMPLE:
+	   
+	   do ^DEPLBB(.dep, .ACR,. IRCB, .BI, 0) quit:ER
+
+	----- Revision History -----------------------------------------------
+	
+	01/25/06 - SmithCD - CR 19343 (16890)
+		   Added non-required UNWIND parameter for calls from LNUEFD. 
+		   Applicable code was added to the SHIFT section.
+	
+	02/01/05 - SmithCD - CR13661
+		   . Modified $$GRACE call to pass the dep object, as required 
+		     by that function to avoid undefined error
+		   . Corrected GRACE section to properly use $$LBACNJD 
+		     (code was causing an infinite loop)
+		   . Corrected order of parameters in RATE section to coincide 
+		     with the call to it
+		   . Modified INDLOAD section to properly handle an empty 
+		     select on INDEX0 by setting ACTDATE to null if in that 
+		     case (was causing infinite loop)
+		   . Removed repetitive/unnecessary code in LBACNJD function
+		   . Modified call to $$ACRDT in POS section to pass required 
+		     paremeter LBCM
+		   . Removed unused public section SPRE
+		   . Removed references variable FILELBB, which is no longer 
+		     used
+		   . Added "(" to second call to PERIOD in section ACR that 
+		     was missing
+		   . Replaced IACM variable with dep.iacm (IACM was not being 
+		     initialized)
+		   . Removed INTDATA and INDDATA variables, INDDATA^DEPFUNCS 
+		     call, and some PAR parameter passed to CTL^UINDX (no 
+		     longer useful in p04, and some was incorrect usage)
+		   . Pass PAR by reference to CTL^UINDX in INDLOAD,IX sections
+		   . Brought NUMER section in-line within RATE section
+		   . Replaced $$NJD^UFRE calls with nextFreqDate method
+		   . Modified to conform to current standards
+
+	----------------------------------------------------------------------
+	*/
+	
+	type public String ER
+	
+	type Number BAL, LBB, WRATE(,)
+	type Date JD
+	type String FRE, MFRE
+
+	do INIT(.dep) quit:ER
+	do PROC(.dep) quit:ER
+
+	quit
+
+
+INIT(RecordDEP dep)
+
+	// Initialize variables
+
+	type public Number BAL, IRCB, LBB
+	type public String ER, MFRE
+
+	if IRCB = 5 set BAL = dep.bal
+	else  set BAL = dep.balcol
+
+	// Monthly Interest Posting Freq
+	set MFRE = $$MFRE(dep.ipf, dep.inp) quit:ER
+
+	set LBB = dep.lbbcm
+	
+	quit
+
+
+PROC(RecordDEP dep)
+
+	/*
+	Main Processing Section
+	
+	   If the balance is non-negative, check to see if the low balance
+	   bucket needs to be updated.  If it's negative, then make sure
+	   the low balance is zero, and set IRCB to 1 and BI=BAL to pass
+	   through "normal" interest accrual.
+	*/
+	
+	type public Number BAL
+	type public String ER
+
+	if BAL < 0 do NEG(.dep) quit:ER
+	if BAL ' <0 do POS(.dep) quit:ER
+
+	quit
+
+
+NEG(RecordDEP dep)
+
+	/*
+	Negative Accrual Processing
+	
+	   Make sure the low balance bucket is zero, set BI to the negative
+	   balance and set IRCB to 1 to pass through normal accruals.
+
+	   If it a monthly accrual date, shift the buckets.
+	*/
+	
+	type public Number ACR, BAL, BI, IRCB, LBB
+	type public Boolean UNWIND
+	
+	set BI = BAL
+	
+	// Ledger Balance
+	if IRCB = 5 set IRCB = 1
+
+	// Collected Balance
+	else  set IRCB = 3
+
+	if LBB do {
+		set dep.lbbcm = 0
+		set LBB = 0
+		}
+
+	if '$$ACRDT(dep.lbcm) quit
+	
+	// If unwinding, shift back BEFORE accruing
+	if UNWIND.get() do SHIFT(.dep, .LBB, 1)
+
+	set ACR = $$ACR(.dep)
+
+	// If going forward, shift forward AFTER accruing
+	if 'UNWIND.get() do SHIFT(.dep, .LBB, 0)
+
+	quit
+
+
+POS(RecordDEP dep)
+
+	/*
+	Positive Accrual Processing
+	
+	   POSBKT will reset the bucket if necessary, and set flag F on, if
+	   the low balance buckets have changed. If it is an accrual date, then the buckets are
+	   shifted.
+	*/
+	
+	type public Boolean UNWIND
+	type public Number ACR, BAL, LBB
+	type public String ER
+
+	do POSBKT(.dep) quit:ER
+
+	if '$$ACRDT(dep.lbcm) quit
+
+	// If unwinding, shift backward BEFORE accruing
+	if UNWIND.get() do SHIFT(.dep, .LBB, 1)
+
+	set ACR = $$ACR(.dep)
+
+	// If going forward, shift forward AFTER accruing
+	if 'UNWIND.get() do {
+		set LBB = BAL
+		do SHIFT(.dep, .LBB, 0)
+		}
+	
+	quit
+	
+	
+POSBKT(RecordDEP dep)		// Deposit account			/REF:RW
+
+	/*
+	Positive Current Month Bucket
+	
+	   Positive balance processing will reset the bucket if not in the
+	   grace period and the balance is less than the bucket, or if
+	   it is a grace period, and the balance has changed.
+	*/
+	
+	type public Number BAL, LBB
+
+	// No Change
+	if BAL = LBB quit
+
+	// Within grace or decrease
+	if $$GRACE(.dep) ! (BAL < LBB) do {
+		set dep.lbbcm = BAL
+		set LBB = BAL
+		}
+
+	quit
+
+
+GRACE(RecordDEP dep)
+
+	/*
+	Grace Period Determination
+
+	   Determine if it is within a grace period.  It is within a
+	   grace period if any of the following are true:
+
+	      1) The number of grace days (INTGRC) plus the first day of the
+	         monthly period is not less than today's date.
+
+	      2) The new account grace day option is used, it's a new account,
+	         and the number of new account grace days plus the opening date
+	         are not less than today's date.
+
+	      3) The account is new, that is it never accrued interest yet
+	         and falls within the normal grace period (INTGRC) from the
+	         beginning of the bucket period.  In other words, the INTGRC
+	         grace days is effective the first month the account is opened,
+	         as well as the dep.lbgpna grace days.
+
+	         Example: dep.intgrc=4, dep.lbgpna=0, IPF=1QAE.  If this account
+	                  is opened on the 1st, 2nd, 3rd, or 4th of a
+	                  month, though there is no new account grace days,
+	                  it falls within the normal grace days.
+
+	      4) The grace business day option is used (="N"), it's the
+	         last day of a grace period.  The period is determined
+	         using the beginning of the monthly period, or if a new account,
+	         the opening date.
+
+	      Note:  Make NO grace if INTGRC or LBGPNA is zero or null.
+	*/
+	
+	type public String ER, MFRE
+	
+	type Date INTDATE, NADATE, NJD
+
+	// Interest Grace Period
+	if dep.intgrc.isNull() set dep.intgrc = 0
+	if dep.lbgpna.isNull() set dep.lbgpna = 0
+
+	// New Account Grace Period
+	set NADATE = dep.odt + dep.lbgpna - 1
+	// Next busindess day
+	if dep.lbbdo = "N", dep.lbgpna set NADATE = $$NBD^UNBD(NADATE, 1, 0, dep.nbdc)
+	if NADATE '< %SystemDate quit 1
+
+	// Interest Grace Period
+
+	set NJD = dep.inp
+	for  set NJD = $$LBACNJD(NJD, MFRE, 1, dep.lbcm) quit:ER ! (NJD < %SystemDate)
+	if ER quit 0
+
+	set INTDATE = NJD + dep.intgrc
+	if dep.lbbdo = "N", dep.intgrc set INTDATE = $$NBD^UNBD(INTDATE, 1, 0, dep.nbdc)
+	if INTDATE '< %SystemDate quit 1
+
+	// Not in Grace
+	quit 0
+
+
+ACRDT(Number LBCM)
+
+	/*
+	Accrual Date Determination
+	
+	   This is called by the accrual process, and it's same
+	   day of the month as the interest posting date. (So if
+	   IPF=1QA13, then on the 13th of each month this will
+	   be 1), and it's not an interest posting date.
+	*/
+	
+	type public String ER
+
+	if $$HIT(LBCM) quit:'ER 1
+
+	quit 0
+
+
+HIT(Number LBCM)
+
+	/*
+	Day of month to accrue
+	
+	   Based on the monthly accrual frequency, check if the system date
+	   falls on the frequency by calling $$LBACNJD^DEPLBB forwards then 
+	   backwards.
+	*/
+	
+	type public String ER
+	type public String MFRE
+	
+	type Date NJD
+
+	// Forward
+	set NJD = $$LBACNJD(%SystemDate, MFRE, 0, LBCM) quit:ER 0
+
+	// Backward
+	set NJD = $$LBACNJD(NJD, MFRE, 1, LBCM) quit:ER 0
+
+	// On accrual date
+	if %SystemDate = NJD quit 1
+
+	quit 0
+
+
+ACR(RecordDEP dep)		// Deposit account			/REF:R
+
+	/*
+	Low balance accruals
+
+	INPUTS:
+
+		. MFRE - Monthly Interest Posting Freq	//TYP=FRE/REQ/MECH=REF:R
+
+	   If this subroutine is called, then the accrued amount will be
+	   updated based on the low balance and weighted rate for a month.
+
+	    LBB  - current month's low balance. This will be used as the
+	           balance for the whole month, regardless of transaction
+	           history.
+
+	    RATE - A weighted rate which considers any index change or
+	           rate change.
+
+	      FD - Take the interest posting frequency, make it monthly,
+	           then back up one month from TJD.
+
+	   The low balance used for interest calcs for interest posting may
+	   not necessarily be the current low balance.
+
+	   For example:
+	   .  If the current month's low balance is GREATER THAN a prior month's
+	      then we compute based on the LOWEST balance of all prior months.
+	   .  If the current month's low balance is LESS THAN the lowest balance
+	      in all prior months then we compute a current period accrual
+	      which restates the accrual for the current and prior periods.
+	*/
+	
+	type public String ER, FRE, MFRE
+	type public Number LBB
+	type public Date FD
+	
+	type Number ACR, LOWBC, LOWBP
+	type Boolean CHG
+	type String NOD
+	
+	// FRE to be used by ACRCAL
+	set FRE = MFRE
+	set FD = $$LBACNJD(%SystemDate, MFRE, 1, dep.lbcm) quit:ER 0
+
+	// If we have a monthly/semi-monthly LB calc period, compute ACR and quit
+	set ACR = $$ACRCAL(.dep, LBB, FD, %SystemDate) quit:ER 0
+
+	// Both are monthly
+	if 'dep.lbcp, 'dep.lbcm quit ACR
+
+	// Both are semi-monthly
+	if dep.lbcp = 3, dep.lbcm = 3 quit ACR
+
+	/*
+	What period are we in?  Note that %SystemDate is adjusted by 1 to get 
+	the last period in the prior LBCP. If IPD=0 then we want to subtract 
+	1 more. If IPD=1 then there's no adjustment.
+	*/
+	type Number MON, PER
+	#IF CUVAR.IPD
+		do PERIOD(.dep, FRE,(%SystemDate - 1)) quit:ER 0
+	#ELSE
+		do PERIOD(.dep, FRE,(%SystemDate - 2)) quit:ER 0
+	#ENDIF
+
+	// Note: PER should always equal one.
+
+	/*
+	If we're in the first month, we do not have to go back
+	any further.
+	*/
+
+	if MON = 1 quit ACR
+
+	do LOWB(.dep, PER, MON, dep.lbcp, LBB, .NOD)
+
+	// If the balance hasn't changed then we're okay too - we can use ACR
+	if 'CHG quit ACR
+
+	/*
+	If the current LBB is LESS than prior periods, then for each
+	of the prior periods, compute the original accrual and the
+	new accrual. The original accrual is based on what did happen -
+	LOWBP (the low balance prior). The new accrual is based on what
+	should have happened - LOWBC (the low balance present and prior).
+
+	This is unnecessary if the current LBB is greater than prior because
+	we will only compute interest on the prior low balance amount.
+	*/
+	type String LBP
+	type Date BDT, JD
+	type Number OACR, NACR
+
+	set (OACR, NACR) = 0
+
+	/*
+	For this period we "pay" the net of what was paid and what should
+	have been paid for the prior months in the LBCP, plus the current
+	period.
+	*/
+	set LBP = MON_MFRE.extract(2, 99)
+	set BDT = $$LBACNJD(%SystemDate, LBP, 1, dep.lbcp) + 1 quit:ER 0
+	set JD = $$LBACNJD(%SystemDate, MFRE, 1, dep.lbcm) quit:ER 0
+
+	set OACR = $$ACRCAL(.dep, LOWBP, BDT, JD) quit:ER 0
+	set NACR = $$ACRCAL(.dep, LOWBC, BDT, %SystemDate) quit:ER 0
+	
+	quit (NACR - OACR)
+
+
+public	ACRCAL(RecordDEP dep,	// Deposit account object		/REF:R
+	       Number LBB,	// Current month's low balance	
+	       Date FD,		// From date			
+	       Date TD,		// Thru date			
+	       Number DTL,	// Print supporting detail		/NOREQ
+	       Number LBPER)	// Number of low bal periods		/NOREQ
+	/*
+	Compute low balance accrual
+
+	Additional Notes on ARGUMENTS:
+	. DTL 	Passed in from ^RECALC
+	    	0 = No (On-line processing)
+	    	1 = Yes (On-line test mode, program ^DEPACR)
+	    	2 = Earnings allowance processing
+	    	3 = Mass index rate change
+	    	4 = Effective dated interest rate change
+	    	7 = On-line test mode, low balance
+
+	. LBPER	Number of low balance periods	/TYP=N/NOREQ/MECH=VAL
+	     		Default value is 1
+
+	INPUTS:
+	. FRE	Interest Posting Frequency		/TYP=F
+
+	. LBCM	Low Balance Accr Calc Method		/TYP=N
+
+	RETURNS:
+	. $$	Low balance accrual amount		/TYP=$
+
+	EXAMPLE:
+		set ACR = $$ACRCAL^DEPLBB(.dep, .LBB, FD, TJD, DTL) quit:ER
+	*/
+	
+	type public String ER, FRE
+	type public Number LBCM
+	
+	type Number ACR, RATE
+	
+	if 'LBB quit 0
+
+	// Calculate only number of days on deposit if in initial period
+	if FD < dep.odt set FD = dep.odt
+	if FD > TD quit 0
+
+	// Get weighted rate for whole period
+	set RATE = $$RATE(.dep, LBB, FD, TD) quit:ER 0
+
+	if dep.lbcm = 3 do { quit ACR.roundDec(5)
+		// Calculate using annual factor only if using semi-monthly
+		type Number AF
+		set AF = $$LBCAF^PROCLBB(dep.lbcm)
+		if LBPER.get().isNull() set LBPER = 1
+		set ACR = (LBB * (RATE / 100) / AF) * LBPER
+		}
+
+	// Calculate interest for a month's accrual on the low balance
+	set ACR = $$^UIC(LBB, FD, TD, dep.iacm, RATE, "00", 12, FRE)
+
+	quit ACR.roundDec(5)
+
+
+LOWB(RecordDEP dep,		// Deposit account object		/REF:RW
+     Number PER,		// Starting LBCP period number
+     Number MON,		// LBCP month number in PER
+     Number CP,			// LBCP (Calc Period)
+     Number LBB,		// Comparison Low Balance		/NOREQ
+     String NOD)		// Account low balance node		/REF:W
+
+	/*
+	Roll through the low balance amounts and find:
+
+	RETURNS:
+
+	. LOWBC - The lowest balance in LBCP including the current period buckets
+
+	. LOWBP - The lowest balance in LBCP for the prior period buckets only.
+
+	. LOWBA - The low balance for the PER/MON specified.
+
+	. CHG   - Indicates whether the balance changed through the period.
+
+	*/
+	
+	type public Number LOWBA, LOWBC, LOWBP
+	type public Boolean CHG
+	
+	type Date FROM, TO
+	type Number LB, PERIOD
+
+	set (CHG, LOWBC, LOWBP) = 0
+	if 'CP quit
+	
+	if 'MON.get() set MON = 1
+	set TO = MON
+	set FROM = 1
+
+	// Set up NOD in order to do compair and eventual shift of buckets
+	set NOD = dep.lbbcm_"|"_dep.lbb1mp_"|"_dep.lbb2mp_"|"_dep.lbb3mp_"|"_dep.lbb4mp_"|"_dep.lbb5mp_"|"
+	set NOD = NOD_"|"_dep.lbb6mp_"|"_dep.lbb7mp_"|"_dep.lbb8mp_"|"_dep.lbb9mp_"|"_dep.lbb10mp_"|"
+	set NOD = NOD_"|"_dep.lbb11mp_"|"_dep.lbb12mp_"|"_dep.lbb13mp_"|"_dep.lbb14mp_"|"_dep.lbb15mp_"|"
+	set NOD = NOD_"|"_dep.lbb16mp_"|"_dep.lbb17mp_"|"_dep.lbb18mp_"|"_dep.lbb19mp_"|"_dep.lbb20mp_"|"
+	set NOD = NOD_"|"_dep.lbb21mp_"|"_dep.lbb22mp_"|"_dep.lbb23mp
+
+	// If there's no dep.lbbcm defined, use the first dep.lbbcm in the LBCP
+	if LBB.get().isNull() set LBB = +NOD.piece("|", MON)
+	set LOWBC = LBB
+	set LOWBP = NOD.piece("|", MON)
+	set LOWBA = NOD.piece("|", FROM)
+
+	for PERIOD = FROM:1:TO set LB = NOD.piece("|", PERIOD) if 'LB.isNull() do {
+		if LB '= LBB set CHG = 1
+		if LB < LOWBC set LOWBC = LB
+		if LB < LOWBP, PERIOD '= FROM set LOWBP = LB
+		}
+		
+	quit
+
+
+public	MFRE(String FRE,	// Interest Posting Frequency
+	     Date INP)		// Int/Div Next Posted
+
+	/*
+	Returns the frequency as a once monthly frequency.
+
+	First, strip off any numerics from the front, then
+	add "1M" to the front.
+	*/
+
+	/*
+	If user-defined frequency, use associated standard frequency.
+	If no standard frequency is associated, assume 1MAE.
+	*/
+	
+	type RecordUSRFRE usrfre = Db.getRecord("USRFRE","UFRE=:FRE", 1)
+	if usrfre.getMode() set FRE = usrfre.fre
+	else  quit "1MAE" 
+
+	// Strip off numerics
+	for  if FRE.extract()?1N set FRE = FRE.extract(2, 99) quit:FRE.extract()'?1N
+
+	// Strip off QMWY...
+	set FRE = FRE.extract(2, 99)
+	if FRE.length() = 1 set FRE = FRE_INP.toString("DD")
+
+	quit "1M"_FRE
+
+
+RATE(RecordDEP dep,		// Deposit account			/REF:R
+     Number LBB,		// Low balance bucket
+     Date FDT,			// From date (beginning date), inclusive
+     Date TDT)			// To date (end date), inclusive
+
+	/*
+	Calculate Weighted Rate
+	
+	   This extrinsic will calculate the weighted rate for an account based
+	   on the low balance over a date range. This will take into account
+	   both fixed rate and indexed accounts. There are some exclusions to
+	   index considerations:
+
+	     a) Only the current index on the account will be used, so history
+	        passes can be avoided.
+
+	     b) Interest offsets will not be considered (INTOFF=0).
+
+	     c) Only daily changes will be considered (INTFRE=1DA).
+
+	     d) No Adjustments are allowed, such as INDEX +2
+
+	     e) No Rounding Options are allowed, such as INDEX +2 U
+
+	     f) No rates tied to rates will be allowed.
+
+	   The weighted rate calculation is:
+
+	    (RATE1 * # days at RATE1) + (RATE2 * # days at RATE2) + (RATE3...
+
+	                          Total # of days
+
+	   Example:  If an account has a monthly low balance of 500, and the
+	             Index has a rate of 6% for the first 10 days, and 8% for
+	             the remaining 21 days, then the weighted rate is:
+
+	             (.06*10)+(.08*21)   (.6)+(1.68)    2.28
+
+	                     31              31          31
+
+	   Sample Call:
+
+	               set RATE=$$RATE(.dep,LBB,FDT,TDT) quit:ER
+
+	               This will get a weighted rate for accrual processing
+	               based on the balance LBB over the period including FDT
+	               through and including TDT.
+	*/
+	
+	type public String ER
+	type public Number WRATE(,)
+	type public Boolean BTTOPT
+
+	type Date ACTDATE, PREVDATE
+	type String INDEX
+	type Number DAYS, DENOM, NUMER, RATE, RRATE, SRATE, TDRATE, URATE
+
+	// Int/Div Index
+	set INDEX = dep.index
+
+	// Use current rate if no index
+	if INDEX.isNull() quit dep.irn
+
+	// Load Rate Table
+	do INDLOAD(.dep) quit:ER 0
+
+	set TDRATE = 1
+
+	// Set up WRATE array for today's date.
+	if 'WRATE(INDEX, TDT).exists() do { quit:ER 0
+
+		type String PAR()
+		
+		set PAR("IXLOAD") = 0
+		set PAR("NOTSER") = 0
+		set PAR("IPMODE") = BTTOPT
+
+		do CTL^UINDX(.dep, TDT, LBB, .PAR()) quit:ER
+
+		set WRATE(INDEX, TDT) = RATE
+		set TDRATE = 0
+		}
+
+	// Date Range
+	set DENOM = TDT - FDT + 1
+	
+	// Start Date
+	set ACTDATE = FDT
+
+	// Previous Date
+	set PREVDATE = ACTDATE
+
+	// Init Numerator
+	set NUMER = 0
+
+	// Collate through WRATE array to get numerator
+	for  set ACTDATE = WRATE(INDEX, ACTDATE).order() quit:ACTDATE.isNull()  do {
+		// # days at rate
+		set DAYS = ACTDATE - PREVDATE
+		if ACTDATE = TDT, 'TDRATE set DAYS = DAYS + 1
+		// Add to NUMER
+		set NUMER = NUMER + (DAYS * WRATE(INDEX, FDT))
+		set PREVDATE = ACTDATE
+		}
+	
+	if TDRATE set NUMER = NUMER + WRATE(INDEX, TDT)
+	set RATE = NUMER / DENOM.roundDec(5)
+	
+	quit RATE
+
+
+INDLOAD(RecordDEP dep)		// Deposit account		/REF:R
+
+	/*
+	Load Index from User Table
+	
+	   Starting with the "From" date, set up WRATE array for each
+	   date entry in the table, with the returned rate.
+	*/
+	
+	type public Number DTL, LBB, WRATE(,)
+	type public Date ACTDATE, FDT, TDT
+	type public String ER, INDEX
+	type public Boolean BTTOPT
+	
+	type String INDNAME
+	type Number RATE, RRATE, SRATE, URATE
+
+	kill WRATE
+
+	set INDNAME = INDEX
+	set ACTDATE = FDT
+
+	if DTL.get() = 3 do IX(.dep) quit
+
+	for  do { quit:ER ! (ACTDATE.isNull()) ! (ACTDATE > TDT)
+		
+		type String PAR()
+
+		set PAR("IXLOAD") = 0
+		set PAR("NOTSER") = 0
+		set PAR("IPMODE") = BTTOPT
+		
+		do CTL^UINDX(.dep, ACTDATE, LBB, .PAR()) quit:ER
+
+		set WRATE(INDEX, ACTDATE) = RATE
+
+		type ResultSet rs = Db.select("EFD", "INDEX0", "INDEX=:INDNAME AND EFD>:ACTDATE")
+		if rs.next() set ACTDATE = rs.getCol("EFD")
+		else  set ACTDATE = ""
+		}
+	
+	if ER quit
+
+	quit
+
+
+IX(RecordDEP dep)		// Deposit account			/REF:R
+
+	// Collate the IX array
+
+	type public Boolean BTTOPT
+	type public Date ACTDATE, TDT
+	type public String ER, INDEX, INDNAME, IX(,)
+	type public Number RATE, RRATE, SRATE, URATE, WRATE(,)
+
+	for  do { quit:ER ! (ACTDATE.isNull()) ! (ACTDATE > TDT)
+		
+		type String PAR()
+
+		set PAR("IXLOAD") = 1
+		set PAR("NOTSER") = 0
+		set PAR("IPMODE") = BTTOPT
+
+		do CTL^UINDX(.dep, ACTDATE, dep.lbbcm, .PAR()) quit:ER
+
+		set WRATE(INDEX, ACTDATE) = RATE
+		set ACTDATE = IX(INDNAME, ACTDATE).order()
+		}
+	if ER quit
+
+	quit
+
+
+SHIFT(RecordDEP dep,		// Deposit account			/REF:RW
+      Number LBB,		// Low balance bucket			/REF:RW
+      Boolean UNWIND)		// Unwind indicator
+
+	/*
+	Shift Buckets when interest has been accrued from either accruals or 
+	interest posting
+	*/
+
+	if LBB < 0 set LBB = 0
+
+	if 'UNWIND do {
+		/*
+		Shift the buckets forward, setting the current bucket to the 
+		low balance, then moving all others one position over to the 
+		right
+		*/
+		set dep.lbb23mp = dep.lbb22mp
+		set dep.lbb22mp = dep.lbb21mp
+		set dep.lbb21mp = dep.lbb20mp
+		set dep.lbb20mp = dep.lbb19mp
+		set dep.lbb19mp = dep.lbb18mp
+		set dep.lbb18mp = dep.lbb17mp
+		set dep.lbb17mp = dep.lbb16mp
+		set dep.lbb16mp = dep.lbb15mp
+		set dep.lbb15mp = dep.lbb14mp
+		set dep.lbb14mp = dep.lbb13mp
+		set dep.lbb13mp = dep.lbb12mp
+		set dep.lbb12mp = dep.lbb11mp
+		set dep.lbb11mp = dep.lbb10mp
+		set dep.lbb10mp = dep.lbb9mp
+		set dep.lbb9mp = dep.lbb8mp
+		set dep.lbb8mp = dep.lbb7mp
+		set dep.lbb7mp = dep.lbb6mp
+		set dep.lbb6mp = dep.lbb5mp
+		set dep.lbb5mp = dep.lbb4mp
+		set dep.lbb4mp = dep.lbb3mp
+		set dep.lbb3mp = dep.lbb2mp
+		set dep.lbb2mp = dep.lbb1mp
+		set dep.lbb1mp = dep.lbbcm
+		set dep.lbbcm = LBB
+		}
+	else  do {
+		/*
+		Shift the buckets backward, moving each bucket one position 
+		over to the left
+		*/
+		set dep.lbbcm = dep.lbb1mp
+		set dep.lbb1mp = dep.lbb2mp
+		set dep.lbb2mp = dep.lbb3mp
+		set dep.lbb3mp = dep.lbb4mp
+		set dep.lbb4mp = dep.lbb5mp
+		set dep.lbb5mp = dep.lbb6mp
+		set dep.lbb6mp = dep.lbb7mp
+		set dep.lbb7mp = dep.lbb8mp
+		set dep.lbb8mp = dep.lbb9mp
+		set dep.lbb9mp = dep.lbb10mp
+		set dep.lbb10mp = dep.lbb11mp
+		set dep.lbb11mp = dep.lbb12mp
+		set dep.lbb12mp = dep.lbb13mp
+		set dep.lbb13mp = dep.lbb14mp
+		set dep.lbb14mp = dep.lbb15mp
+		set dep.lbb15mp = dep.lbb16mp
+		set dep.lbb16mp = dep.lbb17mp
+		set dep.lbb17mp = dep.lbb18mp
+		set dep.lbb18mp = dep.lbb19mp
+		set dep.lbb19mp = dep.lbb20mp
+		set dep.lbb20mp = dep.lbb21mp
+		set dep.lbb21mp = dep.lbb22mp
+		set dep.lbb22mp = dep.lbb23mp
+		set dep.lbb23mp = ""
+		
+		set LBB = dep.lbbcm
+		}
+
+	// Low Balance Last Accrual Date
+	set dep.lbacrdt = %SystemDate
+
+	quit
+
+
+PERIOD(RecordDEP dep,		// Deposit account			/REF:R
+       String FRE,		// Interest payment frequency
+       Date TD)			// To date
+
+	/*
+	   Determine which monthly bucket we're in within
+	   
+	   Additional notes on ARGUMENTS:
+	          . TD	The date for which we want to calculate what period
+	   		and month we're in. Note that if FRE=3MA15 and 
+	   		TD=4/15 then MON will be 1 because TD is the first 
+	   		day in that frequency. The calling program must 
+	   		resolve whether the value of TD is the first or last 
+	   		day in the period.
+
+	   RETURNS:
+
+	. MON   - Month that TD is in with relation to IND
+
+	. PER   - LB period that TD is within based on IND
+
+	. PERBD - Date Associated with the beginning of PER
+	*/
+	
+	type public Number MON, PER
+	type public Date PERBD
+
+	type Number CP
+	type String CPFRE, ER
+	type Date ILD, JD, NJD
+
+	set (MON, PER) = 1
+
+	// Default to current
+	if (dep.lbcp) quit
+
+	set CP = (12 / dep.lbcp)
+
+	// Find the LB calc period frequency, based on the calculation period
+	// and the interest payment frequency.
+	set CPFRE = (-CP)_$$MFRE(FRE).extract(2, 999)
+
+	/*
+	Compute the beginning of the current period if not defined.
+	If TD is before the beginning of the current LB calc period, go
+	back to that period.
+	*/
+	set ILD = dep.inp
+	if TD < ILD for  set ILD = $$LBACNJD(ILD, CPFRE, 0, dep.lbcp) quit:ER!(ILD < TD)
+	if ER quit
+	set PERBD = ILD
+	if TD '< dep.inp quit
+
+	// Now, within that period, find the month that TD is in.
+	set JD = ILD
+	set FRE = $$MFRE(FRE)
+	if ILD < dep.odt for  set NJD = $$LBACNJD(JD, FRE, 0, dep.lbcm) quit:ER ! (NJD '< dep.odt)  set JD = NJD
+	if ER quit
+
+	set NJD = JD
+	for  set NJD = $$LBACNJD(NJD, FRE, 0, dep.lbcm) quit:ER ! (NJD '< TD)  set MON = MON + 1
+	if ER quit
+
+	quit
+
+
+public	LBACNJD(Date JD,	// Start date
+		String MFRE,	// Monthly frequency
+		String CTL,	// Calculation Control
+		Number LBCM)	// Low balance calc method
+
+	/*
+	   Next low balance accrual date
+	 
+	   Calculates the next low balance accrual date (monthly or
+	   semi-monthly) according to LBCM (Low Balance Accrual Calculation
+	   Method).
+
+	   Additional notes on ARGUMENTS:
+	   . JD	    must be a valid low balance accrual date
+ 
+	   . CTL     Calculation Control  
+                     0 - Use forward calculation
+                     1 - Use reverse (backwards) calculation
+ 
+	   . LBCM    Low balance calc method
+		     (may also be LBCP)
+		     0 - Monthly
+		     1 - Annually
+		     2 - Semi-Annually
+		     3 - Semi-Monthly
+		     4 - Quarterly
+
+	   INPUTS:
+
+	   RETURNS:
+	   . NJD     Next low balance accrual date
+
+	   EXAMPLE:
+		     set NJD = $$LBACNJD(NJD, MFRE, 1, LBCM) quit:ER
+	*/
+
+	// Apply semi-monthly frequency
+	if LBCM = 3 quit JD.nextFreqDate("1SA15-31", , CTL)
+
+	// Apply monthly frequency
+	if LBCM '= 3 quit JD.nextFreqDate(MFRE, , CTL)
+
+	quit
+
+
+public	VALNACP(RecordDEP dep,		// Deposit account		/REF:R
+		Date %EffectiveDate)	// Effective date
+
+	/*
+	   Value date to next accrual calculation date
+
+	   Calculates the next low balance accrual date (monthly or
+	   semi-monthly) according to LBCM (Low Balance Accrual Calculation
+	   Method) and transaction effective date. For use with TRN.PCFD21
+	   (Value Date to Next Accrual Cal Period).
+
+	   INPUTS:
+	   . CID	   	Account number
+
+	   RETURNS:
+	   . NJD           	Next low balance accrual date
+
+	   EXAMPLE:
+		set VDT = $$VALNACP^DEPLBB(.dep, %EffectiveDate) quit:ER
+	*/
+	
+	type public String ER
+	
+	type Number BAL
+	type String FRE, MFRE
+	type Date JD, NJD
+
+	do INIT(.dep) quit:ER ""
+
+	set JD = dep.inp
+	if %EffectiveDate.isNull() set %EffectiveDate=%SystemDate
+	if %EffectiveDate < %SystemDate do { quit (JD + 1)
+		// Effective date in the past - go backward
+		// (return date prior to final value of NJD)
+		for  set NJD = $$LBACNJD(JD, MFRE, 1, dep.lbcm) quit:ER ! (NJD < %EffectiveDate)  set JD = NJD
+		}
+
+	// Effective date current or in the future
+	// Re-designed to work when today is an accrual date
+
+	// Go backward to before current system date(use final value of NJD)
+	set NJD = JD
+	for  set NJD = $$LBACNJD(NJD, MFRE, 1, dep.lbcm) quit:ER ! (NJD < %SystemDate)
+
+	// Go forward to after effective date (return value prior to final NJD)
+	for  set NJD = $$LBACNJD(NJD, MFRE, 0, dep.lbcm) quit:ER ! (NJD '< %EffectiveDate)
+
+	quit NJD + 1
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60297^70598^Chad Smith^25630"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,1027 @@
+LNPURGU	/*
+	ORIG: satyanas - 12/05/2005
+	DESC: Purge Closed Loan Accounts
+
+	---- Comments --------------------------------------------------------
+
+	---- Revision History ------------------------------------------------
+
+ 	12/05/05 - SATYANAS - 18155
+	   	   Converted M to PSL.
+	   
+	   Closed account purge report (SCA163)
+ 	
+ 	*/
+
+	quit
+	
+	
+CIDACC
+	/*
+	CID access routine. Called from the account purge report (SCA163).
+
+	Input:
+	  CID	   - Account Number
+	  TYPE     - Product Type
+	  GRP	   - Product Group
+  	  CLS	   - Product Class	
+	  TDT      - Transaction Open Cut-off Date
+	  NOKIL    - Mode (if equal to 1 - Anticipated mode)
+	  GD       - History Archive Global Directory
+	  OPEN     - Flag (equal to O if 'NOKIL)
+	  PGM      - Data extraction routine
+	  HISTARCH - History archive global directory flag
+
+	*/								   
+
+	type public Boolean ER,NOKIL
+	type public Number CID
+	type public Date TDT
+	type public String ACN(),ET
+	      	
+	type RecordACN ln=Db.getRecord("LN","CID=:CID",1)
+	if 'ln.getMode() set ER=1 quit
+	
+	// Not purged
+	do VERIFY(.ln,TDT) if ER quit
+
+	// Anticipated mode
+	if NOKIL set ER=1 quit
+
+	// Purge account
+	do KILL(.ln)
+	
+	quit
+
+
+VERIFY( RecordLN ln,
+        Date TDT)
+  
+
+	/*
+	   Validate purge criteria
+
+	   ARGUMENT:	 
+	   . ln      - Loan Account Object      /TYP=RecordLn/REQ/MECH=REF
+	   . TDT     - Cut-off date  		/TYP=N/REQ/MECH=VAL/DFT=TJD-30	
+	
+	   OUTPUT:
+	     ER 		Error flag   
+	
+
+	   EXAMPLE:
+	    do VERIFY(.ln,TDT)
+
+	*/
+	
+	type public Boolean ER
+	type Number ACN,BOO,CC,ECID,I
+	
+	// Cut-off date  
+	if 'TDT.exists() set TDT=$S(%SystemDate.exists():%SystemDate,1:%SystemDate)-30  	
+	set ER=0 
+
+	// Outstanding balance 
+	if ln.bal set ER=1 do Runtime.setErrMSG("LN",6499) quit
+	
+	// Transaction last date > cut-off 
+	if ln.tld>TDT set ER=1 do Runtime.setErrMSG("LN",1652) quit
+	
+	// Account not closed
+	if ln.stat'=4 set ER=1 do Runtime.setErrMSG("LN",76) quit
+	
+	// Account's skip purge flag is set
+	if ln.adf set ER=1 do Runtime.setErrMSG("LN",1649) quit
+	
+	// Account's opening date > cut-off
+	if ln.cntdr>0,ln.odt>TDT set ER=1 do Runtime.setErrMSG("ACN",1669) quit
+	
+	// Account has accrued int/div 
+	if ln.acr set ER=1 do Runtime.setErrMSG("LN",1651) quit
+	
+	// Account has interest/dividend year-to-date 
+	if ln.iytd set ER=1 do Runtime.setErrMSG("LN",1650) quit
+
+	// Commitment Processing Flag
+	if ln.cpf=1 do { quit:ER
+
+		// master commitment with no linked loans
+		if 'ln.ccl quit
+		// master commitment not closed
+		if ln.stat'=4 set ER=1 do Runtime.setErrMSG("LN",1647) quit
+		// linked loan with credit limit
+		if +ln.crlmt set ER=1 do Runtime.setErrMSG("LN",1648) quit
+		}
+
+	// check escrows
+
+	type RecordLNBIL0 lnbil0=Db.getRecord("LNBIL0","CID=:ln.cid",1)
+	if 'lnbil0.getMode() set ER=1 quit
+	
+	set ECID=$P($$ESCACT^BILFUNCS(.lnbil0,2),$C(9),1) 
+	if ECID do CHK2(ECID) quit:ER
+
+	// Cost Center	
+	set CC=ln.cc 	
+	
+	// Branch of Ownership
+	set BOO=ln.boo	
+	
+	// Customer Number
+	set ACN=ln.acn	
+
+	quit
+
+
+CHK2( Number ECID)	
+
+	/*
+	Check escrow account status
+	
+	ARGUMENT:	   
+	   ECID - escrow account number		/TYP=N/REQ/MECH=VAL	
+	
+
+	*/
+
+	type public Boolean ER
+	type public Date TDT
+
+	type RecordDEP dep=Db.getRecord("DEP","CID=:ECID",1)
+
+	// balance   
+	if dep.bal set ER=1 do Runtime.setErrMSG("DEP",1621) quit 
+	
+	// tran last date>cut-off 
+	if dep.tld>TDT set ER=1 do Runtime.setErrMSG("DEP",1629) quit 
+	
+	// skip purge flag  ADF
+	if dep.adf set ER=1 do Runtime.setErrMSG("DEP",1630) quit 
+	
+	// ODT>cut-off   ODT
+	if dep.odt>TDT set ER=1 do Runtime.setErrMSG("DEP",1631) quit 
+	
+	// interest accrued  ACR
+	if dep.posacr set ER=1 do Runtime.setErrMSG("DEP",1633) quit
+	
+	// interest YTD   IYTD
+	if dep.iytd set ER=1 do Runtime.setErrMSG("DEP",1634) 
+
+	quit
+
+KILL( RecordLN ln)	
+	/*
+	Purge account files.
+
+	ARGUMENT:	 
+	   . ln      - Loan Account Object      /TYP=RecordLn/REQ/MECH=REF
+
+	INPUT:
+
+	  TYPE     - Product Type				/REQ	
+	  GD       - History Archive Global Directory		/REQ
+	  OPEN     - Flag (equal to O if 'NOKIL)		/REQ
+	  PGM      - Data extraction routine			/REQ
+	  HISTARCH - History archive global directory flag	/REQ
+	*/
+
+	type public Boolean ER,OPEN
+	type public String COLLIST(),GD,HISTARCH,PGM,RMS,TYPE
+	type Number LNACN
+	type String DI,REC,TSEQ
+	
+	set LNACN=ln.acn
+	
+	// Archive account info
+	if '(PGM.get().isNull()) do ^@PGM
+
+	// Purged accounts file
+	type RecordPURGDACN purgdacn=Db.getRecord("PURGDACN","CID=:ln.cid",1)
+	
+	if 'purgdacn.getMode() do { quit:ER
+		type RecordPURGDACN purgdacn=Class.new("RecordPURGDACN")
+		set purgdacn.cid=ln.cid
+		do purgdacn.bypassSave()
+		}
+
+	if 'OPEN do {
+		
+		type public IO io = Class.new("IO")
+	
+		set io.fileName = RMS_TYPE
+		set io.openParams = "NEWV/WRITE"
+		set io.timeout = 5
+	
+		catch ioExc {
+			// catch exception error
+			if ioExc'["%PSL-E-IO" throw ioExc
+
+			// Error opening ~p1. Process stopped for type ~p2
+			write $$^MSG(992,io.fileName,ioExc.type), !
+			}
+		
+		do io.open()
+	
+		// Writing deleted files to ~p1	
+		do io.write($$^MSG(6969, io.fileName))
+		set OPEN=1
+	
+		// write headers
+	
+		do io.write($$HEADER("LNBLP",.COLLIST()))
+		do io.write($$HEADER("LNVRCHG",.COLLIST()))
+		do io.write($$HEADER("LNPTCHG",.COLLIST()))
+		do io.write($$HEADER("LNRACHG",.COLLIST()))
+		do io.write($$HEADER("DAYENDLCHG",.COLLIST()))
+		do io.write($$HEADER("NOTES",.COLLIST()))
+		do io.write($$HEADER("DAYENDINP",.COLLIST()))
+		do io.write($$HEADER("DAYENDPVO",.COLLIST()))
+		do io.write($$HEADER("LNAPCHG",.COLLIST()))
+		do io.write($$HEADER("LNAPCHGE",.COLLIST()))
+		do io.write($$HEADER("LNCPN",.COLLIST()))
+		do io.write($$HEADER("LNCYCPTS",.COLLIST()))
+		do io.write($$HEADER("LNCYCDLD",.COLLIST()))
+		do io.write($$HEADER("LNCYCMSC",.COLLIST()))
+		do io.write($$HEADER("LNCYCINS",.COLLIST()))
+		do io.write($$HEADER("LNMCOM1",.COLLIST()))
+		do io.write($$HEADER("LNFEE",.COLLIST()))
+		do io.write($$HEADER("LNLS8",.COLLIST()))
+		do io.write($$HEADER("LNLS6",.COLLIST()))
+		do io.write($$HEADER("LNLS6B",.COLLIST()))
+		do io.write($$HEADER("LNLS6C",.COLLIST()))
+		do io.write($$HEADER("LNPL2",.COLLIST()))
+		do io.write($$HEADER("LNPL3A",.COLLIST()))
+		do io.write($$HEADER("LNPL3",.COLLIST()))
+		do io.write($$HEADER("LNOLC2",.COLLIST()))
+		do io.write($$HEADER("LNCOL",.COLLIST()))
+		do io.write($$HEADER("COL",.COLLIST()))			
+		do io.write($$HEADER("LNBIL0",.COLLIST()))
+		do io.write($$HEADER("RELCIF",.COLLIST()))
+		do io.write($$HEADER("CMBCID",.COLLIST()))
+		do io.write($$HEADER("CMBSTM",.COLLIST()))
+		do io.write($$HEADER("TRTYPE",.COLLIST()))
+		do io.write($$HEADER("ACN",.COLLIST()))
+		do io.write($$HEADER("RAMT",.COLLIST()))
+		do io.write($$HEADER("RFLG",.COLLIST()))
+		do io.write($$HEADER("HLD7",.COLLIST()))
+		do io.write($$HEADER("HLD8",.COLLIST()))
+		do io.write($$HEADER("PAA",.COLLIST()))
+		do io.write($$HEADER("TIKLACN",.COLLIST()))
+		do io.write($$HEADER("LNENT",.COLLIST()))
+		do io.write($$HEADER("HIST",.COLLIST()))
+		do io.write($$HEADER("LNBIL1",.COLLIST()))
+		do io.write($$HEADER("LNBIL5",.COLLIST()))
+		do io.write($$HEADER("LN",.COLLIST()))
+	
+		do io.write("EOH")		
+	
+		}
+		
+	// write the data and delete the files
+	
+	// Delete Billing information.
+		
+	// Purge last Loan Bill Print file entry.
+				
+	type DbSet ds = Db.selectDbSet("NOTES","CID=:ln.cid")
+		
+	while ds.next() do { 
+			
+		type RecordNOTES notes = ds.getRecord("NOTES")
+		
+		do DATA(COLLIST("NOTES"),"NOTES",ln.cid)
+		
+		do Db.fastDelete("NOTES","FILE=:notes.file,NUM=:notes.num,CID=:ln.cid")
+		}
+		
+	if ln.bldt do {	
+		type DbSet ds = Db.selectDbSet("LNBLP","CID=:ln.cid")
+
+		while ds.next() do {
+		
+			type RecordLNBLP lnblp = ds.getRecord("LNBLP")
+			
+			do DATA(COLLIST("LNBLP"),"LNBLP",ln.cid)
+			
+			do Db.delete("LNBLP","CID=:ln.cid")
+			}
+				
+		}
+		
+	// Delete interest information.
+		
+	if ln.ichnd do {
+		type DbSet ds = Db.selectDbSet("LNVRCHG","CID=:ln.cid")
+
+		while ds.next() do {
+
+			type RecordLNVRCHG lnvrchg = ds.getRecord("LNVRCHG")
+
+			do DATA(COLLIST("LNVRCHG"),"LNVRCHG",ln.cid)
+	
+			// Delete Interest Rate Change Data entry.
+			do Db.delete("LNVRCHG","CID=:ln.cid")
+			}
+				
+		}
+		
+	// Delete payments.
+		
+	if ln.pchnd do {
+		type DbSet ds = Db.selectDbSet("LNPTCHG","CID=:ln.cid")
+
+		while ds.next() do {
+
+			type RecordLNPTCHG lnptchg = ds.getRecord("LNPTCHG")
+	
+			do DATA(COLLIST("LNPTCHG"),"LNPTCHG",ln.cid)
+			
+			// Delete Payment Change Data entry.
+			do Db.delete("LNPTCHG","CID=:ln.cid")
+			}
+	
+		}	
+		
+	
+	if ln.rand do {
+
+		type DbSet ds = Db.selectDbSet("LNRACHG","CID=:ln.cid")
+
+		while ds.next() do {
+
+			type RecordLNRACHG lnrachg = ds.getRecord("LNRACHG")
+
+			do DATA(COLLIST("LNRACHG"),"LNRACHG",ln.cid)
+			
+			// Delete Re-amortization Change Data entry.
+			do Db.delete("LNRACHG","CID=:ln.cid")
+			}
+				
+		}
+		
+	// Delete Late charges.
+		
+	if ln.lcad do { 
+
+		type DbSet ds = Db.selectDbSet("DAYENDLCHG","CID=:ln.cid")
+
+		while ds.next() do {
+
+			type RecordDAYENDLCHG dayendlchg = ds.getRecord("DAYENDLCHG")
+
+			do DATA(COLLIST("DAYENDLCHG"),"DAYENDLCHG",ln.cid)
+			
+			// Delete DAYEND Late Charge Setup entry.
+			do Db.delete("DAYENDLCHG","CID=:ln.cid")
+			}
+				
+		}
+		
+	
+	// Interest Posting information.
+		
+	if ln.intmx do {
+		
+		type DbSet ds = Db.selectDbSet("DAYENDINP","CID=:ln.cid")
+
+		while ds.next() do {
+
+			type RecordDAYENDINP dayendinp = ds.getRecord("DAYENDINP")
+
+			do DATA(COLLIST("DAYENDINP"),"DAYENDINP",ln.cid)
+			
+			// Delete Dayend Interest Posting Date entries.
+			do Db.delete("DAYENDINP","CID=:ln.cid")
+			}
+			
+		}
+		
+	// Scheduled Payment and Variance Options info.
+		
+	if ln.schnd do {
+		
+		type DbSet ds = Db.selectDbSet("DAYENDPVO","CID=:ln.cid")
+
+		while ds.next() do {
+
+			type RecordDAYENDPVO dayendpvo = ds.getRecord("DAYENDPVO")
+
+			do DATA(COLLIST("DAYENDPVO"),"DAYENDPVO",ln.cid)
+
+			// Delete Principal Variance Options entry.
+			do Db.delete("DAYENDPVO","CID=:ln.cid")
+			}
+	
+		}
+		
+	// Payment Change Batch Data.
+		
+	if ln.apcnd do {
+		
+		type DbSet dschg = Db.selectDbSet("LNAPCHG", "CID=:ln.cid")
+
+		while dschg.next() do {
+
+			type RecordLNAPCHG lnapchg = dschg.getRecord("LNAPCHG")
+
+			do DATA(COLLIST("LNAPCHG"),"LNAPCHG",ln.cid)
+			
+			// Delete Analysis Payment Change Batch Data.
+			do Db.delete("LNAPCHG","APCND=:ln.apcnd AND CID=:ln.cid")
+			}
+
+		type DbSet dschge = Db.selectDbSet("LNAPCHGE", "CID=:ln.cid")
+
+		while dschge.next() do {
+
+			type RecordLNAPCHGE lnapchge = dschge.getRecord("LNAPCHGE")
+
+			do DATA(COLLIST("LNAPCHGE"),"LNAPCHGE",ln.cid)
+			
+			// Delete Analysis Payment Change Batch - Escrow.
+			do Db.delete("LNAPCHGE","APCND=:ln.apcnd AND CID=:ln.cid")
+			}
+	
+		}
+		
+	// Coupon Production.
+		
+	if ln.cbpnd do {
+			
+		type Number MET
+		// Coupon Book Production Method
+		set MET=ln.cbmet	
+
+		set MET=$S(MET=3:1,MET=2:2,1:3)
+		
+		type DbSet dscpn = Db.selectDbSet("LNCPN","CID=:ln.cid")
+
+		while dscpn.next() do {
+
+			type RecordLNCPN lncpn = dscpn.getRecord("LNCPN")
+
+			do DATA(COLLIST("LNCPN"),"LNCPN",ln.cid)
+			
+			// Delete Coupon Production table.
+			do Db.delete("LNCPN","PMET=:MET AND CID=:ln.cid")
+			}
+	
+		}
+		
+	// Loan Cycled Items - FASB91 Fees.
+		
+	type DbSet dspts = Db.selectDbSet("LNCYCPTS","CID=:ln.cid")
+
+	while dspts.next() do {
+
+		type RecordLNCYCPTS lncycpts = dspts.getRecord("LNCYCPTS")
+				
+		do DATA(COLLIST("LNCYCPTS"),"LNCYCPTS",ln.cid)
+		
+		// Delete table LNCYCPTS
+		do Db.delete("LNCYCPTS","CID=:CID AND TYP=:lncycpts.typ")
+		}
+		
+	// Loan Add-on.
+		
+	// Dealer Discount Flag
+	if ln.dlrp do {	
+			
+		type DbSet dsdld = Db.selectDbSet("LNCYCDLD","CID=:ln.cid")
+
+		while dsdld.next() do {
+
+			type RecordLNCYCDLD lncycdld = dsdld.getRecord("LNCYCDLD")
+			
+			do DATA(COLLIST("LNCYCDLD"),"LNCYCDLD",ln.cid)
+			
+			// Delete table LNCYCDLD
+			do Db.delete("LNCYCDLD","CID=:ln.cid AND TYP=:lncycdld.typ")
+			}
+				
+		}
+		
+	// Miscellaneous Add-on.
+		
+	//Misc Add-on Flag
+	if ln.mscp do {
+		
+		type DbSet dsmsc = Db.selectDbSet("LNCYCMSC","CID=:ln.cid")
+
+		while dsmsc.next() do {
+
+			type RecordLNCYCMSC lncycmsc = dsmsc.getRecord("LNCYCMSC")
+			
+			do DATA(COLLIST("LNCYCMSC"),"LNCYCMSC",ln.cid)
+			
+			// Delete table LNCYCMSC
+			do Db.delete("LNCYCMSC","CID=:ln.cid AND TYP=:lncycmsc.typ")
+			}
+	
+		}
+		
+		
+	// Insurance.
+		
+	type DbSet dsins = Db.selectDbSet("LNCYCINS","CID=:ln.cid")
+
+	while dsins.next() do {
+
+		type RecordLNCYCINS lncycins = dsins.getRecord("LNCYCINS")
+		
+		do DATA(COLLIST("LNCYCINS"),"LNCYCINS",ln.cid)
+		
+		// Delete table LNCYCINS
+		do Db.delete("LNCYCINS","CID=:ln.cid AND TYP=:lncycins.typ")
+		}
+		
+	// Loan Commitment.
+		
+	// Delete Commercial Commitment X-REF.	
+	// Delete Loan Commitments.
+	
+	type DbSet dscom1 = Db.selectDbSet("LNMCOM1", "CID=:ln.cid")
+
+	while dscom1.next() do {
+
+		type RecordLNMCOM1 lnmcom1 = dscom1.getRecord("LNMCOM1")
+
+		do DATA(COLLIST("LNMCOM1"),"LNMCOM1",ln.cid)
+		
+		do Db.delete("LNMCOM1","ACN=:ln.acn AND CID=:ln.cid")
+		}
+		
+	// Loan fee cross reference file.
+		
+	type DbSet dslnfee = Db.selectDbSet("LNFEE", "CID=:ln.cid")
+
+	while dslnfee.next() do {
+
+		type RecordLNFEE lnfee = dslnfee.getRecord("LNFEE")
+
+		do DATA(COLLIST("LNFEE"),"LNFEE",ln.cid)
+		
+		// Delete Loan Fee entries.
+		do Db.delete("LNFEE","FEETYP=:lnfee.feetyp AND CID=:ln.cid")
+		}
+		
+	// Loan sold.
+		
+	type DbSet dsls8 = Db.selectDbSet("LNLS8","CID=:ln.cid")
+
+	while dsls8.next() do {
+
+		type RecordLNLS8 lnls8 = dsls8.getRecord("LNLS8")
+
+		do DATA(COLLIST("LNLS8"),"LNLS8",ln.cid)
+		
+		// Remove Loan Sale Investor/Acct X-REF entries.
+		do Db.delete("LNLS8","INCD=:lnls8.incd AND PL=:lnls8.pl AND GRP=:lnls8.grp AND CID=:ln.cid")
+ 		}
+	 				
+	type DbSet dsls6 = Db.selectDbSet("LNLS6","CID=:ln.cid")
+
+	while dsls6.next() do {
+
+		type RecordLNLS6 lnls6 = dsls6.getRecord("LNLS6")
+
+		do DATA(COLLIST("LNLS6"),"LNLS6",ln.cid)
+		
+		//  Remove Loans Sold - Account Level.
+		do Db.delete("LNLS6","CID=:ln.cid")
+		}
+	
+	type DbSet dsls6b = Db.selectDbSet("LNLS6B","CID=:ln.cid")
+
+	while dsls6b.next() do {
+
+		type RecordLNLS6B lnls6b = dsls6b.getRecord("LNLS6B")
+
+		do DATA(COLLIST("LNLS6B"),"LNLS6B",ln.cid)
+		
+		// Remove Loan Sold Contra Account
+		do Db.delete("LNLS6B","CID=:ln.cid")
+		}
+	
+	type DbSet dsls6c = Db.selectDbSet("LNLS6C","CID=:ln.cid")
+
+	while dsls6c.next() do {
+
+		type RecordLNLS6C lnls6c = dsls6c.getRecord("LNLS6C")
+
+		do DATA(COLLIST("LNLS6C"),"LNLS6C",ln.cid)
+		
+		// Remove Loan Sale Investor Calculation
+		do Db.delete("LNLS6C","CID=:ln.cid")
+		}
+		
+	// Problem loan file.
+		
+	type DbSet dspl2 = Db.selectDbSet("LNPL2","CID=:ln.cid")
+
+	while dspl2.next() do {
+
+		type RecordLNPL2 lnpl2 = dspl2.getRecord("LNPL2")
+
+		do DATA(COLLIST("LNPL2"),"LNPL2",ln.cid)
+		
+		// Remove Problem Loan Action	Date File. 
+		do Db.delete("LNPL2","CAD=:lnpl2.cad AND CID=:ln.cid") 
+		}
+			
+	// Problem Loan Restructures.
+		
+	type DbSet dspl3a = Db.selectDbSet("LNPL3A","CID=:ln.cid")
+
+	while dspl3a.next() do {
+
+		type RecordLNPL3A lnpl3a = dspl3a.getRecord("LNPL3A")
+
+		do DATA(COLLIST("LNPL3A"),"LNPL3A",ln.cid)
+		
+		// Delete Problem Ln Restruct Sequences.
+		do Db.delete("LNPL3A","RSEQ=:lnpl3a.rseq AND CID=:ln.cid")
+ 		}
+	
+	type DbSet dspl3 = Db.selectDbSet("LNPL3","CID=:ln.cid")
+
+	while dspl3.next() do {
+
+		type RecordLNPL3 lnpl3 = dspl3.getRecord("LNPL3")
+
+		do DATA(COLLIST("LNPL3"),"LNPL3",ln.cid)
+		
+		// Delete Problem Loan Restructures
+		do Db.delete("LNPL3","CID=:ln.cid")
+		}
+		
+	// On-Line Collection.
+		
+	type DbSet dslc2 = Db.selectDbSet("LNOLC2","CID=:ln.cid")
+
+	while dslc2.next() do {
+
+		type RecordLNOLC2 lnolc2 = dslc2.getRecord("LNOLC2")
+
+		do DATA(COLLIST("LNOLC2"),"LNOLC2",ln.cid)
+		
+		//  Remove On-Line Collection Lseq Level.
+		do Db.delete("LNOLC2","ACN=:lnolc2.acn AND UID=:lnolc2.uid AND LSEQ=:lnolc2.lseq")
+ 		}
+		
+	// Collateral.
+		
+	type ResultSet rs=Db.select("COLL","LNCOL","CID=:ln.cid")
+		   
+	while rs.next() do { 
+
+		type DbSet dscol = Db.selectDbSet("COL","COLL=:rs.getCol(1)")
+
+		while dscol.next() do {
+
+			type RecordCOL col = dscol.getRecord("COL")
+
+			do DATA(COLLIST("COL"),"COL",ln.cid)
+			
+			// Delete Collateral File
+			do Db.delete("COL","COLL=:rs.getCol(1)")
+			}
+		
+		}
+		
+	// Find escrow accounts.
+		
+	type Number ECID,ELENUM
+	type String X
+	
+	set ELENUM=0
+	
+	type RecordLNBIL0 lnbil0=Db.getRecord("LNBIL0","CID=:ln.cid",1)
+	
+	set X=$$ESCACT^BILFUNCS(.lnbil0,.ELENUM) 
+	
+	set ECID=X.piece($C(9),1)
+	
+	if ECID do {
+	
+	// Find customers linked to escrow .
+		
+		type DbSet dscif = Db.selectDbSet("RELCIF","CID=:ln.cid")
+		
+		while dscif.next() do { 
+	
+			type RecordRELCIF relcif = dscif.getRecord("RELCIF")
+		
+			do DATA(COLLIST("RELCIF"),"RELCIF",ln.cid)
+		
+			// Delete CIF-ACN Relationship File entries
+			do Db.fastDelete("RELCIF","ACN=:LNACN,CID=:ECID")
+			}
+	
+		// Delete Combined Statement Account Level
+		type RecordCMBCID cmbcid=Db.getRecord("CMBCID","CID=:ECID,ACN=:ln.acn",1)
+		
+		type DbSet dsstm = Db.selectDbSet("CMBSTM","CID=:ln.cid")
+		
+		while dsstm.next() do { 
+		
+			type RecordCMBSTM cmbstm = dsstm.getRecord("CMBSTM")
+	
+			do DATA(COLLIST("CMBSTM"),"CMBSTM",ln.cid)
+		
+			// Delete Combined Statement Maintenance entries
+			do Db.delete("CMBSTM","ACN=:ln.acn AND STMGRP=:cmbcid.stmgrp AND CID=:ECID")
+			}
+		
+		while dscif.next() do { 
+	
+			type RecordRELCIF relcif = dscif.getRecord("RELCIF")
+	
+			do DATA(COLLIST("RELCIF"),"RELCIF",ln.cid)
+			}
+	
+		do Db.fastDelete("RELCIF","ACN=:LNACN,CID=:ECID")
+		
+		// Escrow Transfer Type table.
+		
+		type DbSet dstype = Db.selectDbSet("TRTYPE","CID=:ln.cid")
+		
+		while dstype.next() do { 
+	
+			type RecordTRTYPE trtype = dstype.getRecord("TRTYPE")
+			
+			do DATA(COLLIST("TRTYPE"),"TRTYPE",ln.cid)
+		
+			do Db.delete("TRTYPE","CID=:ECID AND TYP=:trtype.typ")
+			}
+		
+		// Escrow Transfer Type table.
+		
+		// Delete history records for escrow account
+		
+		type DbSet dsacn = Db.selectDbSet("ACN","CID=:ln.cid")
+		
+		while dsacn.next() do { 
+	
+			type RecordACN acn = dsacn.getRecord("ACN")
+	
+			do DATA(COLLIST("ACN"),"ACN",ln.cid)
+		
+			// Delete escrow account file
+			do Db.delete("ACN","CID=:ECID")
+			}
+	
+		type DbSet dsramt = Db.selectDbSet("RAMT","CID=:ln.cid")
+		
+		while dsramt.next() do { 
+	
+			type RecordRAMT ramt = dsramt.getRecord("RAMT")
+
+			do DATA(COLLIST("RAMT"),"RAMT",ln.cid)
+			
+			// Delete Transfer Remittance File
+			do Db.delete("RAMT","CID=:ECID")
+			}
+
+		type DbSet dsrflg = Db.selectDbSet("RFLG","CID=:ln.cid")
+		
+		while dsrflg.next() do { 
+	
+			type RecordRFLG rflg = dsrflg.getRecord("RFLG")
+
+			do DATA(COLLIST("RFLG"),"RFLG",ln.cid)
+		
+			// Restrict Flag table
+			do Db.fastDelete("RFLG","ECID")
+			}
+
+		type DbSet dshld7 = Db.selectDbSet("HLD7","CID=:ln.cid")
+		
+		while dshld7.next() do { 
+	
+			type RecordHLD7 hld7 = dshld7.getRecord("HLD7")
+
+			do DATA(COLLIST("HLD7"),"HLD7",ln.cid)
+		
+			// Float/Value Hold File
+			do Db.fastDelete("HLD7","ECID")
+			}
+
+		type DbSet dshld8 = Db.selectDbSet("HLD8","CID=:ln.cid")
+		
+		while dshld8.next() do { 
+	
+			type RecordHLD8 hld8 = dshld8.getRecord("HLD8")
+
+			do DATA(COLLIST("HLD8"),"HLD8",ln.cid)
+			
+			// Float/Value Hold File
+			do Db.fastDelete("HLD8","ECID")
+			}
+		}	
+		
+	// CIF's linked to account.
+	type DbSet dscif = Db.selectDbSet("RELCIF","CID=:ln.cid")
+		
+	while dscif.next() do { 
+	
+		type RecordRELCIF relcif = dscif.getRecord("RELCIF")
+
+		do DATA(COLLIST("RELCIF"),"RELCIF",ln.cid)
+		
+		// CIF-ACN Relationship Index
+		do Db.fastDelete("RELCIF","ACN=:LNACN,CID=:ln.cid")
+		}
+	
+	type ResultSet rs1=Db.select("ACN","CMBCID","CID=:ln.cid")
+	
+	while rs1.next() do {
+		
+		type Number CMBCIDACN
+		
+		set CMBCIDACN=rs1.getCol(1)
+		type RecordCMBCID cmbcid=Db.getRecord("CMBCID","CID=:ln.cid,ACN=:CMBCIDACN")
+
+		type DbSet dsstm = Db.selectDbSet("CMBSTM","CID=:ln.cid")
+
+		while dsstm.next() do {
+			type Number STMGRP
+			
+			type RecordCMBSTM cmbstm = dsstm.getRecord("CMBSTM")
+			set STMGRP=cmbcid.stmgrp
+			
+			do DATA(COLLIST("CMBSTM"),"CMBSTM",ln.cid)
+			
+			// Delete Combined Statement Maintenance entries
+			do Db.fastDelete("CMBSTM","ACN=:CMBCIDACN,STMGRP=:STMGRP,CID=:ln.cid")
+			}
+				
+		}
+		
+	// Account primary files.
+		
+	while dscif.next() do { 
+	
+		type RecordRELCIF relcif = dscif.getRecord("RELCIF")
+
+		do DATA(COLLIST("RELCIF"),"RELCIF",ln.cid)
+		
+		do Db.fastDelete("RELCIF","ACN=:LNACN,CID=:ln.cid")
+		}
+			
+	// Profitability Analysis.
+		
+	type DbSet dspaa = Db.selectDbSet("PAA","CID=:ln.cid")
+
+	while dspaa.next() do {
+
+		type RecordPAA paa = dspaa.getRecord("PAA")
+		
+		do DATA(COLLIST("PAA"),"PAA",ln.cid)
+		
+		// Profitability Analysis Acc Level
+		do Db.fastDelete("PAA","EFD=:paa.efd,CID=:ln.cid")
+		}
+		
+	// Tickler File - Account Review Next Date.
+		
+	type DbSet dsklacn = Db.selectDbSet("TIKLACN","CID=:ln.cid")
+
+	while dsklacn.next() do {
+
+		type RecordTIKLACN titlacn = dsklacn.getRecord("TIKLACN")
+
+		do DATA(COLLIST("TIKLACN"),"TIKLACN",ln.cid)
+		
+		do Db.fastDelete("TIKLACN","CID=:ln.cid")
+		}
+		
+	// Enterprise Processing.
+		
+	type String SUB
+	
+	type DbSet dsent = Db.selectDbSet("LNENT","CID=:ln.cid")
+
+	while dsent.next() do {
+
+		type RecordLNENT lnent= dsent.getRecord("LNENT")
+
+		do DATA(COLLIST("LNENT"),"LNENT",ln.cid)
+		
+		// Loan Budget Sys Support File
+		do Db.fastDelete("LNENT","CID=:ln.cid")
+		}
+		
+	// Purge account user-defined cross-reference files
+	set %ProcessMode=3
+
+	set SUB="CIF"
+		
+	// Account, history and bills records.
+		
+	type DbSet dshist = Db.selectDbSet("HIST","CID=:ln.cid")
+
+	while dshist.next() do {
+
+		type RecordHIST hist = dshist.getRecord("HIST")
+
+		do DATA(COLLIST("HIST"),"HIST",ln.cid)
+		
+		// delete HIST records
+		do Db.fastDelete("HIST","CID=:ln.cid") 
+		}
+
+	type DbSet dsrflg = Db.selectDbSet("RFLG","CID=:ln.cid")
+	while dsrflg.next() do {
+
+		type RecordRFLG rflg = dsrflg.getRecord("RFLG")
+
+		do DATA(COLLIST("RFLG"),"RFLG",ln.cid)
+		
+		// delete holds
+		do Db.fastDelete("RFLG","CID=:ln.cid")
+		}
+	
+	type DbSet dsbil0 = Db.selectDbSet("LNBIL0","CID=:ln.cid")
+
+	while dsbil0.next() do {
+
+		type RecordLNBIL0 lnbil0= dsbil0.getRecord("LNBIL0")
+
+		do DATA(COLLIST("LNBIL0"),"LNBIL0",ln.cid)
+		
+		// delete bills
+		do Db.fastDelete("LNBIL0","CID=:ln.cid")
+		}
+	
+	type DbSet dsbil1 = Db.selectDbSet("LNBIL1","CID=:ln.cid")
+
+	while dsbil1.next() do {
+
+		type RecordLNBIL1 lnbil1 = dsbil1.getRecord("LNBIL1")
+
+		do DATA(COLLIST("LNBIL1"),"LNBIL1",ln.cid)
+			
+		do Db.fastDelete("LNBIL1","CID=:ln.cid")
+		}
+		
+	type DbSet dsbil5 = Db.selectDbSet("LNBIL5","CID=:ln.cid")
+
+	while dsbil5.next() do {
+
+		type RecordLNBIL5 lnbil5 = dsbil5.getRecord("LNBIL5")
+
+		do DATA(COLLIST("LNBIL5"),"LNBIL5",ln.cid)
+		
+		do Db.fastDelete("LNBIL5","CID=:ln.cid")
+		}
+	
+	type DbSet dsln = Db.selectDbSet("LN","CID=:ln.cid")
+
+	while dsln.next() do {
+
+		type RecordLN ln = dsln.getRecord("LN")
+
+		do DATA(COLLIST("LN"),"LN",ln.cid)
+		
+		// delete account
+		do Db.fastDelete("LN","CID=:ln.cid")
+		}
+	
+	
+	quit
+
+
+HEADER( String TABLE, 
+        String COLLIST())	// write header
+ 	
+	set COLLIST = $$COLLIST^DBSDD(TABLE,1,1,1)
+	set COLLIST(TABLE) = COLLIST
+
+	quit (TABLE_9.char()_COLLIST.translate(",",9.char()))
+
+
+DATA( String COLLIST, 
+      String TABLE, 
+      Number CID)	// write data
+
+	type public IO io
+	type String DATA
+
+	#ACCEPT Date=02/10/2006; PGM=Satyanarayan Sethy
+	type ResultSet rs = Db.select(COLLIST,TABLE,"CID=:CID")
+	
+	while rs.next() do {
+
+		type Row rw = rs.getRow()
+
+		set DATA = TABLE_9.char()_CID_rw.toString()
+
+		do io.write(.DATA)
+		}
+
+	quit
+
+	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60310^28746^Sethy, Satyanarayan^22108"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,826 @@
+DBSBCH		/*
+	ORIG: MATTSON - 02/27/2003
+	DESC: Batch Definition Compiler
+
+	---- Comments --------------------------------------------------------
+
+	*** NOTE *******************************************************
+	Any change to the batch compiler that will necessitate the batch
+	definitions to be re-compiled requires a change to the Version
+	ID in function $$VERSION^DBSBCH.  This will advise DRV^UBCHID
+	to re-compile the batch definition before it is executed.
+	****************************************************************
+
+	---- Revision History ------------------------------------------------
+	04/04/07 - RussellDS - CR26386
+		   Remove commands("xecute") - no longer used by PSL compiler.
+		   
+		   Removed old revision history.
+	
+	01/20/07 - RussellDS - CRs 24902 / 24903 / 24974
+		   Modified MPROF section extensively to correct the structure,
+		   processing, and use of tables.
+	
+	05/12/06 - RussellDS - CR20967
+		   Added CR to accept directives to avoid PSL warnings.
+	
+	04/04/06 - RussellDS - CR20602
+		   Modified m2src section to add private label to specified
+		   tags to avoid PSL warnings on compile of scheduler and
+		   thread procedures.  Modified calls to m2src so that the
+		   scheduler and thread call back sections are now labelled
+		   private.
+	
+	03/14/06 - RussellDS - CR20135
+		   Modify generated catch code for vMIAN and vPROC sections to
+		   make them consistent with current trapping.
+	
+	02/25/06 - RussellDS - CR19065
+		   Modify COMPILE section to return PGM.
+		   
+		   Change Public to public, throughout,
+	
+	02/01/06 - SmithCD - CR 19343 (16890)
+		   Modified vPROC section to reference %INTRPT() instead of 
+		   %INTRPT to avoid a "deprecated feature" compiler warning 
+		   that was occurring when compiling batches.
+	*/
+
+	quit
+	
+	
+public VERSION()	// Batch compiler Version ID
+	/*
+	Called by UBCHID to determine if a batch definition needs to be
+	re-compiled due to changes in the batch compiler.
+	*/
+	
+	quit "V7-0.02"
+	
+	
+public COMPILE(String BCHID,	// Batch ID
+	       String CMPFLG(),	// Compiler flags [*]		/NOREQ/MECH=REFARR:R
+	       String PGM)	// Generated program name	/NOREQ/MECH=REFNAM:W
+	/*
+	Compile executive run-time routine
+
+	ARGUMENT NOTES:
+	
+	  . CMPFLG allows the following values:
+	
+		CMPFLG("DEBUG","CCV")	Mark PSL for code coverage
+			0		Do not mark lines (default)
+			1		Mark lines
+		
+		CMPFLG("DEBUG","NOTP")	Disable TP (Use for testing only)
+			0		Do not disable TP (default)
+			1		Disable TP
+	
+		CMPFLG("DEBUG","PRO")	M code profiler (GT.M V4.1)
+			0		Do not profile (default)
+			1		Profile
+	
+		CMPFLG("DEBUG","PSL")	Debug PSL methods
+			"*"		Debug all methods
+	        	class.*		Debug class 'class' methods
+			class.method	Debug method 'class.method'
+
+		CMPFLG("DEBUG","SYM")	Save symbol table to file
+			0		Do not save symbol table (default)
+			1		Save symbol table to file
+	
+		CMPFLG("DEBUG","TRACE")	Trace M code
+			0		Do not trace code (default)
+			1		Trace code
+	
+			CMPFLG("DEBUG","TRACE","SCH")=Start trace (scheduler)
+			CMPFLG("DEBUG","TRACE","THR")=Start trace (threads)
+	*/
+
+	catch error {
+		if error.type'["%GTM-" do ZE^UTLERR quit
+
+		write !,error.type,"-",error.description
+		write !,"At source code line: ",error.thrownAt
+		}
+		
+	do SYSVAR^SCADRV0()
+	do initflgs(.CMPFLG)
+	do gen(BCHID, .CMPFLG, .PGM)
+
+	quit
+	
+	
+gen(String BCHID,
+    String CMPFLG(),
+    String PGM)
+
+	// User code from batch definition
+	
+	type String commands(),exec(),m2src(),mcode(),open()
+	type String schexec(),schexit(),schinit(),schpost()
+	type String threxec(),threxit(),thrinit()
+	type String vmain(),vproc()
+	type String SELECT
+	
+	type RecordDBTBL33 dbtbl33=Db.getRecord("DBTBL33","%LIBS='SYSDEV',BCHID=:BCHID")
+	
+	set PGM = dbtbl33.pgm
+
+	if CMPFLG("DEBUG").exists() set dbtbl33.des=dbtbl33.des_" (debug mode)"
+	write !,BCHID,?15,dbtbl33.des
+	
+	do load(BCHID,"OPEN",.open)
+	do load(BCHID,"EXEC",.exec)
+
+	// Compile error - procedural code req'd for ~p1
+	if 'exec.data() throw Class.new("Error",$$^MSG(8744,"EXEC"))
+	
+	do load(BCHID,"SCHINIT",.schinit)
+	do load(BCHID,"SCHEXEC",.schexec)
+	do load(BCHID,"SCHPOST",.schpost)
+	do load(BCHID,"SCHEXIT",.schexit)
+	do load(BCHID,"THRINIT",.thrinit)
+	do load(BCHID,"THREXEC",.threxec)
+	do load(BCHID,"THREXIT",.threxit)
+	
+	do sysgen(.dbtbl33,.commands,.SELECT)
+
+	// Compile error - procedural code req'd for ~p1
+	if 'schexec.data() throw Class.new("Error",$$^MSG(8744,"SCHEXEC"))
+
+	// Compile error - procedural code req'd for ~p1
+	if 'threxec.data() throw Class.new("Error",$$^MSG(8744,"THREXEC"))
+	
+	do HDR(.dbtbl33,.m2src)
+	do vMAIN(.dbtbl33,.vmain)
+	do vPROC(.dbtbl33,.vproc,.SELECT)
+	do m2src(.dbtbl33,.m2src,"","",.vmain,"")
+	
+	if dbtbl33.formal="" do {
+		do m2src(.dbtbl33,.m2src,"vPROC","("_SELECT_")",.vproc,"")
+		do m2src(.dbtbl33,.m2src,"vEXEC","(vCONTEXT,"_SELECT_")",.exec,"")
+		}
+
+	else  do {
+		do m2src(.dbtbl33,.m2src,"vPROC","("_dbtbl33.formal_")",.vproc,"")
+		do m2src(.dbtbl33,.m2src,"vEXEC","(vCONTEXT,"_dbtbl33.formal_")",.exec,"")
+		}
+	
+	do m2src(.dbtbl33,.m2src,"vTHREXEC","(vINPUT,vRETURN)",.threxec,"private")
+	do m2src(.dbtbl33,.m2src,"vSCHEXEC","(vINPUT,vRETURN)",.schexec,"private")
+	do m2src(.dbtbl33,.m2src,"vSCHPOST","(vINPUT,vRETURN)",.schpost,"private")
+	
+	if 'open.data() set open(1)=" set %BatchExit=0"
+	do m2src(.dbtbl33,.m2src,"vOPEN","(String vINPUT, Boolean %BatchExit)",.open,"")
+	do m2src(.dbtbl33,.m2src,"vTHRINIT","(vINPUT,vRETURN)",.thrinit,"private")
+	do m2src(.dbtbl33,.m2src,"vTHREXIT","(vINPUT,vRETURN)",.threxit,"private")
+	do m2src(.dbtbl33,.m2src,"vSCHINIT","(vINPUT,vRETURN)",.schinit,"private")
+	do m2src(.dbtbl33,.m2src,"vSCHEXIT","(vINPUT,vRETURN)",.schexit,"private")
+	
+	// Set PSL and SQL compiler switches
+	if CMPFLG("DEBUG","PSL").get()'="" set commands("DEBUG")=CMPFLG("DEBUG","PSL")
+	
+	// Add compiler version
+	do vVERSION(.m2src)
+	
+	// Add marker for code coverage utility
+	if CMPFLG("DEBUG","CCV").get() do MARKER^UCUTIL(.m2src)
+
+	// Call PSL compiler
+	do cmpA2F^UCGM(.m2src,PGM,,,.commands,,,BCHID_"~Batch")
+
+	quit
+	
+	
+load(String BCHID,String LABEL,String code())
+
+	// Insert batch procedural code from batch definition
+	
+	type ResultSet rs=Db.select("CODE","DBTBL33D","%LIBS='SYSDEV' AND BCHID=:BCHID AND LABEL=:LABEL")
+	while rs.next() set code(code("").order(-1)+1)=rs.getCol("CODE")
+	quit
+
+	
+m2src(RecordDBTBL33 dbtbl33,
+      String m2src(),
+      String tag,
+      String par(),
+      String code(),
+      String tagtype)		// If not null, type of tag, e.g., private
+
+	// Build m2src
+	
+	type public String CMPFLG()
+	
+	type Number n,seq
+	type String trace
+	
+	set seq=m2src("").order(-1)+1
+	set m2src(seq)=tag_par_" //"
+	if 'tagtype.isNull() set m2src(seq) = tagtype_" "_m2src(seq)
+	
+	if tag="vSCHINIT", dbtbl33.schrcnt do {
+		set seq=seq+1
+		set m2src(seq)=" type public Number vMONID,vMONCNT"
+		set seq=seq+1
+		set m2src(seq)=" type public String %FN"
+		set seq=seq+1
+		set m2src(seq)=" set vMONID=$$INIT^JOBMON($G(%FN)_""#""_"""_dbtbl33.bchid_"""),vMONCNT=0"
+	}
+	if tag="vTHRINIT", dbtbl33.thrrcnt do {
+		set seq=seq+1
+		set m2src(seq)=" type public Number vMONID,vMONCNT"
+		set seq=seq+1
+		set m2src(seq)=" type public String %FN"
+		set seq=seq+1
+		set m2src(seq)=" set vMONID=$$INIT^JOBMON($G(%FN)_""#""_"""_dbtbl33.bchid_""")),vMONCNT=0"
+	}
+	
+	if tag="vSCHEXIT", dbtbl33.schrcnt do {
+		set seq=seq+1
+		set m2src(seq)=" type public Number vMONID,vMONCNT"
+		set seq=seq+1
+		set m2src(seq)=" type public String %FN"
+		set seq=seq+1
+		set m2src(seq)=" do CLOSE^JOBMON(vMONID,vMONCNT)"
+	}
+	if tag="vTHREXIT", dbtbl33.thrrcnt do {
+		set seq=seq+1
+		set m2src(seq)=" type public Number vMONID,vMONCNT"
+		set seq=seq+1
+		set m2src(seq)=" type public String %FN"
+		set seq=seq+1
+		set m2src(seq)=" do CLOSE^JOBMON(vMONID,vMONCNT)"
+	}
+	if tag="vEXEC", dbtbl33.schrcnt!dbtbl33.thrrcnt do {
+		set seq=seq+1
+		set m2src(seq)=" type Number vMONID,vMONCNT"
+	}
+	if tag="vSCHEXEC", dbtbl33.schrcnt!dbtbl33.thrrcnt do {
+		set seq=seq+1
+		set m2src(seq)=" type public Number vMONID,vMONCNT"
+	}
+	
+	
+	if CMPFLG("DEBUG","PRO").get() do {
+		if tag="vSCHINIT" do {
+			set seq=seq+1,m2src(seq)=" do Db.fastDelete(""MPROF"",""BCHID='"_dbtbl33.bchid_"'"")"
+
+			set seq=seq+1,m2src(seq)=" #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967"
+			set seq=seq+1,m2src(seq)=" #BYPASS"
+
+			set seq=seq+1,m2src(seq)=" view ""TRACE"":1:""^MPROF("""""_dbtbl33.bchid_""""",""""SCH"""",$J)"""
+			set seq=seq+1,m2src(seq)=" #ENDBYPASS"
+			}
+
+		if tag="vTHRINIT" do {
+			set seq=seq+1,m2src(seq)=" #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967"
+			set seq=seq+1,m2src(seq)=" #BYPASS"
+
+			set seq=seq+1,m2src(seq)=" view ""TRACE"":1:""^MPROF("""""_dbtbl33.bchid_""""",""""THR"""",$J)"""
+			set seq=seq+1,m2src(seq)=" #ENDBYPASS"
+			}
+			
+		if tag="vSCHEXIT"!(tag="vTHREXIT") do {
+			set seq=seq+1,m2src(seq)=" #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967"
+			set seq=seq+1,m2src(seq)=" #BYPASS"
+
+			set seq=seq+1,m2src(seq)=" view ""TRACE"":0"
+			set seq=seq+1,m2src(seq)=" #ENDBYPASS"
+			}
+		}
+	
+	if CMPFLG("DEBUG","SYM").get() do {
+		if tag="vSCHEXIT" set seq=seq+1,m2src(seq)=" do DUMP^BCHUTL("""_dbtbl33.bchid_""")"
+		if tag="vTHREXIT" set seq=seq+1,m2src(seq)=" do DUMP^BCHUTL("""_dbtbl33.bchid_""")"
+		}
+	
+	if CMPFLG("DEBUG","TRACE").get() do {
+		if tag="vSCHINIT" set trace=CMPFLG("DEBUG","TRACE","SCH").get() if trace.isNull() set trace="vSCHEXEC^"_dbtbl33.pgm
+		if tag="vTHRINIT" set trace=CMPFLG("DEBUG","TRACE","THR").get() if trace.isNull() set trace="vTHREXEC^"_dbtbl33.pgm
+		if trace.get()'="" set seq=seq+1,m2src(seq)=" do TRACE^SCAUTL("""_trace_""")"
+		}
+	
+	set n=""
+	for  set n=code(n).order() quit:n.isNull()  set seq=seq+1,m2src(seq)=code(n)
+
+	/*
+	#ACCEPT used to avoid 'Dead code' warning messages generated by the
+	PSL compiler inthe event the source code already contained a 'quit'.
+	*/
+	
+	set seq=seq+1,m2src(seq)=" #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967"
+	set seq=seq+1,m2src(seq)=" quit"
+	quit
+	
+	
+HDR(RecordDBTBL33 dbtbl33,String m2src())	 // Routine header & copyright message
+	
+	type String copyrght
+	
+	do add(.m2src,dbtbl33.pgm_" //Batch "_dbtbl33.bchid_" - "_dbtbl33.des)
+	do ^SCACOPYR(.copyrght)
+	do add(.m2src,copyrght)
+	do add(.m2src," //")
+	
+	do add(.m2src," // ********** This is a DATA-QWIK generated Routine **********")
+	do add(.m2src," // Level 33  - "_dbtbl33.bchid_" Batch Definition")
+	do add(.m2src," // ***********************************************************")
+	do add(.m2src," //")
+	quit
+	
+	
+vMAIN(RecordDBTBL33 dbtbl33,String vmain())	// Build MAIN code
+	
+	type Number seq
+
+	set seq=0
+	
+	set seq=seq+1,vmain(seq)=" type public Number ER"
+	set seq=seq+1,vmain(seq)=" type public String %FN,RM"
+	
+	set seq=seq+1,vmain(seq)=" catch vERROR {"
+	set seq=seq+1,vmain(seq)=" type public Number ER"
+	set seq=seq+1,vmain(seq)=" type public String RM"
+	set seq=seq+1,vmain(seq)=" "
+	set seq=seq+1,vmain(seq)=" do Runtime.rollback()"
+	set seq=seq+1,vmain(seq)=" "
+	set seq=seq+1,vmain(seq)=" // DBFILER errors do not log on a call to ZE^UTLERR"
+	set seq=seq+1,vmain(seq)=" if vERROR.type=""%PSL-E-DBFILER"" do {"
+	set seq=seq+1,vmain(seq)="  type String ET = vERROR.type"
+	set seq=seq+1,vmain(seq)="  do ^UTLERR"
+	set seq=seq+1,vmain(seq)=" }"
+	set seq=seq+1,vmain(seq)=" else  do ZE^UTLERR"
+	set seq=seq+1,vmain(seq)=" "
+	set seq=seq+1,vmain(seq)=" set ER = 1"
+	set seq=seq+1,vmain(seq)=" set RM = vERROR.description"
+	set seq=seq+1,vmain(seq)=" }"
+	
+	set seq=seq+1,vmain(seq)=" type Number %BatchExit,%BatchRestart,vBCHSTS"
+	set seq=seq+1,vmain(seq)=" type String vCONTEXT,vINPUT,vSYSVAR,vRESULT"
+	set seq=seq+1,vmain(seq)=" set %BatchExit=0,%BatchRestart=0,ER=0,RM="""""
+	set seq=seq+1,vmain(seq)=" do INIT^BCHUTL(.vSYSVAR)"
+	
+	if dbtbl33.restind do {
+		set seq=seq+1,vmain(seq)=" set vBCHSTS=$$STATUS^BCHUTL("""_dbtbl33.bchid_""")"
+		// Batch ~p1 could not be restarted. Batch still active.
+		set seq=seq+1,vmain(seq)=" if vBCHSTS=1 set ER=1,RM=$$^MSG(3410) quit"
+
+		// Batch ~p1 could not be restarted. Batch completed successfully.
+		set seq=seq+1,vmain(seq)=" if vBCHSTS=2 set ER=1,RM=$$^MSG(3414) quit"
+		set seq=seq+1,vmain(seq)=" if vBCHSTS=0 set %BatchRestart=1"
+		}
+	
+	set seq=seq+1,vmain(seq)=" do vOPEN(.vINPUT,.%BatchExit) if %BatchExit"
+	if dbtbl33.restind set vmain(seq)=vmain(seq)_" do EXIT^BCHUTL("""_dbtbl33.bchid_""")"
+	set vmain(seq)=vmain(seq)_" quit"
+	
+	set seq=seq+1,vmain(seq)=" do JOBMGR^BCHUTL(%FN,"""_dbtbl33.bchid_""",.vINPUT)"
+	set seq=seq+1,vmain(seq)=" do ^JOBMGR(.vINPUT)"
+	
+	if dbtbl33.restind set seq=seq+1,vmain(seq)=" do EXIT^BCHUTL("""_dbtbl33.bchid_""")"
+	quit
+	
+	
+vPROC(RecordDBTBL33 dbtbl33,String vproc(),String SELECT)	// Insert PROC code
+	
+	type public String CMPFLG(), recname
+	type Number seq
+
+	// Note that this currently only supports a single Record object being passed
+	// Not clear if more than one ever would be
+	if dbtbl33.formal.isLike("Record%") do {
+		type String x = dbtbl33.formal
+		
+		if x.isLike("%,%") set recname = ""
+		else  set recname = x.piece(" ", 2)
+	}
+	else  set recname = ""
+
+	set seq=0
+	
+	set seq=seq+1,vproc(seq)=" type public Number ER"
+	set seq=seq+1,vproc(seq)=" type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT"
+	
+	if dbtbl33.thrrcnt set seq=seq+1,vproc(seq)=" type public Number vMONID,vMONCNT"
+	
+	// Determine what variables are passed as parameters.  Publicly type any
+	// in SELECT that aren't coming in as parameters
+	if 'dbtbl33.formal.isNull() do {
+		type Number I
+		type String formal,newlist,var
+		
+		set formal=dbtbl33.formal
+		set newlist=""
+		for I=1:1:SELECT.length(",") do {
+			set var=SELECT.piece(",",I)
+			if '{List}formal.contains(var) set newlist=newlist_var_","
+		}
+		set newlist=newlist.extract(1,newlist.length()-1)
+		if 'newlist.isNull() set seq=seq+1,vproc(seq)=" type public String "_newlist
+	}
+	
+	//if 'SELECT.isNull() set seq=seq+1,vproc(seq)=" type public String "_SELECT
+	
+	set seq=seq+1,vproc(seq)=" catch vERROR {"
+	set seq=seq+1,vproc(seq)=" type public Number ER"
+	set seq=seq+1,vproc(seq)=" type public String RM"
+	set seq=seq+1,vproc(seq)=" "
+	set seq=seq+1,vproc(seq)=" do Runtime.rollback()"
+	set seq=seq+1,vproc(seq)=" "
+	set seq=seq+1,vproc(seq)=" do LOG^UTLEXC("""_dbtbl33.bchid_""",""*"","""","_$$keyval(recname,SELECT)_", vERROR.thrownAt, vERROR.type)"
+	set seq=seq+1,vproc(seq)=" "
+	set seq=seq+1,vproc(seq)=" // DBFILER errors do not log on a call to ZE^UTLERR"
+	set seq=seq+1,vproc(seq)=" if vERROR.type=""%PSL-E-DBFILER"" do {"
+	set seq=seq+1,vproc(seq)="  type String ET = vERROR.type"
+	set seq=seq+1,vproc(seq)="  do ^UTLERR"
+	set seq=seq+1,vproc(seq)=" }"
+	set seq=seq+1,vproc(seq)=" else  do ZE^UTLERR"
+	set seq=seq+1,vproc(seq)=" "
+	set seq=seq+1,vproc(seq)=" set ER = 1"
+	set seq=seq+1,vproc(seq)=" set RM = vERROR.description"
+	set seq=seq+1,vproc(seq)=" }"
+	
+	if dbtbl33.thrrcnt do {
+		set seq=seq+1,vproc(seq)=" set vMONCNT=vMONCNT+1"
+		set seq=seq+1,vproc(seq)=" if vMONCNT#"_dbtbl33.thrrcnt_"=0 do UPDATE^JOBMON(vMONID,vMONCNT,"_$$keyval(recname,SELECT)_")"
+	}
+	
+
+        set seq=seq+1,vproc(seq)=" if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())"
+        
+	if dbtbl33.restind do {
+		set seq=seq+1,vproc(seq)=" if %BatchRestart,$$CHKLOG^BCHUTL(%SystemDate,%FN,"""_dbtbl33.bchid_""","_$$keyval(recname,SELECT)_") do { quit"
+		set seq=seq+1,vproc(seq)=" do LOG^BCHUTL(%SystemDate,%FN,"""_dbtbl33.bchid_""","_$$keyval(recname,SELECT)_",""Record already processed"")"
+		set seq=seq+1,vproc(seq)=" }"
+		}
+	
+	if 'CMPFLG("DEBUG","NOTP").get() set seq=seq+1,vproc(seq)=" do Runtime.start(""BA"")"
+	set seq=seq+1,vproc(seq)=" set vCONTEXT="""""
+	set seq=seq+1,vproc(seq)=" set (ET,RM)="""""
+	set seq=seq+1,vproc(seq)=" set ER=0"
+	
+	if dbtbl33.formal="" set seq=seq+1,vproc(seq)=" do vEXEC(.vCONTEXT,"_SELECT_")"
+	else  do {
+		// Reduce RecordXXX xxx syntax to xxx
+		type Number i
+		type String formal,x,y
+		
+		set x = dbtbl33.formal
+		set formal = ""
+		
+		for i = 1:1:x.length(",") do {
+			set y = x.piece(",",i)
+			if y?1"Record".e1" ".e set y = y.piece(" ",2)
+			set formal = formal_y_","
+		}
+		
+		set formal = formal.extract(1,formal.length()-1)
+		
+		set seq=seq+1,vproc(seq)=" do vEXEC(.vCONTEXT,"_formal_")"
+	}
+	
+	set seq=seq+1,vproc(seq)=" if ER.get() do { quit"
+	set seq=seq+1,vproc(seq)=" type String et"
+	set seq=seq+1,vproc(seq)=" set et=$S(ET.get().isNull():RM.get(),1:ET)"
+	set seq=seq+1,vproc(seq)=" "
+	
+	if 'CMPFLG("DEBUG","NOTP").get() set seq=seq+1,vproc(seq)=" do Runtime.rollback()"
+	set seq=seq+1,vproc(seq)=" do LOG^UTLEXC("""_dbtbl33.bchid_""",""*"","""","_$$keyval(recname,SELECT)_","""",et)"
+	set seq=seq+1,vproc(seq)=" }"
+	
+	if dbtbl33.restind set seq=seq+1,vproc(seq)=" do UPDLOG^BCHUTL(%SystemDate,%FN,"""_dbtbl33.bchid_""","_$$keyval(recname,SELECT)_",vCONTEXT)"
+	if 'CMPFLG("DEBUG","NOTP").get() set seq=seq+1,vproc(seq)=" do Runtime.commit()"
+	quit
+	
+	
+sysgen(RecordDBTBL33 dbtbl33,String commands(),String SELECT)
+
+	// System generated code
+	
+	type public String open(),schexec(),threxec()
+	
+	type Number i,keycnt,keylen,seq
+	type String di,fsn,keys,var,val,x
+	
+	do fsn^SQLDD(.fsn,dbtbl33.pfid)
+	set keys=fsn(dbtbl33.pfid).piece("|",3)
+	
+	set keycnt=0
+	set keylen=0
+	set SELECT=""
+	
+	for i=1:1:keys.length(",") do {
+		set di=keys.piece(",",i)
+		if dbtbl33.distinct'="",","_dbtbl33.distinct_","'[(","_di_",") quit
+
+		set keycnt=keycnt+1
+		set SELECT.piece(",",keycnt)=di
+
+		type RecordDBTBL1D dbtbl1d=Db.getRecord("DBTBL1D","%LIBS='SYSDEV',FID=:dbtbl33.pfid,DI=:di")
+		set keylen=keylen+dbtbl1d.len+1
+		}
+	
+	set commands("GLOBAL")=dbtbl33.mglobal
+	
+	// vOPEN
+	set x="""" 
+	if dbtbl33.distinct'="" set x=x_"DISTINCT "
+	set x=x_SELECT_""","""_dbtbl33.pfid_""","""_dbtbl33.where_""""
+	
+	set i=open("").order(-1)
+	set open(i+1)=" #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967"
+	set open(i+2)=" type public ResultSet vRESULT=Db.select("_x_")"
+	set open(i+3)=" #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967"
+	set open(i+4)=" if vRESULT.isEmpty() set %BatchExit=1 quit"
+	set open(i+5)=" #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967"
+	set open(i+6)=" set %BatchExit=0"
+	
+	if schexec.data() quit
+	if threxec.data() quit
+	
+	set seq=0
+	
+	set seq=seq+1,schexec(seq)=" type public String vBUFOVFL"
+	
+	set seq=seq+1,schexec(seq)=" type String vRECORD,vrow,"_SELECT
+	set seq=seq+1,schexec(seq)=" type Number vcur,vlen"
+	
+	set seq=seq+1,schexec(seq)=" set vINPUT=vBUFOVFL.get()"
+	set seq=seq+1,schexec(seq)=" set vBUFOVFL="""",vlen=0"
+	
+	set seq=seq+1,schexec(seq)=" type public ResultSet vRESULT"
+	
+	set seq=seq+1,schexec(seq)=" for  do { quit:'vcur"
+	set seq=seq+1,schexec(seq)=" set vcur=vRESULT.next() if 'vcur quit"
+	set seq=seq+1,schexec(seq)=" set vrow=vRESULT.getRow()_""|"",vlen=vlen+vrow.length()"
+	set seq=seq+1,schexec(seq)=" if vlen>"_dbtbl33.maxsize_" set vBUFOVFL=vrow,vcur=0 quit"
+	set seq=seq+1,schexec(seq)=" set vINPUT=vINPUT_vrow if vlen+"_keylen_">"_dbtbl33.maxsize_" set vcur=0 quit"
+	set seq=seq+1,schexec(seq)=" }"
+	set seq=seq+1,schexec(seq)=" set vINPUT=vINPUT.extract(1,vINPUT.length()-1)"
+	
+	if dbtbl33.schrcnt do {
+		set seq=seq+1,schexec(seq)=" set vMONCNT=vMONCNT+1"
+		set seq=seq+1,schexec(seq)=" if vMONCNT#"_dbtbl33.schrcnt_"=0 do UPDATE^JOBMON(vMONID,vMONCNT,$TR(vrow,$C(9),$C(44)))"
+	}
+	
+	set seq=0
+	set seq=seq+1,threxec(seq)=" type String vRECORD,"_SELECT
+	set seq=seq+1,threxec(seq)=" for  set vRECORD=vINPUT.piece(""|"",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {"
+	
+	for i=1:1:SELECT.length(",") do {
+		set di=SELECT.piece(",",i)
+		set seq=seq+1,threxec(seq)=" set "_di_"=vRECORD.piece($C(9),"_i_")"
+		}
+	
+	if dbtbl33.formal="" set seq=seq+1,threxec(seq)=" do vPROC("_SELECT_")"
+	else  set seq=seq+1,threxec(seq)=" do vPROC("_dbtbl33.formal_")"
+	
+	set seq=seq+1,threxec(seq)=" }"
+	quit
+	
+	
+public labels(String labels())	// Return labels info for PSL UCLABEL checking
+
+	/* Return additions to the labels array to define label information for
+	   labels that are not part of the batch definition but are added as
+	   calls from the scheduler and thread.  Because UCLABEL checks the
+	   batch definition, PSL will throw warnings when compiling scheduler
+	   and thread procedures without knowledge of these labels.	
+	
+	ARGUMENTS:
+		. labels()	PSL labels array	/REQ/MECH=REFARR:W
+				labels(label)=parameters
+				
+	EXAMPLE:
+		do labels^DBSBCH(.labels)
+	*/
+	
+	set labels("vSCHINIT")="(vINPUT,vRETURN)"
+	set labels("vSCHEXEC")="(vINPUT,vRETURN)"
+	set labels("vSCHEXIT")="(vINPUT,vRETURN)"
+	set labels("vSCHPOST")="(vINPUT,vRETURN)"
+	set labels("vTHRINIT")="(vINPUT,vRETURN)"
+	set labels("vTHREXIC")="(vINPUT,vRETURN)"
+	set labels("vTHREXIT")="(vINPUT,vRETURN)"
+	
+	quit
+	
+	
+keyval(String recname,	// RecordXXX object name
+       String keys)	// Key list
+       
+       /*
+       Construct string of key values
+       
+       If recname has a value, then a record is passed to vPROC, not a list
+       of values, so use object references instead of key names
+       */
+	
+	type Number i
+	type String x
+	
+	if recname.isNull() do {
+		set x = keys.piece(",", 1)_".get()"
+		for i = 2:1:keys.length(",") set x = x_"_"",""_"_keys.piece(",", i)_".get()"
+	}
+	else  do {
+		set x = recname_"."_keys.piece(",", 1).lowerCase()
+		for i = 2:1:keys.length(",") set x = x_"_"",""_"_recname_"."_keys.piece(",", i)
+	}
+	
+	quit x
+	
+	
+initflgs(String CMPFLG())	// Initialize compiler flags
+	
+	/*
+	This subroutine translates the compiler flag array (CMPFLG)
+	to upper case thereby allowing the compiler flags passed
+	into this procedure to be case insensitive.
+	*/
+	
+	type String ref,x,y
+	
+	set ref="CMPFLG"
+	for  set ref=$Q(@ref) quit:ref.isNull()  do {
+		set x=$$UPPER^%ZFUNC(ref)
+
+		#ACCEPT Date=06/10/2003;PGM=Allan Mattson;CR=20967
+		set y=$$UPPER^%ZFUNC(@ref)
+		zwi @ref
+		set @x=y
+		}
+		
+	quit
+	
+	
+public debug(String bchid,
+	     Boolean pro,
+	     Boolean trace,
+	     Boolean psl,
+	     Boolean sym,
+	     Boolean notp)
+	/*
+	This subroutine is used to compile a batch definition in debug
+	mode.  Refer to the documentation in subroutine COMPILE for a
+	more detailed description of the debug parameters.
+	
+	 ARGUMENTS:
+	     . bchid	Batch Definition ID	/REQ/MECH=VAL/TBL=DBTBL33
+	     . pro	Profile M Code		/NOREQ/MECH=VAL
+	     . trace	Trace M Code		/NOREQ/MECH=VAL
+	     . psl	PSL Debug Flag		/NOREQ/MECH=VAL
+	     . sym	Dump Symbol Table	/NOREQ/MECH=VAL
+	     . notp	No TP Flag		/NOREQ/MECH=VAL
+
+	     		Note that the 'notp' parameter must be
+	     		'off' if running on a relational
+	     		database.
+	*/
+	
+	type String par()
+	
+	set par("DEBUG","PRO")=pro.get()
+	set par("DEBUG","SYM")=sym.get()
+	set par("DEBUG","NOTP")=notp.get()
+	set par("DEBUG","TRACE")=trace.get()
+	if psl.get() set par("DEBUG","PSL")="*"
+	
+	do compile(bchid,.par)
+	quit
+	
+	
+compile(String bchid,String par())	// Compile batch(es)
+	
+	if bchid="*" do {
+		type ResultSet rs=Db.select("BCHID","DBTBL33","%LIBS='SYSDEV'")
+		while rs.next() do COMPILE(rs.getCol("BCHID"),.par)
+		}
+	
+	else  do COMPILE(bchid,.par)
+	quit
+	
+	
+add(String m2src(),String data)	// Insert procedural code into buffer
+
+	set m2src(m2src("").order(-1)+1)=data
+	quit
+	
+
+vVERSION(String m2src())	// Insert compiler Version ID
+	
+	do add(.m2src,"vVERSION() // Compiler Version ID")
+	do add(.m2src," quit """_$$VERSION_"""")
+	quit
+	
+	
+public MPROF(String BCHID,String IO)
+	/*	
+	 This sub-routine is used to create an ASCII file of the
+	 results from a batch that was compiled and run with the
+	 M-Profiling feature enabled.   This file is intended to
+	 be imported into a MS Excel spreadsheet for performance
+	 analysis.
+	 
+	 Format:typ|pgm|lbl|off|cnt|usr|sys
+
+		typ	Process type
+			SCH = Scheduler
+			THR = Thread
+
+		pgm	Program name
+	        lbl	Label name (subroutine)
+	        off	Line offset from label name
+		cnt	Number of calls to lbl+off^pgm
+		sys	System time spent in lbl+off^pgm
+		usr	User time spent in lbl+off^pgm
+		
+	NOTE:  The data gathered at the label level relates to that specific
+	       sub-routine only, and does not include any call-out data.
+	       
+	       The data gathered at the individual statement level, i.e.,
+	       label + offset, includes the data for that statement as well
+	       as for any call-outs from that statement.
+	
+	 ARGUMENTS:
+	     . BCHID	Batch definition ID	/REQ/MECH=VAL
+	     . IO	Output device		/NOREQ/MECH=VAL
+	
+	*/
+	
+	type Number CNT,OFF,SYS,USR
+	type String LBL,PGM,PID,TAB,TYP
+	
+	if IO.get().isNull() set IO=$$FILE^%TRNLNM("MPROF_"_BCHID_".DAT","SCAU$SPOOL")
+	if '$$FILE^%ZOPEN(IO,"WRITE/NEWV",2,1024) quit
+	use IO
+	
+	do Db.fastDelete("MPROF","BCHID=:BCHID,PID='ALL'")
+	
+	type ResultSet rs=Db.select("TYP,PID,PGM,LBL,CNT,USR,SYS","MPROF0","BCHID=:BCHID AND PID NOT = 'ALL'")
+	
+	while rs.next() do {
+		
+		set TYP = rs.getCol("TYP")
+		set PID = rs.getCol("PID")
+		set PGM = rs.getCol("PGM")
+		set LBL = rs.getCol("LBL")
+
+		type RecordMPROF mprofa1=Db.getRecord("MPROF","BCHID=:BCHID,TYP=:TYP,PID='ALL',PGM=:PGM,LBL=:LBL,OFF='*'",1)
+		
+		set mprofa1.cnt=mprofa1.cnt + rs.getCol("CNT")
+		set mprofa1.usr=mprofa1.usr + rs.getCol("USR")
+		set mprofa1.sys=mprofa1.sys + rs.getCol("SYS")
+		
+		do mprofa1.save()
+		
+		// Get offset data for this label
+		type ResultSet rs2=Db.select("OFF,CNT,USR,SYS","MPROF","BCHID=:BCHID AND TYP=:TYP AND PID=:PID AND PGM=:PGM AND LBL=:LBL")
+		
+		while rs2.next() do {
+			
+			set OFF = rs2.getCol("OFF")
+
+			type RecordMPROF mprofa2=Db.getRecord("MPROF","BCHID=:BCHID,TYP=:TYP,PID='ALL',PGM=:PGM,LBL=:LBL,OFF=:OFF",1)
+			
+			set mprofa2.cnt = mprofa2.cnt + rs2.getCol("CNT")
+			set mprofa2.usr = mprofa2.usr + rs2.getCol("USR")
+			set mprofa2.sys = mprofa2.sys + rs2.getCol("SYS")
+			
+			do mprofa2.save()
+		}
+	}
+
+	type ResultSet rs2=Db.select("TYP,PGM,LBL,OFF,CNT,USR,SYS","MPROF","BCHID=:BCHID AND PID='ALL'")
+
+	write "Type"_$C(9)_"Program"_$C(9)_"Label"_$C(9)_"Offset"_$C(9)_"Count"_$C(9)_"User Time"_$C(9)_"System Time"_$C(9)_"Total Time"
+	while rs2.next() write !,rs2.getRow(),$C(9),rs2.getCol("USR") + rs2.getCol("SYS")
+	
+	do CLOSE^SCAIO
+	use 0
+	
+	quit
+ 	
+public SYSMAPLB(String tag,		// Line tag
+		String comment)		// Comment on the line
+		
+	/*
+	Used by UCSYSMAP to return the appropriate label reference for
+	triggers from filer code being generated.  This information is
+	used for storage in the SYSMAP* tables.
+	*/
+	
+	type String RETURN = tag
+	
+	if (tag ? 1"v"1.U), 'tag.beginsWith("vVERSION") do {
+		
+		set RETURN = tag.piece("(", 1)
+		set RETURN = RETURN.extract(2, RETURN.length())
+		set RETURN = tag_" (Section - "_RETURN.trim(0)_")"
+	}
+	
+	quit RETURN
+
+vSIG()	quit "60726^46391^Dan Russell^25496"	// Signature - LTD^TIME^USER^SIZE

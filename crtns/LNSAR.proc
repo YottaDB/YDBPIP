@@ -1,0 +1,191 @@
+LNSAR		//Compute Special Allowance Rates 
+        /*
+               ORIG:  Chuck Hardy (6721) - 05/12/87
+               DESC:  Computes Special Allowance Rates for Student Loans.
+               
+             INPUTS:
+                . CID           Main Account               TYP=N/MECH=VAL/REQ
+                . RELCID        Related Account            TYP=N/MECH=VAL/NOREQ
+            RETURNS:
+                        Several arrays for report SCA066 to use.
+          ---- Revision History ------------------------------------------------
+     	   10/19/2005 - BHOLT - 17068
+     	   	        Modified the depricated method.	
+           08/04/03 - CARROLLJ - 51629
+                      Modified call to INIT^UAVB to remove second parameter
+                      that was passed.
+           06/20/02 - Diana Shvachkina - 49794
+                      Converted to PSL.
+
+        */
+        type public Boolean ER
+	type public Date %DDYS, %FD, JD, NJD, %TD
+        type public Number ACR, ACRT, ADV, ADVDT, AF, AMT, ACID, AVB, BAL(), BALT(), CID, CLOSE, CMT, CRL, FRE, I, IRN, LNADV(), N, NUMT, OFF, RELCID, %REPEAT, SAR, SVCID, SVREL, TDUE, TDUET, UAVB, X
+        
+        if 'CID.get() quit
+        if 'RELCID.get() set RELCID = CID
+        set SVCID = CID
+        set SVREL = RELCID
+        if 'RELCID set RELCID = CID
+        set (%REPEAT, AVB, AVB(1), AVB(2), ER, CLOSE, ACR(1), ACR(2), TDUE(1), TDUE(2), BAL(1), BAL(2), NUMT) = 0
+       
+	 // Find the account which has loan advances (ACID)
+        type RecordLN ln = Db.getRecord("LN", "CID = :CID")
+        if ln.idpf = 2 set ACID = ln.relcid if 'ACID do END quit
+        else  set ACID = ln.cid
+        // Load in advances
+        type ResultSet lnadvrs
+        set lnadvrs = Db.select("ADV, AMT, ADVDT, SAR, OFF, CMT", "LNADV", "CID = :ACID")
+        if lnadvrs.isEmpty() do END quit
+        while lnadvrs.next() do {
+                set ADV = lnadvrs.getCol(1)
+                set AMT = lnadvrs.getCol(2)
+                set ADVDT = lnadvrs.getCol(3)
+                set SAR = lnadvrs.getCol(4)
+                set OFF = lnadvrs.getCol(5)
+                set CMT = lnadvrs.getCol(6)
+                
+                set LNADV(ADV) = AMT_"|"_ADVDT_"|"_SAR_"|"_OFF_"|"_CMT
+                }
+
+        // Find total of advances (CRL), IRN for ACID
+        type RecordLN lna = Db.getRecord("LN", "CID = :ACID")
+        set CRL = lna.crlmt
+        set IRN = lna.irn
+        for I = 1, 2, 3 if 'BALT(I, IRN).exists() set BALT(I, IRN) = ""
+        for I = 1, 2, 3 if 'NUMT(I, IRN).exists() set NUMT(I, IRN) = ""
+
+        // Calculate From and To dates for ACID
+        set JD = lna.schld 
+        set FRE = "-"_lna.dist1fre
+        set NJD = $$NJD^UFRE(JD, FRE)
+        if ER quit
+        set %FD = NJD 
+        set %TD = JD - 1
+        set ER = 0
+        
+        // Account closed date is less than From date
+        if ln.dtc.length(), ln.dtc < %FD set ER = 1
+        
+        // Check the related account
+        type RecordLN ln1 = Db.getRecord("LN", "CID = :RELCID")
+        
+        // Account closed date is less than From date
+        if ln1.dtc.length(),ln1.dtc < %FD set ER = 1
+        
+        // Handle errors
+        if ER do { quit
+                set CLOSE = 1 
+                set ER = 0 
+                do END
+                }
+                
+        // Find total average balances for main account
+        do INIT^UAVB(.ln, CID, %FD, %TD)
+        
+        // Handle UAVB errors
+        if ER do { quit
+                do EXC(.ln) 
+                do SETARR
+                }
+        set AVB = AVB + UAVB(1) 
+        set X = 1 
+        do TOT(.ln) 
+        if CID = RELCID do SETARR quit
+        
+        // Calculate average balances for related account
+        do INIT^UAVB(.ln1, RELCID, %FD, %TD) 
+        set AVB = AVB + UAVB(1) 
+        set X = 2 
+        do TOT(.ln) 
+        quit
+        
+SETARR  // Create arrays for report SCA066
+	type public Boolean ER
+	type public Number ACR, ACRT, ADV, ADVDT, AF, AMT, ACID, AVB, BAL(), BALT(), CID, CLOSE, CMT, CRL, FRE, I, IRN, LNADV(), N, NUMT, OFF, RELCID, %REPEAT, SAR, SVCID, SVREL, TDUE, TDUET, UAVB, X
+        
+        set N = ""
+        for  set N = LNADV(N).exists() do { quit:N = ""
+        	
+             // Set up advance % of total credit limit
+             if CRL set LNADV(N).piece("|", 6) = $$^SCARND((+LNADV(N))/CRL*100,0,"","",5)
+             
+             // Find each advance's portion of the average balance, acr and 
+             set LNADV(N).piece("|", 7) = $$^SCARND(LNADV(N).piece("|", 6)*AVB/100,0,"","",5)
+             set ACRT=$$^SCARND(LNADV(N).piece("|", 6)*ACR(1)/100,0,"","",5)
+             set ACRT = ACRT + $$^SCARND(LNADV(N).piece("|", 6)*ACR(2)/100,0,"","",5)
+             set TDUET = $$^SCARND(LNADV(N).piece("|", 6)*TDUE(1)/100,0,"","",5)
+             set TDUET = TDUET + $$^SCARND(LNADV(N).piece("|", 6)*TDUE(2)/100,0,"","",5)
+             set BALT = $$^SCARND(LNADV(N).piece("|", 6)*BAL(1)/100,0,"","",5)
+             set BALT = BALT + $$^SCARND(LNADV(N).piece("|", 6)*BAL(2)/100,0,"","",5)
+                
+	     // Save the special allowance rate/SAR file
+             set X = +LNADV(N).piece("|", 3)
+             for I = 1:1:3 if 'SAR(I, IRN, X).exists() set SAR(I, IRN, X) = 0
+	     for I = 1, 2 set SAR(I, IRN, X).piece("|", 1) = SAR(I, IRN, X) + $$^SCARND(LNADV(N).piece("|", 6)*AVB(I)/100,0,"","",5)
+             for I = 1, 2 set SAR(I, IRN, X).piece("|", 2) = SAR(I, IRN, X).piece("|", 2) + $$^SCARND(LNADV(N).piece("|", 6)*ACR(I)/100,0,"","",5)
+             for I = 1, 2 set SAR(I, IRN, X).piece("|", 3) = SAR(I, IRN, X).piece("|", 3) + $$^SCARND(LNADV(N).piece("|", 6)*TDUE(I)/100,0,"","",5)
+             for I = 1, 2 set SAR(I, IRN, X).piece("|", 4) = SAR(I, IRN, X).piece("|", 4) + $$^SCARND(LNADV(N).piece("|", 6)*BAL(I)/100,0,"","",5)
+        
+             set SAR(3, IRN, X).piece("|", 1) = SAR(3, IRN, X) + LNADV(N).piece("|", 7)
+             set SAR(3, IRN, X).piece("|", 2) = SAR(3, IRN, X).piece("|", 2) + ACRT
+             set SAR(3, IRN, X).piece("|", 3) = SAR(3, IRN, X).piece("|", 3) + TDUET
+             set SAR(3, IRN, X).piece("|", 4) = SAR(3, IRN, X).piece("|", 4) + BALT
+             set %REPEAT=%REPEAT+1
+             }
+        
+        do END 
+        quit
+       
+END     // Reset CID and RELCID to saved values
+        type public Number CID, RELCID, SVCID, SVREL
+        
+        set CID = SVCID 
+        set RELCID = SVREL
+        quit
+TOT(RecordLN ln)           /*Accumulate totals for primary and secondary accounts.
+        ARGUMENTS:
+                . ln            Loan Account Object     TYP=RecordLN/REQ
+ 
+        INPUTS:
+		. AVB()         Average balances        TYP=ARR/MECH=VAL/REQ
+                . ACR()         Accruals array          TYP=ARR/MECH=VAL/REQ
+                . TDUE()        Totals Due              TYP=ARR/MECH=VAL/REQ
+                . BAL           Balances array          TYP=ARR/MECH=VAL/REQ
+                . BALT          Balance totals          TYP=ARR/MECH=VAL/NOREQ
+                . NUMT          Number totals           TYP=ARR/MECH=VAL/NOREQ
+                . IRN           Interest Rate           TYP=N/MECH=VAL/REQ
+                . X             Array counter           TYP=N/MECH=VAL/REQ    
+        */
+        
+        type public Number ACR(), AVB(), BAL(), BALT(), IRN, NUMT(), TDUE(), UAVB(), X
+                
+        if 'UAVB(1), ln.acr + ln.bal = 0 quit
+        set AVB(X) = AVB(X) + UAVB(1)
+        set ACR(X) = ACR(X) + ln.acr
+        
+        // Total Due
+        set TDUE(X) = TDUE(X) + ln.tdue
+        set BAL(X) = BAL(X) + ln.bal
+        set BALT(X, IRN) = BALT(X, IRN).get() + ln.bal
+        set BALT(3, IRN) = BALT(3, IRN).get() + ln.bal
+        set NUMT(X, IRN) = NUMT(X, IRN).get() + 1
+        set NUMT(3, IRN) = NUMT(3, IRN).get() + 1
+        quit
+EXC(RecordLN ln)            
+     /* 
+     INPUTS:
+                . ET            Error type              TYP=T/MECH=VAL/NOREQ
+                . %ZTSEQ        $$ETLOC^%ZT (system)    TYP=T/MECH=VAL/NOREQ
+                
+        */
+        
+        // Compute Special Allowance Rates For SL
+        type public Number %ZTSEQ
+        type public String ET
+                
+        do LOG^UTLEXC(%RoutineName, "*", $$^MSG(4230), ln.cid, %ZTSEQ.get(), ET.get(), ln.bal)
+        kill ET, %ZTSEQ
+        quit
+
+vSIG()	quit "60195^32599^Tanuja Bhol^8078"	// Signature - LTD^TIME^USER^SIZE

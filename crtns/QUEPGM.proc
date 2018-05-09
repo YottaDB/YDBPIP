@@ -1,0 +1,1309 @@
+QUEPGM	//Generic Job Scheduler Routine
+	/*
+	ORIG:  Mike Winigrad (6969) - 10/30/86
+
+	---- Revision History -------------------------------------------------
+	
+	10/31/06 - SmithCD - CR 23179
+		   Modified JOBRUN section to report errors on ET description 
+		   if not defined in RM. Prevents generic "No Error Message" 
+		   from showing in QUERPTD report when ET is used (as is the 
+		   case with PSL errors).
+	
+	02/24/06 - RussellDS - CR20920
+		   Modified BCHEXEC section to add order by to result set when
+		   stepping through job numbers.  Otherwise, order of jobs
+		   was random.
+		   
+		   Added private labels.
+		   
+		   Removed old revision history.
+	
+	01/12/06 - RussellDS - CR18999
+		   Modified JOBRUN1 to accept %DIR parameter.  %DIR needs to
+		   be passed as public variable to called code, since it's not
+		   clear where it might be used, but the symbol table clean-up
+		   cleans it up too.  This leads to error in ERR1, if called.
+		   
+		   Eliminated deprecated feature warnings.
+
+	09/14/05 - S.Krishnan - CR16724
+   		 . Modified the section JOBRUN1 to set the variable %FN 
+   		   equal to the called function so it will be available 
+                   to the elements called by each function.
+		 . Reverted back the above mentioned changes in the 
+		   section JOBRUN1.
+		 . In the section INIT & JOBRUN1, added a third parameter 
+		   in the Db.getRecord() for Restrict restore.
+		 	
+	07/19/05 - RussellDS - CR16652
+		   Further modifications to JOBRUN1 to management symbol table.
+		   Need to protect PSL assigned variables (v*).
+	
+	07/08/05 - Erik Scheetz - 15677
+		   Modified code to register and unregister batch process in
+		   the PROCESSID table.
+		   
+		   Added call in section JOBRUN1 to XKILL^SCADRV0 in order to
+		   clean up variables.
+	
+	07/04/05 - RussellDS - CR16514
+		   Modified JOBRUN1 section to save correct variables and
+		   manage symbol table protection correctly.
+	
+	02/16/05 - RussellDS - CR13817
+		   Changed filing of QUEUEHD.CMT to truncate to only first
+		   100 characters to avoid error when excess length.
+	*/
+
+	quit
+	
+
+private INIT(String %DIR, Number BCHNUM,Number JOBNUM,String %EVENT,Boolean %EXTERN)	// Initialization section
+
+	/*
+	   Primary batch executor, responsible for the execution of all jobs
+	   defined in a batch for a given event.
+
+	   ARGUMENTS:
+	   	   . %DIR  	Identifies the global directory file for
+	     			which the job will run.
+	       					/REQ/MECH=VAL
+
+	    	   . BCHNUM 	Batch number  	/REQ/MECH=VAL
+
+		   . JOBNUM 	Job number within the batch, can be 0,
+	     			to run all jobs or the specific job in the
+	     			batch to start with.
+	       					/REQ/MECH=VAL
+
+		   . %EVENT  	Event for which jobs are contained
+	       					/REQ/MECH=VAL
+
+	      	   . %EXTERN 	External flag.  If set, the process will
+	                        exit M and return a status to the O/S.
+	       					/NOREQ/MECH=VAL
+	*/
+	
+	type Public String %LOGID
+	
+	type Number BCHABT
+
+	catch vERROR {
+		type Public String RM
+		
+                if vERROR.type["%GTM-" do { quit
+                	type Boolean %ZTHALT = 0
+                	do ZE^UTLERR
+                }
+	
+		else  set RM=vERROR.description
+	}
+
+	// Turn on code coverage collection if requested
+	do batchck^TBXCDCV
+
+	if '%LOGID.exists() set %LOGID=$$LOGID^SCADRV
+	if '%EVENT.exists() set %EVENT=0
+	
+	// Register M process
+	do REGISTER^IPCMGR("BATCH","SCH")
+
+        do Runtime.start("CS")
+
+	if 'JOBNUM do {
+		// Clear start time, end time, and execution status.
+		type DbSet ds=Db.selectDbSet("QUEUEJ","BCHNUM=:BCHNUM")
+		while ds.next() do {
+			type RecordQUEUEJ queuej=ds.getRecord("QUEUEJ")
+			set queuej.stim=""
+			set queuej.ctim=""
+			set queuej.cstat=""
+			set queuej.lstat=""
+			do queuej.save()	
+		}
+	}
+
+	// Clear the batch abort flag
+	set BCHABT=0
+
+        type RecordQUEUEB queueb=Db.getRecord("QUEUEB","BCHNUM=:BCHNUM")
+
+	// Last run date 
+	set queueb.lrd=%CurrentDate
+
+	// Actual time started
+	set queueb.stim=%CurrentTime
+
+	// Flag batch as "In Process" (LSTAT)
+	set queueb.lstat=5
+
+	// Restrict restore
+	if queueb.rest do {
+                type RecordNOREST norest=Db.getRecord("NOREST","JOBNUM=:%ProcessID",1)
+                set norest.curdt=%CurrentDate
+                do norest.save()		 
+	}
+
+	// Event name
+	set queueb.event=%EVENT
+	
+	do queueb.save()
+
+	do Runtime.commit()  
+
+	// Log the start of the batch
+	do LOGIT("QUEBCHSTRT",BCHNUM)
+
+	// Notify on Batch Start
+	if queueb.mail["2" do {
+		type String MSG()
+
+		// Directory ~p1
+		set MSG(1)=$$^MSG(4572,%DIR)
+
+		// Batch number ~p1 (~p2)
+		set MSG(2)=$$^MSG(4569,BCHNUM,queueb.desc)
+
+		// has begun execution.
+		set MSG(3)=$$^MSG(4580)
+
+		do MAIL^QUEALRT(.MSG,BCHNUM)
+	}
+
+	if queueb.brcd["2" do {
+		type String MSG
+
+		// Directory ~p1, Batch number ~p2 has begun execution
+		set MSG=$$^MSG(4573,%DIR,BCHNUM)
+
+		do BRCD^QUEALRT(MSG,BCHNUM)
+	}
+
+	do BCHEXEC
+
+	// Unregister M process
+	do CLOSE^IPCMGR()
+
+	quit
+	
+
+BCHEXEC	// Execute the jobs
+
+	type public Number BCHABT, BCHNUM, JOBNUM
+
+	type Number SAVBAT,SAVJOB
+	type String SAVEERR
+
+	set JOBNUM=JOBNUM-1
+	
+	type DbSet ds2=Db.selectDbSet("QUEUEJ","BCHNUM=:BCHNUM AND JOBNUM>:JOBNUM", "JOBNUM ASC") 
+	while ds2.next() do { quit:BCHABT>0
+	
+		type String %FN
+		
+		type RecordQUEUEJ queuej=ds2.getRecord("QUEUEJ")
+			
+		set %FN=queuej.fun
+
+		set (SAVEERR,SAVBAT,SAVJOB)=""
+
+		/*
+		Check value of SCATBL.  If <null>, the function name is not
+		valid and should produce an error; if not <null>, a valid
+		function has been verified, and processing may continue.
+		*/
+		if 'Db.isDefined("SCATBL","FN=:%FN") do FUNCERR quit
+
+		do EXEC(.queuej)
+	}
+	
+	do BCHEND
+	
+	quit
+
+
+private BCHEND	// Batch completion info to be logged here
+
+	type public Boolean %EXTERN
+	type public Number BCHABT, BCHNUM
+	type public String %DIR, %EVENT, EVENT
+
+	type Boolean COMPLETE, FINFLAG, ON, OFF
+	type Number BCHPTR, JOB
+	type String EXIT
+	
+	do Runtime.start("CS")
+
+	set ON=1 
+	set OFF=0 
+	set COMPLETE=1
+
+	type RecordQUEUEB queueb=Db.getRecord("QUEUEB","BCHNUM=:BCHNUM")
+
+	// Actual time completed (CTIM)
+	set queueb.ctim=%CurrentTime
+
+	// Status of last run (LSTAT)
+	set queueb.lstat=BCHABT
+
+	set JOB=%ProcessID
+	do Db.delete("NOREST","JOBNUM=:JOB")
+	
+	/*
+	***********************************************************************
+	The code in the next section will only be processed when the current
+	batch has been successfully completed.
+
+	Prior to this redesign,the code was sometimes bumping the next run date
+	each time the batch was restarted. Now the only time that the date will
+	be bumped is after a successful completion.
+
+	Another problem fixed here is to set the queue to be not scheduled for
+	today.  This will disallow any restart of a successfully completed
+	batch during a restart of another batch.
+	***********************************************************************
+
+	is batch status Successful Completion?
+
+	       0 - Successfully Completed.
+	       1 - Batch Aborted on error.
+	       2 - Job caused Batch to abort on Job Failure.
+	       3 - Batch was skipped.
+	       4 - Batch was resubmitted.
+	*/
+	
+	if $G(BCHABT)=0 do {
+		
+		type Date JD
+		type String FRE
+		
+		if $G(%EVENT)="" set %EVENT=$G(EVENT)
+		
+		type RecordQUETBLEB quetbleb=Db.getRecord("QUETBLEB","EVENT=:%EVENT,BCHNUM=:BCHNUM")
+                
+                set quetbleb.subm=COMPLETE		
+		do quetbleb.save()
+
+		//Set batch to not scheduled, finished running for today.
+		set queueb.subm=0
+
+		set FRE=queueb.fre 
+		set JD=queueb.nrd
+		set queueb.nrd=$$NJD^UFRE(JD,FRE)
+	}
+
+	do queueb.save()
+
+	set FINFLAG=""
+
+	type ResultSet rs=Db.select("BCHNUM,SUBM","QUETBLEB","EVENT=:%EVENT","BCHNUM ASC")
+	while rs.next() do { quit:'FINFLAG
+		set FINFLAG=rs.getCol("SUBM")
+	}
+
+	if FINFLAG do {
+		// Remove table
+		do Db.delete("QUETBLEB","EVENT=:%EVENT")
+
+		// Remove queue control
+		do Db.delete("QUECTRLD","EVENT=:%EVENT")
+		do Db.delete("QUECTRL","EVENT=:%EVENT")			
+	}
+
+	do Runtime.commit()
+
+	// Log completion and send alert if necessary
+	if $G(BCHABT)=0 do {
+		do LOGIT("QUEBCHCMP",BCHNUM)
+
+		if queueb.mail["3" do {
+			type String MSG()
+
+			// Directory ~p1
+			set MSG(1)=$$^MSG(4572,%DIR)
+
+			// Batch number ~p1 (~p2)
+			set MSG(2)=$$^MSG(4569,BCHNUM,queueb.desc)
+
+ 			// has completed execution.
+			set MSG(3)=$$^MSG(4581)
+
+			do MAIL^QUEALRT(.MSG,BCHNUM)
+		}
+
+		if queueb.brcd["3" do {
+			type String MSG
+
+			// Directory ~p1, Batch number ~p2 has completed execution
+			set MSG=$$^MSG(4574,%DIR,BCHNUM)
+
+			do BRCD^QUEALRT(MSG,BCHNUM)
+		}
+	}
+
+	if FINFLAG do {
+		type String X
+		type RecordUTBLEVENT utblevent=Db.getRecord("UTBLEVENT","EVENT=:%EVENT")
+
+		// Event post processor
+		set X=utblevent.pgm1
+
+		if X'="" do @X
+		//Event Complete
+	
+		do LOGIT("QUEEVNTCMP",%EVENT)
+	}
+
+	if $G(%EXTERN) set EXIT=$$EXIT^%ZFUNC($G(BCHABT)+1)
+
+	quit
+
+
+EXEC(RecordQUEUEJ queuej)	// Job executor
+
+	type public Number %REPEAT, BCHABT, JOBABT
+	type public String %LOGID
+
+	type Boolean DIZ, RUNPROC
+	type Date SYSDAT
+	type Number AOF, BCHNUM, JOBNUM, HDSEQ, MAXR, RETC, RETI, RESUB, SKIP, TTR, TTRTEST
+	type String %ID, QHDLCK
+
+	catch vERROR {
+		type public String RM
+		
+		type Boolean %ZTHALT
+		type String ET, ZE
+		
+		set ET=vERROR.type
+	
+		set ZE=$$ETLOC^%ZT
+		set %ZTHALT=0
+
+                if ET["%GTM-" do ZE^UTLERR quit
+	
+		set ET=ET_"-"_vERROR.thrownAt
+		set RM=vERROR.description
+	}
+
+	set BCHNUM=queuej.bchnum
+	set JOBNUM=queuej.jobnum
+
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+	set SYSDAT=cuvar.tjd
+	
+	set QHDLCK = ""
+	L +QHDLCK			// Lock until DBI concurrency resolved
+
+	do Runtime.start("CS")
+
+	// Log function in QUEUEHD (Daily log file)
+
+	type RecordQUEUEHD queuehd=Class.new("RecordQUEUEHD")
+	set queuehd.tjd=SYSDAT
+	set HDSEQ=Db.nextVal("QUEUEHD","TJD=:SYSDAT")
+	set queuehd.seq=HDSEQ
+	set queuehd.bchnum=BCHNUM
+	set queuehd.jobnum=JOBNUM
+	set queuehd.fun=queuej.fun
+	set queuehd.sdat=%CurrentDate
+	set queuehd.stim=%CurrentTime
+
+	//  Check for stop command (STOP)
+	type RecordQUEUEB queueb=Db.getRecord("QUEUEB","BCHNUM=:BCHNUM")
+	if queueb.stop=1 do {
+		
+		type Boolean STOP
+		type String MSG
+		
+		set queueb.stop=0
+		do queueb.save()
+		
+		type RecordQUEUEJ queuej=Db.getRecord("QUEUEJ","BCHNUM,JOBNUM")
+		set queuej.cstat=7
+		set queuej.lstat=7
+		do queuej.save()
+
+		set BCHABT=3
+
+		// Manually stopped
+		set MSG=$$^MSG(4584)
+		if '%LOGID.exists() set %LOGID=$$LOGID^SCADRV
+
+		set queuehd.ctim=%CurrentTime
+		set queuehd.cmt=MSG.extract(1,100)
+		set queuehd.username=$P(%LOGID,"|",2)
+		set queuehd.cdat=%CurrentDate
+	}
+
+	else  set JOBABT=0 set %REPEAT=15
+
+	do queuehd.save()		
+
+	do Runtime.commit()
+	
+	L -QHDLCK
+
+	if BCHABT do LOGIT("QUEBCHSTP",BCHNUM) quit
+	
+	// Job start information logged here
+	
+	set RUNPROC=0
+	
+	do Runtime.start("CS")
+
+	// Log function in SYSLOG
+	set (%UserID,%UserStation)="BATCH"
+	set %ID=$$SYSLOG^SCADRV0
+
+	set queuej.lrd=%CurrentDate
+	set queuej.stim=%CurrentTime
+
+	// CSTAT = Currently running
+	set queuej.cstat=5
+
+	// Start date = LRD
+	set queuej.sdat=%CurrentDate
+
+	set TTR=queuej.ttr
+	set DIZ=queuej.diz
+	set SKIP=queuej.skip
+
+	// Checked later in Jobend Section.
+	set TTRTEST=TTR
+
+	// Bypass job (SKIP)
+	if SKIP do {
+		set queuej.skip=SKIP-1
+		set JOBABT=3 
+		kill SKIP
+		set RUNPROC=1
+	}
+
+	// Bypass job (SKIP)
+	else  if SKIP="UNL" do {
+		set queuej.skip=SKIP
+		set JOBABT=3 
+		kill SKIP
+		set RUNPROC=1
+	}
+
+	kill SKIP
+
+	else  if TTR=0,DIZ=1 do {
+		do JOBDEL^QUEMANT(BCHNUM,JOBNUM)
+		set RUNPROC=0
+	}
+
+	// Only run current job if Times To Run is Greater than 0.
+
+	else  if TTR>0!(TTR="") do {
+	
+		// decrease Times to run
+		if TTR>0 set TTR=TTR-1 set queuej.ttr=TTR
+		kill TTR,DIZ
+		
+		type ResultSet rs=Db.select("BATCH,JOB","QUEUED","BCHNUM=:BCHNUM AND JOBNUM=:JOBNUM")
+		if rs.isEmpty() set RUNPROC=2 quit
+
+		do DEPEND
+
+		/*
+		If RESUB=1 try to resubmit the job, but if not set,
+		call JOBRUN to set JOB variables to finished.
+		*/
+
+		if 'RESUB set queuej.retc=0 set RUNPROC=2 quit
+
+		/*
+		If RESUB=2, that means the conditional job aborted due to
+		dependency error.  In that case we should abort this batch.
+		*/
+
+		if RESUB=2 set JOBABT=6 set BCHABT=2 set RUNPROC=3 quit
+
+		set JOBABT=2
+
+		set RETI=queuej.reti 
+		set MAXR=queuej.maxr
+		set RETC=queuej.retc+1 
+		set AOF=queuej.aof
+
+		// Retry counter (RETC)
+		set queuej.retc=RETC
+
+		// Continue with next job or abort the batch
+		if RETC'<MAXR do {
+			set queuej.retc=0
+			if AOF=1 set BCHABT=2
+			set JOBABT=4
+			set RUNPROC=3
+		}
+
+		else  set RUNPROC=4
+	}
+
+	else  set RUNPROC=1
+
+	do queuej.save()
+
+	do Runtime.commit()
+
+	if RUNPROC=4 do RESUBM do JOBEND quit
+	if RUNPROC=3 do RESABT do JOBEND quit
+	if RUNPROC=2 do JOBRUN quit
+	if RUNPROC=1 do JOBEND quit
+
+	quit
+
+
+RESUBM	// Resubmit the batch
+
+	type public Boolean ER
+	type public Number BCHABT, BCHNUM, JOBABT, JOBNUM, RETI
+	type public String %DIR, %EVENT, %MSKD, RM, SAVEERR
+	
+	type Boolean QUEDEL, QUEIDT
+	type Date DAT, QUEDAT
+	type Number TIM, QUETIM
+	type String ET, QUEDCL
+
+	do Runtime.start("CS")	
+
+	set DAT=%CurrentDate+(RETI\1440)
+	set TIM=%CurrentTime+((RETI#1440)*60)
+
+        type RecordQUEUEB queueb=Db.getRecord("QUEUEB","BCHNUM=:BCHNUM")
+
+	set QUEDAT=DAT 
+	set QUETIM=TIM
+	if QUETIM>86399 set QUEDAT=QUEDAT+1 set QUETIM=QUETIM-86400
+
+	set QUEDCL="Q"_BCHNUM_"_"_%CurrentDate_%CurrentTime_".COM" 
+	set QUEDEL=1 
+	set QUEIDT=0
+	set queueb.vmstag=$P(QUEDCL,".COM",1)
+
+	hang 1
+
+	do Runtime.commit()
+
+	// Initialize batch abort to Resubmission status
+	set BCHABT=4
+
+	// Re-submit batch at job: JOBNUM
+	set ER=$$SBMTBCH^%OSSCRPT(BCHNUM,JOBNUM,%EVENT,QUEDCL,+RETI,queueb.fre,queueb.strt)
+
+	if ER do { quit
+		//Batch resubmit failed - log an entry in error table
+		if 'ET.exists() set ET="QUEBCHSBMT"
+
+		//Submit failure
+		set (RM,SAVEERR)=$$^MSG(5151)
+
+		//Log an error
+		do ^UTLERR
+
+		//Batch aborted on error
+		set BCHABT=1
+
+		//Aborted on error
+		set JOBABT=1
+
+		//Mail error message
+		if queueb.mail["1"!(queueb.mail["4") do {
+			type String MSG()
+
+			// Directory ~p1
+			set MSG(1)=$$^MSG(4572,%DIR)
+
+			// Batch number ~p1 (~p2)
+			set MSG(2)=$$^MSG(4569,BCHNUM,queueb.desc)
+
+			// Job number ~p1 (~p2)
+			set MSG(3)=$$^MSG(4583,JOBNUM,queueb.desc)
+
+			// Submit failure - batch ~p1 aborted on resubmission
+			set MSG(4)=$$^MSG(5151,BCHNUM)
+
+			do MAIL^QUEALRT(.MSG,BCHNUM)
+		}
+
+		if queueb.brcd["1"!(queueb.brcd["4") do {
+			type String MSG
+
+			// Directory ~p1, Batch number ~p2, Job number ~p3 has been aborted
+			set MSG=$$^MSG(5756,%DIR,BCHNUM,JOBNUM)
+
+			do BRCD^QUEALRT(MSG,BCHNUM)
+		}
+	}
+
+
+	//Batch resubmit on dependency
+	do LOGIT("QUEBCHDPND",BCHNUM)
+
+	if queueb.mail["1" do {
+		type String MSG()
+
+		// Directory ~p1
+		set MSG(1)=$$^MSG(4572,%DIR)
+
+		// Batch number ~p1 (~p2)
+		set MSG(2)=$$^MSG(4569,BCHNUM,queueb.desc)
+
+		// Job number ~p1 (~p2)
+		set MSG(3)=$$^MSG(4583,JOBNUM,queueb.desc)
+
+		// has been resubmitted due to incomplete dependency.
+		set MSG(4)=$$^MSG(4579)
+
+		// Continuation of the batch has been
+		set MSG(5)=$$^MSG(4570)
+
+		// rescheduled for ~p1 at ~p2.
+		set MSG(6)=$$^MSG(5758,$$DAT^%ZM(%CurrentDate,$G(%MSKD)),$$TIME^%ZD)
+
+		do MAIL^QUEALRT(.MSG,BCHNUM)
+	}
+
+	if queueb.brcd["1" do {
+		type String MSG
+
+		// Directory ~p1, Batch number ~p2, Job number ~p3 has been resubmitted
+		set MSG=$$^MSG(5757,%DIR,BCHNUM,JOBNUM)
+
+		do BRCD^QUEALRT(MSG,BCHNUM)
+	}
+
+	do queueb.save()
+
+	quit
+
+
+RESABT	// Abort the resubmission due to dependency failure
+
+	type public Number AOF, BCHNUM, JOBNUM
+	type public String %DIR
+
+	type RecordQUEUEB queueb=Db.getRecord("QUEUEB","BCHNUM=:BCHNUM")
+	type RecordQUEUEJ queuej=Db.getRecord("QUEUEJ","BCHNUM=:BCHNUM,JOBNUM=:JOBNUM")
+
+	do LOGIT($S(AOF=1:"QUEBCHABT",1:"QUEBCHCNT"),BCHNUM)
+
+	if queueb.mail["1" do {
+		type String MSG()
+
+		// Directory ~p1
+		set MSG(1)=$$^MSG(4572,%DIR)
+
+		// Batch number ~p1 (~p2)
+		set MSG(2)=$$^MSG(4569,BCHNUM,queueb.desc)
+
+		// Job number ~p1 (~p2)
+		set MSG(3)=$$^MSG(4583,JOBNUM,queuej.desc)
+
+		// has been aborted due to incomplete dependency.
+		set MSG(4)=$$^MSG(4577)
+
+		// Continuation of the batch will be aborted.
+		if AOF=1 set MSG(5)=$$^MSG(5754)
+	
+		// Continuation of the batch will be with the next job.
+		else  set MSG(5)=$$^MSG(5755)
+	
+		do MAIL^QUEALRT(.MSG,BCHNUM)
+	}
+
+	if queueb.brcd["1" do {
+		type String MSG
+
+		// Directory ~p1, Batch number ~p2, Job number ~p3 has been aborted
+		set MSG=$$^MSG(5756,%DIR,BCHNUM,JOBNUM)
+
+		do BRCD^QUEALRT(MSG,BCHNUM)
+	}
+	
+	quit
+
+
+JOBRUN	// Pre-define system variables
+
+	type public Boolean ER
+	type public String %DIR, ET, RM
+
+	type Number %NET
+	type String %BLK, %UFN, CONAM, PARAM, ZE
+
+	set (%UserID,%UFN,%UserStation)="BATCH" 
+	set %UserClass="MGR"
+	
+        type RecordDDPSTS ddpsts=Db.getRecord("DDPSTS")	
+	set %NET=ddpsts.status
+
+	set CONAM=CUVAR.CONAM
+
+	#ACCEPT DATE=12/18/03;PGM=John Carroll
+	if '%InputTimeOut.get() set %InputTimeOut=60
+
+	set ER=""
+
+	set %BLK="/"_$char(1)
+
+	type ResultSet rs=Db.select("PARAM","QUEUEP","BCHNUM=:BCHNUM AND JOBNUM=:JOBNUM AND SEQ NOT >:%REPEAT","SEQ")
+	while rs.next() do {
+		set PARAM=rs.getCol("PARAM")
+		set %BLK=%BLK_PARAM_$char(1)
+		}
+
+	// Strip off last $char(1)
+        set %BLK=%BLK.extract(1,%BLK.length()-1)
+
+	// New the variables and run the routines
+	do JOBRUN1(%DIR)
+
+	if ER.get() do {
+		// Use RM if available
+		if 'RM.get().isNull() set ZE=RM
+		// If RM not present, use ET if available
+		else  set ZE=ET.get()
+		// Default to "No Error Message"
+		if ZE.isNull() set ZE=$$^MSG(4585)
+
+		do ERR1
+		}
+	
+	do JOBEND
+	
+	quit
+
+
+JOBEND	// Job completion information logged here
+
+	type public Date SYSDAT
+	type public Number BCHABT, BCHNUM, HDSEQ, JOBABT, JOBNUM, SAVBAT, SAVJOBN, TTRTEST
+	type public String %EVENT, %ID, %LOGID, SAVEERR
+	
+	type String PARAM, X
+	
+	do Runtime.start("CS")
+	
+	type RecordQUEUEB queueb=Db.getRecord("QUEUEB","BCHNUM=:BCHNUM")
+        type RecordQUEUEJ queuej=Db.getRecord("QUEUEJ","BCHNUM=:BCHNUM,JOBNUM=:JOBNUM")
+
+	// Actual time completed (CTIM)
+	set queuej.ctim=%CurrentTime
+	// Completion date (CDAT)
+	set queuej.cdat=%CurrentDate
+
+	//Set the job's current status (CSTAT)
+	type RecordQUECTRL quectrl=Db.getRecord("QUECTRL", "EVENT=:%EVENT", 1)
+
+	if JOBABT'=0,quectrl.ctlmsg="STOP" set (BCHABT,JOBABT)=7
+
+	// Current status (CSTAT)
+	set queuej.cstat=JOBABT
+
+	// Status of last run (LSTAT)
+	set queuej.lstat=JOBABT
+
+	do queuej.save()
+	
+	do SYSLOGXT^SCADRV0(%ID)
+	if '%LOGID.exists() set %LOGID=$$LOGID^SCADRV
+
+	set X=""
+
+	set PARAM="(D:"_$G(SAVBAT)_":"_$G(SAVJOBN)_")"
+	
+	if JOBABT=0 do {
+		// Job not executed. Times to run equal zero.
+		if TTRTEST=0 set X=$$^MSG(4582)
+		// Successful completion
+		else  set X=$$^MSG(4562)
+	}
+
+	// Aborted on error ~p1
+	else  if JOBABT=1 set X=$$^MSG(5528,$G(SAVEERR))
+
+	// Resubmission pending ~p1
+	else  if JOBABT=2 set X=$$^MSG(5743,PARAM)
+
+	// Skipped
+	else  if JOBABT=3 set X=$$^MSG(5761)
+
+	// Aborted on resubmission failure ~p1
+	else  if JOBABT=4 set X=$$^MSG(5753,PARAM)
+
+	// Aborted on dependency error ~p1
+	else  if JOBABT=6 set X=$$^MSG(5752,PARAM)
+
+	// Manually stopped
+	else  if JOBABT=7 set X=$$^MSG(4584)
+
+        type RecordQUEUEHD queuehd=Db.getRecord("QUEUEHD","TJD=:SYSDAT,SEQ=:HDSEQ")
+	set queuehd.ctim=%CurrentTime
+	set queuehd.cmt=X.extract(1,100)
+	set queuehd.username=$P(%LOGID,"|",2)
+	set queuehd.cdat=%CurrentDate
+	do queuehd.save()
+
+	/*
+	**************************************************************************
+	If job completed normally  or  batch flag (Action on Error) is not set to
+	abort on error, Log completion time and date for conditional jobs.
+	dfm 2/15/99 - added test to see if the job is not being resubmitted.
+	**************************************************************************
+	*/
+
+	if JOBABT'=2,(JOBABT=0!(queueb.aoe=0)) do CONDT
+
+	/*
+	Completion date and time must be recorded for accrual purposes 
+	regardless of whether it aborted or not.
+
+	To ensure accruals run properly, the only case where we
+	would NOT want to log completion date/time is if the job
+	resubmitted itself (JOBABT=2).
+	We need to discuss the implications of these changes for
+	other applications that use the queuing system.
+	*/
+
+	do Runtime.commit()
+
+	quit
+
+
+JOBRUN1(String %DIR)	// Run the routines
+
+	/*	
+	Note that if we add other objects in earlier code that leads to calls
+	to JOBRUN1, need to protect them here, like ds2 is, otherwise, they
+	will be deleted when XKILL is called.  We can't just add them to the
+	XKILL call since the program we call may have used their name for
+	other purposes.
+	
+	%DIR is passed by value in order to protect it.  Otherwise, even
+	if public, will be deleted by reinitialization of symbol table.
+	*/
+
+	type public Boolean ER
+	type public String %BLK, %FN, %EVENT, %UFN, CONAM, RM
+	
+	// Protect variables used in other parts of QUEPGM
+	type Boolean %EXTERN	
+	type Date SYSDAT
+	type Number BCHABT, BCHNUM, HDSEQ, JOBABT, JOBNUM, SAVBAT, SAVJOBN, TTRTEST
+	type String %ID, %LOGID, cuvar, ddpsts, ds2, EVENT, rs, SAVEERR, savev, z
+	
+	type String %NOPRMT, %SN, %VSAV, PGM, POP, PRP, UTLO
+	
+	catch vERROR2 {
+		
+		set ER=1
+		
+                if vERROR2.type["%GTM-" do { quit
+                	type Boolean %ZTHALT = 0
+                	do ZE^UTLERR
+                }
+	
+		else  set RM=vERROR2.description
+	}
+		
+	do SYSVAR^SCADRV0(.%VSAV)
+	if '%DIR.exists() do INT^%DIR
+	if '%UserStation.exists() do ^UTLO set %UserStation=UTLO
+
+        type RecordSCATBL scatbl=Db.getRecord("SCATBL","FN=:%FN")
+	set %SN=scatbl.%sn
+
+	type RecordSCASYS scasys=Db.getRecord("SCASYS","SYSSN=:%SN")
+	#ACCEPT DATE=12/18/03;PGM=John Carroll
+	xecute scasys.xecut
+	
+	set %NOPRMT="F"
+	//Restrict restore	
+	if scatbl.restore do {
+		type RecordNOREST norest
+		set norest=Db.getRecord("NOREST","JOBNUM=%ProcessID",1)
+		set norest.curdt=%CurrentDate
+		set norest.curtim=%CurrentTime
+		do norest.save()
+	}
+	
+	set PGM=scatbl.pgm
+	
+	set PRP=scatbl.prp
+	#ACCEPT DATE=12/18/03;PGM=John Carroll
+	if PRP'="" xecute PRP if ER quit
+ 
+	do @PGM
+	if 'ER do {
+		set POP=scatbl.pop
+		#ACCEPT DATE=12/18/03;PGM=John Carroll
+		if POP'="" xecute POP
+		}
+		
+	// Get list of v* variable names to save
+	set savev = ",%EVENT,v"
+	set z = "v"
+	for  set z = @z.order() quit:(z.isNull() ! 'z.isLike("v%"))  set savev = savev_","_z 
+	
+	do XKILL^SCADRV0(savev)		// Clean the symbol table	
+	do SYSVAR^SCADRV0()		// Reinit system variables
+
+	quit
+
+
+DEPEND	// Dependency section
+
+	type public Number BCHNUM, JOBNUM, RESUB, SAVBAT, SAVJOBN
+	type public String SAVEERR
+
+	type Number A, B, DIFFDAT, DIFFTIM, LIMDAT, LIMTIM
+	
+	set RESUB=0
+
+	type DbSet ds=Db.selectDbSet("QUEUED","BCHNUM=:BCHNUM AND JOBNUM=:JOBNUM")
+	while ds.next() do { quit:RESUB=1
+		
+		type RecordQUEUED queued=ds.getRecord("QUEUED")
+		
+		set A=queued.batch
+		set B=queued.job
+		
+		// SAVBAT and SAVJOBN keeps the job and batch number for reporting
+		set SAVBAT=A
+		set SAVJOBN=B
+
+		type RecordQUEUEB queueb=Db.getRecord("QUEUEB","BCHNUM=:A")
+		
+		// Not Scheduled to run today
+		if queueb.subm=0 quit
+		if queueb.subm="" do { quit
+			set RESUB=1   
+			//Conditional Job not started
+			set SAVEERR=$$^MSG(4563)
+		}
+
+		if queued.cdate="",queued.ctime="" do { quit
+			/*
+			Check why there's no end time set in this
+                        job.  If the reason is because the conditional
+                        job aborted due to a dependency error, then
+                        we don't want to resubmit this batch, we want
+                        to abort it. So we'll have to return a new
+                        flag from this subroutine that will indicate
+                        that the batch should abort in this situation.
+			*/
+			type RecordQUEUEJ queuej=Db.getRecord("QUEUEJ","BCHNUM=:A,JOBNUM=:B")
+	               	if queuej.lstat=4 set RESUB=2
+			else  set RESUB=1 
+		}
+
+		set DIFFDAT=%CurrentDate-queued.cdate
+		if DIFFDAT set DIFFTIM=%CurrentTime+(86400-queued.ctime)+((DIFFDAT-1)*86400)
+		else  set DIFFTIM=%CurrentTime-queued.ctime
+		set LIMTIM=(queued.limit#1440)*60
+		if DIFFTIM>LIMTIM set RESUB=1 quit
+	}
+
+	do CLEAR
+
+	quit
+
+
+private CONDT	// Conditional section
+
+	type public Number BCHNUM, JOBNUM
+	
+	type Number A, B
+	
+	type ResultSet rs=Db.select("BATCH,JOB","QUEUEC","BCHNUM=:BCHNUM AND JOBNUM=:JOBNUM")
+	while rs.next() do {
+		set A=rs.getCol("BATCH")
+		set B=rs.getCol("JOB")
+		
+		type RecordQUEUED queued=Db.getRecord("QUEUED","BCHNUM=:A,JOBNUM=:B,BATCH=:BCHNUM,JOB=:JOBNUM")
+
+		set queued.cdate=%CurrentDate
+		set queued.ctime=%CurrentTime
+		do queued.save()
+	}
+
+	quit
+
+
+CLEAR	// Clear dependency completion date and time
+
+	type public Number BCHNUM, JOBNUM, RESUB
+	
+	if RESUB quit
+	
+	type DbSet ds=Db.selectDbSet("QUEUED","BCHNUM=:BCHNUM AND JOBNUM=:JOBNUM")
+	while ds.next() do {
+		
+		type RecordQUEUED queued=ds.getRecord("QUEUED")
+                set queued.cdate=""
+                set queued.ctime=""
+               	do queued.save()
+		}
+	quit
+
+
+ERR1	// Log error if occurred in running or trying to run job ... ZE is error
+
+	type public Number %ZTSEQ, AOF, BCHABT, BCHNUM, JOBABT, JOBNUM
+	type public String %DIR, SAVEERR, ZE
+
+
+	set JOBABT=1
+	set SAVEERR=$G(ZE)
+
+	type RecordQUEUEJ queuej=Db.getRecord("QUEUEJ","BCHNUM=:BCHNUM,JOBNUM=:JOBNUM")
+	type RecordQUEUEB queueb=Db.getRecord("QUEUEB","BCHNUM=:BCHNUM")
+	set AOF=queueb.aoe
+	if AOF set BCHABT=1
+
+	do LOGIT($S(AOF=1:"QUEBCHABT",1:"QUEBCHCNT"),BCHNUM)
+
+	if queueb.mail["4" do {
+		type String MSG()
+
+		// Directory ~p1
+		set MSG(1)=$$^MSG(4572,%DIR)
+
+		// Batch number ~p1 (~p2)
+		set MSG(2)=$$^MSG(4569,BCHNUM,queueb.desc)
+
+		// Job number ~p1 (~p2)
+		set MSG(3)=$$^MSG(4583,JOBNUM,queuej.desc)
+
+		// has been aborted.
+		set MSG(4)=$$^MSG(4578)
+
+		// The following error has occurred:
+		set MSG(5)=$$^MSG(4590)
+
+		set MSG(6)=ZE
+
+		// Error log sequence number ~p1
+		if %ZTSEQ.exists() set MSG(7)=$$^MSG(3389,%ZTSEQ)
+		kill %ZTSEQ
+
+		do MAIL^QUEALRT(.MSG,BCHNUM)
+		}
+
+	if queueb.brcd["4" do {
+		new MSG
+
+		// Directory ~p1, Batch number ~p2, Job number ~p3 has been aborted
+		set MSG=$$^MSG(5756,%DIR,BCHNUM,JOBNUM)
+
+		do BRCD^QUEALRT(MSG,BCHNUM)
+		}
+
+	do JOBEND
+
+	quit
+	
+
+FUNCERR	//  Function Error routine.
+
+	type public Date SYSDAT
+	type public Number BCHABT, BCHNUM, HDSEQ, JOBABT, JOBNUM
+	type public String %FN, %ID, %LOGID, SAVEERR
+
+	// Log error condition
+	do LOGIT("INVLDFN",%FN)
+
+	// Invalid function ~p1
+	set SAVEERR=$$^MSG(1361,%FN)
+
+	if '%LOGID.exists() set %LOGID=$$LOGID^SCADRV
+	set %ID=$$SYSLOG^SCADRV0
+
+	type RecordQUEUEB queueb=Db.getRecord("QUEUEB","BCHNUM=:BCHNUM")
+	type RecordQUEUEJ queuej=Db.getRecord("QUEUEJ","BCHNUM=:BCHNUM,JOBNUM=:JOBNUM")
+
+	type RecordQUEUEHD queuehd=Class.new("RecordQUEUEHD")
+	set queuehd.tjd=SYSDAT
+	set HDSEQ=Db.nextVal("QUEUEHD","TJD=:SYSDAT")
+	set queuehd.seq=HDSEQ
+	set queuehd.bchnum=BCHNUM
+	set queuehd.jobnum=JOBNUM
+	set queuehd.fun=queuej.fun
+	set queuehd.sdat=%CurrentDate
+	set queuehd.stim=%CurrentTime
+	do queuehd.save()
+
+
+	// Continue the batch (AOE)
+	if 'queueb.aoe set JOBABT=1
+
+	// Abort the batch (AOE)
+	if queueb.aoe set BCHABT=1 set JOBABT=1
+
+	do JOBEND
+
+	quit
+	
+	
+public JOBLISTU(String JOBLIST())	// List of running jobs - for UNIX
+
+	/*
+	This sub-routine is called by the UNIX version of BATSTOPN^%OSSCRPT to
+	generate a list of jobs that are currently active and should be stopped.
+	This replaces the older code in %OSSCRPT that directly references globals.
+	
+	This sub-routine should not be called from any other source.
+	*/
+	
+	type Number BCHNUM
+	type String EVENT
+	
+	type ResultSet rs = Db.select("EVENT,BCHNUM", "QUETBLEB", "SUBM <> 1")
+	while rs.next() do {
+		set EVENT = rs.getCol("EVENT")
+		set BCHNUM = rs.getCol("BCHNUM")
+		
+		type ResultSet rs2 = Db.select("JOBNUM,PID", "QUECTRLD", "EVENT=:EVENT AND BCHNUM=:BCHNUM AND PID > 0")
+		while rs2.next() set JOBLIST(EVENT, BCHNUM, rs2.getCol("JOBNUM")) = rs2.getCol("PID")
+	}
+	
+	quit
+	
+	
+public JOBLISTV(String JOBLIST())	// List of running jobs - for VMS
+
+	/*
+	This sub-routine is called by the VMS version of BATSTOP^%OSSCRPT to
+	generate a list of jobs that are currently active and should be stopped.
+	This replaces the older code in %OSSCRPT that directly references globals.
+	
+	This sub-routine should not be called from any other source.
+	*/
+	
+	type Number BATCH
+	type String EVENT
+	
+	type ResultSet rs = Db.select("EVENT", "QUECTRL")
+	while rs.next() do {
+		set EVENT = rs.getCol("EVENT")
+		type ResultSet rs2 = Db.select("BATCH", "UTBLEBCH", "EVENT=:EVENT")
+		while rs2.next() do {
+			set BATCH = rs2.getCol("BATCH")
+			type RecordQUEUEB queueb = Db.getRecord("QUEUEB", "BCHNUM=:BATCH")
+			if 'queueb.vmstag.isNull() set JOBLIST(EVENT, BATCH) = queueb.vmstag
+		}
+	}
+	
+	quit
+	
+	
+public QUECTRLU(String EVENT,	// Event name
+		Number BCHNUM,	// Batch number
+		Number JOBNUM,	// Job number (may be zero)
+		Number offset,	// Offset (seconds)		/MECH=REFNAM:W
+		Number JOBOFF)	// Job offset (minutes)		/NOREQ
+
+	/*
+	Update QUECTRL
+	
+	This sub-routine is called by the UNIX version of CTRL^%QUEFUNC to
+	update QUECTRL.  This replaces the older code in %QUEFUNC that directly
+	references globals.
+	
+	This sub-routine should not be called from any other source.
+	*/
+	
+	do Db.delete("QUECTRLD", "EVENT=:EVENT AND BCHNUM=:BCHNUM")
+	
+	type RecordQUEUEB queueb = Db.getRecord("QUEUEB", "BCHNUM=:BCHNUM")
+	
+	set offset = queueb.strt * 60
+	
+	if (JOBNUM > 0) do {
+		type RecordQUEUEJ queuej = Db.getRecord("QUEUEJ", "BCHNUM=:BCHNUM,JOBNUM=:JOBNUM")
+		
+		set offset = queuej.reti * 60
+	}
+	
+	type RecordQUECTRLD quectrld = Class.new("RecordQUECTRLD", "EVENT=:EVENT,BCHNUM=:BCHNUM,JOBNUM=:JOBNUM")
+	
+	set quectrld.pid = %ProcessID
+	set quectrld.fre = queueb.fre
+	set quectrld.cdt = %CurrentDate
+	set quectrld.bchoff = queueb.strt
+	set quectrld.runtime = (%CurrentTime + (queueb.strt * 60))
+	set quectrld.joboff = JOBOFF.get()
+	if (JOBOFF.get() > 0) set quectrld.jrt = (%CurrentTime + (JOBOFF * 60))
+	
+	do quectrld.save()
+	
+	quit
+	
+
+public QUECTRLI(String EVENT,	// Event name
+		Number BCHNUM,	// Batch number
+		Number JOBNUM,	// Job number (may be zero)
+		String DATA)	// Data for setting into QUECTRLD
+
+	/*
+	Update QUECTRLD.
+	
+	This sub-routine is called by the VMS version of SBMTBCH^%OSSCRPT to
+	initialize QUECTRL.  This replaces the older code in %OSSCRPT that directly
+	references globals.
+	
+	This sub-routine should not be called from any other source.
+	*/
+		
+	do Db.delete("QUECTRLD", "EVENT=:EVENT AND BCHNUM=:BCHNUM")
+	
+	type RecordQUECTRLD quectrld = Class.new("RecordQUECTRLD", "EVENT=:EVENT,BCHNUM=:BCHNUM,JOBNUM=:JOBNUM")
+	
+	set quectrld.pid = %ProcessID
+	set quectrld.fre = DATA.piece("|", 2)
+	set quectrld.cdt = DATA.piece("|", 3)
+	set quectrld.bchoff = DATA.piece("|", 4)
+	set quectrld.runtime = DATA.piece("|", 5)
+	set quectrld.joboff = DATA.piece("|", 6)
+	set quectrld.jrt = DATA.piece("|", 7)
+	
+	do quectrld.save()
+	
+	quit
+	
+	
+public PID(String EVENT,	// Event
+	   Number BCHNUM)	// Batch number
+	   
+	/*
+	Return process ID for a running job in this event/batch.
+	
+	This function is called by the UNIX version of JOBNAM^%ZFUNC to return
+	the process ID without reference to a global.
+	
+	RETURNS:
+		. $$	Process ID		/TYP=N
+	*/
+	
+	type Number PID = 0
+	
+	type ResultSet rs = Db.select("JOBNUM,PID", "QUECTRLD", "EVENT=:EVENT AND BCHNUM=:BCHNUM", "JOBNUM ASC")
+	
+	if rs.next() set PID = rs.getCol("PID")
+	
+	quit PID
+	
+	
+
+private LOGIT(ET,PARAM)	//Private; Log the event to external logging facility.
+
+	do EVNTLOG^%ZFUNC(ET,"STBLER",$G(PARAM))
+
+	quit
+
+vSIG()	quit "60569^40255^Chad Smith^29723"	// Signature - LTD^TIME^USER^SIZE

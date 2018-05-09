@@ -1,0 +1,147 @@
+ZSTAT07		/*
+	 Procedure Id: ZSTAT07
+	 DESC: Custom STAT07 File (ATM) Processing
+	 ORIG: Brandon Rickards
+	 DATE: 25-April-2007
+
+	 This procedure will process the incoming STAT07 batch file containing
+	 ATM transactions. It will match the data in the STAT07 file to the 
+	 data in the Authorization Detail log in Profile. Any transactions
+	 present in the STAT07 file that are not found in the Authorization Detail
+	 log will be logged as an exception. If the response code in the 
+	 Authorization Detail log was a success then a match against the Daily
+	 Transaction Journal (DTJ) will be performed. Any successful financial
+	 transactions that are not found in the DTJ table will also be logged 
+	 as an exception.
+
+	 ---- Revision History ------------------------------------------------
+
+	 06/28/07 - Brandon Rickards - CR 27864
+	 	o Modified section PROC to skip processing the Trailer Record.
+	 	o Removed using CID (Account Number) in Result Sets because
+	 	  Prosa will be sending this information zero-filled.
+	 	o Modified default File Name format to be: S7DDMMYY.134
+	 	o Translated exception messages to Spanish.
+	 	o Modified to use Local Transaction Date to locate transaction
+	 	  in Authorization Detail Log after converting Date from DD/MM/YY 
+	 	  to MMDD format.
+
+	 ----------------------------------------------------------------------
+
+	*/
+
+	catch vERROR {
+		set ET=vERROR.type
+
+		if ET["%GTM-" do ZE^UTLERR quit
+
+		set ET=ET_"-"_vERROR.thrownAt
+		set RM=vERROR.description
+
+		do ^UTLERR
+	}
+
+	type public String ER,ET,RM
+	type String FILENAME,%READ,REC,%TAB,VFMQ
+	type IO io
+
+	// Set default file name
+	set FILENAME="S7"_$$DAT^%ZM(%SystemDate-1,"DDMMYY")_".134"
+
+	// Prompt user for file name
+	set %TAB("FILENAME")="/DES=Input File Name/TYP=T/LEN=20/"
+	set %READ="@@%FN,,,FILENAME/REQ"
+
+	do ^UTLREAD
+	if VFMQ="Q" quit
+
+	set io=Class.new("IO")
+	set io.fileName=FILENAME
+	set io.openParams="READ"
+	do io.open()
+
+	for  set REC=io.read() quit:REC.isNull()  do PROC(REC)
+
+	do io.close()
+
+	quit
+
+PROC(REC)
+	/*
+	Process detail records
+
+	ARGUMENTS:
+		REC	Detail Record
+	*/
+	type String ATMID,DATE,FIID
+	type Number CRDNUM,TAMT
+	// Acquirer
+	set FIID=REC.extract(3,6)
+
+	// Skip processing Trailer Record. FIID will be NULL in the Trailer
+	if FIID.isNull() quit
+
+	// Card Number
+	set CRDNUM=REC.extract(25,43)
+	// Account Number from where the funds were retrieved
+	set CID=REC.extract(48,66)
+	// ID of ATM Terminal
+	set ATMID=REC.extract(136,145)
+
+	// Date of ATM transaction
+	set DATE=REC.extract(150,157)
+	// Convert Date from DD/MM/YY to MMDD format
+	set DATE=DATE.extract(4,5)_DATE.extract(1,2)
+
+	// Time of ATM transaction
+	set TIME=REC.extract(159,166)
+	// Transaction Amount in local currency
+	set TAMT=REC.extract(181,193)
+
+	type ResultSet rs1=Db.select("RSPCD","ZAUTHDTL","CRDNUM=:CRDNUM AND LTD=:DATE AND TAMT=:TAMT")
+	// If transaction not in Authorization Log file, create an exception
+	if rs1.isEmpty() do {
+		// Create Exception
+		type RecordZSTAT07 zstat07=Class.new("RecordZSTAT07")
+		set zstat07.procdat=%SystemDate
+		set zstat07.seq=Db.nextVal("ZSTAT07","%SystemDate")
+		set zstat07.crdnum=CRDNUM
+		set zstat07.cid=CID
+		set zstat07.atmid=ATMID
+		set zstat07.atmdat=DATE
+		set zstat07.time=TIME
+		set zstat07.tamt=TAMT
+		set zstat07.fiid=FIID
+		// Not found in Authorization Log
+		set zstat07.desc="AUTORIZACION NO ENCONTRADA"
+		do zstat07.bypassSave()
+	}
+	/*
+	If any successful financial transactions (RSPCD="00") are not found in 
+	the DTJ table, log an exception
+	*/
+	if 'rs1.isEmpty(),rs1.next() do {
+		set RSPCD=rs1.getCol("RSPCD")
+		if RSPCD="00" do {
+			type ResultSet rs2=Db.select("TSEQ","DTJ","ATMD=:DATE AND TAMT=:TAMT AND TIME=:TIME")
+			if rs2.isEmpty() do {
+			// Create Exception
+			type RecordZSTAT07 zstat07=Class.new("RecordZSTAT07")
+			set zstat07.procdat=%SystemDate
+			set zstat07.seq=Db.nextVal("ZSTAT07","%SystemDate")
+			set zstat07.crdnum=CRDNUM
+			set zstat07.cid=CID
+			set zstat07.atmid=ATMID
+			set zstat07.atmdat=DATE
+			set zstat07.time=TIME
+			set zstat07.tamt=TAMT
+			set zstat07.fiid=FIID
+			// Not found in Daily Transaction Journal
+			set zstat07.desc="TRANSACCION NO ENCONTRADA"
+			do zstat07.bypassSave()
+		}
+	}
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60813^86026^Brandon Rickards^4030"	// Signature - LTD^TIME^USER^SIZE

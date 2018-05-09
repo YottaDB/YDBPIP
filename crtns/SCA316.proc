@@ -1,0 +1,301 @@
+public	SCA316(Boolean TELLSORT)	// Sort / break on teller
+
+	/*
+	ORIG: SmithCD - 03/15/2005
+	DESC: Teller/Branch Summary Activity
+
+	Initialization program for teller totals to define queries,
+	needed by procedure CHKINT.
+	
+	Additional notes on ARGUMENTS:
+	
+		TELLSORT	Sort / break on teller
+				Passed by SCA313, indicates the data will 
+				be organized by user ID (third key):
+				
+				0 - Group (no page break)
+				1 - User ID (page break)
+				
+				TJD
+				BRCD
+				GRP / UID
+	
+	---- Revision History ------------------------------------------------
+	
+	06/21/05 - SmithCD - CR 15902
+		   Modified to handle REP313 by introducing TELLSORT option.
+
+	03/15/05 - SmithCD - CR 13782
+		   Created to handle REP316.
+
+	 */
+
+	type Boolean DC, ER, IEC, INQ, IRV
+	type String %READ, %SLT, %TAB, %TS, BRCD, DQQRY(), FROM, INTERVAL()
+	type String IO, KEY3, RPTDATA(), SC, STRT, UID, VAL, VFMQ, WHERE
+	type Number %TN, ALLT, I, INT, INTERVAL, LAST, LEVEL, NOW, OPT(), POS
+	type Number POSITION(,,), SEQ, START, STOP, STP, TIMESLOT, VAL1
+	type Date TPD
+	
+	set STOP = ""
+	set (BRCD, TPD, UID) = "ALL"
+	set (IEC, IRV) = 1
+	set (INQ, SEQ) = 0
+	
+	set %TAB("IO") = $$IO^SCATAB($I)_"/REQ/HLP=[DEVICE]DEVNAME"
+	set %TAB("START") = "/DES=Time (Start)/REQ/TYP=C/LEN=11/HLP=[TTX]TIM/XPP=D EXT^DBSQRY"
+	set %TAB("STOP") = "/DES=Time (Ending)/TYP=C/LEN=11/HLP=[TTX]TIM/POS=STOP^SCA316"
+	set %TAB("INTERVAL") = "/DES=Interval Length (Mins)/REQ/TYP=N/LEN=3/MIN=15/MAX=120"
+	set %TAB("IRV") = "/DES=Include Reversals/LEN=1/TYP=L/HLP=[TTX]ITC12"
+	set %TAB("IEC") = "/DES=Include Error Corrects/LEN=1/TYP=L/HLP=[TTX]ITC6"
+	set %TAB("INQ") = "/DES=Include Inquiries/LEN=1/TYP=L"
+	set %TAB("TPD") = "/DES=System Processing Date/HLP=[TTX]TJD/XPP=D EXT^DBSQRY"
+	set %TAB("BRCD") = ".A5/HLP=[TTX]BRCD/XPP=D EXT^DBSQRY"
+	set %TAB("UID") = ".A3/HLP=[TTX]UID/XPP=D EXT^DBSQRY"
+
+	set %READ = "@@%FN,,IO,START,STOP,INTERVAL,IRV,IEC,INQ,TPD,BRCD,UID"
+
+	do ^UTLREAD
+	if VFMQ = "Q" quit
+ 
+	do Db.fastDelete("TMPRPT1", "PID=:%ProcessID")
+	do Db.fastDelete("TMPRPT2", "PID=:%ProcessID")
+	do Db.fastDelete("TMPRPT3", "PID=:%ProcessID")
+
+	if TELLSORT do Db.fastDelete("TMPRPT4", "PID=:%ProcessID")
+ 
+	set %TN = START
+	do ^SCATIM1
+	set STRT = %TS
+
+	set SC = $select(STRT.isLike("%A%"):"AM", 1:"PM")
+	set INT = INTERVAL * 60
+
+	for TIMESLOT = 1:1:12 set INTERVAL(TIMESLOT) = ""
+
+	set LAST = 12		// Number of time slots
+ 
+	if 'STOP.isNull() do {
+		set STP = START + (INT * 12)
+		if STOP > STP set STOP = STP
+
+		set LAST = 0
+		set NOW = START
+		for I=1:1 set NOW = NOW + INT quit:NOW > STOP  set LAST = LAST + 1
+	}
+ 
+	for TIMESLOT = 1:1:LAST do {
+		set %TN = START + (INT * TIMESLOT)
+		set OPT(%TN) = TIMESLOT
+		do ^SCATIM1
+		set INTERVAL(TIMESLOT) = %TS.piece(SC, 1)
+		set %SLT(%TN) = ""
+		if INTERVAL(TIMESLOT).isLike("%M%") set SC = INTERVAL(TIMESLOT).extract(INTERVAL(TIMESLOT).length() - 1, 99)
+	}
+
+	set VAL = ""
+	for I=1:1 set VAL = %SLT(VAL).order(-1) quit:VAL < 86401
+	set STOP = VAL
+
+	// Construct dynamic SQL FROM and WHERE clauses based on queries
+	
+	if START > 0 set SEQ = SEQ + 1, DQQRY(SEQ) = "[TTX]TIM NOT<"_START
+	if STOP > 0 set SEQ = SEQ + 1, DQQRY(SEQ) = "[TTX]TIM NOT>"_STOP
+	if 'IRV set SEQ = SEQ + 1, DQQRY(SEQ) = "[TTX]ITC12 0"
+	if 'IEC set SEQ = SEQ + 1, DQQRY(SEQ) = "[TTX]UID6 0"
+	if 'INQ set SEQ = SEQ + 1, DQQRY(SEQ) = "[TTX]ETC NOT='@INQ'"
+	if TPD '="ALL" set SEQ = SEQ + 1, DQQRY(SEQ) = "[TTX]TJD "_TPD
+	if BRCD '="ALL" set SEQ = SEQ + 1, DQQRY(SEQ) = "[TTX]BRCD "_BRCD
+	if UID '="ALL" set SEQ = SEQ + 1, DQQRY(SEQ) = "[TTX]UID "_UID
+	
+	set WHERE = $$WHERE^SQLCONV(.DQQRY(), "TTX") quit:ER
+	
+	#ACCEPT DATE=03/16/05;PGM=SmithCD
+	type DbSet ds = Db.selectDbSet("TTX", WHERE)
+
+	// Starting (offset) -1 detail positions in tmp
+	set POSITION("DRS", "DTL") = 0		// Debits(level 3 or 4)
+	set POSITION("CRS", "DTL") = 12		// Credits(level 3 or 4)
+	set POSITION("ECS", "DTL") = 0		// Error corrects (level 2 or 3)
+	set POSITION("REVS", "DTL") = 12	// Reversals(level 2 or 3)
+	set POSITION("INQS", "DTL") = 24	// Inquiry(level 2 or 3)
+	
+	// Swap teller and branch totals (level and positions) if sorting 
+	// by teller
+	if TELLSORT do {
+		// Branch totals (level 2)
+		set POSITION("BRTS", "DTL") = 0
+		
+		// Branch totals total (level 2)
+		set POSITION("BRTS", "TOT") = 13
+
+		// Teller totals (level 3)
+		if TELLSORT set POSITION("TTS", "DTL") = 36
+
+		// Teller totals total (level 3)
+		set POSITION("TTS", "TOT") = 52
+		}
+	else  do {
+		// Branch totals (level 2)
+		set POSITION("BRTS", "DTL") = 36
+
+		// Branch totals total (level 2)
+		set POSITION("BRTS", "TOT") = 52
+		}
+	
+	set POSITION("ALLT", "DTL") = 0		// All totals (level 1)
+	
+	// Actual "totals" positions in tmp
+	set POSITION("DRS", "TOT") = 25		// Slot debit total (level 3 or 4)
+	set POSITION("CRS", "TOT") = 26		// Slot credit total (level 3 or 4)
+	set POSITION("ECS", "TOT") = 49		// Error corrects total (level 2 or 3)
+	set POSITION("REVS", "TOT") = 50	// Reversals total (level 2 or 3)
+	set POSITION("INQS", "TOT") = 51	// Inquiry total (level 2 or 3)
+	
+	set POSITION("ALLT", "TOT") = 13	// All totals total (level 1)
+	
+	while ds.next() do { quit:ER
+		type RecordTTX ttx = ds.getRecord("TTX")
+		
+		if TELLSORT set KEY3 = ttx.uid
+		else  set KEY3 = ttx.grp
+		
+		// if TELLSORT
+		type RecordTMPRPT4 tmprpt4 = Db.getRecord("TMPRPT4", "PID=:%ProcessID,KEY1=:ttx.tjd,KEY2=:ttx.brcd,KEY3=:KEY3,KEY4=:ttx.grp", 1)
+		set RPTDATA(4) = tmprpt4.data
+
+		type RecordTMPRPT3 tmprpt3 = Db.getRecord("TMPRPT3", "PID=:%ProcessID,KEY1=:ttx.tjd,KEY2=:ttx.brcd,KEY3=:KEY3", 1)
+		set RPTDATA(3) = tmprpt3.data
+		
+		type RecordTMPRPT2 tmprpt2 = Db.getRecord("TMPRPT2", "PID=:%ProcessID,KEY1=:ttx.tjd,KEY2=:ttx.brcd", 1)
+		set RPTDATA(2) = tmprpt2.data
+				
+		type RecordTMPRPT1 tmprpt1 = Db.getRecord("TMPRPT1", "PID=:%ProcessID,KEY1=:ttx.tjd", 1)
+		set RPTDATA(1) = tmprpt1.data
+				
+		set DC = ttx.itc.extract(1)
+
+		// Set SLT array (define debit and credit counts for each time 
+		// slot for each group). This the detail for the GRP level.
+
+		// Define slot into which transacton would fall (choose from 
+		// OPT array)
+		set VAL1 = OPT(ttx.tim).order() quit:VAL1.isNull()  set TIMESLOT = OPT(VAL1)
+		
+		if TELLSORT set LEVEL = 3
+		else  set LEVEL = 2
+
+		// Update branch-level totals counters
+		do ADDATA(.RPTDATA(2), POSITION("BRTS", "DTL") + TIMESLOT))
+		do ADDATA(.RPTDATA(2), POSITION("BRTS", "TOT"))
+
+		if TELLSORT do {
+			// Update teller-level totals counters
+			do ADDATA(.RPTDATA(LEVEL), POSITION("TTS", "DTL") + TIMESLOT))
+			do ADDATA(.RPTDATA(LEVEL), POSITION("TTS", "TOT"))
+			}
+		
+		// Update system processing date-level counters
+		do ADDATA(.RPTDATA(1), POSITION("ALLT", "DTL") + TIMESLOT)
+		do ADDATA(.RPTDATA(1), POSITION("ALLT", "TOT"))
+
+		if ttx.itc6 do {
+			// Update error corrects at branch- or teller-level counters
+			do ADDATA(.RPTDATA(LEVEL), POSITION("ECS", "DTL") + TIMESLOT)
+			do ADDATA(.RPTDATA(LEVEL), POSITION("ECS", "TOT"))
+		}
+		else  if ttx.itc12 do {
+			// Update reversals at branch- or teller-level counters
+			do ADDATA(.RPTDATA(LEVEL), POSITION("REVS", "DTL") + TIMESLOT)
+			do ADDATA(.RPTDATA(LEVEL), POSITION("REVS", "TOT"))
+		}
+		else  if ttx.etc = "@INQ" do { quit
+			// Update inquiries at branch- or teller-level counters
+			do ADDATA(.RPTDATA(LEVEL), POSITION("INQS", "DTL") + TIMESLOT)
+			do ADDATA(.RPTDATA(LEVEL), POSITION("INQS", "TOT"))
+		}
+		else  if DC do {
+			// Update credits at group-level counters
+			do ADDATA(.RPTDATA(LEVEL + 1), POSITION("CRS", "DTL") + TIMESLOT)
+			do ADDATA(.RPTDATA(LEVEL + 1), POSITION("CRS", "TOT"))
+		}
+		else  do {
+			// Update debits at group-level counters
+			do ADDATA(.RPTDATA(LEVEL + 1), POSITION("DRS", "DTL") + TIMESLOT)
+			do ADDATA(.RPTDATA(LEVEL + 1), POSITION("DRS", "TOT"))
+		}
+
+		if TELLSORT do {
+			set tmprpt4.data = RPTDATA(4)
+			do tmprpt4.save()
+		}
+		
+		set tmprpt3.data = RPTDATA(3)
+		do tmprpt3.save()
+
+		set tmprpt2.data = RPTDATA(2)
+		do tmprpt2.save()
+
+		set tmprpt1.data = RPTDATA(1)
+		do tmprpt1.save()
+		}
+	
+	do REPORT(TELLSORT)
+
+	do Db.fastDelete("TMPRPT1", "PID=:%ProcessID")
+	do Db.fastDelete("TMPRPT2", "PID=:%ProcessID")
+	do Db.fastDelete("TMPRPT3", "PID=:%ProcessID")
+
+	if TELLSORT do Db.fastDelete("TMPRPT4", "PID=:%ProcessID")
+	
+	quit
+	
+
+ADDATA(String RPTDATA, Number POS)	// Add data to RPTDATA string
+	
+	set RPTDATA.piece("|", POS) = RPTDATA.piece("|", POS) + 1
+	
+	quit
+
+
+public	STOP	// Post-processor for STOP field
+
+	type public Number START
+	type public String X
+	type public Boolean ER
+	
+	type String %TS
+	type Number %TN
+
+	quit:X.isNull()
+	
+	set %TS = X
+
+	do ^SCATIM quit:ER
+	
+	// Ending time must be after the start time
+	if %TN '> START do Runtime.setErrMSG(6581) quit
+	
+	quit
+
+	
+REPORT(Boolean TELLSORT)	// Print report
+
+	type String PGM, RID
+
+	if TELLSORT set RID = "SCA313"
+	else  set RID = "SCA316"
+
+	do ^URID 
+
+	if PGM.isNull() do { quit 
+		// Invalid report linkage <<RID>> 
+		do Runtime.setErrSTBLER("", "INVLDRPT")
+		do ^UTLERR
+		}
+
+	do V0^@PGM
+
+	quit
+
+vSIG()	quit "60073^50451^Chad Smith^8555"	// Signature - LTD^TIME^USER^SIZE

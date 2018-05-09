@@ -1,0 +1,859 @@
+Public DBSEDIT(Number opt, String fid, String sel, String nu1, String nu2, Number frame)
+
+	/*
+	ORIG:	FSANCHEZ - 22 JUL 1991
+	DESC:	DATA-QWIK database editor
+	 
+	A general purpose database editor.  This utility can be used to
+	create or update files that have very few data items.
+
+	ARGUMENTS: 
+		. opt	Database access option		/NOREQ/MECH=REFNAM:W
+			Null=create or modify
+			0=create
+			1=modify
+			2=inquiry
+			3=delete
+
+		. fid	File ID
+			(List previously allowed, no longer)
+
+		. sel   Data Item Select list		/NOREQ/DFT=all items
+			A list of valid data items
+
+		. nu1	Not used (was DQ query array)	/NOREQ
+
+		. nu2	Not used (was oby - order by)	/NOREQ
+
+		. frame	Screen Frame Definition		/NOREQ
+			Define the starting line number of a default screen frame
+
+	RETURNS:
+		. ER	Error Signal			/TYP=L
+
+		. RM	Error Message			/TYP=T           
+
+	EXAMPLE:
+
+		D ^DBSEDIT(1,"UTBLOFF")
+       
+		System displays following data entry screen:
+
+		Primary Account Officer Code: ____
+				 Description: _________________ 
+
+		D ^DBSEDIT("","UTBLBRCD","BRCD,DESC,BRCITY,BRCNTRY")
+
+		System displays following data entry screen:
+
+				   Branch Code: ______
+				   Description: ____________________
+				   Branch City: ____________________
+				Branch Country: __
+
+	----- Revision History ------------------------------------------------
+	08/03/07 - Pete Chenard - CR28597
+		   Modified call to Runtime.start method to put quotes 
+		   around the savepoint parameter.
+		   
+	06/08/07 - GIRIDHARANB - CR26409
+		   Modified section BLDKEY to add "NOVAL" qualifier to 
+		   any key level.
+		   
+	04/16/07 - RussellDS - CR26386
+		   Modified to eliminate calls to DBSLOGIT.  PSL or the filers
+		   will handle this.
+		   
+		   General clean-up.
+		   
+		   Removed old revision history.
+	
+	04/16/07 - RussellDS - CR26585
+		   Fix issue with last change.  Don't want double quotes for
+		   deletes, only for Db.getRecord.
+	
+	03/27/07 - Pete Chenard - CR26025/26023
+		   Modified TOP section to build Db.getRecord call using 
+		   double-quotes around key values rather than single-quotes.
+		   This allows support for keys with embedded spaces (as used 
+		   in user table UTBLCNTXTEVT, for example.
+		   
+	01/02/07 - RussellDS - CR24408
+		   Modified PPK section to allow default to reference
+		   CUVAR.column.
+		   
+		   Modified same section to set key name with value since may
+		   be needed by following key look-ups (see table UTBLATMREB,
+		   for example).
+	
+	08/02/06 - Pete Chenard - CR20403
+		   Modified PPK section to check that the data entered matches
+		   the data type.
+	
+	05/01/06 - RussellDS - CR20967
+		   Added label PROMPT for call from function DBSEDITOR, which
+		   previously called obsoleted EDITOR^DBSDRV0.
+	
+	02/28/06 - RussellDS - CR19318
+		   Add code to better handle user quit out of UTLREAD screen.
+		   No longer prompt to continue at that point.
+	
+	02/02/06 - RussellDS - CR19376
+		   Modify BLDKEY to not add NOVAL to bottom key if that column
+		   is tied to another table.  See, for example, UTBLIRCB.
+	
+	01/17/06 - RussellDS - CR18945
+		   Don't add NOVAL to table look-up except on bottom key.  Changes
+		   to BLDKEY to support.
+	
+	*/
+	
+	// I18N=QUIT
+	
+	type public Boolean ER = 0
+	type public String %SN, RM
+	
+	type Boolean isDone, vDFLAG, vRFLAG
+	type Number I, vDESLEN
+	type String %RECORD, keys, poke(), predaen, syssn, vFSN(), vGLOB, VREC, X
+	
+	set RM = ""
+	
+	if %UserID.isNull() do { quit
+		set ER = 1
+		// Must be a user
+		set RM = $$^MSG(2849)
+		write $$MSG^%TRMVT(RM,0,1)
+	}
+
+	quit:fid.get().isNull()				// Required
+	
+	set opt = opt.get()
+	if sel.get().isNull() set sel = "*"
+	
+	set vDESLEN = 0					// the max length of prompts
+	do fsn^DBSDD(.vFSN, fid) quit:ER
+
+	set X = vFSN(fid)
+	
+	if (+X.piece("|",4) = 0) do { quit
+		set ER=1
+		// Record Type '0' Contains no Records
+		set RM = $$^MSG(2339)
+	}
+	
+	set keys = X.piece("|", 3)
+	if keys.isNull() do { quit
+		set ER=1
+		// Invalid file structure
+		set RM = $$^MSG(5531)
+	}
+	
+	set vGLOB = X.piece("|", 2).piece("(", 1)
+	set vGLOB = vGLOB.extract(2, vGLOB.length())
+	
+	type RecordDBTBL1 dbtbl1 = Db.getRecord("DBTBL1","%LIBS=""SYSDEV"",FID=:fid")
+
+	if ((vGLOB = "UTBL") ! (vGLOB = "STBL") ! (vGLOB = "CTBL")) do { quit:ER
+		
+		type Number mode
+		
+		if opt = 3 set mode = 3
+		else  set mode = 0
+		
+		do CHKACCES^DBSTBLM(vGLOB, .dbtbl1, mode)
+	}		
+
+	if (dbtbl1.filetyp = 5) do { quit		// Dummy file type
+		set ER=1
+		// Invalid file structure
+		set RM=$$^MSG(5531)
+	}
+	
+	set syssn = dbtbl1.syssn			// System name
+	if (syssn '= %SN.get()) do { quit:ER		// Change system
+		set %SN = syssn
+		do %SN^SCADRV0
+	}
+
+	set predaen = dbtbl1.predaen			// Data entry Pre-Processor
+	set vRFLAG = dbtbl1.rflag			// Restriction flag         
+	set vDFLAG = dbtbl1.dflag			// deletion restriction flag
+
+	if (opt '= 2), vRFLAG do { quit
+		set ER = 1
+		// File ~p1 is restricted
+		set RM = $$^MSG(5634, fid)
+	}
+
+	if (opt = 3), vDFLAG do { quit
+		set ER = 1
+		// Deletion is restricted
+		set RM = $$^MSG(806)
+	}
+	
+	#ACCEPT DATE=12/27/04; PGM=Dan Russell; CR=Unknown; GROUP=XECUTE
+	if 'predaen.isNull() X predaen quit:ER		// Data Entry Pre-Proc
+
+	// Process wildcard
+	if (sel = "*") set sel = $$GETLIST^DBE(fid) quit:ER
+
+	// Make sure keys are at front of select list, in order
+	for I = 1:1:keys.length(",") do {		// Build Key Post Proc
+		
+		type Boolean isLast
+		type String key
+
+		if (I = keys.length(",")) set isLast = 1
+		else  set isLast = 0
+		set key = keys.piece(",", I)			// Retrieve access key
+		do BLDKEY(fid, key, I, opt, .poke(), isLast)	// Build access key info
+		
+		// Remove from select list if in it
+		if {List}sel.contains(key) do {
+			set sel = ","_sel_","
+			set sel = sel.replace(","_key_",", ",")
+			set sel = sel.extract(2, sel.length() - 1)
+		}
+	}
+	
+	// Add key(s) to select list
+	set sel = keys_","_sel
+	if sel.endsWith(",") set sel = sel.extract(1, sel.length() - 1)
+		
+	set %RECORD = "VREC"
+	set VREC = ""					// Init record
+	set isDone = 0
+	for  do { quit:isDone
+	
+		type String UX()
+
+		do TOP(.isDone) quit:isDone
+		if ER set VREC = ""			// Reset screen on error
+		
+		// Continue?
+		if '$$YN^DBSMBAR("", $$^MSG(5652,RM.get(), "Continue?"), 1) do { quit
+			set isDone = 1
+			set RM = ""
+		}
+		
+		set ER = 0
+		set RM = ""   
+
+		if (%ProcessMode = 3) set VREC=""	// Reset screen when deleting a record
+	}
+	
+	quit
+
+	
+TOP(Boolean DONE)	// Main routine
+
+	type public Boolean ER
+	type public Number frame, opt, vDESLEN
+	type public String fid, keys, RM, sel, VREC
+
+	type Boolean isDone, log
+	type Number %PAGE, %PG, end, I, opttmp, start
+	type String fiddes, filer, VFMQ, VPG()
+	
+	type RecordDBTBL1 dbtbl1 = Db.getRecord("DBTBL1", "%LIBS=""SYSDEV"",FID=:fid")
+	
+	set DONE = 0	// Flag if quit out of screen
+	
+	set fiddes = dbtbl1.des
+	set filer = dbtbl1.udfile
+	set log = dbtbl1.log
+	
+	// Calculate number of pages
+	set %PAGE = (sel.length(",") \ 21) + 1
+	set %PG = 1
+	
+	if (%PAGE > 1) for I = 1:1:%PAGE do {		// Create Page Index
+	
+		type String di
+		
+		set di = sel.piece(",", ((I - 1) * 20) + 1)
+		
+		type RecordDBTBL1D dbtbl1d = Db.getRecord("DBTBL1D", "%LIBS=""SYSDEV"",FID=:fid,DI=:di")
+		
+		set VPG(I) = dbtbl1d.des
+	}
+
+	set %ProcessMode = 0
+
+	set VFMQ = ""
+
+	set isDone = 0
+	for  do { quit:isDone
+		
+		type Number %FRAME, %MAX, %VERSN, cnt, key, OLNTB
+		type String %READ, %TAB(), DBSEDIT(), KVAR, msgend, msghdr, PGM
+
+		set %MAX = 0
+		set KVAR = "K %VERSN"
+		set %VERSN = 4
+		set PGM = %RoutineName
+	
+		set cnt = sel.length(",") 
+
+		if (%PG = 1) do {
+			set start = 1
+			if opt.isNull() set end = 17
+			else  set end = 18
+			if (end > cnt) set end = cnt
+		}
+		
+		else  if (%PG = 2) do {
+			set start = end + 1
+			set end = start + 19
+			if (end > cnt) set end = cnt
+		}
+		
+		else  do {
+			set start = ((%PG - 1) * 20) + 1
+			set end = start + 19
+			if (end > cnt) set end = cnt
+		}
+
+		set msghdr = "["_fid_"] "			// file name
+		set msghdr = msghdr_" "_fiddes
+		// Page ~p1 of ~p2
+		if (%PAGE > 1) set msgend = $$^MSG(2127, %PG, %PAGE)
+		else  set msgend = ""
+		set msghdr = msghdr_msgend.justify(80 - msghdr.length(), 1)
+
+		set %READ = "@msghdr/REV/CEN,"
+
+		for key = start:1:end do BUILD(key)		// Build VO,%TAB
+
+		if frame.exists() set %FRAME = 2		// check frame
+	
+		if (vDESLEN > 30) set OLNTB = vDESLEN		// Adjust the positions of prompts  
+		else  set OLNTB = 30
+		
+		if (%PG '= 1), (%ProcessMode = 3) do DEL^UTLREAD	// deletion in multiple pages
+		else  do {
+			if (opt '= 2) do ^UTLREAD		// create screen
+			else  do INQ^UTLREAD			// inquiry mode
+		}
+
+		// Action
+		if opttmp.exists() set %ProcessMode = opttmp
+		else  set %ProcessMode = opt
+	
+		if (VFMQ = "Q"), (%ProcessMode '= 2) do { quit	// User terminated
+			// not Created,not Modified,not Displayed,not Deleted,not Printed
+			set RM = $$^MSG(8259)
+			set RM = RM.piece(",", %ProcessMode + 1)
+			set (DONE, isDone) = 1
+		}
+
+		if ((VFMQ = "D") ! (VFMQ = "F")) do { quit	// File Record
+			
+			type String CMPERR(), keylist, PGM, pslcode(), TAB
+
+			// Generate filer routine
+			set PGM = "TMP"_(({String}(%ProcessID / 10000)).piece(".", 2))
+			
+			set TAB = $C(9)
+
+			do addcode(0 , PGM_TAB_"// DBSEDIT temporary filer compiled program")
+			do addcode(1, "// Last compiled:  "_%CurrentDate.toString()_" "_$$TIM^%ZM_" - "_%UserName)
+			do addcode(0, "")
+			do addcode(1, "// THIS IS A COMPILED ROUTINE.  Compiled by procedure DBSEDIT")
+			do addcode(0, "")
+			
+			// Prevent accidental execution by other than this process
+			do addcode(1, "quit:(%ProcessID '= "_%ProcessID_")")
+			
+			set keylist = ""
+			for I = 1:1:keys.length(",") set keylist = keylist_keys.piece(",", I)_"="""""_VREC.piece("|", I)_""""","
+
+			set keylist = keylist.extract(1, keylist.length() - 1)
+			
+			if (log ! (VFMQ = "F")) do addcode(1, "type Record"_fid_" rec = Db.getRecord("""_fid_""","""_keylist_""",1)")
+			
+			if VFMQ = "F" do {
+				do addcode(1, "do rec.setAuditFlag(1)")
+				for I = keys.length(",")+1:1:sel.length(",") do addcode(1, "set rec."_sel.piece(",", I)_" = """_VREC.piece("|", I)_"""")
+				do addcode(1, "do rec.save()")
+			}
+			else  do {
+				set keylist = keylist.replace(",", " AND ")
+				set keylist = keylist.replace("""""", "'")	// Need single quotes for Db.delete
+				do addcode(1, "do Db.delete("""_fid_""","""_keylist_""")")
+			}
+			
+			do addcode(1, "quit")
+			// Lock to ensure no conflict
+			lock +DBSEDIT(PGM):5
+			else  do { quit
+				set ER = 1
+				set RM = "Unable to generate temporary filer "_PGM
+			}
+			
+			// Build compiled routine
+			do BUILDRTN^UCGM(.pslcode, PGM, .CMPERR)
+			if +CMPERR.get() do {
+				set ER = 1
+				set RM = "Unable to generate temporary filer "_PGM
+			}
+			
+			if 'ER do {
+			
+				type String savepnt = ""
+				
+				do Runtime.start("CS", "", "savepnt")
+				
+				// Call the temporary filer
+				do {
+					
+					catch error {
+					
+						if error.type = "%PSL-E-DBFILER" do {
+						
+							set ER = 1
+							set RM = error.description
+						}
+						else  throw error
+					}
+					
+					do @("^"_PGM)
+				}			
+			
+				if 'ER do {
+				
+					do Runtime.commit()
+				
+					// Created,Modified,Displayed,Deleted,Printed
+					set RM = $$^MSG(648)
+					set RM = RM.piece(",", %ProcessMode + 1)
+				}
+				else  do Runtime.rollback("savepnt")
+			}
+			
+			set isDone = 1
+			lock -DBSEDIT(PGM)
+		}
+		
+		set %PG = %PG + 1			// Next page
+	}
+			
+	quit
+
+	
+BLDKEY(String fid,	// Table
+       String key,	// Access key
+       Number cnt,	// Key number
+       Number opt,	// Access option
+       String poke(),	// Access key info array	/MECH=REFARR:W
+       Boolean isLast)	// Is last key
+       
+	/*
+	Set up Access Key info
+	*/
+	
+	type public String keys
+	
+	type String tbl
+	
+	type RecordDBTBL1D dbtbl1d = Db.getRecord("DBTBL1D", "%LIBS=""SYSDEV"",FID=:fid,DI=:key")
+
+	set poke(cnt,6)="do PPK^DBSEDIT("_cnt_")"		// post-processor     
+
+	if 'dbtbl1d.tbl.isNull() set tbl = dbtbl1d.tbl
+	else  if cnt = keys.length(",") set tbl = "["_fid_"]"	// Look-up table at bottom
+	else  set tbl = "["_fid_"]"_key_":DISTINCT"
+
+	if (+opt = 0), dbtbl1d.tbl.isNull() set tbl = tbl_":NOVAL"
+	set poke(cnt, 4) = tbl.addQuotes()
+
+	quit
+	
+	
+BUILD(Number pos)	// Position
+      
+	/*
+	Build VO(array) and %TAB(array)
+	*/
+	
+	type Public Number %PG, opt, vDESLEN
+	type Public String %READ, fid, keys, poke(), prot(), sel, vDELETE, VDFT
+	
+	type String DI, xpo
+	
+	set DI = sel.piece(",", pos)
+
+	type RecordDBTBL1D dbtbl1d = Db.getRecord("DBTBL1D", "%LIBS=""SYSDEV"",FID=:fid,DI=:DI")
+
+	set xpo = dbtbl1d.depostp
+	
+	set VDFT.piece("|", pos) = dbtbl1d.dft			// Default values
+	
+	if (dbtbl1d.des.length() > (vDESLEN - 3)) set vDESLEN = dbtbl1d.des.length() + 3
+	
+	set %READ = %READ_",["_fid_"]"_sel.piece(",", pos)_"/POS="_pos
+	if prot(pos).exists() set %READ = %READ_"/PRO" quit
+
+	if (opt > 1), (%PG > 1) set %READ = %READ_"/PRO" quit
+	if (opt > 1), (pos > keys.length(",")) set %READ = %READ_"/NOREQ" quit
+	if (opt > 1), (pos = keys.length(",")) set xpo = "do GOTO^DBSMACRO(""END"")"
+	
+	if 'poke(pos,4).get().isNull() set %READ = %READ_"/TBL="_poke(pos,4)
+	else  if 'dbtbl1d.tbl.isNull() set %READ = %READ_"/TBL="_dbtbl1d.tbl.addQuotes()
+
+	if 'dbtbl1d.deprep.isNull() set %READ = %READ_"/XPR="_dbtbl1d.deprep.addQuotes()
+
+	if poke(pos,6).exists() do {
+		
+		if xpo.isNull() set xpo = poke(pos,6)
+		else  if 'xpo.isLike("%I %") set xpo = xpo_" I 'ER "_poke(pos,6)
+		else  set xpo = poke(pos,6)_" "_xpo
+	}
+
+	if 'xpo.isNull() set %READ = %READ_"/XPP="_xpo.addQuotes()
+
+	if opt.isNull(), (pos = keys.length(",")) do {		// Delete prompt
+	
+		set %READ = %READ_",,.FUN34/NOREQ/XPP=D DELETE^DBSEDIT/VAR=vDELETE,"
+		set vDELETE="N"
+	}
+	
+	quit
+
+
+DELETE	// post processor for "delete" field
+
+	type public Boolean ER, vDFLAG, vprotdi
+	type public Number %PAGE, opt, opttmp, vni
+	type public String fid, I(), RM, X
+	
+	type String global
+	
+	quit:vprotdi
+	
+	set %ProcessMode = opt				// get access mode
+	set ER = 0					// initialize error signal
+	if X=1 do { quit:ER				// deletion mode
+		
+		if vDFLAG do {
+			set ER = 1
+			// Deletion is restricted
+			set RM = $$^MSG(806)
+		}
+		
+		set %ProcessMode = 3
+		set opttmp = 3				// set access mode
+		
+		type RecordDBTBL1 dbtbl1 = Db.getRecord("DBTBL1", "%LIBS=""SYSDEV"",FID=:fid")
+		
+		set global = dbtbl1.global
+		if ((global = "CTBL") ! (global = "UTBL")) do CHKACCES^DBSTBLM(global, .dbtbl1, 3)
+		
+		if 'ER do GOTO^DBSMACRO("END")		// go to the bottom of the screen
+		if ER set X="N"
+	}
+	
+	if (+X = 0), (opt '= 2) set (%ProcessMode, opttmp) = 1	// set modify mode
+	if (opt = 2) do GOTO^DBSMACRO("END") quit		// inquiry mode
+
+	if (%ProcessMode = 0) set I(3)=""			// Remove table lookup
+
+	// Create,Modify,Display,Delete,Print ... Record
+	set RM = $$^MSG(647)
+	set RM = RM.piece(",", %ProcessMode + 1)_" "_$$^MSG(2326)
+
+	if (%PAGE = 1), ((opt = 2) ! (opt = 5)) do {
+		set vni = vni-1					// Stay on bottom key
+		set %ProcessMode = 0
+	}
+
+	quit
+
+
+public PPK(Number keylvl)	// Key level
+	   
+	/*
+	Post Processor for all ley levels - from UTLREAD SCREEN
+	
+	Not to be called from anything else other than UTLREAD generated by
+	this procedure.
+	
+	Note that this sets the variable with the key name equal to the value
+	since there are a number of look-up tables that depend on higher order
+	keys being defined.  While this is not particularly clean, there is
+	no other option at the present without major changes to how look-ups
+	are defined and managed.
+	*/
+	
+	type public Boolean ER
+	type public Number NI, opt, opttmp, vprotdi
+	type public String %TAB(), E8, fid, fsn(), keys, RM, sel, V, vdft(), VDFT, VREC, X
+	
+	type Number I, keycnt
+
+	if X.isNull(), (+opt = 0)), (E8 = "L") set X = 0	// Treat null logical as zero
+
+	quit:X.isNull()
+	if (E8 = "N"), (X'?.N) set ER=1, RM = "Data type defined as numeric" quit 
+	set keycnt = keys.length(",")				// Total Number of keys
+
+	set X = X.trim(0)
+	
+	// Assign keyname variable the value
+	set @keys.piece(",", keylvl) = X
+	
+	set VREC.piece("|", keylvl) = X					// Assign to key value array
+	
+	// If next to last key, modify table reference for last key
+	if (keylvl + 1 = keycnt) do {
+		
+		type Number I
+		type String query, tbl, z
+		
+		set z = %TAB(NI+1).get()
+		quit:z.isNull()					// No next %TAB entry
+
+		set tbl = z.piece("|", 4).piece(":Q", 1)
+		quit:'tbl.isLike("%["_fid_"]%")
+		
+		set query = ""
+		for I = 1:1:keylvl set query = query_keys.piece(",", I)_"="""_VREC.piece("|", I)_""" AND "
+	
+		set %TAB(NI + 1).piece("|", 4) = tbl_":QU """_query.extract(1, query.length()-5)_""""
+	}
+
+	set vprotdi = 0
+	
+	// Bottom key
+	if (keylvl = keycnt) do { set V = X quit
+		
+		type Boolean defined
+		type Number I
+		type String acc, row
+		
+		set acc = ""
+		for I = 1:1:keys.length(",") set acc.piece("|", I) = VREC.piece("|", I)
+		
+		set defined = $$EXIST(fid, acc, 124, "", sel, .row)
+
+		if defined, (opt = 0) do { quit
+			set ER=1
+			// Record in file
+			set RM = $$^MSG(5651)
+		}
+		
+		if 'defined, (opt > 0) do { quit
+			set ER=1
+			// Record not in file	
+			set RM=$$^MSG(5521)
+		}
+		
+		if defined set VREC = row.translate($C(9), "|")
+			
+		// Otherwise, create VREC with key values and default values
+		else  do {
+			//set VREC = ""
+			//for I = 1:1:keycnt set VREC.piece("|", I) = vkey(I)
+			
+			for I = keycnt+1:1:VDFT.length("|") do {
+				type String dft = VDFT.piece("|", I)
+				
+				quit:dft.isNull()
+				
+				if dft?1"<<".E1">>" do {
+					set dft = dft.extract(3, dft.length()-2)
+					
+					if dft.upperCase().isLike("CUVAR.%") do {
+						
+						type String X = dft.piece(".", 2).lowerCase()
+						
+						type RecordCUVAR cuvar = Db.getRecord("CUVAR")
+						
+						set dft = cuvar.@X
+					}
+					else  do {
+						#ACCEPT DATE=12/27/04; PGM=Dan Russell; CR=unknown
+						Xecute "set dft="_dft
+					}
+				}
+				set VREC.piece("|", I) = dft
+			}
+		}
+
+		do VDA^UTLREAD					// Update Screen Image
+		do ^DBSPNT(1)					// Display Screen Image
+
+		if (opt = 3) do { quit
+			set %ProcessMode = 3
+			do GOTO^DBSMACRO("END")
+		}
+		
+		quit:(opt > 0)
+
+		if 'defined do {				// Not in database
+
+			set opttmp = 0
+			set %ProcessMode = 0
+			//do vinit^DBSFILER(fid)
+			do PROTECT^DBSMACRO("@vDELETE")		// protect the delete field
+			set vprotdi = 1
+			
+			// Create,Modify,Display,Delete,Print
+			set RM = $$^MSG(647)
+			//  Record
+			set RM = RM.piece(",", 1)_" "_$$^MSG(2326)
+		}
+		else  do {
+			do UNPROT^DBSMACRO("@vDELETE")			// unprotect the delete field
+			do DEFAULT^DBSMACRO("@vDELETE", 0, 1, 0, 1)	// set default value
+		}
+	}
+
+	if (X = V), 'VREC.piece("|", keycnt+1, 999).isNull() quit	// Don't Change
+
+	set VREC.piece("|", keylvl) = X			// reprint the current data
+	if VREC.piece("|", keylvl+1).isNull() quit	// not UP Arrow
+	set VREC = VREC.piece("|", 1, keylvl) 
+	do VDA^UTLREAD
+	do ^DBSPNT(1)					// Display data with format
+	
+	for I = keylvl+1:1:keycnt set vdft(I)=""
+	
+	set V = X					// Set previous value
+
+	quit
+
+
+public EXIST(String fid,	// File ID
+	     String acc,	// Access key value list
+	     Number del,	// $A value for acc delimiter		/NOREQ/DFT=124
+	     String fsn(),	// DQ fsn array				/NOREQ
+	     String sel,	// Select list				/NOREQ
+	     String row)	// First row				/NOREQ/MECH=REFNAM:W
+	     
+	/*
+	Returns existence of record.
+	
+	This should eventually be eliminated and Db.isDefined() used instead.
+	It remains, for now, until all callers changed.
+	The call in this procedure can then do its own result set instead of
+	having to depend on this as the single dynamic result set allowed.
+	*/
+	
+	type public Boolean ER = 0
+	type public String RM
+	
+	type Boolean RETURN
+	type Number I
+	type String key, keys, keyvals, sellist
+	
+	if del.get().isNull() set del = 124
+	
+	if 'fsn(fid).exists() do fsn^DBSDD(.fsn, fid) if ER quit ""
+	
+	set del=$C(del)
+
+	set (keyvals, sellist) = ""
+	set keys = fsn(fid).piece("|", 3)
+	for I = 1:1:keys.length(",") do { quit:ER
+		
+		type String value
+		
+		set key = keys.piece(",", I)
+		set sellist = sellist_key_","
+		set value = acc.piece(del, I)
+		if value.isNull() do {
+			set ER = 1
+			set RM="Access Key "_key_" cannot be null"
+		}
+		else  set keyvals = keyvals_key_"='"_value_"' AND "
+	}
+	if ER quit ""
+	
+	set sellist = sellist.extract(1, sellist.length() - 1)
+	if 'sel.get().isNull() set sellist = sel		// Use select list, if provided
+	
+	set keyvals = keyvals.extract(1, keyvals.length()-5)
+	
+	#ACCEPT DATE=12/27/04; PGM=Dan Russell; CR=Unknown; GROUP=DYNAMIC
+	type ResultSet rs = Db.select(sellist, fid, keyvals)
+	
+	if rs.next() do {
+		set RETURN = 1
+		set row = rs.getRow().toString()
+	}
+	
+	else  do {
+		set RETURN = 0
+		set row = ""
+	}
+	
+	quit RETURN
+
+
+public DBLQ(String X)	// Value to double quote
+
+	/*
+	Return Double Quoted X, if necessary
+	
+	Replace with use of String.addQuotes() in callers and eventually
+	eliminate this function.
+	*/
+	
+	quit X.addQuotes()
+		
+	
+addcode(Number TABS,		// Add new line to CODE array
+	String CODE)
+		
+	/*
+	ARGUMENTS:
+		. TABS		Number of tabs to add		/REQ/MECH=VAL
+		
+		. CODE		Code to add to array		/REQ/MECH=VAL
+	*/
+
+	type Public String pslcode()
+	
+	type Number I, LINENO
+	
+	set LINENO = pslcode("").order(-1) + 1 	// Add to end
+	
+	if TABS for I = 1:1:TABS set CODE=$C(9)_CODE
+	
+	set pslcode(LINENO) = CODE
+
+	quit
+	
+	
+public PROMPT
+
+	/*
+	Prompt for table name then call top to edit
+	*/
+	
+	type String VFMQ
+	
+	set VFMQ = ""
+	
+	for  do { quit:(VFMQ = "Q")
+		
+		type Number %FRAME
+		type String %NOPRMT, %READ, %TAB(), FIL
+	
+		set %TAB("FIL") = $$TBLPRMPT^DBSGETID("DBTBL1")	
+		set FIL = ""				// File name
+
+		set %READ = "@@%FN,,FIL/REQ,"
+		set %NOPRMT = "F"
+		set %FRAME = 2
+		
+		do ^UTLREAD quit: (VFMQ = "Q")
+		
+		do DBSEDIT("", FIL, "", "", "", 2)
+	}
+	
+	quit
+
+vSIG()	quit "60845^40340^Pete Chenard^20405"	// Signature - LTD^TIME^USER^SIZE

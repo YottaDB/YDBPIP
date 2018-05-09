@@ -1,0 +1,1986 @@
+SWIFTGEN // SWIFT Message Generation
+	/*
+
+	ORIG:  TSUNG TSAI (based on LESSIG -  4 JUN 1993)
+	CALLED BY:  DEALEOD
+		    EFTNDPO1
+		    EFTNDPO2
+	CALLS:  SWIFTUTL
+	DESC:  SWIFT Message Generation
+
+	Called by transaction routines, this routine creates
+	records for the SWIFT which stores all data
+	needed for SWIFT messages (types: 103, 202, 210, 300).
+	For each transaction type, there is a common structure
+	which is to load the related input file and then using
+	a message type list a common procedure creates the
+	messages.  The procedure uses the common message and
+	field table (SWIFTMSG,SWIFTFLD) as output reference to
+	SWIFT and inputs transaction type specific data specified
+	in this file labeled by a common convention.
+	Labeling Convention:
+
+	     trantype_PREPROC
+	     trantype_msgtype_PREPROC
+	     trantype_msgtype_fieldno()
+	   			.
+	   			.
+	   			.
+	     trantype_msgtype_fieldno'n'()
+	     trantype_msgtype_POSTROC
+	     trantype_POSTPROC
+
+	    - fieldno must correspond to the field format table
+	    - after trantype_msgtype_POSTPROC has been called the
+	      main routine supposes the following variables are set
+	      by one of the message routines (preproc,fieldprocs,
+	      postproc) : RECEIVER,PRIORITY,TRREFNO,QUEDATE .
+
+	   ARGUMENTS:
+	   	. TRANTYPE 	Transaction Type (Deal/Nondoc/...)
+	   	. TRANID1  	Transaction Identifier 1
+	   	. TRANID2 	Transaction Identifier 1
+	   	. MSGLIS  	Message Type List (optional)
+	        		delimiter: "," $C(44)
+	   	. fEFTPAY  	Electronic Payment File (optional)
+
+
+	   GLOBALS -
+	       READ:  TRANFILE (DEAL1/EFTPAY/...)
+	        SET:  SWIFT
+
+	---- Revision History -------------------------------------------------
+
+	02/13/06 - KELLYP - CR 16664
+		   Modified to set up TRREFNO variable for use in several
+		   sections and modified MAIN section to call POST sections
+		   appropriately depending on Deal/Eftpay type.
+
+	01/23/06 - KELLYP - CR 18292
+		   Modified the entire procedure to eliminate indirection where
+		   possible.  The old programming methodology used was 
+		   inefficient and was not robust enough under PSL to support 
+		   the retrofit of the deal (D*) sections which were apparently 
+		   removed at some point & needed to be added back.  
+		   
+		   The old version of this procedure used labels based on the 
+		   SWIFT message field number (e.g., E103F23 is field 23 for
+		   the MT103 and was generated from an EFTPAY record), called
+		   these labels via indirection, and after each call, called
+		   the SWIFTFLD section (which has been removed) to populate the
+		   correct piece(s) of the SWIFT fsn array.  The code now simply
+		   calls into each field label and sets the correct SWIFT
+		   column(s) directly instead of setting the column(s) via
+		   indirection.
+
+	10/06/05 - KELLYP - CR 17050
+		   Modified TRANS section not to quit returning a value as it
+		   is not an extrinsic function.  Also modified SWACK section
+		   to prevent an undefined error on the TMP variable.  Also
+		   modified DOTRANS section to correct several problems with
+		   translating SWIFT characters.
+
+	09/07/05 - KELLYP - CR 17118
+		   Removed all reference to the MT100 message which has been
+		   obsoleted by SWIFT.  Removed all E100* sections and copied
+		   code over from some of these sections which were used in
+		   some of the E103* sections.  
+	
+        07/26/05 - SkariahV- CR16679
+	           Removed #WARN and #OPTIMIZE directives.
+	              
+	10/24/03 - CARROLJ - 51630
+		   Modified procedure to accept eftpay object in linetag NDPO
+		   instead of swift and correct passing of objects throughout.
+
+	06/11/03 - DATTAR - 51351
+		   Converted to PSL
+
+	-------------------------------------------------------------------------------------
+
+	*/
+	
+	quit
+
+
+public DEAL(Number DEALNO,RecordDEAL1 deal1)
+
+	type Date value
+	type String currency,PRIORITY,RECEIVER,TRREFNO
+
+	set TRREFNO=deal1.trrefno
+
+	do MAIN(,"D",DEALNO,,,"",.deal1)
+	
+	quit
+
+	
+public NDPO(Number CID,Number SEQ,String MSGLIST,RecordEFTPAY eftpay)	//
+
+	/*
+
+	   ARGUMENTS:
+
+	   . CID  	Account Number		 	/REQ/NONULL/MECH=VAL
+	   . SEQ  	Sequence Number		 	/REQ/NONULL/MECH=VAL
+	   . MSGLIST 	Message				/NOREQ/NONULL/MECH=VAL
+	   . eftpay	EFTPAY object			/REQ/NONULL/MECH=REF
+
+	*/
+
+	type public Number ONLY103,ONLY202
+	
+	type String STATUS,SWIFTDT,temp54,temp72,TRREFNO
+		
+	set MSGLIST=MSGLIST.get()
+	set TRREFNO=eftpay.refno
+
+	if MSGLIST="103" set ONLY103=1
+	if MSGLIST="202" set ONLY202=1
+
+	do MAIN(.eftpay,"E",,CID,SEQ,MSGLIST)
+	
+	quit
+
+
+MAIN(RecordEFTPAY eftpay,String TRANTYPE,Number NO,String CID,Number SEQ,String MSGLIST,RecordDEAL1 deal1)
+	
+	/*
+	   ARGUMENTS:
+	   . eftpay	EFTPAY object			/REQ/NONULL/MECH=REF
+	   . TRANTYPE	Transcation type		/REQ/NONULL/MECH=VAL
+	   . NO  	Contract Number		 	/NOREQ/MECH=VAL
+	   . CID  	Account Number		 	/NOREQ/MECH=VAL
+	   . SEQ  	Sequence Number		 	/NOREQ/MECH=VAL
+	   . MSGLIST 	Message				/NOREQ/MECH=VAL
+	*/
+
+	type public String OPTION,PRIORITY,RECEIVER,SENDER,SWDIRECT,TRREFNO
+	type public Number MSGTYPE
+
+	type String field,fieldprc,J,msgloc,msgpost,msgpre,NODATA,varlist
+
+	set NODATA=""
+
+	if TRANTYPE="E" do {
+		if 'eftpay.exists() set eftpay=Db.getRecord("EFTPAY","CID=:CID,SEQ=:SEQ")
+		do EPRE(.eftpay,.MSGLIST)
+		}
+	else  if TRANTYPE="D" do {
+		if 'deal1.exists() set deal1=Db.getRecord("DEAL1","NOINT=:NO")
+		do DPRE(.deal1,.MSGLIST)
+		}
+
+	for msgloc=1:1 do { quit:MSGTYPE.isNull()
+		set MSGTYPE=MSGLIST.piece(",",msgloc) 
+
+		if MSGTYPE.isNull() quit
+		set SWDIRECT="OUT"
+
+		type RecordSWIFT swift=Db.getRecord("SWIFT","SWDIRECT=:SWDIRECT,TRREFNO=:TRREFNO,MSG=:MSGTYPE",1)
+
+		set msgpre=TRANTYPE_MSGTYPE_"PRE"
+		if TRANTYPE="E" set msgpre=msgpre_"(.eftpay)"
+		if TRANTYPE="D" set msgpre=msgpre_"(.deal1)"
+		do @msgpre
+
+		type DbSet dsmsg=Db.selectDbSet("STBLSWMSG","MSGTYPE=:MSGTYPE","SEQ ASC")
+		while dsmsg.next() do {
+			
+			type RecordSTBLSWMSG stblsmsg=dsmsg.getRecord("STBLSWMSG")
+			if 'stblsmsg.field quit
+
+			set field=(stblsmsg.field).piece(":",1)
+			set fieldprc=TRANTYPE_MSGTYPE_"F"_field
+
+			if TRANTYPE="E" set fieldprc=fieldprc_"(.eftpay,.swift)"
+			if TRANTYPE="D" set fieldprc=fieldprc_"(.deal1,.swift)"
+			
+			do @fieldprc
+			}
+
+		// header (sender,receiver,priority)
+				
+		set swift.sndr=SENDER.get()
+		set swift.rcvr=RECEIVER.get()
+		set swift.priority=PRIORITY.get()
+		set msgpost=TRANTYPE_MSGTYPE_"POST"
+		
+		if TRANTYPE="E" set msgpost=msgpost_"(.eftpay,.swift)"
+		if TRANTYPE="D" set msgpost=msgpost_"(.deal1,.swift)"
+		
+		do @msgpost		
+		do FILE(.swift)
+		}
+
+	quit
+
+EPRE(RecordEFTPAY eftpay,String MSGLIST)	// Clean payment transactions.
+
+
+	type public String CID,PRIORITY,procdt,SCMSG,SENDER
+	type public Number repr,SEQ,ONLY103,ONLY202
+	type public Date value
+	type Date today
+
+	// Process Date
+	set procdt=eftpay.procdt
+
+	// Priority (Non-Documentary)
+	set PRIORITY=eftpay.pri2
+
+	set today=%SystemDate
+
+	set value=eftpay.efd
+	set value=value.toString("YYMMDD")
+
+	set SENDER=CUVAR.SWIFTADD
+
+	/*
+	   If no message specified build the list by system
+	   If sender's correspondent is the receiver, no 202 is needed
+	   If loro account was used, no 202 is needed
+	*/
+
+	if (MSGLIST'["103") set SCMSG="103"
+	else  set SCMSG=MSGLIST.piece(",",1)
+
+	// Payment Exchange Rate
+	if ((eftpay.recv)=(eftpay.sendcorr))!(eftpay.intext=0) set MSGLIST=SCMSG
+	else  set MSGLIST=SCMSG_",202"
+
+	if ONLY103.get()=1 set MSGLIST="103"
+	if ONLY202.get()=1 set MSGLIST="202"
+	
+	set repr=eftpay.repair
+	quit
+
+
+E103PRE(RecordEFTPAY eftpay)	// Single Customer Credit Transfer - MT103
+
+	type public String RECEIVER
+	
+	// Receiver (Destination)
+	if '(eftpay.recv).isNull() set RECEIVER=eftpay.recv
+	quit
+
+
+E103F13C(RecordEFTPAY eftpay,RecordSWIFT swift)	// Time Indication Codes
+
+	quit
+
+
+E103F20(RecordEFTPAY eftpay,RecordSWIFT swift)	// Transaction Reference Number
+
+	type public String TRREFNO
+
+	set swift.trnofmt=TRREFNO
+
+	quit
+
+
+E103F23B(RecordEFTPAY eftpay,RecordSWIFT swift)	// Bank Operation Code
+
+	set swift.bankop=eftpay.bankop
+
+	quit
+
+
+E103F23E(RecordEFTPAY eftpay,RecordSWIFT swift)	// Instruction Codes
+
+	quit
+
+
+E103F26T(RecordEFTPAY eftpay,RecordSWIFT swift)	// Transaction Type Code
+
+	set swift.trntypcd=eftpay.trntypcd
+
+	quit
+
+
+E103F32A(RecordEFTPAY eftpay,RecordSWIFT swift)	// Value Date, Currency Code, Amount
+
+	type public String value
+
+	type Number amt,FREEPTR,RCVRCHG
+	type String amount,crcd,RCVRCHGC
+	
+	// Anticipated Payment Exchange Rate
+	if eftpay.setcrcd=1 do {
+		set crcd=CUVAR.emucrcd
+		set amt=eftpay.euramt
+		}
+	else  do {
+		set crcd=eftpay.crcd
+		set amt=eftpay.amount
+		}
+
+	// Receiver's Charge
+	set RCVRCHG=eftpay.rcvrchg
+
+	// Currency of Receiver's Charge
+	set RCVRCHGC=eftpay.rcvrchgc
+
+	// SWIFT Free Format Field Pointer Ref.
+	set FREEPTR=eftpay.freeptr
+
+	// Include sender's charges and receiver's charges in amount
+	if ('RCVRCHG.isNull())!('FREEPTR.isNull()) set amt=$$ADDCHGS(amt,crcd,RCVRCHG,RCVRCHGC,FREEPTR) 
+
+	set amount=value_crcd_$$AMTCONV(amt,crcd)
+	
+	set swift.vcas2=amount
+	
+	quit
+
+
+E103F33B(RecordEFTPAY eftpay,RecordSWIFT swift)	// Currency/Instructed Amount
+	/*
+	 33B is not used if no receiver's or sender's charges
+	 Receiver's Charge
+	*/
+	
+	type String orgamt
+	
+	if ($$MULT2^SWIFTCDI("OUT",eftpay.freeptr,"71F")=""),'(eftpay.rcvrchg) quit
+	
+	/*
+	 The instructed amount equals 32A less any receiver's charges
+	 plus any sender's charges
+	 Anticipated Payment Exchange Rate
+	*/
+	
+	if eftpay.antrate=1 do {
+
+		// Related Reference Number
+		set orgamt=eftpay.relrefno
+		set orgamt=$$AMTCONV(orgamt,CUVAR.emucrcd)
+		set orgamt=CUVAR.emucrcd_orgamt
+		}
+
+	// Transaction Reference Number
+	if eftpay.setcrcd'=1 set orgamt=eftpay.crcd_$$AMTCONV(eftpay.amount,eftpay.crcd)
+
+	set swift.vcas=orgamt
+
+	quit
+
+
+E103F36(RecordEFTPAY eftpay,RecordSWIFT swift)	// Exchange Rate (only used in conjunction with 33B)
+
+	set swift.rate=eftpay.swrate
+
+	quit
+	
+
+E103F50(RecordEFTPAY eftpay,RecordSWIFT swift)	// Ordering Customer
+
+	if '(eftpay.ord).isNull() do { quit
+		set swift.ordtyp="A"
+		set swift.ordacc="/"_eftpay.ordacc
+		set swift.ord=eftpay.ord
+		}
+
+	set swift.ordtyp="K"
+	set swift.ordacc="/"_eftpay.ordacc
+	set swift.ord1=eftpay.ord1
+	set swift.ord2=eftpay.ord2
+	set swift.ord3=eftpay.ord3
+	set swift.ord4=eftpay.ord4
+
+	quit
+
+E103F51(RecordEFTPAY eftpay,RecordSWIFT swift)	// Sending Institution
+
+	if 'eftpay.sendinst.isNull() do {
+		set swift.sendtyp="A"
+		set swift.sndracc="/"_eftpay.sndrp
+		set swift.sendinst=eftpay.sendinst
+		}
+
+	quit
+
+E103F52(RecordEFTPAY eftpay,RecordSWIFT swift)	// Ordering Institution
+
+	// Ordering Institution
+	if 'eftpay.ordinst.isNull() do { quit
+		set swift.ordtype="A"
+		set swift.ordinacc="/"_eftpay.ordp
+		set swift.ordinst=eftpay.ordinst
+		}
+	
+	// Ordering Institution Line 1
+	if 'eftpay.ordinst1.isNull() do {
+		set swift.ordtype="D"
+		set swift.ordinacc="/"_eftpay.ordp
+		set swift.ordinst1=eftpay.ordinst1
+		set swift.ordinst2=eftpay.ordinst2
+		set swift.ordinst3=eftpay.ordinst3
+		set swift.ordinst4=eftpay.ordinst4
+		}
+
+	quit
+	
+
+E103F53(RecordEFTPAY eftpay,RecordSWIFT swift)	// Sender's Correspondent
+
+	type Boolean QUIT = 0
+
+	/*
+	 If the sender's correspondent is the receiver, then send the account
+	 number under field 53 option "B"; unless there is only one account
+	 relationship between the two banks, then no field 53 is needed.
+	*/
+
+	if (eftpay.recv)=(eftpay.sendcorr) do {  quit:QUIT
+
+		// Vostro account was used, so quit, as field 54B compensates
+		if eftpay.intext=0 quit
+		
+		/*
+		 Nostro account was used, but only send if multiple nostros
+		 are serviced by the receiver
+		*/
+		
+		if '$$SCANXNOS^NOSTTRF(eftpay.sendnos) set QUIT=1 quit
+		
+		type RecordDEP dep=Db.getRecord("DEP","CID=:eftpay.sendnos",1)
+		
+		// Nostro account number at receiver institution
+		if dep.correacn.isNull() quit
+		
+		set swift.sndrtype="B"
+		set swift.sndcracc="/"_dep.correacn
+		set QUIT=1
+		}
+	
+	set swift.sndrtype="A"
+	set swift.sndrcorr=eftpay.sendcorr
+		
+	// Sender's Correspondent Party Identifier
+	if 'eftpay.sndrcorp.isNull() set swift.sndcracc="/"_eftpay.sndrcorp
+	
+	quit
+
+E103F54(RecordEFTPAY eftpay,RecordSWIFT swift)	// Receiver's Correspondent
+
+	type public String temp54
+
+	set temp54=""
+
+	if eftpay.intext=0 do {
+		set swift.rcvrtype="B"
+		set swift.rcvcracc="/"_eftpay.recacct
+		}
+	else  do {
+		// In PROFILE it always knows the SWIFT address
+		set swift.rcvrtype="A"
+		set swift.rcvrcorr=eftpay.recvcorr
+		if 'eftpay.rcvrcorp.isNull() set swift.rcvcracc="/"_eftpay.rcvrcorp
+		set temp54=eftpay.recvcorr
+		}
+
+	quit
+
+E103F55(RecordEFTPAY eftpay,RecordSWIFT swift)	// Third Reimbursement Institution
+
+	if 'eftpay.trib.isNull() do {  quit
+		set swift.trityp="A"
+		set swift.tri="/"_eftpay.trip
+		set swift.trib=eftpay.trib
+		}
+	
+	if 'eftpay.triadd1.isNull() do {
+		set swift.trityp="D"
+		set swift.tri="/"_eftpay.trip
+		set swift.triadd1=eftpay.triadd1
+		set swift.triadd2=eftpay.triadd2
+		set swift.triadd3=eftpay.triadd3
+		set swift.triadd4=eftpay.triadd4
+		}
+
+	quit
+
+E103F56(RecordEFTPAY eftpay,RecordSWIFT swift)	// Intermediary
+
+	do E103F156(.eftpay,.swift)
+
+	quit
+
+E103F156(RecordEFTPAY eftpay,RecordSWIFT swift)	// Intermediary
+
+	// Intermediary
+	if 'eftpay.inter.isNull() do {  quit
+		set swift.intstype="A"
+		set swift.intsacc="/"_eftpay.interp
+		set swift.ints=eftpay.inter
+		}
+
+	// Intermediary Line 1
+	if 'eftpay.inter1.isNull() do {
+		set swift.intstype="D"
+		set swift.intsacc="/"_eftpay.interp
+		set swift.ints1=eftpay.inter1
+		set swift.ints2=eftpay.inter2
+		set swift.ints3=eftpay.inter3
+		set swift.ints4=eftpay.inter4
+		}
+
+	quit
+
+E103F57(RecordEFTPAY eftpay,RecordSWIFT swift)	// Account w/ Institution
+
+	do E103F157(.eftpay,.swift)
+
+	quit
+
+E103F157(RecordEFTPAY eftpay,RecordSWIFT swift)	// Account w/ Institution
+
+	if 'eftpay.beninst.isNull() do {  quit
+		set swift.accstype="A"
+		set swift.accsacc="/"_eftpay.beninstp
+		set swift.send=eftpay.beninst
+		}
+
+	if 'eftpay.beninstl.isNull() do {  quit
+		set swift.accstype="B"
+		set swift.accsacc="/"_eftpay.beninstp
+		set swift.send1=eftpay.beninstl
+		}
+	
+	if ('eftpay.beninstp.isNull())&(eftpay.beninst1.isNull()) do {  quit
+		set swift.accstype="C"
+		set swift.accsacc="/"_eftpay.beninstp
+		}
+
+	if 'eftpay.beninst1.isNull() do {
+		set swift.accstype="D"
+		set swift.send1=eftpay.beninst1
+		set swift.send2=eftpay.beninst2
+		set swift.send3=eftpay.beninst3
+		set swift.send4=eftpay.beninst4
+		}
+
+	quit
+
+E103F59(RecordEFTPAY eftpay,RecordSWIFT swift)	// Beneficiary Customer
+
+
+	// Beneficiary Institution
+	if 'eftpay.ben.isNull() do {  quit
+		set swift.bentyp="A"
+		set swift.bnfcry="/"_eftpay.benacn
+		set swift.ben=eftpay.ben
+		}
+
+	// No letter option
+	set swift.bentyp=""
+	set swift.bnfcry="/"_eftpay.benacn
+	set swift.benad1=eftpay.benad1
+	set swift.benad2=eftpay.benad2
+	set swift.benad3=eftpay.benad3
+	set swift.benad4=eftpay.benad4
+	
+	quit
+
+E103F70(RecordEFTPAY eftpay,RecordSWIFT swift)	// Remittance Information (formerly Details of Payment)
+
+	set swift.dtlpmt1=eftpay.msg1
+	set swift.dtlpmt2=eftpay.msg2
+	set swift.dtlpmt3=eftpay.msg3
+	set swift.dtlpmt4=eftpay.msg4
+
+	quit
+
+E103F71A(RecordEFTPAY eftpay,RecordSWIFT swift)	// Details of Charges
+
+	set swift.dtlchgs=eftpay.feepayor
+
+	quit
+
+E103F71F(RecordEFTPAY eftpay,RecordSWIFT swift)	// Sender's Charges
+
+	quit
+
+
+E103F71G(RecordEFTPAY eftpay,RecordSWIFT swift)	// Receiver's Charges
+
+	// Receiver's Charge
+	if 'eftpay.rcvrchg quit
+
+	set swift.rcvrchg=eftpay.rcvrchgc_eftpay.rcvrchg
+
+	quit
+
+E103F72(RecordEFTPAY eftpay,RecordSWIFT swift)	// Sender to Receiver Information
+
+	// Sender to Receiver (if messages exist)
+
+	type public Boolean RETURN
+	type public String MSGLIST,temp72
+
+	type Number EXCAMT
+	type String feecrcd,feetmp,info1,info2,info3,info4,info5,info6,oldcrcd,tmp
+		
+	// Foreign Payment Message 1
+	set info1=eftpay.msgfp1
+	
+	set temp72=""
+
+	// Recalc OCMT value on returned MT103
+	if (info1["/OCMT/"),(RETURN.get()) do {
+
+		// "To" Currency
+		set oldcrcd=info1.piece("/OCMT/",2).extract(1,3)
+		
+		if (eftpay.amount.isNull())!(eftpay.crcd.isNull())!(oldcrcd.isNull()) quit
+		
+		// Convert
+		do EXC^CRCDUTL(eftpay.crcd,oldcrcd,eftpay.amount,1,0,00)
+		
+		if EXCAMT.get().isNull() quit
+		
+		// Round
+		set EXCAMT=EXCAMT.roundDec(2)
+		
+		if EXCAMT["." set EXCAMT=EXCAMT.piece(".",1)_","_EXCAMT.piece(".",2)
+		set tmp="/OCMT/"_oldcrcd_EXCAMT_"/"
+		
+		// Do same for charges
+		if info1["/CHGS/" do {
+		
+			// Return Fee Amount
+			// set feeamt=eftpay.rtnfeeamt
+		
+			// Return Fee Currency
+			set feecrcd=eftpay.rtnfeecrcd
+		
+			// Fee Currency
+			if feecrcd.isNull() set feecrcd=eftpay.feecrcd
+			
+			set oldcrcd=info1.piece("/CHGS/",2).extract(1,3)
+			
+			if eftpay.rtnfeeamt.isNull()!(oldcrcd.isNull()) quit
+		
+			// Kill old amount
+			kill EXCAMT
+
+			do EXC^CRCDUTL(feecrcd,oldcrcd,eftpay.rtnfeeamt,1,0,00)
+
+			if EXCAMT.get().isNull() quit
+
+			set EXCAMT=$$^SCARND(EXCAMT,2)
+
+			if EXCAMT["." set EXCAMT=EXCAMT.piece(".",1)_","_EXCAMT.piece(".",2)
+
+			set feetmp="/CHGS/"_oldcrcd_EXCAMT_"/"
+			}
+			
+		set info1=tmp_feetmp.get()
+		}
+
+	set info2=eftpay.msgfp2
+	if ('info2.isNull())&(info2.extract(1)'="/") set info2="//"_info2
+	set info3=eftpay.msgfp3
+	if ('info3.isNull())&(info3.extract(1)'="/") set info3="//"_info3
+	set info4=eftpay.msgfp4
+	if ('info4.isNull())&(info4.extract(1)'="/") set info4="//"_info4
+	set info5=eftpay.msgfp5
+	if ('info5.isNull())&(info5.extract(1)'="/") set info5="//"_info5
+	set info6=eftpay.msgfp6
+	if ('info6.isNull())&(info6.extract(1)'="/") set info6="//"_info6
+
+	if MSGLIST.get()="103,202" do {
+		type String tempstr
+		set tempstr=info1.extract(1,5)
+		if ((tempstr="/RCB/")!(tempstr="/rcb/")) do {
+			set temp72=info1.extract(6,info1.length())
+			}
+		}
+
+	set swift.by1=info1
+	set swift.by2=info2
+	set swift.by3=info3
+	set swift.by4=info4
+	set swift.by5=info5
+	set swift.by6=info6
+
+	quit
+
+E103F77B(RecordEFTPAY eftpay,RecordSWIFT swift)	// Regulatory Reporting
+
+	set swift.regrep1=eftpay.regrep1
+	set swift.regrep2=eftpay.regrep2
+	set swift.regrep3=eftpay.regrep3
+
+	quit
+
+E103F77T(RecordEFTPAY eftpay,RecordSWIFT swift)	// Extended Remittance
+
+	quit
+
+E103POST(RecordEFTPAY eftpay,RecordSWIFT swift)	// MT103 Post Processor
+
+	type public Number STATUS
+	type public Date SWFTDT
+
+	// Receiver window lines (telex address)
+	if eftpay.exists() do {
+		set swift.rcvr1=eftpay.recv1
+		set swift.rcvr2=eftpay.recv2
+		set swift.rcvr3=eftpay.recv3
+		set swift.rcvr4=eftpay.recv4
+		set swift.rcvr5=eftpay.recv5
+		set swift.rcvr6=eftpay.recv6
+		}
+
+	set STATUS=$Select('swift.rcvr.isNull():0,1:7)
+	set SWFTDT=%SystemDate
+
+	/*
+	 FREEPTR reference to SWFREE (for 23E, 71F, and 77T)
+	 SWIFT Free Format Field Pointer Ref.
+	*/
+	if 'eftpay.freeptr.isNull() set swift.freeptr=eftpay.freeptr
+
+	quit
+
+
+E202PRE(RecordEFTPAY eftpay)	// MT202 Pre-Processor
+
+	type public String RECEIVER
+
+	// Sender's Correspondent
+	set RECEIVER=eftpay.sendcorr
+
+	quit
+
+E202F13C(RecordEFTPAY eftpay,RecordSWIFT swift)	// Time Instruction Codes
+
+	quit
+
+E202F20(RecordEFTPAY eftpay,RecordSWIFT swift)	// Transaction Reference Number
+
+	type public String TRREFNO
+
+	set swift.trnofmt=TRREFNO
+
+	quit
+
+E202F21(RecordEFTPAY eftpay,RecordSWIFT swift)	// Related Reference
+
+	type public String RETURN,TRREFNO
+
+	if RETURN.get() set swift.relref=eftpay.relrefno
+	else  set swift.relref=TRREFNO
+
+	quit
+	
+E202F32A(RecordEFTPAY eftpay,RecordSWIFT swift)	// Value date, Currency code, Amount
+
+	type public Date value
+
+	type Boolean FREEPTR
+	type Number amt,RCVRCHG
+	type String crcd,FREEPTR,RCVRCHGC
+
+	if eftpay.setcrcd=1 do {
+		set amt=eftpay.euramt
+		set crcd=CUVAR.emucrcd
+		}
+	else  do {
+		set amt=eftpay.amount
+		set crcd=eftpay.crcd
+		}
+
+	// Receiver's Charge
+	set RCVRCHG=eftpay.rcvrchg
+
+	// Currency of Receiver's Charge
+	set RCVRCHGC=eftpay.rcvrchgc
+
+	// SWIFT Free Format Field Pointer Ref.
+	set FREEPTR=eftpay.freeptr
+
+	// Include sender's charges and receiver's charges in amount
+	if ('RCVRCHG.isNull())!('FREEPTR.isNull()) set amt=$$ADDCHGS(amt,crcd,RCVRCHG,RCVRCHGC,FREEPTR)
+
+	set swift.vcas2=value_crcd_$$AMTCONV(amt,crcd)
+	
+	quit
+
+E202F52(RecordEFTPAY eftpay,RecordSWIFT swift)	// Ordering Customer (for incomming msg only)
+
+	quit
+
+E202F53(RecordEFTPAY eftpay,RecordSWIFT swift)	// Sender's Correspondent (for incomming msg only)
+	/*
+	 Nostro account was used, but only send if multiple nostros
+	 are serviced by the correspondent
+	*/
+
+	type public Number extcid,intext,nostro
+	type public String OPTION
+
+	if eftpay.intext=0 quit
+
+	if eftpay.sendnos.isNull() quit
+
+	if '$$SCANXNOS^NOSTTRF(eftpay.sendnos) quit
+
+	// Nostro account number at receiver institution
+	type RecordDEP dep=Db.getRecord("DEP","CID=:eftpay.sendnos",1)
+	if dep.correacn.isNull() quit
+	
+	set swift.sndrtype="B"
+	set swift.sndrcorr1="/"_dep.correacn
+
+	quit
+
+E202F54(RecordEFTPAY eftpay,RecordSWIFT swift)	// Receiver's Correspondent
+
+	type public String temp72
+
+	if 'temp72.exists() do {  quit
+		set swift.rcvrtype="A"
+		set swift.rcvrc1=eftpay.recvcorr
+		}
+
+	quit
+
+E202F56(RecordEFTPAY eftpay,RecordSWIFT swift)	// Intermediary
+
+	quit
+
+E202F57(RecordEFTPAY eftpay,RecordSWIFT swift)	// Account With Institution
+
+	quit
+
+E202F156(RecordEFTPAY eftpay,RecordSWIFT swift)	// Intermediary
+
+	type public String OPTION,temp54,temp72
+
+	if temp72.exists() do {  quit
+		set swift.intstype="A"
+		set swift.ints=temp54.get()
+		set eftpay.inter=temp54.get() 
+		}
+
+	quit
+
+E202F157(RecordEFTPAY eftpay,RecordSWIFT swift)	// Receiver's Correspondent
+
+	type public String temp72
+
+	if temp72.exists() set eftpay.recvcorr=temp72
+	
+	// Receiver's Correspondent
+	if eftpay.recvcorr.isNull() quit
+	
+	set swift.accstype="A"
+	set swift.send=eftpay.recvcorr
+
+	quit	
+	
+E202F58(RecordEFTPAY eftpay,RecordSWIFT swift)	// Beneficiary Institution - receiver of MT103
+
+	// Receiver (Destination)
+	if 'eftpay.recv.isNull() do {  quit
+		set swift.benopt="A"
+		set swift.beninst=eftpay.recv
+		}
+
+	set swift.benopt="D"
+	set swift.beninst1=eftpay.recv1
+	set swift.beninst2=eftpay.recv2
+	set swift.beninst3=eftpay.recv3
+	set swift.beninst4=eftpay.recv4
+
+	quit
+
+E202F72(RecordEFTPAY eftpay,RecordSWIFT swift)	// Sender to Receiver Information
+	/*
+	 Sender to Receiver (if messages exist)
+	 Field 72 on MT202 should be null if both msg's are being generated
+	*/
+
+	type public String MSGLIST
+
+	if MSGLIST.get()="103,202" quit
+
+	set swift.by1=eftpay.msgfp1
+	set swift.by2=eftpay.msgfp2
+	set swift.by3=eftpay.msgfp3
+	set swift.by4=eftpay.msgfp4
+	set swift.by5=eftpay.msgfp5
+	set swift.by6=eftpay.msgfp6
+
+	quit
+	
+E202POST(RecordEFTPAY eftpay,RecordSWIFT swift)	// General Financial Institution Transfer - MT202
+
+	type public String STATUS
+	type public Date SWFTDT
+
+	set STATUS=$Select('swift.rcvr.isNull():0,1:7)
+	set SWFTDT=%SystemDate
+
+	quit
+	
+
+DPRE(RecordDEAL1 deal1, String MSGLIST)
+
+	type public Date value
+	type public String currency
+
+	set value=deal1.vdt
+	set value=value.toString("YEARMMDD")
+	set currency=deal1.crcds
+
+	if MSGLIST.isNull() do {
+		if deal1.mt202flg set MSGLIST="202"
+		}
+	else  do {
+		if deal1.mt210flg set MSGLIST=$S(MSGLIST.length()<0:MSGLIST_",210",1:"210")
+		if deal1.mt300flg set MSGLIST=$S(MSGLIST.length()<0:MSGLIST_",300",1:"300")
+		}
+
+	quit
+
+D202PRE(RecordDEAL1 deal1)
+
+	type public String PRIORITY,RECEIVER
+
+	if deal1.paidbys set RECEIVER=deal1.paidbys
+	else  set RECEIVER=deal1.paidbys1
+	
+	set PRIORITY=deal1.mt202pri
+	
+	quit
+
+D202F13C(RecordDEAL1 deal1,RecordSWIFT swift)      // Time Indication Codes
+
+	quit
+
+D202F20(RecordDEAL1 deal1,RecordSWIFT swift)       // Transaction Reference Number
+	
+	set swift.trnofmt=deal1.trrefno
+
+	quit
+
+D202F21(RecordDEAL1 deal1,RecordSWIFT swift)       // Related Reference
+
+	set swift.relref=deal1.noext
+
+	quit
+
+D202F32A(RecordDEAL1 deal1,RecordSWIFT swift)      // Value date,Currency,Amount
+
+	type public Date value
+	type public String currency
+
+	set swift.vcas2=value_currency_$$AMTCONV(deal1.amts,currency)
+	
+	quit
+
+D202F52(RecordDEAL1 deal1,RecordSWIFT swift)       // Ordering customer (for incomming msg only)
+
+	quit
+
+D202F53(RecordDEAL1 deal1,RecordSWIFT swift)       // Sender's Correspondent (for incomming msg only)
+
+	quit
+
+D202F54(RecordDEAL1 deal1,RecordSWIFT swift)       // Receiver's Correspondent
+
+	set swift.rcvrtype=deal1.recvcorropt
+
+	if 'deal1.recvcorr.isNull() do {  quit
+		set swift.rcvrcorr=deal1.recvcorr	// 54A
+		}
+	
+	set swift.rcvrc1=deal1.recv1	// 54D
+	set swift.rcvrc2=deal1.recv2
+	set swift.rcvrc3=deal1.recv3
+	set swift.rcvrc4=deal1.recv4
+
+	quit
+
+D202F58(RecordDEAL1 deal1,RecordSWIFT swift)	// Beneficiary Institution
+
+	quit
+
+D202F72(RecordDEAL1 deal1,RecordSWIFT swift)	// Sender to Receiver Information
+
+	type String info1,info2,info3,info4,info5,info6
+
+	type RecordDEALMSG3 dealmsg3=Db.getRecord("DEALMSG3","NOINT=:deal1.noint,MSG=6",1)
+	
+	set info1=dealmsg3.msg1
+	set info2=dealmsg3.msg2 if ('info2.isNull()),(info2.extract(1)'="/") set info2="//"_info2
+	set info3=dealmsg3.msg3 if ('info3.isNull()),(info3.extract(1)'="/") set info3="//"_info3
+	set info4=dealmsg3.msg4 if ('info4.isNull()),(info4.extract(1)'="/") set info4="//"_info4
+	set info5=dealmsg3.msg5 if ('info5.isNull()),(info5.extract(1)'="/") set info5="//"_info5
+	set info6=dealmsg3.msg6 if ('info6.isNull()),(info6.extract(1)'="/") set info6="//"_info6
+	
+	set swift.by1=info1
+	set swift.by2=info2
+	set swift.by3=info3
+	set swift.by4=info4
+	set swift.by5=info5
+	set swift.by6=info6
+
+	quit
+        
+D202F156(RecordDEAL1 deal1,RecordSWIFT swift)
+
+	if 'deal1.inters.isNull() do {  quit
+		set swift.intstype="A"
+		set swift.ints=deal1.inters
+		}
+
+	set swift.intstype="D"
+	set swift.ints1=deal1.inters1
+	set swift.ints2=deal1.inters2
+	set swift.ints3=deal1.inters3
+	set swift.ints4=deal1.inters4
+
+	quit
+
+D202F157(RecordDEAL1 deal1,RecordSWIFT swift)
+
+	set swift.accstype=deal1.paytosopt
+	
+	if swift.accstype="A" do {  quit
+		set swift.send=deal1.paytos
+		}
+	
+	if swift.accstype="B" do {  quit
+		set swift.send1=deal1.paytos1
+		}
+
+	if swift.accstype="D" do {  quit
+		set swift.send1=deal1.paytos1
+		set swift.send2=deal1.paytos2
+		set swift.send3=deal1.paytos3
+		set swift.send4=deal1.paytos4
+		}
+
+	quit
+	
+D202POST(RecordDEAL1 deal1,RecordSWIFT swift)
+
+	type public Date SWFTDT
+	type public Number STATUS
+
+	set STATUS=$Select('swift.rcvr.isNull():0,1:7)
+	set swift.noint=deal1.noint
+	set SWFTDT=deal1.sdt
+
+	quit
+
+D210PRE(RecordDEAL1 deal1) // Notice to Receive SWIFT Message - MT210.
+
+	type public String PRIORITY,RECEIVER
+
+	if 'deal1.corrercv.isNull() set RECEIVER=deal1.corrercv
+	else  set RECEIVER=deal1.paidbyb
+	
+	set PRIORITY=deal1.mt210pri
+	
+	quit
+
+D210F20(RecordDEAL1 deal1,RecordSWIFT swift)	// Transaction Reference Number
+
+	set swift.trnofmt=deal1.trrefno
+	
+	quit
+
+
+D210F21(RecordDEAL1 deal1,RecordSWIFT swift)	// Related Reference
+
+	set swift.relref=deal1.noext
+
+	quit
+
+D210F25(RecordDEAL1 deal1,RecordSWIFT swift)	// Account Identification
+
+	if '$$SCANXNOS^NOSTTRF(deal1.nostrob) quit
+	
+	type RecordDEP dep=Db.getRecord("DEP","CID=:deal1.nostrob",1)
+	
+	if ('dep.getMode())!(dep.correacn.isNull()) quit
+	
+	set swift.acctid=dep.correacn
+	
+	quit
+
+D210F30(RecordDEAL1 deal1,RecordSWIFT swift)	// Value date
+
+	type public Date value
+
+	set swift.tdt=value
+
+	quit
+
+D210F32B(RecordDEAL1 deal1,RecordSWIFT swift) 	// Currency code, Amount
+
+	set swift.crcdamtb=deal1.crcdb_$$AMTCONV(deal1.amtb,deal1.crcdb)
+
+	quit
+
+D210F50(RecordDEAL1 deal1,RecordSWIFT swift)	// Ordering Customer
+
+	quit
+
+D210F52(RecordDEAL1 deal1,RecordSWIFT swift)	// Ordering Institution
+
+	if deal1.acn.isNull() quit
+	
+	type RecordCIF cif=Db.getRecord("CIF","ACN=:deal1.acn",1)
+	
+	set swift.ordtype="D"
+	set swift.ordinst1=cif.nam.extract(1,35)
+	
+	quit
+
+D210F56(RecordDEAL1 deal1,RecordSWIFT swift)	// Intermediary
+
+	if deal1.interbopt.isNull() quit
+	
+	set swift.intbtype=deal1.interbopt
+	
+	if deal1.interbopt="A" do {  quit
+		set swift.intb=deal1.interb
+		}
+
+	if deal1.interbopt="D" do {  quit
+		set swift.intb1=deal1.interb1
+		set swift.intb2=deal1.interb2
+		set swift.intb3=deal1.interb3
+		set swift.intb4=deal1.interb4
+		}
+
+	if deal1.interbopt="J" do {  quit
+		set swift.intb1=deal1.interb1
+		set swift.intb2=deal1.interb2
+		set swift.intb3=deal1.interb3
+		set swift.intb4=deal1.interb4
+		set swift.intb5=deal1.interb5
+		}
+	quit
+	
+D210POST(RecordDEAL1 deal1,RecordSWIFT swift)
+
+	type public Date SWFTDT
+	type public Number STATUS
+
+	set STATUS=$Select('swift.rcvr.isNull():0,1:7)
+	set swift.noint=deal1.noint
+	set SWFTDT=deal1.sdt
+
+	quit
+
+D300PRE(RecordDEAL1 deal1) // Foreign Exchange confirmation.
+
+	type public String PRIORITY,RECEIVER
+
+	set RECEIVER=deal1.acnnam
+	set PRIORITY=deal1.mt300pri
+	
+	quit
+
+D300F15A(RecordDEAL1 deal1,RecordSWIFT swift)
+
+	quit
+
+D300F15B(RecordDEAL1 deal1,RecordSWIFT swift)
+
+	quit
+
+D300F15C(RecordDEAL1 deal1,RecordSWIFT swift)
+
+	quit
+
+D300F17(RecordDEAL1 deal1,RecordSWIFT swift) // Block Trade Indicator and Split Settlement Indicator
+
+	set swift.bltdin=deal1.bltdin
+
+	quit
+
+D300F20(RecordDEAL1 deal1,RecordSWIFT swift)	// Transaction Reference Number
+
+	set swift.trnofmt=deal1.trrefno
+
+	quit
+
+D300F21(RecordDEAL1 deal1,RecordSWIFT swift)	// Broker's Reference , Related Reference
+
+	set swift.brokref=deal1.brokref
+	set swift.relref="NEW"
+
+	quit
+
+D300F22(RecordDEAL1 deal1,RecordSWIFT swift)	// Code/Common Reference
+
+	set swift.typeop="NEWT"
+	set swift.cmnref=$$COMREF("",CUVAR.swiftadd,deal1.rate)
+
+	quit
+
+D300F24(RecordDEAL1 deal1,RecordSWIFT swift)	// Dealing Method
+
+	set swift.dlmeth=deal1.dlmeth
+
+	quit
+
+D300F26(RecordDEAL1 deal1,RecordSWIFT swift)	// Counterparty's Reference
+
+	set swift.cntpref=deal1.cntpref
+	
+	quit
+
+D300F29(RecordDEAL1 deal1,RecordSWIFT swift) 	// Contact Information
+
+	set swift.contact1=deal1.contact1
+	set swift.contact2=deal1.contact2
+	set swift.contact3=deal1.contact3
+	set swift.contact4=deal1.contact4
+
+	quit
+
+D300F32B(RecordDEAL1 deal1,RecordSWIFT swift)	// Currency code, Amount bought
+
+	set swift.vcab=deal1.crcdb_$$AMTCONV(deal1.amtb,deal1.crcdb)
+
+	quit
+        
+D300F33B(RecordDEAL1 deal1,RecordSWIFT swift)	// Currency code, Amount sold
+
+	set swift.vcas=deal1.crcds_$$AMTCONV(deal1.amts,deal1.crcds)
+
+	quit
+
+D300F36(RecordDEAL1 deal1,RecordSWIFT swift)	// Exchange Rate
+
+	set swift.rate=$$AMTCONV(deal1.rate,"")
+
+	quit
+
+D300F53(RecordDEAL1 deal1,RecordSWIFT swift)	// Sender's Correspondent (Sell)
+
+	set swift.sndrtype="A"
+	set swift.sndrcorr=deal1.paidbys
+
+	quit
+
+D300F56(RecordDEAL1 deal1,RecordSWIFT swift)	// Intermediary (Buy)
+
+	set swift.intbtype=deal1.interbopt
+	
+	if swift.intbtype="A" do {  quit
+		set swift.intb=deal1.interb
+		set swift.intb1=deal1.interb1
+		}
+	if swift.intbtype="D" do {  quit
+		set swift.intb1=deal1.interb1
+		set swift.intb2=deal1.interb2
+		set swift.intb3=deal1.interb3
+		set swift.intb4=deal1.interb4
+		}
+	if swift.intbtype="J" do {  quit
+		set swift.intb1=deal1.interb1
+		set swift.intb2=deal1.interb2
+		set swift.intb3=deal1.interb3
+		set swift.intb4=deal1.interb4
+		set swift.intb5=deal1.interb5		
+		}
+
+	quit
+
+D300F57(RecordDEAL1 deal1,RecordSWIFT swift)	// Account With Institution (Buy)
+
+	set swift.accstype=deal1.recvopt
+	
+	if swift.accstype="A" do {  quit
+		set swift.recv=deal1.corrercv
+		}
+
+	quit
+
+D300F58(RecordDEAL1 deal1,RecordSWIFT swift)	// Beneficiary
+
+	set swift.benopt=deal1.beninstopt
+	
+	if swift.benopt="A" do {  quit
+		set swift.beninst=deal1.beninst
+		set swift.beninst1=deal1.beninst1
+		}
+	if swift.benopt="D" do {  quit
+		set swift.beninst1=deal1.beninst1
+		set swift.beninst2=deal1.beninst2
+		set swift.beninst3=deal1.beninst3
+		set swift.beninst4=deal1.beninst4
+		}
+	if swift.benopt="J" do {  quit
+		set swift.beninst1=deal1.beninst1
+		set swift.beninst2=deal1.beninst2
+		set swift.beninst3=deal1.beninst3
+		set swift.beninst4=deal1.beninst4
+		set swift.beninst5=deal1.beninst5
+		}
+
+	quit
+
+D300F71(RecordDEAL1 deal1,RecordSWIFT swift)	// Broker's Commision
+
+	set swift.brokcm=deal1.brokcm
+
+	quit
+        
+D300F72(RecordDEAL1 deal1,RecordSWIFT swift)	// Sender to Receiver Information
+
+	type String info1,info2,info3,info4,info5,info6
+
+	type RecordDEALMSG2 dealmsg2=Db.getRecord("DEALMSG2","NOINT=:deal1.noint,MSG=5",1)
+
+	set info1=dealmsg2.msg1
+	set info2=dealmsg2.msg2 if ('info2.isNull()),(info2.extract(1)'="/") set info2="//"_info2
+	set info3=dealmsg2.msg3 if ('info3.isNull()),(info3.extract(1)'="/") set info3="//"_info3
+	set info4=dealmsg2.msg4 if ('info4.isNull()),(info4.extract(1)'="/") set info4="//"_info4
+	set info5=dealmsg2.msg5 if ('info5.isNull()),(info5.extract(1)'="/") set info5="//"_info5
+	set info6=dealmsg2.msg6 if ('info6.isNull()),(info6.extract(1)'="/") set info6="//"_info6
+	
+	set swift.by1=info1
+	set swift.by2=info2
+	set swift.by3=info3
+	set swift.by4=info4
+	set swift.by5=info5
+	set swift.by6=info6
+
+	quit
+
+D300F77(RecordDEAL1 deal1,RecordSWIFT swift)	// Terms and Conditions
+
+	set swift.cond1=deal1.tercon1
+	set swift.cond2=deal1.tercon2
+	set swift.cond3=deal1.tercon3
+	set swift.cond4=deal1.tercon4
+	set swift.cond5=deal1.tercon5
+	set swift.cond6=deal1.tercon6
+
+	quit 
+
+D300F82(RecordDEAL1 deal1,RecordSWIFT swift)	// Party A
+
+	set swift.partyaopt=deal1.partyaopt
+
+	if swift.partyaopt="A" do {  quit
+		set swift.partya=deal1.partya
+		set swift.partyaacc="/"_deal1.partya1
+		}
+	if swift.partyaopt="D" do {  quit
+		set swift.partya1=deal1.partya1
+		set swift.partya2=deal1.partya2
+		set swift.partya3=deal1.partya3
+		set swift.partya4=deal1.partya4
+		}
+	if swift.partyaopt="J" do {  quit
+		set swift.partya1=deal1.partya1
+		set swift.partya2=deal1.partya2
+		set swift.partya3=deal1.partya3
+		set swift.partya4=deal1.partya4
+		set swift.partya5=deal1.partya5
+		}
+	quit
+
+D300F83(RecordDEAL1 deal1,RecordSWIFT swift)	// Fund or Beneficiary Customer
+
+	set swift.fobcusopt=deal1.fobcusopt
+	
+	if swift.fobcusopt="A" do {  quit
+		set swift.fobcus=deal1.fobcus
+		set swift.fobcusacc="/"_deal1.fobcus1
+		}
+	if swift.fobcusopt="D" do {  quit
+		set swift.fobcus1=deal1.fobcus1
+		set swift.fobcus2=deal1.fobcus2
+		set swift.fobcus3=deal1.fobcus3
+		set swift.fobcus4=deal1.fobcus4
+		}
+	if swift.fobcusopt="J" do {  quit
+		set swift.fobcus1=deal1.fobcus1
+		set swift.fobcus2=deal1.fobcus2
+		set swift.fobcus3=deal1.fobcus3
+		set swift.fobcus4=deal1.fobcus4
+		set swift.fobcus5=deal1.fobcus5
+		}
+	quit
+
+D300F84(RecordDEAL1 deal1,RecordSWIFT swift)	// Party A dealing branch
+
+	set swift.dlbrpyaopt=deal1.dlbrpyaopt
+	
+	if swift.dlbrpyaopt="A" do {  quit
+		set swift.dlbrpya=deal1.dlbrpya
+		set swift.dlbrpyaacc="/"_deal1.dlbrpya1
+		}
+	if swift.dlbrpyaopt="B" do {  quit
+		set swift.dlbrpya1=deal1.dlbrpya1
+		set swift.dlbrpya2=deal1.dlbrpya2
+		}
+	if swift.dlbrpyaopt="D" do {  quit
+		set swift.dlbrpya1=deal1.dlbrpya1
+		set swift.dlbrpya2=deal1.dlbrpya2
+		set swift.dlbrpya3=deal1.dlbrpya3
+		set swift.dlbrpya4=deal1.dlbrpya4
+		}
+	if swift.dlbrpyaopt="J" do {  quit
+		set swift.dlbrpya1=deal1.dlbrpya1
+		set swift.dlbrpya2=deal1.dlbrpya2
+		set swift.dlbrpya3=deal1.dlbrpya3
+		set swift.dlbrpya4=deal1.dlbrpya4
+		set swift.dlbrpya5=deal1.dlbrpya5
+		}
+
+	quit
+
+D300F85(RecordDEAL1 deal1,RecordSWIFT swift)	// Party B dealing branch
+
+	set swift.dlbrpybopt=deal1.dlbrpybopt
+	
+	if swift.dlbrpybopt="A" do {  quit
+		set swift.dlbrpyb=deal1.dlbrpyb
+		set swift.dlbrpybacc="/"_deal1.dlbrpyb1
+		}
+	if swift.dlbrpyaopt="B" do {  quit
+		set swift.dlbrpyb1=deal1.dlbrpyb1
+		set swift.dlbrpyb2=deal1.dlbrpyb2
+		}
+	if swift.dlbrpyaopt="D" do {  quit
+		set swift.dlbrpyb1=deal1.dlbrpyb1
+		set swift.dlbrpyb2=deal1.dlbrpyb2
+		set swift.dlbrpyb3=deal1.dlbrpyb3
+		set swift.dlbrpyb4=deal1.dlbrpyb4
+		}
+	if swift.dlbrpyaopt="J" do {  quit
+		set swift.dlbrpyb1=deal1.dlbrpyb1
+		set swift.dlbrpyb2=deal1.dlbrpyb2
+		set swift.dlbrpyb3=deal1.dlbrpyb3
+		set swift.dlbrpyb4=deal1.dlbrpyb4
+		set swift.dlbrpyb5=deal1.dlbrpyb5
+		}
+	quit
+
+D300F87(RecordDEAL1 deal1,RecordSWIFT swift)	// Party B
+
+	set swift.partybopt=deal1.partybopt
+	
+	if swift.partybopt="A" do {  quit
+		set swift.partyb=deal1.partyb
+		set swift.partybacc="/"_deal1.partyb1
+		}
+	if swift.partybopt="B" do {  quit
+		set swift.partyb1=deal1.partyb1
+		set swift.partyb2=deal1.partyb2
+		set swift.partyb3=deal1.partyb3
+		set swift.partyb4=deal1.partyb4
+		}
+	if swift.partybopt="J" do {  quit
+		set swift.partyb1=deal1.partyb1
+		set swift.partyb2=deal1.partyb2
+		set swift.partyb3=deal1.partyb3
+		set swift.partyb4=deal1.partyb4
+		set swift.partyb5=deal1.partyb5
+		}
+	quit
+
+D300F88(RecordDEAL1 deal1,RecordSWIFT swift)	// Broker Identification
+
+	set swift.brokidopt=deal1.brokidopt
+	
+	if swift.brokidopt="A" do {  quit
+		set swift.brokid=deal1.brokid
+		set swift.brokidacc=deal1.brokid1
+		}
+	if swift.brokidopt="D" do {  quit
+		set swift.brokid1=deal1.brokid1
+		set swift.brokid2=deal1.brokid2
+		set swift.brokid3=deal1.brokid3
+		set swift.brokid4=deal1.brokid4
+		}
+	if swift.brokidopt="J" do {  quit
+		set swift.brokid1=deal1.brokid1
+		set swift.brokid2=deal1.brokid2
+		set swift.brokid3=deal1.brokid3
+		set swift.brokid4=deal1.brokid4
+		set swift.brokid5=deal1.brokid5
+		}
+	quit
+
+D300F94A(RecordDEAL1 deal1,RecordSWIFT swift)	// Scope of Operation
+
+	set swift.scopop=deal1.scopop
+
+	quit
+
+D300F153(RecordDEAL1 deal1,RecordSWIFT swift)	// Delivery Agent (Buy)
+
+	set swift.delivbopt=deal1.paidbybopt
+	
+	if swift.delivbopt="A" do {  quit
+		set swift.delivb=deal1.paidbyb
+		set swift.delivb1=deal1.paidbyb1
+		}
+	if swift.delivbopt="D" do {  quit
+		set swift.delivb1=deal1.paidbyb1
+		set swift.delivb2=deal1.paidbyb2
+		set swift.delivb3=deal1.paidbyb3
+		set swift.delivb4=deal1.paidbyb4
+		}
+	if swift.delivbopt="D" do {  quit
+		set swift.delivb1=deal1.paidbyb1
+		set swift.delivb2=deal1.paidbyb2
+		set swift.delivb3=deal1.paidbyb3
+		set swift.delivb4=deal1.paidbyb4
+		set swift.delivb5=deal1.paidbyb5
+		}
+	quit
+
+D300F156(RecordDEAL1 deal1,RecordSWIFT swift)	// Intermediary
+
+	set swift.intstype=deal1.intersopt
+	
+	if swift.intstype="A" do {  quit
+		set swift.ints=deal1.inters
+		set swift.intsacc=deal1.inters1
+		}
+	if swift.intstype="B" do {  quit
+		set swift.ints1=deal1.inters1
+		set swift.ints2=deal1.inters2
+		set swift.ints3=deal1.inters3
+		set swift.ints4=deal1.inters4
+		}
+	if swift.intstype="J" do {  quit
+		set swift.ints1=deal1.inters1
+		set swift.ints2=deal1.inters2
+		set swift.ints3=deal1.inters3
+		set swift.ints4=deal1.inters4
+		set swift.ints5=deal1.inters5
+		}
+	quit
+
+D300F157(RecordDEAL1 deal1,RecordSWIFT swift)	// Account With Institution (Sell)
+
+	set swift.accstype=deal1.paytosopt
+	
+	if swift.accstype="A" do {  quit
+		set swift.send=deal1.paytos
+		set swift.accsacc=deal1.paytos1
+		}
+	if swift.accstype="B" do {  quit
+		set swift.send1=deal1.paytos1
+		set swift.send2=deal1.paytos2
+		set swift.send3=deal1.paytos3
+		set swift.send4=deal1.paytos4
+		}
+	if swift.accstype="J" do {  quit
+		set swift.send1=deal1.paytos1
+		set swift.send2=deal1.paytos2
+		set swift.send3=deal1.paytos3
+		set swift.send4=deal1.paytos4
+		set swift.send5=deal1.paytos5
+		}
+	quit
+
+D300POST(RecordDEAL1 deal1,RecordSWIFT swift)
+
+	type public Date SWFTDT
+	type public Number STATUS
+
+	set STATUS=$Select('swift.rcvr.isNull():0,1:7)
+	set swift.noint=deal1.noint
+	set SWFTDT=deal1.tdt
+
+	quit
+
+FILE(RecordSWIFT swift,String qtype,Date swdate)	// Prepare data for filer.
+
+	type public String MSG,RECEIVER,STATUS,SWDIRECT
+	type public Number MSGTYPE,TRREFNO,repr,swqcnt,swqcntd
+	type Public Date SWFTDT
+		
+	// status
+	set swift.status=STATUS
+	
+	// date stamp  
+	set swift.date=%SystemDate
+	
+	// time stamp
+	set swift.time=%CurrentTime
+	
+	// SWIFT date
+	set swift.swftdt=SWFTDT
+	
+	do DOTRANS(.swift)
+		
+	set SWDIRECT="OUT" 
+	set MSG=MSGTYPE
+	
+	set swift.swdirect="OUT"
+	set swift.trrefno=TRREFNO
+	set swift.msg=MSGTYPE
+	
+	do swift.save()
+
+	// Repair before transmission
+	if repr.get().isNull() set repr=0
+
+	// See if repair is desired
+	if repr do QUEUE("REP",SWFTDT) if 1
+	else  if 'RECEIVER.isNull() do QUEUE("RTT",SWFTDT) if 1
+	else  do QUEUE("TLX",SWFTDT)
+
+	quit
+
+
+public AMTCONV(String val,String crcd)	//
+
+	//   Convert amount into SWIFT format
+
+	type public String co
+	type public Number decimal,val1,val2,length
+	type Number I
+
+	//replace decimal by a comma
+	set val=val.translate(".",",")
+
+	//if there is no decimal, put a comma at the end
+	if val'["," set val=val_","_"00"
+
+	// Check CRCD table if the currency have decimal
+	if 'crcd.isNull() do {
+
+		set co=CUVAR.CO
+
+		type RecordCRCD fcrcd=Db.getRecord("CRCD","CO=:co,CRCD=:crcd")
+		
+		set decimal=fcrcd.curdec
+		if 'decimal set val=val.piece(",",1)_"," quit
+		set val1=val.piece(",",1)
+		set val2=val.piece(",",2)
+		set length=val2.length()
+		if 'val1.length() set val1=0
+		for I=1:1:(decimal-length) set val2=val2_"0"
+		set val=val1_","_val2
+		}
+
+	if val.extract()="," set val="0"_val
+	
+	quit val
+
+
+RATECNV(Number rate)	//
+
+	/*
+	   To transfer the rate field into a right format TT  04.14.94
+
+	   ARGUMENTS:
+	  	.  rate  	Rate to convert for field 22
+
+	   RETURNS:
+	   	.  $$  		Four digits consist of the rightmost non-zero
+	     			digit of the rate
+	   EXAMPLE:
+
+	*/
+
+	type String nbr,temp,chr
+	type Number begin,CHAR,end,length,nozero
+
+	set rate=rate.translate(",",".")
+
+	// Find begin
+	for begin=0:1 set chr=rate.extract(begin) if (begin>12)!("123456789"[chr) quit
+
+	// Find end
+	for end=0:1 set chr=rate.extract(rate.length()-end+1) if (begin>12)!("123456789"[chr) quit
+
+	// Exclude out "," and "."
+	set nbr=rate.extract(begin,(rate.length()-end))
+	if nbr["," set nbr=nbr.piece(",",1)_nbr.piece(",",2)
+	if nbr["." set nbr=nbr.piece(".",1)_nbr.piece(".",2)
+
+	// Padding with leading zero
+	// Remove trailing zeros from right side
+	set length=nbr.length()
+	if length>4 do {
+		set nozero=length
+		for  do { quit:nozero=0
+			if nbr.extract(nozero)=0 set nbr=nbr.extract(1,nozero-1) set nozero=nozero-1
+			else  set nozero=0 quit
+			}
+		}
+
+	set length=nbr.length()
+
+	//length more than 4
+	if length>4 set nbr=nbr.extract(nbr.length()-3,nbr.length())
+
+	if (length<4)!(length=4) do {
+		for  do { quit:CHAR'=0
+			set CHAR=nbr.extract(length)
+			if CHAR'=0 quit
+			set nbr=nbr.extract(1,length-1)
+			set length=length-1
+			}
+		set temp="0000" set nbr=temp.extract(1,4-length)_nbr
+		}
+	quit nbr
+
+
+ADDCHGS(Number AMT,String CRCD,Number RCVRCHG,String RCVRCHGC,String FREEPTR)	//
+
+	/*
+	   Private
+	   Add receiver's charges and subtract sender's charges from amount
+
+	   ARGUMENTS:
+	   	. AMT  		Amount
+	   	. CRCD 	 	Amount currency
+	   	. RCVRCHG 	Receiver's charge amount
+	   	. RCVRCHGC 	Receiver's charge currency
+	   	. FREEPTR 	SWIFT free format field pointer
+
+	   RETURNS:
+	   	. $$  		AMT + receiver's charges - sender's charges
+
+	*/
+
+	type public Number AMOUNT,CHG,DECIMAL,EFT71F,EXCAMT,I,MAXRATE,MINRATE,MULTIPLY
+	type public Number RATE,SAMT,SNDRCHG
+	type public String co,ER,SCRCD
+
+	// Convert RCVRCHG to AMT curr. (no margins, non-cash, mid-rate)
+	if RCVRCHG,(RCVRCHGC'=CRCD) do {
+
+		do EXC^CRCDUTL(RCVRCHGC,CRCD,RCVRCHG,1,2,"00","","",1)
+
+		set RCVRCHG=EXCAMT
+		}
+
+	if ER quit ""
+
+	// Retrieve sender's charges
+	set SNDRCHG=0
+	if 'FREEPTR.isNull() set EFT71F=$$MULT2^SWIFTCDI("OUT",FREEPTR,"71F")
+
+	if 'EFT71F.isNull() for I=1:1:5 do {
+		set CHG=EFT71F.piece($C(13,10),I)
+		set SCRCD=CHG.extract(1,3)
+		if SCRCD.isNull() quit
+
+		set SAMT=$$INT^%ZM(CHG.extract(4,CHG.length()),"$",",.",2)
+
+		// Convert sender's charge to AMT curr. (no margins, non-cash, mid-rate)
+		if SCRCD'=CRCD do {
+
+			do EXC^CRCDUTL(SCRCD,CRCD,SAMT,1,2,"00","","",1)
+
+			set SAMT=EXCAMT
+			}
+		set SNDRCHG=SNDRCHG+SAMT
+		}
+	if ER quit ""
+
+	set AMOUNT=AMT+RCVRCHG-SNDRCHG
+
+	set co=CUVAR.CO
+	
+	type RecordCRCD crcd=Db.getRecord("CRCD","CO=:co,CRCD=:CRCD",1)
+
+	// Decimal precision
+	set DECIMAL=crcd.curdec
+
+	quit $$^SCARND(AMOUNT,0,"","",DECIMAL)
+
+
+COMREF(Number swftcif,Number swftcvr,Number rate)	//
+
+	/*
+	   To generate the right formated data for the subfield of the field.
+
+	   ARGUMENTS:
+	         .  swftcif              Sender's bank code
+	         .  swftcvr              Receiver's bank code
+	         .  rate                 Exchange rate
+
+	   RETURN:
+	         .  $$                   Formated data for field 22
+
+	   EXAMPLE:
+
+
+	*/
+	
+	type String array(),index1,index2
+	
+	set index1=swftcif.extract(1,4)_swftcif.extract(swftcif.length()-1,swftcif.length())
+	set index2=swftcvr.extract(1,4)_swftcvr.extract(swftcvr.length()-1,swftcvr.length())
+
+	if 'index1.isNull() set array(index1)=""
+	if 'index2.isNull() set array(index2)=""
+	if ('index1.isNull())&('index2.isNull()) quit array("").order()_$$RATECNV(rate)_array("").order(-1)
+	quit array("").order()_$$RATECNV(rate)
+
+
+TRANS(String data)	//
+
+	/*
+	   ARGUMENTS: one node from ^SWIFT OUTPUT: the translated node
+
+	   This subroutine will check if there is a translatable uncommon
+	   SWIFT character; if one was found, translate it into standard SWIFT
+	   character according to the table UTBLSWCHTR
+	*/	
+
+	type public Boolean CHGFLG
+	type String currdata,TRANNEW,TRANOLD
+
+	set (TRANOLD,TRANNEW)=""
+	set CHGFLG=0
+
+	type DbSet rs=Db.selectDbSet("UTBLSWCHTR")
+        while rs.next() do {
+                type RecordUTBLSWCHTR swchtr=rs.getRecord("UTBLSWCHTR")
+                set TRANOLD=TRANOLD_swchtr.ch1_swchtr.ch2_swchtr.ch3_swchtr.ch4_swchtr.ch5_swchtr.ch6_swchtr.ch7_swchtr.ch8
+                set TRANNEW=TRANNEW_swchtr.tr1_swchtr.tr2_swchtr.tr3_swchtr.tr4_swchtr.tr5_swchtr.tr6_swchtr.tr7_swchtr.tr8
+                }
+
+	// translate the input-uncommon SWIFT character into standard character
+	set currdata=data
+	set data=data.translate(TRANOLD,TRANNEW)
+	if currdata'=data set CHGFLG=1
+	quit
+
+ 
+public DOTRANS(RecordSWIFT swift) //
+
+ 	/*
+ 	   This subroutine will go through all SWIFT data and check if there
+ 	   was any translatable uncommon SWIFT character; if it was found,
+ 	   translate the node by calling TRANS(data).
+  
+ 	*/
+ 	
+	type Boolean CHGFLG
+ 	type String DIDATA,FDATA,FDI,SFDI,TDATA
+	type Number I
+	
+	set (FDATA,FDI)=""
+	type ResultSet rs=Db.select("DI","DBTBL1D","FID='SWIFT' AND CMP IS NULL","NOD,POS")
+	while rs.next() do {
+		set FDI=FDI_"|"_rs.getCol("DI")
+		set TDATA=rs.getCol("DI")
+		set DIDATA=swift.@TDATA
+		set FDATA=FDATA_"|"_DIDATA
+		do TRANS(.FDATA)
+		}
+
+	//Replaces the translated data to SWIFT object.
+	if CHGFLG do {
+		for I=1:1 do { quit:SFDI.isNull()
+			set SFDI=FDI.piece("|",I)
+			if SFDI.isNull() quit
+			if FDATA.piece("|",I).isNull() quit
+			set swift.@SFDI=FDATA.piece("|",I)
+			}
+		}
+	quit
+
+
+SWACK(String dt103,String dt202,String recv,Number rate,String send,String crcd,Number CID,Number SEQ,RecordEFTPAY eftpay) //
+
+	/*
+	   To check if all SWIFT messages have been successfully transmitted.
+
+	   system base currency
+	*/
+
+	type Boolean NORECFLG = 0
+	type Number flg
+	
+	if 'eftpay.exists() do { quit:NORECFLG 0
+		set eftpay=Db.getRecord("EFTPAY","CID=:CID,SEQ=:SEQ",1)
+        	if eftpay.getMode()=0 set NORECFLG=1
+		}
+
+	set flg=0
+
+	// if vostro, then no 202 was used, quit w/flg
+	// Payment Exchange Rate
+	if dt103 set flg=1 if eftpay.rate=0 quit flg
+
+	// Transaction Reference Number
+	if 'crcd.data() set crcd=eftpay.refno
+
+	// Receiver (Destination)
+	if 'recv.data() set recv=eftpay.recv
+
+	// Sender's Correspondent
+	if 'send.data() set send=eftpay.sendcorr
+
+	/* if receiver is correspondent, or payment in system base currency
+	   then no 202 was used, quit w/flg
+	*/
+	if (recv=send)!(crcd=%SystemCurrency) quit flg
+
+	quit flg&(dt202.get())
+
+
+public QUEUE(String qtype,Date swdate)	//
+
+	// Build SWIFT queue.
+
+	type public Number qseq,TRREFNO,swqcnt,swqcntd
+	type public String ER,MSG,RM,SWIFTQ(,),qinfo
+	
+
+	if 'swdate.get() do { quit
+
+		// ~p1 record locked by another user
+		lock +SWIFTQ(qtype):5 else  set ER=1 set RM=$$^MSG(7354,qtype) quit
+
+		type RecordSWQCNT swqcnt=Db.getRecord("SWQCNT","QUE=:qtype",1)
+
+		set qseq=swqcnt.nseq+1
+		set swqcnt.nseq=qseq
+		set swqcnt.tot=swqcnt.tot+1
+		set swqcnt.ptoday=swqcnt.ptoday+1
+ 		do swqcnt.bypassSave()
+
+		type RecordSWIFTQ2 swiftq2=Db.getRecord("SWIFTQ2","QUE=:qtype,SEQ=:qseq,TRREFNO=:TRREFNO,TYPE=:MSG",1)
+		do swiftq2.bypassSave()
+	
+		lock -SWIFTQ(qtype) quit
+		}
+
+
+	// ~p1 record locked by another user
+	lock +SWIFTQ(qtype,swdate):5 else  set ER=1 set RM=$$^MSG(7354,qtype) quit
+
+	type RecordSWQCNTD swqcntd=Db.getRecord("SWQCNTD","QUE=:qtype,DT=:swdate",1)
+	set qseq=swqcntd.nseq+1
+	set swqcntd.nseq=qseq
+	set swqcntd.tot=swqcntd.tot+1
+	set swqcntd.ptoday=swqcntd.ptoday+1
+	do swqcntd.bypassSave()
+
+	type RecordSWIFTQ1 swiftq1=Db.getRecord("SWIFTQ1","QUE=:qtype,DT=:swdate,SEQ=:qseq,TRREFNO=:TRREFNO,TYPE=:MSG",1)
+	do swiftq1.bypassSave()
+
+	lock -SWIFTQ(qtype,swdate)
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60312^41654^Pat Kelly^45933"	// Signature - LTD^TIME^USER^SIZE

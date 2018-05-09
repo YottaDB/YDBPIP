@@ -1,0 +1,474 @@
+public	LNPTSRV(RecordLN ln,		// Loan account			/REF:RW
+		RecordTRN trn,		// Transaction code		/REF:R
+		RecordTTX ttx)		// Primary transaction 		/REF:R
+
+	/*
+	   DESC: This routine will automatically reverse/reapply all 
+	         transaction within the effective-dated period.
+	
+	---- Revision History -------------------------------------------------
+	
+	04/23/07 - KUMARB / SmithCD - CR 26550
+		   Modified section EXTERN to dump INDEX and MATRIX based on
+		   PRCTYP value.
+		   Added to code to save interest rate in lnseg before the
+		   call to TRNINGL^TRNDRV.
+	
+	01/05/07 - KUMARB - CR24680
+		   Added new section EXTERN to handle external calls for
+		   effective-dated interest rate and index changes for 
+		   accounts with Segments Allowed (LN.SEGMENTS) selected.
+
+	11/29/06 - DHANALAKSHMI R - CR 21407
+		   Modified the TRNSINGL^TRNDRV call to pass ttx stored value 
+		   for TranMode as Transaction Mode, instead of 1. This ensures 
+		   that same Mode is used through out the flow.
+
+	09/07/06 - KELLYP - CR 22962
+		   Modified the TRNSINGL^TRNDRV call to pass BRCD for the
+		   primary transaction instead of ln.boo.  This prevents a 
+		   situation where the backdated transaction could not be 
+		   error corrected when the backdated transaction was posted
+		   from a branch other than the one defined by ln.boo.
+
+	06/15/06 - GIRIDHAL - CR 21207
+		   Added code at top level to force re-accumulation of 
+		   CIF.DOODYTD
+		   
+	05/23/06 - SmithCD - CR 19732
+		   . Removed code that problematically looped through 
+		     secondary escrow transactions to call SETSTAT^LNFUNCS in 
+		     REMRED section. Since this code should be identical, 
+		     regardless of where it's called from, it has been moved 
+		     to SETSTAT^LNFUNCS itself.
+		   . Added CID parameter to $$SECPCFD^LNUEFD call.
+		   . Replaced TRNSEQ reference with 
+		     ttx.getStoredValue("TranSeq").
+	
+	03/13/06 - NATRAJAH - CR 20026
+		   In LNPTSRV section, passed TRNSEQ as parameter in 
+		   TRNSINGL^TRNDRV call.
+		   
+	03/08/06 - Hillanbrand CR 19985
+		   Added ln.bypassSave() after the call to REMRED to save the 
+		   changes for account status and delinquency counters. This was
+		   necessary since in TRNDRV, the variable PRMDBTLN will prevent
+		   these changes from occurring since PRMDBTLN indicates that the 
+		   primary backdated loan transaction filed the changes when 
+		   posted after unwinding the account.  The REMRED section needs to
+		   be executed after the primary backdated loan transaction is posted
+		   and after bring loan forward.
+
+	01/31/06 - SmithCD - CR 19343 (16890)
+		   . Modified to account for new key in ttx1(,), and to load 
+		     and accept dep() objects (escrow accounts related to the 
+		     loan) in VPG00A and FORWARD sections
+		   . Added call to SECPCFD5^LNUEFD for escrow closeout 
+		     processing. Changed call to VPG00A^LNRENEW to 
+		     BACKWARD^LNRENEW in conjunction with the change in 
+		     LNRENEW
+		   . Added RJ(), SPV(), OVR(,,) to call to TRNSINGL^TRNDRV 
+		     when processing the currect primary transaction
+		   . Retrofit the following change from p01 / p99:
+			10/27/03 - BECKERJ - 6286
+		   Modified section REMRED to call to section SETSTAT^LNFUNCS
+		   to correctly set the loan and any attached escrow
+		   account's status after processing the transaction, if
+		   applicable. Removed section RAROD, this section exist
+		   in LNPTS1 and will be called from SETSTAT^LNFUNCS.
+	*/
+
+	type public Date CUVAR2, TPD
+	type public Number BRCD, ER, EXTSEG, NEWRATE, PRCTYP, PTRC, RATE
+	type public String INDNAM, MATNAM, NEWIFRE, NEWIRND, NEWISPR
+	type public Date NEWICH
+	type public String OM(), OVR(,,), PRETRN(), RJ(), SPV()
+	
+	// Set up a flag for loan reversals
+	type Boolean LNPTSRV = 1
+
+	// ACRADJ(,) contains the accrual adjustment necessary to
+	// adjust LN.ACR for the effective period.
+
+	type Date SAVTJD, SAVTPD
+	type Number ACRADJ(,), DAYS, LCHGADJ, REVSEQ
+	type String LCHGNOT()
+	type RecordTTX ttx1(,,)
+	type RecordDEP dep()
+
+	// Save original date values (will be changed in LNRENEW)
+	set SAVTJD = %SystemDate
+	set SAVTPD = TPD
+	
+	#ACCEPT DATE=08/30/02;PGM=John Carroll;CR=Unknown
+	type Date %SystemDate, TPD
+
+	#ACCEPT DATE=08/30/02;PGM=John Carroll;CR=Unknown
+	set %SystemDate = SAVTJD
+	set TPD = SAVTPD
+	
+	set CUVAR2 = %SystemDate
+	
+	if BRCD.get().isNull() set BRCD = CUVAR.BOBR
+	
+	// Reversal of transaction prior to last renewal prohibited
+	if %EffectiveDate '= %SystemDate, %EffectiveDate '> ln.lrd do Runtime.setErrMSG("LN", 1993) quit
+	
+	set PRETRN("CNTDR") = ln.cntdr
+	set PRETRN("DIST1ND") = ln.dist1nd
+	
+	// Load escrow accounts	
+	type ResultSet rs = Db.select("CID", "DEP", "AREF=:ln.cid")
+	while rs.next() do {
+		type Number ESCCID = rs.getCol("CID")
+		set dep(ESCCID) = Db.getRecord("DEP", "CID=:ESCCID")
+		}
+
+	// Unwind account back to end-of-day on EFD
+	do BACKWARD^LNRENEW(.ln, .ttx1(,,), .ttx, .dep()) quit:ER
+	
+	/*
+	Reset TRC in TSO field EC. If TRC is out of sync between the branch
+	and the host, the error-correct transaction needs the value of
+	[TTX]TRC from the host.
+	*/
+	if ttx.itc6 do {
+		
+		type Number TRC
+		set TRC = $$FIELD^UTSO(ttx.tso, "EC")
+		
+		if TRC.isNull() quit
+		
+		type RecordTTX ttx2 = Db.getRecord("TTX", "TJD=:SAVTPD,BRCD=:BRCD,UID=:%UserID,TSEQ=:TRC", 1)
+		set TRC = ttx2.trc
+
+		if 'TRC.isNull() set ttx.tso = $$FIELDIN^UTSO(ttx.tso, "EC", TRC)
+		}
+		
+	/*
+	Process the primary transaction only if it is not the reversal of a
+	a payoff or an escrow closeout, which are in covered by LNUEFD.
+	*/
+	set REVSEQ = $$FIELD^UTSO(ttx.tso, "REV")
+	if REVSEQ, (trn.pcfl5 ! ($$SECPCFD5^LNUEFD(trn.pcfl5, REVSEQ, ln.cid)))
+	else  do { quit:ER
+		set ttx.tjd = %SystemDate + ttx.itc8
+		
+		// Effective-dated rate change
+		if (PRCTYP.get() = 3), ('EXTSEG.get().isNull()) do {
+			type RecordLNSEG lnseg = Db.getRecord("LNSEG", "CID=:ln.cid,SEGMENT=:EXTSEG", 1)
+
+			/*
+			Note the actual history entries for these will be 
+			stored in the LNSEG filer, after the unwind / reapply 
+			process is complete for effective-dated rate change.
+			*/
+			if INDNAM.exists() set lnseg.index = INDNAM
+			if MATNAM.exists() set lnseg.intmat = MATNAM
+			if NEWRATE.exists() set lnseg.irn = NEWRATE
+			if NEWISPR.exists() set lnseg.intspr = NEWISPR
+			if NEWIFRE.exists() set lnseg.intfre = NEWIFRE
+			if NEWIRND.exists() set lnseg.rndmtd = NEWIRND
+			if NEWICH.exists() set lnseg.ichnd = NEWICH
+
+			do lnseg.save()
+			}
+		
+		// Process current primary transaction on the effective date 
+		// as if it were the current system date
+		do TRNSINGL^TRNDRV(.ttx, .ln, ttx.tjd, BRCD, ttx.getStoredValue("TranMode"), .RJ(), .SPV(), .OVR(,,), PTRC.get(), ttx.getStoredValue("TranSeq"), .OM()) quit:ER
+		}
+
+	// Bring loan forward
+	do FORWARD^LNRENEW(.ln, .ttx, .ttx1(,,), , .dep()) quit:ER
+	
+	// Restore original date values
+	#ACCEPT DATE=08/30/02;PGM=John Carroll;CR=Unknown
+	set %SystemDate = SAVTJD
+	set TPD = SAVTPD
+	
+	// Process commission adjustments
+	do COMADJ(ln.boo, ttx.efd) quit:ER 
+
+	do COMCOR^TTXCOM(.ln, ttx.efd) quit:ER
+	
+	// Update account status and delinquency counters, and process fee 
+	// offsets
+	do REMRED(.ln, .dep(), .trn, .ttx) 
+
+	do ln.bypassSave()
+	
+	//BASEL II
+	type Number ACN
+	type ResultSet rsrelcif = Db.select("ACN","RELCIF","CID=:ln.cid")
+	while rsrelcif.next() do {
+		set ACN = rsrelcif.getCol("ACN")
+		type RecordCIFBAL0 rcifbal0 = Db.getRecord("CIFBAL0","ACN=:ACN",1)
+		if rcifbal0.getMode() = 0 quit
+		if (rcifbal0.accumto) , (%EffectiveDate <= rcifbal0.accumto) do Db.delete("CIFBAL0","ACN=:rcifbal0.acn")
+	}
+	
+	quit
+
+
+REMRED(RecordLN ln,		// Loan account				/REF:RW
+       Record dep(),		// Deposit (escrow) accounts		/REF:RW
+       RecordTRN trn,		// Transaction code			/REF:
+       RecordTTX ttx)		// Primary transaction
+       
+	// Update delinquency counters. File OFFST of fees to transaction set
+
+	type public Date TPD
+	type public Number BRCD, ER
+	type public String OFFST(,,,,), PRETRN()
+	
+	type Date ODIST1ND
+	type String DL(), DP(), DY()	
+	type Number DAYS, XCID
+	
+	// Now that any accrual adjustments due to the backdate will have been 
+	// posted to the accounts involved, determine payoff / closeout status
+	do SETSTAT^LNFUNCS(.ln, .ttx, (ttx.itc6 + ttx.itc12)) quit:ER
+	
+	// Determine the # of days when an efd. account is disbursed
+	// with fees updated to the bill at loan creation
+
+	// First efd. disbursement (only fees on bill)
+	if 'PRETRN("CNTDR") set PRETRN("DIST1ND") = ln.schnd
+
+	// Reversal of first efd. disbursement
+	else  if 'ln.cntdr do {
+	
+		set ODIST1ND = ln.dist1nd
+
+		// LN.DIST1ND is only modified to update the delinquency
+		// counters and will be reset after the counters are updated
+		set ln.dist1nd = ln.schnd
+		}
+	
+	set DAYS = ln.dist1nd - PRETRN("DIST1ND")
+	
+	if DAYS do { quit:ER
+		
+		type String DCC(), DL(), DY(), DP()
+
+		if DAYS > 0 do DCC^LNPTS3(.ln) quit:ER
+		if DAYS < 0 do DCC^LNPTSR(.ln) quit:ER
+			 
+		do FILE2^LNPTS3(.ln) quit:ER
+		}
+	
+	if ODIST1ND.get() set ln.dist1nd = ODIST1ND
+	
+	// If EC or REV, process Custom Notices, if defined for account
+	if (ttx.itc6 + ttx.itc12) , 'ln.custnot.isNull() do ^LNCUSNOT(.ln,ttx.cid,2)
+	
+	if 'OFFST.data() quit
+
+	//  File OFFST of fees to transaction array
+	type Number CID, S1
+	type String CRCD, DATA, ETC, FEE, GLACN(), GLETC(), GLSC
+	type String OFFSTAMT(), S2, Z
+	
+	set (CRCD, FEE, GLSC, S2, Z) = ""
+	set (OFFSTAMT(0), OFFSTAMT(1)) = 0
+	
+	for  set CRCD = OFFST(CRCD).order() quit:CRCD.isNull()  do {
+		
+		for  set FEE = OFFST(CRCD, FEE).order() quit:FEE.isNull()  do {
+			
+			for  set GLSC = OFFST(CRCD, FEE, GLSC).order() quit:GLSC.isNull()  do {
+				
+				for  set Z = OFFST(CRCD, FEE, GLSC, Z).order() quit:Z.isNull()  do {
+					
+					set DATA = OFFST(CRCD, FEE, GLSC, Z)
+					
+					set GLACN(0) = DATA.piece("|", 1) 
+					set GLETC(0) = DATA.piece("|", 2)
+					set GLACN(1) = DATA.piece("|", 3) 
+					set GLETC(1) = DATA.piece("|", 4)
+					
+					for S1 = 0, 1 do {
+						
+						if 'OFFST(CRCD, FEE, GLSC, Z, S1).exists() quit
+						set OFFSTAMT(S1) = OFFSTAMT(S1) + OFFST(CRCD, FEE, GLSC, Z, S1)
+						}
+					}
+				}
+			}
+		}
+		
+	for  set S2 = OFFSTAMT(S2).order() quit:S2.isNull()  do { quit:ER
+		
+		if 'OFFSTAMT(S2) > 0 quit
+		
+		set CID = GLACN(S2)
+		set ETC = GLETC(S2)
+		
+		if 'ETC.isNull() do {
+			  
+			type RecordTTX ttx2 = Class.new("RecordTTX")
+			
+			set ttx2.cid = CID
+			set ttx2.itc = trn.itc
+			set ttx2.etc = GLETC(S2)
+			set ttx2.tamt = OFFSTAMT(S2)
+			set ttx2.tlo = %UserStation
+			set ttx2.tcmt = ""
+			set ttx2.cdt = $select(%SystemDate=%CurrentDate:"", 1:%CurrentDate)
+			set ttx2.tim = %CurrentTime
+			set ttx2.crcd = CRCD.get()
+			set ttx2.bcrcd = CRCD.get()
+			
+			do TRNSINGL^TRNDRV(.ttx2, .ln, TPD, BRCD, 5) quit:ER
+			}
+		}
+	
+	kill OFFST
+	
+	quit
+
+	
+COMADJ(String AGENT, Date COMJD)
+
+	// Calculate commission adjustment
+	
+	type public Boolean ER
+	type public Number CID
+	
+	type String CPLAN
+	type Date DATE, NJD
+	
+	type ResultSet rs = Db.select("CPLAN", "COMPLNCID", "CID=:CID")
+
+	while rs.next() do { quit:ER
+		set CPLAN = rs.getCol("CPLAN")
+
+		type RecordUTBLCOMPLN utblcompln = Db.getRecord("UTBLCOMPLN", "CPLAN=:CPLAN")
+
+		// Quit if this is a transaction based plan
+		if utblcompln.amth = 2 quit
+	
+		/*
+		Check to see if this transaction passes over a plan
+		calculation date
+		*/
+		set NJD = COMJD.nextFreqDate(utblcompln.calcfre) quit:ER 
+		if NJD '< %SystemDate quit
+	
+		// Quit if the plan utilizes a calc formula
+		if 'utblcompln.comcalc.isNull() quit
+	
+		set DATE = utblcompln.ncald + utblcompln.postoff
+
+		// If a prior adjustment was made, we don't need this one
+		type RecordDAYENDCOMADJ dayendcomadj = Db.getRecord("DAYENDCOMADJ", "PSTDT=:DATE,AGENT=:AGENT,CPLAN=:CPLAN,CID=:CID", 1)
+		if dayendcomadj.getMode() = 1, dayendcomadj.efd < COMJD quit
+		
+		// Set up new dayend file entry
+		set dayendcomadj.efd = COMJD
+		
+		do dayendcomadj.bypassSave()
+		}
+		
+	quit
+	
+public EXTERN(RecordLN ln,	 // Loan account		/REF:RW
+	      String PAR(),	 // Processing qualifiers	/REF:R
+	      String NEWARR())	 // New index/matrix info	/NOREQ/REF:R
+	
+	/*
+	External Enter Point for Unwind / Reapply
+	 
+	Additional notes on Arguments:
+	
+		. PAR()	Processing qualifiers		/NOREQ
+
+			PRCTYP	External process type	/NOREQ
+				Externally called from:
+				1 - Mass interest index change
+				2 - Mass interest matrix change
+				3 - Effective-dated interest rate change
+
+			INDNAM	Index name			/NOREQ
+				Used for effective dated index change and 
+				effective dated interest rate change
+
+			MATNAM	Matrix name			/NOREQ
+				Used for effective dated matrix change and
+				effective dated interest rate change
+
+			RATE	New interest rate		/NOREQ
+				Used for effective dated interest rate change
+
+			INTSPR	New interest spread		/NOREQ
+				Used for effective dated interest rate change
+
+			INTFRE	New interest change frequency	/NOREQ
+				Used for effective dated interest rate change
+
+			RNDMTD	New INTEREST rounding method	/NOREQ
+				Used for effective dated interest rate change
+
+			ICHND	New interest change date	/NOREQ
+				Used for effective dated interest rate change
+
+	 		SEGMENT	External segment number		/NOREQ
+				Segment of effective dated interest rate change
+	*/
+
+	type public String AX(,,,), IX(,,)
+
+	type Date SAVEFD, TPD
+	type Number EXTSEG, I, NEWRATE, NEWISPR, NEWIFRE, NEWRND, NEWICH, PRCTYP
+	type String INTMAT, INDNAM, MATNAM
+
+	set PRCTYP = PAR("PRCTYP").get()
+	if PAR("INDNAM").exists() set INDNAM = PAR("INDNAM")
+	if PAR("MATNAM").exists() set MATNAM = PAR("MATNAM")
+	if PAR("RATE").exists() set NEWRATE = PAR("RATE")
+	if PAR("INTSPR").exists() set NEWISPR = PAR("INTSPR")
+	if PAR("INTFRE").exists() set NEWIFRE = PAR("INTFRE")
+	if PAR("RNDMTD").exists() set NEWRND = PAR("RNDMTD")
+	if PAR("ICHND").exists() set NEWICH = PAR("ICHND")
+	if PAR("SEGMENT").exists() set EXTSEG = PAR("SEGMENT")
+
+	set TPD = %SystemDate
+	
+	set SAVEFD = %EffectiveDate.get()
+	if SAVEFD.isNull() set SAVEFD = %SystemDate
+	
+	// if externally called from INDEXMC, dump new index values into IX
+	if PRCTYP = 1 do {		
+		kill IX(INDNAM, SAVEFD)
+		
+		set I = ""
+		for  set I = NEWARR(I).order() quit:I.isNull()  set IX(INDNAM, SAVEFD, I) = NEWARR(I)
+		}
+	
+	// if externally called from MATRIXMC, dump new matrix values into AX
+	if PRCTYP = 2 do {
+		kill AX(MATNAM, SAVEFD)
+		
+		set I = ""
+		for  set I = NEWARR(I).order() quit:I.isNull()  do {
+	
+			type Number ROW = NEWARR(I).piece("|", 1)
+			type Number COL = NEWARR(I).piece("|", 2)
+			type String SPREAD = NEWARR(I).piece("|", 3)
+	
+			if ('ROW.isNull()), (COL.isNull()) set AX(MATNAM, SAVEFD, ROW) = SPREAD
+			else  if 'COL.isNull() set AX(MATNAM, SAVEFD, ROW, COL) = SPREAD
+			}
+		}
+
+	type RecordTTX ttx = Class.new("RecordTTX")
+        
+	type RecordTRN trn = Class.new("RecordTRN")
+        
+	do ^LNPTSRV(.ln, .trn, .ttx)
+
+	quit
+	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60745^29663^Balasubramonian Sankar^14178"	// Signature - LTD^TIME^USER^SIZE

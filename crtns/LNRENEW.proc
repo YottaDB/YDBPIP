@@ -1,0 +1,454 @@
+LNRENEW	
+	/*
+
+	  Loan Renewal Utility
+
+	---- Revision History ------------------------------------------------
+	
+	05/23/06 - SmithCD - CR 19732
+		   Removed the ' from ttx.exists() before calling EXEC^UANTIC 
+		   so same-day reversals and error corrects cause the account 
+		   to be unwound. Moved FORWARD section to after BACKWARD 
+		   section to group the sections used for transaction posting 
+		   at the top of the procedure.
+	
+	01/31/06 - SmithCD - CR 19343 (16890)
+		   Modified call to EXEC^LNUEFD and EXEC^UANTIC to pass 
+		   ACRADJ(,) instead of just ACRADJ to allow for accrual 
+		   adjustments to escrow accounts. Also modified these 
+		   sections to pass dep() objects for escrow accounts 
+		   related to the loan. Re-named public VPG00A section to 
+		   BACKWARD - makes a lot more sense.
+	
+	10/07/05 - SmithCD - CR 16885
+		   Removed 4th and 5th parameters in call to EXEC^UANTIC.
+	  
+	   05/31/05 - SmithCD - CR 15902
+	   	      . Modified call to EXEC^LNUEFD to pass ACRADJ in the 
+	   	        correct parameter position (was being passed as the 
+	   	        DATA parameter) so accrual asjustments may be 
+	   	        calculated correctly
+	   	      . Swapped parameter 7 (CTL) and 8 (SKIP) in call to 
+	   	        EXEC^UANTIC (prior call would cause the system to 
+	   	        behave as if it is bringing a loan current, and would 
+	   	        also force scheduled payments)
+	   	      . Removed code to generate an accrual adjustment based 
+	   	        on ADJACR(CID) in FORWARD section (was not being 
+	   	        executed in prior versions due to exclusive new 
+	   	        executed in LNUEFD and UANTIC but was removed in p04, 
+	   	        exposing it to being executed in addition to the 
+	   	        accrual adjustment generated in UANTIC)
+	   	      . Fixed typo on STRING variable in CHECKDI section that 
+	   	        would have cause an undefined error
+	   	      . Cleaned up code to conform to current PSL standards
+
+	   03/14/05 - TITOVE - CR 13733
+	   	Modified as part of DBI2 project.
+
+	*/
+
+	quit
+
+
+public	BACKWARD(RecordLN ln,		// Loan account			/REF:RW
+		 RecordTTX ttx1(,,),	// Transaction set from history	/NOREQ/REF:R
+		 RecordTTX ttx,		// Primary transaction		/REF:R
+		 RecordDEP dep())	// Deposit accounts		/REF:RW
+
+	/*
+	External entry point to unwind account
+
+	Called by Reverse trans in effective-dated period procedure (LNPTSRV)
+	Called by MRPC call for Backdated Loan Renewals (MRPC050)
+	*/
+
+	type public Date CUVAR2, TPD
+	type public Number ACRADJ(,), ER, SAVACR, TYPE
+	type public String CRCD, GRP
+	
+	set CRCD = ln.crcd 
+	set TYPE = ln.type
+	set GRP = ln.grp
+
+	// Backdated or a transaction object exists - unwind the account
+	if (%EffectiveDate < %SystemDate) ! (ttx.exists()) do { quit:ER
+
+		do EXEC^LNUEFD(.ln, .ttx1(,,), .ttx, %EffectiveDate, , .ACRADJ(,), , .dep()) quit:ER
+
+		// Process transaction as if effective date was today
+		#ACCEPT DATE=03/20/02;PGM=John Carroll
+		set (%SystemDate, TPD) = %EffectiveDate
+		}
+
+	// Save accrual for later adjustments
+	set SAVACR = ln.acr
+	
+	quit
+
+
+public	FORWARD(RecordLN ln,		// Loan record			/REF:RW
+		RecordTTX ttx,		// Transaction record		/REF:R
+		RecordTTX ttx1(,,),	// Transaction set from history	/NOREQ/REF:RW
+		String CTL,		// Control parameters		/NOREQ
+		RecordDEP dep())	// Deposit accounts		/REF:RW
+
+	/*
+	Bring loan current
+	
+	Called by Reverse trans in effective-dated period procedure (LNPTSRV)
+
+	   Additional notes on ARGUMENTS:
+
+	           . CTL
+	            Position 1 - renewal yes/no
+	*/
+
+	type public Date CUVAR2, SAVTJD
+	type public Number ACRADJ(,), CID, ER
+	type public String FMIRN()
+	
+	type Number ESCCID, GLNUM, OCC, TAMT, TYPE
+	type String GLSC, TSO, TC
+
+	set CTL = CTL.get()
+
+	// Data for back-dated renewals
+	if CTL.extract() do { quit:ER
+		
+		// File Date of Last Renewal
+		do LRD(.ln)
+		
+		// File Original Number of Payments
+		do ONP(.ln) quit:ER
+		}
+
+	do ln.save("NOTRIGBRF/NOVALREQ/NOVALDD/NOTRIGAFT/NOUPDATE/NOVALRI")
+	
+	set ESCCID = ""
+	for ESCCID = dep(ESCCID).order() quit:ESCCID.isNull()  do dep(ESCCID).save("NOTRIGBRF/NOVALREQ/NOVALDD/NOTRIGAFT/NOUPDATE/NOVALRI")
+
+	// Bring loan current
+	do EXEC^UANTIC(.ln, .ttx, .ttx1(,,), CUVAR2, , 1, .ACRADJ(,), , .dep()) quit:ER
+
+	#ACCEPT DATE=03/20/02;PGM=John Carroll
+	set %SystemDate = SAVTJD
+
+	quit
+
+	
+public	FILE(RecordLN ln, 		// Loan account			/REF:RW
+	     RecordTTX ttx)		// Primary transaction		/REF:RW
+	     
+	/*
+	File renewal
+
+	Called by MRPC call for Backdated Loan Renewals (MRPC050)
+	*/
+	   
+	type public Boolean ER
+	
+	// Backdated renewal
+	set ttx.brcd = CUVAR.BOBR
+	
+	do BACKDATE(.ln, .ttx) quit:ER.get() = 1
+
+	// Custom code run after filer
+	#IF 'CUVAR.LRNCPGM.isNull()
+		type String PGM = "AFTER^"_CUVAR.LRNCPGM_"(.ln,.ttx)"
+		do @PGM
+	#ENDIF
+	
+	quit
+
+
+public	PPCID(RecordLN ln,  		// Loan account			/REF:RW
+	      Number MD)
+		
+	/*
+	Account Number Prompt: 0=Native, 1=External	
+
+	Called by MRPC call for Backdated Loan Renewals (MRPC050)
+	*/
+	
+	type public Boolean ER
+
+	type public Number CID, X
+
+	do CID^UACN1
+	if 'X ! (ER) quit
+
+	// Account closed
+	if ln.stat = 4 do Runtime.setErrSTBLER("LN", "ACNCLO"), ^UTLERR quit
+
+	do CHKCID^LNCAL21 quit:ER
+
+	// Custom code for account number check
+	#IF 'CUVAR.LRNCPGM.isNull() 
+		type String PGM = "CHK^"_CUVAR.LRNCPGM_"(.ln)"
+		do @PGM
+	#ENDIF
+
+	quit
+	
+
+public EFD(RecordLN ln) 		// Loan account			/REF:R
+
+	/*
+	Post processor for effective date
+
+	Called by MRPC call for Backdated Loan Renewals (MRPC050)
+	*/
+
+	type public Number X
+
+	/*
+	If the EFD < TJD, then the maturity renewal code
+	cannot be anything other than zero or null.
+
+	Do not allow current or future dated renewals
+	*/
+	if X '< %SystemDate do Runtime.setErrMSG("LN", 3210) quit
+	
+	// Cannot effective-date prior to opening date
+	if X < ln.dtnt do Runtime.setErrMSG("LN", 450) quit
+
+	// Last Renewal - Date
+	// Warning. Effective date not equal to maturity date.
+	if X '= ln.mdt, X '= ln.lrd do Runtime.setErrMSG("LN", 1439) quit
+
+	// Balance renewal code of ~p1 invalid for a backdated renewal
+	if X < %SystemDate, ln.rencd, ln.rencd '= 4 do Runtime.setErrMSG("LN", 2427, "ln.rencd") quit
+
+	// Renewals cannot be effective-dated prior to history cutoff date
+	if ln.hisctf, X < ln.hisctf do Runtime.setErrMSG("LN", 2429) quit
+	
+	quit
+
+
+LRD(RecordLN ln)	 		// Loan account			/REF:RW
+
+	// File Date of Last Renewal Data
+
+	do ln.setAuditFlag(1)
+
+	// Last Renewal - Date
+	if 'ln.isChanged("LRD") set ln.lrd = %SystemDate
+
+	// Last Renewal - Principal Balance
+	if 'ln.isChanged("LRPB") set ln.lrpb = $select('ln.aruf:+ln.bal, 1:ln.bal - ln.udbal)
+
+	// Int/Div Paid - Life
+	if 'ln.isChanged("LRIPB") set ln.lripb = ln.ipl
+
+	// Last Renewal - Interest Accrual Balance
+	if 'ln.isChanged("LRIAB") set ln.lriab = ln.acr
+
+	quit
+
+
+ONP(RecordLN ln)	 		// Loan account			/REF:RW
+
+	// File Original Number of Payments ONP=MDT-LRD/365*(AF of DIST1ND)
+
+	type public Boolean ER
+	
+	type Number AF, AMBAS, ONP
+	type Date NJD, MDT
+
+	do ln.setAuditFlag(1)
+
+	type RecordSTBLPCM stblpcm = Db.getRecord("STBLPCM", "KEY=:ln.pcm")
+
+	if stblpcm.pcmp.extract(1) do {
+		if 'ln.mdt ! ('ln.trm) set ln.onp = "" quit
+		if ln.dist1fre = "*" do {
+			type ResultSet rs1 = Db.select("COUNT(CID)", "LNPS1", "CID=:CID")
+
+			if rs1.next() set ONP = rs1.getCol(1) 
+			else  set ONP = 0
+			}
+		else  do { quit:(ER ! (NJD < 0))
+			set NJD = ln.dist1nd.nextFreqDate(ln.dist1fre,.AF) quit:(NJD < 0 ! (ER))
+			set ONP = (((ln.mdt - ln.lrd) / 365.25) * AF).roundDec(0)
+			}
+		set ln.onp = ONP
+
+		set MDT = $$EXT^UMDT(ln.trm, %EffectiveDate, 0, ln.busopt, ln.nbdc)
+		if %EffectiveDate.isNull() set %EffectiveDate = %SystemDate
+		set AMBAS = (((MDT - %EffectiveDate) / 365.25) * AF).roundDec(00)
+		set ln.ambas = AMBAS
+		}
+		
+	quit
+
+
+public	CHECKDI(RecordLN ln) 		// Loan account			/REF:R
+
+	/*
+	Only allow maintenance to specific data items
+	
+	Called by MRPC call for Backdated Loan Renewals (MRPC050)
+	*/
+
+	type public Boolean ER
+
+	type String DI, DIARRAY(,), NV, OV, STRING, VAR
+
+	if ln.isChanged("PCM") do { quit:ER
+		set OV = ln.pcm.oldVal
+		set NV = ln.pcm
+		if OV '= "2N", OV.extract(1, 2) '= 15 set ER = 1
+		if NV '= "2N", NV.extract(1, 2) '= 15 set ER = 1
+
+		// Loan renewal maintenance only allowed for payment calc 
+		// methods 2N, 15, and 15N
+		if ER do Runtime.setErrMSG("LN", 1282)
+		}
+		
+	set STRING = ",AMBAS,BLOFF,DIST1FRE,DIST2FRE,DIST3FRE,DIST4FRE,EIRN,EPPENMET,FPA,IACF,ICHM,IDP,"
+	set STRING = STRING_"INDEX,INTFRE,INTOFF,IRN,MDT,PMTPI,PPDPL,PPFREQ,PTRM,RFMO,RRMO,RPMO,SCH,"
+	set STRING = STRING_"SCHND,TRM,UPPEN,BNDT,CC,GLSC,TYPE,PCM,"
+
+	do AUDIT^UCUTIL(.ln, .DIARRAY(,), 10, "LN")
+
+	set DI = ""
+
+	// Cannot backdate changes to ~p1. Use account maintenance.
+	for  set DI = DIARRAY("LN", DI).order() quit:DI.isNull()  if 'STRING.isLike("%DI%") set VAR = "LN."_DI.piece(",", 2) do Runtime.setErrMSG("LN", 1438, VAR) quit
+	
+	quit
+
+
+REMDI(RecordLN ln) 			// Loan account			/REF:RW
+
+	// Remove changes to CC, TYPE and GLSC
+
+	if ln.isChanged("CC") set ln.cc = ln.cc.oldVal, ln.cc.journal = 0
+	if ln.isChanged("TYPE") set ln.type = ln.type.oldVal, ln.type.journal = 0
+	if ln.isChanged("GLSC") set ln.glsc = ln.glsc.oldVal, ln.glsc.journal = 0
+
+	quit
+
+
+public	RRMO1(RecordLN ln) 		// Loan account			/REF:RW
+
+	// Make the renewal rate the value in the loan's product
+
+	type Number IRN, IRN1
+
+	do RRMO(.ln)
+
+	quit IRN
+
+
+public	RRMO2(RecordLN ln) 		// Loan account			/REF:RW
+
+	// Renew at the lesser of the loan's rate or the product's rate.
+
+	type Number IRN,IRN1
+
+	do RRMO(.ln)
+
+	quit $select(IRN1 < IRN:IRN1, 1:IRN)
+
+
+public	RRMO3(RecordLN ln) 		// Loan account			/REF:RW
+
+	// Renew at the greater of the loan's rate or the product's rate.
+
+	type Number IRN, IRN1
+
+	do RRMO(.ln)
+
+	quit $select(IRN1 > IRN:IRN1, 1:IRN)
+
+
+public	RRMO4(RecordLN ln) 		// Loan account			/REF:RW
+
+	// Renew at the rate based upon the rate schedule. LOAN RENEWS
+
+	type Number BAL
+
+	/*
+	If there is no rate schedule for this account, then just return the
+	original or existing interest rate.
+	*/
+	if ln.sch.isNull() quit ln.irn
+
+	// Unadvanced Balance
+	set BAL = $select('ln.aruf:+ln.bal, 1:ln.bal - ln.udbal)
+	if %EffectiveDate.get().isNull() set %EffectiveDate = %SystemDate
+
+	quit $$RSCH^URSCH(ln.sch, BAL, %EffectiveDate, ln.mdt, ln.rsintspr, ln.rsrndmtd)
+
+
+public	RRMO(RecordLN ln) 		// Loan account			/REF:R
+
+	// Determine the account and product type's interest rate
+
+	type public Number IRN, IRN1
+
+	type RecordPRODDFTL prod = Db.getRecord("PRODDFTL", "TYPE=:ln.type")
+
+	set IRN = prod.irn
+	set IRN1 = ln.irn
+
+	quit
+
+
+BACKDATE(RecordLN ln, 		// Loan account				/REF:RW
+	 RecordTTX ttx) 	// Primary transaction			/REF:RW
+	 
+	// Backdate loan renewal
+
+	type public Boolean ER
+	type public Date CUVAR2
+
+	// Account Maturity Date
+	if ln.mdt < CUVAR2 do { quit:ER
+		type Date MDT
+
+		// Maturity date must be after the system date
+		if 'ln.trm do Runtime.setErrMSG("LN", 5083) quit
+
+		// Account Term
+		set MDT = $$EXT^UMDT(ln.trm, %EffectiveDate, 0, ln.busopt, ln.nbdc)
+
+		if ln.isChanged("MDT") set MDT = ln.mdt
+
+		// Account Maturity Date
+		set ln.mdt = MDT
+		}
+
+	do REMDI(.ln)
+
+	if %EffectiveDate < CUVAR2 do FORWARD(.ln, .ttx, , 1) quit:ER
+	
+	#ACCEPT DATE=03/20/02;PGM=John Carroll
+	set %SystemDate = CUVAR2
+
+	// Reset account based upon payment (bill) file
+	do CALC^LNUBIL(.ln, "01001") quit:ER
+
+	type String TSO, UTSO()
+
+	// Transaction Source of Funds
+	set TSO = ttx.tso
+	do OUT^UTSO(.UTSO(), TSO)
+	kill UTSO("CFEVENT")
+
+	set TSO = ""
+	do IN^UTSO(.UTSO(), .TSO)
+	set ttx.tso = TSO
+
+	if ttx.exists() do TRNSINGL^TRNDRV(.ttx, .ln, %SystemDate, ttx.brcd, 4) quit
+
+	// File entries to history
+	do ln.save("NOTRIGBRF/NOVALREQ/NOVALDD/NOTRIGAFT/NOUPDATE/NOVALRI")
+
+	#ACCEPT DATE=03/20/02;PGM=John Carroll
+	set %SystemDate = CUVAR2
+
+	quit
+
+vSIG()	quit "60408^71825^Chad Smith^11243"	// Signature - LTD^TIME^USER^SIZE

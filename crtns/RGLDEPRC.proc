@@ -1,0 +1,409 @@
+public	RGLDEPRC(Date %SystemDate)
+	/*
+	  
+	DESC: Deposit Reclassification GL Accumulation
+
+	This routine finds the delinquency asset reclassification amounts
+	by looping through [DAYENDDOVRCB] and  G/L accounts using the
+	General ledger accounts in the file [UTBLACC], then [UTBLGLSCR]
+	table.  The amounts are then accumulated to appropriated GL account
+	in TGL source 10.  TGL source 11 is the reversal of the previous day's
+	amounts in source 10.
+
+	---- Revision History ------------------------------------------------
+
+	03/29/06 - KinI - CR 20009
+		   Added delete for TGL record to avoid Oracle “unique 
+		   constraint violation” error in case of re-accumulation.
+	
+	08/09/05 - TITOVE - CR 16844
+		   Minor clean up as part of DBI3 project. Corrected logic
+		   in FILE section.
+
+	04/16/02 - Sanjay C - 49794
+		   Converted to PSL.
+
+	*/
+
+	new ACN,CO,CC,CID,CRCD,DEP,DTL,GL,GLACT,GLSC,TJD1,UTBL
+	
+	// Lock TJD source 10
+	lock +TGL(%SystemDate,10)
+
+	// Lock TJD source 11
+	lock +TGL(%SystemDate,11)
+	
+	lock +DAYEND(%SystemDate,"DOVRCB")
+
+	// Delete TGL level 10
+	do Db.fastDelete("TGL1","TDT=:%SystemDate,SRC=10")
+	do Db.fastDelete("TGL","TJD=:%SystemDate,SRC=10")
+	
+	// Delete TGL level 11
+	do Db.fastDelete("TGL1","TDT=:%SystemDate,SRC=11")
+	do Db.fastDelete("TGL","TJD=:%SystemDate,SRC=11")
+	
+	// Source 10 - Include detail
+	set DETAIL=1		
+
+	// Find [UTBLACC] gl accounts
+	do ACCGL
+
+	// Loop through DAYENDDOVRCB
+	do PROC
+
+	// File source 10
+	do FILE(10)		
+
+	set TJD1=%SystemDate-1
+	
+	if 'Db.isDefined("TGL1","TDT=:TJD1,SRC=10") quit
+	
+	// No detail for source 11
+	set DETAIL=0		
+
+	// Reverse previous days entries
+	do SRC11(TJD1)		
+
+	// File reversal
+	do FILE(11)	
+
+	// Unlock TJD source 10
+	lock -TGL(%SystemDate,10)
+
+	// Unlock TJD source 11
+	lock -TGL(%SystemDate,11)
+
+	lock -DAYEND(%SystemDate,"DOVRCB")
+	
+	quit
+
+
+PROC	// Loop through DAYENDDOVRCB to get customer and account numbers.
+
+	type ResultSet rs=Db.select("ACN,CID","DAYENDDOVRCB","NPDT=:%SystemDate")
+	
+	while rs.next()  do {
+		
+		set ACN=rs.getCol("ACN")
+		
+		set CID=rs.getCol("CID")
+
+		do DPARRY
+		
+		do DOVRCB(%SystemDate)
+		}
+	quit
+
+
+DPARRY	// Get account fields needed fot TGL
+
+	type RecordDEP dep=Db.getRecord("DEP","CID=:CID")
+
+	// Cost Center
+	set CC=dep.cc
+
+	// Currency Code
+	set CRCD=dep.crcd
+
+	// System Default Currency Code
+	if CRCD="" set CRCD=%SystemCurrency
+
+	// General Ledger Set Code
+	set GLSC=dep.glsc
+
+	quit
+
+public	DOVRCB(Date %SystemDate)	// Get amounts from DAYENDDOVRCB
+
+	// This section is also called by SCA618 report
+
+	type public Number ACN, CID
+	type public String GLSC
+
+	type Number DARCLS
+
+	type RecordDAYENDDOVRCB dovrcb=Db.getRecord("DAYENDDOVRCB","NPDT=:%SystemDate,ACN=:ACN,CID=:CID")
+
+	// If an override set to DARCOVR else set to DARCLS
+	set DARCLS=$S(dovrcb.suspect=1:dovrcb.darcovr,1:dovrcb.darcls)
+	
+	if DARCLS.isNull() quit
+
+	// Negative Principal
+	if dovrcb.ovrnpb do {
+
+		// Debit non perfm neg principal
+		do SUM(dovrcb.ovrnpb,$$GLACN("DGLNB","ACC",GLSC,DARCLS),0)
+
+		// Credit neg principal		
+		do SUM(dovrcb.ovrnpb,$$GLACN("DGLNB","SGL",GLSC,DARCLS),1)	
+		}
+
+	// Unauth Neg Principal
+	if dovrcb.unaunp do {
+
+		// Debit non perfm unauth neg principal
+		do SUM(dovrcb.unaunp,$$GLACN("DGLUNANB","ACC",GLSC,DARCLS),0)
+
+		// Credit  unauth neg principal
+		do SUM(dovrcb.unaunp,$$GLACN("DGLUNANB","SGL",GLSC,DARCLS),1)
+		}
+
+	// Overdrawn Negative Accrual Interest
+	if dovrcb.ovrnai do {
+
+		// Debit non perfm neg accr interest
+		do SUM(dovrcb.ovrnai,$$GLACN("DGLNI","ACC",GLSC,DARCLS),0)
+
+		// Credit neg accr interest
+		do SUM(dovrcb.ovrnai,$$GLACN("DGLNI","SGL",GLSC,DARCLS),1)
+
+		// Debit interest income
+		do SUM(dovrcb.ovrnai,$$GLACN("DGLII","ACC",GLSC,DARCLS),0)
+
+		// Credit interest income
+		do SUM(dovrcb.ovrnai,$$GLACN("DGLII","SGL",GLSC,DARCLS),1)
+		}
+
+	// Unauthorized Negative Accrual Interest
+	if dovrcb.unauni do {
+
+		// Debit non perfm unauth neg accr interest
+		do SUM(dovrcb.unauni,$$GLACN("DGLUNANI","ACC",GLSC,DARCLS),0)
+
+		// Credit unauth neg accr interest
+		do SUM(dovrcb.unauni,$$GLACN("DGLUNANI","SGL",GLSC,DARCLS),1)
+
+		// Debit interest income
+		do SUM(dovrcb.unauni,$$GLACN("DGLII","ACC",GLSC,DARCLS),0)
+
+		// Credit interest income
+		do SUM(dovrcb.unauni,$$GLACN("DGLII","SGL",GLSC,DARCLS),1)
+		}
+
+	// Residual Interest
+	if dovrcb.rin do {
+
+		// Debit non perfm residual interest
+		do SUM(dovrcb.rin,$$GLACN("DGLRI","ACC",GLSC,DARCLS),0)
+
+		// Credit  residual interest
+		do SUM(dovrcb.rin,$$GLACN("DGLRI","SGL",GLSC,DARCLS),1)
+		}
+	quit
+
+
+SUM(Number AMT,			// Reclassification Fee Amount
+    Number GLACT,		// G/L Account Number
+    Boolean IND)		// Credit/Debit Flag	
+    
+	// Accumulate to short name array TGL
+
+	type public Boolean DETAIL
+	type public Number CC, CID
+	type public String CRCD, TGL(,,)
+	
+	set TGL = TGL(CRCD,GLACT,CC).get()
+	
+	set TGL.piece("|",IND*2+1) = TGL.piece("|",IND*2+1) + 1
+	set TGL.piece("|",IND*2+2) = TGL.piece("|",IND*2+2) + AMT
+	
+	set TGL(CRCD,GLACT,CC) = TGL
+	
+	if DETAIL do DTL(10,CRCD,GLACT,CC,IND,AMT,CID)
+
+	quit
+
+
+DTL(Number SRC,			// Source
+    String CRCD,		// Currency Code
+    Number GLACT,		// G/L Account Number
+    Number CC,			// Cost Center
+    Boolean IND,		// Credit/Debit Flag
+    Number AMT,			// Reclassification Fee Amount
+    Number CID)			// Account Number
+
+	// Create G/L Transaction Summary Detail entry
+	
+	type Number SEQ
+
+	set SEQ=Db.nextVal("TGLDTL","TJD=:%SystemDate,SRC=:SRC,CRCD=:CRCD,EFD=:%SystemDate,ACN=:GLACT,CC=:CC")
+
+	type RecordTGLDTL tgldtl=Class.new("RecordTGLDTL")
+	
+	set tgldtl.tjd=%SystemDate
+	set tgldtl.src=10
+	set tgldtl.crcd=CRCD
+	set tgldtl.efd=%SystemDate
+	set tgldtl.acn=GLACT
+	set tgldtl.cc=CC
+	set tgldtl.seq=SEQ
+	set tgldtl.glacn=GLACT
+	set tgldtl.ccntr=CC
+	set tgldtl.trn=$S(IND:"CR",1:"DR")
+	set tgldtl.tamt=AMT
+	set tgldtl.cmt=CID
+
+	do tgldtl.bypassSave()
+
+	quit
+
+FILE(Number SRC)	// File to TGL
+	
+	set (CRCD,GLACT,CC)=""
+	
+	for  set CRCD=$O(TGL(CRCD)) quit:CRCD.isNull()  do {
+		for  set GLACT=$O(TGL(CRCD,GLACT)) quit:GLACT.isNull()  do {
+			for  set CC=$O(TGL(CRCD,GLACT,CC)) quit:CC.isNull()  do {
+	
+				type RecordTGL tgl=Class.new("RecordTGL")
+
+				set tgl.tjd=%SystemDate
+				set tgl.src=SRC
+				set tgl.crcd=CRCD	
+				set tgl.efd=%SystemDate
+				set tgl.acn=GLACT
+				set tgl.cc=CC
+				set tgl.drcnt=$P(TGL(CRCD,GLACT,CC),"|",1)
+				set tgl.dramt=$P(TGL(CRCD,GLACT,CC),"|",2)
+				set tgl.crcnt=$P(TGL(CRCD,GLACT,CC),"|",3)
+				set tgl.cramt=$P(TGL(CRCD,GLACT,CC),"|",4)
+
+				do tgl.bypassSave()
+				}
+			}
+		}
+
+	type RecordTGL1 tgl1=Class.new("RecordTGL1")
+	set tgl1.tdt=%SystemDate
+	set tgl1.src=SRC
+	set tgl1.prcmp="*"
+	
+	do tgl1.bypassSave()
+
+	kill TGL
+	
+	quit
+
+
+public	ACCGL	// User Table UTBLACC General Ledger Accounts
+
+	// This section is also called by SCA618 report
+
+	type public Number GL(,,)
+
+	type DbSet ds=Db.selectDbSet("UTBLACC","CLS='D'")
+	
+	while ds.next()  do {
+
+		type RecordUTBLACC utblacc=ds.getRecord("UTBLACC")
+
+		// Negative Principal
+		set GL("DGLNB","ACC",utblacc.ac)=utblacc.dglnb
+
+		// Unauth Neg Principal
+		set GL("DGLUNANB","ACC",utblacc.ac)=utblacc.dglunanb
+
+		// Negative Interest
+		set GL("DGLNI","ACC",utblacc.ac)=utblacc.dglni
+
+		// Unauth Neg Interest
+		set GL("DGLUNANI","ACC",utblacc.ac)=utblacc.dglunani
+
+		// Interest Income
+		set GL("DGLII","ACC",utblacc.ac)=utblacc.dglii
+
+		// Residual Interest
+		set GL("DGLRI","ACC",utblacc.ac)=utblacc.dglri
+		}
+	quit
+
+
+GLACN(String ELE,
+      String SRC,
+      String GLSC,
+      Number AC)	
+
+	// General Ledger account to be used for item in DAYENDDOVRCB
+
+	/*
+	ARGUMENTS:
+	      . ELE 	Item to be reclassified  	/TYP=T/REQ/MECH=VAL
+
+	      . SRC 	Original source table  		/TYP=T/REQ/MECH=VAL
+	                This is the table to obtain
+	                the general ledger account.
+	    		"ACC" - [UTBLACC] OR [UTBLGLSCR]
+	    		"SGL" - [UTBLGLSC]
+
+
+	      . GLSC 	General Ledger Set Code  	/TYP=T/REQ/MECH=VAL
+
+	      . AC 	Asset Classification  	 	/TYP=N/NOREQ
+	        				 	REQ when SRC="ACC"
+
+	RETURNS:
+	
+	      . $$    	General Ledger Account         /TYP=N
+
+
+	*/
+
+	new GLACN
+	set GLACN=""
+
+	// First check to see if general ledger account has been found for 
+	// element
+	
+	// GL account in [UTBLACC] OR [UTBLGLSCR] OR SUSPENSE
+	if $G(GL(ELE,SRC,AC))'="" quit GL(ELE,SRC,AC)
+
+	// GL account in [UTBLGLSC] OR SUSPENSE
+	if $G(GL(ELE,SRC,GLSC,AC))'="" quit GL(ELE,SRC,GLSC,AC)
+
+	/* 
+	Reclassification general ledger account for item is not in
+	[UTBLACC].  The general ledger account is in [UTBLGLSCR]. If not
+	found in [UTBLGLSCR] the teller suspense account will be used.
+	*/
+
+	if SRC="ACC" do {
+		set GLACN=$$^UTLGLSC(GLSC,ELE,"UTBLGLSCR",AC)
+		set GL(ELE,"ACC",GLSC,AC)=GLACN
+		}
+
+	/* 
+	Loan general ledger accounts in [UTBLGLSC]. If not found in
+	[UTBLGLSC], the teller suspense account will be used.
+	*/
+	
+	else  if SRC="SGL" do {
+		set GLACN=$$^UTLGLSC(GLSC,ELE,"UTBLGLSC")
+		set GL(ELE,"SGL",GLSC,AC)=GLACN
+		}
+
+	quit GLACN
+
+
+SRC11(Date DATE)	// Source 11 Reverse out previous day source 10.
+
+	type DbSet ds = Db.selectDbSet("TGL","TJD=:DATE AND SRC=10 AND EFD=:DATE")
+	while ds.next()  do {
+
+		type RecordTGL tgl = ds.getRecord("TGL")
+		
+		set CRCD = tgl.crcd
+                set GLACT = tgl.acn
+                set CC = tgl.cc
+	
+		// Negative Debit
+		if tgl.dramt do SUM(-tgl.dramt,GLACT,0)
+
+		// Negative Credit
+		if tgl.cramt do SUM(-tgl.cramt,GLACT,1)
+		}
+	
+	quit
+
+vSIG()	quit "60360^52491^Irina Kin^8863"	// Signature - LTD^TIME^USER^SIZE

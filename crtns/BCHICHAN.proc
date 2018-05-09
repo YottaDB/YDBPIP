@@ -1,0 +1,431 @@
+BCHICHAN //Batch BCHLNINTC - Change Interest Rate At ICHND
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 01/31/2007 12:46 - shetyes
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHLNINTC Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit quit
+ do JOBMGR^BCHUTL(%FN,"BCHLNINTC",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(CID) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHLNINTC","*","",CID.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,CID)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHLNINTC","*","",CID.get(),"",et)
+ }
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,CID) //
+	type public Date ICHND
+	type public String ET
+	type public Boolean ER
+
+	// Account Not Processed
+	if 'Db.isDefined("LN", "CID=:CID") set ET = $$^MSG(4116), ER = 1 quit
+
+	type RecordLN ln = Db.getRecord("LN", "CID=:CID")
+
+	do PROCESS(.ln, CID, ln.ichnd)
+
+	quit
+
+
+public EXTERN(RecordLN ln, Date %EffectiveDate, String CTL)
+
+	// Call from individually run function
+	
+	type public String RM()
+	type public Number CID
+	type public Boolean ER
+	
+	type String ERR()
+	type Number I, N
+	type Boolean SING
+	
+	set CTL = CTL.get()
+	set SING = 1
+	if %EffectiveDate.get().isNull() set %EffectiveDate = %SystemDate
+
+	do PROCESS(.ln, CID, %EffectiveDate)
+	
+	if 'ERR.data() quit
+	
+	set ER = 1
+	set N = ""
+	for I = 1:1 set N = ERR(N).order() quit:N.isNull()  set RM(I) = ERR(N)
+
+	quit
+
+
+PROCESS(RecordLN ln, Number CID, Date ICHND)
+
+	// Process one account
+
+	type public Boolean ER = 0
+	type public String ERR()
+	type public Number CTL
+	
+	type Number ANIRIV, ANIRO, BAL, INVL, IRN, IRNC
+	type Date ANIRND, JD, NJD
+
+	if ln.stat = 4 quit
+
+	/* 
+	  Account Already Processed
+	  if the date entered does not match the interest change next date 
+	  of the account, do not perform this processing. It indicates that
+	  the account may have already had the processing performed. The batch
+	  restart flag is set to N because of this next line of code.
+	*/
+	if ICHND '= ln.ichnd do:'CTL Runtime.setErrMSG("LN", 4115) quit
+
+	set BAL = ln.bal
+	set (IRNC, IRN) = ln.irn
+	set ICHND = ln.ichnd
+	set ANIRO = ln.aniro
+	set ANIRND = ln.anirnd
+	set ANIRIV = ln.aniriv
+	set INVL = ln.invl
+	
+	type RecordLNVRCHG lnvrchg = Db.getRecord("LNVRCHG", "ICHND=:%EffectiveDate,CID=:CID", 1)
+
+	set IRNC = lnvrchg.nrate
+
+	// New interest amount not defined - Account not reset
+	if 'IRNC set ERR(2) = $$^MSG(4119)
+
+	// Set AIR flag	
+	if (ln.pcm = 5) ! (ln.pcm = "5N") set ln.air = 1	
+
+	// Reset interest rate and annual rate limits 
+	set ln.irn = IRNC
+	set ln.ichld = ICHND
+	
+	set JD = ICHND
+	
+	// If the loan was converted null ICHND and INTOFFDT
+	if ln.intfre.isNull() do { quit
+		set ln.ichnd = ""
+		set ln.intoffdt = ""
+		
+		do P3A(.ln,.lnvrchg) 
+		}
+	
+	// Invalid Next Interest Change Date
+	set NJD = JD.nextFreqDate(ln.intfre)
+	if ER set ERR(4) = $$^MSG(4118) do P3(.ln, .lnvrchg) quit
+	
+	set ln.ichnd = NJD
+	if 'ln.intoff.isNull() set ln.intoffdt = $$INTOFFDT^LNCDI(NJD, ln.intoff, ln.intoffcl)
+	
+	if ln.stat do P5(.ln)
+
+	do P3(.ln, .lnvrchg)
+
+	quit
+
+
+P3(RecordLN ln, RecordLNVRCHG lnvrchg)	// Annual limits
+
+	type public Date ICHND
+	type public Boolean ER
+	type public String ERR()
+	
+	type Date JD, NJD
+
+	if ln.anirnd '= ICHND do P3B(.ln, .lnvrchg) quit
+	
+	set JD = ln.anirnd
+	set ln.anirld = JD
+
+	set NJD = JD.nextFreqDate("1YA")
+	
+	// Invalid Annual Rate Limit Next Change Date
+	if ER set ERR(5) = $$^MSG(4117) do P3A(.ln, .lnvrchg) quit
+
+	set ln.anirnd = NJD
+	
+	do P3A(.ln, .lnvrchg)
+
+	quit
+
+
+P3A(RecordLN ln, RecordLNVRCHG lnvrchg)	//
+
+	type public Number IRNC
+
+	set ln.aniro = IRNC
+
+	do P3B(.ln, .lnvrchg)
+	
+	quit
+
+
+P3B(RecordLN ln, RecordLNVRCHG lnvrchg)	//
+
+	type public Number CID, INVL, IRN, IRNC
+	type public String ERR()
+	type public Date ANIRND
+
+	type String TCMT
+
+	// Annual Rate Limit - Last Index Value = Current Interest Index Value
+	if ln.ichld = ANIRND set ln.aniriv = lnvrchg.linv
+
+	// Index Value - Last Rate Change = Current Interest Index Value
+	set ln.invl = lnvrchg.linv
+
+	// Set up History Record for changes
+
+	if ERR.data() do ERR quit
+	
+	if (IRN - IRNC) '= 0 do {
+		set TCMT = CID_"[LN]IRN:"_IRN_":"_IRNC
+		do HISTFILE(.ln, CID, TCMT)
+
+		set TCMT = CID_"[LNVRCHG]NRATE:"_IRN_":"_IRNC
+		do HISTFILE(.ln, CID, TCMT)
+		}
+	
+	if INVL = ln.invl do P4A(.ln) quit
+	
+	set TCMT = CID_"[LN]INVL:"_INVL_":"_ln.invl
+	do HISTFILE(.ln, CID, TCMT)
+	
+	do P4A(.ln)
+
+	quit
+
+	
+P4A(RecordLN ln)	//
+
+	type public Date ANIRND
+	type public Number ANIRIV, ANIRO, CID
+
+	type String TCMT
+
+	if ln.anirnd '= ANIRND do {
+		set TCMT = CID_"[LN]ANIRND:"_ANIRND_":"_ln.anirnd
+		do HISTFILE(.ln, CID, TCMT)
+
+		set TCMT = CID_"[LN]ANIRO:"_ANIRO_":"_ln.aniro
+		do HISTFILE(.ln, CID, TCMT)
+	
+		set TCMT = CID_"[LN]ANIRIV:"_ANIRIV_":"_ln.aniriv
+		do HISTFILE(.ln, CID, TCMT)
+		}
+		
+	do P5(.ln)
+	
+	quit
+
+
+P5(RecordLN ln)
+
+	type public Number CID, CTL
+	type public String ERR()
+	type public Date ICHND
+	
+	type String TCMT
+	type Date NJD
+
+	// File account, history
+
+	if ERR.data() do ERR quit
+
+
+	if ln.ichnd ! (ICHND) do {
+		set TCMT = CID_"[LN]ICHND:"_ICHND_":"_ln.ichnd
+		do HISTFILE(.ln, CID, TCMT)
+		}
+
+	if 'CTL do ln.bypassSave()
+
+	// File next Dayend entries based upon next date
+
+	set NJD = ln.ichnd
+
+	if 'NJD quit
+	
+	if ICHND '= %EffectiveDate quit
+
+	quit
+
+
+HISTFILE(RecordLN ln, Number CID, String TCMT)
+
+	// Create a history and file maintenance record
+
+	type RecordHIST hist = Class.new("RecordHIST")
+
+	set hist.cid = CID
+	set hist.tseq = Db.nextVal("HIST", "CID")
+	set hist.tjd = %SystemDate
+	set hist.tlo = %UserStation
+	set hist.cdt = %CurrentDate
+	set hist.time = %CurrentTime
+	set hist.uid = %UserID
+	set hist.tcmt = TCMT
+
+	do hist.bypassSave()
+
+	quit
+
+	
+ERR	// Set error
+
+	type public Boolean SING
+
+	if SING quit
+	
+	type public Boolean ER = 1
+	type public String ERR(), ET
+
+	type Number N = ""
+
+	/*
+	  set ET and ER so that ER will roll back to location where
+	  TP was started, at that location the history will be rolled 
+	  back and a dayend exception error created with ET to explain
+	  the reason
+	*/
+	for  set N = ERR(N).order() quit:N = ""  set ET = ERR(N)
+
+	kill ERR
+
+	quit
+	
+	
+LOGERR	// File Dayend exceptions
+
+	type public Number %ZTSEQ, BAL, CID
+	type public String ET
+
+	type String DESC
+
+	// Variable Rate Loan Change Date Reset 
+	set DESC = $$^MSG(7118)_"|1"
+	
+	do LOG^UTLEXC($T(+0), "*", DESC, CID.get(), %ZTSEQ.get(), ET.get(), +BAL.get())
+
+	quit
+
+	
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,CID
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set CID=vRECORD.piece($C(9),1)
+ do vPROC(CID)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,CID
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>32767 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+13>32767 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("CID","LN","ICHND=:TJD AND INDEX NOT = '' AND INTFRE NOT = '' AND INTOFF NOT = ''")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	type public Boolean CTL, SING
+
+	set CTL = 0
+	set %EffectiveDate = %SystemDate
+	
+	set %UserID = "BATCH"
+	set SING = ""
+
+	quit
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

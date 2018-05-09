@@ -1,0 +1,185 @@
+public	CRTCH(RecordTTX ttx(),	// Transaction
+	      Number LTRNSEQ)	// Stored Value for Transaction Sequence
+	     
+	/*
+	       ORIG:  Allan R. Mattson (6915) - 12/05/86
+	       DESC:  Application program for CH transaction. Calculates the
+	      	available balance and returns OVR array if restriction
+	      	is encountered on BALAVL. ^CRTCH does NOT allocate any
+	      	chk holds. The holds are allocated by CRTHLD after all
+	      	transactions are entered on the screen.
+	
+	  ---- Revision History ------------------------------------------------
+	
+	   05/30/06 - DESHPANDE S K - CR 20748
+		Renamed paramater variable %TRNSEQ as LTRNSEQ to reduce ambiguity
+		with global variable. Also made CRTCH and BALCALC public as per 
+		Eugene's request.
+	
+	   11/22/05 - NATRAJAH - 13734
+	   	      . Modified CRTCH section parameter to accept only ttx() 
+	   	        and %TRNSEQ. Set the values to CLS and GRP variable 
+	   	        using RecordACN.
+		      . General DBI3 cleanup.
+
+	   01/03/05 - TITOVE - CR 13734
+	   	Cleaned up logic as part of DBI2 project.
+	*/
+
+	type Public Number TAMT
+	type Public Boolean ER
+	type Public String RM
+	type Number BALAVL,CID
+	type String GRP
+	type Boolean OVRFLG
+
+	set CID = ttx(LTRNSEQ).cid
+	set OVRFLG=0
+	
+	set TAMT=ttx(LTRNSEQ).tamt
+	type RecordACN acn=Db.getRecord("ACN","CID=:CID")
+	set CLS=acn.cls
+	set GRP=acn.grp
+	
+	// ~p1 not allowed on ~p2 account
+	if "RC|COM|CD|DDA|SAV|WASH|LN"'[GRP set ER=1 set RM=$$^MSG(3059,ttx(LTRNSEQ).etc,GRP) quit  
+		
+	set BALAVL=$$BALAVL(.acn,.ttx(),LTRNSEQ)
+	
+	do AUT(.acn)
+	
+	quit 
+	
+
+BALAVL(RecordACN acn,RecordTTX ttx(),SEQ)
+		
+	type Number %AMT,%LN,%SQ,BALAVL,CNT,CKAMT,DEPAMT,TRB,TRNTYP
+	type Public Number CID
+	type Public String CLS
+	type Public Boolean OVRFLG
+	
+	// Get account's available balance
+	set BALAVL=$$BALCALC(.acn)
+	set TRB=acn.trb
+	
+	// Check for split-hold (cash back) transactions - Start
+	set CNT=""
+	set (CKAMT,DEPAMT)=0
+	for  set CNT=$O(ttx(CNT)) quit:CNT=""  do {
+		if CNT#1!(CNT=SEQ) quit
+		set TRNTYP = $$TRNTYP^TTXEXT(ttx(CNT).etc)
+		if (ttx(CNT).cid=CID),(TRNTYP'=3) set DEPAMT=ttx(CNT).tamt
+		// External Transaction Code 2 - Check Transaction
+		if TRNTYP=2 set CKAMT=CKAMT+ttx(CNT).tamt     
+		}
+
+	set TRNTYP = $$TRNTYP^TTXEXT(ttx(SEQ).etc)
+	
+	if TRNTYP=3,(CKAMT>DEPAMT) do { quit BALAVL
+		do CH(.ttx(),SEQ)
+		if %AMT>BALAVL set OVRFLG=1
+		}
+	// Check for split-hold (cash back) transactions - End
+	
+	// Accumulate all amounts for this account, entered on teller screen
+	set (%AMT,%SQ)=""
+	for  set %SQ=$O(ttx(%SQ)) quit:%SQ=""  do {
+		if %SQ#1!(%SQ=SEQ) quit 
+		if (ttx(%SQ).cid)'=CID quit
+
+		set TRNTYP = $$TRNTYP^TTXEXT(ttx(%SQ).etc)
+		if TRNTYP=3 do CH(.ttx(),%SQ) quit 
+		if CLS="L" set %LN(CID)=($G(%LN(CID))+(ttx(%SQ).tamt))
+		if CLS="D",TRB=0 set %AMT=$S((ttx(%SQ).itc)=1:%AMT-(ttx(%SQ).tamt),1:%AMT+(ttx(%SQ).tamt))
+		if CLS="D",TRB=1 set %AMT=$S((ttx(%SQ).itc)=1:%AMT+(ttx(%SQ).tamt),1:%AMT-(ttx(%SQ).tamt))
+		}
+	
+	set BALAVL=BALAVL-%AMT
+	
+	quit BALAVL
+	
+
+CH(RecordTTX ttx(),SEQ)	// Check hold transaction
+
+	type Number Z
+	type Public Number CID,%AMT,%LN
+	
+	if '$D(%LN(CID)) set %AMT=$G(%AMT)+(ttx(SEQ).tamt) quit 
+	set Z=$S((ttx(SEQ).tamt)>%LN(CID):%LN(CID),1:(ttx(SEQ).tamt))
+	set %LN(CID)=%LN(CID)-Z 
+	set %AMT=%AMT+Z 
+	if '%LN(CID) kill %LN(CID)
+	quit 
+	
+
+AUT(RecordACN acn)	//
+	/* 
+	Authorization Verification
+
+	Argument:
+
+	.acn	Account Record			/TYP=RecordACN/REQ
+
+	*/
+	
+	type Public Number BALAVL,CID,TAMT
+	type Public String OVR
+	type Public Boolean OVRFLG
+
+	// Set OVR array for split-hold (cash back) transaction
+	if OVRFLG set OVR(CID,"OVR","BALAVL")=$$^SCARND(BALAVL,0,CID) quit 
+	
+	if TAMT>BALAVL set OVR(CID,"OVR","BALAVL")=$$^SCARND(BALAVL,0,CID)
+	
+	if acn.rflg do ^UFLG(.acn)
+	 	  
+	quit 
+
+public BALCALC(RecordACN acn)
+	
+	type Number AVLBAL
+	
+	if acn.cls="D" do {
+		type RecordDEP dep={RecordDEP}acn
+		set AVLBAL=dep.balavl
+		}
+	else  if acn.cls="L" do AVLBAL^LNCO(.acn)
+	
+	quit AVLBAL
+	
+
+CALC(RecordTTX ttx(),SEQ)	//Calculate check holds that have been allocated
+
+	type Public Number HLD,TCK,%IPMODE,%MSPOS,CRT
+	type Number POS,X,Y
+	type String Z
+	
+	do POD^CRTETC(.ttx(),SEQ)
+	//Batch processing
+	quit:'$G(CRT)	
+	//Non-interactive/client server
+	if $G(%IPMODE)["NOINT" quit	    
+
+	set POS=1 
+	set X=1 
+	set Y=23
+	if $D(%MSPOS(1)) do {
+		set X=$P(%MSPOS(1),",",1)
+		set Y=$P(%MSPOS(1),",",2)
+		}
+	
+	set Z=$$VIDINC^%TRMVT
+	// ~p1Total Check: $ ~p2
+	set Z=$$^MSG(3195,Z,$$FN^SCARND(TCK,","))
+	
+	// ~p1   Allocated: $ ~p2
+	set Z=$$^MSG(3193,Z,$$FN^SCARND(HLD,","))
+	
+	// ~p1   Unallocated: $ ~p2
+	set Z=$$^MSG(3194,Z,$$FN^SCARND(TCK-HLD,","))  
+	
+	set Z=Z_$$VIDOFF^%TRMVT write $$MSG^%TRMVT(Z,0,0,X,Y)
+	quit 
+	
+
+vSIG()	quit "60460^57498^Shriram Deshpande^4416"	// Signature - LTD^TIME^USER^SIZE

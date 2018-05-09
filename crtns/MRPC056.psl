@@ -1,0 +1,333 @@
+MRPC056(return,versn,CID,scope,pmtdat,filter)	// Public; Request loan pmt rows
+	/*
+	   ORIG: GORMAN - 05/01/97
+
+	   Process returns payment record detail for (optionally) a single
+	   or multiple loan payment records for a specified loan account.
+
+	   KEYWORDS: Client/Server, Loan Utilities
+
+	   ARGUMENTS:
+
+	  	 . return	 Payment record detail
+
+	  	 . versn 	 ^MRPC056 version number 	 /TYP=N/REQ
+	    			 Current version = 1 		 /MECH=VAL
+
+	  	 . CID 		 Account number 		 /TYP=N/REQ
+	        						 /MECH=VAL
+	
+	  	 . scope 	 Nature of request 		 /TYP=N/NOREQ
+	        						 /MECH=VAL/DEF=1
+
+	    			 0	 Returns payment elements only.  Used
+	     				 for maintenance of LNBIL0 values such
+	     				 as lump or escrow payment amounts.
+
+	    			 1	 Return payment data for a single
+	     				 payment record.
+
+	     				 The payment record is either for
+	     				 'pmtdat' (if passed) or LN.OSEQ (if
+	     				 'pmtdat' is not passed).
+
+	     				 If no bill record exists for payment
+	     				 date 'pmtdat', then a payment record
+	     				 template is returned.
+
+	       			 2	 Return payment data for multiple rows.
+
+	     				 If 'pmtdat' is passed, data for it and
+	     				 all that follow will be returned.  If
+	     				 there is no sequence associated with
+	     				 'pmtdat', then only those sequences
+	     				 due after 'pmtdat' are returned.
+
+	     				 Otherwise, data for LN.OSEQ and all
+	     				 that follow will be returned.
+
+	    			 3	 Return data for all payment rows.
+
+			         			 'pmtdat', if passed, is ignored.
+
+
+	  	 . pmtdat	 Payment Date  			 /typ=D/NOREQ
+	        						 /MECH=VAL
+
+	    			 If passed, utility returns payment record
+	    			 associated with specified date
+
+
+	  	 . filter	 Element filter  		 /typ=T/NOREQ
+	        						 /MECH=VAL
+	    			 Passed in conjunction with
+	    			 with 'scope' option 0.  If
+	    			 only payment elements are
+	    			 required, value of 'filter'
+	    			 limits values returned to:
+
+	    			 1	 Elements for which 'lump' amounts
+	     				 are acceptable.  (Single character
+	     				 and escrow elements only.  No fees.)
+	     				 Expected use is with lump amount
+	     				 maintenance functions.
+
+	    			 2	 Escrow elements only.
+
+	   RETURNS:
+	  	 . $$ 		 Error message   /TYP=T
+	    			 Null = No error
+
+	   . Return
+
+	     Data  Description
+
+	     1	   Payment element data (in length/value wrapper)
+
+	    	   ele<tab>base<tab>link<tab>desc
+
+	   	   ele		 - Payment element acronym
+
+	   	   base		 - Indicator (0/1) of whether or not this is
+	      			   a base element for linked fees.
+
+	   	   link		 - If linked fee, element on which based
+
+	   	   desc		 - Element description
+
+	     2	   Payment control and detail data (in l/v wrapper)
+
+	   	   For each payment record (where each payment is
+	   	   in l/v wrapper):
+
+	   	   In one l/v wrapper for all control columns:
+	   	   cdpd<tab>casd<tab>cbcd<tab>schseq<tab>ctab<tab>
+	           cpid<tab>cpib<tab>copb<tab>coia<tab>cdib<tab>
+	   	   cirn<tab>csubamt<tab>csubdue
+
+	     	   1  cdpd	 Payment due date
+	     	   2  casd  	 Amount still due
+	     	   3  cbcd  	 Cut-off date
+	     	   4  schseq  	 Sequence number
+	     	   5  ctab 	 Total amount billed
+	     	   6  cpid  	 Prin + Int amount still due
+	   	   7  cpib  	 Prin + Int original billed
+	      	   8  copb  	 Balance for Interest Calc at cutoff
+	     	   9  coia  	 Interest9 adjustment at cutoff
+	  	  10  cdib  	 Deferred interest at cutoff
+	 	  11  cirn  	 Interest rate at cutoff
+	 	  12  csubamt  	 Subsidy amount
+		  13  csubdue  	 Subsidy remaining
+
+	   	  In one l/v wrapper for all elements:
+	   	  amtbld<tab>amtdue<tab> continues for each element
+	                                 in data field 1.
+
+	   	  amtbld  - Original amount billed
+	   	  amtdue  - Amount currently due
+
+	   RELATED:
+	  	 . $$^PBSMRPC - MRPC Service Class Driver
+
+	   EXAMPLE:
+	  	 Text of example (line one)
+
+	---- Revision History ------------------------------------------------
+	
+	04/04/06 - KELLYP - CR 20566
+		   Modified to not set fld2sub="".  This variable is used as
+		   an array and setting it equal to "" caused complications
+		   within V2LV^MSG when the message was packed which resulted
+		   in no payment detail data being returned.
+		
+	03/02/06 - TITOVE - CR 19733
+		   Modified to instantiate an LNFEEP object with
+		   a "create-if-needed" qualifier.
+
+	*/
+	catch vERROR {
+                new ET,RM
+                set ET=vERROR.type
+ 
+       		if ET["%GTM-" do { quit
+       			do ZE^UTLERR
+       			}
+ 
+        	set ET=ET_"-"_vERROR.thrownAt
+        	set RM=vERROR.description
+        	do ^UTLERR
+                }
+	
+	new count,ctlarr,date,detarr,ele,elebyseq,fld,fld1sub,fld2sub,I,idp
+	new pmtseq,tplarr,x
+
+	// Version number of client message is not compatible with server
+	if $G(versn)'=1 quit $$ERRMSG^PBSUTL($$^MSG(2951))
+
+	set scope=$G(scope)
+	set (fld(1),fld(2),return)=""
+
+	// Build payment file arrays
+
+	/*
+		tplarr  	Template array, including information about
+	  			each element in the payment string, plus
+	   			linked fees.
+
+		ctlarr  	Payment control info (dates, totals, etc.)
+
+		detarr  	Payment detail by element
+	*/
+	
+	set pmtdat=$G(pmtdat)
+	set filter=$G(filter)
+
+	set ER=$$VIEW^PROCLNBL(CID,.tplarr,.ctlarr,.detarr,pmtdat,scope,filter)
+	if ER quit $$ERRMSG^PBSUTL($G(RM),$G(ET))
+	
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+	set idp=ln.idp
+
+	// Payment elements
+	set (count,ele)=""
+	for  set ele=$O(tplarr(ele)) quit:ele=""  do {
+
+		new desc,ER,i,temp
+		set ER=0
+		set temp=""
+		// Find payment application sequence of this element
+		set pmtseq=$G(tplarr(ele,1))
+
+		// If interest determined at payment, ignore principal
+		if idp,ele="P" quit
+
+		// Find description of element
+		do { quit:ER
+
+			new TYPE
+
+			set desc=""
+			set TYPE=ele
+
+			// First, deal with PROFILE reserved elements
+			if $L(ele)=1 do { quit
+
+				set TYPE=$S(ele="I":3,ele="P":2,ele="L":4,1:ele)
+				type RecordSTBLGLDESCL stblgldescl=Db.getRecord("STBLGLDESCL","KEY=:TYPE")
+				set desc=stblgldescl.desc
+
+				if '(ele="I"&(idp)) quit
+
+				set TYPE=2
+				set stblgldescl=Db.getRecord("STBLGLDESCL","KEY=:TYPE")
+                                set desc=stblgldescl.desc_"+"_desc
+				}
+
+			// Next, check if element is a fee
+			type RecordLNFEEP lnfeep=Db.getRecord("LNFEEP", "FEETYP = :TYPE", 1)
+                        
+                        set desc=lnfeep.desc
+                        
+			if 'desc.isNull() ! '$$ESC^LNU(TYPE) quit
+
+			// Find description in escrow table (which includes
+			// single character elements like "P"rincipal)
+
+			// Remove numbers which are used with escrow elements
+			set TYPE=$$TT^LNU(TYPE)
+
+			type RecordLNTRS lntrs=Db.getRecord("LNTRS", "TRTYPE = :TYPE", 1)
+                        
+                        set desc=lntrs.trdes
+			
+			quit	
+			}
+
+		set count=count+1
+
+		set $P(temp,$C(9),1)=$S(idp&(ele="I"):"P+I",1:ele)
+
+		// Are any fees linked to this element?
+		set $P(temp,$C(9),2)=+$G(tplarr(ele,2))
+
+		// If a linked fee, what element is it linked to?
+		set $P(temp,$C(9),3)=$G(tplarr(ele,3))
+
+		// Element description
+		set $P(temp,$C(9),4)=desc
+
+		/*
+		If only element information requested, also return
+		lump amount (piece 5), new payment amount (piece 6),
+		and current payment amount (piece 7)
+		*/
+		if 'scope for i=5,6,7 set $P(temp,$C(9),i)=+$G(tplarr(ele,i))
+
+		set fld1sub(pmtseq)=temp
+
+		// Maintain array of all elements by application sequence.  The
+		// detail (detarr) array only contains those elements which
+		// have amounts due.
+		set elebyseq(pmtseq)=ele
+
+		quit
+
+		}
+
+	// GUI client needs at least template returned for all retrieves
+	set pmtdat=+pmtdat
+	if '$D(ctlarr(pmtdat)) set $P(ctlarr(pmtdat),$C(9),2)=%SystemDate
+
+	// Format control and detail array for return
+	set (count,date,ele)=""
+	for  set date=$O(ctlarr(date)) quit:date=""  do {
+
+		new i,pmtdtl,payment
+
+		// Begin with the date and control data
+		set payment(1)=date_$C(9)_$TR(ctlarr(date),"|",$C(9))
+
+		// Replace null values with zeros
+		for i=2,5:1:13 set $P(payment(1),$C(9),i)=+$P(payment(1),$C(9),i)
+
+		/*
+		Then add information for each element in the template.  It
+		is important that we collate through the template array and
+		not the payment detail array because we want to include
+		all payment elements, in the appropriate order, regardless
+		of whether or not they were all billed on a given payment
+		date.
+		*/
+		set (pmtseq,payment(2))=""
+		for  set pmtseq=$O(elebyseq(pmtseq)) quit:pmtseq=""  do {
+
+			new rec,temp,subfld
+			set temp=""
+
+			// Find element associated with this sequence
+			set ele=elebyseq(pmtseq)
+
+			// Find payment detail data
+			set rec=$G(detarr(date,pmtseq))
+
+			// Amt Billed
+			set $P(temp,$C(9),1)=+$P(rec,"|",2)
+			
+			// Amt Due
+			set $P(temp,$C(9),2)=+$P(rec,"|",3)
+
+			set payment(2)=payment(2)_$C(9)_temp
+
+			}
+
+		// Wrap all information for one payment date
+		set fld2sub(date)=$$V2LV^MSG(.payment)
+
+		}
+
+	set fld(1)=$$V2LV^MSG(.fld1sub)
+	set fld(2)=$$V2LV^MSG(.fld2sub)
+	set return=$$V2LV^MSG(.fld)
+	quit ""
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60359^37973^Pat Kelly^8610"	// Signature - LTD^TIME^USER^SIZE

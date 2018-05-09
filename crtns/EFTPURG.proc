@@ -1,0 +1,353 @@
+EFTPURG		/*
+	ORIG: SIGDAE - 06/18/2002
+	DESC: EFT Record Purge Utility
+
+	---- Comments --------------------------------------------------------
+
+	---- Revision History ------------------------------------------------
+
+	10/06/03 - CARROLLJ - 51630
+		   Removed toArray method and sections RPAY,REFT,REND,RREC, 
+		   and INDEX.  If EFT records are purged they will be recovered
+		   by going back to disk.
+
+
+	06/26/02 - SIGDAE - 50872
+		o Added logic to consider the purging of Suppressed
+		  orders.
+		o Remove change made under ARQ 34213 to change Status
+		  to 'D' prior to deleted the record.  A new change has
+		  been made to turn off the before delete triggers.
+		o Added section PURGEFT to handle the purging and archiving
+		  of an EFT Type.
+		o Removed section KILL since a the Db.delete call will
+		  delete the EFTPAY record and all related tables.
+		  New Foreign Key Definitions have been added to remove
+		  PAYHIST and EFTHLD entries.  New code has also been
+		  added to the EFTPAY AFTER_INSERT trigger to remove
+		  EFTREF entries if required.
+		o Added several new sections to make the code easier
+		  to read.
+		o Modified section RESTORE to use two columns to
+		  display the EFT Types.
+		o Added section INDEX to handle the creation all
+		  indexes for an account.  Previously the creation
+		  of the indexes was hard coded, with several missing.
+		  This section will be only called once for each EFTPAY
+		  record.
+		o Modified section REND to display the number of
+		  EFTPAY records restored as well as the number of
+		  physical records restored.  Previously the code
+		  only displayed the number of physical records
+		  restored, which was misleading.
+		o Modified section INIT to take an argument so
+		  the same section could be called for the purge and
+		  restore processes.
+		o Added section CUVAR to return CUVAR max day variables.
+		o Removed section BUILD.
+		o Removed logic that set several of the SRC array pieces.
+
+		Removed older revision history
+
+
+	----------------------------------------------------------------------
+	*/
+
+Public PURGE
+	/*
+	 Purge payment records to archive files
+
+	 INTERNAL VARIABLES USED:
+
+		. SRC 	EFT Source Array
+			 1 = Purge option
+			 4 = Archive file open failure message
+			 5 = Counter for records archived
+			 6 = Counter for records purged
+	*/
+
+	new %CTPRMT,%FRAME,%READ,%TAB
+	new EFDMAX,EFT,EFTCAN,EFTCOM,EFTDEL,EFTREJ,EFTSUP,OLNTB,SRC,VFMQ
+
+	// Variable declaration
+	set VFMQ=0
+	set OLNTB=38
+	set %CTPRMT="2|39"
+	set %FRAME=2
+
+	// Initialize SRC() and %TAB() arrays with all payment types.
+	do INIT(0)
+
+	// Populate Maximum Days variables
+	do CUVAR(.EFTCAN,.EFTCOM,.EFTDEL,.EFTREJ,.EFTSUP,.EFDMAX)
+
+	set %READ="@@%FN,,"
+	set EFT=""
+	for  set EFT=$O(%TAB(EFT)) quit:EFT=""  set %READ=%READ_","_EFT
+	do ^UTLREAD
+	if VFMQ="Q" quit
+
+	// Collates thru the SRC() array and purge valid EFT types.
+	set EFT=""
+	for  set EFT=$O(SRC(EFT)) quit:EFT=""  if SRC(EFT) do PURGEFT(EFT)
+
+	// Build response-message to the user.
+	do END
+	quit
+
+
+PURGEFT(EFTTYPE)
+	/*
+	 Purge EFT and PAYHIST records
+
+	 ARGUMENTS:
+		. EFTTYPE	EFT Type
+	*/
+
+	new CID,DATE,LASTSEQ,SEQ
+
+	type ResultSet rs
+
+	catch error {
+		if '$D(EFTTYPE) quit
+		set $P(SRC(EFTTYPE),"|",4)=error.type_", "_error.description
+	}
+
+	set DATE=$$DAT^%ZM(%SystemDate,"MMDDYY")
+
+	// Counter for records archived
+	set $P(SRC(EFTTYPE),"|",5)=0
+	// Counter for records purged
+	set $P(SRC(EFTTYPE),"|",6)=0
+
+	set rs=Db.select("CID,SEQ","EFTPAY","EFTTYPE=:EFTTYPE AND EFD NOT >:EFDMAX AND ((STATUS='CA' AND EFD NOT >:EFTCAN) OR (STATUS='D' AND EFD NOT >:EFTDEL) OR (STATUS='C' AND EFD NOT >:EFTCOM) OR (STATUS='R' AND EFD NOT >:EFTREJ) OR (STATUS='SUP' AND EFD NOT >:EFTSUP))")
+
+	if rs.isEmpty() quit
+
+	// Open EFT Archive File
+	type IO ioeft=Class.new("IO")
+	set ioeft.fileName="PURG"_EFTTYPE_"_"_DATE_".LIS"
+	set ioeft.openParams="NEWV/WRITE"
+	do ioeft.open()
+
+	// Open PAYHIST Archive File
+	type IO iopay=Class.new("IO")
+	set iopay.fileName="PAYHIST"_EFTTYPE_"_"_DATE_".LIS"
+	set iopay.openParams="NEWV/WRITE"
+	do iopay.open()
+
+	set CID=""
+
+	while rs.next() do {
+
+		// Ignore errors for individual record deletes
+		catch error3 {
+		}
+
+		// Determine last EFTPAY record sequence for an account
+		if CID'=rs.getCol(1) do {
+			set CID=rs.getCol(1)
+			set LASTSEQ=""
+			set LASTSEQ=Db.prevVal("EFTPAY","CID,LASTSEQ")
+		}
+
+		set SEQ=rs.getCol(2)
+
+		// Do not purge last EFTPAY record for an account
+		if SEQ=LASTSEQ quit
+
+		// Archive EFT records to file
+		do WEFT(.ioeft,CID,SEQ)
+		// Archive PAYHIST records to file
+		do WPAY(.iopay,CID,SEQ)
+
+		// Update archived record counter
+		set $P(SRC(EFTTYPE),"|",5)=$P(SRC(EFTTYPE),"|",5)+1
+
+		// Delete EFTPAY record and all related tables (EFTPAY, EFTHLD, EFTREF, PAYHIST)
+		do Db.delete("EFTPAY","CID=:CID AND SEQ=:SEQ","/NOTRIGBEF")
+
+		// Update purged record counter
+		if 'ER set $P(SRC(EFTTYPE),"|",6)=$P(SRC(EFTTYPE),"|",6)+1
+
+		// Ignore errors for individual record deletes
+		set ER=0
+		set RM=""
+	}
+
+	// Close archive files
+	do ioeft.close()
+	do iopay.close()
+
+	quit
+
+
+WEFT(IO ioeft,CID,SEQ)
+	/*
+	 Archive EFT records
+
+	 ARGUMENTS:
+		. ioeft		EFT Archive File Object
+		. CID		Account Number
+		. SEQ		EFTPAY Sequence
+	*/
+
+	new DATA,HCID,HSEQ,REC,REFNO,X
+
+	type RecordEFTPAY eftpay
+	type RecordEFTHLD efthld
+	type RecordEFTREF eftref
+	type ResultSet rs
+
+	// Archive EFTPAY record
+	set eftpay=Db.getRecord("EFTPAY","CID=:CID,SEQ=:SEQ")
+
+	// Archive EFTHLD records
+	set rs=Db.select("HCID,HSEQ","EFTHLD","CID=:CID AND SEQ=:SEQ")
+	while rs.next() do {
+		set HCID=rs.getCol(1)
+		set HSEQ=rs.getCol(2)
+		do Db.delete("EFTHLD","CID=:CID AND SEQ=:SEQ AND HCID=:HCID AND HSEQ=:HSEQ")
+	}
+
+	// Archive EFTREF record
+	if eftpay.refno'="" do {
+		set REFNO=eftpay.refno
+		do Db.delete("EFTREF","REFNO=:REFNO")
+	}
+	do Db.delete("EFTPAY","CID=:CID AND SEQ=:SEQ","/NOTRIGBEF")
+
+	quit
+
+
+WPAY(IO iopay,CID,SEQ)
+	/*
+	 Archive PAYHIST records
+
+	 ARGUMENTS:
+		. iopay		PAYHIST Archive File Object
+		. CID		Account Number
+		. SEQ		EFTPAY Sequence
+	*/
+
+	new DATA,REC,TSEQ
+
+	type RecordPAYHIST payhist
+	type ResultSet rs
+
+	// Archive PAYHIST records
+	set rs=Db.select("TSEQ","PAYHIST","CID=:CID AND SEQ=:SEQ")
+	while rs.next() do {
+		set TSEQ=rs.getCol(1)
+		do Db.delete("PAYHIST","CID=:CID AND SEQ=:SEQ AND TSEQ=:TSEQ")
+	}
+
+	quit
+
+
+END
+	/*
+	 Build response-message to the user.
+	*/
+
+	new EFT,I
+
+	type RecordCTBLEFTTYPE efttype
+
+	set ER="W"
+
+	set I=1
+	// msg 7806: EFT Type:(Written/Purged)
+	set RM(1)=$J(" ",27)_$$^MSG(7806)
+
+	set EFT=""
+	for  set EFT=$O(SRC(EFT)) quit:EFT=""  do {
+		set I=I+1
+
+		set efttype=Db.getRecord("CTBLEFTTYPE","KEY=:EFT")
+
+		set RM(I)=$J(" ",35-$L(efttype.desc))_$G(RM(I))_efttype.desc_":("
+
+		// Counters
+		set RM(I)=RM(I)_$P(SRC(EFT),"|",5)_"/"
+		set RM(I)=RM(I)_$P(SRC(EFT),"|",6)_") "
+	}
+
+	quit
+
+
+INIT(OPTION)
+	/*
+	 Initialize SRC() and %TAB() arrays with all payment types.
+
+	 ARGUMENTS:
+		. OPTION	Purge/Restore Option
+
+	 RETURNS:
+		. SRC		EFT Source Array
+		. %TAB		UTLREAD Prompts
+	*/
+
+	// I18N=OFF
+	new EFT,DESC
+
+	type ResultSet rs
+
+	/*
+	 Populate the SRC and %TAB() array with an array of all defined 
+	 EFT types. The first piece of SRC array is a logical indicating 
+	 if the user wants to purge/restore this EFT type.
+	*/
+
+	set rs=Db.select("KEY,DESC","CTBLEFTTYPE")
+	while rs.next() do {
+		set EFT=rs.getCol(1)
+		set DESC=rs.getCol(2)
+		set SRC(EFT)=OPTION
+		set %TAB("SRC("""_EFT_""")")="/DES="_$E(DESC,1,34)_"/TYP=L/LEN=1"
+	}
+	// I18N=ON
+
+	quit
+
+
+CUVAR(EFTCAN,EFTCOM,EFTDEL,EFTREJ,EFTSUP,EFDMAX)
+	/*
+	 Populate Maximum Days variables
+
+	 RETURNS:
+		. EFTCAN	Days to Retain Cancelled Orders
+		. EFTCOM	Days to Retain Completed Orders
+		. EFTDEL	Days to Retain Deleted Orders
+		. EFTREJ	Days to Retain Rejected Orders
+		. EFTSUP	Days to Retain Suppressed Orders
+		. EFDMAX	Maximum Effective Date to Purge
+
+	 Also called by Report SCA495, EFT Purged Records Report.
+	*/
+
+	type RecordCUVAR cuvar
+
+	set cuvar=Db.getRecord("CUVAR")
+
+	// Populate Maximum Days variables
+	set EFTDEL=$S(cuvar.eftdel="":%SystemDate-60,1:%SystemDate-cuvar.eftdel)
+	set EFTCOM=$S(cuvar.eftcom="":%SystemDate-60,1:%SystemDate-cuvar.eftcom)
+	set EFTREJ=$S(cuvar.eftrej="":%SystemDate-60,1:%SystemDate-cuvar.eftrej)
+
+	// Cancelled orders use the same max days as Completed orders
+	set EFTCAN=EFTCOM
+
+	// Do not purge Suppressed records if no value in CUVAR
+	set EFTSUP=$S(cuvar.eftsup="":1,1:%SystemDate-cuvar.eftsup)
+
+	// Determine maximum valid EFD
+	set EFDMAX=EFTDEL
+	if EFTCOM>EFDMAX set EFDMAX=EFTCOM
+	if EFTCAN>EFDMAX set EFDMAX=EFTCAN
+	if EFTREJ>EFDMAX set EFDMAX=EFTREJ
+	if EFTSUP>EFDMAX set EFDMAX=EFTSUP
+
+	quit
+
+vSIG()	quit "59886^43515^Sanchez SCM Administrator^8203"	// Signature - LTD^TIME^USER^SIZE

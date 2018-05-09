@@ -1,0 +1,217 @@
+MRPC091(RETURN,VERSN,XTJD,XACN,XCID,XCRCD)
+
+	/* 
+	   Procedure ID: MRPC091
+	   DESC: This procedure returns all the transactions executed
+		 for PATs, except for the transactions which were system
+		 generated for currency exchanges i.e. where ETC=[CUVAR]CECR
+		 or ETC=[CUVAR]CEDR.
+	   ORIG: Smita Agarwal
+	   DATE: 12/14/99
+	
+	KEYWORDS: RPC
+
+	ARGUMENTS:
+		. RETURN      PAT transactions Details   /TYP=T/REQ/MECH=^
+
+		. VERSN        ^MRPC091 version number
+			       current version=1              /TYP=T/REQ/MECH=^
+
+		. XTJD           Transaction Date              /TYPE=T/REQ/MECH^
+
+		. XACN          Customer Number               /TYP=T/NOREQ/MEC^
+
+		. XCID          Account Number                 /TYP=T/NOREQ/ME^
+
+		. XCRCD         Currency Code                 /TYP=T/NOREQ/MEC^
+	
+	   RETURNS:
+	   . $$     Error Message		/TYP=T
+	     Null= No Error
+	
+	   . RETURN Report			/TYP=N
+	
+	   RELATED:
+	   . $$^PBSMRPC - MRPC Service Class Driver
+	
+	   EXAMPLE:
+	   S RM=$$^MRPC091(RETURN,1,TJD,ACN,CID,"USD")
+
+	---- Revision History ------------------------------------------------
+
+		02/17/06 - PUTTASWH - CR 17988
+			   Modified calls to GETDTJ and GETDMJ sections
+			   to correct the undefined errors.
+			   
+		11/25/05 - PUTTASWH - CR 18157
+			   Modifications done as per the DBI standards.
+			   
+		02/28/02 - GRAY - 43583
+			   Removed global reference in SETRET section and
+			   did general cleanup of this procedure.
+
+	*/		
+	
+	// Check Version
+	// Version number of client message is not compatible with server
+	if VERSN.get()'=1 quit $$ERRMSG^PBSUTL($$^MSG(2951))	
+	
+	do Db.fastDelete("PATTNX","JOB=:%ProcessID")	
+	
+	do GETDTJ(%ProcessID,XTJD)
+	do GETDMJ(%ProcessID,XTJD)
+	do SETRET(%ProcessID,RETURN)
+	
+	do Db.fastDelete("PATTNX","JOB=:%ProcessID")
+	quit ""
+	
+	// Retrieve PAT records from [DTJ]
+GETDTJ(Number JOB,	// Process ID
+	Date XTJD)	// Transaction Date 
+	
+	type public Number XACN,XCID
+	type public String XCRCD
+	type Number CID,RATE
+	type String BCRCD,BSEAMT,CRCD,ETC,TAMT,TSO
+	
+	type ResultSet rs=Db.select("CID,ETC,CRCD,RATE,TAMT,BCRCD,BSEAMT,TSO","DTJ","TJD=:XTJD")
+	
+	while rs.next() do {
+	
+		set TSO=rs.getCol(8)
+		if '(TSO["PAT#") quit     // not a PAT transaction
+	
+		set CID=rs.getCol(1)		
+		if ('(XCID.get().isNull())&(XCID'=CID)) quit
+		
+		set CRCD=rs.getCol(3)		
+		if ('(XCRCD.get().isNull())&(XCRCD'=CRCD)) quit
+	
+		set ETC=rs.getCol(2)
+		set RATE=rs.getCol(4)
+		set TAMT=rs.getCol(5).piece("#",1)
+		set BCRCD=rs.getCol(6)
+		set BSEAMT=rs.getCol(7)
+	
+		type RecordACN acn=Db.getRecord("ACN","CID=:CID",1)		
+		
+		if ('(XACN.get().isNull())&(XACN'=acn.acn)) quit
+	
+		do SETTMP(JOB,XCID,XACN,XCRCD,acn.type,ETC,RATE,TAMT,BCRCD,BSEAMT)
+		}
+	quit
+	
+	// Retrieve PAT records from [DMJ}		
+GETDMJ(Number JOB,	// Process ID
+	Date XTJD)	// Transaction Date 
+	
+	type public Number XACN,XCID
+	type public String XCRCD
+	type Number ACN,CID,RATE,TYPE
+	type String BCRCD,BSEAMT,CECR,CEDR,CRCD,ETC,TAMT,TSO
+	
+	if (XACN.get()) quit
+	
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+	set CECR=cuvar.cecr
+	set CEDR=cuvar.cedr
+	
+	type ResultSet rs=Db.select("CID,ETC,CRCD,RATE,TAMT,BCRCD,BSEAMT,TSO","DMJ","TJD=:XTJD")	
+		
+	while rs.next() do {
+		set TSO=rs.getCol(8)		
+		if '(TSO.piece("#",1)="PAT") quit
+	
+		set CID=rs.getCol(1)
+		if ('(XCID.get().isNull())&(XCID'=CID)) quit		
+	
+		set ETC=rs.getCol(2)
+		if (ETC=CEDR)!(ETC=CECR) quit   // currency exchange transaction
+	
+		set CRCD=rs.getCol(3)
+		if ('(XCRCD.get().isNull())&(XCRCD'=CRCD)) quit		
+	
+		set RATE=rs.getCol(4)
+		set TAMT=rs.getCol(5)
+		set BCRCD=rs.getCol(6)
+		set BSEAMT=rs.getCol(7)
+		set TYPE="G/L"
+	
+		do SETTMP(JOB,XCID,XACN,XCRCD,TYPE,ETC,RATE,TAMT,BCRCD,BSEAMT)		
+		}
+	quit
+	
+	
+	// Set information into temporary report file	
+SETTMP(Number JOB,	// Process ID
+	Number XCID,	// Account Number
+	Number XACN,	// Customer Number 
+	String XCRCD,	// Currency Code	
+	Number TYPE,	// Product Type
+	String ETC,	// External Transaction Code
+	Number RATE,	// Exchange Rate
+	Number TAMT,	// Transaction Amount
+	String BCRCD,	// Base Currency
+	Number BSEAMT)	// Base Amount (Currency Exchange)
+	
+	type Number SEQ=0
+	
+	type ResultSet rs=Db.select("SEQ","PATTNX","JOB=:JOB AND CID=:XCID","SEQ DESC")
+	if rs.next() set SEQ=rs.getCol("SEQ")
+	
+	set SEQ=SEQ+1
+	
+	type RecordPATTNX pattnx=Db.getRecord("PATTNX","JOB=:JOB,CID=:XCID,SEQ=:SEQ",1)
+	set pattnx.acn=XACN
+	set pattnx.type=TYPE
+	set pattnx.etc=ETC
+	set pattnx.crcd=XCRCD
+	set pattnx.rate=RATE
+	set pattnx.tamt=TAMT
+	set pattnx.bcrcd=BCRCD
+	set pattnx.bseamt=BSEAMT
+	
+	do pattnx.bypassSave()
+	
+	quit
+	
+	// Build return message
+SETRET(Number JOB,	// Process ID
+	String RETURN)	// Return Value
+	
+	type String TAB
+	type Number CID,CREDITS,DEBITS,ETC
+	
+	set TAB=$C(9)
+
+	type ResultSet rs=Db.select("CID,ACN,TYPE,ETC,CRCD,RATE,TAMT,BCRCD,BSEAMT","PATTNX","JOB=:JOB","CID,SEQ")
+	
+	while rs.next() do {
+		set CID=rs.getCol(1)
+		set ETC=rs.getCol(4)
+	
+		// customer no, account no., type
+       		set RETURN=RETURN_rs.getCol(2)_TAB_CID_TAB_rs.getCol(3)_TAB
+	
+		// transaction code, currency, anticipated rate
+       		set RETURN=RETURN_ETC_TAB_rs.getCol(5)_TAB_rs.getCol(6)_TAB
+	
+		type RecordTRN trn=Db.getRecord("TRN","ETC=:ETC",1)
+		if (trn.itc) do {
+       			set CREDITS=rs.getCol(7)
+       			set DEBITS=""
+			}
+		else  set CREDITS="",DEBITS=rs.getCol(7)
+	
+		// debits, credits, base currency
+		set RETURN=RETURN_DEBITS_TAB_CREDITS_TAB_rs.getCol(8)_TAB
+	
+		// converted amount
+		set RETURN=RETURN_rs.getCol(9)_$C(13,10)
+		}
+	
+	set RETURN=$$V2LV^MSG(RETURN)
+	
+	quit
+
+vSIG()	quit "60326^21895^Hema Puttaswamy^5231"	// Signature - LTD^TIME^USER^SIZE

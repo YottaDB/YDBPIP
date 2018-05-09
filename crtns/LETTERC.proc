@@ -1,0 +1,488 @@
+LETTERC		/*
+
+	 5/2000 - Walton
+
+		  This procedure compiles 2 routines based on the 
+		  entries made in the tables UTBLFORMBCH, UTBLFORM,
+		  UTBLFORM0, and UTBLFORMVAR.  
+
+		  The system generated routines are:
+
+		  	LETTERF - contains all record producing
+				  functions based on a unique table.
+
+			LETTRIG - contains all test logic per batch
+				  based on form, affinity group, and
+				  variation.
+
+		  ** - To generate these routines run function
+		       @LETTERCOM
+
+		  UTBLFORM stores all the columns from a single
+		  table needed for a specific record type, 
+		  i.e.  Record Type 100, may contain information
+		  pertaining to affinity group (UTBLCO table), while
+		  Record Types 300 and 400 may contain DEP and LN
+		  information, respectfully.
+
+		  UTBLFORMBCH stores the trigger name (the primary
+		  table for a batch definition), a form code, and the 
+		  necessary record types needed to produce the letters.
+		
+		  The user table UTBLFORMVAR contains the test logic
+		  to produce the form variation and all associated
+		  columns for the letter.  The test logic can contain
+		  only M operators and only columns from the primary
+		  table based on the form id.  It is possible to create
+		  a sub-query using other tables but the knowledge of
+		  PSL (PROFILE Scripting Language) is required. 
+
+		  Processing Flow:
+
+		  1.  A standard letter batch defintion in the BOD batch
+		      collates through a primary file, i.e. DTJNA for new
+		      accounts.  There will be multiple letter batch
+		      definitions in the BOD batch process.
+	
+		  2.  All access keys needed for each possible record
+		      types must be defined within the batch EXEC section
+		      prior to calling the system generated routine
+		      LETTRIG.
+
+		  3.  LETTRIG contains all user defined test logic to
+		      produce letters based on form, affinity group,
+		      and variation.     
+
+		  4.  If a test is true then the utility TRIGGER^LETTUTL
+		      is called.  Based on the form, record types are
+		      defined.  The system generated routine LETTERF
+		      produces the information to be stored in the
+		      variable REC for each record type.  Multiple
+		      record types are combined to create one letter.
+
+		  5.  The FILE utility is called to file a unique entry
+		      into the LETTER table.  Per letter this can be
+		      called multiple times.
+
+		  6.  Once all the BOD letter batch defintions run the
+		      procedure LETTER is called to select all rows
+		      in the LETTER table for today's date.  This 
+		      procedure creates the daily letter extract.
+
+---- Revision History ------------------------------------------------
+
+	01/30/06 Radhika - CR 17423
+		 .Eliminated PSL deprecated features and warnings.
+		 .Removed revision history prior to 2004.
+		 .Removed commented code lines.
+        */
+
+	quit
+
+	// I18N=QUIT
+	
+COMPILE	// Extrinsic Functions from UTBLFORM
+
+	type public Boolean ER
+	type public String %MSKD,MASK
+	type Boolean FIX
+	type String m2src,pgm,q,XLIBS
+	
+	set pgm="LETTERF"
+	set MASK=%MSKD.get("MM/DD/YEAR")
+	set XLIBS="SYSDEV"
+	set q=$C(34),ER=0
+	
+	do hdr(pgm)
+	do add("quit")
+	set FIX=CUVAR.letfix
+
+	type ResultSet rs=Db.select("RECTYPE,FID,ACCKEYS,ROUTINE","UTBLFORM0")
+        if 'rs.isEmpty() while rs.next() do FORM0(.rs)
+
+	do CPGM(pgm,.m2src)
+        quit
+
+FORM0(ResultSet rs)	// Compile top level of extrinsic functions	
+	
+	type public Boolean FIX 
+	type public String obj,q
+	type String keys,PKEY,XTBL,XREC
+	type Number i
+	
+	set XREC=rs.getCol("RECTYPE")
+	if XREC="TRN" quit
+	set XTBL=rs.getCol("FID")
+	set PKEY=rs.getCol("ACCKEYS")
+
+	if 'XTBL.isNull() do {
+		set keys=""
+		for i=1:1:PKEY.length(",") set keys=keys_"X"_PKEY.piece(",",i)_","
+		set keys=keys.piece(",",1,keys.length(",")-1)
+		do add("Public "_XREC_"("_keys_")")
+
+		set obj=$$LOWER^%ZFUNC(XTBL)
+		do add(" new "_obj_",REC")
+		do add(" type Record"_XTBL_" "_obj)
+		do add(" set "_obj_"=Db.getRecord("_q_XTBL_q_","_q_keys_q_")")
+		do add(" set REC=""""")
+		}
+
+	else  do add("Public "_XREC_"(tmp)"),add(" set REC=""""")
+
+	// Add custom hook for record types
+	if 'rs.getCol("ROUTINE").isNull()="" do add(" do "_rs.getCol("ROUTINE"))
+
+	type ResultSet rs3=Db.select("DI,DECPRE,TYP,LEN,VARNAM","UTBLFORM","RECTYPE=:XREC")
+	if rs3.isEmpty() quit
+	while rs3.next() do FORM(.rs3)
+	
+	if FIX do add(" quit $$BLK^FIL("_XREC_"_REC,416)")
+	else  do add(" quit "_XREC_"_REC")
+
+	quit
+
+FORM(ResultSet rsform)	// Compile column info into extrinsic functions
+	
+	type public Boolean FIX
+	type public String obj,q
+	type public Date MASK
+	type Number dec,len
+	type String col,typ,x
+			
+	set col=rsform.getCol("DI")
+	set dec=rsform.getCol("DECPRE")
+	set typ=rsform.getCol("TYP")
+	set len=rsform.getCol("LEN")
+	if col.isNull() set x="$G("_rsform.getCol(5)_")"
+	else  set x=obj_"."_$$LOWER^%ZFUNC(col)
+
+	if FIX do {
+		if typ="D"  do add(" S REC=REC_$$BLK^FIL($$DAT^%ZM("_x_","_q_MASK_q_"),10)") quit			
+		if typ="N"!(typ="$") do add(" S REC=REC_$$ZERO^FIL("_x_","_len_","_dec_","_q_typ_q_")") quit 
+		do add(" S REC=REC_$$BLK^FIL("_x_","_len_")")
+		}
+	else  do {
+		if typ="D" do add(" S REC=REC_""~""_$$DAT^%ZM("_x_","_q_MASK_q_")") quit
+        	do add(" S REC=REC_""~""_"_x)	
+		}
+
+	quit	
+
+COMPILE1	// Compiles test logic for batch definitions
+	 
+	type Boolean ER
+	type String m2src,pgm,q,XLIBS
+			
+	set q=$C(34),ER=0
+	set XLIBS="SYSDEV"
+	set pgm="LETTRIG"
+
+	do hdr(pgm)
+        do add(" quit")
+	
+	type ResultSet rs1=Db.select("DISTINCT FID","UTBLFORMBCH")
+        if 'rs1.isEmpty() while rs1.next() do BCH(.rs1)
+		
+	do CPGM(pgm,.m2src)
+	quit
+
+BCH(ResultSet rsbch)
+	
+	type public String XFORM,XLIBS,XDCOL,XPT
+	type public Number addseq,seq
+	type Number HIT,i
+	type String AKEYS,add(),col,obj,key,NEED(),pkeys,tl,q,x,XTRIG
+	
+        set (addseq,HIT)=0
+	set XTRIG=rsbch.getCol("FID")
+	
+	type RecordDBTBL1 dbt=Db.getRecord("DBTBL1","%LIBS=:XLIBS,FID=:XTRIG")
+	set AKEYS=dbt.acckeys
+	set (pkeys,seq)=""
+	for i=1:1:$L(AKEYS,",") do {
+		set key=AKEYS.piece(",",i)
+		if key["""" quit
+		if +key'=0 quit
+		set seq=seq+1,pkeys.piece(",",seq)=key
+		}
+
+	// if table contains DAYEND then the tag into the
+	// compiled routine will be the table name minus DAYEND
+
+	set tl=XTRIG
+	if tl.length()>8,tl["DAYEND" set tl=tl.piece("DAYEND",2) 
+	do add("Public "_tl)
+
+	set obj=$$LOWER^%ZFUNC(tl)
+	do add(" new "_obj)
+	do add(" type Record"_XTRIG_" "_obj)
+	set x=" set "_obj_"=Db.getRecord("_q_XTRIG_q_","_q_pkeys_q_")"
+	do add(x)
+
+	do COLUMN(XTRIG)	// defines NEED array
+		
+	set col=""
+	for  set col=NEED(col).order() quit:col=""  do {
+		set x=" set "_col_"="_obj_"."_NEED(col)
+        	do add(x)
+		}			
+
+	type ResultSet rs2=Db.select("FORM,DCOL,PTEST","UTBLFORMBCH","FID=:XTRIG")
+	if rs2.isEmpty() do add(" quit") set HIT=1 quit
+	while rs2.next() do {
+		set XFORM=rs2.getCol("FORM")
+		set XDCOL=rs2.getCol("DCOL")
+		set XPT=rs2.getCol("PTEST")
+		do TEST(XFORM,XDCOL,XPT)
+			}
+
+	set i=""
+	for  set i=add(i).order() quit:i.isNull()  do add(add(i))
+	do add(" quit")
+
+	quit
+
+TEST(String XFORM,String XDCOL,String XPT) // Builds each unique test variation
+	
+	type public Number addseq
+	
+	type ResultSet rstest=Db.select("CO,VAR,TEST,RECTYPES,SUBQRY,CPROC,QFLG,TJDVAL,PARMFLG,CAL","UTBLFORMVAR","FORM=:XFORM")
+        if rstest.isEmpty() quit
+        while rstest.next() set addseq=addseq+1 do BUILD(.rstest)
+
+	quit
+
+BUILD(ResultSet rsbl)	//  will allow "*" test logic to be compiled 1st
+ 	
+ 	type public String addseq,q,XFORM,XDCOL,XPT
+ 	type String company,program,qcode,XCAL,XAGRP,XTEST,XCPROC
+ 	type String add(),x,XDAYS,XRECT,XSUB,XPROC,XPARM,y
+ 	type Number XVAR,XQFLG
+ 		
+        set qcode=""
+	set XAGRP=rsbl.getCol("CO")
+        set XVAR=rsbl.getCol("VAR")
+
+	// just trying to Semple proof user logic
+	// if TEST contains LETTJD we add () to maintain truth
+
+        set XTEST=rsbl.getCol("TEST")
+	if XTEST["LETTJD" do {
+		new find,i,num,test,xi
+		set xi=XTEST.length("LETTJD")
+		for i=1:1:xi do { 
+			set test(i)=XTEST.piece("LETTJD",i)
+			if test(i).extract(test(i).length())["=" set test(i)=test(i)_"("
+			}
+		for i=2:1:xi do {
+			set num=+test(i)
+			if num=0 set test(i)=")"_test(i) quit
+			set find=$F(test(i),num)
+			set test(i)=test(i).extract(1,find-1)_")"_test(i).extract(find,test(i).length())
+			}
+		set XTEST=""
+		for i=1:1:xi set XTEST=XTEST_test(i)_$S(i'=xi:"LETTJD",1:"")
+		}
+
+	if XTEST.isNull() set XTEST=1
+	set XRECT=rsbl.getCol("RECTYPES")
+        set XSUB=rsbl.getCol("SUBQRY")
+	set XCPROC=rsbl.getCol("CPROC")
+	set XQFLG=rsbl.getCol("QFLG")
+	set XDAYS=rsbl.getCol("TJDVAL")
+	set XPARM=rsbl.getCol("PARMFLG")
+	if XDAYS.extract(1)="T" set XDAYS=$S(XDAYS.piece("T",2)="":"+0",1:XDAYS.piece("T",2))
+		
+	set y=""
+	set XCAL=rsbl.getCol("CAL")
+	if XDAYS["P",XCAL="" set XCAL="IBS"
+	if XQFLG set qcode="quit"
+	if 'XPT.isNull() set y=","_XPT
+	if 'XDAYS.isNull() set y=y_","_XDCOL_"=("_$S(XCAL'="":"PRBD)",1:"LETTJD"_(XDAYS)_")")	
+
+	if 'XCPROC.isNull() set program=XCPROC_$S(XPARM:"("_q_XAGRP_q_","_q_XFORM_q_","_q_XVAR_q_")",1:"")
+	else  set program="TRIGGER^LETTERU("_q_XAGRP_q_","_q_XFORM_q_","_q_XVAR_q_")"
+
+	if XAGRP'="*" set company=" if CO="_q_XAGRP_q
+	else  set company=" if "
+
+	set XTEST=$S(y="":","_XTEST,1:y_","_XTEST)
+	if company=" if " set XTEST=XTEST.piece(",",2,XTEST.length(","))
+	if 'XSUB.isNull() set x=company_XTEST_","_XSUB_" do "_program_" "_qcode
+	else  set x=company_XTEST_" do "_program_" "_qcode
+        set add(addseq)=x
+
+	if XAGRP="*" do add(add(addseq)) kill add(addseq)
+			
+	quit
+
+COLUMN(String XTRIG)	// Loads all needed columns prior to Test logic
+
+	type ResultSet rs4=Db.select("FORM,PTEST,DCOL","UTBLFORMBCH","FID=:XTRIG")
+	if rs4.isEmpty() quit
+	while rs4.next() do COL1(.rs4)
+
+	quit
+
+COL1(ResultSet rscol)		
+	
+	type public String XTRIG
+	type String col,cnt,di,NEED(),sql,WHERE,XNEEDCOL,XFORM,XPTEST,XDCOL
+	type Number i
+	
+	set XFORM=rscol.getCol("FORM")
+
+	set XPTEST=rscol.getCol("PTEST")
+	if 'XPTEST.isNull() do {
+		set WHERE=$$WHERE^SQLCONV(.XPTEST,XTRIG)
+		do ^SQLQ(WHERE,XTRIG,.sql)
+		set cnt=""
+		for  set cnt=sql(cnt).order() quit:cnt.isNull()  do { 
+			set di=(sql(cnt).piece($C(1),2)).piece(".",2)
+			if 'NEED(di).exists() set NEED(di)=$$LOWER^%ZFUNC(di)
+			}	
+		}
+	set XDCOL=rscol.getCol("DCOL")
+	if 'XDCOL.isNull(),'NEED(XDCOL).exists() set NEED(XDCOL)=$$LOWER^%ZFUNC(XDCOL)
+		
+	type ResultSet rs3=Db.select("NEEDCOL","UTBLFORMVAR","FORM=:XFORM")
+	if rs3.isEmpty() quit
+	while rs3.next() do {
+		set XNEEDCOL=rs3.getCol("NEEDCOL")
+		if XNEEDCOL.isNull() quit
+		for i=1:1:XNEEDCOL.length(",") do {
+			set col=XNEEDCOL.piece(",",i)
+			if 'NEED(col).exists() set NEED(col)=$$LOWER^%ZFUNC(col)
+			}
+		}
+	quit
+
+hdr(pgm)	// Routine Header & Copyright message
+	
+	type String z
+	
+	do add(pgm_" ; Entrinsic Functions for LETTER")
+	do ^SCACOPYR(.z),add(z)
+	do add(" ;")
+	do add(" ; ***********This is a Function generated routine***********")
+	do add(" ;")
+	do add(" ;    Run function @LETTERCOM to generated this routine")
+	do add(" ;")
+	do add(" ;    Please see procedure LETTERCOM for more details")
+	do add(" ;")
+	do add(" ; **********************************************************")
+	do add(" ;")
+	
+	quit
+
+add(String x)
+
+	type public String commands,mcode,ltags,m2src()
+	type String n
+	set n=m2src("").order(-1)+1
+	set m2src(n)=x
+	quit
+
+CPGM(pgm,String m2src)
+
+	type public String commands,mcode,ltags
+	type public Boolean ER
+	do main^UCGM(.m2src,.mcode,.ltags,,.commands) quit:ER
+        write $$^MSG(3005,"",pgm),$$TIM^%ZM,!
+        do ^DBSCMPF(pgm,.mcode)
+        quit 
+
+COPY	
+	// copy all letter/form system tables to user tables
+	
+	type String XFID,XREC,XFORM
+	type Number XSEQ
+	
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR") 
+	if cuvar.letfix.isNull() do {
+		set cuvar.letfix=1
+		do cuvar.save()
+		}
+
+	// copy STBLFORM0 to UTBLFORM0
+	type ResultSet cform0=Db.select("RECTYPE","STBLFORM0")
+	if 'cform0.isEmpty() while cform0.next() do {
+		set XREC=cform0.getCol("RECTYPE")
+		
+		type RecordUTBLFORM0 utform=Db.getRecord("UTBLFORM0","RECTYPE=:XREC",1)
+		if utform.getMode() quit
+
+		type RecordSTBLFORM0 sform0=Db.getRecord("STBLFORM0","RECTYPE=:XREC")
+
+		type RecordUTBLFORM0 uform0=Class.new("RecordUTBLFORM0")
+		set uform0=sform0.copy()
+
+		set uform0.rectype=XREC		
+
+		do uform0.bypassSave()	
+		}
+	
+	// copy STBLFORM to UTBLFORM
+	type ResultSet cform=Db.select("RECTYPE,CSEQ","STBLFORM")
+	if 'cform.isEmpty() while cform.next() do {
+		set XREC=cform.getCol("RECTYPE")
+		set XSEQ=cform.getCol("CSEQ")
+		
+		type RecordUTBLFORM utform=Db.getRecord("UTBLFORM","RECTYPE=:XREC,CSEQ=:XSEQ",1)
+		if utform.getMode() quit 
+
+		type RecordSTBLFORM sform=Db.getRecord("STBLFORM","RECTYPE=:XREC,CSEQ=:XSEQ")
+
+		type RecordUTBLFORM uform=Class.new("RecordUTBLFORM")
+		set uform=sform.copy("DECPRE=DEC")
+		
+		set uform.rectype=XREC
+		set uform.cseq=XSEQ
+
+		do uform.save()
+		}
+
+	// copu STBLFORMBCH to UTBLFORMBCH
+	type ResultSet cbch=Db.select("FID,FORM","STBLFORMBCH")
+	if 'cbch.isEmpty() while cbch.next() do {
+
+		set XFID=cbch.getCol("FID")
+		set XFORM=cbch.getCol("FORM")
+
+		type RecordUTBLFORMBCH ufo=Db.getRecord("UTBLFORMBCH","FID=:XFID,FORM=:XFORM",1)
+		if ufo.getMode() quit
+		
+		type RecordSTBLFORMBCH sbch=Db.getRecord("STBLFORMBCH","FID=:XFID,FORM=:XFORM")
+
+		type RecordUTBLFORMBCH ubch=Class.new("RecordUTBLFORMBCH")
+		set ubch=sbch.copy()
+
+		set ubch.fid=XFID
+		set ubch.form=XFORM
+
+		do ubch.save()
+		}
+
+	// copy STBLFORMS to UTBLFORMS
+
+	type ResultSet cforms=Db.select("FORM","STBLFORMS")
+	if 'cforms.isEmpty() while cforms.next() do {
+		set XFORM=cforms.getCol("FORM")
+	
+		type RecordUTBLFORMS ufors=Db.getRecord("UTBLFORMS","FORM=:XFORM",1)
+		if ufors.getMode() quit
+
+		type RecordSTBLFORMS sforms=Db.getRecord("STBLFORMS","FORM=:XFORM")
+
+		type RecordUTBLFORMS uforms=Class.new("RecordUTBLFORMS")
+		set uforms=sforms.copy()
+
+		set uforms.form=XFORM
+		
+		do uforms.save()
+		}
+	quit 
+ 
+
+vSIG()	quit "60298^29608^Radhika Panchanathan^13227"	// Signature - LTD^TIME^USER^SIZE

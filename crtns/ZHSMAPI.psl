@@ -1,0 +1,1271 @@
+ZHSMAPI		/*
+	 ORIG: rickardb - 03/29/2007
+	 DESC: HSM API Utility
+
+	---- Comments --------------------------------------------------------
+
+	---- Revision History ------------------------------------------------
+
+	08/16/07 - Prabhu Reginald - CR 28823
+		Modified section SCSHA1 to Retry n times to retrieve SECCD
+		before sending as FFF.
+
+	08/22/07 - Brandon Rickards - CR 28686
+		Added section TRNSZPK to translate ZPK received from Prosa.
+		Modified sections VEROFST and PINCHG to use the same PIN 
+		Validation Data used to generate the Offset.
+
+	07/05/07 - Brandon Rickards - CR 28011
+		Modified section HSMEXEC to only convert the Request length 
+		to HEX and binary pack the value to save processing time.
+		Modified section CRDVLDT to remove logging SCAER error when
+		validation fails.
+
+	06/25/07 - Brandon Rickards - CR 27864
+		Modified section PINOFST to remove using the PIN Validation
+		Data (PVDD) and replace with using the first 4 characters of
+		the Card Number concatenated with "N0000000".
+		Removed section HSMBTHX and replaced it with section SCEXEC
+		to be used for message exchange for Security Code generation
+		only. The security code message format is different from all
+		other message formats and therefore requires a separate
+		message exchange section.
+		Modified section PINOFST to convert the encrypted PIN Offset
+		returned from "Blow Fish" encryption to Hexadecimal before 
+		storing in the database.
+		Modified section VEROFST to convert the stored Hexadecimal
+		PIN Offset to packed binary prior to the "Blow Fish" decryption.
+		Modified CRDVLDT to include Status 15 as valid status.
+
+	06/19/07 - Brandon Rickards - CR 27711
+		Modified error handling to return '-1' for any unknown errors
+		and removed setting RETCD=+ERRCD to avoid returning successful
+		response during a failure.
+		Modified section HMACDATA to strip the trailing "|" delimiter
+		off the request.
+		Modified CVVCMP to pass in CVV type for validation (CVV/CVV2)
+		Modified section SCSHA1 to pull HMAC Key from ZUTBLHSM
+		Modified HSMEXEC and HSMBTHX to pull Time Out value (TIMOUT)
+		from UTBLEXTINT.MISC2
+		General code clean up.
+
+	06/18/07 - Karthik Raman
+		Fixed the HSMBTHX to read the responses in a loop. Based
+		on the total number of requests sent, every time two bytes
+		are read to identify the length of the response and using 
+		on the calculated length the responses are read.
+
+	06/14/07 - Brandon Rickards - CR 27626
+		Modified section HSMEXEC and HSMBTHX to Read the first two bytes
+		of the response from the socket to identify the length of the 
+		reponse, and then read the data of the calculated length
+		Added logging Request and Response to HSM Message Log
+		Created section HMACGEN to generate an HMAC Key
+
+	06/07/07 - Karthik Raman - CR 27424
+		Updated the code to fetch and use the ZUTBLHSM entries of 
+		PIN Block Format Code, Min. PIN Length, Decimalziation table,
+		and service code values.
+
+		Updated the VEROFST to take CRDTYP as a parameter. 
+
+		06/01/07 - Karthik Raman
+		Updated the HSMEXEC implementation to execute multiple requests
+		and return the results. 
+
+		05/29/07 - Karthik Raman
+		Added the implementation to create a SHA-1 derived security
+		code for a given bank, check and account information.
+
+	05/25/07 - Brandon Rickards - CR 27311
+		Release including:
+
+		05/21/07 - Karthik Raman
+		Added the PIN offset verification using the IBM 3624 method.
+
+		05/15/07 - Karthik Raman
+		Added the BYBASS directive to enclose the OPEN and USE commands
+		in the HSMEXEC routine. This keeps ths PSL compiler from 
+		generating warnings/errors.
+
+	05/11/07 - Brandon Rickards - CR 27068
+		Initial Release including:
+
+		04/19/07 - Karthik Raman
+		Added the implementation to generate a random security
+		key. (ZSKHSM and GENPRN)
+
+		03/29/07 - Brandon Rickards
+		Created procedure
+
+	*/
+
+	// No top level entry
+	quit
+
+PINGEN(String CRDNUM, String CRDTYP)
+	/*
+	DESC: Generates a Random PIN of configured length. This returned PIN 
+		  is encrypted using the LMK pair 02-03. Please note that the
+		  custom validations do not apply since it is a random 
+		  generated PIN. The generated PIN is stored in the CRD.ENCPIN
+		  data item
+
+	ARGUMENTS:
+		. CRDNUM - Card Number /TYP=T/REQ
+		. CRDTYP - Card Type /TYP=T/REQ
+	
+	RETURNS:
+		. RETCD - 0 on success, else error codes on failure /TYP=N
+			  -1 is Card missing or unknown error
+	
+	EXAMPLE:
+		. S RNDPIN=$$PINGEN^ZHSMAPI(CRDNUM)
+	*/
+	type String AN,EXTINT,MH,PINLEN,REQ,RESP,RNDPIN,WKPINS
+	type Number CRDSTAT,MHLEN,PGENTYPE,RETCD
+	type RecordCRD crd
+	type RecordZUTBLHSM hsm
+
+	// Message Header - PIN Generate
+	set MH = "PING"
+	// Message Header length
+	set MHLEN = MH.length()
+	// System generated PIN Generation Type ref. STBLCMPGEN
+	set PGENTYPE = 2
+
+	// Initialize Variables
+	set RETCD = -1
+	set CRDSTAT=0
+
+	// Get the card record from the database
+	if 'Db.isDefined("CRD","CRDNUM=:CRDNUM,CRDTYP=:CRDTYP") quit RETCD
+	set crd = Db.getRecord("CRD","CRDNUM=:CRDNUM,CRDTYP=:CRDTYP")
+	// Validate the card information
+	set CRDSTAT=$$CRDVLDT(crd)
+	if CRDSTAT'=0 quit RETCD
+
+	// Get the Key Information from ZUTBLHSM
+	set EXTINT = "HSM"
+	set hsm = Db.getRecord("ZUTBLHSM","INTRFACE=:EXTINT",1)
+
+	// The minimum PIN length
+	set PINLEN = hsm.chklen.toString().justify(2,1,"0",1)
+
+	// Strip the check digit
+	set AN = CRDNUM\10
+	// Extract and pad it if required
+	set AN = AN.extract(AN.length()-11,50)
+
+	// Excluded the "Excluded PIN Information"...no message trailer
+	set WKPINS=""
+
+	// Generate Request
+	set REQ= MH_"JA"_AN_PINLEN_"*00"_WKPINS
+
+	// Execute the request
+	set RESP=$$HSMEXEC(REQ)
+
+	// Fetch the error code from the response.
+	type String ERRCD = RESP.extract(MHLEN+3,MHLEN+4)
+	if ERRCD = "00" do {
+		// Get the generated PIN from the response
+		set RNDPIN = RESP.extract(MHLEN+5,MHLEN+16)
+		// Store in the PIN in the dataStore
+		set crd.encpin = RNDPIN
+		set crd.pingen = PGENTYPE
+		// Save the changes
+		do crd.save()
+		// PIN Creation successful
+		set RETCD = 0
+	}
+	else  do {
+		if ERRCD="" set ERRCD="-1"
+		set RETCD = ERRCD
+	}
+
+	quit RETCD
+
+TRNSZPK(String ZPK)
+	type String MH
+	type RecordZUTBLHSM hsm
+	set EXTINT = "HSM"
+	set hsm = Db.getRecord("ZUTBLHSM","INTRFACE=:EXTINT")
+
+	set MH="TRNZ"
+	set MHLEN=MH.length()
+
+	set ZMK=hsm.zmk
+
+	set REQ=MH_"FAU"_ZMK_"U"_ZPK_"1"
+	set RESP=$$HSMEXEC(REQ)
+
+	type String ERRCD=RESP.extract(MHLEN+3,MHLEN+4)
+	if ERRCD'="00" quit "-1"
+
+	quit RESP.extract(MHLEN+6,MHLEN+37)
+
+PINOFST(String CRDNUM, String CRDTYP, String PINBLK)
+	/*
+	DESC: Creates a PIN Offset using IBM 3264 Method for the 
+	      customer selected PIN. The generated offset is 
+	      encrypted and stored in the CRD.ENCPIN data item.
+
+	ARGUMENTS:
+		. CRDNUM - Card Number /TYP=T/REQ
+		. CRDTYP - Card Type /TYP=T/REQ
+		. PINBLK - Customer entered PIN Block Encrypted /TYP=T/REQ
+
+	RETURNS:
+		. RETCD - 0=Success, other error codes=Failure /TYP=N
+
+	EXAMPLE:
+		. S OFFSET=$$PINOFST^ZHSMAPI(CRDNUM,CRDTYP,PINBLK)
+	*/
+	type String AN,CHKLEN,DECTBL,EXTINT,MH,PBFC,PBK,PBKT,PVK,REQ,RESP
+	type Number ANLEN,CRDSTAT,MHLEN,PGENTYPE,RETCD
+	type RecordCRD crd
+	type RecordZUTBLHSM hsm
+
+	// Messsage Header - PIN Offset
+	set MH = "PINO"
+	// Message Header length
+	set MHLEN = MH.length()
+	// Customer Selected PIN Type ref. STBLCMPGEN
+	set PGENTYPE = 1
+
+	// Initialize Variables
+	set RETCD = -1
+	set CRDSTAT=0
+
+	// Get the card record from the data store
+	if 'Db.isDefined("CRD","CRDNUM=:CRDNUM,CRDTYP=:CRDTYP") quit RETCD
+	set crd = Db.getRecord("CRD","CRDNUM=:CRDNUM,CRDTYP=:CRDTYP")
+	do crd.setAuditFlag(1)
+
+	// Validate the card information. Quit if invalid
+	set CRDSTAT=$$CRDVLDT(crd)
+	if CRDSTAT'=0 quit RETCD
+
+	// Get the Key Information from ZUTBLHSM
+	set EXTINT = "HSM"
+	set hsm = Db.getRecord("ZUTBLHSM","INTRFACE=:EXTINT",1)
+
+	// The minimum PIN length
+	set CHKLEN = hsm.chklen.toString().justify(2,1,"0",1)
+
+	// PIN Block Key Type.. Usually its the TPK
+	set PBKT = "002"
+
+	// PIN Block Key...usually the Terminal PIN Key
+	set PBK = hsm.tpk
+
+	//PIN Block Format Code: 01/02/03/04/05/34/35/41/42/47
+	set PBFC = hsm.pbfc
+
+	// PIN Verification Key
+	set PVK = hsm.pvk
+
+	/*
+	PBFC '= "04" use the 12 right most digits of the Card Number,
+	excluding the last digit (check digit).
+	PBFC = "04" use 18 digits excluding the check digit.
+	If necessary pad with "F" on the left
+	*/
+	set ANLEN = 12
+	if PBFC = "04" set ANLEN =  18
+	// Strip the check digit
+	set AN = CRDNUM\10
+	// Extract and pad it if required
+	set AN = AN.extract(AN.length()+1-ANLEN,50).justify(ANLEN,1,"F",0)
+
+	/* 
+	Decimalization Table: Encrypted/Plaintext [E/P]
+	'E' = Encrypted and consists of 16 hexadecimal digits.
+	'P' = Plaintext and consists of 16 decimal digits.
+	*/
+	set DECTBL = hsm.dectbl
+
+	// Generate the Request
+	set REQ= MH_"BK"_PBKT_PBK_PVK_PINBLK_PBFC_CHKLEN_AN_DECTBL_CRDNUM.extract(1,4)_"N0000000"
+
+	// Execute the request
+	set RESP=$$HSMEXEC(REQ)
+
+	// Fetch the error code from the response.
+	type String ERRCD = RESP.extract(MHLEN+3,MHLEN+4)
+	if ERRCD = "00" do {
+		// Strip off the trailing "F" and return the OFF SET
+		type String PINOFF = RESP.extract(MHLEN+5,MHLEN+16)
+		// Encrypt the offset using the "Blow Fish" algorithm
+		type ByteString OFFSET = $$ENCRYPT^%ENCRYPT("BF",PINOFF,hsm.pinkey)
+		set OFFSET=$$UPKNS^ISO8583(OFFSET)
+		// Store in the Offset in the dataStore
+		set crd.encpin = OFFSET
+		set crd.pingen = PGENTYPE
+		// Reset the retry attempts information
+		set crd.retrycnt = 0
+		// Save the changes
+		do crd.bypassSave()
+		// PIN Offset creation successful
+		set RETCD = 0
+	}
+	else  do {
+		if ERRCD="" set ERRCD="-1"
+		set RETCD = ERRCD
+	}
+
+	quit RETCD
+
+
+PINCHG(String CRDNUM, String CRDTYP, String CPINBLK, String NPINBLK,String CHNL)
+	/*
+	DESC: Verify an IBM PIN Offset, and if successful, 
+	      generate the PIN offset of the customer selected PIN 
+	      using the IBM 3624 method. The current and new PINs 
+	      must be supplied.
+	
+	ARGUMENTS:
+		. CRDNUM  - Card Number /TYP=T/REQ
+		. CRDTYP  - Card Type /TYP=T/REQ
+		. CPINBLK - Current PIN Block (Encrypted) /TYP=T/REQ
+		. NPINBLK - New PIN Block (Encrypted) /TYP=T/REQ
+	
+	RETURNS:
+		. RETCD - 0 on success, else error codes on failure /TYP=N
+			  -1 On unknown errors
+			  -2 On Number of attempts failed for a day (To be decided)
+		
+	EXAMPLE:
+		. S OFFSET=$$PINCHG^ZHSMAPI(CRDNUM,CRDTYP,CPINBLK,CPINOFF,NPINBLK)
+	*/
+	type String AN,CHKLEN,DECTBL,EXTINT,MH,PBFC,PBK,PBKT,PVK,REQ,RESP
+	type Number ANLEN,CRDSTAT,MHLEN,PGENTYPE,RETCD
+	type ByteString CPINOFF
+	type Date NOW
+	type RecordCRD crd
+	type RecordCRDTYP crdtyp
+	type RecordZUTBLHSM hsm
+
+	// Message Header - PIN Modify
+	set MH = "PINM"
+	// Message Header length
+	set MHLEN = MH.length()
+
+	// Initialize variables
+	set RETCD = -1
+	set CRDSTAT=0
+	set PGENTYPE=1
+
+	// Get the card record from the database
+	if 'Db.isDefined("CRD","CRDNUM=:CRDNUM,CRDTYP=:CRDTYP") quit RETCD
+	set crd = Db.getRecord("CRD","CRDNUM=:CRDNUM,CRDTYP=:CRDTYP")
+	do crd.setAuditFlag(1)
+
+	// Validate the card information
+	set CRDSTAT=$$CRDVLDT(crd)
+	if CRDSTAT'=0 quit RETCD
+
+	// Verify if this pin change attempt can be allowed for the day
+	set NOW = $P($H,",",1)
+
+	// Determine retry limits for Card Type
+	if 'Db.isDefined("CRDTYP","CARDTYPE=:crd.crdtyp") quit RETCD
+	set crdtyp = Db.getRecord("CRDTYP","CARDTYPE=:crd.crdtyp")
+	// Do not allow if the attempts have exceeded for a given day
+	if crd.retrycnt=crdtyp.retry,(crd.retrydt=NOW) quit -2
+
+	// Get the Key Information from ZUTBLHSM
+	set EXTINT = "HSM"
+	set hsm = Db.getRecord("ZUTBLHSM","INTRFACE=:EXTINT",1)
+
+	// The minimum PIN length
+	set CHKLEN = hsm.chklen.toString().justify(2,1,"0",1)
+
+	if CHNL.get()="ICHG" do {
+		// PIN Block Key Type
+		set PBKT = "001U"
+		// PIN Block Key
+		set PBK=hsm.zpk
+	}
+	else  do {
+		// PIN Block Key Type
+		set PBKT = "002"
+		// PIN Block Key
+		set PBK = hsm.tpk
+	}
+
+	if PBK="-1" quit RETCD	
+
+	set CPINOFF=crd.encpin
+	set CPINOFF=$$PKNS^ISO8583(CPINOFF)
+
+	// Get the PIN offset for this CRDNUM from the data store
+	set CPINOFF = $$DECRYPT^%ENCRYPT("BF",CPINOFF,hsm.pinkey)
+
+	// PIN Block Format Code: 01/02/03/04/05/34/35/41/42/47
+	set PBFC = hsm.pbfc
+	// PIN Verification Key
+	set PVK = hsm.pvk
+
+	/*
+	PBFC '= "04" use the 12 right most digits of the Card Number,
+	excluding the last digit (check digit).
+	PBFC = "04" use 18 digits excluding the check digit.
+	If necessary pad with "F" on the left
+	*/
+	set ANLEN = 12
+	if PBFC = "04" set ANLEN = 18
+	// Strip the check digit
+	set AN = CRDNUM\10
+	// Extract and pad it if required
+	set AN = AN.extract(AN.length()+1-ANLEN,50).justify(ANLEN,1,"F",0)
+
+	/* 
+	Decimalization Table: Encrypted/Plaintext [E/P]
+	'E' = Encrypted and consists of 16 hexadecimal digits.
+	'P' = Plaintext and consists of 16 decimal digits.
+	*/
+	set DECTBL = hsm.dectbl
+
+	// Generate the Request
+	set REQ=MH_"DU"_PBKT_PBK_PVK_CPINBLK_PBFC_CHKLEN_AN_DECTBL_CRDNUM.extract(1,4)_"N0000000"_CPINOFF_NPINBLK
+
+	// Execute the request
+	set RESP=$$HSMEXEC(REQ)
+
+	// Fetch the error code from the response
+	type String ERRCD = RESP.extract(MHLEN+3,MHLEN+4)
+	if ERRCD = "00" do {
+		// Strip off the trailing "F" and return the OFF SET
+		type String PINOFF = RESP.extract(MHLEN+5,MHLEN+16)
+		// Encrypt the offset using the "Blow Fish" algorithm
+		type ByteString OFFSET = $$ENCRYPT^%ENCRYPT("BF",PINOFF,hsm.pinkey)
+		set OFFSET=$$UPKNS^ISO8583(OFFSET)
+		// Store in the Offset in the dataStore
+		set crd.encpin = OFFSET
+		set crd.pingen = PGENTYPE
+		// PIN change successful
+		set RETCD = 0
+	}
+	else  do {
+		// PIN verification changed
+		if ERRCD="" set ERRCD="-1"
+		set RETCD = ERRCD
+	}
+
+	if crd.retrydt'=NOW set crd.retrycnt=0
+	set crd.retrycnt=crd.retrycnt+1
+	set crd.retrydt=NOW
+	do crd.bypassSave()
+
+	quit RETCD
+
+
+PINCMP(String CRDNUM, String CRDTYP, String PINBLK, String CHNL)
+	/*
+	DESC: Verifies the PIN using the comparison method. 
+	      Applicable to both the Interchange and terminal PINs. 
+	      Use this method if the PINs were generated using the
+	      PINGEN method.
+	      
+	      The applicable values for CHNL are "ICHG/TERM"
+	      ICHG - Interchange PIN (PIN is from a Interchange)
+	      TERM - Terminal PIN (when the PIN is from a ATM or 
+	      	     any terminal)
+	
+	ARGUMENTS:
+		. CRDNUM - Card Number /TYP=T/REQ
+		. CRDTYP - Card Type /TYP=T/REQ
+		. PINBLK - Encrypted PIN Block /TYP=T/REQ
+		. CHNL   - PIN verification channel (ICHG/TERM) /TYP=T/REQ
+	
+	RETURNS:
+		. RETCD - 0 on success, else error codes on failure /TYP=N
+				
+	EXAMPLE:
+		. W PINCMP^ZHSMAPI(CRDNUM,PINBLK,CHNL)
+	*/
+	type String AN,CMDCD,ERRCD,EXTINT,MH,PBFC,PINKEY,CMDCD,REQ,RESP
+	type Number ANLEN,CRDSTAT,MHLEN,RETCD
+	type ByteString ENCPIN
+	type RecordCRD crd
+	type RecordZUTBLHSM hsm
+
+	// Message Header - PIN Compare
+	set MH = "PINC"
+	// Message Header length
+	set MHLEN = MH.length()
+
+	// Initialize variables
+	set RETCD = -1
+	set CRDSTAT=0
+
+	// Get the card record from the data store
+	if 'Db.isDefined("CRD","CRDNUM=:CRDNUM,CRDTYP=:CRDTYP") quit RETCD
+	set crd = Db.getRecord("CRD","CRDNUM=:CRDNUM,CRDTYP=:CRDTYP")
+
+	// Validate the card information
+	set CRDSTAT=$$CRDVLDT(crd)
+	if CRDSTAT'=0 quit RETCD
+
+	// Get the Key Information from ZUTBLHSM
+	set EXTINT = "HSM"
+	set hsm = Db.getRecord("ZUTBLHSM","INTRFACE=:EXTINT",1)
+
+	if CHNL="TERM" do { 
+		set CMDCD="BC"
+		// Get the Terminal PIN Key (TPK)
+		set PINKEY = hsm.tpk
+	}
+	else  do {
+		set CMDCD="BE"
+		// Get the Zone PIN Key (ZPK)
+		set PINKEY = hsm.zpk
+	}
+
+	// PIN Block Format Code: 01/02/03/04/05/34/35/41/42/47
+	set PBFC = hsm.pbfc
+
+	/*
+	PBFC '= "04" use the 12 right most digits of the Card Number,
+	excluding the last digit (check digit).
+	PBFC = "04" use 18 digits excluding the check digit.
+	If necessary pad with "F" on the left
+	*/
+	set ANLEN = 12
+	if PBFC = "04" set ANLEN =  18
+	// Strip the check digit
+	set AN = CRDNUM\10
+	// Extract and pad it if required
+	set AN = AN.extract(AN.length()+1-ANLEN,50).justify(ANLEN,1,"F",0)
+
+	/*
+	Fetch encypted PIN from database
+	Assumption: PIN is encrypted using LMK.
+	Otherwise, encrypt the PIN using LMK and send as input
+	*/
+	set ENCPIN=crd.encpin
+
+	// Generate Request
+	set REQ=MH_CMDCD_PINKEY_PINBLK_PBFC_AN_ENCPIN
+
+	// Execute the Request
+	set RESP=$$HSMEXEC(REQ)
+
+	// Fetch the error code from the response
+	set ERRCD = RESP.extract(MHLEN+3,MHLEN+4)
+	if ERRCD="" set ERRCD="-1"
+	set RETCD = ERRCD
+
+	quit RETCD
+
+VEROFST(String CRDNUM, String CRDTYP, String PINBLK, String CHNL)
+	/*
+	DESC: Performs the PIN offset verification using the IBM 3624 Method. Use this
+	      method to verify the offsets if the offsets were generated using the 
+	      PINOFST method.
+	      
+	      The applicable values for CHNL are "ICHG/TERM"
+	      ICHG - Interchange PIN (PIN is from a Interchange)
+	      TERM - Terminal PIN (when the PIN is from a ATM or 
+	      	     any terminal)
+	
+	ARGUMENTS:
+		. CRDNUM - Card Number /TYP=T/REQ
+		. CRDTYP - Card Type /TYP=T/REQ
+		. PINBLK - Encrypted PIN Block /TYP=T/REQ
+		. CHNL   - PIN verification channel (ICHG/TERM) /TYP=T/REQ
+	
+	RETURNS:
+		. RETCD - 0 on success, else error codes on failure /TYP=N
+				
+	EXAMPLE:
+		. W $$VEROFST^ZHSMAPI(CRDNUM,PINBLK,CHNL)
+	*/
+	type String AN,CHKLEN,CMDCD,DECTBL,ERRCD,MH,PBFC,PINKEY,PVK,REQ,RESP
+	type Number ANLEN,CRDSTAT,MAXPLEN,MHLEN,RETCD
+	type ByteString OFFSET,PINOFF
+	type RecordCRD crd
+	type RecordZUTBLHSM hsm
+
+	// Message Header - Verify Offset
+	set MH = "VERO"
+	// Message Header length
+	set MHLEN = MH.length()
+
+	// Initialize variables
+	set RETCD = -1
+	set CRDSTAT=0
+
+	// Get the card record from the data store
+	if 'Db.isDefined("CRD","CRDNUM=:CRDNUM,CRDTYP=:CRDTYP") quit RETCD
+	set crd = Db.getRecord("CRD","CRDNUM=:CRDNUM,CRDTYP=:CRDTYP")
+
+	// Validate the card information
+	set CRDSTAT=$$CRDVLDT(crd)
+	if CRDSTAT'=0 quit RETCD
+
+	type Date NOW=$H.piece(",",1)
+	if 'Db.isDefined("CRDTYP","CARDTYPE=:CRDTYP") quit RETCD
+	type RecordCRDTYP crdtyp=Db.getRecord("CRDTYP","CARDTYPE=:CRDTYP")
+	if crd.invldcnt=crdtyp.retry,(crd.invlddt=NOW) quit -2
+
+	// Get the Key Information from ZUTBLHSM
+	set EXTINT = "HSM"
+	set hsm = Db.getRecord("ZUTBLHSM","INTRFACE=:EXTINT",1)
+
+	if CHNL="TERM" do { 
+		set CMDCD="DA"
+		// Get the Terminal PIN Key (TPK)
+		set PINKEY = hsm.tpk
+	}
+	else  do {
+		set CMDCD="EAU"
+		// Get the Zone PIN Key (ZPK)
+		set PINKEY=hsm.zpk
+	}
+
+	if PINKEY="-1" quit PINKEY
+
+	// PIN Verification Key
+	set PVK = hsm.pvk
+	// The minimum PIN length
+	set CHKLEN = hsm.chklen.toString().justify(2,1,"0",1)
+
+	//Maximum PIN length: 12 according to Thales documentation
+	set MAXPLEN = 12
+
+	// PIN Block Format Code: 01/02/03/04/05/34/35/41/42/47
+	set PBFC = hsm.pbfc
+
+	/*
+	PBFC '= "04" use the 12 right most digits of the Card Number,
+	excluding the last digit (check digit).
+	PBFC = "04" use 18 digits excluding the check digit.
+	If necessary pad with "F" on the left
+	*/
+	set ANLEN = 12
+	if PBFC = "04" set ANLEN =  18
+	// Strip the check digit
+	set AN = CRDNUM\10
+	// Extract and pad it if required
+	set AN = AN.extract(AN.length()+1-ANLEN,50).justify(ANLEN,1,"F",0)
+
+	/* 
+	Decimalization Table: Encrypted/Plaintext [E/P]
+	'E' = Encrypted and consists of 16 hexadecimal digits.
+	'P' = Plaintext and consists of 16 decimal digits.
+	*/
+	set DECTBL = hsm.dectbl
+
+	set OFFSET=crd.encpin
+	set OFFSET=$$PKNS^ISO8583(OFFSET)
+
+	// Get the PIN offset for this CRDNUM from the data store
+	set PINOFF = $$DECRYPT^%ENCRYPT("BF",OFFSET,hsm.pinkey)
+
+	// Generate the Request
+	set REQ=MH_CMDCD_PINKEY_PVK_MAXPLEN_PINBLK_PBFC_CHKLEN_AN_DECTBL_CRDNUM.extract(1,4)_"N0000000"_PINOFF
+
+	// Execute the request
+	set RESP=$$HSMEXEC(REQ)
+
+	// Fetch the error code from the response
+	set ERRCD = RESP.extract(MHLEN+3,MHLEN+4)
+	if ERRCD="00" do {
+		set crd.invldcnt=0
+		do crd.bypassSave()
+		set RETCD=0
+	}
+	else  do {
+		set crd.invldcnt=crd.invldcnt+1
+		set crd.invlddt=NOW
+		do crd.bypassSave()
+		set RETCD=-1
+	}
+
+	quit RETCD
+
+
+CVV(String CRDNUM,String CRDTYP,Date EXPDT)
+	/*
+	DESC: Generates a CVV for a given card number
+	
+	ARGUMENTS:
+		. CRDNUM - Card Number /TYP=T/REQ
+		. CRDTYP - Card Type /TYP=T/REQ
+		. EXPDT - Expiry Date /TYP=D/REQ
+
+	RETURNS:
+		. CVVVAL - True/False /TYP=N
+				
+	EXAMPLE:
+		. W $$CVV^ZHSMAPI(CRDNUM,CRDTYP,EXPDT)
+	*/
+	type String CVVVAL=""
+	type String RTCD=$$CVVCRE(CRDNUM,CRDTYP,EXPDT,"CVV",.CVVVAL)
+	quit CVVVAL
+
+CVV2(String CRDNUM,String CRDTYP,Date EXPDT)
+	/*
+	DESC: Generates a CVV2 for a given card number
+	
+	ARGUMENTS:
+		. CRDNUM - Card Number /TYP=T/REQ
+		. CRDTYP - Card Type /TYP=T/REQ
+		. EXPDT - Expiry Date /TYP=D/REQ
+		
+	RETURNS:
+		. CVVVAL - True/False /TYP=N
+				
+	EXAMPLE:
+		. W $$CVV2^ZHSMAPI(CRDNUM,CRDTYP,EXPDT)
+	*/
+	type String CVV2VAL=""
+	type String RTCD=$$CVVCRE(CRDNUM,CRDTYP,EXPDT,"CVV2" ,.CVV2VAL)
+	quit CVV2VAL
+
+private CVVCRE(String CRDNUM,String CRDTYP,Date EXPDT,String CVVTYP,String CVVAL) 
+	/*
+	DESC: Common implemenation to generate CVV/CVV2 values. 
+	      The SVCCD defines what is to be generated
+	
+	ARGUMENTS:
+		. CRDNUM - Card Number /TYP=T/REQ
+		. CRDTYP - Card Type /TYP=T/REQ
+		. EXPDT  - Expiry Date /TYP=D/REQ
+		. CVVTYP - CVV Type - Values are CVV/CVV2 /TYP=T/REQ
+	 	. CVVAL  - Generated CVV/CVV2 (Pass by Name) /TYP=T/REQ
+
+	RETURNS:
+		. ERRCD - HSM Error Code /TYP=T
+		. CVVAL - Card Verification Value (Passed by name). /TYP=T
+
+	EXAMPLE:
+		. W $$CVVCRE^ZHSMAPI(CRDNUM,CRDTYP,TYP,.CVVAL)
+	
+	*/
+	type String CVKA,CVKB,EXTINT,MH,REQ,RESP,ERRCD,SVCCD
+	type Number MHLEN
+	type RecordZUTBLHSM hsm
+
+	// Message Header - CVV Generate
+	set MH = "CVVG"
+	// Message Header length
+	set MHLEN = MH.length()
+
+	set CVVAL = ""
+
+	// Get the Key Information from ZUTBLHSM
+	set EXTINT = "HSM"
+	set hsm = Db.getRecord("ZUTBLHSM","INTRFACE=:EXTINT",1)
+
+	// Fetch the VISA Card Verification Key A/B from the system
+	set CVKA = hsm.cvka
+	set CVKB = hsm.cvkb
+
+	// Service Code: CVV2="000"
+	if CVVTYP="CVV2" set SVCCD = "000"
+	else  set SVCCD = hsm.svccd
+
+	// Generate the Request
+	set REQ = MH_"CW"_CVKA_CVKB_CRDNUM_";"_EXPDT.toString("MMYY")_SVCCD
+
+	//  Execute the Request
+	set RESP=$$HSMEXEC(REQ)
+
+	// Fetch the error code from the response
+	set ERRCD = RESP.extract(MHLEN+3,MHLEN+4)
+	if ERRCD = "00" set CVVAL = RESP.extract(MHLEN+5,MHLEN+7)
+
+	quit ERRCD
+
+CVVCMP(String CRDNUM, String CRDTYP, String CVV,String CVVTYP)
+	/*
+	DESC: Card Verification Value comparison section.
+	      Verify a VISA CVV or MasterCard CVC.
+	
+	ARGUMENTS:
+		. CRDNUM - Card Number /TYP=T/REQ
+		. CRDTYP - Card Type /TYP=T/REQ
+		. CVV    - Card Verification Value as 
+		           plain text /TYP=T/REQ
+		. CVVTYP - CVV Type - Values are CVV/CVV2 /TYP=T/REQ
+
+	RETURNS:
+		. RETCD - 0 on success, else error codes on failure /TYP=N
+				
+	EXAMPLE:
+		. W $$CVVCMP^ZHSMAPI(CRDNUM,CRDTYP)
+	*/
+	type String CVK,ERRCD,EXPDT,EXTINT,MH,REQ,RESP
+	type Number MHLEN
+	type RecordCRD crd
+	type RecordZUTBLHSM hsm
+
+	// Message Header - CVV Compare
+	set MH = "CVVC"
+	// Message Header length
+	set MHLEN = MH.length()
+
+	// Get the Key Information from ZUTBLHSM
+	set EXTINT = "HSM"
+	set hsm = Db.getRecord("ZUTBLHSM","INTRFACE=:EXTINT",1)
+
+	// Fetch the VISA Card Verification Key A/B from the system
+	set CVK = hsm.cvka_hsm.cvkb
+
+	// Fetch the card expiry date
+	set crd = Db.getRecord("CRD","CRDTYP=:CRDTYP,CRDNUM=:CRDNUM",1)
+	set EXPDT = crd.expdt.toString("MMYY")
+
+	// Service Code: CVV2="000"
+	if CVVTYP="CVV2" set SVCCD = "000"
+	else  set SVCCD = hsm.svccd
+
+	// Generate the Request
+	set REQ = MH_"CY"_CVK_CVV_CRDNUM_";"_EXPDT_SVCCD
+
+	// Execute the Request
+	set RESP = $$HSMEXEC(REQ)
+
+	set ERRCD = RESP.extract(MHLEN+3,MHLEN+4)
+	quit ERRCD
+
+private CRDVLDT(RecordCRD crd)
+	/*
+	DESC: Performs the necessary business validations for 
+	      the Card used during the New PIN comparison, 
+	      creation and PIN change. Returns "true" if the
+	      validation succeeds otherwise "false".
+
+	ARGUMENTS:
+		. RecordCRD crd	- CRD Object
+
+	RETURNS:
+		. RETVAL - 0 if successful, otherwise error codes /TYP=N
+
+	EXAMPLE:
+		. S CRDSTAT=$$CRDVLDT(CRDNUM)
+	*/
+	type Number STAT
+
+	// Initialize Return Value to Successful
+	set STAT=0
+
+	// Validate Card Status
+	if crd.stat'=0,(crd.stat'=15) set STAT=1
+	if crd.expdt < %CurrentDate set STAT=1
+
+	quit STAT
+
+SCSHA1(String DATA)
+	/*
+	DESC: Generates a security code for the passed data using the
+	      SHA-1 HMAC. A HAMC is first generated using the SHA-1
+	      hashing. The resultant HMAC is reduced to a 3 digit code.
+	      Following logic is used to derive the 3 digit security
+	      code:
+
+	      A HMAC is created using the SHA-1. The returned HMAC data is
+	      in packed binary format. This packed binary value is then
+	      converted to decimal and the last 3 digits are returned as
+	      the Security Code.
+
+	ARGUMENTS:
+		. DATA - Data for which the security code to be generated /TYP=T/REQ
+			 If multiple requets need to be processed then send it as a single buffer
+			 delimited with the "|".
+
+	RETURNS:
+		. SECCD -  A three digit security code for the HMAC . /TYP=T
+			   If the input had multiple requests delimitered with "|" the 
+			   reponse will also have multiple security codes with "|" as the
+			   delimiter.
+
+	EXAMPLE:
+		. S SECCD=$$SCSHA1^ZHSMAPI(DATA)
+	*/
+	type String DATP,EXTINT,HMACKEY,SCDLST,SECCD
+	type Number CNT,RETRY
+	type ByteString BHMACKEY
+	type RecordZUTBLHSM hsm
+
+	// Get the Key Information from ZUTBLHSM
+	set EXTINT = "HSM"
+	set hsm=Db.getRecord("ZUTBLHSM","INTRFACE=:EXTINT")
+
+	// Fetch the HMAC key
+	set HMACKEY = hsm.hmackey
+	set BHMACKEY=$$PKNS^ISO8583(HMACKEY)
+
+        // Times to Retry
+        set RETRY = hsm.retry
+	if 'RETRY.get() set RETRY=1
+
+	set SCDLST=""
+
+	set CNT=1
+	set RESP = ""
+	for  set DATP=DATA.piece("|",CNT) quit:DATP=""  do {
+		// Generate the HMAC for this data using the Key (SHA-1)
+		type ByteString HMACS=""
+		for i=1:1:RETRY do {
+			set HMACS=$$HMACDATA(DATP,BHMACKEY)
+			if HMACS'="FFF" set SECCD=$$CNVDEC(HMACS),i=RETRY
+			else  set SECCD="FFF"
+		}
+		set SCDLST=SCDLST_SECCD.extract(SECCD.length()-2,SECCD.length())_"|"
+		set CNT=CNT+1
+	}
+
+	// Strip the trailing "|"
+	set SCDLST=SCDLST.extract(1,SCDLST.length()-1)
+
+	quit SCDLST
+
+
+HMACDATA(String DATA,ByteString HMACKEY)
+	/*
+	DESC: Generates a Keyed Hash Message Authentication Code (HMAC)
+	      for the block of data.
+
+	ARGUMENTS:
+		. DATA - DATA for which the Hash need to created /TYP=T/REQ
+		. HMACKEY - The HMAC key encrypted under LMK34-35 Variant I /TYP=T/REQ
+
+	RETURNS:
+		. HMAC - Key Hashed Message Authentication Code from the HSM /TYP=T
+
+	EXAMPLE:
+		. S HMAC=$$HMACDATA^ZHSMAPI(DAT,HASHID,HMACKEY)
+	*/
+	type String ERRCD,HASHID,HMAC,HMACLEN,KEYFMT,MH
+	type Number BDATALEN,HMKEYLEN,MHLEN
+	type ByteString BDATA,REQ,RESP
+
+	// Message Header - HMAC Create
+	set MH = "HMAC"
+	// Message Header length
+	set MHLEN = MH.length()
+
+	// Hash Algorithm Identifier - "01" = SHA-1
+	set HASHID="01"
+
+	// HMAC Length - set for SHA-1
+	set HMACLEN = "0020"
+
+	// HMAC Key format
+	set KEYFMT = "00"
+
+	// Convert Data to binary
+	set BDATA=$$PKNS^ISO8583(DATA)
+
+	// HMAC Key Length
+	set HMKEYLEN=HMACKEY.length().toString().justify(4,1,"0")
+	set BDATALEN=BDATA.length().toString().justify(5,1,"0")
+
+	set REQ=MH_"LQ"_HASHID_HMACLEN_KEYFMT_HMKEYLEN_BHMACKEY_";"_BDATALEN_BDATA
+
+	set RESP=$$SCEXEC(REQ)
+
+	set ERRCD=RESP.extract(MHLEN+3,MHLEN+4)
+	if ERRCD="00" set HMAC=RESP.extract(MHLEN+5,RESP.length())
+	else  set HMAC ="FFF"
+	quit HMAC
+
+HSMEXEC(String REQ)
+	/*
+	DESC: Connects to the HSM and executes a given request
+
+	ARGUMENTS:
+		. REQ - Request to HSM /TYP=T/REQ
+
+	RETURNS:
+		. BRESP - Response message from the HSM /TYP=T
+
+	EXAMPLE:
+		. S RESP=$$HSMEXEC^ZHSMAPI(REQ)
+	*/
+	type String INTRFACE,HOST,PORT
+	type Number TIMOUT,REQLEN,RESPLEN
+	type Object SOCK
+	type ByteString BRESP,HREQ
+	type RecordUTBLEXTINT extint
+
+	// Fetch the HSM related configuration items
+	set INTRFACE="HSM"
+	set extint=Db.getRecord("UTBLEXTINT","INTRFACE=:INTRFACE",1)
+	set HOST = extint.misc1
+	set TIMOUT = extint.misc2
+	set PORT = extint.misc3
+
+	// If error generated during Connection, catch error and quit 0
+	set $ZT=$$SETZT^%ZT("CATCH^ZHSMAPI")
+	// Generate a dummy but unique, device name
+	set SOCK="SCK$"_$J
+
+	// Convert the Request length to HEX and binary pack the value
+	set REQLEN = REQ.length()
+	set HREQ=$$DECHEX^%ZHEX(REQLEN).justify(4,1,"0")
+	set HREQ=$$PKNS^ISO8583(HREQ)
+	set HREQ=HREQ_REQ
+
+	/*
+	At the time of writing code the PSL compiler had limited support for 
+	OPEN and USE command, so the following code block needed to be
+	enclosed in the BYPASS directive to keep the PSL-compiler off
+	*/
+	#BYPASS
+	; Open the device 
+	OPEN SOCK:(CONNECT=HOST_":"_PORT_":TCP":DELIMITER=$C(13,10,58,27,95):ATTACH="HSMCLIENT"):TIMOUT:"SOCKET"
+	ELSE  SET ER=1 CLOSE SOCK QUIT "-1"
+	; Use the socket
+	USE SOCK
+	; Write the request. The request message is packed and the bytesteam is written
+	WRITE HREQ,#
+	; Read the first two bytes from the socket to identify the length of the reponse
+	READ BRESP#2:TIMOUT ELSE  SET ER=1 CLOSE SOCK QUIT "-1"	
+	; Calculate the length of the incoming data
+	SET RESPLEN=$A(BRESP,1)_$A(BRESP,2)
+	; Now read the data of the calculated length
+	READ BRESP#RESPLEN:TIMOUT ELSE  SET ER=1 CLOSE SOCK QUIT "-1"
+	; Cleanup
+	CLOSE SOCK
+	#ENDBYPASS
+
+	//Log Request and Response to HSM Message Log.
+	type RecordZHSMLOG zhsmlog=Class.new("RecordZHSMLOG")	
+	set zhsmlog.cdat=%CurrentDate
+	set zhsmlog.seq=Db.nextVal("ZHSMLOG","%CurrentDate")
+	set zhsmlog.req=REQ
+	set zhsmlog.resp=BRESP
+	do zhsmlog.bypassSave()
+
+	set ER=0,RM=""
+
+	quit BRESP
+
+CNVDEC(ByteString DTA)
+	type String BYTE
+	type Number CNV,J
+
+	set CNV=""
+	for J=1:1:DTA.length() do {
+		set BYTE=DTA.extract(J)
+		set BYTE=$A(BYTE)
+		set CNV=CNV_BYTE
+	}
+	quit CNV
+
+SCEXEC(ByteString REQ)
+	/*
+	DESC: Connects to the HSM and executes a given request specifically
+	      for Security Code generation.
+
+	ARGUMENTS:
+		. REQ - Request to HSM /TYP=T/REQ
+
+	RETURNS:
+		. RESP - Response message from the HSM /TYP=T
+
+	EXAMPLE:
+		. S RESP=$$SCEXEC^ZHSMAPI(REQ)
+	*/
+	type String INTRFACE,HOST,PORT
+	type Number TIMOUT,REQLEN,RESPLEN
+	type Object SOCK
+	type ByteString BRESP,HREQ
+	type RecordUTBLEXTINT extint
+
+	// Fetch the HSM related configuration items
+	set INTRFACE="HSM"
+	set extint=Db.getRecord("UTBLEXTINT","INTRFACE=:INTRFACE")
+	set HOST = extint.misc1
+	set TIMOUT = extint.misc2
+	set PORT = extint.misc3
+
+	set HREQ=""
+	set REQLEN=REQ.length()
+
+	// Convert Request length to Binary packed
+	set HREQ=$$DECHEX^%ZHEX(REQLEN).justify(4,1,"0")
+	set HREQ=$$PKNS^ISO8583(HREQ)
+
+	// Append Request onto the Request length
+	set HREQ=HREQ_REQ
+
+	// If error generated during Connection, catch error and quit 0
+	set $ZT=$$SETZT^%ZT("CATCH^ZHSMAPI")
+	// Generate a dummy but unique, device name
+	set SOCK="SCK$"_$J
+
+	/*
+	At the time of writing code the PSL compiler had limited support for 
+	OPEN and USE command, so the following code block needed to be
+	enclosed in the BYPASS directive to keep the PSL-compiler off
+	*/
+	#BYPASS
+	; Open the device 
+	OPEN SOCK:(CONNECT=HOST_":"_PORT_":TCP":DELIMITER=$C(13,10,58,27,95):ATTACH="HSMCLIENT"):TIMOUT:"SOCKET"
+	ELSE  SET ER=1 CLOSE SOCK QUIT "-1"
+	; Use the socket
+	USE SOCK
+	; Write the request.
+	WRITE HREQ,#
+	; Read the response from the HSM.
+	READ BRESP#2:TIMOUT ELSE  SET ER=1 CLOSE SOCK QUIT "-1"	
+	; Calculate the lenght of the incoming response
+	SET RESPLEN=$A(BRESP,1)_$A(BRESP,2)
+	; Now read the data of the calculated length
+	READ BRESP#RESPLEN:TIMOUT ELSE  SET ER=1 CLOSE SOCK QUIT "-1"
+	; Cleanup
+	CLOSE SOCK
+	#ENDBYPASS
+
+	//Log Request and Response to HSM Message Log.
+	type RecordZHSMLOG zhsmlog=Class.new("RecordZHSMLOG")	
+	set zhsmlog.seq=Db.nextVal("ZHSMLOG","%CurrentDate")
+	set zhsmlog.cdat=%CurrentDate
+	set zhsmlog.req=REQ
+	set zhsmlog.resp=BRESP
+	do zhsmlog.bypassSave()
+
+	set ER=0,RM=""
+
+	quit BRESP
+
+CATCH
+	/*
+	Catch errors generated while Opening Connection
+	Quit -1(unsuccessful) to avoid generating a GTM error.
+	*/
+	quit -1
+
+ZSKHSM(Number KEYLEN)
+	/*
+	DESC: Generates a random key for a given key length. It has a 
+	minimum key length enforced. Check the system configuration
+	
+	ARGUMENTS:
+		. KEYLEN - Size of the Key to be generated /TYP=N/REQ
+		
+	RETURNS:
+		. SECKEY - Generated Key /TYP=T
+				
+	EXAMPLE:
+		. W $$ZSKHSM^ZHSMAPI(15)
+	*/
+	type Number I,MKL,PRN,RNG
+	type String CARR(),SECKEY
+	type Boolean VLDKEY
+
+	// Minimum Key Length to be read from syscfg
+	set MKL=8
+
+	// Buffer for usable characters to generate the key
+	set SECKEY=""
+	set (RNG,VLDKEY)=0
+
+	if MKL>KEYLEN set KEYLEN=MKL
+
+	/* 
+	Create an array of 95 possible characters from which to 
+	choose for generating secret key. The range will be
+	the number of characters in the source array
+	*/
+	for I=48:1:57,65:1:90,97:1:122 set CARR(RNG)=$C(I) set RNG=RNG+1
+
+	/* 
+	For all the valid characters use the following
+	for I=32:1:126 set CARR(RNG)=$C(I) set RNG=RNG+1
+	*/
+
+	// Generate the key
+	while VLDKEY=0 do {
+		set SECKEY=""
+		for I=1:1:KEYLEN do {
+			set PRN=$$GENPRN(RNG)
+			set SECKEY=SECKEY_CARR(PRN)			
+		}
+		if SECKEY?1.(1.N1.A,1.A1.N).(.A,.N)=1 set VLDKEY=1
+	}
+	quit SECKEY
+
+GENPRN(Number RNG)
+	/*
+	DESC: Generates a Pseudo Random Number. The range indicates
+ 	      the boundary within which the numbers should be generated
+	
+	ARGUMENTS:
+		. KEYLEN - Size of the Key to be generated /TYP=N/REQ
+		
+	RETURNS:
+		. SECKEY - Generated Key /TYP=T
+				
+	EXAMPLE:
+		. W $$GENPRN^ZHSMAPI(9999)
+	*/
+	type Number RNDSD=999999999 
+	type Number PRN=0
+
+	// The PRN is 0:RNG-1
+	set PRN=(RNDSD.random())#RNG
+	quit PRN
+
+ECHOHSM(MSG)
+	/*
+	DESC: Sends and ECHO message to HSM to verify the
+	      availability. Use it for testing the setup.
+	
+	RETURNS:
+		. RESP - Echoed Response from the HSM/TYP=T
+				
+	EXAMPLE:
+		. W $$ECHOHSM^ZHSMAPI
+	*/	
+	type String REQ,RESP
+
+	set REQ="ECHOB20009HELLO HSM"
+	set RESP=$$HSMEXEC(REQ)
+	quit RESP
+
+STATHSM(MSG)
+	/*
+	DESC: Returns the HSM status. Use this for
+	      diagnostic purposes.
+	
+	RETURNS:
+		. RESP - Returns the HSM Status/TYP=T
+				
+	EXAMPLE:
+		. W $$STATHSM^ZHSMAPI
+	*/
+	
+	type String REQ,RESP
+
+	set REQ="STATNO00"
+	set RESP=$$HSMEXEC(REQ)
+	quit RESP
+
+HMACGEN(MSG)
+	/*
+	DESC: Generates an HMAC Key
+
+	RETURNS:
+		. HRESP - Hexadecimal HMAC Key pulled from Response
+
+	EXAMPLE:
+		. W $$HMACGEN^ZHSMAPI
+	*/
+	type String HRESP,REQ
+	type ByteString RESP
+
+	set REQ="HMACL00101002000"
+	set RESP=$$HSMEXEC(REQ)
+	set RESP=RESP.extract(13,RESP.length())
+	set HRESP=$$DECHEX^%ZHEX(RESP)
+	quit HRESP
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60870^23974^Brandon Rickards^32772"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,892 @@
+DBMAP	
+
+	// *******************************************************************
+	// * IMPORTANT NOTE:                                                 *
+	// * According to the rules that apply to PSL compiler upgrades,     *
+	// * the generated M routine associated with this procedure must be  *
+	// * checked into StarTeam and released with the procedure whenever  *
+	// * changes are made to this procedure.  The M routine from the     *
+	// * crtns directory should be used for this purpose.                *
+	// *                                                                 *
+	// * The M routine will be loaded to the mrtns directory during      *
+	// * upgrades and will then be removed from that directory as part   *
+	// * of the upgrade process.  Therefore, other during an upgrade,    *
+	// * an mrtns version of this routine should not exist.              *
+	// *                                                                 *
+	// * Keep these comments as single line to ensure they exist in the  *
+	// * generated M code.                                               *
+	// *******************************************************************
+			 
+	/*
+	Database Mapping procedure
+	
+	Private labels are available for DATA-QWIK, SQL, and PSL only.
+
+	---- Revision History -------------------------------------------------
+	08/03/06 - RussellDS - CRs: 22519 / 20613
+		   Modified FILE section to new label MAPPING instead of
+		   MAP^DBSDDMAP.
+		   
+		   Added section MAPPING to return mapping information based
+		   on either custom or default split table map.
+		   
+		   Added TSV section to allow creation (or update) of
+		   custom split table map.
+	
+	12/01/05 - RussellDS - CR18400
+		   Modify COMP section to eliminate separate code to handle
+		   functions.  They are handled under the general case.
+		   
+		   Also modify COMP section to pass literals as parameters
+		   if they appear in an extrinsic function call.
+		   
+		   Modified structure of DBMAPIDX.
+	
+	11/29/05 - RussellDS - CR18065
+		   Added note at top related to need to keep version of M code
+		   routine in StarTeam.
+	
+	11/22/05 - GIRIDHARANB - CR18345
+		   Modified section nod2tbl to return ACN when referring to 
+		   the top level of the wide table.
+		   
+	10/25/05 - RussellDS - CR18072
+		   Converted to PSL.
+		   
+		   Removed old revision history, much of which no longer applies
+		   due to changes labels.
+	-----------------------------------------------------------------------
+	*/
+	
+	// I18N=off
+
+	quit		// Do not call from top
+
+
+public MAP(String dbid,		// Database ID [*]
+	   String table,	// Table name [*]	/MECH=REFNAM:RW
+	   String column,	// Column name [*]	/MECH=REFNAM:RW/NOREQ
+	   Number position,	// Position [*]		/MECH=REFNAM:W/NOREQ
+	   Boolean notDef,	// Not defined [*]	/MECH=REFNAM:W/NOREQ
+	   Number coltype)	// Column type [*]	/MECH=REFNAM:W/NOREQ
+
+	/*
+	Schema Map Utility
+	
+	Returns mapping information of the PROFILE M schema to the target
+	database schema.
+
+	ARGUMENT NOTES:
+	
+		. dbid		RDB name, e.g., ORACLE
+		
+		. table		Input value will be the DATA-QWIK table
+				name.  Must be passed by reference since
+				return value will be the mapped DB
+				table name for an RDB, otherwise, e.g., if
+				GTM database, will be the input name.
+				
+		. column	Input value will be the DATA-QWIK column
+				name.  Must be passed by reference since
+				return value will be the mapped DB
+				column name for an RDB, otherwise, e.g., if
+				GTM database, will be the input name.
+				
+				May not always be column name.  If master
+				field will be select to retrieve.  If computed
+				will be extended computed expression.
+				
+				Not required.  If not provided, only
+				table mapping information is returned.
+				
+		. position	Ordinal position of the column in the RDB
+				data dictionary.  This value is used by PSL
+				for location of the data in the local object.
+				
+				Only valid if column parameter is provided.
+				
+		. notDef	Allows return of an indicator if the table or
+				column is not defined in DBMAP.  Does not
+				apply if only table information is requested.
+				
+		. coltype	0 = regular column, 1 = computed, 2 = master field
+				Note that value of 2 only applies if database is
+				RDB.  If GTM database, master field will return
+				a value of 0.
+	
+	Example:
+		do MAP^DBMAP("Oracle", .table, .column, .position, .notDef, .coltype)
+	;----------------------------------------------------------------------
+	*/
+	
+	// Request is just for table data
+	if column.get().isNull() do {
+		
+		type RecordDBMAPT dbmapt = Db.getRecord("DBMAPT", "DB=:dbid,TBL=:table", 1)
+		
+		if (dbmapt.getMode() > 0) set table = dbmapt.rtbls
+	}
+	
+	// Table and column data
+	else  do {
+		
+		type RecordDBMAP dbmap = Db.getRecord("DBMAP", "DB=:dbid,TBL=:table,COL=:column", 1)
+		
+		if (dbmap.getMode() > 0) do {
+			
+			set table = dbmap.rtbl
+			
+			// Return extended data for computeds and master fields
+			if (dbmap.coltype > 0) set column = $$extdata(dbmap)
+			else  set column = dbmap.rcol
+			
+			set position = dbmap.pos
+			set coltype = dbmap.coltype
+			set notDef = 0
+		}
+		
+		else  do {
+			
+			set (position, coltype) = ""
+			set notDef = 1
+		}
+	}
+	
+	quit
+	
+	
+extdata(RecordDBMAP dbmap)	// DBMAP Record
+
+	/*
+	Use this call to avoid overhead of always attempting to load
+	memo field.  PSL does not yet optimize for this.
+	*/
+	
+	quit dbmap.extdata
+	
+	
+public ALL(String dbid)		// Database ID
+
+	/*
+	Builds the DBMAP global for all tables for a target database
+	specified by dbid 
+	
+	EXAMPLE:
+	 	D ALL^DBMAP("ORACLE/DB2")
+	*/
+
+	type ResultSet rs = Db.select("FID", "DBTBL1", "%LIBS='SYSDEV'")
+	
+	while rs.next() do FILE(rs.getCol("FID"), dbid)
+	
+	quit
+	
+
+private FILE(String dqtable,	// DATA-QWIK table name
+	     String dbid)	// Database ID
+	     
+	/*
+	Build DBMAP, DBMAPT, and DBMAPIDX tables for dqtable.
+
+	Performs name replacement for names starting with % or reserved words.
+	*/
+	
+	type literal List SPLTTBLS = ",DEP,LN,"
+	
+	type Boolean isDEPLN, isRDBtbl, isSplit
+	type Number I, pos()
+	type String acckeys, btmkey, dqcol, N, mflist(), rdbtable, RESERVED(), tblarr(,)
+	
+	set isRDBtbl = $$rdb^UCDBRT(dqtable)
+	
+	do Db.fastDelete("DBMAP", "DB=:dbid,TBL=:dqtable")
+	do Db.fastDelete("DBMAPT", "DB=:dbid,TBL=:dqtable")
+	do Db.fastDelete("DBMAPIDX", "%LIBS='SYSDEV',DB=:dbid,TBL=:dqtable")
+	
+	quit:'Db.isDefined("DBTBL1", "%LIBS='SYSDEV' AND FID=:dqtable")
+
+	if SPLTTBLS.contains(dqtable) set isSplit = 1
+	else  set isSplit = 0
+	
+	if ((dqtable = "DEP") ! (dqtable = "LN")) set isDEPLN = 1
+	else  set isDEPLN = 0
+	
+	// Load reserved words
+	#ACCEPT Date=10/10/2006; Pgm=RussellDS; CR=22519; Group=PSLBOOT
+	type ResultSet rs2 = Db.select("WORD", "STBLRESERVED", , , , "/PSLBOOT")
+	while rs2.next() set RESERVED(rs2.getCol("WORD")) = ""
+	
+	set rdbtable = ""
+	
+	// Need to do master fields separately, and last, since they depend
+	// on data stored for sub-fields.
+	if isSplit do {
+		
+		type String ACN, COLS(,)
+				
+		// Split the table
+		do MAPPING(dbid, dqtable, .COLS(,))
+			
+		// Load list of ACN columns if DEP or LN
+		if isDEPLN do {
+		
+			type ResultSet rs = Db.select("DI", "DBTBL1D", "%LIBS='SYSDEV' AND FID='ACN'")
+			while rs.next() set ACN(rs.getCol("DI")) = ""
+		}	
+	
+		// Build tblarr with renamed table
+		set dqcol = ""
+		for  set dqcol = COLS(dqtable, dqcol).order() quit:dqcol.isNull()  do {
+			
+			// Do masterfields separately
+			if isRDBtbl, $$isSfdMaster^UCXDD(dqtable, dqcol) set mflist(dqcol) = ""
+			else  do {
+				
+				if isDEPLN, ACN(dqcol).exists() set rdbtable = "ACN"
+				else  set rdbtable = "W_"_dqtable_"_"_COLS(dqtable, dqcol)
+
+				set tblarr(rdbtable, dqcol) = ""
+			}
+		}
+	}
+	
+	else  do {
+		
+		// If not split, but table name is a reserved word, change name
+		if RESERVED(dqtable).exists() set rdbtable = "S_"_dqtable
+		else  set rdbtable = dqtable
+		
+		type ResultSet rs = Db.select("DI", "DBTBL1D", "%LIBS='SYSDEV' AND FID=:dqtable")
+		
+		while rs.next() do {
+			
+			set dqcol = rs.getCol("DI")
+			
+			// Do masterfields separately
+			if isRDBtbl, $$isSfdMaster^UCXDD(dqtable, dqcol) set mflist(dqcol) = ""
+			else  set tblarr(rdbtable, dqcol) = ""
+		}
+	}
+	
+	// Get RDB table(s)
+	set (N, rdbtable) = ""
+	for  set N = tblarr(N).order() quit:N.isNull()  do {
+			
+		// Skip computed tables from split tables
+		if 'N.isLike("%_Computed") set rdbtable = rdbtable_N_","
+	}
+	
+	if rdbtable.endsWith(",") set rdbtable = rdbtable.extract(1, rdbtable.length() - 1)
+	
+	// Update DBMAPT for split tables or tables with name changes
+	if (dqtable '= rdbtable), 'rdbtable.isNull() do {
+		
+		type RecordDBMAPT dbmapt = Class.new("RecordDBMAPT", "DB=:dbid,TBL=:dqtable")
+		
+		set dbmapt.rtbls = rdbtable
+		set dbmapt.issplit = isSplit
+		
+		do dbmapt.save()
+	}
+        
+        // Get positions in RDB	
+	if $$rdb^UCDBRT do {
+		
+		type Boolean ER
+		type Number J
+		type String colpos, data, RM, table
+		
+		for I = 1:1:rdbtable.length(",") do {
+			
+			set table = rdbtable.piece(",", I)
+			
+			quit:'$$rdb^UCDBRT(table)
+		
+			set ER = $$EXECSP^%DBAPI("", "FINDPOS", table, 1, $C(124), .data, .RM)
+		
+			for J = 1:1:data.length("|") do {
+			
+				set colpos = data.piece("|", J)
+			
+				set pos(table, colpos.piece(",", 1)) = colpos.piece(",", 2)
+			}
+		}
+	}
+	
+	// Get bottom key for use in DBMAPIDX
+	type RecordDBTBL1 dbtbl1 = Db.getRecord("DBTBL1", "%LIBS='SYSDEV',FID=:dqtable")
+	
+	set acckeys = dbtbl1.acckeys
+	set btmkey = ""
+	for I = 1:1:acckeys.length(",") do {
+		
+		type String key = acckeys.piece(",", I)
+		
+		if 'key.isLiteral() set btmkey = key
+	}
+	if btmkey.isNull() set btmkey = $C(254)		// CUVAR-like tables
+		
+	set (rdbtable, dqcol) = ""
+	for  set rdbtable = tblarr(rdbtable).order() quit:rdbtable.isNull()  do {
+		for  set dqcol = tblarr(rdbtable, dqcol).order() quit:dqcol.isNull()  do {
+				
+			type Number position
+			type String rdbcol
+					
+			type RecordDBTBL1D dbtbl1d = Db.getRecord("DBTBL1D", "%LIBS='SYSDEV',FID=:dqtable,DI=:dqcol")
+			
+			// Change column name, if necessary		
+			set rdbcol = $$RESWRD(dbtbl1d.di, .RESERVED())
+		
+			type RecordDBMAP dbmap = Class.new("RecordDBMAP", "DB=:dbid,TBL=:dqtable,COL=:dqcol")
+			
+			// COLTYPE - 0 = regular, 1 = computed, 2 = master field
+			if '(dbtbl1d.cmp.isNull() ! (dbtbl1d.cmp = " ")) do {
+				
+				set dbmap.coltype = 1
+				set dbmap.extdata = $$COMP(dqtable, dqcol, dbtbl1d.cmp)
+				set dbmap.rtbl = dqtable
+				set dbmap.pos = ""
+			}
+			else  do {
+				
+				set dbmap.coltype = 0
+				set dbmap.rtbl = rdbtable
+				set dbmap.rcol = rdbcol
+				set dbmap.pos = pos(rdbtable, rdbcol).get()
+			}
+			
+			do dbmap.save()
+
+			set position = dbmap.pos
+		
+			if 'position.isNull() do {
+		
+				type String split
+		
+				type RecordDBMAPIDX dbmapidx = Class.new("RecordDBMAPIDX", "%LIBS='SYSDEV',DB=:dbid,TBL=:dqtable,POS=:position,DI=:dqcol")
+				
+				if 'isSplit set split = btmkey
+				else  if rdbtable.piece("_", 3).isNumber() set split = rdbtable.piece("_", 3)
+				else  set split = btmkey
+				
+				set dbmapidx.split = split
+						
+				set dbmapidx.rcol = rdbcol
+				
+				do dbmapidx.save()
+			}
+		}
+	}
+	
+	// Set master field info
+	if isRDBtbl for  set dqcol = mflist(dqcol).order() quit:dqcol.isNull()  do {
+		
+		type RecordDBMAP dbmap = Class.new("RecordDBMAP", "DB=:dbid,TBL=:dqtable,COL=:dqcol")
+					
+		set dbmap.coltype = 2
+		set dbmap.extdata = $$rtMfORC^UCCOLSF(dqtable, dqcol)
+		set dbmap.rtbl = dqtable
+		
+		do dbmap.save()
+	}
+				
+	quit
+	
+
+COMP(String dqtable,		// Table name
+     String dqcol,		// Column name
+     String cmp,		// Computed expression
+     String RESERVED())		// Reserved words list		/MECH=REFARR:R
+     
+	/*
+	Return RDB computed expression.
+	
+	Include each column only once.  Include literals only if an
+	extrinsic function parameter; and only include once as well.
+	*/
+
+	type Boolean isExtFn
+	type Number ptr
+	type String cmpcols(), cmpuc, expr, rescol, restbl, tok
+        
+        set restbl = $$RESWRD(dqtable)
+        set rescol = $$RESWRD(dqcol)
+        
+        if cmp.beginsWith("(") set cmp = $$POP^%ZS(cmp)
+        
+ 	// Do now allow Set or Do in computed
+	set cmpuc = cmp.upperCase()
+        	
+	if (cmpuc.beginsWith("S ") ! cmpuc.beginsWith("D ")) do {
+        		
+		type String RM
+        		
+		// Invalid computed data item = 'di'
+		set RM = $$^MSG(8316, $$^MSG(595), dqtable_"."_dqcol)
+		throw Class.new("Error", "%DQ-E-DBMAP,"_RM.replace(",","~"))
+	}
+        	
+	set cmp = $$TOKEN^%ZS(cmp, .tok)
+	set expr = ""
+	set (isExtFn, ptr) = 0
+        	
+	for  do { quit:(ptr = 0)
+        		
+		type String atom, delims, ref
+        		
+		set delims = "[]+-*/\#_'=><\*(),!&:?"
+        		
+		set atom = $$ATOM^%ZS(cmp, .ptr, delims, tok, 0)
+		
+		if atom.isLiteral() do { quit
+			
+			type String lit
+			
+			set lit = atom.stripQuotes().addQuotes("'")
+			
+			if isExtFn, '{List}expr.contains(lit) set expr = expr_lit_","
+		}
+        	
+        	if isExtFn, (atom = ")") set isExtFn = 0
+        	
+       		if (atom.beginsWith("$$")) set isExtFn = 1 quit
+       		
+      		quit:(delims [ atom)
+       		quit:(atom.upperCase() = "$C")
+       		quit:(atom.upperCase() = "$E")
+       		quit:(atom.upperCase() = "$P")
+       		quit:(atom.upperCase() = "$S")
+        	
+       		if atom.beginsWith(dqtable_".") set atom = atom.piece(".", 2)
+        	
+       		// Not a column in this table
+       		quit:'Db.isDefined("DBTBL1D", "%LIBS='SYSDEV',FID=:dqtable,DI=:atom")
+        	
+       		set ref = dqtable_"."_atom
+       		if '{List}expr.contains(ref) set expr = expr_ref_","
+	}
+		
+	set expr = expr.extract(1, expr.length() - 1)
+		
+	set expr = restbl_"_"_rescol_"("_expr_")"
+        
+        quit expr
+        
+
+private nod(String dbid,	// Database ID
+	    String table,	// DATA-QWIK table name
+	    String column)	// DATA-QWIK column name
+	    
+	/*
+	Returns nod for a wide table split
+
+	Returns the node number for the table and column.
+	Node will always be null unless this is a wide table.
+	For wide tables, node is set to the table number.  For example,
+	W_DEP_3 returns node 3.
+	*/
+	
+	type RecordDBMAP dbmap = Db.getRecord("DBMAP", "DB=:dbid,TBL=:table,COL=:column", 1)
+	
+	quit $$tbl2nod(dbmap.rtbl)
+
+
+private tbl2nod(String rdbtbl)	// RDB Table Name
+
+	/*
+	Return the node in vobj() that will be used to store columns
+	from this RDB table.
+	
+	The algorithm assumes that internal tablenames that start with
+	"W_" will be stored in a node, and data of all other tablenames
+	will reside in vobj(objectname).
+	
+	RETURNS:
+		. $$	node used to store the data	/TYP=T
+			for this table:
+			
+			  - "" if the data is stored in vobj(oid)
+			  - node if data stored in vobj(oid,node)
+	*/
+	
+	type String return = ""
+	
+	if rdbtbl.beginsWith("W_") set return = rdbtbl.piece("_", rdbtbl.length("_"))
+	
+	quit return
+	
+
+private nod2tbl(String dbid,		// Database ID
+		String dqtable,		// DATA-QWIK table name
+		String node)		// Node [*]
+		
+	/*
+	Return the internal tablename that will be used to store data
+	from vobj(oid,nod) of the supplied table.
+
+	ARGUMENT NOTES:
+		. node		"" for default node (data in vobj(oid))
+				value for data in vobj(oid,node)
+
+	RETURNS:
+		. $$		RDB table name		/TYP=T
+	*/
+
+	type String rdbtable = dqtable
+	
+	do MAP(dbid, .rdbtable)
+	
+	if rdbtable.isLike("%,%") do {
+		
+		if node.isNull() set rdbtable = "ACN"
+		else  set rdbtable = "W_"_dqtable_"_"_node
+	}
+	
+	quit rdbtable
+
+	
+private RESWRD(String oldname,		// Column name
+	       String RESERVED())	// Reserved words [*]	/NOREQ/MECH=REFARR:R
+	
+	/*
+	Change column name, if necessary
+	
+	ARGUMENT NOTES:
+	
+		. RESERVED	This array is passed by local calls from DBMAP
+				for performance, but isn't required since external
+				calls need not pass it.
+	
+	RETURNS:
+		. $$		New column name		/TYP=T
+	*/
+	
+	type Boolean isResrvd
+	type String newname
+	
+	if oldname.beginsWith("%") set newname = "X"_oldname.extract(2, oldname.length())
+	else  set newname = oldname
+
+	set isResrvd = 0
+	
+	if RESERVED.data() do {
+		
+		if RESERVED(newname).exists() set isResrvd = 1
+	}
+	else  do {
+	
+		#ACCEPT Date=10/10/2006; Pgm=RussellDS; CR=22519; Group=PSLBOOT
+		type ResultSet rs = Db.select("WORD", "STBLRESERVED", "WORD=:newname", , , "/PSLBOOT")
+		if rs.next() set isResrvd = 1
+	}
+	
+	if isResrvd set newname = "S_"_newname
+	
+	quit newname
+	
+	
+private MAPPING(String dbid,	// Database ID, e.g., Oracle or DB2
+		String table,	// Table name to map, DEP or LN
+		String MAP(,))	// returned mapping array [*]	/MECH=REFARR:W
+
+	/*
+	Split Table Mapping Info
+	
+	Provides the ability to return the mapping information for split
+	tables DEP and LN.  Called by FILE and by CRTBL1^TBXSQL.
+	*/
+	
+	type Boolean haveERR
+	type String COLUMN, ERMSG, filename
+	
+	set filename = $$TRNLNM^%ZFUNC("SCAU$DBMAP_FILE", "")
+	if filename.isNull() set filename = $$FILE^%TRNLNM("DBMAP.txt", "SCAU$DIR")
+	
+	// Load mapping information
+	do LOADMAP(dbid, filename, table, .MAP(,))
+	
+	// Validate information and determine maximum split table
+	set haveERR = 0
+	set COLUMN =""
+	for  set COLUMN = MAP(table, COLUMN).order() quit:COLUMN.isNull()  do {
+			
+		type String SPLIT = MAP(table, COLUMN).upperCase()
+		
+		set ERMSG = ""
+			
+		type SchemaColumn colrec = Db.getSchemaColumn(table, COLUMN)
+		
+		if SPLIT.isNull() do {
+			
+			set ERMSG = table_"."_COLUMN_" has no split table mapping value"
+		}	
+		if Db.isSchemaColumn("ACN", COLUMN), '((SPLIT = "ACN") ! (SPLIT = "COMPUTED")) do {
+			
+			set ERMSG = table_"."_COLUMN_" is in ACN and must be mapped to ACN"
+		}
+		if (SPLIT = "ACN"), 'Db.isSchemaColumn("ACN", COLUMN) do {
+			
+			set ERMSG = table_"."_COLUMN_" is not in ACN and cannot be mapped to ACN"
+		}
+		if 'colrec.computation.isNull(), (SPLIT '= "COMPUTED") do {
+			
+			set ERMSG = table_"."_COLUMN_" is a computed and must be mapped as 'Computed'"
+		}
+		if (SPLIT = "COMPUTED"), colrec.computation.isNull() do {
+			
+			set ERMSG = table_"."_COLUMN_" is not a computed but is mapped as one"
+		}
+		if ERMSG.isNull(), (SPLIT '= "ACN"), (SPLIT '= "COMPUTED"), ((SPLIT'?1.2N) ! (SPLIT < 1) ! (SPLIT > 99)) do {
+				
+			set ERMSG = table_"."_COLUMN_" split table value must be an integer between 1 and 99"
+		}
+			
+		if 'ERMSG.isNull() do {
+		
+			set haveERR = 1
+			write ERMSG, !
+		}
+	}
+	
+	if haveERR throw Class.new("Error", "%DQ-E-DBMAP, Invalid mapping information")
+	
+	// Add any missing columns
+	do ADDMISNG(dbid, table, .MAP(,), 100)
+	
+	quit
+	
+	
+public TSV
+
+	/*
+	Generates a TSV file of the mapping information which can be edited
+	through Excel or other tools to modify the default mapping for split
+	tables.  The function will prompt for an output file.  If the file
+	does not exist, the mapping data from DBMAPDFT will be output to the
+	file, as well as any columns in the data dictionary that are not
+	contained in the DBMAPDFT data.  If the file does exist, the existing
+	data from the file will be preserved, and only columns that are in the
+	data dictionary that are not in the file will be added to the file.
+	*/
+	
+	type public Boolean ER
+	type public String %DB, RM
+	
+	type String %READ, %TAB(), COLUMN, filename, MAP(,), TAB, TABLE, VFMQ
+	
+	// File Name
+	set %TAB("filename") = "/DES="_$$^MSG(5204)_"/TYP=T/LEN=80"
+	
+	set filename = $$TRNLNM^%ZFUNC("SCAU$DBMAP_FILE", "")
+	if filename.isNull() set filename = $$FILE^%TRNLNM("DBMAP.txt", "SCAU$DIR")
+	
+	set %READ = "@@%FN,,filename/REQ"
+	
+	do ^UTLREAD quit:(VFMQ = "Q")
+	
+	catch error {
+			
+		set ER = 1
+		set RM = error.description
+	}
+	
+	// Load mapping information
+	do LOADMAP(%DB, filename, "DEP", .MAP(,))
+	do LOADMAP(%DB, filename, "LN", .MAP(,))
+	
+	// Add any missing columns
+	do ADDMISNG(%DB, "DEP", .MAP(,), "")
+	do ADDMISNG(%DB, "LN", .MAP(,), "")
+	
+	// Save the new file
+	type IO file = Class.new("IO")	
+	
+	set file.directory = $$PARSE^%ZFUNC(filename, "DIRECTORY")
+	set file.fileName = $$PARSE^%ZFUNC(filename, "NAME")_$$PARSE^%ZFUNC(filename, "TYPE")
+	set file.openParams = "WRITE/NEWV"
+	set file.timeout = 5
+	
+	do {
+		
+		catch openerr {
+			
+			do file.close()
+			
+			throw openerr
+		}
+	
+		do file.open()
+	}
+	
+	set TAB = 9.char()
+	
+	do file.write("TABLE"_TAB_"COLUMN"_TAB_"SPLIT_TABLE")
+	
+	set (TABLE, COLUMN) = ""
+	for  set TABLE = MAP(TABLE).order() quit:TABLE.isNull()  do {
+		
+		for  set COLUMN = MAP(TABLE, COLUMN).order() quit:COLUMN.isNull()  do {
+			
+			do file.write(TABLE_TAB_COLUMN_TAB_MAP(TABLE, COLUMN))
+		}
+	}
+	
+	do file.close()
+
+	quit
+	
+	
+LOADMAP(String dbid,		// Database ID
+	String filename,	// File name for custom map
+	String table,		// DEP or LN
+	String MAP(,))		// Mapping array		/MECH=REFARR:W
+	
+	/*
+	Load the mapping information from filename, if filename
+	exists, otherwise from default info.
+	*/
+	
+	type String X
+			
+	// See if filename exists, and, if so, load map from it
+	#ACCEPT Date=08/04/06; Pgm=RussellDS; CR=22519; Group=BYPASS
+	#BYPASS
+	set X=$zsearch("x.x")	; Clear context
+	set X=$zsearch(filename)
+	#ENDBYPASS
+	if 'X.isNull() do {
+		
+		do LOADFILE(X, table, .MAP(,))
+	}
+	// Otherwise load defaults
+	else  do ^DBMAPDFT(dbid, table, .MAP(,))
+	
+	quit
+	
+	
+LOADFILE(String filename,	// TSV file
+	 String table,		// DEP or LN
+	 String MAP(,))		// Mapping info		/MECH=REFARR:W
+	
+	/*
+	Load mapping information, from file.  Throw errors if file doesn't
+	exist, cannot be opened, or has wrong format.
+	*/
+	
+	type Number i
+	type String TAB, X
+	
+	set TAB = 9.char()
+	
+	type IO file = Class.new("IO")	
+	
+	set file.directory = $$PARSE^%ZFUNC(filename, "DIRECTORY")
+	set file.fileName = $$PARSE^%ZFUNC(filename, "NAME")_$$PARSE^%ZFUNC(filename, "TYPE")
+	set file.openParams = "READ"
+	set file.timeout = 5
+	
+	catch error {
+		
+		do file.close()
+		
+		if 'error.type.isLike("%IOEOF%") throw error
+	}
+	
+	do file.open()
+		
+	// Check file format based on first line
+	set X = file.read()
+	if '(X = ("TABLE"_TAB_"COLUMN"_TAB_"SPLIT_TABLE")) do {
+		
+		type String ERMSG
+		// file name - Input file header - Invalid format
+		set ERMSG = file.device_" - "_$$^MSG(3594)_" - "_$$^MSG(1350)
+			
+		throw Class.new("Error", "%DQ-E-DBMAP,"_ERMSG.replace(",", "~"))
+	}
+		
+	// Read the data from the file
+	for i = 2:1 do {
+			
+		type String COLUMN, SPLIT
+			
+		set X = file.read() quit:X.isNull()
+			
+		// Not the table we care about
+		quit:(X.piece(TAB, 1).upperCase() '= table)
+		
+		set COLUMN = X.piece(TAB, 2).upperCase()
+		set SPLIT = X.piece(TAB, 3)
+			
+		if COLUMN.isNull() do {
+				
+			type String ERMSG
+			// file name - Invalid format - Record i - COLUMN Column Cannot be NULL
+			set ERMSG = file.device_" - "_$$^MSG(1350)_" - "_$$^MSG(2326)_" "_i_" - "
+			set ERMSG = ERMSG_"COLUMN "_$$^MSG(8557)
+			
+			throw Class.new("Error", "%DQ-E-DBMAP,"_ERMSG.replace(",", "~"))
+		}
+		
+		if MAP(table, COLUMN).exists() do {
+			
+			// file name - table.COLUMN - Record i - already exists
+			throw Class.new("Error", "%DQ-E-DBMAP,"_file.device_" - "_$$^MSG(3019, table_"."_COLUMN_" - "_$$^MSG(2326)_" "_i_" -"))
+		}
+			
+		set MAP(table, COLUMN) = SPLIT
+	}
+	
+	quit
+	
+	
+ADDMISNG(String dbid,	// Database ID
+	 String table,	// DEP or LN
+	 String MAP(,),	// Mapping info			/MECH=REFARR:W
+	 Number SPLIT)	// Split table for missing 100 or null
+	 
+	/*
+	Add any columns in the DQ schema that are missing from map.  Assign
+	them to split table 100, or leave null to indicate must be mapped.
+	
+	For any missing columns, indicate in message where default would have
+	them mapped.
+	*/
+	
+	type String COLUMN, DFTMAP(,), SPLITSUB
+	
+	do ^DBMAPDFT(dbid, table, .DFTMAP(,))
+	
+	type ResultSet rs = Db.select("DI", "DBTBL1D", "FID=:table", "DI")
+	
+	while rs.next() do {
+		
+		set COLUMN = rs.getCol("DI")
+		
+		if 'MAP(table, COLUMN).exists() do {
+		
+			type SchemaColumn colrec = Db.getSchemaColumn(table, COLUMN)
+			
+			if 'colrec.computation.isNull() set SPLITSUB = "Computed"
+			else  if Db.isSchemaColumn("ACN", COLUMN) set SPLITSUB = "ACN"
+			else  if 'SPLIT.isNull() set SPLITSUB = 100
+			else  set SPLITSUB = ""		// New - needs to get mapped
+			
+			set MAP(table, COLUMN) = SPLITSUB
+			
+			write table, ".", COLUMN, " - in schema, missing from mapping.  "
+			
+			if ((SPLITSUB = 100) ! SPLITSUB.isNull()), DFTMAP(table, COLUMN).exists() write "Default mapping is to wide table ", DFTMAP(table, COLUMN), ".  "
+			
+			if 'SPLIT.isNull() write "Added to split table ", SPLITSUB, !!
+			else  write "Added to file, must be mapped", !!
+		}
+	}
+	
+	quit
+			
+			
+			
+
+vSIG()	quit "60579^47912^Dan Russell^23154"	// Signature - LTD^TIME^USER^SIZE

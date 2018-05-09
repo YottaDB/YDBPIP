@@ -1,0 +1,202 @@
+BCHPOGEN //Batch BCHPOGEN - Payment Order Generator for Direct Debit
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 01/31/2007 12:46 - shetyes
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHPOGEN Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit quit
+ do JOBMGR^BCHUTL(%FN,"BCHPOGEN",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(EFTDAT,INST,RECACCT,CRCD,CC) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHPOGEN","*","",EFTDAT.get()_","_INST.get()_","_RECACCT.get()_","_CRCD.get()_","_CC.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,EFTDAT,INST,RECACCT,CRCD,CC)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHPOGEN","*","",EFTDAT.get()_","_INST.get()_","_RECACCT.get()_","_CRCD.get()_","_CC.get(),"",et)
+ }
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,EFTDAT,INST,RECACCT,CRCD,CC) //
+	catch ERROR {
+                set RM=ERROR.type_", "_ERROR.description
+                set FROM=ERROR.thrownAt
+		do EXC
+		}
+
+   	set ER=0
+	new GLNAME,ONUS,TCID
+
+	type RecordEFTSUM2 eftsum2
+	set eftsum2=Db.getRecord("EFTSUM2","EFTDAT,INST,RECACCT,CRCD,CC")
+
+	// Account Already Processed
+	if eftsum2.processed=1 set RM=$$^MSG(4115) do EXC quit
+
+	// Create new EFTPAY record
+	type RecordEFTPAY eftpay=Class.new("RecordEFTPAY")
+
+	// Set the keys
+	set TCID=eftsum2.tcid
+	set eftpay.cid=TCID
+	set eftpay.seq=Db.nextVal("EFTPAY","TCID")	
+	
+	set eftpay.efd=EFTDAT
+	set eftpay.recinst=INST
+	set eftpay.recacct=RECACCT
+	set eftpay.crcd=CRCD
+	set eftpay.efttype="PO"
+	set eftpay.cc=CC
+	set eftpay.amount=eftsum2.amount
+        set eftpay.status="A"
+	set eftpay.brcd=BRCD
+	set eftpay.uid=%UserID
+	
+	// Set name of GL account - [EFTPAY]LNM is only twenty characters.
+	set GLNAME=Db.getOneRow("DESC1","GLAD","TCID")
+	set eftpay.lnm=$E(GLNAME,1,20)
+	
+	// This is always a GL account, so set TTYPE to 2 or 3. 
+	set ONUS=Db.getOneRow("ONUS","UTBLEFTINST","INST")
+	if ONUS=1 set eftpay.ttype=2
+	else  set eftpay.ttype=3
+
+	// Create the payment order
+	do eftpay.save()
+
+	// Consider record processed once in EFTPAY
+	do eftsum2.setAuditFlag(1)
+	set eftsum2.processed=1
+	do eftsum2.bypassSave()
+
+	// Process order
+	do public^BCHEFT(eftpay.cid,eftpay.seq)
+
+	quit
+
+
+EXC	// Private;Log error in exception file
+
+	if $G(RM)="" set RM=$G(ET)
+
+	do LOG^UTLEXC($T(+0),"*","",$G(INST)_","_$G(RECACCT)_","_$G(CRCD)_","_$G(CC),$G(%ZTSEQ),RM,"")
+	kill ET,%ZTSEQ
+
+	quit
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,EFTDAT,INST,RECACCT,CRCD,CC
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set EFTDAT=vRECORD.piece($C(9),1)
+ set INST=vRECORD.piece($C(9),2)
+ set RECACCT=vRECORD.piece($C(9),3)
+ set CRCD=vRECORD.piece($C(9),4)
+ set CC=vRECORD.piece($C(9),5)
+ do vPROC(EFTDAT,INST,RECACCT,CRCD,CC)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,EFTDAT,INST,RECACCT,CRCD,CC
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>32767 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+50>32767 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+	 do SOURCE^BCHSOURC("BOFF","EFT",.%UserID,.BRCD,.%UserClass,.TSDR,.TSCR)
+	 if ER set RM=$$^MSG(1482),%BatchExit=1 quit
+
+	 set XTJD=%SystemDate
+
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("EFTDAT,INST,RECACCT,CRCD,CC","EFTSUM2","EFTSUM2.EFTDAT=:XTJD")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	 do SOURCE^BCHSOURC("BOFF","EFT",.%UserID,.BRCD,.%UserClass,.TSDR,.TSCR)
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

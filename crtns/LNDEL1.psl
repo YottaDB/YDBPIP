@@ -1,0 +1,937 @@
+public LNDEL1	// Loan Delinquency Determination - SCA Method
+	/*
+	       ORIG:  Chuck Hardy (6721) - 02/02/86
+	       DESC:
+
+	      INPUT: LNDRM,JOB,DRC()
+	     OUTPUT: ^TMP( JOB, 1-5 ... )
+
+	Uses delinquency categories ( [CUVAR]DRC1 - [CUVAR]DRC20 ), report
+	option ( [CUVAR]LNDRBY ), and report method ( [CUVAR]LNDRM )
+	to determine which loans are delinquent according to those categories.
+
+	   ^TMP(JOB,1  = Detail report data, by collection officer
+	   ^TMP(JOB,2  = Collateral Code Summary report data
+	   ^TMP(JOB,3P = Nonaccrual Principal General Ledger Summary report data
+	   ^TMP(JOB,3I = Nonaccrual Accrued General Ledger Summary report data
+	   ^TMP(JOB,4  = Loan Participation List
+	   ^TMP(JOB,5  = Totals
+	   ^TMP(JOB,6  = Detail report by last name SCA404
+
+	   DRC(sequence)  = minimum | maximum
+	   DRCD(sequence,1 and 2) = julian dates of values in DRC(sequence)
+
+	  ---- Revision History ------------------------------------------------
+	   
+	   08/05/06 - Ravindra Rathi - CR 22516
+	             Modified the TYPE TAG to eliminate RECNOFL errors by adding
+	             a third parameter to Db.getRecord("PRODCTL","TYPE=:TYPE").Added 
+	             a quit condition if 'prodctl.getMode() quit,so that it 
+	             will skip to the next type if theres an invalid 
+	             product type that doesnt exist in PRODCTL.In addition, 
+                     changed the rs.getCol("type") to rs.getCol("TYPE").
+     	   
+	   07/31/06 - KELLYP - CR 22048
+	   	      Modified STEP3 section to eliminate PRECDENCE warning.
+	   
+	   04/03/06 - Ravindra Rathi - 20491
+	              Added the function that deletes all the temp tables. This 
+	              corrects a unique constraint violation on an insert to 
+	              rep404 when the same user session executes the function 
+	              LNDL01 more than once.
+	   
+	   03/06/06 - HILLANBRAND - 19939
+	              Modified NPERF section to correctly set P and I to 
+	              utblglsc.lgl1 and utblglsc.lgl2.  This corrects a unique 
+	              constraint error which was a result of the TMP array using 
+	              the wrong columns from utblglsc.
+	   
+	   02/13/06 - NATRAJAH - 19053
+	   	      Replaced the Index table reference XCLSGRP with base table
+	   	      ACN in LNDEL1 section.
+	   	      
+	   06/13/05 - HILLANBRAND - 13281
+	   	      Modified fromArray method since it is deprecated and will 
+	   	      not work for Oracle.
+	   
+	   05/23/05 - HILLANBRAND - 13281
+	   	      Corrected error by setting array when either PROPCD or COLCD
+	   	      is set to unknow also set array.
+	   
+	   05/12/05 - HILLANBRAND - 13281 
+	   	      Declared TYPE, POOL and GROUP per code review comments.
+
+	   03/03/05 - HILLANBRAND - 13281
+	   	      Modified TYPE section fixed undefined on TYPE by setting
+	   	      TYPE. In subsection SUBFILE, replace variable LIT0 with
+	   	      literal "3P" and variable LIT1 ithe literal "3I".	Add the
+	   	      setting of key columns to " " throughout when the value 
+	   	      being used was from a column that is not required or the 
+	   	      variable could be null. 
+
+	   01/06/04 - RussellDS - CR7514
+	  	      Replaced use of table PROPCD (obsoleted) with UTBLPROPCD.
+	
+	   10/16/02 - GRAY - 49794
+		      Rewrote converted procedure.
+
+	   05/15/02 - VETSENM - 49794
+		      Converted to PSL.          	
+
+	   08/28/00 - Carrie Baildon - 35996
+	              Modified EXCL to skip problem loan sub-accounts.  The real
+	              delinquency will show up on the customer view loan and
+	              should not be considered on its linked sub-accounts.
+	              Modified DRCD2 to replace ^UFRE reference with NJD^UFRE.
+
+	*/
+	
+	// Number of categories
+	set DRCNUM=+$O(DRC(""),-1)
+	set DRC(0)="0|0" 
+	set (DRCD(0,1),DRCD(0,2))=%SystemDate
+       
+        do Db.fastDelete("LNDELQ1","JOB=:JOB")
+	do Db.fastDelete("LNDELQ2","JOB=:JOB")
+	do Db.fastDelete("LNDELQ21","JOB=:JOB")
+	do Db.fastDelete("LNDELQ2B","JOB=:JOB")
+	do Db.fastDelete("LNDELQ2B1","JOB=:JOB")
+	do Db.fastDelete("LNDELQ2C","JOB=:JOB")
+	do Db.fastDelete("LNDELQ2C1","JOB=:JOB")
+	do Db.fastDelete("LNDELQNI","JOB=:JOB")
+	do Db.fastDelete("LNDELQNP","JOB=:JOB")
+	do Db.fastDelete("LNDELQP","JOB=:JOB")
+	do Db.fastDelete("LNDELT1","JOB=:JOB")
+	do Db.fastDelete("LNDELT2","JOB=:JOB")
+	do Db.fastDelete("LNDELT3","JOB=:JOB")
+	do Db.fastDelete("LNDELT4","JOB=:JOB")
+	do Db.fastDelete("REP404","PID=:JOB")
+
+	// Convert offsets to dates
+	if LNDRBY'="P" do {
+		set ZFRE=LNDRBY_"A" 
+		set DRC=0 
+		do DRCD
+		}
+
+	// Load first set of access keys.
+	
+ 	type ResultSet rs=Db.select("DISTINCT GRP","ACN","CLS='L'")
+	if rs.isEmpty() do END quit
+	while rs.next() do {
+		set GRP=rs.getCol(1)
+		set TMP(5,GRP)=""
+		do STEP3
+		do TYPE
+		set (TB,TN)=0
+		// Accumulate across categories
+		for I=1:STEP:MAX do {
+			set $P(TMP(5,GRP),"|",I)=I\STEP+1
+			set TB=TB+$P(TMP(5,GRP),"|",I+1)
+			set TN=TN+$P(TMP(5,GRP),"|",I+2)
+			}
+		// Nothing in this group
+		if TN=0 do { quit
+			kill TMP(5,GRP)
+			// Clear collateral code/general ledger table
+			kill COLCD
+			set COLCD=""
+			}
+		
+			
+		type RecordLNDELT1 lndelt1=Class.new("RecordLNDELT1")
+		set lndelt1.job=JOB
+        	set lndelt1.grp=GRP
+        	set lndelt1.tbal=TB
+        	set lndelt1.tnum=TN
+        	
+		type Number CNT, NUM, POS
+		type String COL
+		set POS=0
+		for NUM=1:1:20 do {
+			for CNT=1:1:3 do {
+				if CNT=1 set COL="CT"_NUM
+				else  if CNT=2 set COL="TB"_NUM
+				else  set COL="TN"_NUM
+				set POS=POS+1
+				set lndelt1.@COL=$P(TMP(5,GRP),"|",POS) 
+				}
+			}
+		do lndelt1.bypassSave()
+		}
+
+	do END
+
+	quit
+
+TYPE	//
+	type ResultSet rs=Db.select("DISTINCT TYPE","LN","CLS='L' AND GRP=:GRP")
+	if rs.isEmpty() quit
+	while rs.next() do {
+		type Number TYPE
+		set TYPE=rs.getCol("TYPE")
+		type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:TYPE",1)
+		if 'prodctl.getMode() quit
+		// Skip this product type?  Get next type.
+		if prodctl.drskip quit
+		set TMP(5,GRP,TYPE)=""
+		set (TYTN,TYTB)=0
+		do CID
+
+		do SUBFILE
+
+		do STEP3
+
+		set (TB,TN)=0
+
+		// Accumulate across categories
+		for I=1:STEP:MAX do {
+			set B=+$P(TMP(5,GRP,TYPE),"|",I+1)
+			set N=+$P(TMP(5,GRP,TYPE),"|",I+2)
+			set TB=TB+B set TN=TN+N
+			set $P(TMP(5,GRP,TYPE),"|",I)=I\STEP+1
+			// Add TYPE buckets to GROUP buckets
+			set $P(TMP(5,GRP),"|",I+1)=$P(TMP(5,GRP),"|",I+1)+B
+			set $P(TMP(5,GRP),"|",I+2)=$P(TMP(5,GRP),"|",I+2)+N
+			}
+
+		// Nothing in this type
+		if TN=0 kill TMP(5,GRP,TYPE) quit
+
+				
+		type RecordLNDELT2 lndelt2=Class.new("RecordLNDELT2")
+		set lndelt2.job=JOB
+		set lndelt2.grp=GRP
+		set lndelt2.type=TYPE
+		set lndelt2.tbal=TB
+		set lndelt2.tnum=TN		
+
+		type Number CNT, NUM, POS
+		type String COL
+		set POS=0
+		for NUM=1:1:20 do {
+			for CNT=1:1:3 do {
+				if CNT=1 set COL="CT"_NUM
+				else  if CNT=2 set COL="TB"_NUM
+				else  set COL="TN"_NUM
+				set POS=POS+1
+				set lndelt2.@COL=$P(TMP(5,GRP,TYPE),"|",POS) 
+				}
+			}
+		do lndelt2.bypassSave()
+		}
+	quit
+
+
+CID	//
+	type Public Number TYPE
+	type ResultSet rs=Db.select("CID","LN","CLS='L' AND GRP=:GRP AND TYPE=:TYPE")
+	if rs.isEmpty() quit
+	while rs.next() do {
+			set CID=rs.getCol(1)
+			type RecordLN ln=Db.getRecord("LN","CID=:CID")
+
+			/*
+			Ignore delinqunecy on closed loans and
+			problem loan sub-accounts
+			*/
+
+			if ln.stat'=4,('ln.pcidstat) do EXCL(.ln)
+			}
+	quit
+
+
+EXCL(RecordLN ln)	//Exclude accounts from analysis
+
+	//Start of data selection processing
+
+	set BAL=+ln.bal		
+	set ACR=+ln.acr
+
+	// General Ledger Set Code
+	set GLSC=ln.glsc
+
+	// Nonaccrual Indicator
+	set NAI=ln.nai
+
+	// Total balance in this type
+	set TYTB=TYTB+BAL
+
+	// Total # loans in this type
+	set TYTN=TYTN+1
+
+	set DIST1ND=ln.dist1nd 
+	if DIST1ND>%SystemDate do NPERF quit
+
+	// Currency Code
+	set CRCD=ln.crcd 
+	if CRCD="" set CRCD=%SystemCurrency
+
+	//Int Accr Calc Base
+	set IRCB=ln.ircb
+	if 'IRCB do NPERF quit
+
+
+	// Participation Flag
+	set PFLG=+ln.pflg
+	if '$D(PART) set PART=0
+
+	// Include in participation report?
+	if PART,'PFLG do NPERF quit      
+	                                   
+	set LCHG=ln.lchg			// Late Charge Due $
+	set MCHG=ln.mchg	                // Misc Charge Due $
+	set UNAPF=ln.unapf                      // Unapplied funds
+	set PPA=+ln.ppa                         // Partial Payment Amount $
+	set SCHBAL=ln.schbal                    // Sched Bal Due $
+	set TDUE=ln.tdue                        // Total Due $ 
+	set SCHSEQ=ln.schseq                    // Scheduled sequence number
+	set DIST1FRE=ln.dist1fre                // Frequency
+	set DSEQ=ln.dseq                        // Due sequence number
+	set COLOFF=ln.coloff                    // Collect Off
+	set COLCD=ln.colcd                      // Collateral Code
+	set COLL=ln.coll                        // Collateral Record #
+
+	// set non-required columns to space to create record lndelq1
+	if COLOFF="" set COLOFF=" "
+
+	set PROPCD=""
+
+	if COLL do {
+		type RecordCOL col=Db.getRecord("COL","COLL=:COLL")
+		set PROPCD=col.propcd
+		}
+
+	// Amount to bring loan current
+	set GTDUE=TDUE-UNAPF+LCHG+MCHG
+
+	if GTDUE<MINAMT do NPERF quit
+
+	if LNDRBY="P" do PAYMENT
+
+	if LNDRBY'="P" do PERIOD
+
+        // Create detail record ?
+	if DRC<1 do NPERF quit      
+
+	// Participation Loan report record
+	if PFLG do PART
+
+	// Detail report record
+	type RecordLNDELQ1 lndelq1=Class.new("RecordLNDELQ1")
+	set lndelq1.job=JOB
+	set lndelq1.grp=GRP
+	set lndelq1.coloff=COLOFF
+	set lndelq1.type=TYPE
+	set lndelq1.cat=DRC
+	set lndelq1.cid=CID
+	set lndelq1.gtdue=GTDUE
+	do lndelq1.bypassSave()
+	
+
+	// SCA404 - Delinquency report by customer
+	set ACN=ln.acn
+	type RecordCIF cif=Db.getRecord("CIF","ACN=:ACN")
+
+	// Last Name
+	set Y=cif.lnm if Y="" set Y=" "
+
+        
+        type RecordREP404 rep404=Class.new("RecordREP404")
+	set rep404.pid=JOB
+	set rep404.cat=DRC
+	set rep404.lnm=Y
+	set rep404.cid=CID
+	do rep404.bypassSave()
+	
+
+COLCD	// Set up collateral code summary
+
+	// I18N=OFF
+	if '$L(COLCD) set COLCD="unknown",COLCD(GRP,COLCD)=""
+	// I18N=ON
+
+	if '$D(COLCD(GRP,COLCD)) do {
+        	type RecordUTBLCOLCD utblcolcd=Db.getRecord("UTBLCOLCD","GRP=:GRP,KEY=:COLCD")
+		set COLTYP=utblcolcd.type
+		do utblcolcd.toArray("COLCD(GRP,COLCD")
+		}
+
+	do STEP3
+
+	set LIT="2A"
+	if '$D(TMP(2,COLCD)) set (TMP(2,COLCD),TMP(LIT,COLCD))=""
+	set $P(TMP(2,COLCD),"|",P1)=$P(TMP(2,COLCD),"|",P1)+BAL
+	set $P(TMP(2,COLCD),"|",P2)=$P(TMP(2,COLCD),"|",P2)+1
+
+PROPCD	// Set up property code summary.
+	
+	// Classify all unknown's.
+
+	// I18N=OFF
+	if '$L(PROPCD) set PROPCD="unknown",PROPCD(PROPCD)="",RES=""
+
+	if COLCD="unknown" do P1 quit
+	// I18N=ON
+
+	// Exclude non real estate
+	if '(COLTYP>9&(COLTYP<20)) do NPERF quit         
+
+P1	//
+
+	do STEP3
+
+	if '$D(TMP(2,COLCD,PROPCD)) set (TMP(2,COLCD,PROPCD),TMP(LIT,COLCD,PROPCD))=""
+	set $P(TMP(2,COLCD,PROPCD),"|",P1)=$P(TMP(2,COLCD,PROPCD),"|",P1)+BAL
+	set $P(TMP(2,COLCD,PROPCD),"|",P2)=$P(TMP(2,COLCD,PROPCD),"|",P2)+1
+
+RES	// Set up residential/non-residential code summary
+
+        if '$D(PROPCD(PROPCD)) do {
+                type RecordUTBLPROPCD propcd=Db.getRecord("UTBLPROPCD","KEY=:PROPCD")
+		set RES=propcd.desc
+                do propcd.toArray("PROPCD(PROPCD")
+                }
+
+	do STEP3
+
+	if '$D(TMP(2,COLCD,PROPCD,RES)) set TMP(2,COLCD,PROPCD,RES)="" set TMP(LIT,COLCD,PROPCD,RES)=""
+	set $P(TMP(2,COLCD,PROPCD,RES),"|",P1)=$P(TMP(2,COLCD,PROPCD,RES),"|",P1)+BAL
+	set $P(TMP(2,COLCD,PROPCD,RES),"|",P2)=$P(TMP(2,COLCD,PROPCD,RES),"|",P2)+1
+
+NPERF	// Nonaccrual loan G/L summary
+	if 'NAI quit
+	if '$D(GLN(GLSC)) do {
+                type RecordUTBLGLSC utblglsc=Db.getRecord("UTBLGLSC","GLSC=:GLSC")
+                set P=utblglsc.lgl1
+        	set I=utblglsc.lgl2
+		do utblglsc.toArray("GLN(GLSC") 
+		}
+
+	set LIT0="3P"
+	if '$D(TMP(LIT0,TYPE,P)) set TMP(LIT0,TYPE,P)=""
+	set $P(TMP(LIT0,TYPE,P),"|",1)=$P(TMP(LIT0,TYPE,P),"|",1)+BAL
+	set $P(TMP(LIT0,TYPE,P),"|",2)=$P(TMP(LIT0,TYPE,P),"|",2)+1
+	set $P(TMP(LIT0,TYPE,P),"|",3)=$P(TMP(LIT0,TYPE,P),"|",3)+ACR
+	
+	set LIT1="3I"
+	if '$D(TMP(LIT1,TYPE,I)) set TMP(LIT1,TYPE,I)=""
+	set $P(TMP(LIT1,TYPE,I),"|",1)=$P(TMP(LIT1,TYPE,I),"|",1)+BAL
+	set $P(TMP(LIT1,TYPE,I),"|",2)=$P(TMP(LIT1,TYPE,I),"|",2)+1
+	set $P(TMP(LIT1,TYPE,I),"|",3)=$P(TMP(LIT1,TYPE,I),"|",3)+ACR
+
+	//End of data selection processing
+	
+	quit
+
+
+END	// Clean up
+	kill BAL,ACR,DIST1ND,DFT,IRCB,LCHG,MCHG,SCHBAL,TDUE,DIST1FRE,COLOFF,TN
+	kill COLL,TMP,DRCNUM,DRCD,DRCTEXT,LN,GTDUE,CIF,CID,JD,NJD,SEQ,STEP,TN
+	kill GRP,TYPE,COLCD,PROPCD,RES,GLN,GROUP,POOL,COLTYP,COL,FRE,FID,ZFRE
+	quit
+
+PERIOD	//How many days/months behind?
+	new I
+	set DRC=0
+	if DIST1ND>DRCD(1,1) quit
+	if 'SINGLE do PER1 quit
+	if DIST1ND<DRCD(1,2) quit
+	set DRC=1
+	quit
+
+PER1	//
+	for  set DRC=$O(DRCD(DRC)) quit:DRC=""  quit:DIST1ND>DRCD(DRC,1)
+	if $L(DRC) set DRC=DRC-1
+	// Always in last category
+	if DRC="" set DRC=$O(DRCD(""),-1)
+	quit
+
+PAYMENT	//How many payments behind?
+	set DRC=0
+	set X=PPA+UNAPF
+	set PMTDEL=SCHSEQ-DSEQ
+	if X set PMTDEL=PMTDEL-0.5
+
+	// Not delinquent
+	if PMTDEL'>0 quit
+
+	// Not delinquent enough
+	if PMTDEL<+DRC(1) quit
+
+	if 'SINGLE do PAY1 quit
+
+	if PMTDEL>+$P(DRC(1),"|",2) quit
+
+	set DRC=1
+
+	quit
+
+PAY1	//
+	for  set DRC=$O(DRC(DRC)) quit:DRC=""  quit:PMTDEL<+DRC(DRC)  
+	if PMTDEL=+DRC(DRC) set DRC=DRC+1 quit
+	if DRC="" set DRC=$O(DRC(""),-1)
+	else  set DRC=DRC-1
+	quit
+
+STEP3	//
+	set STEP=3  //3 data items per category
+
+	// Piece # to update (Balance)
+	set P1=(DRC-1)*STEP+2
+
+	// Number
+	set P2=(DRC-1)*STEP+3
+
+	set MAX=(DRCNUM-1)*STEP+1
+
+	quit
+
+DRCD	//Convert DRC() offsets into dates using ZFRE
+
+	kill DRCD
+	for I=1:1 set DRC=$O(DRC(DRC)) quit:DRC=""  do DRCD1
+	quit
+
+DRCD1	//
+	for J=1,2 do {
+		set JD=%SystemDate 
+		set FRE="-"_$P(DRC(DRC),"|",J)_ZFRE 
+
+		if '$P(DRC(DRC),"|",J) set NJD=%SystemDate
+		else  set NJD=$$NJD^UFRE(JD,FRE) quit:ER
+		set DRCD(DRC,J)=NJD
+		}
+	quit
+ 
+
+SUBFILE	//File all sublevels below this type
+
+	set (COLCD,PROPCD,RES)=""
+
+	// File all lower levels
+	do STEP3 
+	do FILE1
+	
+	// Nonaccrual General Ledger Summary
+	set G=""
+	for  set G=$O(TMP("3P",TYPE,G)) quit:G=""  do {
+		type RecordLNDELQNP lndelqnp=Class.new("RecordLNDELQNP")
+                set lndelqnp.job=JOB
+                set lndelqnp.type=TYPE
+                set lndelqnp.gln=G
+        	set lndelqnp.nbal=$P(TMP(LIT0,TYPE,G),"|",1)
+        	set lndelqnp.ncnt=$P(TMP(LIT0,TYPE,G),"|",2)
+        	set lndelqnp.nacr=$P(TMP(LIT0,TYPE,G),"|",3)
+                do lndelqnp.bypassSave()		
+		}
+
+	for  set G=$O(TMP("3I",TYPE,G)) quit:G=""  do {
+		type RecordLNDELQNI lndelqni=Class.new("RecordLNDELQNI")
+        	set lndelqni.job=JOB
+        	set lndelqni.type=TYPE
+		set lndelqni.gln=G
+        	set lndelqni.nbal=$P(TMP(LIT1,TYPE,G),"|",1)
+        	set lndelqni.ncnt=$P(TMP(LIT1,TYPE,G),"|",2)
+        	set lndelqni.nacr=$P(TMP(LIT1,TYPE,G),"|",3)
+        	do lndelqni.bypassSave()
+		}
+	quit
+
+FILE1	//Files COLCD level
+
+	set COLCD=""
+
+	for  set COLCD=$O(TMP(2,COLCD)) quit:COLCD=""  do {
+		set TMP(5,GRP,TYPE,COLCD)=""
+
+		// Property codes
+		do FILE1A
+
+		set (TB,TN)=0 set J=1 for I=1:STEP:MAX do FILE10
+
+		// Total is zero, ignore it
+		if TN<1 do FILE1 quit
+
+		do STEP3
+
+		for I=1:STEP:MAX do FILE11
+		
+			
+		//Insert a new record into LNDELQ2
+		type RecordLNDELQ2 lndelq2=Class.new("RecordLNDELQ2")
+        	set lndelq2.job=JOB
+		set lndelq2.grp=GRP
+        	set lndelq2.type=TYPE
+        	set lndelq2.colcd=COLCD
+		set lndelq2.totbal=TB
+		set lndelq2.totnum=TN		
+
+		type Number CNT, NUM, POS
+		type String COL
+		set POS=0
+		for NUM=1:1:20 do {
+			for CNT=1:1:3 do {
+				if CNT=1 set COL="CT"_NUM
+				else  if CNT=2 set COL="BD"_NUM
+				else  set COL="NN"_NUM
+				set POS=POS+1
+				set lndelq2.@COL=$P(TMP(2,COLCD),"|",POS) 
+				}
+			}
+        	do lndelq2.bypassSave()
+
+				
+                //Insert a new record into LNDELQ21
+		type RecordLNDELQ21 lndelq21=Class.new("RecordLNDELQ21")
+        	set lndelq21.job=JOB
+        	set lndelq21.grp=GRP
+        	set lndelq21.type=TYPE
+        	set lndelq21.colcd=COLCD
+        	set lndelq21.totbal=TB
+		set lndelq21.totnum=TN		
+
+		set POS=0
+		for NUM=1:1:20 do {
+			for CNT=1:1:3 do {
+				if CNT=1 set COL="CT"_NUM
+				else  if CNT=2 set COL="BP"_NUM
+				else  set COL="NP"_NUM
+				set POS=POS+1
+				set lndelq21.@COL=$P(TMP(LIT,COLCD),"|",POS) 
+				}
+			}
+        	do lndelq21.bypassSave()
+
+		//Insert a new record into LNDELT3	
+		type RecordLNDELT3 lndelt3=Class.new("RecordLNDELT3")
+        	set lndelt3.job=JOB
+        	set lndelt3.grp=GRP
+        	set lndelt3.type=TYPE
+        	set lndelt3.colcd=COLCD
+        	set lndelt3.tbal=TB
+		set lndelt3.tnum=TN		
+
+		set POS=0
+		for NUM=1:1:20 do {
+			for CNT=1:1:3 do {
+				if CNT=1 set COL="CT"_NUM
+				else  if CNT=2 set COL="TB"_NUM
+				else  set COL="TN"_NUM
+				set POS=POS+1
+				set lndelt3.@COL=$P(TMP(5,GRP,TYPE,COLCD),"|",POS) 
+				}
+			}
+        	do lndelt3.bypassSave()
+
+		kill TMP(2,COLCD)
+		kill TMP(LIT,COLCD)
+		kill TMP(5,GRP,TYPE,COLCD)
+		}
+	quit
+
+
+FILE10	//Accumulate totals accross categories.
+
+	set B=+$P(TMP(2,COLCD),"|",I+1)
+	set N=+$P(TMP(2,COLCD),"|",I+2)
+
+	set TB=TB+B set TN=TN+N
+
+	set $P(TMP(5,GRP,TYPE),"|",J)=J\3+1
+	set $P(TMP(5,GRP,TYPE),"|",J+1)=$P(TMP(5,GRP,TYPE),"|",J+1)+B
+	set $P(TMP(5,GRP,TYPE),"|",J+2)=$P(TMP(5,GRP,TYPE),"|",J+2)+N
+
+	set J=J+3
+
+	quit
+
+FILE11	//Calculate and save percentages, COLCD level
+
+	set $P(TMP(2,COLCD),"|",I)=I\STEP+1
+	set $P(TMP(LIT,COLCD),"|",I)=I\STEP+1
+
+	set B=+$P(TMP(2,COLCD),"|",I+1)
+	set N=+$P(TMP(2,COLCD),"|",I+2)
+
+	set $P(TMP(LIT,COLCD),"|",I+1)=$S(TYTB:+$$^SCARND(B/TYTB*100,0,"","",5),1:0)
+	set $P(TMP(LIT,COLCD),"|",I+2)=$S(TYTN:+$$^SCARND(N/TYTN*100,0,"","",5),1:0)
+
+	quit
+
+FILE1A	//Files PROPCD level
+
+	set PROPCD=""
+	for  set PROPCD=$O(TMP(2,COLCD,PROPCD)) quit:PROPCD=""  do {
+		set TMP(5,GRP,TYPE,COLCD,PROPCD)=""
+
+		// Residential/Non-Residential
+		do FILE1B
+
+		// Add buckets to COLCD level
+		set (TB,TN)=0 set J=1 for I=1:STEP:MAX do FILE1A0
+
+		// Total is zero, ignore it
+		if TN<1 do FILE1A quit   
+
+		do STEP3
+
+		// Calculate percentages
+		for I=1:STEP:MAX do FILE1A1
+
+			
+	        //Insert a new record to LNDELQ2B
+		type RecordLNDELQ2B lndelq2b=Class.new("RecordLNDELQ2B")
+        	set lndelq2b.job=JOB
+        	set lndelq2b.grp=GRP
+        	set lndelq2b.type=TYPE
+        	set lndelq2b.colcd=COLCD
+        	set lndelq2b.prpcd=PROPCD
+        	set lndelq2b.totbal=TB
+		set lndelq2b.totnum=TN		
+
+		type Number CNT, NUM, POS
+		type String COL
+		set POS=0
+		for NUM=1:1:20 do {
+			for CNT=1:1:3 do {
+				if CNT=1 set COL="CT"_NUM
+				else  if CNT=2 set COL="BD"_NUM
+				else  set COL="NN"_NUM
+				set POS=POS+1
+				set lndelq2b.@COL=$P(TMP(2,COLCD,PROPCD),"|",POS) 
+				}
+			}
+        	do lndelq2b.bypassSave()
+		
+		
+		//Insert a new record to LNDELQ2B1
+		type RecordLNDELQ2B1 lndelq2b1=Class.new("RecordLNDELQ2B1")
+        	set lndelq2b1.job=JOB
+        	set lndelq2b1.grp=GRP
+        	set lndelq2b1.type=TYPE
+        	set lndelq2b1.colcd=COLCD
+        	set lndelq2b1.prpcd=PROPCD
+        	set lndelq2b1.totbal=TB
+		set lndelq2b1.totnum=TN		
+
+		set POS=0
+		for NUM=1:1:20 do {
+			for CNT=1:1:3 do {
+				if CNT=1 set COL="CT"_NUM
+				else  if CNT=2 set COL="BP"_NUM
+				else  set COL="NP"_NUM
+ 				set POS=POS+1
+				set lndelq2b1.@COL=$P(TMP(LIT,COLCD,PROPCD),"|",POS) 
+				}
+			}
+        	do lndelq2b1.bypassSave()
+	
+		
+		//Insert a new record to LNDELT4
+		type RecordLNDELT4 lndelt4=Class.new("RecordLNDELT4")
+        	set lndelt4.job=JOB
+        	set lndelt4.grp=GRP
+        	set lndelt4.type=TYPE
+        	set lndelt4.colcd=COLCD
+		set lndelt4.prpcd=PROPCD
+		set lndelt4.tbal=TB
+		set lndelt4.tnum=TN		
+
+		set POS=0
+		for NUM=1:1:20 do {
+			for CNT=1:1:3 do {
+				if CNT=1 set COL="CT"_NUM
+				else  if CNT=2 set COL="TB"_NUM
+				else  set COL="TN"_NUM
+				set POS=POS+1
+				set lndelt4.@COL=$P(TMP(5,GRP,TYPE,COLCD,PROPCD),"|",POS) 
+				}
+			}
+        	do lndelt4.bypassSave()
+
+		kill TMP(2,COLCD,PROPCD)
+		kill TMP(LIT,COLCD,PROPCD)
+		kill TMP(5,GRP,TYPE,COLCD,PROPCD)
+		}
+
+	quit
+
+FILE1A0	//Accumulate totals accross categories.
+
+	set B=+$P(TMP(2,COLCD,PROPCD),"|",I+1)
+	set N=+$P(TMP(2,COLCD,PROPCD),"|",I+2)
+
+	set TB=TB+B set TN=TN+N
+
+	set $P(TMP(5,GRP,TYPE,COLCD),"|",J)=J\3+1
+	set $P(TMP(5,GRP,TYPE,COLCD),"|",J+1)=$P(TMP(5,GRP,TYPE,COLCD),"|",J+1)+B
+	set $P(TMP(5,GRP,TYPE,COLCD),"|",J+2)=$P(TMP(5,GRP,TYPE,COLCD),"|",J+2)+N
+
+	set J=J+3
+
+	quit
+
+FILE1A1	//Calculate and save percentages, PROPCD level
+
+	set B=+$P(TMP(2,COLCD,PROPCD),"|",I+1)
+	set N=+$P(TMP(2,COLCD,PROPCD),"|",I+2)
+
+	set $P(TMP(2,COLCD,PROPCD),"|",I)=I\STEP+1
+	set $P(TMP(LIT,COLCD,PROPCD),"|",I)=I\STEP+1
+	set $P(TMP(LIT,COLCD,PROPCD),"|",I+1)=$S(TYTB:+$$^SCARND(B/TYTB*100,0,"","",5),1:0)
+	set $P(TMP(LIT,COLCD,PROPCD),"|",I+2)=$S(TYTN:+$$^SCARND(N/TYTN*100,0,"","",5),1:0)
+
+	quit
+
+FILE1B	//Files RESIDE level
+
+	set RES=""
+	for  set RES=$O(TMP(2,COLCD,PROPCD,RES)) quit:RES=""  do {
+		// Add buckets to PROPCD level
+		set (TB,TN)=0 set J=1 for I=1:STEP:MAX do FILE1B0
+
+		// Total is zero, ignore it
+		if TN<1 do FILE1B quit
+
+		do STEP3
+
+		for I=1:STEP:MAX do FILE1B1
+
+		// Grand total balance
+		set $P(TMP(2,COLCD,PROPCD,RES),"|",61)=TB
+
+		// Grand total number
+		set $P(TMP(2,COLCD,PROPCD,RES),"|",62)=TN
+
+		// Grand total balance
+		set $P(TMP(LIT,COLCD,PROPCD,RES),"|",61)=TB
+
+		// Grand total number
+		set $P(TMP(LIT,COLCD,PROPCD,RES),"|",62)=TN
+
+		set $P(TMP(5,GRP,TYPE,COLCD,PROPCD),"|",61)=TB
+		set $P(TMP(5,GRP,TYPE,COLCD,PROPCD),"|",62)=TN
+
+		
+		
+		//Insert a new record into LNDELQ2C
+		type RecordLNDELQ2C lndelq2c=Class.new("RecordLNDELQ2C")
+        	set lndelq2c.job=JOB
+        	set lndelq2c.grp=GRP
+        	set lndelq2c.type=TYPE
+        	set lndelq2c.colcd=COLCD
+        	set lndelq2c.prpcd=PROPCD
+		set lndelq2c.resf=RES
+		set lndelq2c.totbal=TB
+		set lndelq2c.totnum=TN		
+
+		type Number CNT, NUM, POS
+		type String COL
+		set POS=0
+		for NUM=1:1:20 do {
+			for CNT=1:1:3 do {
+				if CNT=1 set COL="CT"_NUM
+				else  if CNT=2 set COL="BD"_NUM
+				else  set COL="NN"_NUM
+				set POS=POS+1
+				set lndelq2c.@COL=$P(TMP(2,COLCD,PROPCD,RES),"|",POS) 
+				}
+			}
+        	do lndelq2c.bypassSave()
+		
+		
+		//Insert a new record into LNDELQ2C1
+		type RecordLNDELQ2C1 lndelq2c1=Class.new("RecordLNDELQ2C1")
+        	set lndelq2c1.job=JOB
+        	set lndelq2c1.grp=GRP
+        	set lndelq2c1.type=TYPE
+        	set lndelq2c1.colcd=COLCD
+        	set lndelq2c1.prpcd=PROPCD
+        	set lndelq2c1.resf=RES
+		set lndelq2c1.totbal=TB
+		set lndelq2c1.totnum=TN		
+
+		set POS=0
+		for NUM=1:1:20 do {
+			for CNT=1:1:3 do {
+				if CNT=1 set COL="CT"_NUM
+				else  if CNT=2 set COL="BP"_NUM
+				else  set COL="NP"_NUM
+				set POS=POS+1
+				set lndelq2c1.@COL=$P(TMP(LIT,COLCD,PROPCD,RES),"|",POS) 
+				}
+			}
+        	do lndelq2c1.bypassSave()
+
+		kill TMP(2,COLCD,PROPCD,RES)
+		kill TMP(LIT,COLCD,PROPCD,RES)
+		}
+
+	quit
+
+FILE1B0	//Accumulate totals accross categories.
+
+	set B=+$P(TMP(2,COLCD,PROPCD,RES),"|",I+1)
+	set N=+$P(TMP(2,COLCD,PROPCD,RES),"|",I+2)
+
+	set TB=TB+B set TN=TN+N
+
+	set $P(TMP(5,GRP,TYPE,COLCD,PROPCD),"|",J)=J\3+1
+	set $P(TMP(5,GRP,TYPE,COLCD,PROPCD),"|",J+1)=$P(TMP(5,GRP,TYPE,COLCD,PROPCD),"|",J+1)+B
+	set $P(TMP(5,GRP,TYPE,COLCD,PROPCD),"|",J+2)=$P(TMP(5,GRP,TYPE,COLCD,PROPCD),"|",J+2)+N
+
+	set J=J+3
+
+	quit
+
+FILE1B1	//Calculate and save percentages, RESIDE level
+
+	set B=+$P(TMP(2,COLCD,PROPCD,RES),"|",I+1)
+	set N=+$P(TMP(2,COLCD,PROPCD,RES),"|",I+2)
+
+	set $P(TMP(2,COLCD,PROPCD,RES),"|",I)=I\STEP+1
+
+	set $P(TMP(LIT,COLCD,PROPCD,RES),"|",I)=I\STEP+1
+	set $P(TMP(LIT,COLCD,PROPCD,RES),"|",I+1)=$S(TYTB:+$$^SCARND(B/TYTB*100,0,"","",5),1:0)
+	set $P(TMP(LIT,COLCD,PROPCD,RES),"|",I+2)=$S(TYTN:+$$^SCARND(N/TYTN*100,0,"","",5),1:0)
+
+	quit
+
+
+PART	//File Loan Participation info
+
+	new PSEQ
+	type String GROUP, POOL
+	
+	type ResultSet rs=Db.select("PSEQ","LNLS6","CID=:CID")
+	if rs.isEmpty() quit
+	while rs.next() do {
+		set PSEQ=rs.getCol(1)
+		type RecordLNLS6 lnls6=Db.getRecord("LNLS6","CID=:CID,PSEQ=:PSEQ")
+		set INV=lnls6.incd
+		if INV="" quit
+
+		// No report necessary
+		if '$D(INCD(INV)) quit
+
+		if lnls6.rfpf quit
+	
+		set POOL=lnls6.pl
+		if POOL="" set POOL=" "
+		set GROUP=lnls6.grp
+		if GROUP="" set GROUP=" "
+		
+				
+		type RecordLNDELQP lndelqp=Class.new("RecordLNDELQP")
+        	set lndelqp.job=JOB
+        	set lndelqp.inv=INV
+        	set lndelqp.pl=POOL
+        	set lndelqp.grp=GROUP
+        	set lndelqp.delcat=DRC
+        	set lndelqp.cid=CID
+        	do lndelqp.bypassSave()
+		}
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60485^5128^Ravindra Rathi^23170"	// Signature - LTD^TIME^USER^SIZE

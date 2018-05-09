@@ -1,0 +1,809 @@
+public	RGLFXP(Date %SystemDate)	// Foreign Currency Position Build
+	/*
+
+	   This procedure creates transactions which update the base currency
+	   equivalent accounts  by multiplying the foreign currency exchange
+	   position accumulated in TGL(TJD,2,CRCD) by a user defined rate
+	   (ie: MIDRATE,FINSPOT) and placing it into TGL(TJD,5,CRCD) to be
+	   transferred to the GL.
+
+	   ARGUMENTS:
+
+	   .  %SystemDate - Passed by value from BCHRGLXFR and indicates the 
+	   		    date for which the Profit/Loss is to be calculated
+
+	---- Revision History -------------------------------------------------
+
+	  06/29/07 - KinI - CR 27935
+		     Modified main section to correct source when deleting from
+		     TGLDTL file.
+		     
+	  06/25/07 - KinI - CR 27713
+	  	     Modified ACCUM section to replace OPTION with CRCD in POS 
+	  	     array to avoid undefined.
+
+	  06/20/07 - KinI - CR 27726
+		     Modified main section to add TGLDTL record deleting 
+		     to avoid records double-counting when RGLXFR function is 
+		     re-run. Cleaned up compilation warnings in main section.
+
+	   03/14/07 - KumarSS - CR 25177
+	   	      Removed Invalid Unicode Characters.
+
+	   03/29/06 - KinI - CR 20009
+		      Added delete for TGL1 record to avoid Oracle "unique 
+		      constraint violation" error in case of re-accumulation.
+	   	
+	   12/13/05 - KinI - CR 16664
+		      Modified to remove BLDTR section that was only called by 
+		      the TEST tag, which was obsoleted previously.
+		      
+	   05/15/05 - TITOVE - CR 14192
+	   	      Modified ACCUM and GETAMT to ensure that CRCD would be
+	   	      defined. Deleted old revision history. Performed minor 
+	   	      clean up.
+	*/
+	
+	type public String TGL(,)
+	
+	type Number BASPOS, BASPOSEQ, CC, FXBASEQ, FXBASPOS, FXPOSL, FXPOSPL
+	type Number FXPOSRT, GLTS, ITSL, ITSP, ITSPOSRT, OTCBASPOS, PL(,,)
+	type Number TFSBASEQ, TFSBASPOS, TFSL, TFSP, TFSPOSRT
+	type String CMT, CO, POS(,,)
+	type Date %EffectiveDate
+	
+	// This procedure could be run ad-hoc, which prevent the usage of direct
+	// references to CUVAR in some cases, especially for such columns as TJD
+	type RecordCUVAR cuvar = Db.getRecord("CUVAR")
+
+	// Lock DMJ Level
+	lock +TGL(%SystemDate,2)
+
+	// Lock Position
+	lock +TGL(%SystemDate,5)
+
+	do Db.fastDelete("TGL","TJD=:%SystemDate,SRC=5")
+	do Db.fastDelete("TGL1","TDT=:%SystemDate,SRC=5")
+	do Db.fastDelete("TGLDTL","TJD=:%SystemDate,SRC=5")
+	
+        set CO=cuvar.co
+	set CC="" 
+	set %EffectiveDate=""
+	set GLTS=cuvar.glts
+
+	type RecordCRCD crcd=Db.getRecord("CRCD","CO=:CO,CRCD=:%SystemCurrency")
+
+	//Initialize variables for OTC exchanges
+	if cuvar.otc=1 do {
+
+		//OTC position account
+		set OTCBASPOS=crcd.otcgl
+		//If null, use suspense
+		if OTCBASPOS="" set OTCBASPOS=GLTS
+
+		//OTC base equivalent account
+		set BASPOSEQ=crcd.bsotcgl
+		//If null, use suspense
+		if BASPOSEQ="" set BASPOSEQ=GLTS
+
+		//OTC rate type
+		set FXPOSRT=cuvar.fxposrt
+		//If null, use mid-rate
+		if FXPOSRT="" set FXPOSRT=1
+
+		//OTC profit account
+		set FXPOSPL=cuvar.fxpospl
+		//If null, use suspense
+		if FXPOSPL="" set FXPOSPL=GLTS
+
+		//OTC loss account
+		set FXPOSL=cuvar.fxposl
+		//If null, use suspense
+		if FXPOSL="" set FXPOSL=GLTS
+
+		//Generate OTC P&L
+		do ACCUM(.cuvar,OTCBASPOS,FXPOSRT,1)
+		}
+
+	//Initialize variables for FX exchanges
+	if cuvar.fx=1 do {
+		
+		//FX position account
+		set FXBASPOS=crcd.fxposgl
+		//If null, use OTC position account
+		if FXBASPOS="" set FXBASPOS=crcd.otcgl
+
+		//If still null, use suspense
+		if FXBASPOS="" set FXBASPOS=GLTS
+
+		//Base Equivalent account
+		set FXBASEQ=crcd.bsfxposgl
+		//If null, use suspense
+		if FXBASEQ="" set FXBASEQ=GLTS
+
+		//Rate Type
+		set ITSPOSRT=cuvar.itspospl
+
+		//If null, default to mid-rate
+		if ITSPOSRT="" set ITSPOSRT=1
+
+		//FX profilt account
+		set ITSP=cuvar.fxprofit
+		//If null, use suspense
+		if ITSP="" set ITSP=GLTS
+
+		//FX Loss Account
+		set ITSL=cuvar.fxloss
+		//If null, use suspense
+		if ITSL="" set ITSL=GLTS
+
+		//generate P&L
+		do ACCUM(.cuvar,FXBASPOS,ITSPOSRT,2)
+		}
+
+	//Initialize variables for TFS exchanges
+	if cuvar.tfs=1 do {
+		
+		// TFS Position Account
+		set TFSBASPOS=crcd.tfsgl
+		// if null, use suspense
+		if TFSBASPOS="" set TFSBASPOS=GLTS
+
+		// TFS base equivalent account
+		set TFSBASEQ=crcd.tfsbsgl
+		// if null, use suspense
+		if TFSBASEQ="" set TFSBASEQ=GLTS
+
+		// Rate Type
+		set TFSPOSRT=cuvar.tfspospl
+		// If null, use mid-rate
+		if TFSPOSRT="" set TFSPOSRT=1
+
+		// TFS profit account
+		set TFSP=cuvar.tfsp
+		// if null, use suspense
+		if TFSP="" set TFSP=GLTS
+
+		// TFS loss account
+		set TFSL=cuvar.tfsl
+		// if null, use suspense
+		if TFSL="" set TFSL=GLTS
+
+		// Generate TFS P&L
+		do ACCUM(.cuvar,TFSBASPOS,TFSPOSRT,3)
+		}
+	quit
+
+
+ACCUM(	RecordCUVAR cuvar,	// Institution Variables
+	Number BASPOS,		// Base Currency Position Account
+	Number RATETYP,		// Rate Position (OTC, FX or TFS)
+	Number OPTION)		// P&L Calculation Indicator (1 = OTC, 2 = FX, 3 = TFS)
+
+	/*
+	   INPUTS:
+	       . FXPOSPL    FX Trading Profit Account
+
+	   RETURNS:
+	       . ^TGL(TJD,5... Sets up ^TGL
+	*/
+
+	// Collate TGL level 2.  Accumulate all postings to the position account.
+
+	type Date %EffectiveDate
+	type Number CC, CRAMT, DRAMT
+	type String CRCD
+
+	type ResultSet rs=Db.select("EFD,CC,DRAMT,CRAMT","TGL","TJD=:%SystemDate AND SRC=:SRC AND CRCD=:%SystemCurrency AND ACN=:BASPOS")
+	while rs.next() do {
+		
+		set %EffectiveDate=rs.getCol("EFD")
+		set CC=rs.getCol("CC")
+		set DRAMT=rs.getCol("DRAMT")
+		set CRAMT=rs.getCol("CRAMT")
+		// -DRs + CRs
+		set PL(OPTION,%EffectiveDate,CC)=PL(OPTION,%EffectiveDate,CC).get()-DRAMT+CRAMT
+		}
+
+	type DbSet ds = Db.selectDbSet("CRCD", "CO = :CO")
+	while ds.next() do {
+		
+		type RecordCRCD crcd = ds.getRecord("CRCD")
+		
+		do GETAMT(.cuvar,.crcd,CO,RATETYP)
+		}
+
+	if OPTION=1,FXPOSPL'="" do {
+	
+		set %EffectiveDate=""
+		set CC=""
+		for  set %EffectiveDate=PL(OPTION,%EffectiveDate).order() quit:%EffectiveDate.isNull()  do {
+			for  set CC=PL(OPTION,%EffectiveDate,CC).order() quit:CC.isNull()  do {
+				if PL(OPTION,%EffectiveDate,CC) do FILPL
+				}
+			}
+		}
+	
+	// FX trading P&L calculations
+	else  do {
+		set CRCD=""
+		set %EffectiveDate=""
+		set CC=""
+		for  set CRCD=POS(CRCD).order() quit:CRCD.isNull()  do {
+			for  set %EffectiveDate=POS(CRCD,%EffectiveDate).order() quit:%EffectiveDate.isNull()  do {
+				for  set CC=POS(CRCD,%EffectiveDate,CC).order() quit:CC.isNull()  do {
+					if POS(CRCD,%EffectiveDate,CC),OPTION=2 do FXPL quit
+					if POS(CRCD,%EffectiveDate,CC),OPTION=3 do TFSPL
+					}
+				}
+			}
+		}
+
+	// Mark Completed
+	type RecordTGL1 tgl1=Class.new("RecordTGL1")
+	
+	set tgl1.tdt=%SystemDate
+	set tgl1.src=5
+	set tgl1.prcmp="*"
+	do tgl1.bypassSave()
+
+
+	// Unlock DMJ Level
+	lock -TGL(%SystemDate,2)
+
+	// Unlock Position
+	lock -TGL(%SystemDate,5)	
+
+	quit
+
+FXPL	// Calculate the FX trading P&L
+
+	type Number BSOTCGL
+	type String PLGL
+	
+	set DAMT=""
+	
+	type RecordCRCD crcd=Db.getRecord("CRCD","CO=:CO,CRCD=:CRCD")
+	set ISO=crcd.crcdno
+
+	set BSOTCGL=crcd.bsfxposgl
+	if BSOTCGL="" set BSOTCGL=GLTS
+
+	set DIV=crcd.terms
+
+	set RATE=POS(CRCD)
+	set AMT=POS(CRCD,%EffectiveDate,CC)
+
+	if 'DIV set AMT=(+AMT.get()*RATE).roundCur(CRCD)
+	else  set AMT=(+AMT.get()/RATE).roundCur(CRCD)
+
+	set AMT=AMT-POS(CRCD,%EffectiveDate,CC).piece("|",2)
+
+	if AMT<0 do {
+		set ITSPL=ITSL
+		set ITC=0
+		set (DAMT,AMT)=$$ABS(AMT)
+		}
+
+	else  do {
+		set ITSPL=ITSP
+		set ITC=1
+		}
+
+	set PLGL=ITSPL.extract(1,ITSPL.length()-3)_ISO
+
+	if 'Db.isDefined("GLAD","ACN=:PLGL")  do {
+		type public String RM
+		
+		// Invalid FX P&L G/L ~p1. Posted to suspense ~p2.
+		set RM=$$^MSG(4293,PLGL,GLTS)
+		do LOG^UTLEXC($T(+0),"*",,,,RM)
+		set PLGL=GLTS
+		}
+
+	if 'AMT quit
+
+	set SRC=5
+
+	type RecordTGL tgl=Db.getRecord("TGL","TJD=:%SystemDate,SRC=:SRC,CRCD=:%SystemCurrency,EFD=:%EffectiveDate,ACN=:PLGL,CC=:CC",1)
+
+	if ITC do {
+		//number of CR
+		set tgl.crcnt=tgl.crcnt+1
+
+		//amount of CR
+		set tgl.cramt=tgl.cramt+AMT
+
+		do tgl.bypassSave()
+		}
+
+	else  do {
+		//number of DR
+		set tgl.drcnt=tgl.drcnt+1
+
+		//amount of DR
+		set tgl.dramt=tgl.dramt+AMT
+
+		do tgl.bypassSave()
+		}
+
+	set AMT=AMT.roundCur(CRCD)
+	set CMT=CRCD_" "_$$ABS(POS(CRCD,%EffectiveDate,CC).piece("|",1))_" "_$select(DIV:"/",1:"*")_" "_RATE_" "_"-"_" "_$$ABS(POS(CRCD,%EffectiveDate,CC).piece("|",2))_" "_"="_" "_AMT
+
+	do DETAIL(%SystemCurrency,%EffectiveDate,PLGL,CC,ITC,AMT,CMT)
+
+        type RecordTGL tgl1=Db.getRecord("TGL","TJD=:%SystemDate,SRC=:SRC,CRCD=:%SystemCurrency,EFD=:%EffectiveDate,ACN=:BSOTCGL,CC=:CC",1)
+	
+	//reverse - post offsets
+	if ITC do {
+		//number of CR
+		set tgl1.drcnt=tgl1.drcnt+1
+
+		//amount of CR
+		set tgl1.dramt=tgl1.dramt+AMT
+
+		do tgl1.bypassSave()
+		}
+
+	else  do {
+		//number of DR
+		set tgl1.crcnt=tgl1.crcnt+1
+
+		//amount of DR
+		set tgl1.cramt=tgl1.cramt+AMT
+
+		do tgl1.bypassSave()
+		}
+
+	//Transferred to fx trade p&l account # ~p1 rate: ~p2
+	set CMT=$$^MSG(428,PLGL,RATE)
+
+	do DETAIL(%SystemCurrency,%EffectiveDate,BSOTCGL,CC,'ITC,AMT,CMT)
+
+	quit
+
+
+TFSPL	//Calculate the TFS trading P&L
+
+	type Number BSOTCGL
+	type String PLGL
+	
+	set DAMT=""
+
+        type RecordCRCD crcd=Db.getRecord("CRCD","CO=:CO,CRCD=:CRCD")
+	set ISO=crcd.crcdno
+
+	set BSOTCGL=crcd.tfsbsgl
+	if BSOTCGL="" set BSOTCGL=GLTS
+
+	set DIV=crcd.terms
+
+	set RATE=POS(CRCD)
+	set AMT=POS(CRCD,%EffectiveDate,CC)
+
+	// Use system base currency to determine rounding factor
+	if 'DIV set AMT=(+AMT.get()*RATE).roundCur(%SystemCurrency)
+	else  set AMT=(+AMT.get()/RATE).roundCur(%SystemCurrency)
+
+	set AMT=AMT-POS(CRCD,%EffectiveDate,CC).piece("|",2)
+	set AMT=AMT.roundCur(%SystemCurrency)
+
+	if AMT<0 do {
+		set TFSPL=TFSL
+		set ITC=0
+		set (DAMT,AMT)=$$ABS(AMT)
+		}
+
+	else  do {
+		set TFSPL=TFSP
+		set ITC=1
+		}
+
+	set PLGL=TFSPL.extract(1,TFSPL.length()-3)_ISO
+
+	if 'Db.isDefined("GLAD","ACN=:PLGL") do {
+		type public String RM
+		
+		// Invalid TFS P&L G/L ~p1. Posted to suspense ~p2.
+		set RM=$$^MSG(4294,PLGL,GLTS)
+		do LOG^UTLEXC($T(+0),"*",,,,RM)
+		set PLGL=GLTS
+		}
+
+	if 'AMT quit
+
+        set SRC=5
+
+        type RecordTGL tgl=Db.getRecord("TGL","TJD=:%SystemDate,SRC=:SRC,CRCD=:%SystemCurrency,EFD=:%EffectiveDate,ACN=:PLGL,CC=:CC",1)
+
+	if ITC do {
+		//number of CR
+		set tgl.crcnt=tgl.crcnt+1
+
+		//amount of CR
+		set tgl.cramt=tgl.cramt+AMT
+
+		do tgl.bypassSave()
+		}
+
+	else  do {
+		//number of DR
+		set tgl.drcnt=tgl.drcnt+1
+
+		//amount of DR
+		set tgl.dramt=tgl.dramt+AMT
+
+		do tgl.bypassSave()
+		}
+
+	set AMT=AMT.roundCur(%SystemCurrency)
+
+	set CMT=CRCD_" "_$$ABS(POS(CRCD,%EffectiveDate,CC).piece("|",1))_" "_$select(DIV:"/",1:"*")_" "_RATE_" "_"-"_" "_$$ABS(POS(CRCD,%EffectiveDate,CC).piece("|",2))_" "_"="_" "_AMT
+
+	do DETAIL(%SystemCurrency,%EffectiveDate,PLGL,CC,ITC,AMT,CMT)
+
+        type RecordTGL tgl1=Db.getRecord("TGL","TJD=:%SystemDate,SRC=:SRC,CRCD=:%SystemCurrency,EFD=:EFD,ACN=:BSOTCGL,CC=:CC")
+
+	//reverse - post offsets
+	if ITC do {
+		//number of CR
+		set tgl1.drcnt=tgl1.drcnt+1
+		//amount of CR
+		set tgl1.dramt=tgl1.dramt+AMT
+		do tgl1.bypassSave()
+		}
+	else  do {
+		//number of DR
+		set tgl1.crcnt=tgl1.crcnt+1
+		//amount of DR
+		set tgl1.cramt=tgl1.cramt+AMT
+		do tgl1.bypassSave()
+		}
+
+	//Transferred to tfs trade p&l account # ~p1 rate: ~p2
+	set CMT=$$^MSG(428,PLGL,RATE)
+
+	do DETAIL(%SystemCurrency,%EffectiveDate,BSOTCGL,CC,'ITC,AMT,CMT)
+
+	quit
+
+
+FILPL	//File Profit/Loss transactions to level 5 for OTC
+
+
+	set DAMT=""
+
+	// Round using system base currency for rounding factor
+	set PL(OPTION,%EffectiveDate,CC)=PL(OPTION,%EffectiveDate,CC).roundCur(%SystemCurrency)
+
+	if PL(OPTION,%EffectiveDate,CC)>0 do {
+		set FXPOS=FXPOSPL
+		set ITC=1
+		}
+
+	else  do {
+		set (DAMT,PL(OPTION,%EffectiveDate,CC))=-PL(OPTION,%EffectiveDate,CC)
+		set FXPOS=FXPOSL
+		set ITC=0
+		}
+
+	if 'PL(OPTION,%EffectiveDate,CC) quit 
+
+	set SRC=5
+
+        type RecordTGL tgl=Db.getRecord("TGL","TJD=:%SystemDate,SRC=:SRC,CRCD=:%SystemCurrency,EFD=:%EffectiveDate,ACN=:FXPOS,CC=:CC",1)
+
+	if DAMT do {
+		//loss - debit count
+		set tgl.drcnt=tgl.drcnt+1
+
+		//loss - debit amount
+		set tgl.dramt=tgl.dramt+PL(OPTION,%EffectiveDate,CC)
+
+		// Transferred from ~p1
+		set CMT=$$^MSG(3940,BASPOS)
+
+		do DETAIL(%SystemCurrency,%EffectiveDate,FXPOS,CC,ITC,PL(OPTION,%EffectiveDate,CC),CMT)
+
+		do tgl.bypassSave()
+		}
+
+	else  do {
+		//loss - credit count
+		set tgl.crcnt=tgl.crcnt+1
+
+		//loss - credit amount
+		set tgl.cramt=tgl.cramt+PL(OPTION,%EffectiveDate,CC)
+
+		// Transferred from ~p1
+		set CMT=$$^MSG(3939,BASPOS)
+
+		do DETAIL(%SystemCurrency,%EffectiveDate,FXPOS,CC,ITC,PL(OPTION,%EffectiveDate,CC),CMT)
+
+		do tgl.bypassSave()
+		}
+
+	//Now post the offset to the position account  
+
+        type RecordTGL tgl1=Db.getRecord("TGL","TJD=:%SystemDate,SRC=:SRC,CRCD=:%SystemCurrency,EFD=:%EffectiveDate,ACN=:BASPOS,CC=:CC",1)
+
+	if DAMT do {
+		set tgl1.crcnt=tgl1.crcnt+1
+
+		set tgl1.cramt=tgl1.cramt+PL(OPTION,%EffectiveDate,CC)
+
+		do tgl1.bypassSave()
+		}
+
+	else  do {
+		set tgl1.drcnt=tgl1.drcnt+1
+
+		set tgl1.dramt=tgl1.dramt+PL(OPTION,%EffectiveDate,CC)
+
+		do tgl1.bypassSave()
+		}
+
+	// Transfer to ~p1
+	set CMT=$$^MSG(3940,FXPOS)
+
+	do DETAIL(%SystemCurrency,%EffectiveDate,BASPOS,CC,'ITC,PL(1,%EffectiveDate,CC),CMT)
+
+	quit
+
+
+GETAMT(RecordCUVAR cuvar,RecordCRCD crcd,String CO,Number RATETYP)
+
+	type Date %EffectiveDate
+	type Number CC, DIV, OTCGL, RATE, TFSGL
+	
+	set DIV = crcd.terms
+
+	// OTC exchanes
+	if OPTION=1 do {
+
+		//OTC Postion Account
+		set OTCGL=crcd.otcgl
+		if OTCGL="" set OTCGL=GLTS
+
+		//OTC base equiv
+		set BSOTCGL=bsotcgl
+		if BSOTCGL="" set BSOTCGL=GLTS
+		}
+
+	// FX Exchanges
+	if OPTION=2 do {
+
+		// FX Position Account
+		set FXGL=crcd.fxposgl
+		if FXGL="" set FXGL=GLTS
+
+		// FX base equiv.
+		set BSOTCGL=crcd.bsfxposgl
+		if BSOTCGL="" set BSOTCGL=GLTS
+		}
+
+	// TFS Exchanges
+	if OPTION=3 do {
+
+		// TFS Position Account
+		set TFSGL=crcd.tfsgl
+		if TFSGL="" set TFSGL=GLTS
+
+		// TFS base equiv.
+		set BSOTCGL=crcd.tfsbsgl
+		if BSOTCGL="" set BSOTCGL=GLTS
+		}
+
+	// Get the exchange rate
+	set Z=""
+	
+	if %SystemDate<cuvar.tjd do {
+
+		type Number SEQ
+		type Number XEFD
+		
+		set XEFD = %SystemDate + 1
+                type ResultSet rs=Db.select("EFD,SEQ","CRCDRATEH","CO=:CO AND CRCD=:crcd.crcd AND EFD<:XEFD","EFD DESC,SEQ DESC")
+                while rs.next() do {
+                	
+                        set %EffectiveDate=rs.getCol("EFD")
+                        set SEQ=rs.getCol("SEQ")
+
+			type RecordCRCDRATEH zz=Db.getRecord("CRCDRATEH","CO=:CO,CRCD=:crcd.crcd,EFD=:%EffectiveDate,SEQ=:SEQ",1)
+			if zz.getMode()=0 quit
+
+			set Z=zz.midrate_"|"_zz.spotbid_"|"_zz.spotoffer_"|"
+			set Z=Z_zz.otcbid_"|"_zz.otcoffer_"|"_zz.offbid_"|"
+			set Z=Z_zz.offoffer_"|"_zz.finspot
+			}
+		}
+
+	if Z="" do {
+
+		set Z=crcd.midrate_"|"_crcd.spotbid_"|"_crcd.spotoffer_"|"
+		set Z=Z_crcd.otcbid_"|"_crcd.otcoffer_"|"_crcd.offbid_"|"
+		set Z=Z_crcd.offoffer_"|"_crcd.finspot
+		}
+
+	set RATE=Z.piece("|",RATETYP)
+	if 'RATE quit
+
+	// Store the rate here for use in the FXPL section. It is used in the
+	// computation of P&L for FX Trading.
+	set POS(crcd.crcd)=RATE
+
+	/*
+	1)  Collate through the cost centers within the position accounts
+	2)  Multiply DR's and CR's by the exchange rate to get base equiv
+	3)  Put results in ^TGL(,5,,,,) for the base equiv acct
+	4)  Ofset to the base position acct in ^TGL(,5,,,,)
+	*/
+
+	set SRC=2
+	
+	// Define the position account for OTC
+	if OPTION=1 set POSGL=OTCGL
+
+	// Define the position account for FX
+	if OPTION=2 set POSGL=FXGL
+
+	// Define the position account for TFS
+	if OPTION=3 set POSGL=TFSGL
+
+	type ResultSet rs = Db.select("EFD,CC","TGL","TJD=:%SystemDate AND SRC=:SRC AND CRCD=:crcd.crcd AND ACN=:POSGL")
+	while rs.next() do {
+		
+		set %EffectiveDate = rs.getCol("EFD")
+		
+		set CC = rs.getCol("CC")
+
+		type RecordTGL tgl = Db.getRecord("TGL","TJD=:%SystemDate,SRC=:SRC,CRCD=:crcd.crcd,EFD=:%EffectiveDate,ACN=:POSGL,CC=:CC")	
+
+		do FILEXCH(crcd.crcd,RATE,.tgl)
+		}
+	
+	quit
+
+
+FILEXCH(String CRCD,Number RATE,RecordTGL tgl)
+
+	// File Position account base equivalent transaction
+
+	type Number CAMT, CBSEAMT, DAMT, DBSEAMT, NET, ITC
+	type String CMT
+	
+	//Credit Position Amt
+	set CAMT=tgl.cramt
+
+	//Debit Position Amt
+	set DAMT=tgl.dramt
+
+	//OTC exchanges
+	if OPTION=1 do {
+		
+		set PRNET=CAMT-DAMT
+		
+		if 'DIV do {
+			set CAMT=(CAMT*RATE).roundCur(CRCD)
+			set DAMT=(DAMT*RATE).roundCur(CRCD)
+			}
+		else  do {
+			set CAMT=(CAMT/RATE).roundCur(CRCD)
+			set DAMT=(DAMT/RATE).roundCur(CRCD)
+			}
+
+		set NET=CAMT-DAMT
+
+		set CMT=CRCD_" "_PRNET_" "_$select(DIV:"/",1:"*")_" "_RATE
+		}
+
+	//FX exchanges or TFS exchanges
+	if OPTION=2!(OPTION=3) do {
+		//Debit Base Equiv Amt
+		set DBSEAMT=tgl.drbseamt
+
+		//Credit Base Equiv Amt
+		set CBSEAMT=tgl.crbseamt
+
+		set NET=CBSEAMT-DBSEAMT
+
+		set CMT=CRCD_" "_$$ABS(NET)
+
+		set POS(CRCD,%EffectiveDate,CC).piece("|",1)=POS(CRCD,%EffectiveDate,CC).get().piece("|",1)-DAMT+CAMT
+		set POS(CRCD,%EffectiveDate).piece("|",2)=POS(CRCD,%EffectiveDate,CC).get().piece("|",2)-DBSEAMT+CBSEAMT
+		}
+	
+	/*
+	Round NET amount before update. Use system base currency to determine
+	rounding factor.
+	*/                              
+	set NET=NET.roundCur(%SystemCurrency)
+
+	// Update the base currency equivalency account
+
+	set SRC=5
+	
+	type RecordTGL tgl1=Db.getRecord("TGL","TJD=:%SystemDate,SRC=:SRC,CRCD=:%SystemCurrency,EFD=:%EffectiveDate,ACN=:BSOTCGL,CC=:CC",1)
+
+	if NET'<0 do {
+		set ITC=0
+		set tgl1.dramt=tgl1.dramt+NET
+		set tgl1.drcnt=tgl1.drcnt+1
+		do tgl1.bypassSave()
+		}
+
+	else  do {
+		set ITC=1
+		set tgl1.cramt=tgl1.cramt+$$ABS(NET)
+		set tgl1.crcnt=tgl1.crcnt+1
+		do tgl1.bypassSave()
+		}
+
+	do DETAIL(%SystemCurrency,%EffectiveDate,BSOTCGL,CC,ITC,$$ABS(NET),CMT)
+
+	// Update the base currency exchange position
+        type RecordTGL tgl2=Db.getRecord("TGL","TJD=:%SystemDate,SRC=:SRC,CRCD=:%SystemCurrency,EFD=:%EffectiveDate,ACN=:BASPOS,CC=:CC",1)
+
+	if NET'<0 do {
+		set ITC=1
+		set tgl2.cramt=tgl2.cramt+NET
+		set tgl2.crcnt=tgl2.crcnt+1
+		do tgl2.bypassSave()
+		}
+
+	else  do {
+		set ITC=0
+		set tgl2.dramt=tgl2.dramt+$$ABS(NET)
+		set tgl2.drcnt=tgl2.drcnt+1
+		do tgl2.bypassSave()
+		}
+
+	do DETAIL(%SystemCurrency,%EffectiveDate,BASPOS,CC,ITC,$$ABS(NET),CMT)
+
+	if ITC=1 set PL(OPTION,%EffectiveDate,CC)=PL(OPTION,%EffectiveDate,CC).get()+$$ABS(NET)
+
+	else  set PL(OPTION,%EffectiveDate,CC)=PL(OPTION,%EffectiveDate,CC).get()-$$ABS(NET)
+
+	quit
+
+
+DETAIL(String CRCD,Date %EffectiveDate,Number CID,Number CC,Number ITC,Number AMT,String CMT)	
+
+	// Create detail entry in ^TGL
+
+	type Number SEQ
+
+	set SEQ=Db.nextVal("TGLDTL","TJD,SRC,CRCD,EFD,CID,CC")
+
+	type RecordTGLDTL tgldtl=Class.new("RecordTGLDTL") 
+
+	set tgldtl.tjd=%SystemDate
+	set tgldtl.src=SRC 
+	set tgldtl.crcd=CRCD 
+	set tgldtl.efd=%EffectiveDate 
+	set tgldtl.acn=CID
+	set tgldtl.cc=CC 
+	set tgldtl.seq=SEQ 
+
+	set tgldtl.glacn=CID 
+	set tgldtl.ccntr=CC 
+	set tgldtl.trn=$select(ITC:"CR",1:"DR") 
+	set tgldtl.tamt=AMT 
+	set tgldtl.ref="" 
+	set tgldtl.cmt=CMT 
+	set tgldtl.uid=""
+
+	do tgldtl.bypassSave()
+
+	quit
+
+	
+ABS(Number X)	//Returns the absolute value of the amount passed in
+
+	if X<0 set X=-X
+	
+	quit X
+
+	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60810^45253^Irina Kin^18010"	// Signature - LTD^TIME^USER^SIZE

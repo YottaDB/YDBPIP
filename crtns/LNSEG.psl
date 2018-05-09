@@ -1,0 +1,607 @@
+LNSEG		/*
+	ORIG: chhabris - 01/15/2007
+	DESC: Loan Segment Utilities
+
+	---- Comments --------------------------------------------------------
+	Public; Loan Segment Utilities
+
+	Utilities required for Credit Card Processing 
+
+	LIBRARY:
+	INSERT		Create a new loan segment
+	PURCHASE	Update segment principal balances on disbursements
+	PAYBAL		Pay (reduce) segment balances
+	PAYACR		Pay (reduce) segment interest accrued
+	UPDACR		Update loan interest accrued
+	REVSL		Reverse history sub-ledger loan segments
+
+	---- Revision History ------------------------------------------------
+	
+	07/11/07 - kumarb - CR27856
+		   Modified section UPDACR to update the segment current period
+		   interest accrued balances in the else block of CTL check.
+
+	02/12/07 - chhabris - CR24680
+		   Created new procedure for Credit Card Processing.
+
+	*/
+
+	quit
+
+public INSERT(RecordLN ln,	// Loan account		/REF:RW
+	      Date SEGSTART,	// Segment Start Date	/NOREQ
+	      Number SEGMENT)	// Segment Number	/NOREQ
+
+	/*
+	This section will insert a new loan segment and is called from
+	Loan AFTER_INSERT Procedure (LNAI).
+
+	ARGUMENTS:
+	SEGSTART - If SEGSTART does not have a value, the system date will be
+		   defaulted.
+
+	EXAMPLE:
+		if ln.segments do INSERT^LNSEG(.ln, ln.odt, 1)
+	*/
+
+	type public Boolean ER
+
+	if SEGSTART.get().isNull() set SEGSTART = %SystemDate
+	set SEGMENT = SEGMENT.get()
+
+	if SEGMENT.isNull() do {
+		type ResultSet rs1 = Db.select("SEGMENT","LNSEG","CID=:ln.cid","SEGMENT DESC")
+		if rs1.next() set SEGMENT = rs1.getCol("SEGMENT") + 1
+		else  set SEGMENT = 1
+		}
+
+	type ResultSet rs = Db.select("SEGMENT","LNSEG","CID=:ln.cid and SEGMENT=:SEGMENT")
+
+	// Entry already exists
+	if 'rs.isEmpty() do Runtime.setErrMSG("LN",964,ln.cid) quit
+
+	type RecordLNSEG lnseg = Class.new("RecordLNSEG")
+	set lnseg.cls = "L"
+	set lnseg.cid = ln.cid
+	set lnseg.segment = SEGMENT
+	set lnseg.segstart = SEGSTART
+	set lnseg.pcm = ln.pcm
+	set lnseg.rpp = ln.rpp
+	set lnseg.irn = ln.irn
+	set lnseg.index = ln.index
+	set lnseg.intfre = ln.intfre
+	set lnseg.intmat = ln.intmat
+	set lnseg.intspr = ln.intspr
+	set lnseg.rndmtd = ln.rndmtd
+	set lnseg.segterm = ln.trm
+
+	type RecordUTBLCCSD utblccsd = Db.getRecord("UTBLCCSD","SEGMENT=:SEGMENT",1)
+	set lnseg.fcwo = utblccsd.fcwo
+	set lnseg.fmdesc = utblccsd.fmdesc
+
+	do lnseg.save()
+	quit
+
+
+public PURCHASE(RecordLN ln,		// Loan account		/REF:RW
+		RecordTTX ttx,		// Primary Transaction	/REF:R
+		Number AMOUNT)		// Principal Amount
+
+	/*	
+        This section will update segment principal balances on disbursements.
+	This is called by LNPTS7, LNPTS7A and LNPTS69.
+
+	ARGUMENTS: 
+	EXAMPLE:
+
+		if ln.segments do PURCHASE^LNSEG(.ln, .ttx, AMT)
+	*/
+
+	type public Boolean ER
+
+	type Number SEGMENT, TSEQ
+
+	set SEGMENT = $$FIELD^UTSO(ttx.tso,"SEG")
+	if SEGMENT.isNull() do {
+		type ResultSet rs = Db.select("SEGMENT","LNSEG","CID=:ln.cid")
+		if rs.next() set SEGMENT = rs.getCol("SEGMENT")
+		}
+
+	// Invalid Segment
+	if SEGMENT.isNull() do Runtime.setErrMSG("LNSEG",3326) quit:ER
+
+	type RecordLNSEG lnseg = Db.getRecord("LNSEG","CID=:ln.cid,SEGMENT=:SEGMENT",1)
+	if 'lnseg.getMode() quit
+
+	set TSEQ = ttx.getStoredValue("HistSeq")
+	type RecordHISTSLSEG histslseg = Db.getRecord("HISTSLSEG","CID=:ln.cid,TSEQ=:TSEQ,SEGMENT=:lnseg.segment",1)
+
+	set histslseg.cpbal = histslseg.cpbal + AMOUNT
+
+	set lnseg.cpbal = lnseg.cpbal + AMOUNT
+	set lnseg.bal = lnseg.bal + AMOUNT
+
+	set ln.cpbal = ln.cpbal + AMOUNT
+
+	// Note: The loan record will be updated by the calling procedure.
+	do histslseg.bypassSave()
+	do lnseg.bypassSave()
+
+	quit
+
+
+public PAYBAL(RecordLN ln,		// Loan account		/REF:RW
+	      RecordTTX ttx,		// Primary Transaction	/REF:R
+	      Number AMOUNT,		// Principal Amount
+	      Boolean PAYOFF)		// Payoff Indicator	/NOREQ
+
+	/*	
+	This section will pay (reduce) segment balances, in priority order, 
+	and waive the Last Period Accrual (LNSEG.ONEAGOACR) or Current Period
+	Accrual (LNSEG.CPACR), if applicable. It will be called from 
+	Transaction Posting procedures i.e. LNPTS3, LNPTS4 and LNPTS23.
+
+	ARGUMENTS: 
+	PAYOFF - If the payoff indicatore is selected, it will specify that
+		 the transaction will payoff the due amounts for all the
+		 segments under the laon account.
+
+	EXAMPLE:
+
+		if ln.segments do PAYBAL^LNSEG(.ln, .ttx, AMT)
+
+	*/
+
+	type public Boolean ER
+
+	type Number SEGMENT
+
+	set SEGMENT = $$FIELD^UTSO(ttx.tso,"SEG")
+	if 'SEGMENT.isNull() do { quit
+		type RecordLNSEG lnseg = Db.getRecord("LNSEG","CID=:ln.cid,SEGMENT=:SEGMENT",1)
+
+		// Invalid Segment
+		if 'lnseg.getMode() do Runtime.setErrMSG("LNSEG",3326) quit:ER
+		do PAYBALSEG(.ln, .ttx, .lnseg, AMOUNT, PAYOFF.get())
+		}
+
+	// Payment will be done for the segments with lowest interest first
+	type DbSet ds=Db.selectDbSet("LNSEG","CID=:ln.cid","IRN ASC")
+	while ds.next() do { quit:ER
+		type RecordLNSEG lnseg = ds.getRecord("LNSEG")
+		do PAYBALSEG(.ln, .ttx, .lnseg, AMOUNT, PAYOFF.get())
+		}
+
+	quit
+
+
+public PAYACR(RecordLN ln,		// Loan account		/REF:RW
+	      RecordTTX ttx,		// Primary Transaction	/REF:R
+	      Number AMOUNT)		// Interest amount	
+
+	/*
+	This section will pay (reduce) segment interest accrued, in priority
+	order of the interest rate. It will be called from Transaction Posting
+	procedures i.e.	LNPTS3 and LNPTS23.
+
+	ARGUMENTS:
+
+	EXAMPLE:
+
+		if ln.segments do PAYACR^LNSEG(.ln, .ttx, AMT)
+	*/
+
+	type public Boolean ER
+
+	type Number SEGMENT
+
+	set SEGMENT = $$FIELD^UTSO(ttx.tso,"SEG")
+
+	if 'SEGMENT.isNull() do { quit
+		type RecordLNSEG lnseg = Db.getRecord("LNSEG","CID=:ln.cid,SEGMENT=:SEGMENT",1)
+
+		// Invalid Segment
+		if 'lnseg.getMode() do Runtime.setErrMSG("LNSEG",3326) quit:ER
+		do PAYACRSEG(.ln, .ttx, .lnseg, AMOUNT)
+		}
+
+	type DbSet ds=Db.selectDbSet("LNSEG","CID=:ln.cid","IRN ASC")
+	while ds.next() do { quit:ER
+		type RecordLNSEG lnseg = ds.getRecord("LNSEG")
+		do PAYACRSEG(.ln, .ttx, .lnseg, AMOUNT)
+		}
+
+	quit
+
+
+public UPDACR( RecordLN ln,		// Loan account		/REF:RW
+		RecordTTX ttx,		// Primary Transaction	/REF:R
+		Number AMOUNT,		// Interest amount
+		String CTL)		// Control Indicator
+
+	/*
+	This section will update segment interest accrued balances. It will be
+	called from Transaction Posting procedures. It may be called passing
+	negative amounts to decrease segment accrual balances. This section is
+	called by LNPTS15.
+
+	ARGUMENTS:
+		. CTL
+		  		0 - Regular accrual
+				1 - Last Period Accrual (Current accrual
+				    on one ago balances)
+				2 - Accumulated Prior Period Accrual 
+				    (Current accrual on Two Ago 
+				    balances)
+	RETURNS: 
+
+	EXAMPLE:
+
+		if ln.segments do UPDACR^LNSEG(.ln, .ttx, AMT, CTL)
+	*/
+
+	type public Boolean ER
+	type public String ACRADJ(,,)
+
+	type Number CPACR, DIR, ONEAGOACR, SEGMENT, TSEQ, TWOAGOACR
+
+	set SEGMENT = $$FIELD^UTSO(ttx.tso,"SEG")
+
+	if SEGMENT.isNull() do {
+		type ResultSet rs = Db.select("SEGMENT","LNSEG","CID=:ln.cid","SEGMENT")
+		if rs.next() set SEGMENT = rs.getCol("SEGMENT")
+		}
+
+	type RecordLNSEG lnseg = Db.getRecord("LNSEG","CID=:ln.cid,SEGMENT=:SEGMENT",1)
+	
+	// Invalid Segment
+	if 'lnseg.getMode() do Runtime.setErrMSG("LNSEG",3326) quit:ER
+	
+	set TSEQ = ttx.getStoredValue("HistSeq")
+	type RecordHISTSLSEG histslseg = Db.getRecord("HISTSLSEG","CID=:ln.cid,TSEQ=:TSEQ,SEGMENT=:SEGMENT",1)
+
+	if CTL = "1" do {
+		set histslseg.oneagoacr = histslseg.oneagoacr + AMOUNT
+		set ln.oneagoacr = ln.oneagoacr + AMOUNT
+		set lnseg.oneagoacr = lnseg.oneagoacr + AMOUNT
+		}
+	else  if CTL = "2" do {
+		set histslseg.twoagoacr = histslseg.twoagoacr + AMOUNT
+		set ln.twoagoacr = ln.twoagoacr + AMOUNT
+		set lnseg.twoagoacr = lnseg.twoagoacr + AMOUNT
+		}
+	else  do {
+		set histslseg.cpacr = histslseg.cpacr + AMOUNT
+		set ln.cpacr = ln.cpacr + AMOUNT
+		set lnseg.cpacr = lnseg.cpacr + AMOUNT
+		}
+
+	set lnseg.acr = lnseg.acr + AMOUNT
+	
+	do lnseg.bypassSave()
+	do histslseg.save()
+
+	quit
+
+
+public REVSL(RecordLN ln,		// Loan account			/REF:RW
+	     Number HSEQ,		// Reversed history sequence
+	     Boolean INCRS)		// Increase transaction indicator
+
+	/*
+	This section will update segment principal and interest balances on 
+	reversals, using amounts stored in Sub-Ledger for Loan Segments
+	(HISTSLSEG).
+
+	ARGUMENTS:
+	. INCRS
+		0 - The transaction being reversed is a decrease to the balance
+		1 - The transaction being reversed is a increase to the balance
+
+	RETURNS:
+
+	EXAMPLE:
+
+		if ln.segments do REVSL^LNSEG(.ln, HSEQ, 1)
+	*/
+
+	type public Boolean ER
+	type Number DIR
+
+	if INCRS = 1 set DIR = -1
+	else  set DIR = 1
+
+	type DbSet ds=Db.selectDbSet("HISTSLSEG","CID=:ln.cid and TSEQ=:HSEQ")
+	while ds.next() do { quit:ER
+		type RecordHISTSLSEG histslseg = ds.getRecord("HISTSLSEG")
+
+		type RecordLNSEG lnseg = Db.getRecord("LNSEG","CID=:ln.cid,SEGMENT=:histslseg.segment")
+
+		// Balance reversal
+		set lnseg.cpbal = lnseg.cpbal + (histslseg.cpbal * DIR)
+		set lnseg.oneagobal = lnseg.oneagobal + (histslseg.oneagobal * DIR)
+		set lnseg.twoagobal = lnseg.twoagobal + (histslseg.twoagobal * DIR)
+		set ln.cpbal = ln.cpbal + (histslseg.cpbal * DIR)
+		set ln.oneagobal = ln.oneagobal + (histslseg.oneagobal * DIR)
+		set ln.twoagobal = ln.twoagobal + (histslseg.twoagobal * DIR)
+		set lnseg.bal = lnseg.bal + ((histslseg.cpbal + histslseg.oneagobal + histslseg.twoagobal) * DIR)
+
+		// Accrual reversal
+		set lnseg.cpacr = lnseg.cpacr + (histslseg.cpacr * DIR)
+		set lnseg.oneagoacr = lnseg.oneagoacr + (histslseg.oneagoacr * DIR)
+		set lnseg.twoagoacr = lnseg.twoagoacr + (histslseg.twoagoacr * DIR)
+		set ln.cpacr = ln.cpacr + (histslseg.cpacr * DIR)
+		set ln.oneagoacr = ln.oneagoacr + (histslseg.oneagoacr * DIR)
+		set ln.twoagoacr = ln.twoagoacr + (histslseg.twoagoacr * DIR)
+		set lnseg.acr = lnseg.acr + ((histslseg.cpacr + histslseg.oneagoacr + histslseg.twoagoacr) * DIR)
+
+		do lnseg.bypassSave()
+		}
+
+	quit
+
+
+PAYBALSEG(RecordLN ln,			// Loan account		/REF:RW
+	  RecordTTX ttx,		// Primary transaction	/REF:R
+	  RecordLNSEG lnseg,		// Loan segment		/REF:RW
+	  Number AMOUNT,		// Principal amount	
+	  Boolean PAYOFF)		// Payoff indicator
+
+	/*	
+	This section will pay (reduce) segment balances, and waive the Last
+	Period Accrual (LNSEG.ONEAGOACR) or Current Period Accrual
+	(LNSEG.CPACR), if applicable for the individual targeted segment.
+
+	ARGUMENTS: 
+	EXAMPLE:
+
+		if ln.segments do PAYBALSEG^LNSEG(.ln, .ttx, .lnseg, AMT, 1)
+
+	*/
+
+	
+	type public Boolean ER
+
+	type Number TSEQ
+
+	set TSEQ = ttx.getStoredValue("HistSeq")
+	type RecordHISTSLSEG histslseg = Db.getRecord("HISTSLSEG","CID=:ln.cid,TSEQ=:TSEQ,SEGMENT=:lnseg.segment",1)
+
+	if lnseg.twoagobal do {
+		if (AMOUNT '< lnseg.twoagobal) do {
+			set histslseg.twoagobal = histslseg.twoagobal + lnseg.twoagobal
+			set ln.twoagobal = ln.twoagobal - lnseg.twoagobal
+			set lnseg.bal = lnseg.bal - lnseg.twoagobal
+			set AMOUNT = AMOUNT - lnseg.twoagobal
+			set lnseg.twoagobal = 0
+			}
+		else  do {
+			set histslseg.twoagobal = histslseg.twoagobal + AMOUNT
+			set ln.twoagobal = ln.twoagobal - AMOUNT
+			set lnseg.bal = lnseg.bal - AMOUNT
+			set lnseg.twoagobal = lnseg.twoagobal - AMOUNT
+			set AMOUNT = 0
+			}
+		}
+
+	if 'AMOUNT do { quit
+		do lnseg.bypassSave()
+		do histslseg.save()
+		}
+
+	if lnseg.oneagobal do {
+		if (AMOUNT '< lnseg.oneagobal) do {
+			set histslseg.oneagobal = histslseg.oneagobal + lnseg.oneagobal
+			set ln.oneagobal = ln.oneagobal - lnseg.oneagobal
+			set lnseg.bal = lnseg.bal - lnseg.oneagobal
+			set AMOUNT = AMOUNT - lnseg.oneagobal
+			set lnseg.oneagobal = 0
+			}
+		else  do {
+			set histslseg.oneagobal = histslseg.oneagobal + AMOUNT
+			set ln.oneagobal = ln.oneagobal - AMOUNT
+			set lnseg.bal = lnseg.bal - AMOUNT
+			set lnseg.oneagobal = lnseg.oneagobal - AMOUNT
+			set AMOUNT = 0
+			}
+		}
+
+	if 'AMOUNT do { quit
+		do lnseg.bypassSave()
+		do histslseg.bypassSave()
+		}
+
+	if lnseg.cpbal do {
+		if (AMOUNT '< lnseg.cpbal) do {
+			set histslseg.cpbal = histslseg.cpbal + lnseg.cpbal
+			set ln.cpbal = ln.cpbal - lnseg.cpbal
+			set lnseg.bal = lnseg.bal - lnseg.cpbal
+			set AMOUNT = AMOUNT - lnseg.cpbal
+			set lnseg.cpbal = 0
+			}
+		else  do {
+			set histslseg.cpbal = histslseg.cpbal + AMOUNT
+			set ln.cpbal = ln.cpbal - AMOUNT
+			set lnseg.bal = lnseg.bal - AMOUNT
+			set lnseg.cpbal = lnseg.cpbal - AMOUNT
+			set AMOUNT = 0
+			}
+		}
+
+	do WAIVE(.ln, .lnseg, .ttx, PAYOFF)
+
+	do lnseg.bypassSave()
+	do histslseg.bypassSave()
+
+	quit
+
+PAYACRSEG(RecordLN ln,			// Loan account		/REF:RW
+	RecordTTX ttx,			// Primary Transaction	/REF:R
+	RecordLNSEG lnseg,		// Loan segment		/REF:RW
+	Number AMOUNT)			// Interest amount
+
+	/*
+	This section will pay (reduce) segment interest accrued, in priority
+	order of the interest rate for the targeted segment.
+
+	ARGUMENTS:
+
+	EXAMPLE:
+
+		if ln.segments do PAYACRSEG^LNSEG(.ln, .ttx, .lnseg, AMT)
+	*/
+	type public Boolean ER
+
+	type Number TSEQ
+	type Number DIR
+	
+	set TSEQ = ttx.getStoredValue("HistSeq")
+	type RecordHISTSLSEG histslseg = Db.getRecord("HISTSLSEG","CID=:ln.cid,TSEQ=:TSEQ,SEGMENT=:lnseg.segment",1)
+	
+	set DIR=1
+	if AMOUNT<0 set DIR=-1
+
+	if lnseg.twoagoacr do {
+		if ((DIR*AMOUNT) '< lnseg.twoagoacr) do {
+			set histslseg.twoagoacr = histslseg.twoagoacr + lnseg.twoagoacr
+			set ln.twoagoacr = ln.twoagoacr + (DIR*lnseg.twoagoacr)
+			set lnseg.acr = lnseg.acr + (DIR*lnseg.twoagoacr)
+			set AMOUNT = AMOUNT + lnseg.twoagoacr
+			set lnseg.twoagoacr = 0
+			}
+		else  do {
+			set histslseg.twoagoacr = histslseg.twoagoacr + (DIR * AMOUNT)
+			set ln.twoagoacr = ln.twoagoacr + AMOUNT
+			set lnseg.acr = lnseg.acr + AMOUNT
+			set lnseg.twoagoacr = lnseg.twoagoacr + AMOUNT
+			set AMOUNT = 0
+			}
+		}
+
+	if 'AMOUNT do { quit
+		do lnseg.bypassSave()
+		do histslseg.save()
+		}
+
+	if lnseg.oneagoacr do {
+		if ((DIR*AMOUNT) '< lnseg.oneagoacr) do {
+			set histslseg.oneagoacr = histslseg.oneagoacr + lnseg.oneagoacr
+			set ln.oneagoacr = ln.oneagoacr + (DIR*lnseg.oneagoacr)
+			set lnseg.acr = lnseg.acr + (DIR*lnseg.oneagoacr)
+			set AMOUNT = AMOUNT + lnseg.oneagoacr
+			set lnseg.oneagoacr = 0
+			}
+		else  do {
+			set histslseg.oneagoacr = histslseg.oneagoacr + (DIR * AMOUNT)
+			set ln.oneagoacr = ln.oneagoacr + AMOUNT
+			set lnseg.acr = lnseg.acr + AMOUNT
+			set lnseg.oneagoacr = lnseg.oneagoacr + AMOUNT
+			set AMOUNT = 0
+			}
+		}
+
+	if 'AMOUNT do { quit
+		do lnseg.bypassSave()
+		do histslseg.bypassSave()
+		}
+		
+	if lnseg.cpacr do {
+		if ((DIR*AMOUNT) '< lnseg.cpacr) do {
+			set histslseg.cpacr = histslseg.cpacr + lnseg.cpacr
+			set ln.cpacr = ln.cpacr + (DIR*lnseg.cpacr)
+			set lnseg.acr = lnseg.acr + (DIR*lnseg.cpacr)
+			set AMOUNT = AMOUNT + lnseg.cpacr
+			set lnseg.cpacr = 0
+			}
+		else  do {
+			set histslseg.cpacr = histslseg.cpacr + (DIR * AMOUNT)
+			set lnseg.cpacr = lnseg.cpacr + AMOUNT
+			set ln.cpacr = ln.cpacr + AMOUNT
+			set lnseg.acr = lnseg.acr + AMOUNT
+			set AMOUNT = 0
+			}
+		}
+
+	do lnseg.bypassSave()
+	do histslseg.bypassSave()
+
+	quit
+
+	
+WAIVE(RecordLN ln,		// Loan account			/REF:RW
+      RecordLNSEG lnseg,	// Loan segment			/REF:RW
+      RecordTTX ttx,		// Primary transaction		/REF:R
+      Number PAYOFF)		// Payoff Indicator		/NOREQ
+
+	/*
+	This section will waive off the interest for the targeted segment (if
+	applicable)
+
+	ARGUMENTS: 
+	
+	EXAMPLE: 
+		if ln.segments do WAIVE^LNSEG(.ln, .lnseg, .ttx, 1)
+
+	*/
+
+	// The system will not waive off accruals on the segments if any
+	// of the below conditions are true
+
+	// Credit card finance charge waiver is not defined
+	if 'lnseg.fcwo quit
+
+	// Last period balance has a due amount 
+	if lnseg.oneagobal > 0 quit
+
+	// Last period accrual does not have a due amount
+	if lnseg.oneagoacr '> 0 quit
+
+	// Not paid in advance, and the late charge action date is in the past
+	if (ln.bseq = ln.schseq),('ln.lcad.isNull()),(%SystemDate > ln.lcad) quit
+
+	type public Boolean ER
+
+	type String TCMT,TSO
+	type Number TAMT
+
+	// Get GL set code details
+	type RecordUTBLGLSC utblglsc = Db.getRecord("UTBLGLSC","GLSC=:ln.glsc")
+	type RecordPRODCTL prodctl = Db.getRecord("PRODCTL","TYPE=:ln.type")
+
+	// Accrual waiver
+       	set TCMT = $$^MSG(6179)
+
+	set TSO = ""
+	set TAMT = lnseg.oneagoacr
+       	set TSO = $$FIELDIN^UTSO(TSO, "EXACTACR", TAMT)
+       	
+       	set TAMT = lnseg.oneagoacr.roundCur(ln.crcd)
+       	set TSO = $$FIELDIN^UTSO(TSO, "SEG", lnseg.segment)
+
+	// Last period accrual adjustment transaction
+	do POST^LNTRB(.ttx,ln.cid,prodctl.crtrin1,TAMT,%EffectiveDate,%UserStation,TSO,TCMT,ln.crcd,,,,,1) quit:ER
+
+	// Offset - accrual adjustment for last period accrual
+	do POST^LNTRB(.ttx,utblglsc.lgli,"MDR",TAMT,%EffectiveDate,%UserStation,TSO,TCMT,ln.crcd,,,,,1) quit:ER
+
+	// Payoff is selected and the segment has a current period balance due
+	if (PAYOFF) , (lnseg.cpbal) > 0 quit
+
+	// Payoff is selected and segment has a current period accrual due
+	if (PAYOFF) , (lnseg.cpacr) '>0 quit
+
+	if PAYOFF do { quit:ER
+
+		// Accrual waiver
+		set TAMT = lnseg.cpacr.roundCur(ln.crcd)
+
+		// Accrual adjustment for current period
+		do POST^LNTRB(.ttx,ln.cid,prodctl.crtrin,TAMT,%EffectiveDate,%UserStation,TSO,TCMT,ln.crcd,,,,,1) quit:ER
+
+		// Offset - accrual adjustment for current period
+		do POST^LNTRB(.ttx,utblglsc.lgli,"MDR",TAMT,%EffectiveDate,%UserStation,TSO,TCMT,ln.crcd,,,,,1) quit:ER
+		}
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60848^24640^Balasubramonian Sankar^16375"	// Signature - LTD^TIME^USER^SIZE

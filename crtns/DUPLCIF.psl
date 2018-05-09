@@ -1,0 +1,277 @@
+DUPLCIF		/*
+	PROCEDURE:  DUPLCIF
+	ORIG: SKLYUTD - 07/28/98 - 27872
+	DESC: Duplicate CIF checkings
+
+	---- Comments --------------------------------------------------------
+
+	Uses DQ query to determine possible duplicates.  Search is only
+	against CIF records with same name, then query used to further
+	qualify.
+
+	Note that query form must use variables in the form of
+	<<VAR("column_name")>> for tests.  The query will be converted
+	to SQL WHERE syntax and the variables to host variable name
+	format.  The query can only reference the CIF table.
+
+	Also note that <<VAR("NAM")>> must be in the query.
+	
+	NOTE:  The cif.pers flag must be passed in CIFDATA if CIFDATA
+	       is used and the generated code is expected to work for
+	       non-personal accounts.
+
+	There are two sections of this procedure:
+
+		. SEARCH - to perform the search for duplicates
+		. COMPILE - to compile the runtime checking routine, ^DUPLCIF1
+
+
+ 	---- Revision History ------------------------------------------------
+ 	
+ 	01/23/05 - RussellDS - CR14643
+ 		   Corrected logic.  Resolve PSL warnings.
+ 		   
+ 		   Remove old revision history.
+	*/
+
+	quit	
+
+
+private SEARCH(String CIFDATA, String XACN)	//  Duplicate Customer Search
+		
+	/*
+	This procedure is called by the CIF filer to compare
+	records on file with the record currently being created.
+
+	It is also called by the PFW to search for duplicate customers in
+	the system based on user defined QUERY.
+	
+	ARGUMENTS:
+		. CIFDATA    			/NOREQ/MECH=VAL
+	  	  Values of the Data Items defined in the search Criteria
+	  	  for the new account.  Must be in alpha order by column name
+
+		. XACN				/MECH=REFARR:W 
+		  CIF numbers and names that satisfy search criteria.
+		  XACN(ACN)=ACN_TAB_CIF.NAM
+
+	INPUT:
+		. ACN				/TYP=N/NOREQ
+		  CIF number.  Required if CIFDATA is not
+		  provided since will use to retrieve info
+		  on this ACN for testing.
+
+	*/
+	
+	type public Boolean ER
+	type public Number ACN
+	
+	// No query entered in user table for ~p1
+	if 'Db.isDefined("UTBLDUPCIF","SEQ=1") do Runtime.setErrMSG("UTBLDUPCIF",3562,"UTBLDUPCIF") quit:ER
+	
+	// No query entered in user table for ~p1
+	type RecordUTBLDUPCIF dupcif=Db.getRecord("UTBLDUPCIF","SEQ=1")
+	if dupcif.query.isNull() do Runtime.setErrMSG("UTBLDUPCIF",3562,"UTBLDUPCIF") quit:ER
+	
+	// Missing ~p1
+	if CIFDATA.get().isNull(), ACN.get().isNull() do Runtime.setErrMSG("ACN",3113,"ACN") quit:ER
+
+	do ^DUPLCIF1(CIFDATA.get(), .XACN, ACN.get())
+	
+	quit
+
+
+private COMPILE	// Compile ^DUPLCIF1 used for run-time checking for duplicates
+
+	/* Arguments for ^DUPLCIF1 are:
+		. CIFDATA    		/TYP=T/REQ/MECH=VAL
+	  	  Values of the Data Items defined in the search Criteria
+	  	  for the new account.  Must be in alpha order by column name.
+		  Will always be passed to DUPLCIF1, but may be null.
+
+		. XACN			/TYP=T/MECH=REFARR:W 
+		  CIF numbers and names that satisfy search criteria.
+		  XACN(ACN)=ACN_TAB_CIF.NAM
+
+		. ACN			/TYP=N/NOREQ
+		  CIF number.  Required if CIFDATA is not
+		  provided since will use to retrieve info
+		  on this ACN for testing.
+	*/
+
+	type public Boolean ER
+	type public String %MSKC, RM
+	
+	type Number I, LNMNUM, NAMNUM, PERSNUM
+	type String CMPERR(), CODE(), DQQRY(), LINE, LNMNAM, N, QRYID, TAB
+	type String VARS, VARS(), WHERE
+	
+	catch error {
+		do ZE^UTLERR
+		set ER=1
+		}
+		
+	// No query entered in user table for ~p1
+	if 'Db.isDefined("UTBLDUPCIF","SEQ=1") do Runtime.setErrMSG("UTBLDUPCIF",3562,"UTBLDUPCIF") quit:ER
+	
+	type RecordUTBLDUPCIF dupcif=Db.getRecord("UTBLDUPCIF","SEQ=1")
+	if dupcif.query.isNull() do Runtime.setErrMSG("UTBLDUPCIF",3562,"UTBLDUPCIF") quit:ER
+
+	set QRYID=dupcif.query
+	set ER=0
+	set TAB=$C(9)
+
+	// I18N=OFF
+	
+	do addcode("private DUPLCIF1(String CIFDATA, String XACN() , Number ACN)"_TAB_"// Duplicate CIF Checking Compiled Program")
+	do addcode(TAB_"// Last compiled:  "_%CurrentDate.toString()_" "_%CurrentTime_" - "_%UserID.get())
+	do addcode("")
+	do addcode(TAB_"// THIS IS A COMPILED ROUTINE.  Compiled by procedure DUPLCIF")
+	do addcode("")
+	do addcode(TAB_"// See COMPILE^DUPLCIF for argument definitions")
+	do addcode("")
+
+	/* The approach used is to parse the query and extract the variables that
+	   are used.  The variables must be in the form of <<VAR("column_name")>>.
+	   These will be replaced by VAR# and then the VAR# values will be set to
+	   either the data in CIFDATA, if that is provided, or else the data from
+	   CIF for ACN.
+	*/
+
+	// Load the query
+	type ResultSet dbtbl4rs
+	set dbtbl4rs=Db.select("SEQ,LINE","DBTBL4D","LIBS='SYSDEV' AND QID=:QRYID AND SEQ > 0")
+	
+	// Incomplete query - ~p1
+	if dbtbl4rs.isEmpty() do Runtime.setErrMSG("DBTBL4D",3559,"QRYID") quit:ER
+
+	set VARS=0
+
+	while dbtbl4rs.next() do {
+		type String qryline
+		set qryline=dbtbl4rs.getCol(2)
+		set DQQRY(dbtbl4rs.getCol(1))=$$getvars(qryline,.VARS)
+	}
+
+	// Generate variable list
+	set (LNMNUM, PERSNUM) = ""
+	set LINE="type String LNAME, NACN, PERS, XNAME,"
+	set N=""
+	for  set N=VARS(N).order() quit:N.isNull()  do {
+		set LINE=LINE_"VAR"_VARS(N)_","
+		if N="NAM" set NAMNUM=VARS(N)		// Save variable number for CIF.NAM
+		if N = "LNM" set LNMNUM = VARS(N)	// Variable for CIF.LNM, if have it
+		if N = "PERS" set PERSNUM = VARS(N)	// Variable for CIF.PERS, if have it
+	}
+	set LINE=LINE.extract(1,LINE.length()-1)		// Remove trailing comma
+	do addcode(TAB_LINE)			// New variables
+	do addcode("")
+	do addcode(TAB_"set LNAME = """"")
+	do addcode(TAB_"set PERS = 0")
+	
+	// Generate data load info, either from CIF record or CIFDATA	
+	do addcode(TAB_"if CIFDATA.isNull() do {")
+	do addcode(TAB_TAB_"type RecordCIF cif=Db.getRecord(""CIF"",""ACN=:ACN"")")
+	do addcode(TAB_TAB_"set LNAME = cif.lnm")
+	do addcode(TAB_TAB_"set PERS = cif.pers")
+	set N=""
+	for  set N=VARS(N).order() quit:N.isNull()  do {
+		set LINE="set VAR"_VARS(N)_"=cif."_N.lowerCase()
+		do addcode(TAB_TAB_LINE)
+	}
+	do addcode(TAB_"}")
+
+	do addcode(TAB_"else  do {")
+	for I=1:1 set N=VARS(N).order() quit:N.isNull()  do {
+		set LINE="set VAR"_VARS(N)_"=CIFDATA.piece($C(9),"_I_")"
+		set LINE=LINE_TAB_"// CIF."_N
+		do addcode(TAB_TAB_LINE)
+	}
+	if 'LNMNUM.isNull() do addcode(TAB_TAB_"set LNAME = VAR"_LNMNUM)
+	if 'PERSNUM.isNull() do addcode(TAB_TAB_"set PERS = VAR"_PERSNUM)
+	do addcode(TAB_TAB_"if LNAME.isNull() do {")
+	do addcode(TAB_TAB_TAB_"if (PERS > 0) set LNAME = VAR"_NAMNUM)
+	do addcode(TAB_TAB_TAB_"else  set LNAME = VAR"_NAMNUM_".piece("" "",2).upperCase()")
+	do addcode(TAB_TAB_"}")
+	do addcode(TAB_"}")
+	do addcode("")
+	
+	// Construct XNAME
+	do addcode(TAB_"set XNAME = $$XNAME^XALPHA(VAR"_NAMNUM_", LNAME)")
+
+	// Create WHERE clause from query and add XNAME for index lookup
+	set WHERE=$$WHERE^SQLCONV(.DQQRY,"CIF")
+	quit:ER
+
+
+	if WHERE["$$UPPER^%ZFUNC" set WHERE = WHERE.replace("$$UPPER^%ZFUNC", "UPPER")
+	if WHERE["$$LOWER^%ZFUNC" set WHERE = WHERE.replace("$$LOWER^%ZFUNC", "LOWER")
+
+	set WHERE="XNAME=:XNAME AND ("_WHERE_")"
+
+	do addcode(TAB_"type ResultSet cifrs=Db.select(""ACN,NAM"",""CIF"","""_WHERE_""")")
+	do addcode(TAB_"if cifrs.isEmpty() quit")
+	do addcode(TAB_"while cifrs.next() do {")
+	do addcode(TAB_TAB_"set NACN=cifrs.getCol(""ACN"")")
+	do addcode(TAB_TAB_"if NACN'=ACN.get() set XACN(NACN)=NACN_$C(9)_cifrs.getCol(""NAM"").upperCase()")
+	do addcode(TAB_"}")
+
+	do addcode("")
+	do addcode(TAB_"quit")
+
+	// Build compiled routine
+	do BUILDRTN^UCGM(.CODE,"DUPLCIF1",.CMPERR)
+	if (CMPERR.data() > 0) do {
+		type String N
+		set N=""
+		for  set N=CMPERR(N).order() quit:N.isNull()  do {
+			if 'ER set ER=1,RM=CMPERR(N)
+			write CMPERR(N),!
+		}
+	}
+	
+	//Completed at ~p1
+	if 'ER set ER="W",RM=$$^MSG(591,$$TIM^%ZM(%CurrentTime,%MSKC.get()))
+
+	quit 
+
+
+getvars(LINE,VARS)	// Get variables and replace them in the line
+
+	/* VARS=count of number of variables
+	   VARS(column_name)=number of variable for this column
+
+	   Convert $UPPER and $LOWER to valid SQL functions UPPER and LOWER
+	*/
+
+	type String COL,NEWLINE,VAR
+
+	set NEWLINE=""
+
+	for  quit:LINE'["<<"  do {
+		set NEWLINE=NEWLINE_LINE.piece("<<",1)
+		set VAR=LINE.piece("<<", 2).piece(">>", 1)
+		set LINE=LINE.piece(">>", 2, 999)
+		set COL=VAR.piece($C(34), 2)
+		if (VARS(COL).data() = 0) do {
+			set VARS=VARS+1
+			set VARS(COL)=VARS
+		}
+		// Replace variable syntax with new name
+		set NEWLINE=NEWLINE_"<<VAR"_VARS(COL)_">>"
+	}
+
+	set NEWLINE=NEWLINE_LINE
+
+	quit NEWLINE
+
+
+addcode(String LINE)	// Add new line to CODE arry
+
+	type public String CODE()
+
+	set CODE(CODE("").order(-1) + 1)=LINE
+	
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60032^44835^Marie Mbui^8105"	// Signature - LTD^TIME^USER^SIZE

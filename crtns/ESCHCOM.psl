@@ -1,0 +1,211 @@
+ESCHCOM		/*
+	PROCEDURE:  ESCHCOM
+	ORIG: Bill Greene - 12/17/1990
+	DESC: Escheat run-time query compiler
+
+	---- Comments --------------------------------------------------------
+
+	This procedure builds the run time routine, ESCHEAT.
+
+	Core code from ESCHCOR is combined with escheat queries at DATA-QWIK
+	level 4 (e.g., ESCHPA, ESCHNY) by this procedure and compiled into
+	the ESCHEAT routine.
+
+	If escheat queries are changed, added, or deleted, this procedure
+	must be re-run to re-generate a new version of ^ESCHEAT.
+
+	RETURNS:
+		. ER		Error flag	/TYP=L
+
+		. RM		Error message	/TYP=T
+
+ 	---- Revision History ------------------------------------------------
+
+	01/08/05 - Mugilvannan - CR16619
+		   Modified the procedure to continue compilation even if 
+		   error occurs and the routine ^ESCHEAT will be updated. 
+		   Warning messages will be displayed at the end for all 
+		   the errors occurred.
+	
+	01/06/04 - CARROLLJ - CR7658
+		   Added #ACCEPT in BLDQRY section.
+
+	04/28/02 - Dan Russell
+		   Rewrote from M to PSL.  Modified to generate PSL code
+		   and compile that to M, instead of going directly to M.
+
+		   Eliminated prompt screen.  Now just compiles in all
+		   escheat related queries (from CUVAR.ESCHEAT and from
+		   UTBLESCHEAT).
+
+		   Removed old change history.
+	*/
+
+
+	type public Number LINENO,TAGS
+	type public String CMPERR,CODE,STATES,QUERYID,TAB
+	type public String RM(),QUERIES()
+	type public Boolean ER
+	
+	// Catch GT.M errors
+	catch error {
+		do ZE^UTLERR
+		set ER=1
+		}
+
+	set ER=0
+
+	// See if using default escheat query -- if so, all use this, otherwise
+	// get list of unique queries for the states
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+	if cuvar.escheat'="" set QUERIES(cuvar.escheat)="Default,"
+	else  do {
+		type ResultSet utblesrs=Db.select("KEY,QUERY","UTBLESCHEAT","QUERY IS NOT NULL")
+		if 'utblesrs.isEmpty() while utblesrs.next() do {
+			new QUERYID,STATE
+			set STATE=utblesrs.getCol(1)
+			set QUERYID=utblesrs.getCol(2)
+			set QUERIES(QUERYID)=$G(QUERIES(QUERYID))_STATE_","
+			set STATES(STATE)=QUERYID
+		}
+	}
+
+	// Query not found
+	if '$D(QUERIES) set ER=1,RM=$$^MSG(2297) quit
+
+	do ^ULODTMPL("ESCHCOR","CODE",,.TAGS)
+
+	set TAB=$C(9)
+	set CODE(1)="public ESCHEAT(CID,RecordDEP dep)"_TAB_"// "_$$DAT^%ZM(%CurrentDate,$G(%MSKD))_" "_$$TIM^%ZM_" - "_%UID
+	set CODE(2)=TAB_"// Escheat query routine compiled by ESCHCOM from ESCHCOR"
+
+	// Loop through the queries and build them into
+
+	set LINENO=TAGS("QUERIES")		// Starting line to add code
+	kill CODE(LINENO)			// Remove QUERIES tab line
+	set QUERYID=""
+	for  set QUERYID=$O(QUERIES(QUERYID)) quit:QUERYID=""  do {
+		// Remove trailing comma from state list
+		set QUERIES(QUERYID)=$E(QUERIES(QUERYID),1,$L(QUERIES(QUERYID))-1)
+		do BLDQRY
+		if ER set RM($O(RM(""),-1)+1)=RM,ER=0,RM=""
+	}
+
+	
+	// Attempt to build the routine
+	do BUILDRTN^UCGM(.CODE,"ESCHEAT",.CMPERR)
+
+	if CMPERR.exists() do { quit
+		new N
+		// Escheat program not compiled
+		set RM(1)=$$^MSG(1000)
+		write RM(1),!
+		set N=""
+		for  set N=$O(CMPERR(N)) quit:N=""  do {
+			set RM(N+1)=CMPERR(N)
+			write CMPERR(N),!
+		}
+		set ER=1
+	}
+
+	// Successfully compiled, return success message and any warnings
+
+	// ESCHEAT program compiled
+	write $$BTM^%TRMVT
+	write $$MSG^%TRMVT($$^MSG(8351),0,1)
+
+	// If not using default query, check for states without queries
+	if cuvar.escheat="" do {
+		// Check for any states in branch table but with no
+		// queries.  Not an error, just info
+		
+		type ResultSet stblcntry1=Db.select("STATE","STBLCNTRY1","CNTRY='US'")
+		quit:stblcntry1.isEmpty()
+
+		while stblcntry1.next() do {
+			new STATE
+			set STATE=stblcntry1.getCol(1)
+
+			// No Escheat query for state of ~p1 (Branch ~p2)
+			if '$D(STATES(STATE)) set RM($O(RM(""),-1)+1)=$$^MSG(5619,STATE)
+		}
+	}
+
+		
+	if RM(1).exists() do {
+	
+
+		type public String HDG,X,MSG
+		type public Number HL,I
+		
+		// Escheat Analysis Routine is replaced with below warning
+		
+		set HDG=$$^MSG(3558)
+		set HL=(80-HDG.length())/2
+		set HDG=$J("",HL)_HDG
+		write $$CLEAR^%TRMVT
+		write $$MSG^%TRMVT(HDG,0,0,1,1)
+		for I=1:1 quit:'$D(RM(I))  set MSG(I)=RM(I)
+		set X="" 
+		for I=0:1 set X=$O(MSG(X)) quit:X=""  do {
+			if I>19 do {
+				set I=0
+				write $$BTM^%TRMVT
+				write $$MSG^%TRMVT("",0,1)
+				write $$CLEAR^%TRMVT
+				write $$MSG^%TRMVT(HDG,0,0,1,1)
+			}
+		write $$MSG^%TRMVT(MSG(X),0,0,10,3+I)
+		}
+		write $$BTM^%TRMVT
+		write $$MSG^%TRMVT("",0,1)
+		kill RM
+	}
+	do TEST^ESCHEAT   		; Force test account input
+	quit
+
+
+BLDQRY	// Private - Build query code
+
+	type public Number N,LINENO
+	type public String PRIMTBL,PSLOBJ,PSLQRY,TABLES,QUERYID,TAB,RM
+	type public Boolean ER
+	type public String CODE(),QUERIES()
+
+	set CODE(LINENO)=QUERYID_"(RecordDEP dep)"_TAB_"// "_QUERIES(QUERYID)
+	set LINENO=LINENO+.0001
+
+	// Convert query to PSL code
+	do ^UCQRYBLD(QUERYID,"DEP=dep",.TABLES,.PSLOBJ,.PSLQRY)
+	quit:ER				// Invalid query
+	// Incomplete query - ~p1
+	if $G(TABLES)="" set ER=1,RM=$$^MSG(3559,QUERYID) quit
+
+	set PRIMTBL=$P(TABLES,",",1)
+	// Incomplete query - ~p1 - Select ~p1 for primary file ID
+	if PRIMTBL'="DEP" set ER=1,RM=$$^MSG(3559,QUERYID)_" - "_$$^MSG(2470,"DEP") quit
+
+	set N=""
+	// Insert lines to instantiate new objects
+	for  set N=$O(PSLOBJ(N)) quit:N=""  do {
+		set CODE(LINENO)=TAB_PSLOBJ(N,1)
+		set LINENO=LINENO+.0001
+	}
+
+	// Insert the query lines
+	for  set N=$O(PSLQRY(N)) quit:N=""  do {
+		set CODE(LINENO)=TAB_"if "_PSLQRY(N)
+		set LINENO=LINENO+.0001
+		set CODE(LINENO)=TAB_"else  quit"
+		set LINENO=LINENO+.0001
+		}
+
+	set CODE(LINENO)=TAB_"quit"
+	set LINENO=LINENO+.0001
+	set CODE(LINENO)=""
+	set LINENO=LINENO+.0001
+	set CODE(LINENO)=" #accept PGM=echeat compiler;date=1/6/2004"
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60128^54166^Saravanamuthu Mugilvannan^5432"	// Signature - LTD^TIME^USER^SIZE

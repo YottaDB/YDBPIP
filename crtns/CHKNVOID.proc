@@ -1,0 +1,377 @@
+CHKNVOID	// Void non-issued checks
+	/*
+	   ORIG:  Laura Hillanbrand - 04/30/93
+
+	  ---- Revision History ------------------------------------------------
+
+	   11/04/05 - PUTTASWH - CR17011
+	   	      Deleted the reference to XCHKREG table in section SET.
+	   	      
+	   12/02/03 - CARROLLJ - CR7239
+		      Added #ACCEPT prior to setting %SystemDate to correct
+		      compile errors.
+
+	   06/04/2002 - TELIV - 49794
+			Converted to PSL
+
+	   04/03/00 - TANY - 37915
+	              Optimized performance by modifying ^SCADAT1 calls
+	              to ^SCAJD. Also remove revision history older than
+	              one year.
+
+	  ------------------------------------------------------------------------
+
+	*/	
+		
+	new BRCD,BRCDTBL,CKNO,CKTYP,IO,IOTBL,MAX,MEMO,TYPETBL,x
+	new %SystemDate
+
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+
+	set %CHKFMT=cuvar.chkpnt
+	#ACCEPT DATE=12/02/03;PGM=John Carroll
+	set %SystemDate=cuvar.tjd
+	set CO=cuvar.gls
+	
+	if %CHKFMT'="",%CHKFMT'["^" set %CHKFMT="^"_%CHKFMT
+
+	kill OLNTB 
+	set (ER,STS)=0
+
+
+	set %TAB("TJD")=".TJD4/XPP=do POSTJD^CHKNVOID"
+	set %TAB("BRCD")=".BRCD1/TBL=BRCDTBL(/XPR=do TBLBRCD^CHKNVOID"
+	set %TAB("CKTYP")=".CHKTYP1/TBL=TYPETBL(/XPR=do TBLTYPE^CHKNVOID/XPP=do PPTYP^CHKNVOID"
+	set %TAB("CKNO")=".CKNB1/XPR=do CKNO^CHKNVOID/XPP=do PPCKNO^CHKNVOID"
+	set %TAB("MAX")=".CHKE1/XPP=do PPCKNO^CHKNVOID"
+	set %TAB("MEMO")=".MEMO1"
+	set %TAB("IO")=".IO4/XPP=do PPIO^CHKNVOID/TBL=IOTBL("
+
+	set %READ="@@%FN,,,TJD/REQ,BRCD/REQ,CKTYP/REQ,IO/REQ,CKNO/REQ,MAX/REQ,MEMO"
+	do ^UTLREAD 
+	if VFMQ="Q" do END quit
+
+
+INIT	// Process the check number
+
+	// Third party PDOs
+	set PDO=0
+	type ResultSet rs=Db.select("CID","PDO",,"CID")
+	if rs.next() set PDO=1
+
+	set %EffectiveDate=%SystemDate
+	set RF=0
+	set SAVCKNO=CKNO
+	
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")	
+
+	set ADDR=cuvar.ccity_$C(9)_cuvar.cstate_$C(9)_cuvar.czip_$C(9)_cuvar.cad1
+	set ADDR=ADDR_$C(9)_cuvar.cad2_$C(9)_cuvar.cad3_$C(9)_cuvar.cname
+	set ADDR=ADDR_$C(9)_cuvar.ccntry
+
+	for I=2:1:5 set BKAD(I)=""
+
+	set CSZ=$P(ADDR,$C(9),1)_", "_$P(ADDR,$C(9),2)_" "_$P(ADDR,$C(9),3)_"  "_$P(ADDR,$C(9),8)
+	set BKAD(1)=$P(ADDR,$C(9),7)
+
+	for I=4:1:6 set BKAD(I-2)=$P(ADDR,$C(9),I)
+
+	// Compress bank address
+	for I=2:1:5 if BKAD(I)="" set BKAD(I)=CSZ quit
+
+	set TOTWHD=0 
+	set TOT=0 
+	set CKNO=CKNO-1
+	do OPEN^SCAIO use IO
+
+        catch vERROR {
+                new ET,RM
+                set ET=vERROR.type
+ 
+                if ET["%GTM-" do { quit
+                        do ZE^UTLERR
+                        }
+ 
+                set ET=ET_"-"_vERROR.thrownAt
+                set RM=vERROR.description
+                do ^UTLERR
+                }
+
+
+	set PGM="INIT"_%CHKFMT do @PGM
+	
+	do INIT2
+	quit
+
+
+INIT2	//
+	
+	do TEST
+
+	set STS=1 
+	set CKSTS=0
+	do END
+
+	quit
+
+
+POSTJD	// Post processor for date
+
+	if $G(X)="" quit
+	set %DS=X
+
+	// Invalid date
+	set %JD=$$^SCAJD(%DS) if %JD<0 set ER=1 set RM=$$^MSG(1308) quit
+
+	quit
+
+
+CKNO	// Pre processor for CKNO
+
+	set CKNO=""
+	quit
+
+
+PPCKNO	// Post-processor for check number
+
+	if $G(X)="" quit
+
+	type ResultSet rs=Db.select("CKNO","CHKREG1","CO=:CO AND GL=:GL AND CKNO=:X")
+	if rs.next() do { quit
+
+		// Check ~p1 exists in check register
+		set ER=1 set RM=$$^MSG(544,X)
+		}
+
+	// If check outside range for this printer, display range
+	type RecordCHKDEVP chkdevp=Db.getRecord("CHKDEVP","DEVICE=:IO")
+
+	// Use check number between ~p1 and ~p2
+	if (X<chkdevp.begnum)!(X>chkdevp.endnum) set ER=1 set RM=$$^MSG(2824,chkdevp.begnum,chkdevp.endnum) quit
+
+	/* 
+	Ending check number must be greater than or equal to starting check 
+	number
+	*/
+	if CKNO,CKNO>X set ER=1 set RM=$$^MSG(895)
+	
+	quit
+
+
+PPIO	// Post-processor for IO device
+
+	set ER=0
+	if $G(X)=""!('$D(IOTBL(X))) quit
+	set %EXT=1 do ^SCAIO if $G(ER) quit
+	
+	// Make sure IO Device is a continuous form printer, if not an RMS file.
+	
+	if IO'["." do {
+		if (IOTYP'="PTR") set ER=1
+		else  do {
+			type RecordCRADENIO cradenio
+			type ResultSet rs=Db.select("IONAME","CRADENIO",,"IONAME")
+			while rs.next() do { quit:ER
+				set N=rs.getCol(1)
+				set cradenio=Db.getRecord("CRADENIO","IONAME=:N")
+				if cradenio.devname=X set ER=1
+				}
+			}
+		}
+
+	// Must be continuous form printer
+	if $G(ER) set RM=$$^MSG(1805) quit
+
+	type RecordCHKDEVP chkdevp=Db.getRecord("CHKDEVP","DEVICE=:IO")
+	
+	// No checks loaded on ~p1
+	if chkdevp.ctype="" set ER=1 set RM=$$^MSG(1914,IO) quit
+
+	// Wrong check type for device
+	if CKTYP'=chkdevp.ctype set ER=1 set RM=$$^MSG(2982,IO) quit
+
+	set BEGN=chkdevp.begnum
+	set ENDN=chkdevp.endnum
+	set DEF=chkdevp.def
+
+	// No checks loaded on printer
+	if BEGN'<ENDN set ER=1 set RM=$$^MSG(1913)
+	quit
+
+
+PPTYP	// Post processor for TYPE
+
+	if $G(X)="" quit	
+
+	type RecordUTBLCHKS utblchks=Db.getRecord("UTBLCHKS","CHKS=:X",1)
+	if 'utblchks.getMode() quit
+	
+	type RecordXPDO1 xpdo1=Db.getRecord("XPDO1","TJD=:%SystemDate,CKTYP=:X",1)
+	if xpdo1.getMode() do { quit:ER	
+		// Currently printing
+		lock +XPDO(%SystemDate,X):2 
+		else  set ER=1 set RM=$$^MSG(686) quit
+		}
+
+	type ResultSet rs=Db.select("DEVICE","CHKDEVP","CTYPE=:X","DEVICE")
+	if rs.next() do {
+		set N=rs.getCol(1)
+		set IOTBL(N)=""
+		}
+
+	if $G(IO)="" do DEFIO^CHKPTINI
+
+	set FMT=utblchks.format
+	set CMT=utblchks.comm
+	set GL=utblchks.cid
+	set AP=utblchks.ap
+	set AEC=utblchks.aec
+	set IRA=utblchks.ira
+	set CONCHK=utblchks.conchk
+	set SRTOPT=utblchks.srtopt
+	set CHKFMT=FMT_%CHKFMT
+	set RM($O(RM(""),-1)+1)=IO_"|"_(NI+1)
+
+	quit
+
+TBLBRCD	// Create lookup table for valid UID for this CIF account
+	
+	new BRCD
+
+	kill BRCDTBL
+
+	type ResultSet rs=Db.select("DISTINCT BRCD","CHKALLOC","")
+
+	while rs.next() do {
+		set BRCD=rs.getCol(1)
+		set BRCDTBL(BRCD)=""
+		}
+
+	do CHANGE^DBSMACRO("TBL","BRCDTBL(")
+
+	quit
+
+TBLTYPE	// Create lookup table for valid TYPE for this CHKALLOC of branch BRCD
+	
+	new TYPE
+
+	kill TYPETBL
+
+	type ResultSet rs=Db.select("DISTINCT TYPE","CHKALLOC","BRCD=:BRCD")
+
+	while rs.next() do {
+		set TYPE=rs.getCol(1)
+		set TYPETBL(TYPE)=""
+		}
+
+	do CHANGE^DBSMACRO("TBL","TYPETBL(")
+
+	quit
+
+
+TEST	// Write test pattern
+
+	// I18N=OFF: Excluded from I18N Standards
+
+	for I=1:1:7 set NM(I)="Test name/address ***VOID***"
+
+	// I18N=ON: Included to I18N Standards
+
+	set (CKAMT1,IYTD,X)=0 
+
+	for I=1:1:5 set AMT(I)=X
+	new CID 
+	set CID="" 
+	set SS="000-00-0000"
+	
+	if CKNO>MAX quit
+	set MAXNO=MAX+1
+
+	// I18N=OFF
+	use IO if $D(AUXPTR),AUXPTR write $C(27)_"[5i"
+	// I18N=ON
+
+	type ResultSet rs=Db.select("CKNO","CHKREG1","CO=:CO AND GL=:GL AND CKNO>:CKNO AND CKNO<:MAXNO")
+
+	//reset to the value entered by the user
+	set CKNO=CKNO+1
+
+	while rs.next() do {
+		set CKNO1=rs.getCol(1)
+		set CKNO(CKNO1)=1
+		}
+
+	for CKNO=CKNO:1:MAX do {
+		//exists
+		if $D(CKNO(CKNO)) quit
+		do @CHKFMT do SET
+
+		if RF quit
+
+		// I18N=OFF
+		if $D(AUXPTR),AUXPTR write $C(27)_"[4i"_$C(17)
+		// I18N=ON
+		}
+
+	do CLOSE
+
+	quit
+
+
+SET	// Update check register files
+
+	type RecordCHKREG1 chkreg1	
+
+	type ResultSet rs=Db.select("CKNO","CHKREG1","CO=:CO AND GL=:GL AND CKNO=:CKNO")
+	if 'rs.next() do {
+
+		set chkreg1=Class.new("RecordCHKREG1")
+
+		set chkreg1.ckno=CKNO
+		set chkreg1.gl=GL
+		set chkreg1.co=CO
+		set chkreg1.tjd=%SystemDate
+		set chkreg1.efd=%EffectiveDate
+		set chkreg1.tamt=CHKAMT1
+		set chkreg1.payee="VOID"
+		set chkreg1.ctype=CKTYP
+		set chkreg1.status=2
+		set chkreg1.memo=$G(MEMO)
+
+		do chkreg1.bypassSave()		
+
+		}
+	
+	else  do {
+
+		set chkreg1=Db.getRecord("CHKREG1","GL=:GL,CO=:CO,CKNO=:CKNO")
+		set chkreg1.status=2
+		set chkreg1.uid=""
+		set chkreg1.trc=""
+		set chkreg1.cid=""
+		set chkreg1.payee="VOID"
+
+		do chkreg1.bypassSave()
+		
+		}
+	quit
+
+
+CLOSE	// Close file and exit
+
+	type RecordCHKDEVP chkdevp=Db.getRecord("CHKDEVP","DEVICE=:IO")
+	
+	if chkdevp.begnum=SAVCKNO do {
+		set chkdevp.begnum=CKNO
+		do chkdevp.bypassSave()
+		}
+	
+	do END
+	quit
+
+END	//
+	if $G(IO) do CLOSE^SCAIO
+	lock
+	quit
+
+vSIG()	quit "60220^23976^Hema Puttaswamy^7354"	// Signature - LTD^TIME^USER^SIZE

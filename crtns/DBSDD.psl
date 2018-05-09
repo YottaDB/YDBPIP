@@ -1,0 +1,1169 @@
+DBSDD	
+
+	// *******************************************************************
+	// * IMPORTANT NOTE:                                                 *
+	// * According to the rules that apply to PSL compiler upgrades,     *
+	// * the generated M routine associated with this procedure must be  *
+	// * checked into StarTeam and released with the procedure whenever  *
+	// * changes are made to this procedure.  The M routine from the     *
+	// * crtns directory should be used for this purpose.                *
+	// *                                                                 *
+	// * The M routine will be loaded to the mrtns directory during      *
+	// * upgrades and will then be removed from that directory as part   *
+	// * of the upgrade process.  Therefore, other during an upgrade,    *
+	// * an mrtns version of this routine should not exist.              *
+	// *                                                                 *
+	// * Keep these comments as single line to ensure they exist in the  *
+	// * generated M code.                                               *
+	// *******************************************************************
+		 
+	/*
+	This procedure contains a library of data dictionary related functions.
+	
+	NOTE:  Many of these functions are retained for backward compatability.
+	       Before using a function, review the documentation related to it
+	       and do not add a useage if it is going to be obsoleted.
+	
+	LIBRARY:
+		$$COLLIST	- Return list of columns from table
+		$$CVTREF	- Convert external reference to internal
+		$$DI		- Return record from dictionary for ddref
+		$$FINDINAM	- Find the next dictionary reference in string
+		fsn		- Load File Header Record
+		$$LIB		- Return base library reference for file
+		$$LIST		- Return data item list in file definition field order
+		PARSE		- Return MUMPS expression for ddref
+		$$VER		- Verify dictionary element 
+
+	---- Revision History -------------------------------------------------
+	06/26/06 - Pete Chenard - 22003
+		   Modified DI section to only call fsn section if the 
+		   fsn array is not defined already.
+		   
+	05/04/06 - RussellDS - CR21340
+		   Fix incorrect comment syntax in LIST header.
+		   
+		   Add accept for PSLBOOT qualifier.
+		   
+	03/22/06 - RussellDS - CR20234
+		   Fix incorrect comment syntax in COLLIST header.
+	
+	02/14/06 - RussellDS - CR19065
+		   Change reference to delimiter to use DBTBL1, not the 
+		   obsoleted delimiter from DBTBL1D.
+		   
+		   Eliminate isDefined() and getRecord() methods around
+		   DBTBL1, DBTBL1D, and STBLSYSKEYWD to better support
+		   bootstrapping.
+		   
+	12/06/05 - RussellDS - CR18400
+		   Created.
+
+	-----------------------------------------------------------------------
+	*/
+
+	quit			// No access from top
+	
+	
+public PARSE(String ddexpr,	// Dictionary Reference		/MECH=REF:RW
+	     String X,		// Parameter Record		/NOREQ/MECH=REF:RW
+	     String cmp(,),	// MUMPS computed expression	/MECH=REFARR:W
+	     String fsn(,),	// File attributes records	/NOREQ/MECH=REFARR:RW
+	     String frm,	// List of valid files		/NOREQ/DEL=$C(44)
+	     String vdd(),	// Dictionary Record		/NOREQ/MECH=REFAFF:RW
+	     String lvn,	// Local variable name		/NOREQ/MECH=REF:RW
+	     String vsub())	// Literal substitution value	/NOREQ/MECH=REFARR:R
+	     
+	/*
+	Translate Dictionary Reference to MUMPS Expression
+	
+	************************************************************************
+	* This subroutine is provided for backward compatability only.  No new *
+	* uses should be made of it and existing uses should be rewritten to   *
+	* standard PSL methods when appropriate.  Once all callers have been   *
+	* changed, this code should be removed.                                *
+	************************************************************************
+
+	Translate a DATA-QWIK dictionary reference to its corresponding
+	MUMPS expression.  The MUMPS expression is used in an assignment
+	statement to parse the selected field from a record held in
+	local storage.  Mapping is defined by the array name contained
+	in fsn(file) and the node, position, and subfield parameters
+	contained in vdd(ddref).
+
+	If fsn(file), vdd(ddref) and/or X are not passed to this utility
+	their values will be loaded from [DBTBL1] and [DBTBL1D] respectively.
+
+	RETURNS:
+		. NS		MUMPS assignment expression
+		. ER		(0,1) Error Flag
+		. RM 		Error message message (If ER=1)
+
+	EXAMPLES:
+
+		D PARSE^DBSDD("DEP.BAL","",.cmp,.fsn,"",.vdd)
+       		ZWR
+		ER=0
+		NS="$P(DEP(51),""|"",1)"
+		fsn("DEP")="DEP(|^ACN(CID|CID|10|0|^DEPFILE(%O)||||124|SYSDEV"
+		fsn("DEP",51)="DEP(51)"
+		vdd("SYSDEV,DEP")="SYSDEV.DEP"
+		vdd("SYSDEV.DEP.BAL")="51|12||BALANCE|||||$|Ledger Balance||||2|0|||
+		                       ||124|1|Ledger@Balance|1|1|55510|FSANCHEZ|BAL"
+ 	*/
+
+	type public Boolean ER
+	type public String NS, RM
+	
+	type Number del, fld
+	type String di, file, nod, sfd, typ
+	
+	set ER = 0
+	
+	if X.get().isNull() set X = $$DI(.ddexpr, .frm, .vdd(),.fsn())
+	else  set ddexpr = $$CVTREF(ddexpr, .frm)
+	
+	if ER set NS = "" quit
+
+	if vsub(ddexpr).exists() set NS = vsub(ddexpr) quit
+
+	set file = ddexpr.piece(".", 2)
+	set di = ddexpr.piece(".", 3)
+	
+	if 'fsn(file).exists() do fsn(.fsn(), file)
+
+	if 'frm.get().isNull(), '{List}frm.contains(file) set frm = frm_","_file
+	
+	set del = fsn(file).piece("|", 10)
+	set nod = X.piece("|", 1)
+	set fld = X.piece("|", 21)
+	set sfd = X.piece("|", 18)
+	set typ = X.piece("|", 11)
+	
+	if nod.isNull() set del = ""		// Needed for computed data items
+
+	// Return memo field internal expression
+	if (X.piece("|", 9) = "M") do {
+		
+		type String z
+		
+		set z = $$PARSE^DBSMEMO(file)
+ 		// Remove [TABLE] syntax
+		set X.piece("|", 16) = z.replace("["_file_"]", "")
+	}
+	
+	if 'X.piece("|", 16).isNull() do { quit
+	
+		if cmp(file,di).exists() set NS = cmp(file,di).piece("=", 1) if NS.beginsWith("S ") set NS = NS.extract(3, 999) quit
+		set NS = $$CMPUTED(X.piece("|", 16))
+	}
+
+	if X.piece("|", 1).isLike("%*%") do { quit		// Access keys
+		
+		if lvn.get().isNull() set NS = di
+		else  set NS = lvn
+	}
+	
+	if 'nod.isLiteral() do {
+	
+		if (fsn(file).piece("|", 4) = 1) set nod = " "	// Type 1
+		else  do {
+			
+			type String z
+			
+			set z = fsn(file).piece("|", 3)
+			set z = z.piece(",", z.length(","))
+			if (z = nod) set nod = " "
+			else  set nod = """"_nod_""""
+		}
+	}
+
+	set NS = fsn(file,nod).get().piece("|", 1)
+	
+	if NS.isNull() do {
+		
+		do lodnod(file, nod, .fsn(,))
+		set NS = fsn(file,nod).piece("|", 1)
+	}
+
+        // Apply MUMPS functions to array reference
+
+	if del set NS = "$P("_NS_","_$S(del<32:"$C("_del_")",1:""""_$C(del)_"""")_","_$S(fld:fld,1:1)_")"
+
+	if 'sfd.isNull(), 'sfd.translate("~0").isNull() do {
+		
+		type String sft, sfd1, sfd2, sfp
+		
+		set sft = sfd.piece("~", 1)
+		set sfd1 = sfd.piece("~", 2)
+		set sfd2 = sfd.piece("~",3)
+		set sfp = sfd.piece("~", 4)
+		
+		if sfd1 set sfd1 = {Number}sfd1.char()
+		if sfd2 set sfd2 = {Number}sfd2.char()
+
+		set NS = "$$GET^USUB("_NS_","""_sft_""","""_sfd1_""","""_sfd2_""","_+sfp_")"
+	}
+
+	if typ.beginsWith("B") set NS = "$A("_NS_")\"_$P("1/2/4/8/16/32/64/128","/",$E(typ,2))_"#2"
+
+	if NS.isNull() set NS=""""""
+	
+	quit
+
+
+CMPUTED(String cmpin)	// Computed expression
+
+	/*
+	Decode computed data items
+	*/
+	
+	type public Boolean ER
+	type public String cmp(,), di, file, frm, fsn(), lvn, RM, vdd(), vsub()
+	
+	type Number ptr
+	type String atom, cmpinuc, cmputed, dels, NS, return, tok
+	
+	if cmp(file,di).exists() do { quit return
+		
+		set return = cmp(file,di).piece("=", 1)
+		if return.beginsWith("S ") set return = return.extract(3, 999)
+	}
+
+	// Do not allow set or do in computed
+	set cmpinuc = $$UPPER^%ZFUNC(cmpin)
+	if (cmpinuc.beginsWith("S ") ! cmpinuc.beginsWith("D ")) do { quit ""
+		
+		set ER=1
+		// Invalid computed data item = 'di'
+		set RM = $$^MSG(8316, $$^MSG(595), file_"."_di)
+	}
+	
+        set cmputed = $$TOKEN^%ZS(cmpin, .tok)
+        set return = ""
+        set (ER, ptr) = 0
+        set dels = "[]+-*/\#_'=><\*(),!&:?"
+        
+	// Build the M expression
+	for  do { quit:('ptr ! ER)
+		
+		type String ddref
+	
+		set atom = $$ATOM^%ZS(cmputed, .ptr, dels, tok, 1) quit:ER
+	
+		// Handle pattern match operations
+		if (atom = "?") set return = return_"?"_$$ATOM^%ZS(cmputed, .ptr, dels, tok, 1) quit
+
+		if (dels [ atom) set return = return_atom quit
+		if atom.beginsWith("%") do { quit
+			
+			#ACCEPT Date=05/04/06; PGM=RussellDS; CR=20967
+			type ResultSet rs = Db.select("DES", "STBLSYSKEYWD", "KEYWORD=:atom", , , "/PSLBOOT")
+			
+			if rs.next() set return = return_rs.getCol("DES")
+		}
+
+		if ($A(atom) = 0) set return = return_$$UNTOK^%ZS(atom, tok) quit
+		if atom.beginsWith("$") set return = return_atom quit
+		if atom.isNumber() set return = return_atom quit
+		
+		// Should be column reference at this point
+		if 'Db.isSchemaColumn(file, atom) do { quit
+	
+			// Invalid Table Value
+			set RM = $$^MSG(7194)
+		}
+	
+		// Parse the column
+		set ddref = file_"."_atom
+		do PARSE(.ddref, "", .cmp(), .fsn(), .frm, .vdd(), .lvn, .vsub()) quit:ER
+		set return = return_NS
+		
+		if $$SIMPLFUN(NS) quit
+
+		if cmp(file).get().isNull() set cmp(file) = atom quit
+		
+		if '({List}cmp(file)).contains(atom) set cmp(file) = atom_","_cmp(file)
+	}
+	
+	if ER quit ""
+
+	set return = $$UNTOK^%ZS(return, tok)
+	
+	if $$SIMPLFUN(return) quit return
+	
+	if (return.beginsWith("D ", 1) ! return.beginsWith("DO ", 1)) set cmp(file, atom) = return quit di
+	
+	set lvn = di
+	
+	set cmp(file,di) = "S "_lvn_"="_return
+	
+	quit lvn
+	
+	
+public FINDINAM(String X,	// Input string
+		Number ptr)	// Current pointer location	/NOREQ/MECH=REF:RW
+		
+	/*
+	Find the next data item in a string
+
+	Will return the next element within the string X from the position
+	ptr that matches a valid data item syntax.  The data item syntaxes
+	that are supported are FID.DI [FID]DI and [LIB,FID]DI.  Valid
+	dictionary syntax is required (i.e., a leading Alpha or %) for
+	filenames and data items.  Found elements are not verified. 
+
+	RETURNS:
+		. $$		Dictionary Element
+	
+	EXAMPLE:
+	
+		S ptr=0,X="This is a [DEP]BAL, []BAD and LN.IRN test"
+		W $$FINDINAM^DBSDD(X,.ptr)
+		"[DEP]BAL"
+		W $$FINDINAM^DBSDD(X,.ptr)
+		"LN.IRN"
+		W $$FINDINAM^DBSDD(X,.ptr)
+		""
+	*/
+	
+	
+	// chrldr = valid first characters for file and data item names
+	// chrtbl = valid other characters for file and data item names
+
+	type literal String chrldr = "%ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	type literal String chrtbl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+
+	type Boolean isDone
+	type Number ptrz, s1,s2, y
+	type String ddref, return
+
+	// Check for comment field
+	set y=0 
+	for  set y = X.find(";", y) quit:y.isNull()  quit:X.extract(1,y-2).length("""")#2
+	
+	if y set X = X.extract(1, y-2)
+	
+	if 'ptr.get() set ptr = 1
+	
+	set (s1, s2) = ptr
+	set return = ""
+	set isDone = 0
+	
+	// Return linetag if found item is not legal
+	while 'isDone do {
+
+		for  set s1 = X.find("[", s1)  quit:X.extract(1, s1 - 1).length("""")#2
+		for  set s2 = X.find(".", s2)  quit:X.extract(1, s2 - 1).length("""")#2
+
+		if (s1 = 0), (s2 = 0) do { quit
+		
+			set ptr = X.length()
+			set return = ""
+			set isDone = 1
+		}
+
+		if (s1 <> 0) set ddref = "" do { quit:isDone
+			
+			type Number ptrz
+	
+			do {
+				quit:(chrldr '[ X.extract(s1))		// Invalid char
+	
+				for ptrz = s1:1:X.length() quit:(chrtbl '[ X.extract(ptrz))		; Scan for ,]
+				if (X.extract(ptrz) = ",") for ptrz = ptrz + 1:1:X.length() quit:(chrtbl '[ X.extract(ptrz))
+				quit:((X.extract(ptrz) '= "]") ! (ptrz = X.length()))
+				quit:(chrldr '[ X.extract(ptrz + 1))	// Invalid dinam
+				for ptrz = ptrz + 2:1:X.length() + 1 quit:(chrtbl '[ X.extract(ptrz))
+				set s1 = s1-1
+				set ddref = X.extract(s1, ptrz - 1)
+			}
+		
+			if 'ddref.isNull() do {
+		
+				set ptr = ptrz - 1
+			
+				if ((s1 < s2) ! (s2 = 0)) do {
+				
+					set return = ddref
+					set isDone = 1
+				}
+			}
+		}
+
+		if (s2 <> 0) do {
+		
+			set ddref = ""
+
+			quit:(s2 '< X.length())
+			quit:(chrldr '[ X.extract(s2))			// Invalid Dinam
+			quit:(chrtbl '[ X.extract(s2 - 2))		// Invalid file
+	
+			set ptrz = s2 - 3
+			for s2 = s2 + 1:1:X.length() + 1 quit:(chrtbl '[ X.extract(s2))
+			for ptrz = ptrz:-1:0 quit:(chrtbl '[ X.extract(ptrz))
+			set ptr = s2 - 1
+			quit:(chrldr '[ X.extract(ptrz + 1))		// Invalid 1st
+			if (ptrz <>0), (".?" [ X.extract(ptrz)) quit	// Pattern Match
+			set ddref = X.extract(ptrz + 1, s2 - 1)
+		
+			if 'ddref.isNull() do {
+		
+				set return = ddref
+				set isDone = 1
+			}
+		}
+	
+		if (s1 = 0) set s1 = X.length()
+		if (s2 = 0) set s2 = X.length()
+	}
+	
+	quit return
+
+
+SIMPLFUN(String X)	// Reference to check
+
+	/*
+	Parse String & Determine if it contains a Do or Extrinsic
+	*/
+
+	if X.beginsWith("$$") quit 0
+	if (X.translate(" ^", "") '= X) quit 0
+	
+	quit 1
+
+
+public LIB(String file,		// File name
+	   String libr,		// Library name [*]
+	   String fsn(),	// File attributes records	/NOREQ/MECH=REFARR:RW
+	   String vdd())	// Dictionary records		/NOREQ/MECH=REFARR:RW
+	   
+	/*
+	Resolve implicit reference for file and library
+
+	NOTE that this has been modified to just deal with SYSDEV library and
+	no implicits.
+	
+	************************************************************************
+	* This subroutine is provided for backward compatability only.  No new *
+	* uses should be made of it and existing uses should be rewritten to   *
+	* standard PSL methods when appropriate.  Once all callers have been   *
+	* changed, this code should be removed.                                *
+	************************************************************************
+
+	ARGUMENT NOTES:
+		. libr		Not used.  Always SYSDEV now.
+				Retained for backward compatibility
+
+	RETURN: 
+		. $$		Library.file (Implicit resolved)
+		. ER		(0,1) Error Flag
+		. RM		Error message message (If ER=1)
+	*/
+	
+	type public Boolean ER = 0
+	type public String RM
+	
+	type String X
+	
+	if file.get().isNull() do { quit ""
+		
+		set ER = 1
+		// Null file
+		set RM = $$^MSG(2075)
+	}
+	
+	set X = "SYSDEV,"_file
+
+	if vdd(X).exists() quit vdd(X)
+	
+	if 'fsn(file).exists() do fsn(.fsn(), file) if ER quit ""
+	
+	set vdd(X) = "SYSDEV."_file
+	
+	quit vdd(X)
+
+
+public DI(String ddexpr,	// Dictionary reference		/MECH=REF:RW
+	  String frm,		// List of valid files		/NOREQ
+	  String vdd(),		// Dictionary records		/NOREQ/MECH=REFARR:RW
+	  String fsn())		// File attribute records	/NOREQ/MECH=REFARR:RW
+	  
+	/*
+	Return Dictionary Record from [DBTBL1D]
+
+	Returns a dictionary record from [DBTBL1D].  Also place it into
+	vdd(ddref) for subsequent access - Looks for existence in vdd
+	first.
+
+	RETURN:
+		. $$		Dictionary Record
+				NOD,LEN,DFT,DOM,TBL,PTN,XPO,XPR,TYP,DES,ITP,
+				MIN,MAX,DEC,REQ,CMP,FCR,OFS,SIZ,DEL,POS,RHD,
+				MNT,CNV,LTD,UID,MDD
+	
+		. ER		(0,1) Error Flag
+		. RM		Error message message (If ER=1)
+	*/
+	
+	type public Boolean ER = 0
+	type public String RM
+	
+	type Number delim
+	type String di, fid, return, sfd
+
+	set ddexpr = $$CVTREF(ddexpr, .frm, .fsn(), .vdd()) if ER quit ""
+	
+	if vdd(ddexpr).exists() quit vdd(ddexpr)
+	
+	set fid = ddexpr.piece(".", 2)
+	
+	if 'fsn(fid).exists() do fsn(.fsn(), fid, .vdd()) if ER quit ""
+	
+	set di = ddexpr.piece(".", 3)
+	
+	set ddexpr = "SYSDEV."_fid_"."_di
+	
+	if vdd(ddexpr).exists() quit vdd(ddexpr)
+	
+	type SchemaTable tableinfo
+	
+	set ER = '$$getTableInfo(fid, .tableinfo)
+	
+	if ER set delim = ""
+	else  set delim = tableinfo.columnDelimiter
+	
+	type SchemaColumn colinfo
+	
+	set ER = '$$getColInfo(fid, di, .colinfo)
+	
+	if ER do { quit ""
+	
+		// Invalid data item - ~p1
+		set RM = $$^MSG(1300, ddexpr)
+	}
+	
+	set sfd = colinfo.subfieldTag_"~"_colinfo.subfieldMajor_"~"_colinfo.subfieldMinor_"~"_colinfo.subfieldPosition
+	if (sfd.replace("~").isNull()) set sfd = ""
+
+	set return = colinfo.node_"|"_colinfo.length_"|"_colinfo.default_"|"_colinfo.userType
+	set return = return_"|"_colinfo.lookupTable_"|"_colinfo.pattern_"|"_colinfo.postProcExpr_"|"_colinfo.preProcExpr
+	set return = return_"|"_colinfo.dataType_"|"_colinfo.description_"|"_colinfo.internalType
+	set return = return_"|"_colinfo.minimum_"|"_colinfo.maximum_"|"_colinfo.precision_"|"_colinfo.isRequired
+	set return = return_"|"_colinfo.computation_"|"_(colinfo.masterfieldType>0)_"|"_sfd_"|"_colinfo.displaySize
+	set return = return_"|"_delim_"|"_colinfo.position_"|"_colinfo.reportHeader_"|"_colinfo.isSerial
+	set return = return_"|"_colinfo.conversionFlag_"|"_colinfo.dateUpdated_"|"_colinfo.userUpdated_"|"_colinfo.masterDictionary
+	set return = return_"|"_colinfo.isValidForExtraction_"|"_colinfo.preProcDataEntry_"|"_colinfo.postProcDataEntry_"|"_colinfo.isNullToZero
+
+	set vdd("SYSDEV,"_fid) = "SYSDEV."_fid		// Retain backward compatibility
+	set vdd(ddexpr) = return
+
+	quit return
+	
+
+public CVTREF(String ddref,	// Dictionary reference		/MECH=REF:R
+	      String frm,	// List of valid files		/NOREQ/DEL=$C(44)
+	      String fsn(),	// File attributes records	/NOREQ/MECH=REFARR:RW
+	      String vdd())	// Dictionary records		/NOREQ/MECH=REFARR:RW 
+	
+	/*
+	Convert dictionary references to LIB.FID.DI
+	
+	************************************************************************
+	* This subroutine is provided for backward compatability only.  No new *
+	* uses should be made of it and existing uses should be rewritten to   *
+	* standard PSL methods when appropriate.  Once all callers have been   *
+	* changed, this code should be removed.                                *
+	************************************************************************
+
+	Accepts a variety of data dictionary syntaxes and converts them
+	into a common extended representation.  This utility will accept
+	the input syntaxes FID.DI, [FID]DI, LIB.FID.DI and [LIB,FID]DI.
+	
+	If the parameter frm is provided, will also accept FNUM.DI and
+	DI.  FNUM is the relative file position in frm.  If DI is
+	found in multiple files, the first occurance will be used.
+
+	RETURN:
+		. $$		LIB.FID.DI
+		. ER		(0,1) Error Flag
+		. RM		Error message message	/COND
+	 
+	EXAMPLE:
+	
+		W $$CVTREF^DBSDD("DEP.BAL")
+		SYSDEV.DEP.BAL
+	
+		W $$CVTREF^DBSDD("[DEP]BAL")
+		SYSDEV.DEP.BAL
+	
+		W $$CVTREF^DBSDD("""DEP"".""BAL""")
+		SYSDEV.DEP.BAL
+	
+		W $$CVTREF^DBSDD("1.BAL","CID,DEP,HIST")
+		SYSDEV.DEP.BAL
+	*/
+
+	type public Boolean ER = 0
+	type public String RM
+	
+	set ddref = ddref.stripQuotes()
+
+	if ddref.beginsWith("[") do { if ER quit ""
+
+		if 'ddref.isLike("%]%") do {
+		
+			set ER = 1
+			// Invalid data item name - ~p1
+			set RM = $$^MSG(1300, ddref)
+		}
+		
+		set ddref = ddref.extract(2, 999).translate("],", "..")
+	}
+	
+	if (ddref.length(".") = 1) do {
+		
+		type Number I
+		type String fid
+	
+		if (frm.get().length(",") = 1) set ddref = frm.get()_"."_ddref quit
+	
+		for I = 1:1:frm.length(",") do {
+
+			set fid = frm.piece(",", I) quit:fid.isNull()
+			if 'fsn(fid).exists() do fsn(.fsn(), fid)
+			
+			if 'Db.isSchemaColumn(fid, ddref) do {
+
+				set ddref = "SYSDEV."_fid_"."_ddref
+				set I = frm.length()
+			}
+		}
+
+		if 'ddref.isLike("%.%") do {
+		
+			set ER = 1
+			// Invalid data item name - ~p1
+			set RM = $$^MSG(1300, ddref)
+		}
+	}
+
+	if (ddref.length(".") = 2) do {
+	
+		type String fid
+	
+		set fid = ddref.piece(".", 1)
+	
+		if +fid do { quit:ER
+			
+			set fid = frm.get().piece(",", fid)
+			if fid.isNull() do {
+				
+				set ER = 1
+				// Invalid file name ~p1
+				set RM = $$^MSG(1337, ddref)
+			}
+		}
+		else  if fid.isNull() do { quit
+			
+			set ER = 1
+			// Invalid data item name - ~p1
+			set RM = $$^MSG(1300, ddref)
+		}
+	
+		if 'frm.get().isNull(),'{List}frm.contains(fid) do { quit
+			
+			 set ER = 1
+			// Invalid file name ~p1
+			set RM = $$^MSG(1337, ddref)
+		}
+	
+		if 'fsn(fid).exists() do fsn(.fsn(), fid) quit:ER
+		
+		set ddref = fsn(fid).piece("|", 11)_"."_fid_"."_ddref.piece(".", 2)
+	}
+	
+	if ER quit ""
+	
+	if '$$VER(ddref, .vdd(), .fsn()) do { quit ""
+	
+		set ER = 1
+		// Invalid data item name - ~p1
+		set RM = $$^MSG(1300, ddref)
+	}
+	
+	quit ddref
+
+
+public SETVAL(String ddexpr,
+	      String value,
+	      String x,
+	      String fsn(),
+	      String vdd(),
+	      String ux(),
+	      Number scrseq)
+
+	/*
+	Set Value into Local Array
+
+	** STUB linetag for back compatibility with SETVAL^DBSDB - don't
+	** use that any more either
+	
+	************************************************************************
+	* This subroutine is provided for backward compatability only.  No new *
+	* uses should be made of it and existing uses should be rewritten to   *
+	* standard PSL methods when appropriate.  Once all callers have been   *
+	* changed, this code should be removed.                                *
+	************************************************************************
+	*/
+
+	do SETVAL^DBSDB(ddexpr, value, .x, .fsn(), .vdd(), .ux(), .scrseq)
+	
+	quit
+	
+
+public RETREC(String frm,
+	      String sel,
+	      String acc,
+	      Boolean ext,
+	      Number del,
+	      Number qwt,
+	      String fsn(),
+	      String vdd())
+	      
+	/*
+	Return database record
+	
+	** STUB linetag for back compatibility with RETREC^DBSDB - don't
+	** use that any more either
+	
+	************************************************************************
+	* This subroutine is provided for backward compatability only.  No new *
+	* uses should be made of it and existing uses should be rewritten to   *
+	* standard PSL methods when appropriate.  Once all callers have been   *
+	* changed, this code should be removed.                                *
+	************************************************************************
+	*/
+	
+	quit $$RETREC^DBSDB(frm, sel, .acc, .ext, .del, .qwt, .fsn(), .vdd())
+
+
+public RETVAL(String ddexpr,
+	      String acc,
+	      String buf(),
+	      Boolean vfy,
+	      String fsn(),
+	      String x,
+	      String vdd())
+	      
+	/*
+	Return Field Value from Database
+	
+	** STUB linetag for back compatibility with RETVAL^DBSDB - don't
+	** use that any more either
+	
+	************************************************************************
+	* This subroutine is provided for backward compatability only.  No new *
+	* uses should be made of it and existing uses should be rewritten to   *
+	* standard PSL methods when appropriate.  Once all callers have been   *
+	* changed, this code should be removed.                                *
+	************************************************************************
+	*/
+	
+	quit $$RETVAL^DBSDB(ddexpr, .acc, .buf(), .vfy, .fsn(), .x, .vdd())
+	
+	
+	
+public VER(String ddexpr,	// Dictionary reference		/MECH=REF:RW
+	   String vdd(),	// Dictionary records		/NOREQ/MECH=REFARR:RW
+	   String fsn())	// File header array		/NOREQ/MECH=REFARR:RW
+	   
+	/*
+	Verify the existence of a reference
+
+	Returns the truth flag of the existence of a dictionary element
+	reference in the table [DBTBL1D].
+
+	RETURNS:
+		. $$           Exists (1) or Not (0)  /TYP=L
+	
+	EXAMPLES:
+		W $$VER^DBSDD("DEP.BAL")
+		1
+		W $$VER^DBSDD("DOESN'T.EXIST")
+		0
+	*/
+
+	type Boolean return
+	type String di, file
+	
+	if ddexpr.beginsWith("[") set ddexpr = ddexpr.extract(2, 999).translate("],","..")
+
+	if (ddexpr.length(".") < 3) set ddexpr = "SYSDEV."_ddexpr
+
+	set file = ddexpr.piece(".", 2)
+	set di = ddexpr.piece(".", 3)
+
+	if (file.isNull() ! di.isNull()) set return = 0
+	else  set return = Db.isSchemaColumn(file, di)
+	
+	quit return
+
+
+public fsn(String fsn(),	// File header array [*]	/MECH=REFARR:RW
+	   String file,		// Table name
+	   String vdd())	// Dictionary records		/NOREQ/MECH=REFARR:RW
+	   
+	/*
+	Add a file header to the fsn(file) array
+
+	This subroutine loads file information into a record (fsn) to be used
+	by compilers and other utilities that require included information.
+	
+	KEYWORDS:	Data Dictionary
+	
+	ARGUMENT NOTES:
+		. fsn(file)	File Attributes Record	/NOREQ/MECH=REF:W
+	
+	  Local_Array|Global|Keys (nolits)|Record_Type|Location|Filer name|nolog|
+	     1          2          3           4          5       6     7
+	  Ref_TLD|Ref_UID|Delimiter|library|Existed indicator|Ref_TIM|system name
+	     8       9        10       11       12              13      14                                 
+	
+	EXAMPLES:
+	
+		fsn("CUVAR")="A(|^CUVAR(||10|2|"
+		fsn("DBTBL1D")="fDBTBL1D(|^DBTBL(%LIBS,1,FID,9,DI|%LIBS,FID,DI|1|2|^DBSDFF(%O)"
+		fsn("DEP")="DEP(|^ACN(CID|CID|10|1|^DEPFILE(%O)"
+		fsn("HIST")="fHIST(|^HIST(CID,TSEQ|CID,TSEQ|1|1|"
+	*/
+	
+	type public Boolean ER
+	type public String RM
+	
+	type Number I
+	type String acckeys, glref, keys, lvn, X
+
+	if file.get().isNull() do { quit
+		
+		set ER = 1
+		// Invalid NULL parameter for File
+		set RM = $$^MSG(8615)
+	}
+	
+	type SchemaTable tableinfo
+	
+	set ER = '$$getTableInfo(file, .tableinfo)
+	
+	if ER set RM = $$^MSG(1337,file) quit	// Invalid file name ~p1
+
+	set acckeys = tableinfo.primaryKeys
+	set keys = ""
+	for I = 1:1:acckeys.length(",") do {
+		
+		type String key = acckeys.piece(",", I)
+		
+		if '(key.isLiteral() ! key.beginsWith("$")) set keys = keys_key_","
+	}
+	set keys = keys.extract(1, keys.length() - 1)
+	
+	if fsn.get().isNull() do {
+		
+		set lvn = tableinfo.fileShortName
+		if 'lvn.isLike("%(%") set lvn = lvn_"("
+	}
+	else  set lvn = ""
+	
+	set glref = tableinfo.global
+	if (glref.piece("(", 2) = """*""") set glref = glref.piece("(", 1))_"("	// CUVAR
+		
+	set X = lvn_"|"_glref_"|"_keys_"|"_tableinfo.recordType_"|"_tableinfo.networkLocation
+	set X = X_"|"_tableinfo.filerPGM_"|"_tableinfo.isAutoLog_"|"_tableinfo.dateCreated_"|"_tableinfo.userCreated
+	set X = X_"|"_tableinfo.columnDelimiter_"|SYSDEV|"_tableinfo.existsNode_"|"_tableinfo.timeCreated_"|"_tableinfo.systemName
+	
+	set fsn(file) = X
+	
+	quit
+
+
+public lodnod(String file,	// Table name
+	      String nod,	// Node to set into fsn
+	      String fsn(,))	// File information array	/MECH=REFARR:RW
+	
+	/*
+	Get Local variable name for file,field
+	
+	************************************************************************
+	* This subroutine is provided for backward compatability only.  No new *
+	* uses should be made of it and existing uses should be rewritten to   *
+	* standard PSL methods when appropriate.  Once all callers have been   *
+	* changed, this code should be removed.                                *
+	************************************************************************
+	*/
+
+	type Number rectyp
+	type String lvn
+
+	if 'fsn(file).exists() do fsn(.fsn(), file)
+	
+	set lvn = fsn(file).piece("|", 1)
+	set rectyp = fsn(file).piece("|", 4)
+
+	if ((rectyp '= 1) ! ('lvn.isLike("%)%"))) do {
+		
+		if (nod = " ") set lvn = lvn.extract(1, lvn.length() - 1)
+		else  if (lvn.extract(lvn.length()) = "(") set lvn = lvn_nod_")"
+		else  set lvn = lvn_nod
+	}
+
+	set fsn(file, nod) = lvn
+	
+	quit
+
+
+public MASK()	quit "NOD,LEN,D,DOM,,,,,TYP,DES,ITP,,,DEC,,CMP,FCR,OFS,SIZ,DEL,POS,RHD,MNT,CNV,LTD,USER,MDD,VAL4EXT"
+
+
+public LIST(String file,	// Table Name
+	    Boolean opt)	// Include computed items	/NOREQ/DEF=0
+	    
+	/*
+	Return data items in DATA-QWIK file definition field order
+	
+	************************************************************************
+	* This subroutine is provided for backward compatability only.  No new *
+	* uses should be made of it and existing uses should be rewritten to   *
+	* standard PSL methods when appropriate.  Once all callers have been   *
+	* changed, this code should be removed.                                *
+	*                                                                      *
+	* New callers that need this functionality should now use $$COLLIST    *
+	************************************************************************
+
+	RETURNS:
+		. ER		Error Flag		/NOREQ/TYP=N
+		. RM		Error message		/NOREQ/TYP=T
+		. $$		List of data items 
+	
+	EXAMPLE:
+	
+	  W $$LIST^DBSDD("DMJ")
+	
+	  TJD,DATETIME,CID,TSEQ,CC,ITC,ETC,TAMT,EFD,TLO,TSO,TCMT,CDT,TIME,BRCD,TRC,UID,CRCD
+	  ,RATE,CHKTYP,MULT,BSEAMT,CUSTCD,TRESREF,GLSC,BCRCD
+	
+	  W $$LIST^DBSDD("DMJ",1)
+	
+	  TJD,DATETIME,CID,TSEQ,CC,ITC,ETC,TAMT,EFD,TLO,TSO,TCMT,CDT,TIME,BRCD,TRC,UID,CRCD
+	  ,RATE,CHKTYP,MULT,BSEAMT,CUSTCD,TRESREF,GLSC,BCRCD,EFDCMP,ITC1,ITC10,ITC12,ITC6
+	  ,ITC7,ITC8
+	*/
+	
+	type public Boolean ER
+	type public String RM
+	
+	type Number I
+	type String fsn(), keys, return
+
+	do fsn(.fsn(),file) if ER.get() quit ""
+	
+	set keys = fsn(file).piece("|", 3)_","
+	for I = 1:1:keys.length(",") do {
+		
+		type String di
+		
+		set di = keys.piece(",", I)
+		
+		if di.beginsWith("%") set keys.piece(",", I) = di.addQuotes()
+	}
+	
+	set return = ""
+	
+	type ResultSet rs = Db.select("DI,NOD,POS", "DBTBL1D", "%LIBS='SYSDEV' AND FID=:file AND (NOT NOD LIKE '%*') AND SFD IS NULL", "NOD,POS,DI ASC")
+
+	while rs.next() do {
+		
+		type String di = rs.getCol("DI")
+		
+		type SchemaColumn colinfo
+	
+		quit:'$$getColInfo(file, di, .colinfo)
+		
+		if 'opt.get(), 'colinfo.computation.isNull(), (colinfo.computation '= " ") quit	// Don't include computeds
+		
+		if di.beginsWith("%") set di = di.addQuotes()	// Non-SQL syntax
+		
+		set return = return_di_","
+	}
+	
+	if return.isNull() set return = keys.extract(1, keys.length() - 1)
+	else  do {
+		
+		if (keys = ",") set keys = ""
+		set return = keys_return.extract(1, return.length() - 1)
+	}
+	
+	quit return
+	
+	
+getTableInfo(String table,		// Table name
+	     SchemaTable tableInfo)	// Schema column record
+       
+	/*
+	Load SchemaTable record, with error handling.
+       
+	RETURNS:
+		. $$		1 = success
+				0 = failure
+	*/
+	
+	type Boolean return = 1
+	
+		
+	do {
+		
+		catch error {
+			
+			set return = 0
+		}
+		
+		set tableInfo = Db.getSchemaTable(table)
+	}
+	
+	quit return
+	
+	
+getColInfo(String table,		// Table name
+	   String column,		// Column name
+	   SchemaColumn colInfo)	// Schema column record
+       
+	/*
+	Load SchemaColumn record, with error handling.
+       
+	RETURNS:
+		. $$		1 = success
+				0 = failure
+	*/
+	
+	type Boolean return = 1
+	
+		
+	do {
+		
+		catch error {
+			
+			set return = 0
+		}
+		
+		set colInfo = Db.getSchemaColumn(table, column)
+	}
+	
+	quit return
+	
+	
+public COLLIST(String table,		// Table Name
+	       Boolean noMaster,        // Exclude master fields	/NOREQ/DFT=0
+	       Boolean noBlbMem,	// Exclude Blob and Memo fields	/NOREQ/DFT=0
+	       Boolean noCmputd,	// Exclude computeds		/NOREQ/DFT=0
+	       List keys)		// Key columns [*]		/NOREQ/MECH=REF:W
+	    
+	/*
+	Return columns in DATA-QWIK table definition.
+	
+	ARGUMENT NOTES:
+		. keys		List of key columns in access key order
+		
+	RETURNS:
+		. $$		Comma separated list of columns from the data
+				dictionary.  Key columns are listed first, in
+				access key order, followed by remaining
+				columns, in alphabetical order.
+	*/
+	
+	type Boolean ER
+	type Number I
+	type String acckeys, return
+	
+	type SchemaTable tableinfo
+	
+	set ER = '$$getTableInfo(table, .tableinfo)
+	
+	if ER quit ""
+	
+	set (keys, return) = ""
+	
+	set acckeys = tableinfo.primaryKeys
+	set keys = ""
+	for I = 1:1:acckeys.length(",") do {
+		
+		type String key = acckeys.piece(",", I)
+		
+		if 'key.isLiteral() set keys = keys_key_","
+	}
+	
+	set keys = keys.extract(1, keys.length() - 1)
+	
+	type ResultSet rs = Db.select("DI", "DBTBL1D", "%LIBS='SYSDEV' AND FID=:table AND (NOT NOD LIKE '%*')", "DI ASC")
+	
+	while rs.next() do {
+		
+		type String di = rs.getCol("DI")
+		
+		type SchemaColumn colinfo
+	
+		quit:'$$getColInfo(table, di, .colinfo)
+		
+		if noMaster.get(), (colinfo.masterfieldType>0) quit		// Exclude master fields
+		if noBlbMem.get(), ((colinfo.dataType = "B") ! (colinfo.dataType = "M")) quit	// Exclude blobs and memos
+		if noCmputd.get(), 'colinfo.computation.isNull(), (colinfo.computation '= " ") quit		// Exclude computeds
+		
+		set return = return_di_","
+	}
+	
+	set return = return.extract(1, return.length() - 1)
+	
+	if 'keys.isNull() set return = keys_","_return
+	
+	quit return
+	
+	
+	/*
+	***********************************************************************
+	* Do not add any new uses of the following functions.  These can all  *
+	* be retrieved using either PSLColumn class or directly from DBTBL1D. *
+	*                                                                     *
+	* The code retained here is for backward compatibility with existing  *
+	* callers, and should be removed once no more calls exist.            *
+	***********************************************************************
+	*/
+
+
+public NOD(String ddexpr, String x, String vdd())	quit $$FIELD(ddexpr, 1, .x, .vdd())	// Array Node
+public LEN(String ddexpr, String x, String vdd())	quit $$FIELD(ddexpr, 2, .x, .vdd())	// Field Length
+public DFT(String ddexpr, String x, String vdd())	quit $$FIELD(ddexpr, 3, .x, .vdd())	// Default expression
+public TBL(String ddexpr, String x, String vdd())	quit $$FIELD(ddexpr, 5, .x, .vdd())	// Table lookup
+public TYP(String ddexpr, String x, String vdd())	quit $$FIELD(ddexpr, 9, .x, .vdd())	// Data Type
+public DES(String ddexpr, String x, String vdd())	quit $$FIELD(ddexpr, 10, .x, .vdd())	// Description
+public DEC(String ddexpr, String x, String vdd())	quit $$FIELD(ddexpr, 14, .x, .vdd())	// Decimal Precision
+public REQ(String ddexpr, String x, String vdd())	quit $$FIELD(ddexpr, 15, .x, .vdd())	// Required Flag
+public CMP(String ddexpr, String x, String vdd())	quit $$FIELD(ddexpr, 16, .x, .vdd())	// Cmputed MUMPS Express
+public OFS(String ddexpr, String x, String vdd())	quit $$FIELD(ddexpr, 18, .x, .vdd())	// Offset Pointer
+public POS(String ddexpr, String x, String vdd())	quit $$FIELD(ddexpr, 21, .x, .vdd())	// Field Position 
+public MDD(String ddexpr, String x, String vdd())	quit $$FIELD(ddexpr, 27, .x, .vdd())	// Master Dictionary
+
+
+FIELD(String ddexpr,	// Data item reference
+      Number loc,	// Location in dictionary reference
+      String x,		// Dictionary reference			/NOREQ/MECH=REF:R
+      String vdd())	// Dictionary records			/NOREQ/MECH=REFARR:RW
+      	
+      	/*
+      	Return the value of a data dictionary field
+	*/
+	
+	type public String fsn()
+	
+	if x.get().isNull() set x = $$DI(ddexpr, "", .vdd(), .fsn()) if x.isNull() quit ""
+	
+	quit x.piece("|", loc)
+
+vSIG()	quit "60442^53213^e0101489^32303"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,915 @@
+QUEUTIL	// QUEUE MAINTENANCE UTILITIES
+	/*
+
+	---- Revision History ------------------------------------------------
+	
+	01/04/06 - RussellDS - CR18778
+		   Fixed problem in RESEQ section to make sure setMode(0) is
+		   set to avoid problems re-setting up new entries.
+		   
+		   Added transaction logic around resequence code.
+	
+	05/22/05 - Erik Scheetz - 15677
+		   Modified STPBAT section to issue a STOP interrupt when
+		   stopping a Batch process.
+	
+	12/11/04 - RussellDS - CR13642
+		   Fix various errors.  Fix PSL warnings.
+		   
+		   Modified calls to SBMTBCH^%OSSCRPT to pass new parameters
+		   to indicate DBI version handling.
+		   
+		   Changed call for batch stop from BATSTOP^%OSSCRPT to new
+		   BATSTOPN^%OSSCRPT to avoid global references in older code.
+		   
+		   Modified COPY section to take parameter to indicate move
+		   instead of relying on function name.
+		   
+		   Rewrote RESEQ section so that it would work.
+		   
+		   Removed old revision history.
+		   
+	11/30/04 - Frans S.C. Witte CR12808
+		   Changed IO.read() to IO.read(.ETYP) to maintain compatibility
+		   with new implementation of class IO.
+
+	12/18/03 - CARROLLJ - CR7239
+		   Added #ACCEPT prior to setting system variable.
+
+	----------------------------------------------------------------------
+
+	*/
+	
+	quit
+	
+
+RESEQ	// Resequence a batch
+
+	type public String ER, RM
+
+	type Number BATCHNO, JOBNUM, NJOBNUM, OJOBNUM, SEQ
+	type String %READ, %TAB, VFMQ
+	
+	type RecordQUEUEJ QUEJ()
+	type RecordQUEUED QUED(,)
+	type RecordQUEUEC QUEC(,)
+	type RecordQUEUEP QUEP(,)
+	
+	/*
+	Note:  Need to use BATCHNO instead of BCHNUM or BATCH since those are key
+	names and can cause problems with generated delete code.
+	*/
+
+	set %TAB("BATCHNO")=".BCHNUM1/TBL=[QUEUEB]/XPP=D BCHNUM^QUEUTIL"
+	set %READ="@@%FN,,,BATCHNO/REQ"
+	do ^UTLREAD
+
+	//Batch has not been re-sequenced
+	if "Q"[VFMQ set ER="W" set RM=$$^MSG(328) quit
+	
+	// Move all data into local arrays and delete old data
+	type DbSet dsj = Db.selectDbSet("QUEUEJ", "BCHNUM=:BATCHNO")
+	while dsj.next() do {
+		type RecordQUEUEJ queuej = dsj.getRecord("QUEUEJ")
+		set JOBNUM = queuej.jobnum
+		set QUEJ(JOBNUM) = queuej.copy()
+
+		set SEQ = 0
+		type DbSet dsd = Db.selectDbSet("QUEUED", "BCHNUM=:BATCHNO AND JOBNUM=:JOBNUM")
+		while dsd.next() do {
+			type RecordQUEUED queued = dsd.getRecord("QUEUED")
+			set SEQ = SEQ + 1
+			set QUED(JOBNUM,SEQ) = queued.copy()
+		}
+	
+		set SEQ = 0
+		type DbSet dsc = Db.selectDbSet("QUEUEC", "BCHNUM=:BATCHNO AND JOBNUM=:JOBNUM")
+		while dsc.next() do {
+			type RecordQUEUEC queuec = dsc.getRecord("QUEUEC")
+			set SEQ = SEQ + 1
+			set QUEC(JOBNUM,SEQ) = queuec.copy()
+		}
+	
+		set SEQ = 0
+		type DbSet dsp = Db.selectDbSet("QUEUEP", "BCHNUM=:BATCHNO AND JOBNUM=:JOBNUM")
+		while dsp.next() do {
+			type RecordQUEUEP queuep = dsp.getRecord("QUEUEP")
+			set SEQ = SEQ + 1
+			set QUEP(JOBNUM,SEQ) = queuep.copy()
+		}
+	}
+	
+		
+	do Runtime.start("CS")
+	
+	// Delete the old record
+	do Db.delete("QUEUEP","BCHNUM=:BATCHNO")
+	do Db.delete("QUEUEC","BCHNUM=:BATCHNO")
+	do Db.delete("QUEUED","BCHNUM=:BATCHNO")
+	do Db.delete("QUEUEJ","BCHNUM=:BATCHNO")
+	
+	// Add the records back, resequencing as we go
+	set OJOBNUM="" 
+	set NJOBNUM=10
+	
+	for  set OJOBNUM = $O(QUEJ(OJOBNUM)) quit:OJOBNUM.isNull()  do {
+		
+		type RecordQUEUEJ queuej = QUEJ(OJOBNUM).copy()
+		set queuej.jobnum = NJOBNUM
+		do queuej.setMode(0)
+		do queuej.save()
+		
+		set SEQ = ""
+		for  set SEQ = $O(QUEP(OJOBNUM, SEQ)) quit:SEQ.isNull()  do {
+			
+			type RecordQUEUEP queuep = QUEP(OJOBNUM, SEQ).copy()
+			set queuep.jobnum = NJOBNUM
+			do queuep.setMode(0)
+			do queuep.save()
+		}
+		
+		for  set SEQ = $O(QUED(OJOBNUM, SEQ)) quit:SEQ.isNull()  do {
+			
+			type Number B, J
+			
+			type RecordQUEUED queued = QUED(OJOBNUM, SEQ).copy()
+			set B = queued.batch
+			set J = queued.job
+			set queued.jobnum = NJOBNUM
+			do queued.setMode(0)
+			do queued.save()
+			
+			type RecordQUEUEC queuec = Db.getRecord("QUEUEC", "BCHNUM=:B,JOBNUM=:J,BATCH=:BATCHNO,JOB=:OJOBNUM")
+			type RecordQUEUEC newqc = queuec.copy()
+			set newqc.job = NJOBNUM
+			do newqc.setMode(0)
+			// Do delete before save in case it's the same job number
+			do Db.delete("QUEUEC", "BCHNUM=:B AND JOBNUM=:J AND BATCH=:BATCHNO AND JOB=:OJOBNUM")
+			do newqc.save()
+		}
+		
+		for  set SEQ = $O(QUEC(OJOBNUM, SEQ)) quit:SEQ.isNull()  do {
+			
+			type Number B, J
+			
+			type RecordQUEUEC queuec = QUEC(OJOBNUM, SEQ).copy()
+			set B = queuec.batch
+			set J = queuec.job
+			set queuec.jobnum = NJOBNUM
+			do queuec.setMode(0)
+			do queuec.save()
+			
+			type RecordQUEUED queued = Db.getRecord("QUEUED", "BCHNUM=:B,JOBNUM=:J,BATCH=:BATCHNO,JOB=:OJOBNUM")
+			type RecordQUEUED newqd = queued.copy()
+			set newqd.job = NJOBNUM
+			do newqd.setMode(0)
+			// Do delete before save in case it's the same job number
+			do Db.delete("QUEUED", "BCHNUM=:B AND JOBNUM=:J AND BATCH=:BATCHNO AND JOB=:OJOBNUM")
+			do newqd.save()
+		}
+		
+		set NJOBNUM = NJOBNUM + 10
+	}
+	
+	do Runtime.commit()
+
+	// Batch has been re-sequenced
+	set ER="W" 
+	set RM=$$^MSG(325)
+	
+	quit
+
+
+BCHNUM 	// Post Processor for BATCH NUMBER
+
+	type public Number ER, X
+	type public String RM
+
+	I X'="""",'Db.isDefined("QUEUEB","BCHNUM=:X") do {
+		// Invalid batch number
+		set ER=1,RM=$$^MSG(1272)
+	}
+	
+	quit
+
+
+RESTRT	// Batch restarter
+
+	type public String ER, RM
+
+	type Boolean QUEDEL, QUEIDT
+	type Date DAT, QUEDAT
+	type Number BCHNUM, JOBNUM, NXTJOB, QUETIM, TIM
+	type String %READ, %TAB, EVENT, HDG1, HDG2, HDG3, QUEDCL, VFMQ
+
+	// This function will restart a batch at the specified job.
+	set HDG1=$$^MSG(4603)
+
+	// This should be used in the event of a system crash or system error,
+	set HDG2=$$^MSG(4598)
+	
+	// or if the user requested that a batch be stopped.
+	set HDG3=$$^MSG(8248)
+
+	set DAT=%SystemDate 
+	set TIM=%CurrentTime
+	
+	set %TAB("EVENT")=".EVENT1/TBL=[UTBLEVENT]EVENT"
+	set %TAB("BCHNUM")=".BCHNUM1/TBL=[QUEUEB]/XPP=I X'="""" D BPOST^QUEUTIL"
+	set %TAB("JOBNUM")=".JOBNUM2/TBL=[QUEUEJ]BCHNUM:DISTINCT:QU""[QUEUEJ]JOBNUM:DISTINCT""/XPP=I X'="""" D JPOST^QUEUTIL"
+	set %TAB("DAT")=".DAT1/XPP=I X'="""" D DPOST^QUEUTIL"
+	
+	set %READ="@HDG1,@HDG2,@HDG3,,,EVENT1,BCHNUM/REQ,JOBNUM/REQ,DAT/REQ"
+	do ^UTLREAD
+
+	//Batch has not been restarted
+	if "Q"[VFMQ set ER="W" set RM=$$^MSG(329) quit
+	
+	set QUEDAT=%SystemDate 
+	set QUETIM=TIM
+	
+	set QUEDCL="Q"_BCHNUM_"_"_+%CurrentDate_%CurrentTime
+	set QUEDCL=QUEDCL_".COM"
+	
+	set QUEDEL=1 set QUEIDT=0
+	
+	type RecordQUEUEB queueb=Db.getRecord("QUEUEB","BCHNUM=:BCHNUM")
+	type RecordQUEUEJ queuej=Db.getRecord("QUEUEJ","BCHNUM=:BCHNUM,JOBNUM=:JOBNUM")
+
+	set ER=$$SBMTBCH^%OSSCRPT(BCHNUM,JOBNUM,EVENT,QUEDCL,+queuej.reti,queueb.fre,queueb.strt) quit:ER
+
+	// Batch has been scheduled to restart
+	set ER="W" set RM=$$^MSG(326)
+	
+	quit
+
+
+BPOST   // Batch Post processors
+
+	type public Number ER, JOBNUM, NI, NXTJOB, X
+	type public String RM
+	
+	// Invalid batch number
+	if 'Db.isDefined("QUEUEB","BCHNUM=:X") set ER=1 set RM=$$^MSG(1272) quit
+	
+	// Find first job in this batch with CSTAT = 0
+	
+	type ResultSet rs=Db.select("JOBNUM","QUEUEJ","BCHNUM=:X AND CSTAT=0","JOBNUM")
+	
+	// Batch is not eligible to be restarted
+	if rs.isEmpty() set ER=1 set RM=$$^MSG(330) quit
+	
+	if rs.next() set JOBNUM=rs.getCol("JOBNUM")
+	
+	set RM=JOBNUM_"|"_(NI+1) 
+	set NXTJOB=JOBNUM
+	
+	quit
+
+
+JPOST	// Job Post processor
+
+	type public Number BCHNUM, ER, NXTJOB, X
+	type public String RM
+
+	// Invalid job number
+	if 'Db.isDefined("QUEUEJ","BCHNUM=:BCHNUM,JOBNUM=:X") set ER=1 set RM=$$^MSG(1382) quit
+
+	// Batch may not be restarted prior to job number ~p1
+	if X<NXTJOB set ER=1 set RM=$$^MSG(331,NXTJOB)
+	
+	quit
+
+
+DPOST   // Date post processor
+
+	type public Number BCHNUM, ER
+	type public String RM, X
+	
+	type Date %JD
+
+	set %JD=$$^SCAJD(X)
+	type RecordQUEUEB queueb=Db.getRecord("QUEUEB","BCHNUM=:BCHNUM")
+	
+	// Cannot restart after the next scheduled run date
+	if %JD>queueb.nrd set ER=1 set RM=$$^MSG(475)
+	quit
+
+
+BCHPP	//
+
+	type public Number ER, X
+	type public String RM
+
+	type RecordQUEUEB queueb=Db.getRecord("QUEUEB","BCHNUM=:X",1)
+	
+	// Invalid batch number
+	if (queueb.getMode() = 0) set ER=1 set RM=$$^MSG(1272) quit
+	
+	// Batch number ~p1 is currently set to stop
+	if queueb.stop=1 set RM=$$^MSG(334,X)_"|21000"
+
+	// Batch number ~p1 is currently set to run
+	else  set RM=$$^MSG(333,X)_"|21000"
+
+	quit
+
+
+ESTOP	// Stop all batches in an event after the next job
+
+	type public String ER, RM
+
+	type String %READ, %TAB, EVENT, HDG, VFMQ
+
+	// Stop All Batches in an Event
+	set HDG=$$^MSG(4601) set HDG=HDG.justify(80,0)
+	
+	set %TAB("EVENT")=".EVENT1/TBL=[UTBLEVENT]/XPP=D SPOST^QUEUTIL"
+	set %READ="@HDG,,EVENT/REQ"
+	do ^UTLREAD
+
+	//Batch has not been changed
+	if "Q"[VFMQ set ER="W" set RM=$$^MSG(327) quit
+
+	do STPBAT(EVENT)
+
+	// Event ~p1 has been set to stop
+	set ER="W" set RM=$$^MSG(1025,EVENT)
+	
+	quit
+
+
+public STPBAT(String EVENT)	// Stop all batches in an event
+
+	type Number BCH
+	
+	type ResultSet rs=Db.select("BATCH","UTBLEBCH","EVENT=:EVENT","BATCH")
+	while rs.next() do {
+		set BCH=rs.getCol("BATCH")
+		type RecordQUEUEB queueb=Db.getRecord("QUEUEB","BCHNUM=:BCH",1)
+		if (queueb.getMode() > 0) do {
+			set queueb.stop=1
+			do queueb.bypassSave()
+		}
+	}
+
+	/*  
+	Signal to batch definition processes
+	to stop immediately (i.e., not wait until
+        the current job has finished executing)
+	*/
+	
+	type RecordQUECTRL quectrl=Db.getRecord("QUECTRL","EVENT=:EVENT",1)
+	set quectrl.ctlmsg="STOP"
+	do quectrl.bypassSave()
+	
+	type String sel
+	set sel("EVENT") = EVENT
+	
+	// Interrupt event process to stop
+	do ISSUE^IPCMGR("STOP",,.sel)
+	
+	quit
+
+
+STOPALL	// Stop all events
+
+	type public String ER, RM
+
+	type Number WAIT
+	type String EVENT, X
+
+	type ResultSet rs=Db.select("EVENT","QUETBLEB",,"EVENT")
+	while rs.next() do STPBAT(rs.getCol("EVENT"))
+	
+	// Wait for batches to stop
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+	set WAIT=cuvar.failwait
+		
+	// At least 15 seconds to ensure not resubmits
+	if WAIT<15 set WAIT=15	
+	set X=$$WAIT^%ZFUNC(WAIT)
+
+	//If batches have not stopped yet, kill 'em
+	do BATSTOPN^%OSSCRPT
+    
+	quit:(ER.get() > 0)
+
+	set ER="W"
+
+	// All batches have been stopped
+	set RM=$$^MSG(3649)
+	
+	quit
+
+
+public SPOST	//
+
+	type public Number %OSAVE, ER
+	type public String RM, X
+	
+	type Boolean RUNNING
+
+	quit:'Db.isDefined("UTBLEVENT","EVENT=:X")
+	set %OSAVE=1 do QUE^QUERSTRT(X, .RUNNING)
+
+	// Event not running
+	if 'RUNNING set ER=1 set RM=$$^MSG(1021) quit
+	set ER=0 kill RM
+	quit
+
+
+PURGB	// Purge the ^QUEUEHD global
+
+	type public String ER, RM
+	
+	type Boolean CONT
+	type Date DAT, DATE
+	type Number SEQ
+	type String %READ, %TAB, DATA, IO, TAB, VFMQ
+	
+	new CONT
+	set %TAB("DAT")=".DAT2"
+	set %TAB("IO")=".IO2/XPP=S %EXT=1 D ^SCAIO"
+	set %READ="@@%FN,,DAT/REQ,IO/REQ"
+	do ^UTLREAD
+
+	//History purge has not been performed
+	if "Q"[VFMQ set ER="W" set RM=$$^MSG(1180) quit
+
+	type IO io=Class.new("IO")
+
+        set io.fileName=IO
+
+        set io.openParams="WRITE/NEWV"
+        do io.open()
+
+	set TAB=$C(9)
+	set CONT=0
+	type ResultSet rs=Db.select("TJD,SEQ,BCHNUM,JOBNUM,FUN,SDAT,STIM,CTIM,CMT,USERNAME,CDAT","QUEUEHD",,"TJD,SEQ")
+	while rs.next() do { quit:CONT 
+		set DATE=rs.getCol("TJD")
+		set SEQ=rs.getCol("SEQ")
+		if DATE>DAT set CONT=1 quit
+		set DATA=DATE_TAB_SEQ_TAB_rs.getCol("BCHNUM")_TAB_rs.getCol("JOBNUM")_TAB_rs.getCol("FUN")_TAB
+		set DATA=DATA_rs.getCol("SDAT")_TAB_rs.getCol("STIM")_TAB_rs.getCol("CTIM")_TAB
+		set DATA=DATA_rs.getCol("CMT")_TAB_rs.getCol("USERNAME")_TAB_rs.getCol("CDAT")
+		do io.write(.DATA)
+		do Db.delete("QUEUEHD","TJD=:DATE AND SEQ=:SEQ")
+	}
+	
+	set DATA="$$EOF"
+	do io.write(.DATA)
+	do io.close()
+
+	// History purge has been performed (~p1)
+	set ER="W" set RM=$$^MSG(1179,IO)
+	
+	quit
+
+
+RSTRB	// Restore ^QUEUEHD global from previous purge
+
+	type public String ER, RM
+	
+	type String %READ, %TAB, ETYP, HDG1, IO, VFMQ
+
+	// This function restores entries in the Queuing Daily History file (QUEUEHD)
+	set HDG1=$$^MSG(4602)
+
+	set %TAB("IO")=".IO1/XPP=S %EXT=1 D ^SCAIO"
+	set %READ="@@%FN,,IO/REQ"
+	do ^UTLREAD
+
+	//History restore has not been performed
+	if "Q"[VFMQ set ER="W" set RM=$$^MSG(1182) quit
+
+ 	type IO io=Class.new("IO")
+        set io.fileName=IO
+	set io.openParams="READ"
+
+	do io.open()			// Will throw error if can't open
+
+	/* 
+	Data restore section
+	History restore has been performed
+	*/
+	do REC(.io)
+	
+	quit
+
+	
+REC(IO io)	//
+
+	type public String ER, RM
+	
+	type Boolean DONE
+	type Date DATE
+	type Number SEQ
+	type String ET, REC, TAB
+	
+	set TAB=$C(9)
+	set DONE=0
+	
+	for  set REC=io.read(.ET) do { quit:DONE
+
+		// History restore has been performed
+		if $E(REC,1,5)["$$EOF" do { quit
+			set DONE=1 
+			do io.close() 
+			set ER="W" set RM=$$^MSG(1181)
+			}
+	
+		set DATE=$P(REC,TAB,1)
+		set SEQ=$P(REC,TAB,2)
+		
+		type RecordQUEUEHD queuehd=Class.new("RecordQUEUEHD","TJD=:DATE,SEQ=:SEQ")
+		set queuehd.bchnum=$P(REC,TAB,3)
+		set queuehd.jobnum=$P(REC,TAB,4)
+		set queuehd.fun=$P(REC,TAB,5)
+		set queuehd.sdat=$P(REC,TAB,6)
+		set queuehd.stim=$P(REC,TAB,7)
+		set queuehd.ctim=$P(REC,TAB,8)
+		set queuehd.cmt=$P(REC,TAB,9)
+		set queuehd.username=$P(REC,TAB,10)
+		set queuehd.cdat=$P(REC,TAB,11)
+		do queuehd.bypassSave()
+	}
+	
+	quit
+
+
+JOB	/*
+	This utility will prompt for a batch and job number and mark that job
+	as having been completed.  This is necessary for any jobs that had
+	to be run manually thereby not updating the ^QUEUE global when it
+	finished execution.
+	*/
+
+	type public String ER, RM
+
+	type Boolean DONE
+	type Date RUNDATE
+	type Number BCHABT, BCHNUM, HDSEQ, JOBNUM, OLNTB
+	type String %DIR, %FN, %READ, %TAB, EVENT, QUEUEHD, UTLO, USR, VFMQ
+	
+	do ^UTLO 
+	set %UserStation=UTLO
+	
+	#ACCEPT DATE=12/18/03;PGM=John Carroll
+	if '$D(%InputTimeOut) set %InputTimeOut=60
+	
+	set QUEUEHD=""				// Set to allow lock without PSL warning
+	
+	set DONE=0
+	for  do { quit:DONE
+
+		set %TAB("EVENT")=".EVENT1/TBL=[UTBLEVENT]"
+		set %TAB("BCHNUM")=".BCHNUM1/TBL=[UTBLEBCH]BATCH,DES:DISTINCT:QU ""[UTBLEBCH]EVENT=<<EVENT>>"""
+		set %TAB("JOBNUM")=".JOBNUM1/TBL=[QUEUEJ]JOBNUM,DESC:QU ""[QUEUEJ]BCHNUM=<<BCHNUM>>"""
+		set %READ="@@%FN,,EVENT/REQ,BCHNUM/REQ,JOBNUM/REQ"
+
+		set RUNDATE=%SystemDate
+		set %DIR=$$CDIR^%TRNLNM
+
+		do ^UTLREAD if VFMQ="Q" set DONE=1 quit
+
+		type RecordQUEUEJ queuej=Db.getRecord("QUEUEJ","BCHNUM=:BCHNUM,JOBNUM=:JOBNUM")
+
+		//Completed Successfully	
+		if queuej.cstat=1 do { quit
+			set ER="W"	
+			// Job ~p1 has already been completed successfully
+			set RM=$$^MSG(1581,JOBNUM)
+		}
+
+		set queuej.ctim=%CurrentTime
+		do queuej.bypassSave()
+		do CONDT^QUEPGM
+
+		// Log function in QUEUEHD (Daily log file)
+		set USR=$$USERNAM^%ZFUNC
+		set %FN=queuej.fun
+
+		lock +QUEUEHD
+
+		/*
+		Find Job's entry in QUEUEHD.
+		If an entry is not found for the batch and job in GETSEQ(), the next
+		available sequence number is assigned.
+		*/
+		set HDSEQ=$$GETSEQ(RUNDATE,BCHNUM,JOBNUM)
+
+		type RecordQUEUEHD queuehd=Db.getRecord("QUEUEHD","TJD=:RUNDATE,SEQ=:HDSEQ",1)
+	
+        	set queuehd.bchnum=BCHNUM
+        	set queuehd.jobnum=JOBNUM
+	
+		if queuehd.fun="" set queuehd.fun=%FN
+	
+        	set queuehd.sdat=%SystemDate
+        	if queuehd.stim="" set queuehd.stim=%CurrentTime
+	
+        	set queuehd.ctim=%CurrentTime
+	
+		// Completed manually
+		set queuehd.cmt=$$^MSG(4559)
+	
+        	set queuehd.username=USR
+         
+		do queuehd.bypassSave()
+		lock -QUEUEHD
+
+		// Can Complete Manually only once.
+		if queuej.lstat'=5 do {
+
+			//Completed Manually
+			set queuej.lstat=5
+			do queuej.bypassSave()
+		
+			/*  
+			Check to see if this job is the last one in the batch, if so,
+			call off to bchend in QUEPGM to complete the batch.
+			*/
+			
+			type ResultSet rsmax=Db.select("MAX(JOBNUM)","QUEUEJ","BCHNUM=:BCHNUM")
+		
+			if rsmax.next(),rsmax.getCol(1)=JOBNUM do {
+				set BCHABT=0 
+				do BCHEND^QUEPGM
+			}
+		}
+
+		// Batch ~p1 Job ~p2 flagged as complete
+		if 'ER set ER="W" set RM=$$^MSG(339,BCHNUM,JOBNUM)
+	}
+
+	quit
+
+
+COPY(Boolean MOVE)	// Move (versus copy)
+
+	/*
+	Copy or move a job for one batch to another or from one location in a batch to another.
+	
+	Note - copy doees not copy dependency information, just the base info and parameters.
+	       move moves it all.
+	*/
+	
+	type public String %FN
+	
+	type Number BCHNUM, JOBNUM, TBCH, TJOB
+	type String %READ, %TAB, X, VFMQ
+
+	set %ProcessMode=1
+	set %TAB("BCHNUM")=".BCHNUM2/TBL=[QUEUEB]"
+	set %TAB("JOBNUM")=".JOBNUM3/TBL=[QUEUEJ]JOBNUM,DESC:QU ""[QUEUEJ]BCHNUM=<<BCHNUM>>"""
+	set %TAB("TBCH")=".TBCH1/TBL=[QUEUEB]"
+	set %TAB("TJOB")=".TJOB1/XPP=do TJOB^QUEUTIL"
+
+	set %READ="@@%FN,,,BCHNUM/REQ,JOBNUM/REQ,,TBCH/REQ,TJOB/REQ"
+
+	do ^UTLREAD quit:VFMQ="Q"
+
+	type RecordQUEUEJ qjold=Db.getRecord("QUEUEJ","BCHNUM=:BCHNUM,JOBNUM=:JOBNUM")
+	type RecordQUEUEJ qjnew=Class.new("RecordQUEUEJ")
+	set qjnew.bchnum=TBCH
+	set qjnew.jobnum=TJOB
+	set qjnew.desc=qjold.desc
+	set qjnew.fun=qjold.fun
+	set qjnew.lrd=qjold.lrd
+	set qjnew.stim=qjold.stim
+	set qjnew.ctim=qjold.ctim
+	set qjnew.cstat=qjold.cstat
+	set qjnew.lstat=qjold.lstat
+	set qjnew.ttr=qjold.ttr
+	set qjnew.diz=qjold.diz
+	set qjnew.reti=qjold.reti
+	set qjnew.maxr=qjold.maxr
+	set qjnew.retc=qjold.retc
+	set qjnew.aof=qjold.aof
+	set qjnew.skip=qjold.skip
+	set qjnew.sdat=qjold.sdat
+	set qjnew.cdat=qjold.cdat
+	do qjnew.save()
+
+	type ResultSet rs=Db.select("SEQ,PARAM","QUEUEP","BCHNUM=:BCHNUM AND JOBNUM=:JOBNUM")
+	while rs.next() do {
+		type RecordQUEUEP queuep=Class.new("RecordQUEUEP")
+		set queuep.bchnum=TBCH
+		set queuep.jobnum=TJOB
+		set queuep.seq=rs.getCol("SEQ")
+		set queuep.param=rs.getCol("PARAM")
+		do queuep.bypassSave()
+	}
+		
+	if MOVE do MOVEJOB(BCHNUM,JOBNUM,TBCH,TJOB)
+	do HIST(BCHNUM,JOBNUM,MOVE)
+	do COPY1(BCHNUM,JOBNUM,MOVE)
+	
+	quit
+
+
+MOVEJOB(Number BCHOLD,	// Batch number
+	Number JOBOLD,	// Job Number
+	Number BCHNEW,	// New batch number
+	Number JOBNEW)	// New job number
+
+	/*
+	Move dependency info and delete the original job
+	*/
+	
+	type Number B, J
+	
+	// Get dependency data, move to new records and delete old ones
+	type DbSet dsd=Db.selectDbSet("QUEUED","BCHNUM=:BCHOLD AND JOBNUM=:JOBOLD")
+	while dsd.next() do {
+		type RecordQUEUED queued=dsd.getRecord("QUEUED")
+		type RecordQUEUED newqd=queued.copy()
+		
+		set newqd.bchnum=BCHNEW
+		set newqd.jobnum=JOBNEW
+		
+		// Save new QUEUED record
+		do newqd.save()
+
+		// Delete old QUEUED record				
+		set B=queued.batch
+		set J=queued.job
+		do Db.delete("QUEUED","BCHNUM=:BCHOLD AND JOBNUM=:JOBOLD AND BATCH=:B AND JOB=:J")
+		
+		// Get old QUEUEC record, create new one, and delete old
+		type RecordQUEUEC queuec=Db.getRecord("QUEUEC","BCHNUM=:B,JOBNUM=:J,BATCH=:BCHOLD,JOB=:JOBOLD")
+		type RecordQUEUEC newqc=queuec.copy()
+		set newqc.batch=BCHNEW
+		set newqc.job=JOBNEW
+		do newqc.save()
+		do Db.delete("QUEUEC","BCHNUM=:B AND JOBNUM=:J AND BATCH=:BCHOLD AND JOB=:JOBOLD")
+	}
+	
+	// Get contingent data, move to new records and delete old ones
+	type DbSet dsc=Db.selectDbSet("QUEUEC","BCHNUM=:BCHOLD AND JOBNUM=:JOBOLD")
+	while dsc.next() do {
+		type RecordQUEUEC queuec=dsc.getRecord("QUEUEC")
+		type RecordQUEUEC newqc=queuec.copy()
+		
+		set newqc.bchnum=BCHNEW
+		set newqc.jobnum=JOBNEW
+		
+		// Save new QUEUEC record
+		do newqc.save()
+		
+		// Delete old QUEUEC record
+                set B=queuec.batch
+                set J=queuec.job
+                do Db.delete("QUEUEC","BCHNUM=:BCHOLD AND JOBNUM=:JOBOLD AND BATCH=:B AND JOB=:J")
+                
+                // Get old QUEUED record. create new one, and delete old
+                type RecordQUEUED queued=Db.getRecord("QUEUED","BCHNUM=:B,JOBNUM=:J,BATCH=:BCHOLD,JOB=:JOBOLD")
+                type RecordQUEUED newqd=queued.copy()
+                set newqd.batch=BCHNEW
+                set newqd.job=JOBNEW
+                set newqd.bchprmt=BCHNEW
+                set newqd.jobprmt=JOBNEW
+                do newqd.save()
+                do Db.delete("QUEUED","BCHNUM=:B AND JOBNUM=:J AND BATCH=:BCHOLD AND JOB=:JOBOLD")
+	}
+
+	// Remove QUEUEJ and QUEUEP recordS
+	do Db.delete("QUEUEJ","BCHNUM=:BCHOLD AND JOBNUM=:JOBOLD")
+	do Db.delete("QUEUEP","BCHNUM=:BCHOLD AND JOBNUM=:JOBOLD")
+	
+	quit
+
+
+HIST(Number BCHNUM, Number JOBNUM, Boolean MOVE)	//Update batch history
+
+	type public String %FN
+
+	type Number SEQ
+	type String MSG, QUEUEHD, USR
+	
+	set QUEUEHD=""
+	
+	lock +QUEUEHD
+	
+	type ResultSet rs=Db.select("MAX(SEQ)","QUEUEHD","TJD=:%SystemDate")
+	if rs.isEmpty() set SEQ=1
+	else  set SEQ=rs.getCol(1)+1
+
+	//Job has been moved
+	if MOVE set MSG=$$^MSG(5770)
+
+	//Job has been copied
+	else  set MSG=$$^MSG(5769)
+
+	set USR=$$USERNAM^%ZFUNC
+
+	type RecordQUEUEHD queuehd=Class.new("RecordQUEUEHD","TJD=:%SystemDate,SEQ=:SEQ")
+
+	set queuehd.bchnum=BCHNUM
+	set queuehd.jobnum=JOBNUM
+	set queuehd.fun=%FN
+	set queuehd.sdat=%CurrentDate
+	set queuehd.stim=%CurrentTime
+	set queuehd.ctim=%CurrentTime
+	set queuehd.cmt=MSG
+	set queuehd.username=USR
+
+	do queuehd.save()
+
+	lock -QUEUEHD
+	
+	quit
+
+
+TJOB	//Post processor on To Job prompt
+
+	type public Number TBCH, X
+	type public String ER, RM
+
+	quit:X=""
+
+	// Job ~p1 already exists
+	if Db.isDefined("QUEUEJ","BCHNUM=:TBCH,JOBNUM=:X") do {
+		set ER=1 
+		set RM=$$^MSG(1580,X)
+	}
+	
+	quit
+
+
+COPY1(Number BCHNUM, Number JOBNUM, Boolean MOVE)	//
+
+	type public String %FN, ER, RM, VFMQ
+
+	quit:VFMQ="Q"
+
+	// Batch ~p1, job ~p2 moved
+	if MOVE set RM=$$^MSG(342,BCHNUM,JOBNUM)
+
+	// Batch ~p1, job ~p2 copied
+	else  set RM=$$^MSG(341,BCHNUM,JOBNUM)
+	set ER="W"
+	
+	quit
+
+
+GETSEQ(Date DATE, Number BATCH, Number JOB)	//
+
+	type Number QUESEQ
+	
+	set QUESEQ=""
+	
+	// Get last entry that is for this batch and job, if any	
+	type ResultSet rs=Db.select("SEQ","QUEUEHD","TJD=:DATE AND BCHNUM=:BATCH AND JOBNUM=:JOB","SEQ DESC")
+
+	if rs.next() set QUESEQ=rs.getCol("SEQ")
+	else  do {
+		type ResultSet rs2=Db.select("MAX(SEQ)","QUEUEHD","TJD=:DATE")
+		
+		if rs2.next() set QUESEQ=rs2.getCol(1)+1
+		else  set QUESEQ=1
+	}	
+
+	quit QUESEQ
+
+
+EVNTRST	// Private;    Verify if Batch Queues need to be restarted
+
+	/*
+
+	   Log an Alert if any Event needs to be restarted.  Return
+	   an indicator if event(s) need restarting
+
+	   RETURNS:
+	         . $$    Restart Indicator               /TYP=L
+	                 0 - Event(s) completed.
+	                 1 - Event(s) need restarting.
+
+	   EXAMPLE:
+	         S X=$$EVNTRST^QUEUTIL()
+
+	*/
+	
+	type Boolean RESTART
+	type Number BCHNUM
+	type String EVENT
+
+	set RESTART=0
+	
+	type ResultSet rs=Db.select("EVENT,BATCH","UTBLEBCH",,"EVENT,BATCH")
+	while rs.next() do { quit:RESTART
+		set EVENT=rs.getCol("EVENT")
+		set BCHNUM=rs.getCol("BATCH")
+	
+		type RecordQUEUEB queueb=Db.getRecord("QUEUEB","BCHNUM=:BCHNUM")
+		if queueb.subm=1 do {
+			set RESTART=1 
+			do LOGIT^QUEPGM("QUEEVNTRST",EVENT)
+		}
+	}
+	
+	quit RESTART
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60269^60815^Dan Russell^21508"	// Signature - LTD^TIME^USER^SIZE

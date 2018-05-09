@@ -1,0 +1,365 @@
+UCTEST	 /*
+  ORIG: CHIANG - 10/08/1999
+  DESC: Generate SQL test data
+  
+  ---- Comments --------------------------------------------------------
+  I18N=OFF  
+  ---- Revision History ------------------------------------------------
+ */
+
+ 	new blob,cnt,colcnt,column,data,fsn,i,j,k,key,keycnt,keys,list,msg
+ 	new opt,optcnt,option,query,rec,seq,setexpr,sqlexpr,type,v,value,where
+ 	new vdd,FID,IO,OPT,VFMQ,%FRAME,%READ,%TAB
+
+ 	do SYSVAR^SCADRV0("PBS")			// Init system variables
+ 	if $G(%UID)="" set %UID=1,%UCLS="SCA",TLO=$I
+ 	set %LIBS="SYSDEV",%LOGID=""
+
+	set OPT="C"
+	set %TAB("OPT")="/TYP=T/LEN=1/DES=Create or Execute SQL Script File"
+	set %READ=",OPT"
+	set %NOPRMT="F"
+	do ^UTLREAD
+	if VFMQ="Q" quit
+	if OPT="C" do CREATE quit
+	if OPT="E" do RUN quit
+	quit
+
+CREATE //
+ 	set cnt=1,opt="IUD"				// defaults
+	set OLNTB=4035					// starting location
+	set %TAB("FID")="/TYP=U/LEN=12/DES=Table Name/XPP=do PP^UCTEST/TBL=[DBTBL1]:NOVAL"
+	set %TAB("opt")="/TYP=U/LEN=3/DES=Option (Insert,Update,Delete)"
+	set %TAB("query")="/TYP=T/LEN=60/DES=Query (example, TYPE=300)"
+	set %TAB("cnt")="/TYP=N/LEN=6/DES=Record Count"
+   	set %TAB("IO")=$$IO^SCATAB S:'$D(IO) IO=$I
+	set msg="Generate SQL Insert/Update/Delete Statement"
+	set %READ="@msg/REV/CEN,,FID/REQ,opt/REQ,cnt/REQ,query/NOREQ,IO/REQ"
+	set %FRAME=2
+	do ^UTLREAD
+	if VFMQ="Q" quit
+
+ 	if FID'="*",'Db.isDefined("DBTBL1","%LIBS,FID") quit
+
+	do OPEN^SCAIO use IO			// output device
+
+	if FID'="*" do EXEC,CLOSE quit		// single table
+						// select all 
+	type ResultSet rs=Db.select("FID","DBTBL1","%LIBS=:%LIBS AND FILETYP<>5")
+  	if rs.isEmpty() quit
+ 
+ 	for  quit:'rs.next()  do {             // get next table name
+        set FID=rs.getCol(1)
+	do EXEC
+	}
+	do CLOSE
+	quit
+EXEC //
+	new fsn,vdd,exe
+	set ER="",RM=""
+ 	for optcnt=1:1:$L(opt) do {
+		set option=$E(opt,optcnt)
+		if option="I" do INSERT quit
+		if option="U" do UPDATE quit
+		if option="D" do DELETE quit
+		}
+	quit
+
+CLOSE //
+	use 0 write !
+	if $I'=IO do CLOSE^SCAIO		// close device
+	write $$MSG^%TRMVT("",,1)
+	quit
+
+PP // Post-processor on FID prompt
+
+ 	if X'="*",'Db.isDefined("DBTBL1","%LIBS,X") set ER=1,RM="Invalid Name" Q
+	if X'="*" set IO=$$HOME^%TRNLNM(X_".SQL") do DEFAULT^DBSMACRO("@IO",IO) quit
+	quit
+		
+ // --------------------------------------------------------------------------
+UPDATE // Select columns with trigger logic defined
+ // --------------------------------------------------------------------------
+	new list,blob,trig
+	set blob="",trig=1
+ 	set ER=$$^SQL("SELECT COLUMNS FROM DBTBL7 WHERE TABLE=:FID AND COLUMNS IS NOT NULL","/ROWS=9999",,.data)
+ 	if ER quit
+ 	if data="" do {				// no trigger definition
+		set trig=0
+		set ER=$$^SQL("SELECT DI FROM DBTBL1D WHERE %LIBS=:%LIBS AND FID=:FID AND CMP IS NULL","/ROWS=9999",,.data)
+		}
+	if ER quit
+ 	for i=1:1:$L(data,$C(13,10)) do {	// select columns
+		set v=$P(data,$C(13,10),i)
+		if v="" quit
+		if $E(v)="""" quit		// dummy key
+		if $E(v)?1N quit
+		for j=1:1:$L(v,",") set list($P(v,",",j))=""
+		}
+
+ 	do fsn^SQLDD(.fsn,FID)				// File attributes
+ 	set keys=$P(fsn(FID),"|",3)			// Access keys
+ 	set i="",list=""
+ 	for  set i=$O(list(i)) Q:i=""  do {
+		if 'trig,(","_keys_",")[(","_i_",") quit	// skip access key
+		if "MB"[$$TYP^SQLDD(FID_"."_i) set blob=i quit
+		S list=list_","_i
+		}
+	if blob'="" set list=list_","_blob		// last column
+ 	set list=$e(list,2,9999)
+
+	if keys="" set sqlexpr="Select "_list_" FROM "_FID	// no keys
+ 	else  set sqlexpr="Select "_keys_","_list_" FROM "_FID
+ 	if query'="" set sqlexpr=sqlexpr_" WHERE "_query
+
+ 	set ER=$$^SQL(sqlexpr,"/NOCACHE/ROWS="_cnt,,.data)	// select data
+ 	if ER quit
+ 	set colcnt=$L(keys,",")+$L(list,",")
+	
+ 	for i=1:1:cnt do {
+		if i=cnt set v=$p(data,$C(13,10),i,999999)	// avoid blob/memo error
+		else  set v=$P(data,$C(13,10),i)
+		if v="" quit
+		write !!,"UPDATE "_FID,!," SET "
+		set keycnt=$L(keys,",")			// number of keys
+		set setexpr=""
+		for j=keycnt+1:1:$L(list,",")+keycnt do {
+			if $L(setexpr)>65 write $E(setexpr,2,999),",",! set setexpr=""
+			if j=colcnt set val=$p(v,$C(9),j,999999)
+			else  set val=$P(v,$C(9),j)
+			if val'=+val S val="'"_val_"'"
+			set rec=$P(list,",",j-keycnt)_"="_val		//break up long line
+			if $L(setexpr)+$L(rec)>75 W $E(setexpr,2,999999),",",! S setexpr=""
+			set setexpr=setexpr_","_rec
+			}
+		set setexpr=$e(setexpr,2,$L(setexpr))
+		for k=1:75:$L(setexpr) S v1=$E(setexpr,k,k+74) Q:v1=""  W v1,!
+ 		if keys'="" write " WHERE "_$$where(keys,v),!
+		write " ;",!
+		}
+ 	quit
+
+ // --------------------------------------------------------------------------
+DELETE //
+ // --------------------------------------------------------------------------
+        new whr
+	do fsn^SQLDD(.fsn,FID)		// table attributes
+ 	set list=$P(fsn(FID),"|",3)	// access keys
+	if list="" quit			// no keys defined - CUVAR
+
+ 	set ER=$$^SQL("SELECT "_list_" FROM "_FID,"/NOCACHE/ROWS="_cnt,,.data)
+ 	if data="" set $p(data,"0"_$C(9),$L(list,","))=0
+
+ 	for i=1:1:cnt do {
+		set rec=$p(data,$c(13,10),i)	// single row data
+		if rec="" quit
+		set whr=$$where(list,rec)
+		write !,"DELETE FROM "_FID
+		if list'="" write " WHERE "_whr
+		write !," ;"
+		}
+ 	quit
+
+ // --------------------------------------------------------------------------
+INSERT //
+ // --------------------------------------------------------------------------
+
+ 	do fsn^SQLDD(.fsn,FID)
+ 	set keys=$P(fsn(FID),"|",3)		// access keys
+
+ 	type ResultSet rs=Db.select("DI","DBTBL1D","%LIBS=:%LIBS AND FID=:FID")
+
+ 	if rs.isEmpty() quit
+
+ 	set list=keys,blob=""					// list keys first
+ 	for  quit:'rs.next()  do {				// get column name
+		set column=rs.getCol(1)
+		if '((column?1A.AN)!(column?1"%".AN)) quit	// dummy key
+		if $E(column)="Z" quit				// skip Z data items
+		if " "'[$$CMP^SQLDD(FID_"."_column) quit	// computed item
+		if (","_keys_",")[(","_column_",") quit		// access key
+		set type=$$TYP^SQLDD(FID_"."_column)
+		if type="B"!(type="M") set blob=column quit	// Blob/ Memo
+		set list=list_","_column
+ 		}
+	if blob'="" S list=list_","_blob			// last column
+
+	if $E(list)="," set list=$E(list,2,$L(list))		// tbales without access key
+ 	set sqlexpr="SELECT "_list_" FROM "_FID
+ 	if query'="" S sqlexpr=sqlexpr_" WHERE "_query
+ 
+ 	set ER=$$^SQL(sqlexpr,"/NOCACHE/ROWS="_cnt,,.data)
+ 	if ER write !,RM,!! quit
+
+ 	if data="" S $p(data,"0"_$C(9),$L(keys,","))=0	// no record on file - use defualt key value
+	set colcnt=$L(list,",")			// column count
+ 	for i=1:1:cnt do {
+		if cnt=1 set rec=data		// entire record (avoid memo data error)
+		else  set rec=$p(data,$c(13,10),i)	//  row data
+		if rec="" quit
+		set value="",seq=0
+		for j=1:1:colcnt do {
+			if j=colcnt set v=$P(rec,$C(9),j,99999)	// last column (blob/memo)
+			else  set v=$P(rec,$C(9),j)		// column value
+			if v'=+v set v=$$QADD^%ZS(v,"'")
+			if $L(value)+$L(v)>70 S seq=seq+1,value(seq)=value,value=""
+			set value=value_v_","
+			}
+		if value'="" set seq=seq+1,value(seq)=$E(value,1,$L(value)-1)_")"
+		// set value=$E(value,2,$L(value))
+ 		write !,"INSERT INTO "_FID,!," ("
+		set v=""
+		for k=1:1:$L(list,",") do {		// Column list
+			if $L(v)>65 write " ",v,! S v=""
+			set v=v_$P(list,",",k)_","
+			}
+		write $E(v,1,$L(v)-1),")",!
+		write " VALUES ("			// Value list
+		for k=1:1:seq do {
+			if $L(value(k))<100 write value(k),! quit
+			for z=1:70:$L(value(k)) write $e(value(k),z,z+69),!
+			}
+		write " ;"
+        	}
+ 	quit
+
+ // --------------------------------------------------------------------------
+where(list,rec) //
+ // --------------------------------------------------------------------------
+ 	new j,v,where
+
+ 	set where=""
+ 	for j=1:1:$L(list,",") do {
+		set v=$P(rec,$C(9),j)
+		if v'=+v set v="'"_v_"'"
+		set where=where_" AND "_$P(list,",",j)_"="_v
+		}
+ 	set where=$E(where,6,$L(where))
+ 	quit where
+
+ // --------------------------------------------------------------------------
+RUN // Execute SQL script files
+ // --------------------------------------------------------------------------
+	new eof,expr,msg,rec,record,z,IO,VFMQ,%TAB,%READ,%FRAME
+
+	set msg="Execute SQL statement"
+	set %TAB("IO")=".IFILE/XPP=D CHKIO^UCTEST"
+	set %READ="@msg/CEN/REV,,IO/REQ,"
+	set %FRAME=2
+	set OLNTB=5000
+	do ^UTLREAD
+	if VFMQ="Q" quit
+	
+	do script(IO)
+	quit
+
+script(IO) //
+	set record=""
+ 	set z=$$FILE^%ZOPEN(IO,"READ",5) if 'z quit
+        for  set rec=$$^%ZREAD(IO,.eof) Q:eof  set record=record_rec
+	Close IO
+
+	for rec=1:1:$L(record,";") do {
+		set expr=$P(record,";",rec)
+		if expr="" quit
+		set ER=$$^SQL(expr,"/NOCACHE")
+		if ER write !,$G(RM),!
+		}
+	quit
+
+CHKIO	//
+	set z=$$FILE^%ZOPEN(X,"READ",5) I 'z set ER=1,RM=$P(z,"|",2)
+	close X
+	quit
+	//----------------------------------------------------------------------
+QAPSL(IO,OUTDEV) // Parse SQL statements and display compiled M code
+	//----------------------------------------------------------------------
+	// ARGUMENTS:
+	//
+	// . IO		Input SQL script file	/TYP=T/REQ/MECH=VAL
+	// . OUTDEV	Output device		/TYP=T/REQ/MECH=VAL/DEF=$P
+	//              (stored compiled M code)
+	//
+	// EXAMPLES:
+	//
+	// D QA("SYS$LOGIN:SQLTEST.SQL","SYS$LOGIN:SQLTEST.LIS")
+	//
+	//----------------------------------------------------------------------
+	quit
+QA	//
+	new cnt,eof,expr,i,msg,rec,sqltyp,tok,vexe,z
+	new %TAB,%READ,VFMQ,IO
+	
+	set SCRIPTIO=$$HOME^%TRNLNM("QA.SQL")
+	set IO=$$HOME^%TRNLNM("QA.LIS")
+
+        set msg="Compile SQL statements"
+        set %TAB("SCRIPTIO")=".IFILE/XPP=D CHKIO^UCTEST"
+	set %TAB("IO")=$$IO^SCATAB
+        set %READ="@msg/CEN/REV,,SCRIPTIO/REQ,IO"
+	do ^UTLREAD
+	if VFMQ="Q" quit
+
+	set rec="",expr="",cnt=0
+ 	set z=$$FILE^%ZOPEN(SCRIPTIO,"READ",5) if 'z quit
+	set z=$$FILE^%ZOPEN(IO,"WRITE/NEWV",5) if 'z quit
+
+	use IO write !,$$DAT^%ZM(+$H),"  ",$$TIM^%ZM($P($H,",",2),"24:60:SS"),!
+
+        for  set rec=$$^%ZREAD(SCRIPTIO,.eof) Q:eof  D {
+		use IO write rec,!
+		if rec'?." "1";" set expr=expr_rec quit		// Join lines
+		do SQLQA
+		set expr="",cnt=cnt+1
+		quit
+		}
+
+	use IO write !,$$DAT^%ZM(+$H),"  ",$$TIM^%ZM($P($H,",",2),"24:60:SS")," ",cnt," Records processed",!
+
+	close SCRIPTIO,IO
+	
+	quit
+
+SQLQA	//
+	new i,list,val
+	kill tok,vexe,ER,RM
+	set expr=$$SQL^%ZS(expr,.tok)				// convert it into token form
+	if expr["BUFFER COMMIT" quit
+	if $E(expr,1,6)="BUFFER" S expr=$P(expr," ",4,99999)
+	set sqltyp=$P(expr," ",1)				// SQL command
+	set expr=$P(expr," ",2,9999)
+	
+	if sqltyp="INSERT" do { quit				// INSERT statement
+		if $P(expr," ",1)="INTO" set expr=$P(expr,"INTO ",2,99999)
+		do INSERT^SQLCMP(expr,1,.vexe,1)
+		do SQLQA1
+		set list=$P($P(expr,"(",2),")",1)		// column list
+		set val=""					// use :c1,:c2 host variable syntax
+		for i=1:1:$L(list,",") set val=val_",:C"_i
+		set expr=$P(expr,"(",1,2)_"("_$E(val,2,$L(val))_")"
+		do INSERT^SQLCMP(expr,1,.vexe,1)
+		do SQLQA1
+		set cnt=cnt+1
+		}
+	if sqltyp="UPDATE" do { quit
+		do UPDATE^SQLCMP(expr,1,.vexe,1)		// UPDATE statement
+		do SQLQA1
+		}
+	if sqltyp="DELETE" do { quit				// DELETE statement
+		if $P(expr," ",1)="FROM" set expr=$P(expr,"FROM ",2,99999)
+		do DELETE^SQLCMP(expr,1,.vexe,1)
+		do SQLQA1
+		}
+	quit
+
+SQLQA1	// Compiled M code
+
+	use IO
+	if $G(ER) W !!,"***** ",RM," ****",!! kill vexe quit
+	set i=""
+	for  set i=$O(vexe(i)) quit:i=""  write !," ",vexe(i)
+	write !!
+	kill vexe
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "59886^43624^Sanchez SCM Administrator^10740"	// Signature - LTD^TIME^USER^SIZE

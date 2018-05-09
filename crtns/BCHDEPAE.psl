@@ -1,0 +1,354 @@
+BCHDEPAE //Batch BCHDEPAEC - Anticipated Earnings Check Generation
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 08/30/2007 15:07 - joynerd
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHDEPAEC Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ set vBCHSTS=$$STATUS^BCHUTL("BCHDEPAEC")
+ if vBCHSTS=1 set ER=1,RM=$$^MSG(3410) quit
+ if vBCHSTS=2 set ER=1,RM=$$^MSG(3414) quit
+ if vBCHSTS=0 set %BatchRestart=1
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit do EXIT^BCHUTL("BCHDEPAEC") quit
+ do JOBMGR^BCHUTL(%FN,"BCHDEPAEC",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ do EXIT^BCHUTL("BCHDEPAEC")
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(TJD,CID) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHDEPAEC","*","",TJD.get()_","_CID.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ if %BatchRestart,$$CHKLOG^BCHUTL(%SystemDate,%FN,"BCHDEPAEC",TJD.get()_","_CID.get()) do { quit
+ do LOG^BCHUTL(%SystemDate,%FN,"BCHDEPAEC",TJD.get()_","_CID.get(),"Record already processed")
+ }
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,TJD,CID)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHDEPAEC","*","",TJD.get()_","_CID.get(),"",et)
+ }
+ do UPDLOG^BCHUTL(%SystemDate,%FN,"BCHDEPAEC",TJD.get()_","_CID.get(),vCONTEXT)
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,TJD,CID) //
+	new BAL
+ 
+
+	do PROCESS
+
+        quit
+ 
+
+PROCESS //
+
+	new INTDIS				// JMH - 10/08/98
+
+	if ER do EXC quit
+
+	type RecordDEP dep
+	set dep=Db.getRecord("DEP","CID")	
+
+	set BAL=dep.bal
+
+	if dep.stat=4 quit		    	// Account closed
+
+	if dep.aecamt quit		    	// Anticipated Amount
+
+	set MDT=dep.mdt				// Account Maturity Date			
+	set RENCD=dep.rencd			// Principal Maturity Option
+	set ERO=dep.ero				// Earnings Renewal Option
+	set IOPT=dep.iopt			// Interest Disbursement Option
+	set MININT=dep.minint			// Minimum Balance to Credit Interest
+	set IACM=dep.iacm			// Needed to load node 49 for DTL^TTXP2
+
+	if MININT="" set MININT=-1E15
+	if dep.ira,dep.inp set INTDIS=1		// JMH - 10/08/98      	
+
+	set IPND=0
+	
+	// Interest Paid - Not Disbursed
+	if RENCD=3,ERO quit:MDT=EFD  set IPND=dep.ipnd
+	set PRIN=dep.bal
+
+	/*
+	  If balance is less than minimum balance to pay interest,
+	  set interest amount to zero.  If not maturing and there
+	  is no interest paid not disbursed, quit.  Otherwise, a
+	  check will be generated.
+	*/
+
+	if dep.bal<MININT set INT=0 quit:(MDT'=EFD&'IPND)
+
+	else  do AEC^DEPAES set INT=$$^SCARND(ACR,0,$G(CID))
+
+
+	/*
+	  Set interest amount equal to anticipated accrued 
+	  amount plus any amounts paid but not disbursed.
+	*/
+
+	set INT=INT+IPND
+
+	//Calculate withholding amount, if applicable
+	set BWA=0
+	
+	// 2nd param ttx object can not be passed, DEPBW handles it
+	if INT,dep.bwf do ^DEPBW(.dep,,.INT,.BWA,.NTAX,BWAPGM,,,,,,EFD)
+
+	//Calculate IRA distribution withholding, add to BWA
+	if dep.ira do DWA(.dep) set BWA=BWA+DWA+DSWA
+
+	if MDT=EFD,RENCD=1 set TAMT=$S(IOPT'=2:PRIN+INT-BWA_"#"_PRIN_"#"_INT_"##"_BWA,1:PRIN-BWA_"#"_PRIN_"###"_BWA)
+	else  set TAMT=INT-BWA_"##"_INT_"##"_BWA
+	
+	// File data 
+	
+	set CHKMIN=dep.intchkmin		// Minimum Interest Check Amount
+	set CHKBKT=dep.intchkbkt		// Interest Check Accumulation
+	set CHECK=1
+
+	if TAMT'>0 quit
+	if TAMT+CHKBKT<CHKMIN quit
+	set $P(TAMT,"#",1)=TAMT+CHKBKT
+	
+	new flag1,flag2
+	set TJD=%SystemDate
+	set CKTYP="AEC"
+	set flag1=Db.isDefined("XPDO1","TJD,CKTYP")	
+	set flag2=Db.nextKey("XPDO","TJD,CKTYP,""""")
+
+	if flag1&flag2 do {
+		new xpdo1
+		type RecordXPDO1 xpdo1
+		set xpdo1=Db.getRecord("XPDO1","TJD,CKTYP")
+		
+		set xpdo1.pntflg=""
+
+		do xpdo1.bypassSave()
+
+		}
+		
+
+	set TJD=%SystemDate
+	set CKTYP="AEC"
+	set CKSEQ=""			
+		
+	// last check seq
+	type ResultSet rs=Db.select("CKSEQ","XPDO","TJD=:TJD AND CKTYP=:CKTYP","CKSEQ DESC")
+	if rs.next() set CKSEQ=rs.getCol("CKSEQ")		
+	
+	set CKSEQ=CKSEQ+1			// new seq
+	
+	type RecordXPDO xpdo
+	set xpdo=Class.new("RecordXPDO")	
+	
+	set xpdo.tjd=TJD			// Transaction Date
+	set xpdo.cktyp=CKTYP			// Check Type
+	set xpdo.ckseq=CKSEQ			// Check Sequence
+
+	set xpdo.cid=CID                        // Account Number
+        set xpdo.tamt=TAMT                      // Amount
+        set xpdo.efd=EFD                        // Effecti
+
+	do xpdo.bypassSave()
+
+	set CLS=dep.cls				// Product Class
+	set GRP=dep.grp				// Product Group
+	set TYPE=dep.type			// Product Type
+	set CC=dep.cc				// Cost Center
+
+
+	set TSEQ=Db.nextVal("HIST","CID") 
+
+	type RecordDTJFM dtjfm
+	set dtjfm=Class.new("RecordDTJFM")
+
+	set dtjfm.tjd=TJD			
+	set dtjfm.cls=CLS
+	set dtjfm.grp=GRP
+	set dtjfm.typ=TYPE
+	set dtjfm.cid=CID
+	set dtjfm.tseq=TSEQ
+
+	set dtjfm.cc=CC                         // Cost Center
+	set dtjfm.tlo=%UserStation		// Transaction Location
+						// Transaction Comment
+	set dtjfm.tcmt="Ant. Earnings Check $"_$$^SCARND(TAMT,0,$G(CID))
+	set dtjfm.cdt=%CurrentDate		// Calendar Date
+	set dtjfm.time=%CurrentTime		// Transaction Time
+	set dtjfm.brcd=BRCD			// Branch Code
+	set dtjfm.uid=UID			// User Identification
+
+	do dtjfm.bypassSave()
+
+	type RecordHIST hist
+	set hist=Class.new("RecordHIST")
+
+	set hist.cid=CID
+	set hist.tseq=TSEQ
+
+	set hist.tjd=%SystemDate		// System Processing Date
+	set hist.tlo=%UserStation		// Transaction Location
+	set hist.tcmt="Ant. Earnings Check $"_$$^SCARND(TAMT,0,$G(CID))
+						// Transaction Comment
+	set hist.cdt=%CurrentDate		// Calendar Date
+	set hist.time=%CurrentTime              // Transaction Time
+	set hist.brcd=BRCD			// Branch Code
+	set hist.uid=UID			// User ID
+
+	do hist.bypassSave()			
+	
+	set dep.aecamt=TAMT			// Anticipated Amount
+
+	// 1 write to DB instead of 2.
+	set dep.intchkbkt=0			// Interest Check Accumulation
+
+	do dep.bypassSave()                     // Update the record
+
+	quit
+
+	
+DWA(RecordDEP dep)	// IRA distribution withholding
+
+	type public Number DWA,DSWA
+	type Number STTAX
+
+	set DWA=0,DSWA=0
+	
+	set IRA=dep.ira				// RPA Type
+	set ACN=dep.acn				// Customer Number
+
+	set TAMT=INT+IPND if MDT=EFD,RENCD=1 set TAMT=TAMT+PRIN
+
+	for STTAX=0:1:1 do CLOSE^IRAWH(.dep)
+	quit
+
+
+EXC	// Log exceptions
+
+	// Anticipated Earnings/Payout Checks
+	
+	do LOG^UTLEXC($T(+0),"*",$$^MSG(3462),$G(CID),$G(%ZTSEQ),$G(ET),$S($G(CID):+$G(BAL),1:""))
+	kill ET,%ZTSEQ
+
+	quit
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,TJD,CID
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set TJD=vRECORD.piece($C(9),1)
+ set CID=vRECORD.piece($C(9),2)
+ do vPROC(TJD,CID)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,TJD,CID
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>32767 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+24>32767 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+	set XTJD=%SystemDate
+
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("TJD,CID","DAYENDAEC","TJD=:XTJD")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	type RecordCUVAR cuvar
+	set cuvar=Db.getRecord("CUVAR")
+	set EFD=cuvar.dayend4+%SystemDate
+	set %UserStation=$G(%UserStation)
+	set BWAPGM=cuvar.bwapgm
+	do SOURCE^BCHSOURC("BOFF","AEC",.UID,.BRCD,.UCLS)
+	set POPT=0
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+	new UID,CRCD,UCLS
+	do SOURCE^BCHSOURC("BOFF","AEC",.UID,.BRCD,.UCLS)
+	if ER quit
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

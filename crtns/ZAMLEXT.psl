@@ -1,0 +1,887 @@
+ZAMLEXT	  /*
+ORIG: GAURAV AGRAWAL - 02/12/2007
+DESC: Extract Generator for Experian
+
+---- Comments --------------------------------------------------------
+ 
+        This new procedure will generate all the file extracts needed 
+        by Experian for their anti money laundering system. 
+	
+	07/20/07 - Prabhu Reginald CR 28282
+		   Modified DATA section to removed decimal from EIA and
+		   EOA variables. Modified BAL variable to accomodate
+		   negative sign before the leading zeros.
+		   Changed recordsize to hold in single line
+		   Changed ALERT to send in Y/N
+
+	07/13/07 - Walton
+		   CR 28259 - Added Walmart enhancments, added two new
+		   columns to PROFILES extract, DEP.EIA and DEP.EOA.  	
+
+	07/14/07 - Prabhu Reginald CR28259
+		   AC section - first,last and mmname added, Account
+		   target and Target type fields modified.
+		   AB section - modified to use UTBLNAICS against UTBLSIC        
+		   CUST section - same as AB section
+
+	07/11/07 - Walton
+		   CR 28169 - Modified DRPM and CRPM to be zero filled instead of 
+		   blank filled, and removed seting of array BRCD.
+	
+	07/10/07 - Walton
+		   CR 28140 - Modified CN section to create an entry for each
+		   country
+	
+	06/27/07 - Walton
+		   CR 27852 - Modified date formats from YYYY to YEAR
+
+	06/26/07 - Walton 
+		   CR 27839 - Added CR call to USER section to 
+		   create the currency extract. 
+
+----------------------------------------------------------------------
+ */	
+	// Prompts
+	// #WARN
+
+	type Public Date DATE7
+	type String %READ,%TAB,%ZTSEQ,CID,ER,ET,ETLOC,RM,VFMQ
+	type Boolean ZAML1,ZAML2,ZAML3,ZAML4,ZAML5
+	
+	set DATE7=%SystemDate-1
+	
+	set %TAB("DATE7")=".DATE7/REQ"
+	set %TAB("ZAML1")=".AML1"
+	set %TAB("ZAML2")=".AML2"
+	set %TAB("ZAML3")=".AML3"
+	set %TAB("ZAML4")=".AML4"
+	set %TAB("ZAML5")=".AML5"
+
+	set %READ="DATE7,ZAML1,ZAML2,ZAML3,ZAML4,ZAML5"
+	do ^UTLREAD
+	if VFMQ.get() = "Q" quit
+	
+	/* daily individual customers and companies delimited extracts by collating 
+	through the journal table DTJNA for new CIFs */
+	if (ZAML1'=0) do CUST(DATE7)
+	
+	/* ACCT will create ACyearmmdd.TXT for accounts extract and will cycle through 
+	three tables DTJNA,DTJCL,ZAMLJNL to produce the desired extract */
+	if (ZAML2'=0) do ACCT(DATE7)
+	
+	// Daily Transaction Journal Extract
+	if (ZAML3'=0) do DTJ(DATE7)
+	
+	// UserTables Extract
+	if (ZAML4'=0) do USER(DATE7)
+	
+	/* Monthly individual customers and companies, "," delimited extracts by collating 
+	through the CIF */
+	if (ZAML5'=0) do CUSTM(DATE7)
+	
+	quit
+	
+
+INITIO(PR,Date DATE,IO io1)	// Initialize Extract file with file name and other parameters		
+
+	type String CONTEXT,ET,RM
+	
+	catch Error {
+		set ET=Error.type
+		set CONTEXT=Error.context
+		if ET["%GTM" do ZE^UTLERR quit
+		set RM=Error.description
+		set ET=ET_"-"_RM_"-"_Error.thrownAt
+		do ^UTLERR 
+	}
+	
+        set io1.openParams="NEWV/WRITE"
+	set io1.fileName=PR_DATE.toString("YEARMMDD")_".TXT"
+	set io1.recordSize=2000		// QC808
+        do io1.open()
+	
+	quit 
+
+
+ACCT(DATE)
+	
+	type IO io,iopr
+	type ResultSet rs,rs1,rs2,rs3,rs4
+	type String XCID,BRCD()
+	
+	set io=Class.new("IO")
+	set iopr=Class.new("IO")
+	
+	do INITIO("AC",DATE,.io)			// Initialize IO for Accounts file Extract
+	do INITIO("PR",DATE,.iopr)			// Initialize IO for Profile file Extract
+	
+	/* loop through the journal tables to determine all the Accounts, that are created
+ 	updated or deleted on the specified date, to be dumped in the extract file */
+	
+	set rs1 = Db.select("DISTINCT CID","DTJNA","TJD=:DATE")
+	if 'rs1.isEmpty() while rs1.next() do DATA(rs1.getCol(1),.io,"DTJNA",.iopr)
+	
+	set rs2 = Db.select("DISTINCT CID","DTJCL","TJD=:DATE")
+	if 'rs2.isEmpty() while rs2.next() do DATA(rs2.getCol(1),.io,"")
+	
+	set rs3=Db.select("TABTYPE,CID","ZAMLJNL","ZTJD=:DATE")
+	if 'rs3.isEmpty() while rs3.next() do {
+		set XCID=rs3.getCol(2)
+     		if rs3.getCol(1)="ACN" do DATA(XCID,.io,"") if 1            
+		else  do {
+			set rs4=Db.select("CID","ACN","ACN=:XCID")        
+			if 'rs4.isEmpty() while rs4.next() do DATA(rs4.getCol(1),.io,"")
+		}
+		
+	}
+	
+	do io.close()
+	do iopr.close()
+	
+	quit				
+				
+DATA(CID,IO io,String DATATBL,IO iopr)
+	
+	type String CONTEXT,ET,RM
+	catch Error {
+		set ET=Error.type
+		set CONTEXT=Error.context
+		if ET["%GTM" do ZE^UTLERR quit
+		set RM=Error.description
+		set ET=ET_"-"_RM_"-"_Error.thrownAt
+		do ^UTLERR 
+	}
+	
+	type String ACN,AT,BAL,BLANK,BOO,BYTPE,CRCD,DATA,DATAPR,LNM,OFF,PCNTRY,PR,PURCD
+	type String CLS,DTC,MDT,ODT,REGION,SF,STAT,SW,TABLE,TT,TYPE
+	type RecordACN acn
+	type RecordCIF cif
+	type RecordDEP dep
+	type RecordLN ln
+	
+	if 'Db.isDefined("ACN",":CID") quit
+	set acn=Db.getRecord("ACN","CID=:CID")
+	
+	set (BLANK,PURCD,TT,SF,SW)=""
+	set CLS=acn.cls
+	if CLS="D" do {
+		if Db.isDefined("DEP",":CID") set dep=Db.getRecord("DEP","CID=:CID") 
+		set SF=dep.initdsrc
+		set SW=dep.srcofinc
+		set PURCD=dep.acctprps
+
+		type Number CRPM,DRPM,EIA,EOA
+		set DRPM=dep.drpmonth, DRPM=DRPM.zero(10)
+		set CRPM=dep.crpmonth, CRPM=CRPM.zero(10)
+		set EIA=dep.eia, EIA=EIA.zero(15,2,1,1) //QC 816
+		set EOA=dep.eoa, EOA=EOA.zero(15,2,1,1) //Removed decimals
+
+		// For Extracting records for Profile file form DTJNA
+		if DATATBL.get()="DTJNA" do {
+			set DATAPR=CID.justify(20,-1,,1)_"0112"_EIA_EOA
+			set DATAPR=DATAPR_DRPM_CRPM_"01"
+			do iopr.write(DATAPR) 	
+		}
+	}	
+	
+	
+	set BOO=acn.boo
+	set ACN=acn.acn
+	if ACN'="" do {
+		set cif=Db.getRecord("CIF","ACN=:ACN")
+		set PCNTRY=cif.pcntry
+	}
+	else set PCNTRY=""
+	
+	if ((acn.stat=1)!(acn.stat=2)) set STAT="Y"
+	else  set STAT="N"
+	
+	set ODT=acn.odt.toString("MM/DD/YEAR")
+	set ODT=ODT.justify(10,-1,,1)
+	
+	set DTC=acn.dtc.toString("MM/DD/YEAR")
+	set DTC=DTC.justify(10,-1,,1)
+	
+	set MDT=acn.mdt.toString("MM/DD/YEAR")
+	set MDT=MDT.justify(10,-1,,1)
+	
+	set CID=CID.justify(20,-1,,1)
+	set ACN=ACN.justify(20,-1,,1)
+	set LNM=""
+	if cif.fname'="" set LNM=LNM_cif.fname
+	if cif.lnm'="" set LNM=LNM_" "_cif.lnm
+	if cif.mmname'="" set LNM=LNM_" "_cif.mmname 	
+	set LNM=LNM.justify(40,-1,,1)
+	set BOO=BOO.justify(10,-1,,1)
+	set CRCD=acn.crcd.justify(8,-1,,1)
+	set OFF=acn.off
+	if OFF="" set OFF=0
+	set OFF=OFF.justify(20,-1,,1)
+	set PCNTRY=PCNTRY.justify(8,-1,,1)
+	set REGION=cif.locale.justify(8,-1,,1)
+	set BTYPE=cif.naics
+	set BTYPE=BTYPE.justify(8,-1,,1)
+	set PURCD=PURCD.justify(8,-1,,1)
+	if cif.polexpper set AT="Y"
+	else  set AT="N"
+	set TT=cif.zpolexrel, TT=TT.justify(8,-1,,1)
+	set SF=SF.justify(8,-1,,1)
+	set SW=SW.justify(8,-1,,1)
+	set TYPE=acn.type, TYPE=TYPE.justify(8,-1,,1)
+	set BAL=acn.bal, BAL=BAL.zero(20,2,1,1)
+	
+	set DATA=CID_ACN_LNM_BOO_CRCD_OFF_PCNTRY_REGION_ODT_DTC_MDT_"   "_AT_BLANK.justify(20)_TYPE
+	set DATA=DATA_BTYPE_PURCD_TT_SF_SW_BLANK.justify(16)_BAL_BLANK.justify(8)_STAT_BLANK.justify(10)
+	do io.write(DATA)
+	
+	quit	
+
+
+DTJ(DATE)
+
+	// Transactions extract for DATE by calling into the batch definition ZBCHAMLDTJ
+	type Date XTJD=DATE
+	do DRV^UBCHID("ZBCHAMLDTJ") 
+	quit
+	
+
+USER(DATE)
+	
+	do TC("TC",DATE)	// transaction code extract by collating through the TRN table.			
+	do RE("RE",DATE)	// relationship extract by collating through the RELCIF and CIF tables.
+	do RT("RT",DATE)	// relationship type extract by collating through the new custom table ZCIFREL
+	do CN("CN",DATE)	// countries extract by collating through the system table STBLCNTY.
+	do ST("ST",DATE)	// states extract by collating through the system table STBLCNTY1 where CNTRY=MX
+	do RG("RG",DATE)	// region extract by collating through the usertable UTBLREGION.
+	do BR("BR",DATE)	// the branch extract by collating through the usertable UTBLBRCD.
+	do BA("BA",DATE)	// bankers extract by collating through the usertable UTBLOFF.
+	do AT("AT",DATE)	// account type extract by collating through the table PRODCTL.
+	do AP("AP",DATE)	// account purpose extract by collating through the usertable UTBLPURCD.
+	do SF("SF",DATE)	// source of funds extract by collating through the usertable UTBLINITDSRC
+	do SW("SW",DATE)	// source of wealth extract by collating through the usertable UTBLSRCOFINC
+	do AB("AB",DATE)	// Account Business Type extract by collating through the usertable UTBLSIC
+	do TT("TT",DATE)	// Account Targeted type extract by collating through the usertable ZUTBLPER
+	do CR("CR",DATE)	// currency code extract by collating through CRCD table
+	quit
+	
+	
+TC(String PR,DATE)
+	
+	type IO io=Class.new("IO")	
+	type String ALERT,BLANK,DATA,DC,DES,ETC,RDATA,RDC,RDES,RETC
+	type RecordTRN trn
+	type ResultSet rs
+	
+	do INITIO(PR,DATE,.io)
+	
+	set rs = Db.select("ETC,ALERT","ZUTBLTRN")
+	if 'rs.isEmpty() while rs.next() do {
+			
+		type String CONTEXT,ET,RM
+		catch Error {
+			set ET=Error.type
+			set CONTEXT=Error.context
+			if ET["%GTM" do ZE^UTLERR quit
+			set RM=Error.description
+			set ET=ET_"-"_RM_"-"_Error.thrownAt
+			do ^UTLERR 
+		}
+	
+		set trn=Db.getRecord("TRN","ETC=:rs.getCol(1)")
+		
+		set ETC=trn.etc
+		set DES=trn.des
+		if trn.dc=1 set DC="I" set RDC="O"
+		else  set DC="O" set RDC="I"
+		set ALERT=rs.getCol(2)
+		if ALERT=1 set ALERT="Y"
+		else  set ALERT="N"
+		
+		// For Reversal Transaction code entries
+		set RETC="R"_ETC
+		set RDES="Reversal "_DES
+		
+		set BLANK=""
+		
+		set DATA=ETC.justify(8,-1,,1)_DES.justify(40,-1,,1)_DC_ALERT_BLANK.justify(8)
+		set RDATA=RETC.justify(8,-1,,1)_RDES.justify(40,-1,,1)_RDC_ALERT_BLANK.justify(8)
+		
+		do io.write(DATA)
+		do io.write(RDATA)
+	}
+	do io.close()
+	quit
+	
+
+RE(String PR,DATE)
+	
+	type IO io=Class.new("IO")
+	type String ACN,APH,BLANK,CID,DATA,DOB,HPH,NAM,NATION,PAD1,PCITY,PCNTRY,PSTATE,PZIP
+	type String ACNRELC,RELCODE,ROLE
+	type RecordCIF cif
+	type RecordACN acn
+	type ResultSet rs
+	
+	do INITIO(PR,DATE,.io)	
+	
+	set rs=Db.select("CID,ACN,ROLE","RELCIF")
+	if 'rs.isEmpty() while rs.next() do {
+		
+		type String CONTEXT,ET,RM
+		catch Error {
+			set ET=Error.type
+			set CONTEXT=Error.context
+			if ET["%GTM" do ZE^UTLERR quit
+			set RM=Error.description
+			set ET=ET_"-"_RM_"-"_Error.thrownAt
+			do ^UTLERR 
+		}
+	
+		set CID=rs.getCol(1) 
+		set ACN=rs.getCol(2)
+		set ROLE=rs.getCol(3)
+		
+		if Db.isDefined("ACN",":CID") do {
+			set acn=Db.getRecord("ACN","CID=:CID")
+			set ACNRELC=acn.acnrelc
+			if +ROLE=1 set RELCODE="C"
+			else  set RELCODE=ACNRELC_ROLE
+		}
+		else  set RELCODE=""
+		
+		if 'Db.isDefined("CIF",":ACN") quit
+		set cif=Db.getRecord("CIF","ACN=:ACN")
+		
+		set BLANK=""
+		set CID=CID.justify(20,-1,,1)
+		set NAM=cif.nam.justify(80,-1,,1)
+		set RELCODE=RELCODE.justify(8,-1,,1)
+		set PAD1=cif.pad1.justify(120,-1,,1)
+		set PCITY=cif.pcity.justify(50,-1,,1)
+		set PSTATE=cif.pstate.justify(8,-1,,1)
+		set PZIP=cif.pzip.justify(15,-1,,1)
+		set APH=cif.aph.justify(20,-1,,1)
+		set NATION=cif.nation.justify(8,-1,,1)
+		set HPH=cif.hph.justify(20,-1,,1)
+		set DOB=cif.dob.toString("MM/DD/YEAR")
+		set DOB=DOB.justify(10,-1,,1)
+		set ACN=cif.acn, ACN=ACN.justify(20,-1,,1)
+		set PCNTRY=cif.pcntry.justify(8,-1,,1)
+		
+		set DATA=CID_NAM_RELCODE_PAD1_PCITY_PSTATE_PZIP_APH_NATION_HPH
+		set DATA=DATA_DOB_ACN_BLANK.justify(30,-1,,1)_PCNTRY_BLANK.justify(170,-1,,1)
+		do io.write(DATA)
+	}	
+	do io.close()
+	quit
+
+
+RT(String PR,DATE)
+	
+	type IO io=Class.new("IO")	
+	type String DATA,FMDESC,HIERARCHY,RELTYPE
+	type RecordZUTBLRELTYPE zreltype
+	type DbSet ds 
+	
+	do INITIO(PR,DATE,.io)
+	
+	set ds = Db.selectDbSet("ZUTBLRELTYPE")
+	while ds.next() do {
+		
+		type String CONTEXT,ET,RM
+		catch Error {
+			set ET=Error.type
+			set CONTEXT=Error.context
+			if ET["%GTM" do ZE^UTLERR quit
+			set RM=Error.description
+			set ET=ET_"-"_RM_"-"_Error.thrownAt
+			do ^UTLERR 
+		}
+	
+		set zreltype  = ds.getRecord("ZUTBLRELTYPE")
+		
+		set RELTYPE=zreltype.reltype.justify(8,-1,,1)
+		set FMDESC=zreltype.fmdesc.justify(30,-1,,1)
+		set HIERARCHY=zreltype.hierarchy.justify(8,-1,,1)
+		
+		set DATA=RELTYPE_FMDESC_HIERARCHY
+		do io.write(DATA)
+	}
+	do io.close()
+	quit
+		
+		
+CN(String PR,DATE)
+	
+	type IO io=Class.new("IO")
+	type String BLANK,CNTRY,DATA,FMDESC,RISK
+	type DbSet ds 
+	type RecordSTBLCNTRY stblcntry
+	
+	do INITIO(PR,DATE,.io)
+	
+	set ds = Db.selectDbSet("STBLCNTRY")
+	while ds.next() do {
+		
+		type String CONTEXT,ET,RM
+		catch Error {
+			set ET=Error.type
+			set CONTEXT=Error.context
+			if ET["%GTM" do ZE^UTLERR quit
+			set RM=Error.description
+			set ET=ET_"-"_RM_"-"_Error.thrownAt
+			do ^UTLERR 
+		}
+	
+		set stblcntry  = ds.getRecord("STBLCNTRY")
+		
+		set CNTRY=stblcntry.cntry.justify(8,-1,,1)
+		set FMDESC=stblcntry.fmdesc.justify(40,-1,,1)
+		set RISK="  3"
+		set BLANK=""
+			
+		set DATA=CNTRY_FMDESC_RISK_BLANK.justify(2)
+		do io.write(DATA)
+	}
+	do io.close()
+	quit
+		
+ST(String PR,DATE)
+	
+	type IO io=Class.new("IO")	
+	type String BLANK,CNTRY,DATA,FMDESC,STATE
+	type RecordSTBLCNTRY1 stblcntry1
+	type DbSet ds
+	
+	do INITIO(PR,DATE,.io)
+	
+	set ds = Db.selectDbSet("STBLCNTRY1","CNTRY='MX'")
+	while ds.next() do {
+		
+		type String CONTEXT,ET,RM
+		catch Error {
+			set ET=Error.type
+			set CONTEXT=Error.context
+			if ET["%GTM" do ZE^UTLERR quit
+			set RM=Error.description
+			set ET=ET_"-"_RM_"-"_Error.thrownAt
+			do ^UTLERR 
+		}
+	
+		set stblcntry1  = ds.getRecord("STBLCNTRY1")
+		
+		set BLANK=""
+		set STATE=stblcntry1.state.justify(8,-1,,1)
+		set FMDESC=stblcntry1.fmdesc.justify(40,-1,,1)
+		set CNTRY=stblcntry1.cntry.justify(8,-1,,1)
+		
+		set DATA=STATE_FMDESC_BLANK.justify(1)_CNTRY
+		do io.write(DATA)
+	}
+	do io.close()
+	quit
+
+	
+RG(String PR,DATE)
+	
+	type IO io=Class.new("IO")	
+	type String DATA,FMDESC,KEY
+	type DbSet ds
+	type RecordUTBLLOCALE utbllocale
+	
+	do INITIO(PR,DATE,.io)
+	
+	set ds = Db.selectDbSet("UTBLLOCALE")
+	while ds.next() do {
+		
+		type String CONTEXT,ET,RM
+		catch Error {
+			set ET=Error.type
+			set CONTEXT=Error.context
+			if ET["%GTM" do ZE^UTLERR quit
+			set RM=Error.description
+			set ET=ET_"-"_RM_"-"_Error.thrownAt
+			do ^UTLERR 
+		}
+	
+		set utbllocale = ds.getRecord("UTBLLOCALE")
+		
+		set KEY=utbllocale.locale.justify(8,-1,,1)
+		set FMDESC=utbllocale.fmdesc.justify(40,-1,,1)
+		
+		set DATA=KEY_FMDESC
+		do io.write(DATA)
+	}
+	do io.close()
+	quit
+
+
+BR(String PR,DATE)
+	
+	type IO io=Class.new("IO")	
+	type String BRCD,DATA,FMDESC
+	type DbSet ds
+	type RecordUTBLBRCD utblbrcd
+	
+	do INITIO(PR,DATE,.io)
+	
+	set ds = Db.selectDbSet("UTBLBRCD")
+	while ds.next() do {
+		
+		type String CONTEXT,ET,RM
+		catch Error {
+			set ET=Error.type
+			set CONTEXT=Error.context
+			if ET["%GTM" do ZE^UTLERR quit
+			set RM=Error.description
+			set ET=ET_"-"_RM_"-"_Error.thrownAt
+			do ^UTLERR 
+		}
+	
+		set utblbrcd = ds.getRecord("UTBLBRCD")
+		
+		set BRCD=utblbrcd.brcd, BRCD=BRCD.justify(10,-1,,1)
+		set FMDESC=utblbrcd.fmdesc.justify(40,-1,,1)
+		
+		set DATA=BRCD_FMDESC
+		do io.write(DATA)
+	}
+	do io.close()
+	quit
+
+
+CR(String PR,DATE)
+	
+	type IO io=Class.new("IO")	
+	type String CRCD,DATA,DESC
+	type DbSet ds
+	type RecordCRCD crcd
+	
+	do INITIO(PR,DATE,.io)
+	
+	set ds = Db.selectDbSet("CRCD")
+	while ds.next() do {
+		
+		type String CONTEXT,ET,RM
+		catch Error {
+			set ET=Error.type
+			set CONTEXT=Error.context
+			if ET["%GTM" do ZE^UTLERR quit
+			set RM=Error.description
+			set ET=ET_"-"_RM_"-"_Error.thrownAt
+			do ^UTLERR 
+		}
+	
+		set crcd = ds.getRecord("CRCD")
+		
+		set CRCD=crcd.crcd.justify(8,-1,,1)
+		set DESC=crcd.desc.justify(40,-1,,1)
+		
+		set DATA=CRCD_DESC
+		do io.write(DATA)
+	}
+	do io.close()
+	quit
+
+
+BA(String PR,DATE)
+	
+	type IO io=Class.new("IO")	
+	type String DATA,FMDESC,OFF
+	type DbSet ds
+	type RecordUTBLOFF utbloff
+	
+	do INITIO(PR,DATE,.io)
+	
+	set ds = Db.selectDbSet("UTBLOFF")
+	while ds.next() do {
+		
+		type String CONTEXT,ET,RM
+		catch Error {
+			set ET=Error.type
+			set CONTEXT=Error.context
+			if ET["%GTM" do ZE^UTLERR quit
+			set RM=Error.description
+			set ET=ET_"-"_RM_"-"_Error.thrownAt
+			do ^UTLERR 
+		}
+	
+		set utbloff = ds.getRecord("UTBLOFF")
+		
+		set OFF=utbloff.off.justify(20,-1,,1)
+		set FMDESC=utbloff.fmdesc.justify(40,-1,,1)
+		
+		set DATA=OFF_FMDESC
+		do io.write(DATA)
+	}
+	do io.close()
+	quit
+	
+
+AT(String PR,DATE)
+	
+	type IO io=Class.new("IO")	
+	type String DATA,DES,TYPE
+	type DbSet ds
+	type RecordPRODCTL prodctl
+	
+	do INITIO(PR,DATE,.io)
+	
+	set ds = Db.selectDbSet("PRODCTL")
+	while ds.next() do {
+		
+		type String CONTEXT,ET,RM
+		catch Error {
+			set ET=Error.type
+			set CONTEXT=Error.context
+			if ET["%GTM" do ZE^UTLERR quit
+			set RM=Error.description
+			set ET=ET_"-"_RM_"-"_Error.thrownAt
+			do ^UTLERR 
+		}
+	
+		set prodctl = ds.getRecord("PRODCTL")
+		
+		set TYPE=prodctl.type, TYPE=TYPE.justify(8,-1,,1)
+		set DES=prodctl.des.justify(40,-1,,1)
+		
+		set DATA=TYPE_DES
+		do io.write(DATA)
+	}
+	do io.close()
+	quit
+
+
+
+AP(String PR,DATE)
+	
+	type IO io=Class.new("IO")	
+	type String DATA,FMDESC,KEY
+	type DbSet ds
+	type RecordUTBLACCTPRPS utblacctprps
+	
+	do INITIO(PR,DATE,.io)
+	
+	set ds = Db.selectDbSet("UTBLACCTPRPS")
+	while ds.next() do {
+		
+		type String CONTEXT,ET,RM
+		catch Error {
+			set ET=Error.type
+			set CONTEXT=Error.context
+			if ET["%GTM" do ZE^UTLERR quit
+			set RM=Error.description
+			set ET=ET_"-"_RM_"-"_Error.thrownAt
+			do ^UTLERR 
+		}
+	
+		set utblacctprps = ds.getRecord("UTBLACCTPRPS")
+		
+		set KEY=utblacctprps.acctprps.justify(8,-1,,1)
+		set FMDESC=utblacctprps.fmdesc.justify(40,-1,,1)
+		
+		set DATA=KEY_FMDESC
+		do io.write(DATA)
+	}
+	do io.close()
+	quit
+
+
+SF(String PR,DATE)
+	
+	type IO io=Class.new("IO")	
+	type String INITDSRC,DATA,FMDESC
+	type DbSet ds
+	type RecordUTBLINITDSRC utblinit
+	
+	do INITIO(PR,DATE,.io)
+	
+	set ds = Db.selectDbSet("UTBLINITDSRC")
+	while ds.next() do {
+		
+		type String CONTEXT,ET,RM
+		catch Error {
+			set ET=Error.type
+			set CONTEXT=Error.context
+			if ET["%GTM" do ZE^UTLERR quit
+			set RM=Error.description
+			set ET=ET_"-"_RM_"-"_Error.thrownAt
+			do ^UTLERR 
+		}
+	
+		set utblinit = ds.getRecord("UTBLINITDSRC")
+		
+		set INITDSRC=utblinit.initdsrc, INITDSRC=INITDSRC.justify(8,-1,,1)
+		set FMDESC=utblinit.fmdesc.justify(40,-1,,1)
+		
+		set DATA=INITDSRC_FMDESC
+		do io.write(DATA)
+	}
+	do io.close()
+	quit
+	
+	
+SW(String PR,DATE)
+	
+	type IO io=Class.new("IO")	
+	type String SRCOFINC,DATA,FMDESC
+	type DbSet ds
+	type RecordUTBLSRCOFINC utblsrco
+	
+	do INITIO(PR,DATE,.io)
+	
+	set ds = Db.selectDbSet("UTBLSRCOFINC")
+	while ds.next() do {
+		
+		type String CONTEXT,ET,RM
+		catch Error {
+			set ET=Error.type
+			set CONTEXT=Error.context
+			if ET["%GTM" do ZE^UTLERR quit
+			set RM=Error.description
+			set ET=ET_"-"_RM_"-"_Error.thrownAt
+			do ^UTLERR 
+		}
+	
+		set utblsrco = ds.getRecord("UTBLSRCOFINC")
+		
+		set SRCOFINC=utblsrco.srcofinc, SRCOFINC=SRCOFINC.justify(8,-1,,1)
+		set FMDESC=utblsrco.fmdesc.justify(40,-1,,1)
+		
+		set DATA=SRCOFINC_FMDESC
+		do io.write(DATA)
+	}
+	do io.close()
+	quit
+	
+AB(String PR,DATE)
+	
+	type IO io=Class.new("IO")	
+	type String DATA,FMDESC,NAICS
+	type DbSet ds
+	type RecordUTBLNAICS utblnaics
+	
+	do INITIO(PR,DATE,.io)
+	
+	set ds = Db.selectDbSet("UTBLNAICS")
+	while ds.next() do {
+		
+		type String CONTEXT,ET,RM
+		catch Error {
+			set ET=Error.type
+			set CONTEXT=Error.context
+			if ET["%GTM" do ZE^UTLERR quit
+			set RM=Error.description
+			set ET=ET_"-"_RM_"-"_Error.thrownAt
+			do ^UTLERR 
+		}
+	
+		set utblnaics = ds.getRecord("UTBLNAICS")
+		
+		set NAICS=utblnaics.naics.justify(8,-1,,1)
+		set FMDESC=utblnaics.fmdesc.justify(40,-1,,1)
+		
+		set DATA=NAICS_FMDESC
+		do io.write(DATA)
+	}
+	do io.close()
+	quit		
+
+
+TT(String PR,DATE)
+	
+	type IO io=Class.new("IO")	
+	type String ZPOLEXREL,DATA,FMDESC
+	type DbSet ds
+	type RecordZUTBLPER zutblper
+	
+	do INITIO(PR,DATE,.io)
+	
+	set ds = Db.selectDbSet("ZUTBLPER")
+	while ds.next() do {
+		
+		type String CONTEXT,ET,RM
+		catch Error {
+			set ET=Error.type
+			set CONTEXT=Error.context
+			if ET["%GTM" do ZE^UTLERR quit
+			set RM=Error.description
+			set ET=ET_"-"_RM_"-"_Error.thrownAt
+			do ^UTLERR 
+		}
+	
+		set zutblper = ds.getRecord("ZUTBLPER")
+		
+		set ZPOLEXREL=zutblper.zpolexrel, ZPOLEXREL=ZPOLEXREL.justify(8,-1,,1)
+		set FMDESC=zutblper.fmdesc.justify(40,-1,,1)
+		
+		set DATA=ZPOLEXREL_FMDESC
+		do io.write(DATA)
+	}
+	do io.close()
+	quit		
+	
+
+CUST(DATE)
+	
+	type Number TYPE 
+	type String ACN,DATA,DL
+	type Date DOB
+	type IO io1=Class.new("IO")
+	type IO io2=Class.new("IO")
+	type ResultSet rs
+	type RecordCIF cif
+	
+	// Initialize two extract files each for individual and corporate customers
+	do INITIO("CU",DATE,.io1)
+	do INITIO("CO",DATE,.io2)
+	
+	// Collates through the new accounts journal 
+	set rs=Db.select("CID","DTJNA","TJD=:DATE AND CLS='*' AND GRP='CIF'")
+	if 'rs.isEmpty() while rs.next() do {
+		
+		type String CONTEXT,ET,RM
+		catch Error {
+			set ET=Error.type
+			set CONTEXT=Error.context
+			if ET["%GTM" do ZE^UTLERR quit
+			set RM=Error.description
+			set ET=ET_"-"_RM_"-"_Error.thrownAt
+			do ^UTLERR 
+		}
+	
+		set ACN=rs.getCol(1)	
+		
+		if 'Db.isDefined("CIF",":ACN") quit
+		set cif = Db.getRecord("CIF","ACN=:ACN")
+			
+		set TYPE=cif.pers
+		set DL=","
+		
+		// Exract two different files each for individual and corporate customers
+		if TYPE=0 do {
+			set DOB=cif.dob
+			set DATA=cif.acn_DL_cif.fname_DL_cif.lnm_" "_cif.mmname_DL_cif.fname_" "_cif.lnm_" "_cif.mmname_DL_DOB.toString("MM/DD/YEAR")
+			set DATA=DATA_DL_cif.pad1_DL_cif.pcity_DL_cif.pstate_DL_cif.pcntry_DL_cif.pzip
+			do io1.write(DATA)
+		}
+		if TYPE=1 do {
+			set DATA=cif.acn_DL_cif.nam_DL_cif.pad1_DL_cif.taxid_DL_cif.pcity_DL
+			set DATA=DATA_cif.pstate_DL_cif.pcntry_DL_cif.pzip
+			do io2.write(DATA)
+		}
+				
+	}
+	do io1.close()
+	do io2.close()
+	quit
+
+
+CUSTM(DATE)
+	
+	// Monthly Customer Extract containing all customers
+	do DRV^UBCHID("ZBCHAMLCIF")
+	quit
+	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60838^33721^Jeff Walton^20260"	// Signature - LTD^TIME^USER^SIZE

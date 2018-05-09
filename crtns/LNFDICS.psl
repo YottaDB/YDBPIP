@@ -1,0 +1,1738 @@
+public LNFDICS	//Loan FDIC Report Data Extract
+  /*
+	   ORIG: SWARNALP - 08/29/2005 - CR 16708 (PSL)
+
+	   ---- Revision History ------------------------------------------------
+	   
+	   07/31/06 - KELLYP - CR 22048
+	   	      Modified RCCRPF section to eliminate PRECEDENCE warning.
+	   
+	   03/28/06 - SWARNALP - CR 20305
+	   	   .	Modified RI section to remove the condition check on 
+	   	   	LN.ICAP while adding Deferred Int.YTD-Capitalized
+	   	   	(LN.DICYTD) amount to Income (IFYTD) since interest can 
+	   	   	also be capitalized on the loan through online 
+	   	   	transaction in which case LN.ICAP may not be checked.
+	   	   .	Modified LEV1 section to fetch the records in ascending 
+	   	   	order of the account numbers in order to proccess all 
+	   	   	the records from the starting CID that was mentioned 
+	   	   	till the last account number that was set in the 
+	   	   	variable LAST.
+ 	   		   	   	
+	   03/02/06 - SWARNALP - CR 19778
+	   	   Modified RCC section to use .get() method to resolve UNDEFINED 
+	   	   local variable IC while running the function LNF004 with the 
+	   	   Schedule RC-C flag set in CUVAR, this will return null if IC 
+	   	   is not initialized in INITC section for the primary code and 
+	   	   secondary code combination selected.
+	   
+	   03/01/06 - SWARNALP - CR 19782
+		   Modified RCL section to set the variable KEY with the value 
+		   of 5 for the account that has the primary code as RE, 
+		   secondary code as R1-4 and Revolving Account Flag from LN is 
+		   not set.
+	    	
+  */
+
+	do START
+	quit
+		
+START
+
+	type public Number CID
+	type public String FDIC
+	
+	type Number CONT,I
+	type String %NOPRMT,%READ,%TAB,VFMQ,Z,Z1
+
+	type ResultSet rs = Db.select("SCHRCC,SCHRCK,SCHRCL,SCHRCN,SCHRI","CUVAR")
+	if rs.next() set Z=rs.getRow("|")
+	if Z="" set Z="1|1|1|1|1"
+	else  set Z1="" for I=1:1:5 set Z1=Z1_(Z.piece("|",I))
+	else  if Z1'["1" quit
+	
+	set FDIC="" 
+	for I=1:1:5 do {
+		if '(Z.piece("|",I)) set FDIC=FDIC_"0"
+		else  set FDIC=FDIC_"1"
+		set FDIC=FDIC_"|"
+	}
+	
+	// Included null in second place to follow the field position maintained in CUVAR for SCHRC
+	set FDIC=FDIC.piece("|",1)_"||"_FDIC.piece("|",2,5)
+	
+	set %TAB("CONT")=".CONT2"
+	set %READ="@@%FN,,CONT/REQ",%NOPRMT="F"
+	do ^UTLREAD if VFMQ="Q"!'CONT quit
+
+	do INIT
+
+
+	type ResultSet rs2=Db.select("CLS,GRP,TYPE,CID","ACN","CLS='L'")
+	if 'rs2.isEmpty() do {
+		while rs2.next()  do {
+			set CID=rs2.getCol("CID")
+			do PROCESS
+		}
+	}
+	
+	// if RC-K Schedule
+	if FDIC.piece("|",3) do	{
+		type ResultSet rs4=Db.select("CLS,GRP,TYPE,CID","ACN","CLS='D'")
+		if 'rs4.isEmpty() do {
+			while rs4.next()  do {
+				set CID=rs4.getCol("CID")
+				do DEPPROC
+			}
+		}
+	}
+	
+	do TOT
+	quit
+	
+PROCESS
+
+	type public Boolean ARUF,CPF,LADDR
+	type public Date MDT,ODT,SAVETD,TD,zzFD
+	type public Number AVLBAL,BAL,CID,CBLBAL,COLTYP,FBAL,IUNT,OBAL,PSLD
+	type public String COLCD,LNFDIC1,LNFDIC2,FDIC,UAVB()
+	
+	type Date zFD
+	
+	type RecordLN ln=Db.getRecord("LN","CID")
+	
+	// If closed in a prior quarter/month don't consider the account 
+	// [LN]STAT=4   and [LN]DTC <FD (Date account closed)
+
+	if ln.stat=4,ln.dtc,ln.dtc<zzFD quit
+	if ln.pcidstat>0 Q
+
+	set LNFDIC1=ln.lfpc,LNFDIC2=ln.lfsc
+	
+	// ---------- Do not include this loan on FDIC reports
+
+	if LNFDIC1="SKIP",(LNFDIC2="SKIP") quit
+
+	// ---------- Credit Balance Loan [LN]TRB=0
+
+	if 'ln.trb quit
+
+	set AVLBAL=0 do AVLBAL^LNCO(.ln)
+
+	set ARUF=ln.aruf+0,CPF=ln.cpf+0
+
+	if LNFDIC1=""!(LNFDIC2="") set (LNFDIC1,LNFDIC2)="OTH"
+
+	if 'Db.isDefined("STBLLFSC","LFPC=:LNFDIC1 AND KEY=:LNFDIC2") set (LNFDIC1,LNFDIC2)="OTH"
+
+
+	// Calculate average for
+	// Quarterly report only ... RC-J or RC-K
+
+	set UAVB(1)="",UAVB(2)=""
+
+	set zFD=zzFD if zFD<ln.hisctf set zFD=ln.hisctf+1
+
+	set SAVETD=TD
+	if FDIC.piece("|",3) do INIT^UAVB(.ln,CID,zFD,TD,"00011000000001")
+	set TD=SAVETD
+	
+	if 'ARUF set BAL=ln.bal
+	else  set BAL=ln.bal-ln.udbal
+	set BAL=BAL-ln.coa+ln.rec+0
+
+	set IUNT=""
+	if (ln.iam).extract() set IUNT=ln.iun-ln.ipl
+
+	// ----------[LN]CPF & [LN]ARUF (Commitments or undisbursed processing)
+
+	set OBAL=BAL
+	set BAL=BAL-IUNT
+	set FBAL=BAL
+
+	do PRT(.ln)
+
+	// ---------- Less contra account balance
+
+	set BAL=BAL-CBLBAL
+
+	set BAL=(BAL*(100-PSLD)/100).roundCur(ln.crcd)+0
+
+	set OBAL=BAL
+	set BAL=BAL-IUNT
+
+	// RC-C, RC-L and RC-N
+
+	// Account Maturity Date
+	set MDT=ln.mdt
+	// Date Account Opened
+	set ODT=ln.odt
+	// Primary Collateral Code
+	set COLCD=ln.colcd
+	if COLCD="" set COLTYP=""
+	else  do {
+		if Db.isDefined("UTBLCOLCD","GRP=:ln.grp AND KEY=:COLCD") do {
+			type RecordUTBLCOLCD utblcolcd=Db.getRecord("UTBLCOLCD","GRP=:ln.grp,KEY=:COLCD")
+			set COLTYP=utblcolcd.type
+		}
+	}
+
+	if FDIC.piece("|",1)!FDIC.piece("|",4)!FDIC.piece("|",5) do {
+                /* US Territories include FM - Federated States of Micronesia,
+                  GU - Guam, MP - Northern Mariana Islands,
+                  MH - Republic of Marshall Islands, PR - Puerto Rico,
+                  VI - US Virgin Islands, and PW - Republic of Palau
+                */
+                if Db.isDefined("CIF","ACN=:ln.acn") do {
+			type RecordCIF cif=Db.getRecord("CIF","ACN=:ln.acn")
+			set LADDR=(cif.pcntry="US")!(cif.pcntry="GU")!(cif.pcntry="MP")!(cif.pcntry="MH")!(cif.pcntry="PR")!(cif.pcntry="VI")!(cif.pcntry="PW")!(cif.pcntry="FM")
+		}
+		
+	}
+
+	if +FDIC,'ln.nai do RCC(.ln),RCCM(.ln)
+	if LNFDIC2="PAPER" quit
+	if FDIC.piece("|",3) do RCK(.ln)
+	if FDIC.piece("|",4) do RCL(.ln)
+	if FDIC.piece("|",5) do RCN(.ln)
+	if FDIC.piece("|",6) do RI(.ln)
+
+	quit
+
+RCC(RecordLN ln)
+	// ---------- Balance , Unearned Interest , Book Value
+	
+	type public Boolean RCC
+	type public Number IC(),SEQ
+	type public String LNFDIC1,LNFDIC2
+	
+	set RCC=1
+	if LNFDIC1="LOC" quit
+
+	set SEQ=IC(LNFDIC1,LNFDIC2).get() if 'SEQ quit
+	do RCC2(.ln)
+	quit
+	
+RCC2(RecordLN ln)
+
+	type public Boolean CPF,RCC
+	type public Date TD
+	type public Number BAL,CID,IUNT,OBAL,SEQ
+	type public String FDIC,LNFDC()
+	
+	type Number AMTREQ
+	type String X
+	
+	set X=LNFDC(SEQ)
+	set X.piece("|",1)=X.piece("|",1)+OBAL
+	set X.piece("|",2)=X.piece("|",2)+IUNT
+	set X.piece("|",3)=X.piece("|",3)+BAL
+
+	if 'CPF,RCC do {
+		// TOTAL # LOANS REVIEWED
+		set X.piece("|",10)=X.piece("|",10)+1
+		set AMTREQ=ln.amtreq
+		if ln.ccl do {
+			// COMMITMENT REQUESTED
+			type RecordLN lnccl=Db.getRecord("LN","CID=:ln.ccl",1)
+			if lnccl.getMode() set AMTREQ=lnccl.amtreq
+		}
+		if AMTREQ'>100000 set X.piece("|",4)=X.piece("|",4)+BAL,X.piece("|",5)=X.piece("|",5)+1
+		if (AMTREQ>100000),(AMTREQ'>250000) set X.piece("|",6)=X.piece("|",6)+BAL,X.piece("|",7)=X.piece("|",7)+1
+		if (AMTREQ>250000),(AMTREQ'>1000000) set X.piece("|",8)=X.piece("|",8)+BAL,X.piece("|",9)=X.piece("|",9)+1
+	}
+
+
+	set LNFDC(SEQ)=X
+	if +FDIC'=2 quit
+	// skip commitment accounts
+	if CPF quit
+
+	type RecordLNFDC1 lnfdc1
+	
+	if 'Db.isDefined("LNFDC1","TJD=:TD,RCCL=:SEQ,CID=:CID") do {
+               	set lnfdc1=Class.new("RecordLNFDC1")
+               	set lnfdc1.tjd=TD
+               	set lnfdc1.rccl=SEQ
+               	set lnfdc1.cid=CID
+               	set lnfdc1.bal=OBAL
+	        set lnfdc1.unin=IUNT
+	        set lnfdc1.balnet=BAL
+		
+	}
+	else  do {
+		set lnfdc1=Db.getRecord("LNFDC1","TJD=:TD,RCCL=:SEQ,CID=:CID")
+		set lnfdc1.bal=lnfdc1.bal+OBAL
+	        set lnfdc1.unin=lnfdc1.unin+IUNT
+	        set lnfdc1.balnet=lnfdc1.balnet+BAL
+	}
+	
+	do lnfdc1.bypassSave()		
+
+	quit
+	
+RCCM(RecordLN ln)	// MEMORANDA RCC
+	// RESET BALANCES
+	type public Boolean LADDR,RCC
+        type public Date ICHND,MDT,ODT
+        type public Number BAL,CBLBAL,CID,COLTYP,FBAL,IUNT,OBAL,PRC,PSLD,SEQ,TBAL,TFLG
+        type public String COLCD,INDEX,LNFDIC1,LNFDIC2,UTBL()
+        
+        type Number CLSD,PBAL,PL,SUBCD
+        type String CTRM,INCD,INTFRE,PTRM
+        
+        if LNFDIC1="LOC" quit
+        set SEQ="",RCC=0
+        set BAL=FBAL
+        if CBLBAL do {
+        	set BAL=BAL-(CBLBAL*(100-PRC)/100).roundCur(ln.crcd)
+        	set OBAL=BAL+IUNT
+        }
+        else  do {
+        	set BAL=(BAL*(100-(PSLD))/100).roundCur(ln.crcd)+0
+        	set PBAL=(BAL*(PRC)/100)
+        	set BAL=BAL+PBAL
+        	set OBAL=BAL+IUNT
+        }
+
+        set SEQ=""
+        do RCCM2(.ln) do:SEQ RCC2(.ln)
+        //Lien Subordination Code
+        set SUBCD=ln.subcd
+        //Interest Index
+        set INDEX=ln.index
+        //Interest Change - Next Date
+        set ICHND=ln.ichnd
+        //Interest Change Frequency 
+        set INTFRE=ln.intfre
+        //Payment Term
+        set PTRM=ln.ptrm
+        //Account Term
+        set CTRM=ln.trm         
+        //Number of Pending Sales        
+        set TFLG=ln.tflg
+
+	set CLSD=0
+        // Closed End Loans by first liens on 1-4 family
+        if MDT'="",LNFDIC1="RE",LNFDIC2="O1-4",SUBCD<1 do {
+		set CLSD=1
+               	if TFLG,COLTYP=10 do { quit
+               		set TBAL=0
+               		
+               		type DbSet dsls=Db.selectDbSet("LNLS4B","CID=:CID")
+               		if 'dsls.isEmpty() do {
+				while dsls.next() do {
+					type RecordLNLS4B lnls4b=dsls.getRecord("LNLS4B")
+					set INCD=lnls4b.incd,PL=lnls4b.pl
+	
+	        			type RecordLNLS4 lnls4 = Db.getRecord("LNLS4","INCD=:INCD,PL=:PL,GRP=:lnls4b.grp,CID=:CID",1)
+					if 'lnls4.getMode() quit
+					if '(UTBL("INCD",INCD,PL).exists()) do {
+						type ResultSet rs3=Db.select("PP,EFD,RECP,ITYP","LNLS2","INCD=:INCD AND PL=:PL")
+						if rs3.next() set UTBL("INCD",INCD,PL)=rs3.getRow("|")
+					}
+	        			set MDT=UTBL("INCD",INCD,PL).piece("|",2)
+	        			if lnls4.sold set BAL=lnls4.sold
+					else  set BAL=0
+	        			set OBAL=BAL
+	        			set TBAL=TBAL+BAL
+	        			do RCCMDT("CLEND",.ln)
+	               		}
+	               	}
+        		set BAL=BAL-TBAL
+               	}
+               	if INDEX'="",ICHND<MDT do RCCRPF("CLEND",.ln,.INTFRE) quit
+               	do RCCMDT("CLEND",.ln) quit
+        }
+
+        // All loans and leses other than closed end loans secured by first liens 1-4 family
+        if SUBCD<1,'CLSD do {       
+        	if INDEX'="",ICHND<MDT do RCCRPF("OTHER",.ln,.INTFRE) quit
+                do RCCMDT("OTHER",.ln) quit
+        }
+
+        // Loans to finance commercial real estate, construction, and land dev
+        if COLTYP'="",COLTYP'=10,LNFDIC1="RE"!(LNFDIC1="COM")!(LNFDIC1="NON") set SEQ=53 do RCC2(.ln)
+
+	// Loans secured by real estate to Non-US addressees RCON B837
+	if LNFDIC1="RE",'LADDR set SEQ=56 do RCC2(.ln)
+
+        // Loans and leases held for sale
+        if TFLG do {
+		set TBAL=0
+		
+		type DbSet dsls1=Db.selectDbSet("LNLS4B","CID=:CID")
+               	if 'dsls1.isEmpty() do {
+               		
+			while dsls1.next() do {
+				type RecordLNLS4B lnls4b1=dsls1.getRecord("LNLS4B")
+				set INCD=lnls4b1.incd,PL=lnls4b1.pl
+			
+				type RecordLNLS4 lnls4 = Db.getRecord("LNLS4","INCD=:INCD,PL=:PL,GRP=:lnls4b1.grp,CID=:CID",1)
+				if 'lnls4.getMode() quit
+				if '(UTBL("INCD",INCD,PL).exists()) do {
+					type ResultSet rs3=Db.select("PP,EFD,RECP,ITYP","LNLS2","INCD=:INCD AND PL=:PL")
+					if rs3.next() set UTBL("INCD",INCD,PL)=rs3.getRow("|")
+				}
+				if lnls4.sold set BAL=lnls4.sold
+				else  set BAL=(FBAL*UTBL("INCD",INCD,PL).piece("|",1)).roundCur(ln.crcd)/100	; LEH
+				set TBAL=TBAL+BAL
+			}
+		}
+		set (BAL,OBAL)=TBAL
+        }
+
+        // Adjustable rate closed-end loans secured by first liens on 1-4 family 
+        if LNFDIC1'="RE"!(LNFDIC2'="O1-4")!(SUBCD>1) quit
+        if 'INDEX.isNull(),ICHND<MDT set SEQ=55 do RCC2(.ln) quit
+        if 'MDT quit                // open ended loan
+        if ln.odd-MDT>365 quit
+        if ",11,12,13,14,15,16,17,11N,12N,13N,14N,15N,16N,17N,99N,"'[(","_ln.pcm_",") quit
+        if COLCD=""!(COLTYP'=10)!(PTRM="") quit
+        // Check for PTRM not less than TRM, then this is Not a Balloon Loan
+        // Payment Term Maturity Date Calculated Term Maturity Date
+        if $$EXT^UMDT(PTRM,ODT)'<$$EXT^UMDT(CTRM,ODT) quit
+        if INDEX=""!(INTFRE="")!(ICHND>MDT) set SEQ=55 do RCC2(.ln)
+        quit
+
+RCCM2(RecordLN ln)	// THE IS FOR RESTRUCTED LOANS
+
+	type public Date TJD
+	type public Number CID,SEQ
+	type public String LNFDIC1,LNFDIC2
+	
+	type Date RDTE
+	type Number PLTYP
+	// previous SEQ(31) and SEQ(32) are combined into SEQ(37)
+
+	type ResultSet rs3 = Db.select("PLTYP,RDTE","LNPL3A","CID=:CID","RSEQ DESC")
+	if 'rs3.isEmpty() do {
+		while rs3.next()  do { quit:SEQ=37!(PLTYP>6)
+			set PLTYP=rs3.getCol("PLTYP")
+			set RDTE=rs3.getCol("RDTE")
+			if (RDTE>0),(RDTE+365<TJD) quit
+			if PLTYP=1!(PLTYP=2)!(PLTYP=3) set SEQ=37 quit
+			if (PLTYP>6),(RDTE>0),(RDTE+365>TJD) set SEQ=37 quit
+		}
+	}
+	if SEQ.isNull() quit
+	if LNFDIC1="IND" set SEQ="" quit
+	if ln.dist1nd+30<TJD set SEQ="" quit
+	if LNFDIC1="RE",((LNFDIC2="R1-4")!(LNFDIC2="O1-4")!(LNFDIC2="O1-4JR")) set SEQ="" quit
+	set SEQ=37 quit
+
+RCCMDT(FLG,RecordLN ln)     
+	
+	// Period by maturity date ARQ28164
+	
+	type public Date MDT,TJD
+	type public Number SEQ
+	
+        if MDT>$$EXT^UMDT("15Y",TJD) do {  quit
+        	if (FLG="CLEND") set SEQ=43
+        	else  set SEQ=49
+                do RCC2(.ln)
+        }
+        
+        if MDT>$$EXT^UMDT("5Y",TJD) do { quit
+                if (FLG="CLEND") set SEQ=42
+        	else  set SEQ=48
+                do RCC2(.ln)
+        }
+        
+        if MDT>$$EXT^UMDT("3Y",TJD) do { quit
+                if (FLG="CLEND") set SEQ=41
+        	else  set SEQ=47
+                do RCC2(.ln)
+        }
+        
+        if MDT>$$EXT^UMDT("1Y",TJD) do { quit
+        	if (FLG="CLEND") set SEQ=40
+        	else  set SEQ=46
+                do RCC2(.ln)
+        }
+        
+        set SEQ=50 do RCC2(.ln)
+        
+        if MDT>$$EXT^UMDT("3M",TJD) do { quit
+        	if (FLG="CLEND") set SEQ=39
+        	else  set SEQ=45
+                do RCC2(.ln)
+        }
+        
+        if (FLG="CLEND") set SEQ=38 else  set SEQ=44 do RCC2(.ln) quit
+        
+        quit
+
+	// Period by repricing date (interest change next date ICHND) ARQ28164
+	
+RCCRPF(FLG,RecordLN ln,String INTFRE)
+
+        type public Boolean ER
+        type public Date MDT,TJD
+        type public Number AF,SEQ
+        
+        type Date ND
+        
+	set ER=0
+        set AF=""
+        set ND=$$NJD^UFRE(%SystemDate,INTFRE,.AF)
+        if ER!(INTFRE.isNull()) do { quit
+        	if (FLG="CLEND") set SEQ=38
+        	else  set SEQ=44
+                do RCC2(.ln)
+        	}
+        
+        //Over 15Y
+        if AF<.06667 do { quit
+        	if (FLG="CLEND") set SEQ=43
+        	else  set SEQ=49
+                do RCC2(.ln)
+        	}
+
+	//Over 5 years through 15 years
+	if AF<.2 do { quit
+        	if (FLG="CLEND") set SEQ=42
+        	else  set SEQ=48
+                do RCC2(.ln)
+       		}
+        
+	//Over 3 years through 5 years
+	if AF<.33333 do { quit
+        	if (FLG="CLEND") set SEQ=41
+        	else  set SEQ=47
+                do RCC2(.ln)
+        	}
+        
+ 	//Over 1 year through 3 years
+	if AF<1 do { quit
+        	if (FLG="CLEND") set SEQ=40
+        	else  set SEQ=46
+                do RCC2(.ln)
+        	}
+        
+	if MDT<($$EXT^UMDT("1Y",TJD)+1) set SEQ=50 do RCC2(.ln)
+
+	//Over 3 month through 1 year
+	if AF<4 do { quit
+        	if (FLG="CLEND") set SEQ=39
+        	else  set SEQ=45
+                do RCC2(.ln)
+        	}
+
+	//Three months or less
+	
+	if (FLG="CLEND") set SEQ=38 else  set SEQ=44 do RCC2(.ln) quit
+
+        quit
+
+RCK(RecordLN ln)
+	// ---------- Quarterly Average Balance
+
+	type public Date TD
+	type public Number AVGPSD,CID,IK(),SEQ
+	type public String LNFDIC1,LNFDIC2,LNFDK(),FDIC,UAVB()
+	
+	type Number X
+	
+	set X=(UAVB(1)*(100-AVGPSD)/100).roundCur(ln.crcd)
+	if +X=0 quit
+	set SEQ=IK(LNFDIC1).get()
+	if (LNFDIC1="IND") do {
+		if (LNFDIC2="CRDT") set SEQ=4
+		else  if ((LNFDIC2="OTH")!(LNFDIC2="REVCR")) set SEQ=5
+	}
+	else  if (LNFDIC1="AG") set SEQ=7
+
+	if SEQ set LNFDK(SEQ)=LNFDK(SEQ)+X
+	// Increment total, cell 3360, 49870:1
+	if (LNFDIC1="RE")!(LNFDIC1="COM")!(LNFDIC1="IND")!(LNFDIC1="AG")!(LNFDIC1="BK")!(LNFDIC1="ACC")!(LNFDIC1="FGVT")!(LNFDIC1="GVT")!(LNFDIC1="OTH") set LNFDK(1)=LNFDK(1)+X
+	
+	if SEQ,FDIC.piece("|",3)=2 do {
+		
+		type RecordLNFDK lnfdk
+		
+		if 'Db.isDefined("LNFDK","TJD=:TD,RCKL=:SEQ,CID=:CID") do {
+			set lnfdk=Class.new("RecordLNFDK")
+			set lnfdk.tjd=TD
+			set lnfdk.rckl=SEQ
+			set lnfdk.cid=CID
+		}
+		else  do {
+			set lnfdk=Db.getRecord("LNFDK","TJD=:TD,RCKL=:SEQ,CID=:CID")
+		}
+		set lnfdk.abal=X
+		do lnfdk.bypassSave()
+	}
+	quit
+
+RCN(RecordLN ln)
+
+	type public Date DIST1ND,TD
+	type public String FDIC,LNFDIC1
+	
+	type Number PC,Z
+
+	// ---------- Current, 30-90 Past Due, >90 days Past Due, Nonaccrual
+
+	if LNFDIC1="LOC" quit
+
+	set Z=FDIC.piece("|",5)=2
+
+	// ---------- Nonaccrual
+
+	if ln.nai set PC=4 do RCN1(.ln,.Z,.PC) quit
+
+	// ---------- Current <30 days
+
+	if TD-ln.dist1nd<30 set PC=1 do RCN1(.ln,.Z,.PC) quit
+
+	do PPA(.ln)
+	// No due date to compare (COMMITMENT ACCOUNT)
+	if 'DIST1ND quit
+	if TD-DIST1ND<30 set PC=1 do RCN1(.ln,.Z,.PC) quit
+	if TD-DIST1ND<90 set PC=2 do RCN1(.ln,.Z,.PC) quit
+	else  set PC=3 do RCN1(.ln,.Z,.PC) quit
+	
+	quit
+	
+RCN1(RecordLN ln,Number Z,Number PC)
+
+	type public Boolean ER,LADDR
+	type public Date TD
+	type public Number BAL,CID,COLTYP,IN(),SEQ
+	type public String LNFDIC1,LNFDIC2,LNFDN()
+		
+	type Number ORIGSEQ,SOLDAMT,THSLINE
+			
+	set SEQ=""
+	if LNFDIC1="RE" set SEQ=IN("RE",LNFDIC2)
+	else  if LNFDIC1="IND" set SEQ=IN("IND",LNFDIC2)
+	else  if LNFDIC1="COM" set SEQ=IN("COM",LNFDIC2)
+	else  if LNFDIC1="AG" set SEQ=IN("AG",LNFDIC2)
+	else  if LNFDIC1="LSE" set SEQ=IN("LSE",LNFDIC2)
+        else  if LNFDIC1="ACC",LNFDIC2="FBK" set SEQ=IN("ACC","FBK")
+        else  if LNFDIC1="ACC",LNFDIC2="FCOM" set SEQ=IN("ACC","FCOM")
+	else  if LNFDIC1="BK",LNFDIC2="FBK" set SEQ=IN("BK","FBK")
+	else  if LNFDIC1="BK",LNFDIC2="FCOM" set SEQ=IN("BK","FCOM")	
+	if SEQ="" set SEQ=IN(LNFDIC1) quit:ER
+	set ORIGSEQ=SEQ
+
+	set LNFDN(SEQ).piece("|",PC)=LNFDN(SEQ).piece("|",PC)+BAL
+
+	if Z do LNFDNBAL(.TD,.SEQ,.CID,.PC,.BAL)
+
+	
+	/*
+	 Everything in RCON numbers 5380,5381, and 5382 
+   	 should also appear for RCON numbers B834,B835,and B836.
+   	*/
+   	
+        if SEQ=18 do {
+                set LNFDN(8).piece("|",PC)=LNFDN(8).piece("|",PC)+BAL
+                if Z do LNFDNBAL(.TD,8,.CID,.PC,.BAL)
+        }
+
+	/*
+	 Everything for RCON numbers 1594,1597, and 1583, 
+	 should also appear for RCON numbers 5459,5460,5461.
+	*/
+	
+        if SEQ=21 do {
+        	set LNFDN(13).piece("|",PC)=LNFDN(13).piece("|",PC)+BAL
+        	if Z do LNFDNBAL(.TD,13,.CID,.PC,.BAL)
+        }
+
+	// Loans Secured by Real Estate to Non-US Addressees
+
+	if LNFDIC1="RE",'LADDR set SEQ=IN("RE",0) do {
+	        set LNFDN(17).piece("|",PC)=LNFDN(17).piece("|",PC)+BAL
+	        if Z do LNFDNBAL(.TD,17,.CID,.PC,.BAL)
+	}
+	
+	// Commercial and Industrial Loans to Non-US Addressees
+
+	if LNFDIC1="COM",LNFDIC2="NUS" do {
+	        set LNFDN(9).piece("|",PC)=LNFDN(9).piece("|",PC)+BAL
+	        if Z do LNFDNBAL(.TD,9,.CID,.PC,.BAL)
+	}
+	
+	// Lease Financing Receivables to Non-US Addressees
+
+	if LNFDIC1="LSE",LNFDIC2="NUS" do {
+	        set LNFDN(14).piece("|",PC)=LNFDN(14).piece("|",PC)+BAL
+	        if Z do LNFDNBAL(.TD,14,.CID,.PC,.BAL)
+	}
+	
+	/*
+	 Commercial Real Estate, Construction, and Land Development
+	 (not secured by real estate) RCON 6558,6559,6560
+	*/
+
+	do {
+                set THSLINE=0
+                do {
+	                if COLTYP=10 quit           // Type 10 not permitted.
+                        if LNFDIC1="RE" set THSLINE=1  quit
+                        if (LNFDIC1="COM")&((LNFDIC2="US")!(LNFDIC2="NUS")) set THSLINE=1  quit
+                        if (LNFDIC1="AG")&(LNFDIC2="ALL") set THSLINE=1  quit
+                        if (LNFDIC1="GVT")&((LNFDIC2="NTAX")!(LNFDIC2="TAX")) set THSLINE=1  quit
+                        if (LNFDIC1="OTH")&((LNFDIC2="OTH")!(LNFDIC2="SEC")) set THSLINE=1
+                }
+                quit:THSLINE=0
+                set LNFDN(16).piece("|",PC)=LNFDN(16).piece("|",PC)+BAL
+                if Z do LNFDNBAL(.TD,16,.CID,.PC,.BAL)
+	}
+
+	/*
+	 Loans and Lease Held for Sale...
+         This category applies to the RCON numbers in lines 1-14 according
+         to FDIC.  Also in lines 18 through 20, because these are also
+         reported separately in lines 1-14.
+        */
+         
+        if (ORIGSEQ<15)!(ORIGSEQ=18)!(ORIGSEQ=19)!(ORIGSEQ=20)!(ORIGSEQ=21) do {
+                // Get sold amount for each loan and accumulate.
+                type ResultSet rs3=Db.select("SOLDCMP","LNLS4","CID=:CID")
+		if 'rs3.isEmpty() do {
+			set SOLDAMT=0
+			while rs3.next()  do {
+				set SOLDAMT=SOLDAMT+rs3.getCol("SOLDCMP")
+			}
+			set LNFDN(22).piece("|",PC)=LNFDN(22).piece("|",PC)+SOLDAMT
+                	if Z do LNFDNBAL(.TD,22,.CID,.PC,.SOLDAMT)
+        	}
+        }
+
+	// Problem loan [LN]PLF
+
+	if ln.plf'=2 quit
+
+	// Restructured loans
+
+	if LNFDIC1="IND" quit
+	if LNFDIC1="RE",",DEV,FRM,MULT,NON,"'[(","_LNFDIC2_",") quit
+	
+	set LNFDN(15).piece("|",PC)=LNFDN(15).piece("|",PC)+BAL
+	if Z do LNFDNBAL(.TD,15,.CID,.PC,.BAL)
+
+	quit
+	
+LNFDNBAL(Date TD,String RCNL,Number CID,Number PC,Number BAL)
+
+	type RecordLNFDN lnfdn
+	
+	if 'Db.isDefined("LNFDN","TJD=:TD,RCNL=:RCNL,CID=:CID") do {
+		set lnfdn=Class.new("RecordLNFDN")
+		set lnfdn.tjd=TD
+		set lnfdn.rcnl=RCNL
+		set lnfdn.cid=CID
+	}
+	else  do {
+		set lnfdn=Db.getRecord("LNFDN","TJD=:TD,RCNL=:RCNL,CID=:CID")
+	}
+	if PC=1 set lnfdn.balcur=BAL
+	else  if PC=2 set lnfdn.bal3090=BAL
+	else  if PC=3 set lnfdn.bal90=BAL
+	else  if PC=4 set lnfdn.balnacr=BAL
+		
+	do lnfdn.bypassSave()
+	
+	quit
+
+PPA(RecordLN ln)
+
+	type public Boolean ER
+	type public Date DIST1ND
+	type public Number AF
+	
+	type Date JD
+	type Number I,Y
+	type String X,FRE
+	
+	set DIST1ND=ln.dist1nd
+	set X=ln.pmtdist,Y=0 
+	for I=1:1 quit:X.piece("-",I)=""  if $$ESC^LNU(X.piece("-",I)) set Y=1 quit
+	if Y do PPA1(.ln) quit 
+	if ln.ppa,ln.ppa'<(ln.dpmt*.9) do {
+		set FRE=ln.dist1fre,JD=ln.dist1nd
+		set DIST1ND=$$NJD^UFRE(JD,FRE,.AF) quit:ER
+	}
+	quit
+PPA1(RecordLN ln)
+
+	type public Boolean ER
+	type public Date DIST1ND
+	type public Number AF,CID
+	
+	type Date JD
+	type Number CHKFLG,N,TP,X()
+	type String FRE
+	
+	set N=ln.oseq-1,TP=0
+	type DbSet dsbil=Db.selectDbSet("LNBIL1","CID=:CID")
+        if 'dsbil.isEmpty() do {
+	       	set CHKFLG=1	
+		while (dsbil.next()&(CHKFLG)) do {
+			type RecordLNBIL1 lnbil1=dsbil.getRecord("LNBIL1")
+			if '(lnbil1.cpid-lnbil1.cpib) set CHKFLG=0 quit
+			set X(lnbil1.schseq)=lnbil1.cpib
+			set TP=TP+lnbil1.cpid
+		}
+	}
+	
+	for  set N=X(N).order() quit:N=""  quit:TP'>X(N)  set TP=TP-X(N)
+	quit:N=""
+	if TP'<(X(N)*.9) set N=N+1
+	if Db.isDefined("LNBIL1","CID=:CID,SCHSEQ=:N+1") do {
+		type RecordLNBIL1 lnbl1=Db.getRecord("LNBIL1","CID=:CID,SCHSEQ=:N")
+		set DIST1ND=lnbl1.cdpd
+		quit
+	}
+	type ResultSet rs3 = Db.select("SCHSEQ,CDPD","LNBIL1","CID=:CID","SCHSEQ DESC")
+	if rs3.next() set JD = rs3.getCol("CDPD")
+	set FRE = ln.dist1fre
+	set DIST1ND=$$NJD^UFRE(JD,FRE,.AF) quit:ER
+	quit
+	
+RCL(RecordLN ln)
+	
+	type public Boolean ARUF,CPF
+	type public Date MDT,ODT,TD
+	type public Number AVLBAL,BAL,CID,FBAL,PSLD
+	type public String COLCD,LNFDIC1,LNFDIC2,LNFDL(),FDIC
+	
+	type Number CRLMT,KEY,X,Y1,Z
+	
+	// ---------- Unused Commitment
+	
+	set KEY="",Z=FDIC.piece("|",4)=2
+
+	set Y1=0 
+	
+	if AVLBAL>=0 do {
+
+		if LNFDIC1="IND" set KEY=2
+		if LNFDIC1="RE" do {
+			if LNFDIC2="R1-4" do {
+				if ln.revf set KEY=1
+				else  set KEY=5
+			}
+			else  if (LNFDIC2="DEV"!(LNFDIC2="MULT")!(LNFDIC2="NON")) do {
+				if COLCD=20 set KEY=3
+				else  set KEY=4
+			}
+			else  set KEY=5
+		}
+		else  set KEY=5
+
+		set X=MDT-ODT>364
+
+		set LNFDL(KEY)=LNFDL(KEY)+AVLBAL
+		if Z do LNFDLBAL(.TD,.KEY,.CID,.AVLBAL)
+
+		if X set Y1=(AVLBAL*PSLD/100).roundCur(ln.crcd)
+	}	
+
+	// CREDIT LIMIT less SOLD PORTION OF A COMMITMENT
+
+	set CRLMT=ln.crlmt
+	if ARUF,CPF set CRLMT=CRLMT-BAL
+
+	if LNFDIC1="LOC",CRLMT do {
+		set X=6 if LNFDIC2="PSTBY" set X=8 
+		if LNFDIC2="OTH" set X=10
+
+		set LNFDL(X)=LNFDL(X)+CRLMT
+		if Z do LNFDLBAL(.TD,.X,.CID,.CRLMT)
+	}
+
+	// SOLD LOANS
+
+	if PSLD do {
+		if LNFDIC1="ACC" do {
+			set LNFDL(11)=LNFDL(11)+Y1 
+			if Z do LNFDLBAL(.TD,11,.CID,.Y1)	
+		}
+
+		// ---------- Loans Sold During Report Quarter
+
+		if LNFDIC1="LOC" do {
+			set X=(FBAL*PSLD/100).roundCur(ln.crcd)
+			if LNFDIC2="FSTBY" set LNFDL(7)=LNFDL(7)+X if Z do LNFDLBAL(.TD,7,.CID,.X)
+			else  if LNFDIC2="PSTBY" set LNFDL(9)=LNFDL(9)+X if Z do LNFDLBAL(.TD,9,.CID,.X)
+		}
+	}
+	//---------- Analysis of Purchased Loans
+
+	if 'ln.ppflg quit
+
+	if LNFDIC1="RE",((LNFDIC2="DEV")!(LNFDIC2="FRM")!(LNFDIC2="MULT")!(LNFDIC2="NON")) do BUY quit
+	if LNFDIC1="BK"!(LNFDIC1="AG")!(LNFDIC1="COM")!(LNFDIC1="ACC")!(LNFDIC1="FGVT") do BUY quit
+	if LNFDIC1="GVT"!(LNFDIC1="OTH")!(LNFDIC1="LSE")!(LNFDIC1="LOC") do BUY quit
+	quit
+
+LNFDLBAL(Date TD,Number RCLL,Number CID,Number BAL)
+
+	type RecordLNFDL lnfdl
+	
+	if 'Db.isDefined("LNFDL","TJD=:TD,RCLL=:RCLL,CID=:CID") do {
+		set lnfdl=Class.new("RecordLNFDL")
+		set lnfdl.tjd=TD
+		set lnfdl.rcll=RCLL
+		set lnfdl.cid=CID
+	}
+	else  do {
+		set lnfdl=Db.getRecord("LNFDL","TJD=:TD,RCLL=:RCLL,CID=:CID")
+	}
+	set lnfdl.rcld=BAL
+	
+	do lnfdl.bypassSave()
+	
+	quit
+	
+RI(RecordLN ln)	// Private, Schedule RI
+
+	type public Date TD
+	type public Number CID,LNRI(),SEQ
+	type public String FDIC
+
+	type Number AFTAX,AYTD,CBLIN,IFYTD,ITYTD
+
+	/*
+	 Year-to-date interest income on loans Int/Div Paid Tax YTD (LN.ITYTD)
+	 and on the primary institutions percentatge of sold loans. 
+	*/
+
+	set IFYTD=ln.itytd
+
+	/*
+	 Commercial Sold loans
+	 The year-to-date interest income on each contra account linked to
+	 the sold loan is subtracted from the year-to-date interest of the
+	 loan. The remaining value reported is the year-to-date interest for
+	 the primary institution.
+	*/
+
+	type DbSet dsa2=Db.selectDbSet("LNLS4C","CID=:CID")
+	if 'dsa2.isEmpty() do {
+	
+		while dsa2.next() do {
+			type RecordLNLS4C lnls4c=dsa2.getRecord("LNLS4C")
+			type RecordLNLS4 lnls4 = Db.getRecord("LNLS4","INCD=:lnls4c.incd,PL=:lnls4c.pl,GRP=:lnls4c.grp,CID=:CID",1)
+			if lnls4.getMode() do {
+				type RecordLN lncbl=Db.getRecord("LN","CID=:lnls4.contra")
+				set ITYTD=lncbl.itytd
+				set CBLIN=CBLIN.get()+ITYTD.get()
+			}
+		}
+	}
+
+	/*
+	 Sold Commerical Participations YTD Interest=LN.ITYTD-CBLIN
+	 If CBLIN (Credit Balance Loan Interest YTD) is defined then this 
+	 account is set up as a commercial participation. If CBLIN has a 
+	 value greater than zero than this account has been sold.
+	*/
+
+	if CBLIN.exists(),CBLIN>0 set IFYTD=IFYTD-CBLIN
+
+	else  do {
+		
+		/*
+		 Sold Non-Commercial Participations YTD Interest=
+		 LN.ITYTD-LN.ISPYTD
+		 If CBLIN is not defined and LN.PFLG is turned on, then this is
+		 a sold loan set up as a classic loan participation.
+		*/
+		
+		if ln.pflg set IFYTD=IFYTD-ln.ispytd
+		else  do {
+			
+			/*
+			 Unsold Loan Interest YTD=LN.ITYTD+LN.ACR+
+			 LN.DICYTD+LN.DIU
+			 If LN.PFLG is not set and CBLIN is neither defined
+			 nor greater than zero, this is either a regular loan
+			 or an unsold commercial participation that should be
+			 treated as a regular loan for reporting purposes.
+			*/
+			
+			// Accural Balance (LN.ACR)
+			set IFYTD=IFYTD+ln.acr
+
+			//Deferred Int.YTD - Capitalized (LN.DICYTD)
+			set IFYTD=IFYTD+ln.dicytd
+
+			// Deferred Interest - Uncapitalized (LN.DIU)
+			set IFYTD=IFYTD+ln.diu
+		}
+	}
+
+	// Penalty  Tax Year to Date (LN.PENTYTD) 
+	set IFYTD=IFYTD+ln.pentytd
+
+	// Assessed Fees Tax YTD
+	set AFTAX=$$ASTYTD^LNCDI(CID)
+	set IFYTD=IFYTD+AFTAX
+
+	// Net Deferred Fees (FASB91): Amortized Year to Date
+	set AYTD=ln.aytd	
+	set IFYTD=IFYTD+AYTD
+
+	set IFYTD=IFYTD.roundDec()
+
+	set SEQ=""
+	set SEQ=$$RISEQ()
+	// avoids undefined error if LNFDIC1 or LNFDIC2 are not in STBLFSC
+	quit:SEQ=""
+
+	set LNRI(SEQ)=LNRI(SEQ)+IFYTD
+	// "AG"&"ALL" is reported in cell numbers 4058(line 6) and 4024(line8).
+	if SEQ=8 set LNRI(6)=LNRI(6)+IFYTD
+	if FDIC.piece("|",6)=2 do {
+	 	do LNRIAINC(.TD,.SEQ,.CID,.IFYTD)
+        	if SEQ=8 do LNRIAINC(.TD,6,.CID,.IFYTD)
+	}
+
+        // Total Interest and Fee Income on Loans
+        set LNRI(7)=LNRI(7)+IFYTD
+        quit	
+
+LNRIAINC(Date TD,Number RILN,Number CID,Number IFYTD)
+
+	type RecordLNFDRI1 lnfdri1
+	
+	if 'Db.isDefined("LNFDRI1","RIDT=:TD,RILN=:RILN,CID=:CID") do {
+		set lnfdri1=Class.new("RecordLNFDRI1")
+		set lnfdri1.ridt=TD
+		set lnfdri1.riln=RILN
+		set lnfdri1.cid=CID
+	}
+	else  do {
+		set lnfdri1=Db.getRecord("LNFDRI1","RIDT=:TD,RILN=:RILN,CID=:CID")
+	}
+	set lnfdri1.ainc=IFYTD
+	
+	do lnfdri1.bypassSave()
+	
+	quit
+		
+RISEQ()
+	// Private - Called by RI to identify the Schedule RI line number
+	
+	type public Number SEQ
+	type public String LNFDIC1,LNFDIC2
+
+	// Loans Secured by Real Estate - Cell Number 4011
+	if (LNFDIC1="RE")&((LNFDIC2="DEV")!(LNFDIC2="D1-4")!(LNFDIC2="DMULT")!(LNFDIC2="DNON")!(LNFDIC2="FRM")!(LNFDIC2="MULT")!(LNFDIC2="NON")!(LNFDIC2="O1-4")!(LNFDIC2="O1-4JR")!(LNFDIC2="R1-4")) set SEQ=1 quit SEQ
+
+	// Commercial and Industrial Loans - Cell Number 4012
+	if (LNFDIC1="COM")&((LNFDIC2="US")!(LNFDIC2="NUS")) set SEQ=2 quit SEQ
+
+	// Credit Cards - Cell Number B485
+	if (LNFDIC1="IND"),(LNFDIC2="CRDT") set SEQ=3 quit SEQ 
+
+	// Other Consumer Loans and Student Loans - Cell Number B486
+	if (LNFDIC1="IND")&((LNFDIC2="EDU")!(LNFDIC2="OTH")!(LNFDIC2="REVCR")) set SEQ=4 quit SEQ
+
+	// Loans to Foreign Governments and Official Institutions - 4056
+	if (LNFDIC1="FGVT"),(LNFDIC2="ALL") set SEQ=5 quit SEQ
+
+	// All Other Loans - Cell Number 4058
+	if (LNFDIC1="ACC")&((LNFDIC2="COM")!(LNFDIC2="FBK")!(LNFDIC2="FBR")!(LNFDIC2="FCOM")!(LNFDIC2="OTH")!(LNFDIC2="USBK")) set SEQ=6 quit SEQ
+	if (LNFDIC1="BK")&((LNFDIC2="COM")!(LNFDIC2="FBK")!(LNFDIC2="FBR")!(LNFDIC2="FCOM")!(LNFDIC2="OTH")) set SEQ=6 quit SEQ
+	if (LNFDIC1="GVT")&((LNFDIC2="NTAX")!(LNFDIC2="TAX")) set SEQ=6 quit SEQ
+	if (LNFDIC1="OTH"),(LNFDIC2="OTH") set SEQ=6 quit SEQ
+
+	// Interest and Fee Income on Agricultural and Farm Loans - 4024
+	if (LNFDIC1="AG"),(LNFDIC2="ALL") set SEQ=8 quit SEQ
+
+	quit ""
+
+	// RUN DOWN TOTALS AND ROUND TO THE 1000TH
+TOT
+	// Sub-Total for RCON 1288
+	
+	type public Date TD
+	type public Number CID,LNRI(),N
+	type public String LNFDC(),LNFDK(),LNFDL(),LNFDN()
+	
+	type Number I,J
+	
+	for J=1:1:3 do {
+		for N=9:1:13 do {
+	 		if '(LNFDC(N).exists()) quit
+	 		set LNFDC(8).piece("|",J)=(LNFDC(8).get()).piece("|",J)+LNFDC(N).piece("|",J)
+		}
+	}
+	
+	// Sub-Total for RCON 1766
+	for J=1:1:3 do {
+		for N=16,17 do {
+			if '(LNFDC(N).exists()) quit
+			set LNFDC(15).piece("|",J)=(LNFDC(15).get()).piece("|",J)+LNFDC(N).piece("|",J)
+		}
+	}
+	
+	// Sub-Total for RCON 1563
+	for J=1:1:3 do {
+		for N=24,25 do {
+			if '(LNFDC(N).exists()) quit
+			set LNFDC(23).piece("|",J)=(LNFDC(23).get()).piece("|",J)+LNFDC(N).piece("|",J)
+		}
+	}
+	
+	// Sub-Total for RCON 2165
+	for J=1:1:3 do {
+		for N=27,28 do {
+			if '(LNFDC(N).exists()) quit
+			set LNFDC(26).piece("|",J)=(LNFDC(26).get()).piece("|",J)+LNFDC(N).piece("|",J)
+		}
+	}
+	
+	type RecordLNFDC lnfdc
+	set N=""
+	for  set N=LNFDC(N).order() quit:N=""  do {
+		if 'Db.isDefined("LNFDC","TJD=:TD,RCCL=:N") do {
+			set lnfdc=Class.new("RecordLNFDC")
+			set lnfdc.tjd=TD
+			set lnfdc.rccl=N
+		}
+		else  do {
+			set lnfdc=Db.getRecord("LNFDC","TJD=:TD,RCCL=:N")
+		}
+		set lnfdc.tbal=(LNFDC(N).piece("|",1)+500)\1000
+		set lnfdc.tunin=(LNFDC(N).piece("|",2)+500)\1000
+		set lnfdc.tbalnet=(LNFDC(N).piece("|",3)+500)\1000
+		set lnfdc.tnoa1d=(LNFDC(N).piece("|",4)+500)\1000
+		set lnfdc.tnoa2d=(LNFDC(N).piece("|",6)+500)\1000
+		set lnfdc.tnoa3d=(LNFDC(N).piece("|",8)+500)\1000
+			
+		set lnfdc.tnoa1=LNFDC(N).piece("|",5)
+		set lnfdc.tnoa2=LNFDC(N).piece("|",7)
+		set lnfdc.tnoa3=LNFDC(N).piece("|",9)
+		set lnfdc.tnum=LNFDC(N).piece("|",10)
+		
+		do lnfdc.bypassSave()
+		
+		/*
+		 Dummy Record Insert in Account level details when the account details are not
+		 applicable for the record details in LNFDC.
+		*/
+		
+		if 'Db.isDefined("LNFDC1","TJD=:TD,RCCL=:N,CID=0") do {
+			type RecordLNFDC1 lnfdc1=Class.new("RecordLNFDC1")
+			set lnfdc1.tjd=TD
+			set lnfdc1.rccl=N
+			set lnfdc1.cid=0
+			
+			do lnfdc1.bypassSave()
+		}
+	}
+	
+	type RecordLNFDK1 lnfdk1
+	for I=1:1 set N=LNFDK(N).order() quit:N=""  do {
+		if 'Db.isDefined("LNFDK1","TJD=:TD,RCKL=:N") do {
+			set lnfdk1=Class.new("RecordLNFDK1")
+			set lnfdk1.tjd=TD
+			set lnfdk1.rckl=N
+		}
+		else  do {
+			set lnfdk1=Db.getRecord("LNFDK1","TJD=:TD,RCKL=:N")
+		}
+		set lnfdk1.tabal=(LNFDK(N)+500)\1000
+
+		do lnfdk1.bypassSave()
+		
+		/*
+		 Dummy Record Insert in Account level details when the account details are not
+		 applicable for the record details in LNFDCK1.
+		*/
+		
+		if 'Db.isDefined("LNFDK","TJD=:TD,RCKL=:N,CID=0") do {
+			type RecordLNFDK lnfdk=Class.new("RecordLNFDK")
+			set lnfdk.tjd=TD
+			set lnfdk.rckl=N
+			set lnfdk.cid=0
+			
+			do lnfdk.bypassSave()
+		}
+			
+	}
+	
+	type RecordLNFDL1 lnfdl1
+	for I=1:1 set N=LNFDL(N).order() quit:N=""  do {
+		if 'Db.isDefined("LNFDL1","TJD=:TD,RCLL=:N") do {
+			set lnfdl1=Class.new("RecordLNFDL1")
+			set lnfdl1.tjd=TD
+			set lnfdl1.rcll=N
+		}
+		else  do {
+			set lnfdl1=Db.getRecord("LNFDL1","TJD=:TD,RCLL=:N")
+		}
+		set lnfdl1.rclt=(LNFDL(N)+500)\1000
+
+		do lnfdl1.bypassSave()
+		
+		/*
+		 Dummy Record Insert in Account level details when the account details are not
+		 applicable for the record details in LNFDL1.
+		*/
+		
+		if 'Db.isDefined("LNFDL","TJD=:TD,RCLL=:N,CID=0") do {
+			type RecordLNFDL lnfdl=Class.new("RecordLNFDL")
+			set lnfdl.tjd=TD
+			set lnfdl.rcll=N
+			set lnfdl.cid=0
+			
+			do lnfdl.bypassSave()
+		}
+	}
+	
+	type RecordLNFDN1 lnfdn1
+	for I=1:1 set N=LNFDN(N).order() quit:N=""  do {
+		if 'Db.isDefined("LNFDN1","TJD=:TD,RCNL=:N") do {
+			set lnfdn1=Class.new("RecordLNFDN1")
+			set lnfdn1.tjd=TD
+			set lnfdn1.rcnl=N
+		}
+		else  do {
+			set lnfdn1=Db.getRecord("LNFDN1","TJD=:TD,RCNL=:N")
+		}
+		set lnfdn1.tbalcur=(LNFDN(N).piece("|",1)+500)\1000
+		set lnfdn1.tbal3090=(LNFDN(N).piece("|",2)+500)\1000
+		set lnfdn1.tbal90=(LNFDN(N).piece("|",3)+500)\1000
+		set lnfdn1.tbalnacr=(LNFDN(N).piece("|",4)+500)\1000
+		
+		do lnfdn1.bypassSave()
+		
+		/*
+		 Dummy Record Insert in Account level details when the account details are not
+		 applicable for the record details in LNFDN1.
+		*/
+		
+		if 'Db.isDefined("LNFDN","TJD=:TD,RCNL=:N,CID=0") do {
+			type RecordLNFDN lnfdn=Class.new("RecordLNFDN")
+			set lnfdn.tjd=TD
+			set lnfdn.rcnl=N
+			set lnfdn.cid=0
+			
+			do lnfdn.bypassSave()
+		}
+	}
+	
+	type RecordLNFDRI lnfdri
+	for I=1:1 set N=LNRI(N).order() quit:N=""  do {
+		if 'Db.isDefined("LNFDRI","RIDT=:TD,RILN=:N") do {
+			set lnfdri=Class.new("RecordLNFDRI")
+			set lnfdri.ridt=TD
+			set lnfdri.riln=N
+		}
+		else  do {
+			set lnfdri=Db.getRecord("LNFDRI","RIDT=:TD,RILN=:N")
+		}
+		set lnfdri.tinc=LNRI(N)
+
+		do lnfdri.bypassSave()
+		
+		/*
+		 Dummy Record Insert in Account level details when the account details are not
+		 applicable for the record details in LNFDRI.
+		*/
+		
+		if 'Db.isDefined("LNFDRI1","RIDT=:TD,RILN=:N,CID=0") do {
+			type RecordLNFDRI1 lnfdri1=Class.new("RecordLNFDRI1")
+			set lnfdri1.ridt=TD
+			set lnfdri1.riln=N
+			set lnfdri1.cid=0
+			
+			do lnfdri1.bypassSave()
+		}
+	}
+	
+	quit
+
+PRT(RecordLN ln)	// Get part info with master loan collateral
+
+	type public Number AVGPSD,CBLBAL,CID,PDAYS,PRC,PSLD,PSLDCQ,PSWR
+	
+	set (CBLBAL,PSLD,PSLDCQ,PSWR,PRC,AVGPSD,PDAYS)=0 quit:'ln.pflg
+	
+	type DbSet dsls6=Db.selectDbSet("LNLS6","CID=:CID")
+	if 'dsls6.isEmpty() do {
+		while dsls6.next() do {
+			type RecordLNLS6 lnls6=dsls6.getRecord("LNLS6")
+			do PRT2(.lnls6)
+		}
+	}
+	
+	set AVGPSD=(PDAYS/91).roundCur(ln.crcd)
+	quit
+	
+PRT2(RecordLNLS6 lnls6)
+
+	type public Date zzFD
+	type public Number CBLBAL,PDAYS,PRC,PSLD,PSLDCQ,PSWR
+	type public String UTBL()
+	
+	type Number CBLNUM,PL,PP,X
+	type String INCD,ITYP,ITYP()
+
+	set INCD=lnls6.incd,PL=lnls6.pl
+	if lnls6.rfpf=1 quit  // Check if loan was removed from investor's pool
+	if '(UTBL("INCD",INCD,PL).exists()) do {
+		type ResultSet rs3=Db.select("PP,EFD,RECP,ITYP","LNLS2","INCD=:INCD AND PL=:PL")
+		if rs3.next() set UTBL("INCD",INCD,PL)=rs3.getRow("|")
+	}
+	set PP=UTBL("INCD",INCD,PL).piece("|",1)
+	set PSLD=PSLD+PP
+	set X=UTBL("INCD",INCD,PL).piece("|",3)
+	if X set PSWR=PSWR+PP,PRC=PRC+X
+	set ITYP=UTBL("INCD",INCD,PL).piece("|",4) if ITYP="" set ITYP="OTH"
+	if ITYP="FNMA"!(ITYP="FHLMC") set ITYP="FNMA" // REPORT THESE TOGETHER
+	set ITYP(ITYP).piece("|",1)=(ITYP(ITYP).get()).piece("|",1)+PP
+	if X set ITYP(ITYP).piece("|",2)=ITYP(ITYP).piece("|",2)+PP
+	if  set ITYP(ITYP).piece("|",3)=ITYP(ITYP).piece("|",3)+X
+	if UTBL("INCD",INCD,PL).piece("|",2)>(zzFD-1) set PSLDCQ=PSLDCQ+PP
+	set X=91 if  set X=X-(zzFD-UTBL("INCD",INCD,PL).piece("|",2))
+	set PDAYS=PDAYS+(X*PP)
+
+	// ---------- LINKED TO A CONTRA ACCOUNT ?
+
+	set CBLNUM=lnls6.ccid
+	if CBLNUM'>0 quit
+	if INCD=""!(PL="") quit
+	
+	type RecordLNLS2 lnls2=Db.getRecord("LNLS2","INCD=:INCD,PL=:PL",1)
+	if lnls2.getMode(),lnls2.picm <> 6 quit
+	
+	type RecordLN lncbl=Db.getRecord("LN","CID=:CBLNUM",1)
+	if lncbl.getMode() set CBLBAL=CBLBAL+lncbl.bal
+			
+	quit
+
+	// LOAN BOUGHT CURRENT QUARTER
+
+BUY
+
+	type public Date zzFD
+	type public Number CID
+	type public String UTBL()
+		
+	type Number BLCQ,PL
+	type String SLCD
+	
+	set BLCQ=0
+	type RecordLNPP6 lnpp6=Db.getRecord("LNPP6","CID=:CID",1)
+	if 'lnpp6.getMode() quit
+	
+	set SLCD=lnpp6.slcd,PL=lnpp6.pl
+	// Check if loan was removed from investor's pool
+	if lnpp6.rfpf=1 quit
+	if '(UTBL("LNPP",SLCD,PL).exists()) do {
+		type ResultSet rs3=Db.select("PP,EFD","LNPP2","SLCD=:SLCD AND PL=:PL")
+		if rs3.next() set UTBL("LNPP",SLCD,PL)=rs3.getRow("|")
+	}
+	if UTBL("LNPP",SLCD,PL).piece("|",2)>(zzFD-1) set BLCQ=BLCQ+UTBL("LNPP",SLCD,PL)
+	
+	quit
+INIT
+
+	type public Boolean ER
+	type public Date EFD,TD,TJD
+	
+	type String DTD
+	
+	set ER=0
+	set (TJD,EFD)=%SystemDate
+	set TD=TJD,DTD=TD.toString("MM/DD/YY")
+
+	// ---------- Change first day of new quarter to last day of prior qtr
+
+	if "01/01,04/01,07/01,10/01"[DTD.piece("/",1,2) set (TJD,EFD,TD)=TJD-1
+	
+	do FROMDT
+
+	// LOADS LINE NUMBERS FOR EACH REPORT NEEDED
+	do INITC
+
+	quit
+
+FROMDT	
+
+	type public Date TD,zzFD
+	
+	type String %DS,ZM
+
+	// ---------- Use variable FD to manage monthly or quarterly stat
+
+	// find first day of month/quarter
+
+	set ZM=(((TD.month()-1)\3)*3)+1
+	set %DS=ZM_"/01/"_TD.year() set zzFD=%DS.toDate()
+
+	quit
+
+INITC	
+	type public Date TJD
+	type public Number IC()
+	type public String FDIC,LNFDC()
+	
+	type Number I
+	
+	if 'FDIC do INITK quit
+	
+	do Db.fastDelete("LNFDC","TJD=:TJD")
+	do Db.fastDelete("LNFDC1","TJD=:TJD")
+	
+	set IC("RE","DEV")=1
+	set IC("RE","FRM")=2
+	set IC("RE","R1-4")=3
+	set IC("RE","O1-4")=4
+	set IC("RE","O1-4JR")=5
+	set IC("RE","MULT")=6
+	set IC("RE","NON")=7
+	set IC("BK","FCOM")=9
+	set IC("ACC","FCOM")=9
+	set IC("BK","COM")=10
+	set IC("ACC","COM")=10
+	set IC("ACC","USBK")=10
+	set IC("BK","OTH")=11
+	set IC("ACC","OTH")=11
+	set IC("BK","FBR")=12
+	set IC("ACC","FBR")=12
+	set IC("BK","FBK")=13
+	set IC("ACC","FBK")=13
+	set IC("AG","ALL")=14
+	set IC("COM","US")=16
+	set IC("COM","NUS")=17
+	set IC("IND","CRDT")=18
+	set IC("IND","REVCR")=19
+	set IC("IND","OTH")=20
+	set IC("IND","EDU")=20
+	set IC("FGVT","ALL")=21
+	set IC("GVT","TAX")=22
+	set IC("GVT","NTAX")=22
+	set IC("OTH","SEC")=24
+	set IC("OTH","OTH")=25
+	set IC("LSE","US")=27
+	set IC("LSE","NUS")=28
+
+	for I=1:1:28,37:1:50,53,55,56 set LNFDC(I)=""
+	do INITK
+	
+	quit
+
+INITK
+	type public Date TJD
+	type public Number IK()
+	type public String FDIC,LNFDK()
+	
+	type Number I
+	
+	if '(FDIC.piece("|",3)) do INITL quit
+	
+	do Db.fastDelete("LNFDK","TJD=:TJD")
+	do Db.fastDelete("LNFDK1","TJD=:TJD")
+	
+	set IK("TOT")=1
+	set IK("RE")=2
+	set IK("COM")=3
+	set IK("IND","CRDT")=4
+	set IK("IND","OTH")=5
+	set IK("IND","REVCR")=5
+	set IK("LSE")=6
+	set IK("AG")=7
+	set IK("TA")=8
+	set IK("SAV")=9
+	set IK("LG")=10
+	set IK("SM")=11
+
+	for I=1:1:11 set LNFDK(I)=""
+	do INITL
+	
+	quit
+
+INITL
+	type public Date TJD
+	type public String FDIC,LNFDL()
+	
+	type Number I
+	
+	if '(FDIC.piece("|",4)) do INITN quit
+	
+	do Db.fastDelete("LNFDL","TJD=:TJD")
+	do Db.fastDelete("LNFDL1","TJD=:TJD")
+
+	for I=1:1:11 set LNFDL(I)=""
+	do INITN
+	
+	quit
+
+INITN
+	type public Date TJD	
+	type public Number IN()
+	type public String FDIC,LNFDN()
+	
+	type Number I
+	
+	if '(FDIC.piece("|",5)) do INITRI quit
+	
+	do Db.fastDelete("LNFDN","TJD=:TJD")
+	do Db.fastDelete("LNFDN1","TJD=:TJD")
+	
+	set IN("RE","D1-4")=1
+	set IN("RE","DEV")=1
+	set IN("RE","DMULT")=1
+	set IN("RE","DNON")=1
+	set IN("RE","FRM")=2
+	set IN("RE","R1-4")=3
+	set IN("RE","O1-4")=4
+	set IN("RE","O1-4JR")=5
+	set IN("RE","MULT")=6
+	set IN("RE","NON")=7
+	set IN("BK")=8
+	set IN("ACC")=8
+	set IN("COM","US")=9
+	set IN("IND","CRDT")=10
+	set IN("IND","EDU")=11
+	set IN("IND","OTH")=11
+	set IN("IND","REVCR")=11
+	set IN("FGVT")=12
+	set IN("AG")=13
+	set IN("GVT")=13
+	set IN("OTH")=13
+	set IN("LSE","US")=14
+	set IN("RE",0)=17
+	set IN("BK","FBK")=18
+	set IN("BK","FCOM")=18
+	set IN("ACC","FBK")=18
+        set IN("ACC","FCOM")=18
+	set IN("COM","NUS")=19
+	set IN("LSE","NUS")=20
+	set IN("AG","ALL")=21
+
+	// No need to initialize 22, because this is a sum of other sequences
+	// ,built in section RCN1.
+
+	for I=1:1:22 set LNFDN(I)=""
+	do INITRI
+	
+	quit
+
+INITRI
+	type public Date TJD
+	type public Number LNRI()
+	type public String FDIC
+	
+	type Number I
+	
+	if '(FDIC.piece("|",6)) quit
+	
+	do Db.fastDelete("LNFDRI","RIDT=:TJD")
+	do Db.fastDelete("LNFDRI1","RIDT=:TJD")
+
+	for I=1:1:8 set LNRI(I)=""
+
+	quit
+
+TEST
+
+	type public Number STATUS
+	type public String ACCOUNTS(),FDIC,VFMQ
+	
+	type Number ACCN,I
+	type String %READ,%TAB
+
+	type ResultSet rs = Db.select("SCHRCC,SCHRCK,SCHRCL,SCHRCN,SCHRI","CUVAR")
+	if rs.next() set FDIC=rs.getRow("|")
+	
+	/*
+	 Included null in second place if FDIC is not null, in order to follow 
+	 the field position maintained in CUVAR for SCHRC
+	*/
+	if FDIC="" set FDIC="1||1|1|1|1"
+	else  set FDIC=FDIC.piece("|",1)_"||"_FDIC.piece("|",2,5)
+
+	set %TAB("ACCOUNTS")=".ACCOUNTS1/XPP=D PP^LNFDICS"
+	set %TAB("STATUS")=".STATUS1"
+
+	set %READ="@@%FN,,,STATUS,,ACCOUNTS*15"
+
+	do ^UTLREAD if VFMQ="Q" quit
+
+	if ACCOUNTS(1)="" quit
+
+	if STATUS for I=1:1:6 if FDIC.piece("|",I) set FDIC.piece("|",I)=2
+
+	do INIT
+
+	for ACCN=1:1:15 if ACCOUNTS(ACCN)'=""  do LEV0(.ACCN)
+
+	do TOT quit
+
+LEV0(Number ACCN)
+	
+	type public Number CID
+	type public String ACCOUNTS(),X
+	
+	type Number LAST
+	
+	set X=ACCOUNTS(ACCN)
+	if X?1"A".E!(X?1"a".E) set CID=0,LAST=999999999999999 do LEV1(.LAST) quit
+	
+	set CID=X-1
+	if X'["-" set LAST=X
+	else  set LAST=X.piece("-",2)
+	do LEV1(.LAST)
+	
+	quit
+
+LEV1(Number LAST)
+
+	type public Number CID
+	type public String FDIC
+	
+	type DbSet dsacn=Db.selectDbSet("ACN","CID>:CID","CID ASC")
+	if 'dsacn.isEmpty() do {
+		while dsacn.next() do { quit:CID>LAST
+			type RecordACN acn=dsacn.getRecord("ACN")
+			set CID=acn.cid
+	
+			if CID>LAST quit
+	
+			if (FDIC.piece("|",3)),(acn.cls="D") do DEPPROC quit
+			else  if acn.cls="L" do PROCESS quit
+		}
+	}
+	
+	quit
+
+PP
+
+	type public Boolean ER
+	type public String X
+	
+	if X="" quit
+	if X?1"A".E quit
+	if X?1N.N1"-"1N.N quit
+
+	if 'Db.isDefined("ACN","CID=:X") do Runtime.setErrMSG("ACN",1295) quit:ER
+
+	quit
+
+
+ 	// Deposit account processing
+
+DEPPROC
+
+	/*
+	 This section processes a deposit account in order to report a
+	 quarterly average ledger balance of the account under FDIC RC-K
+	 schedule if this account satisfies selection criteria.
+	*/
+		
+	type public Number CID,IK()
+	type public Date TD,zzFD
+	type public String FDIC,LNFDK(),UAVB()
+	
+	type Date DTC,FFD,MDT
+	type Number AVGBAL,BAL,IRCB,REGD,RENCD,SEQ,STAT
+	type String DEPDIC1
+	
+	type RecordDEP dep=Db.getRecord("DEP","CID")
+
+	set UAVB(1)=""
+
+	// Int/Div Rate Calculation Base
+	set IRCB=dep.ircb
+
+	// Regulation Category	
+	set REGD=dep.regd
+	
+	// Ledger Balance
+	set BAL=dep.bal
+	
+	// Account Status
+	set STAT=dep.stat
+	
+	// Date Account Closed
+	set DTC=dep.dtc
+	
+	set FFD=zzFD
+	
+	// History Cut-Off date
+	if FFD<dep.hisctf set FFD=dep.hisctf+1
+	
+	// Account Maturity Date
+	set MDT=dep.mdt	
+	
+	// Principal Maturity Option		
+	set RENCD=dep.rencd
+
+	// No Regulation Category
+	if 'REGD quit
+	
+	// Account is closed
+	if (STAT=4),(DTC'=""),(DTC<zzFD) quit
+
+	// Find a category
+	set DEPDIC1=$$DEPDIC(.BAL,.IRCB,.MDT,.REGD,.RENCD)
+	if DEPDIC1="" quit
+
+	do INIT^UAVB(.dep,CID,FFD,TD,"10000000000000000000")
+	set AVGBAL=({Number}UAVB(1)).roundCur(dep.crcd)
+	set SEQ=IK(DEPDIC1)
+	set LNFDK(SEQ)=LNFDK(SEQ)+AVGBAL
+	if (FDIC.piece("|",3)=2),(AVGBAL'=0) do {
+	
+		type RecordLNFDK lnfdk
+		
+		if 'Db.isDefined("LNFDK","TJD=:TD,RCKL=:SEQ,CID=:CID") do {
+			set lnfdk=Class.new("RecordLNFDK")
+			set lnfdk.tjd=TD
+			set lnfdk.rckl=SEQ
+			set lnfdk.cid=CID
+		}
+		else  do {
+			set lnfdk=Db.getRecord("LNFDK","TJD=:TD,RCKL=:SEQ,CID=:CID")
+		}
+		set lnfdk.abal=AVGBAL
+		do lnfdk.bypassSave()
+	}
+
+	quit
+
+
+	// Account category
+	
+DEPDIC(Number BAL,Number IRCB,Date MDT,Number REGD,Number RENCD)
+
+	/*
+	 This section determines the category in which the account will be
+	 reported based on the selection criteria.
+	*/
+	
+	type public Date TJD
+	
+	type String DEPDIC1
+
+	set DEPDIC1=""
+	if (REGD<4),(IRCB>0) set DEPDIC1="TA" quit DEPDIC1
+	
+	// Not an interest bearing account
+	if REGD<4 quit DEPDIC1
+
+	if REGD<6 set DEPDIC1="SAV" quit DEPDIC1
+
+	if REGD'=6 quit DEPDIC1
+
+	if (MDT'=""),(MDT<TJD),((RENCD=0)!(RENCD=5)) set DEPDIC1="TA" quit DEPDIC1
+	if (BAL'<100000) set DEPDIC1="LG" quit DEPDIC1
+	if (BAL<100000) set DEPDIC1="SM" quit DEPDIC1
+
+	quit DEPDIC1
+	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60477^65452^Pat Kelly^43060"	// Signature - LTD^TIME^USER^SIZE

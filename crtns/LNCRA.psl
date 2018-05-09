@@ -1,0 +1,425 @@
+LNCRA	  /*
+ORIG: SHVACHKINAD - 12/22/2001
+DESC: CRA Reporting Extract Procedure
+
+---- Comments --------------------------------------------------------
+
+Processing will determine an accounts eligibility for CRA reporting
+when the new column, Metropolitan Statistical Area (MSA) has a value 
+greater than null. If the value in this field is null, then the selection 
+process is terminated and the account will not be selected for CRA 
+reporting. If the value is greater than null, the selection process 
+proceeds to select the Date of Note (LN.DTNT) for loans originated 
+(Loan Participation Flag (LN.PPFLG) = N) or Date Opened (LN.ODT) for 
+loans purchased (Loan Participation Flag (LN.PPFLG) = Y) and validate 
+whether these dates occur within the user-defined calendar year. If either 
+of these criteria is met loans will be reported even if the account was 
+also closed in the same calendar year.  If either the Date of Note
+(LN.DTNT) or Date Account Opened (LN.ODT) is validated, the process 
+continues to select the loan reporting type (Small Business, Small Farm, 
+or Community Development), by determining whether the FDIC Primary Code 
+(LN.LFPC) is either "COM" for small business or "AG" for small farm.  
+If the FDIC/OTS Primary Code for the account contains values not equal 
+to "COM" nor "AG", the account remains eligible for a third loan type, 
+Community Development, if the account has met the prior conditions 
+described above, and the account has both columns for Amount Request 
+(LN.AMTREQ) and Annual Sales (LN.ANSALE) with values greater than 
+$1 million.  
+Totals will be stored in the LNCRATOT (CRA Totals) table. Detail on the 
+accounts, which comprise the totals, will be stored in the LNCRADTL
+(CRA Detail) table.
+Note: Accounts where either MSACD, LFPC, CRASTCD, CRACNTCD or CEN is
+null will be ignored. These columns are primary keys in LNCRATOT and
+LNCRADTL tables and as such must have a value.
+
+---- Revision History ------------------------------------------------
+
+	09/08/05 - Mugilvannan - CR16732
+		   Replaced the reference of Index table XCLSLN to base
+		   table LN in the PROC section.
+		   
+ */
+
+START	// Processing entry point
+ 
+	new CURRYR,DAY,ENDT,PRYRDT,STDT,YR
+ 
+	type Date DAY=%SystemDate
+	set CURRYR=DAY.year()
+
+	/*
+	 Set up screen for user to enter the reporting year.
+	 Default value - prior year.
+	*/
+	do PROMPT if VFMQ="Q" quit
+ 
+	/*
+	If extract for this calendar year has been already built, quit
+	unless it is the current year, then we want to always proceed
+	*/
+	set PRYRDT=0
+	if CURRYR>YR do {  quit:PRYRDT
+		type ResultSet rs=Db.select("CYEAR","LNCRATOT","CYEAR=:YR")
+		if rs.isEmpty() quit
+		else  set PRYRDT=1
+		}
+ 
+	set STDT=$$^SCAJD("01/01/"_YR)
+	set ENDT=$$^SCAJD("12/31/"_YR)
+ 
+	// Delete entries for current year, they will be re-built
+	if CURRYR=YR do INIT
+ 
+	do PROC
+ 
+	quit
+ 
+PROMPT	// Display "Calendar Year:" prompt and validate user input
+ 
+	new %READ,%TAB,OLNTB,ZYEAR
+ 
+	// I18N=OFF
+	set %TAB("ZYEAR")=".ZYEAR1/REQ/TYP=N/LEN=4/HLP=[LNCRATOT]CYEAR/MIN=1841/XPP=D PP^LNCRA/DES=Calendar Year",ZYEAR=CURRYR-1
+	set %READ="@@%FN,,ZYEAR"
+	// I18N=ON
+ 
+	set OLNTB=40    // Center prompt in the middle of the screen
+ 
+	do ^UTLREAD if VFMQ="Q" quit
+ 
+	set YR=ZYEAR
+ 
+	quit
+
+PP	// Post Processor for Calendar Year prompt
+ 
+	/*
+	Cannot generate extract if the year specified is in the future
+	Error message: "Value above maximum range ~p1"
+	*/
+
+	if X>CURRYR do Runtime.setErrMSG("LN",2919,CURRYR) quit
+ 
+	quit
+ 
+INIT	// Initialize extract
+ 
+	/*
+	Kill any table entries for current year prior to generating
+	the extract
+	*/
+ 
+	do Db.fastDelete("LNCRATOT","CYEAR=:YR")
+ 
+	quit
+ 
+PROC	// Generate the extracts by populating LNCRATOT and LNCRADTL tables
+ 
+	new CID,CRA,LAR,rs
+ 
+	type ResultSet rs=Db.select("CID","LN")
+	if rs.isEmpty() quit
+	while rs.next() do {
+		set CID=rs.getCol(1)
+		// Accumulate loan data in local array CRA
+		do ACCT
+		}
+ 
+	// Create the CRA extract from data accumulated in the CRA array
+ 
+	new cen,cid,cracntcd,crastcd,lfpc,msacd
+	set lfpc=""
+	for  set lfpc=$O(CRA(lfpc)) quit:lfpc=""  do {
+		set msacd=""
+		for  set msacd=$O(CRA(lfpc,msacd)) quit:msacd=""  do {
+			set crastcd=""
+			for  set crastcd=$O(CRA(lfpc,msacd,crastcd)) quit:crastcd=""  do {
+				set cracntcd=""
+				for  set cracntcd=$O(CRA(lfpc,msacd,crastcd,cracntcd)) quit:cracntcd=""  do {
+					set cen=""
+					for  set cen=$O(CRA(lfpc,msacd,crastcd,cracntcd,cen)) quit:cen=""  do {
+						new lncratot
+						type RecordLNCRATOT lncratot=Class.new("RecordLNCRATOT")
+						set lncratot.cyear=YR
+						set lncratot.lfpc=lfpc
+						set lncratot.msacd=msacd
+						set lncratot.crastcd=crastcd
+						set lncratot.cracntcd=cracntcd
+						set lncratot.cen=cen
+						set lncratot.numorg1=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",1)
+						set lncratot.numorg2=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",2)
+						set lncratot.numorg3=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",3)
+						set lncratot.numorg4=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",4)
+						set lncratot.numorg5=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",5)
+						set lncratot.amtorg1=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",6)
+						set lncratot.amtorg2=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",7)
+						set lncratot.amtorg3=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",8)
+						set lncratot.amtorg4=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",9)
+						set lncratot.amtorg5=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",10)
+						set lncratot.numpr1=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",11)
+						set lncratot.numpr2=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",12)
+						set lncratot.numpr3=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",13)
+						set lncratot.numpr4=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",14)
+						set lncratot.numpr5=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",15)
+						set lncratot.amtpr1=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",16)
+						set lncratot.amtpr2=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",17)
+						set lncratot.amtpr3=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",18)
+						set lncratot.amtpr4=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",19)
+						set lncratot.amtpr5=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",20)
+						set lncratot.totamt=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",21)
+						set lncratot.totamtaf=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",22)
+						set lncratot.totnum=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",23)
+						set lncratot.totnumaf=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",24)
+						do lncratot.save()
+						set cid=""
+						for  set cid=$O(CRA(lfpc,msacd,crastcd,cracntcd,cen,cid)) quit:cid=""  do {
+							new lncradtl
+							type RecordLNCRADTL lncradtl=Class.new("RecordLNCRADTL")
+							set lncradtl.cyear=YR
+							set lncradtl.lfpc=lfpc
+							set lncradtl.msacd=msacd
+							set lncradtl.crastcd=crastcd
+							set lncradtl.cracntcd=cracntcd
+							set lncradtl.cen=cen
+							set lncradtl.cid=cid
+							set lncradtl.dtnt=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen,cid),"|",1)
+							set lncradtl.amtreq=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen,cid),"|",2)
+							set lncradtl.ansale=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen,cid),"|",3)
+							set lncradtl.affln=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen,cid),"|",4)
+							set lncradtl.ppflg=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen,cid),"|",5)
+							set lncradtl.odt=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen,cid),"|",6)
+							do lncradtl.save()
+							}
+						 }
+					}
+				}
+			}
+		}
+ 
+	quit
+ 
+ACCT	// Evaluate each loan account
+ 
+	new affln,amtreq,ansale,cen,cracntcd,crastcd,dtc,dtnt,lfpc,msacd
+	new odt,ppflg,skip,stat
+	new amtorg1,amtorg2,amtorg3,amtorg4,amtorg5,amtpr1,amtpr2,amtpr3
+	new amtpr4,amtpr5,numorg1,numorg2,numorg3,numorg4,numorg5,numpr1
+	new numpr2,numpr3,numpr4,numpr5,totamt,totamtaf,totnum,totnumaf
+ 
+	// Initialize values for totals to prevent undefined and null values
+	set (amtorg1,amtorg2,amtorg3,amtorg4,amtorg5,amtpr1,amtpr2,amtpr3,amtpr4,amtpr5,totamt,totamtaf)=0
+	set (numorg1,numorg2,numorg3,numorg4,numorg5,numpr1,numpr2,numpr3,numpr4,numpr5,totnum,totnumaf)=0
+ 
+	type RecordLN ln=Db.getRecord("LN","CID")
+ 
+	set msacd=ln.msacd              // Metropolitan Statistical Area Code
+	set amtreq=ln.amtreq            // Amount Requested
+	set odt=ln.odt                  // Original Disbursement Date
+	set dtnt=ln.dtnt                // Date of Note
+	set ansale=ln.ansale            // Annual Sales
+	set crastcd=ln.crastcd          // CRA State Code
+	set cracntcd=ln.cracntcd        // CRA County Code
+	set cen=ln.cen                  // Census Tract
+	set affln=ln.affln              // Affiliate Loan
+	set ppflg=ln.ppflg              // Participation Purchase Flag
+	set lfpc=ln.lfpc                // Loan FDIC/OTS Primary Reporting Code
+	set stat=ln.stat                // Account Status
+	set dtc=ln.dtc                  // Date Account Closed
+ 
+	// Columns listed below cannot be null as they are primary keys
+	if (msacd="")!(lfpc="")!(crastcd="")!(cracntcd="")!(cen="") quit
+
+	// Do not include accounts closed prior to the start of the year
+	if stat=4,dtc>0,dtc<STDT quit
+ 
+	// For Loans Purchased the Opening Date must be within current year
+	if ppflg,(odt<STDT!(odt>ENDT)) quit
+ 
+	// For Loans Originated the Date of Note must be within current year
+	if 'ppflg,(dtnt<STDT!(dtnt>ENDT)) quit
+ 
+	set skip=0
+ 
+	// Small Business reporting type
+	if lfpc="COM" do {
+		 // Eligible only if AMTREQ is less or equal to $1,000,000.00
+		if amtreq>1000000 set skip=1 quit
+ 
+		// Populate CRA array with loan detail
+		set CRA(lfpc,msacd,crastcd,cracntcd,cen,CID)=$$DTL()
+ 
+		if ppflg do PURCH		// Loans Purchased
+		else  do ORG			// Loans Originated
+ 
+		do PRCHORG			// Accumulate sums of totals
+		}
+	// Small Farm reporting type
+	else  if lfpc="AG" do {
+		// Eligible only if AMTREQ is less or equal to $500,000.00
+		if amtreq>500000 set skip=1 quit
+ 
+		// Populate CRA array with loan detail
+		set CRA(lfpc,msacd,crastcd,cracntcd,cen,CID)=$$DTL()
+ 
+		if ppflg do PURCH		// Loans Purchased
+		else  do ORG			// Loans Originated
+ 
+		do PRCHORG			// Accumulate sums of totals
+		}
+	// Community Development reporting type
+	else  do {
+		// Eligible if AMTREQ and ANSALE greater than $1,000,000.00
+		if ansale>1000000,amtreq>1000000 do {
+			// Populate CRA array with loan detail
+			set CRA(lfpc,msacd,crastcd,cracntcd,cen,CID)=$$DTL()
+ 
+			if ppflg do PURCH	// Loans Purchased
+			else  do ORG1		// Loans Originated
+ 
+			do PRCHORG		// Accumulate sums of totals
+			}
+		else  set skip=1 quit
+		}
+ 
+	if 'skip do CRATOT
+ 
+	quit
+ 
+DTL()	// Populate LAR array with loan data for LNCRADTL table
+ 
+	set $P(LAR,"|",1)=dtnt
+	set $P(LAR,"|",2)=amtreq
+	set $P(LAR,"|",3)=ansale
+	set $P(LAR,"|",4)=affln
+	set $P(LAR,"|",5)=ppflg
+	set $P(LAR,"|",6)=odt
+ 
+	quit LAR
+ 
+PURCH	// Accumulate totals for Loans Purchased of type COM and AG
+ 
+	new limitamt
+ 
+	/*
+	Loans to Small Farms cannot exceed $500000, while for Small
+	Businesses they cannot exceed $1000000
+	*/
+	if lfpc="COM" set limitamt=1000000
+	else  set limitamt=500000
+ 
+	if amtreq'>100000 do {
+		set numpr1=numpr1+1
+		set amtpr1=amtpr1+amtreq
+		}
+ 
+	if amtreq>100000,amtreq'>250000 do {
+		set numpr2=numpr2+1
+		set amtpr2=amtpr2+amtreq
+		}
+ 
+	if amtreq>250000,amtreq'>limitamt do {
+		set numpr3=numpr3+1
+		set amtpr3=amtpr3+amtreq
+		}
+ 
+	do PURCH1
+ 
+	quit
+ 
+ORG	// Accumulate totals for Loans Originated of type COM and AG
+ 
+	new limitamt
+ 
+	/*
+	Loans to Small Farms cannot exceed $500000, while for Small
+	Businesses they cannot exceed $1000000
+	*/
+	if lfpc="COM" set limitamt=1000000
+	else  set limitamt=500000
+ 
+	if amtreq'>100000 do {
+		set numorg1=numorg1+1
+		set amtorg1=amtorg1+amtreq
+		}
+ 
+	if amtreq>100000,amtreq'>250000 do {
+		set numorg2=numorg2+1
+		set amtorg2=amtorg2+amtreq
+		}
+ 
+	if amtreq>250000,amtreq'>limitamt do {
+		set numorg3=numorg3+1
+		set amtorg3=amtorg3+amtreq
+		}
+ 
+	do ORG1
+ 
+	quit
+ 
+PURCH1	// Accumulate totals for Loans Purchased (each reporting type)
+ 
+	set numpr4=numpr4+1
+	set amtpr4=amtpr4+amtreq
+ 
+	// Affiliate Loans totals
+	if affln do {
+		set numpr5=numpr5+1
+		set amtpr5=amtpr5+amtreq
+		}
+	quit
+ 
+ORG1	// Accumulate totals for Loans Originated (each reporting type)
+ 
+	set numorg4=numorg4+1
+	set amtorg4=amtorg4+amtreq
+ 
+	// Affiliate Loans totals
+	if affln do {
+		set numorg5=numorg5+1
+		set amtorg5=amtorg5+amtreq
+		}
+	quit
+ 
+PRCHORG	// Accumulate sum of totals for each reporting type
+ 
+	set totnum=totnum+1
+	set totamt=totamt+amtreq
+ 
+	// Sum of Affiliate Loans totals
+	if affln do {
+		set totnumaf=totnumaf+1
+		set totamtaf=totamtaf+amtreq
+		}
+	quit
+ 
+CRATOT	// Accumulate totals for LNCRATOT table in the CRA array
+ 
+	if $G(CRA(lfpc,msacd,crastcd,cracntcd,cen))="" set CRA(lfpc,msacd,crastcd,cracntcd,cen)=numorg1
+	else  set $P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",1)=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",1)+numorg1
+	set $P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",2)=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",2)+numorg2
+	set $P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",3)=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",3)+numorg3
+	set $P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",4)=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",4)+numorg4
+	set $P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",5)=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",5)+numorg5
+	set $P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",6)=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",6)+amtorg1
+	set $P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",7)=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",7)+amtorg2
+	set $P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",8)=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",8)+amtorg3
+	set $P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",9)=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",9)+amtorg4
+	set $P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",10)=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",10)+amtorg5
+	set $P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",11)=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",11)+numpr1
+	set $P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",12)=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",12)+numpr2
+	set $P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",13)=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",13)+numpr3
+	set $P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",14)=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",14)+numpr4
+	set $P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",15)=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",15)+numpr5
+	set $P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",16)=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",16)+amtpr1
+	set $P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",17)=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",17)+amtpr2
+	set $P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",18)=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",18)+amtpr3
+	set $P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",19)=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",19)+amtpr4
+	set $P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",20)=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",20)+amtpr5
+	set $P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",21)=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",21)+totamt
+	set $P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",22)=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",22)+totamtaf
+	set $P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",23)=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",23)+totnum
+	set $P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",24)=$P(CRA(lfpc,msacd,crastcd,cracntcd,cen),"|",24)+totnumaf
+ 
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60121^23289^Saravanamuthu Mugilvannan^14831"	// Signature - LTD^TIME^USER^SIZE

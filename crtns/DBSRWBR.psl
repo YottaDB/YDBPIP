@@ -1,0 +1,966 @@
+public DBSRWBR(Number RPOPT,Number HDROPT,Number BROPT)	/* Part DBSRW*
+	ORIG:
+	PROCEDURE ID: DBSRWBR
+	DESC: DATA-QWIK Report Browser
+	
+	---- Comments --------------------------------------------------------
+	ARGUMENTS:
+		. RPOPT		Report option		/REQ/NONULL/MECH=VAL
+				0 = non-crt
+				1 = QWIK report
+				2 = regular report
+
+		. HDROPT	Header option		/NOREQ/MECH=VAL/DEFAULT=0
+				0 = skip line before prompt
+				1 = don't
+
+		. BROPT		Browse option		/NOREQ/MECH=VAL/DEFAULT=0
+				0 = available
+				1 = suppress
+
+	INPUTS:
+		. PN		Page Number
+		. vCOL		Column data
+		. vcrt		ROM function status  1=Next  2=Bottom  4=Find
+		. vlc		Current line number
+		. vHDG		Heading information
+
+	RETURNS:
+		. VFMQ		0 = Continue, 1 = Quit
+		. vcrt		SOM function status
+		. vHDG		Heading information
+
+	Structure of table TMPRPTBR:
+
+	  Keys = $J,LINENO,PAGENO,SEQ = DATA
+
+	    LINENO	PAGENO		SEQ		DATA
+	      0		  0		 0		last page # if browser option
+	      0		page		 0		page/line index
+	      0		page		1-n		page header if unique
+	      1-n	  0		 0		report line
+	      
+	This procedure is called by compiled reports.  Although labelled as public
+	it should not be called from sources other than report write related.
+
+	------ Revision History ------------------------------------------------
+	07/30/07 - RussellDS - CR28507
+		   Modified FIND section to allow quiting if at Find: prompt.
+		   
+		   Removed old revision history.
+	
+	08/11/06 - RussellDS - CR22069
+		   Fixed logic dealing with multiple uses of FIND and return to
+		   top.  Wasn't locating second instance and then was building
+		   blank page due to index problems.
+	
+	07/05/06 - RussellDS - CR20967
+		   Modified FIND section to add call to INDEX to correctly set
+		   page index on initial use of FIND.
+		   
+		   Fixed PSL warnings.
+	------------------------------------------------------------------------
+
+	I18N=QUIT Excluded from I18N standards
+	*/
+
+	type Public Number PN,vcrt,VFMQ,vlc
+	type Public String vHDG()
+
+	type Number curBTM,lnoff,NOTNWHDR
+
+	// Output report to RMS file or PRINTER
+	if RPOPT=0 do HEADER quit 
+
+	// Reset screen for first report page
+	quit:'PN.exists()
+
+	set curBTM=$$BTM^%TRMVT,lnoff=0
+	if BROPT.get() do {
+		type Number PAGE
+		// Get highest page number
+		set PAGE=$$LASTPAGE
+		do TMPSET(0,0,0,PAGE)
+		}
+
+	if PN=1 do {
+		set PN=PN+1
+		if RPOPT=1 write $$CLEAR^%TRMVT
+		}
+
+	if PN=(-1) do {
+		quit:'$$TMPGET(1,0,0)
+		if vcrt=2!(vcrt=4) set vcrt=3,NOTNWHDR=0
+		write !
+		do WAIT
+		}
+		
+	else  do {
+		// Skip one line before prompt for option
+		if vHDG.get(),'HDROPT.get() do {
+			write ! 
+			do WAIT
+			}
+
+		// QWIK report format
+		else  if RPOPT=1 do {
+			do TMPDEL
+			do PNTHDR
+			}
+
+		// RW report format (PAGE BREAK OPTION)
+		else  do {
+			do SETHDR
+			do LOCKHDR(vHDG)
+			}
+		}
+
+	quit
+
+
+HEADER	// Private - Display header
+
+	type Public Number PN
+	type Public String vHDG()
+
+	write $C(12),!
+	set $Y=1
+	if PN'<0 do {
+		type Number N=""
+		for  set N=vHDG(N).order() quit:N=""  do HEADER1(vHDG(N))
+		set PN=PN+1
+		}
+	quit
+
+
+HEADER1(String DATA)	// Private - Display header with page number
+
+	type Public Number PN
+	type String X
+
+	// Page ~p1
+	set X=$$^MSG(2125)
+	set X=X.extract(1,X.length()-1)		// Report page number
+	if DATA[X write DATA.piece(X,1)_X_":"_$J(PN,4),!
+	else  write DATA,!
+	quit
+
+
+PNTHDR	// Private - Print out screen page header
+
+	type Public Number IORM
+	type Public String vHDG()
+
+	type Number CNT,N
+
+	// Clear screen and switch to 132 column mode
+	if IORM=132 write $$SCR132^%TRMVT
+	else  write $$SCR80^%TRMVT
+
+	set $X=0,$Y=0
+	do TERM^%ZUSE($I,"WIDTH="_(IORM+1)_"/ECHO")
+	set N=""
+	for CNT=1:1 set N=vHDG(N).order() quit:N=""  write vHDG(N),!
+	set vHDG=CNT
+	do LOCKHDR(CNT)
+	quit
+
+
+SETHDR	// Private - Copy current RW page header information into vHDG() array
+
+	type Public Number vlc
+	type Public String vHDG()
+
+	type Number J,K,LINENO,PGNO
+	type String DATA
+
+	kill vHDG
+	
+	type ResultSet rs=Db.select("PAGENO,DATA","TMPRPTBR","JOBNO=:%ProcessID AND LINENO=0 AND SEQ=0","PAGENO DESC")
+	if rs.isEmpty() set (J,PGNO)=1
+	else  if rs.next() do {
+		set PGNO=rs.getCol("PAGENO")
+		set J=+rs.getCol("DATA")
+		}
+
+	type ResultSet rs2=Db.select("LINENO,DATA","TMPRPTBR","JOBNO=:%ProcessID AND LINENO >= :J AND PAGENO=0 AND SEQ=0","LINENO ASC")
+
+	set K=1
+	while rs2.next() do {
+		set vHDG(K)=rs2.getCol("DATA")
+		set K=K+1
+		set vlc=vlc-1
+		set LINENO=rs2.getCol("LINENO")
+		do Db.fastDelete("TMPRPTBR","JOBNO=:%ProcessID,LINENO=:LINENO")
+		}
+	set vHDG=K_"|"_PGNO
+
+	type RecordTMPRPTBR tmprptbr=Db.getRecord("TMPRPTBR","JOBNO=:%ProcessID,LINENO=0,PAGENO=:PGNO,SEQ=0",1)
+	set DATA=tmprptbr.data
+	set DATA.piece("|",2)=PGNO
+	set tmprptbr.data=DATA
+        do tmprptbr.bypassSave()
+
+	for J=1:1 quit:'vHDG(J).exists()  do TMPSET(0,PGNO,J,vHDG(J))
+
+	quit
+
+
+LOCKHDR(Number LN)	// Private - Lock page header region
+
+	type Public String vHDG()
+
+	quit:LN>23			// Avoid ST420 error
+
+	write $$LOCK^%TRMVT(LN+0,24),$$CUP^%TRMVT(1,LN-1),!
+	set $Y=LN-1,$X=0
+	quit
+
+
+WAIT	// Private - Option Selection
+
+	type Public Number vcrt
+
+	type Number ACCESS,PGNO
+
+	set ACCESS=0
+
+	if '$$TMPGET(0,1,0) set PGNO=1
+	else  set PGNO=$$LASTPAGE
+
+	for  quit:$$OPTS
+
+	quit
+
+
+OPTS()	/* Private - Display and execute browser options
+
+	Variable: vcrt   1  Normal processing
+	                 2  Last Page Mode
+	                 3  Last Page Mode (buffer only)
+	                 4  Find Mode
+
+	Return 1 to quit, 0 to do again
+	*/
+
+	type Public Number ACCESS,curBTM,PGNO,PN,vcrt,VFMQ
+	type Public String %fkey(),vCOL,vHDG()
+
+	type Number I,QUIT,SEQ,ZPGNO
+	type String fkterm,MASK(),OP(),RM,VAR(),X
+
+	set QUIT=""
+
+	set ZPGNO=$$LASTPAGE
+	if 'ZPGNO set ZPGNO=1
+
+	if PN>0,vcrt=4 do FIND1
+	if PN<0,vcrt=4 set vcrt=1
+	if vcrt=3 do ENDPAGE set vcrt=1
+
+	//  Page ~p1  Press any key to stop operation
+	if vcrt=2!(vcrt=4) do { if 'QUIT.isNull() quit QUIT
+		write $$CUOFF^%TRMVT,curBTM,$$^MSG("20",PGNO)
+		#ACCEPT Date=02/08/05; PGM=Dan Russell; CR=13807
+		read *X:0
+		if X=(-1) write $$CUU^%TRMVT do {
+			do INDEX(1)
+			if VFMQ!(PN<0) set QUIT=0
+			else   set QUIT=1
+		}
+	}
+
+	if vcrt>1 do PREV set vcrt=1
+
+	if %fkey("").order().isNull() do ZBINIT^%TRMVT()
+
+	set fkterm="ENT,SES,DSP,PRN"
+
+	for I=1:1:10 set (MASK(I),VAR(I))=""	
+	set SEQ=1
+
+	// PAUSE option on last page only
+	if PN<0,ZPGNO=PGNO do {
+		set OP(1)="PAUSE"
+		set SEQ=SEQ+1
+		kill MASK(1)
+		}
+
+	// NEXT option not avaliable on last page
+	if '((PN<0)&(ZPGNO=PGNO)) set OP(2)="NEXT" kill MASK(2)	do ADD^DBSMBAR("PDN",.SEQ)
+
+	// PREV & TOP options not available on first page
+	if PGNO'=1 set OP(3)="PREV" kill MASK(3) do ADD^DBSMBAR("PUP",.SEQ)
+
+	if PGNO'=1 set OP(4)="TOP" kill MASK(4) do ADD^DBSMBAR("TOP",.SEQ)
+	
+	// BOTTOM option not available on last page
+	if '((PN<0)&(ZPGNO=PGNO)) set OP(5)="BOTTOM" kill MASK(5) do ADD^DBSMBAR("BOT",.SEQ)
+
+	// RESUME option not available on last page
+	if PN>0,PGNO'=ZPGNO do {
+		set OP(6)="RESUME"
+		set VAR(6)=ZPGNO
+		set SEQ=SEQ+1
+		kill MASK(6)
+		}
+
+	// Skip option for labels or notices
+	if $D(vHDG) set OP(7)="FIND" kill MASK(7) do ADD^DBSMBAR("FND",.SEQ)
+
+	set OP(8)="PNTSCR" kill MASK(8) do ADD^DBSMBAR("PRN",.SEQ)
+
+	// Check column definition and BROWSE status flag
+	if vCOL.exists() do {
+		type Number X,Y
+		
+		set Y=$$TMPGET(0,0,0,.X)
+		if X=""!(PGNO<X) do {
+			set OP(9)="BROWSE"
+			set SEQ=SEQ+1
+			kill MASK(9)
+			}
+		}
+
+	set OP(10)="QUIT" kill MASK(10) do ADD^DBSMBAR("ESC",.SEQ)
+
+	// Last Page (~p1)
+	if PGNO=ZPGNO&(PN<0) set RM=$$^MSG(1594,PGNO)
+	// Page ~p1
+	else  set RM=$$^MSG(2125,PGNO)
+	set OP=$$^DBSMBAR(34,fkterm,.MASK,"",.VAR)
+
+	if %fkey="DSP" do REFRESH quit 0
+
+	if OP="" do { quit 1
+		do QUIT
+		do EXIT
+		}
+
+	write $C(13),$$LINDEL^%TRMVT,$$CUP^%TRMVT(1,23)
+
+	set ACCESS=0
+	set OP=OP(OP)
+	do @OP
+
+	if VFMQ do EXIT quit 1
+
+	if ACCESS do { quit QUIT
+		do INDEX(1)
+		if VFMQ!(PN<0) set QUIT=0
+		else   set QUIT=1
+		}
+
+	if vcrt=1 quit 0
+
+	quit 1
+
+
+INDEX(OPT)	// Private - Create page /line index file
+
+	type Public String vHDG(),vlc
+
+	type Number Y
+	type String X
+
+	set $X=0,$Y=vHDG-1
+
+	set Y=$$TMPGET(0,1,0,.X)
+	if X="" do {
+		do TMPSET(0,1,0,"1|1")
+		do TMPSET(0,2,0,vlc.get()+1)
+		}
+	else  if OPT do {
+		type Number PAGE
+
+		set PAGE=$$LASTPAGE+1
+		do TMPSET(0,PAGE,0,(vlc.get()+1)_"|"_vHDG.piece("|",2))
+		}
+
+	// Save default page header information if not already saved
+	if '$$TMPGET(0,1,1) do {
+		type Number I
+
+		for I=1:1 quit:'vHDG(I).exists()  do TMPSET(0,1,I,vHDG(I))
+		}
+
+	quit
+		
+
+EXIT	// Private - Clean up
+
+	// Unlock region
+	do TERM^%ZUSE(0,"FLUSH")
+
+	// Unlock region, clear screen, switch to 80 colmn mode
+	write $$LOCK^%TRMVT,$$CLEAR^%TRMVT,$$SCR80^%TRMVT
+	do TERM^%ZUSE($I,"ECHO/ESCAPE")
+
+	do TMPDEL
+	quit
+
+
+PREV	// Private - Previous Page
+
+	type Public Number lnoff,PGNO
+
+	type Number LN1,LN2
+	
+	quit:PGNO=1
+
+	set lnoff=0,PGNO=PGNO-1
+	do GETLINE(.LN1,.LN2)
+	do PRINT(LN1,LN2)
+	quit
+
+
+NEXT	// Private - Next Page
+
+	type Public Number ACCESS,lnoff,PGNO,PN
+
+	type Number LN1,LN2,X
+
+	if PN<0,$$LASTPAGE=PGNO quit
+
+	set X=PGNO+1
+	if '$$TMPGET(0,X,0) set ACCESS=1 quit
+
+	set lnoff=0,PGNO=X
+	do GETLINE(.LN1,.LN2)
+	do PRINT(LN1,LN2)
+	quit
+
+
+TOP	// Private - First Page
+
+	type Public Number lnoff,PGNO
+
+	type Number LN1,LN2
+
+	quit:PGNO=1
+
+	set PGNO=1,lnoff=0
+	do GETLINE(.LN1,.LN2)
+	do PRINT(LN1,LN2)
+	quit
+
+
+RESUME	// Private - Return to current page
+
+	type Public Number lnoff,PGNO
+
+	type Number LASTPAGE,LN1,LN2
+
+	set LASTPAGE=$$LASTPAGE
+	quit:LASTPAGE=PGNO
+
+	if LASTPAGE'>1 set LASTPAGE=1
+
+	set PGNO=LASTPAGE,lnoff=0
+	do GETLINE(.LN1,.LN2)
+	do PRINT(LN1,LN2)
+	quit
+
+
+BOTTOM	// Private - Last Page
+
+	type Public Number PGNO,PN,vcrt,vlc
+	type Public String vHDG()
+
+	if PN<0 do {
+		set PGNO=$$LASTPAGE
+		do ENDPAGE
+		}
+	else  do {
+		if '$$TMPGET(0,1,0) do {
+			do TMPSET(0,1,0,"1|1")
+			do TMPSET(0,2,0,vlc.get()+1)
+			}
+		else  do {				// Copy header status
+			type Number PAGE,X
+			type String DATA
+
+			// Get last page with a header
+			type ResultSet rs=Db.select("PAGENO","TMPRPTBR","JOBNO=:%ProcessID AND LINENO=0 AND SEQ=1","PAGENO DESC")
+			
+			if rs.isEmpty() set PAGE=1
+			else  if rs.next() set PAGE=rs.getCol("PAGENO")
+			
+			set X=$$TMPGET(0,PAGE,0,.DATA)
+			set PAGE=$$LASTPAGE+1
+			do TMPSET(0,PAGE,0,(vlc.get()+1)_"|"_DATA.piece("|",2))
+			}
+		set $X=0,$Y=vHDG-1
+		set vcrt=2
+		}
+
+	quit
+
+
+PAUSE	// Private - Pause option
+
+	quit
+
+
+QUIT	// Private - Quit option
+
+	type Public Number VFMQ
+
+	do TMPDEL
+	set VFMQ=1
+	quit
+
+
+ENDPAGE	// Private
+
+	type Number LN1,LN2
+
+	do GETLINE(.LN1,.LN2)
+	do PRINT(LN1,LN2)
+	quit
+
+
+public PRINT(Number LN1,	// Print from line LN1 to line LN2
+	Number LN2)
+	
+	// Change to private once that feature works in PSL
+
+	type Public Number vcrt,vHDG
+	type Public String vfind
+
+	type Number I
+
+	set $Y=+vHDG
+	write $$CUP^%TRMVT(1,+vHDG)
+	write $$CLP^%TRMVT
+
+	for I=LN1:1:LN2 do {
+		type Number HILIGHT,X,Y
+		type String DATA
+
+		set HILIGHT=0
+		set Y=$$TMPGET(I,0,0,.X)
+		#ACCEPT DATE=01/02/03;PGM=Dan Russell;CR=Mark Spier
+		if vcrt=4 xecute vfind if  set HILIGHT=1
+
+		if HILIGHT do {
+			write $$VIDREV^%TRMVT
+			write X,!
+			write $$VIDOFF^%TRMVT
+			}
+		else  write X,!
+		}
+	quit
+
+
+PNTSCR	// Private - Print Screen
+
+	type Public Number curBTM,lnoff,PGNO,RPOPT,vcrt,ZPGNO
+	type Public String %fkey,vHDG()
+
+	type Number I,IORM,IOSL,LN1,LN2,NOTNWHDR,OP,PN,VLC,Y,ZZLN1,ZZLN2
+	type String HIDX(),IO,VAR(),X
+
+	if PGNO=1 set OP=1
+	else  set VAR(2)=PGNO,OP=$$^DBSMBAR(35,"","","",.VAR)
+	quit:'OP
+
+	if OP=1 do {
+		set NOTNWHDR=1
+		do GETLINE(.LN1,.LN2)
+		}
+	else  if OP=2 do PNTALL(.LN1,.LN2)
+
+	do { quit:IO=""
+		type String PGM
+
+		do ^DBSIO
+		}
+
+	set IORM=80
+	set Y=$$TMPGET(1,0,0,.X) if X.length()>80 set IORM=132
+
+	set PN=1,IOSL=IOSL-1
+	use IO do RWHDR
+
+	set ZZLN1=LN1,ZZLN2=LN2
+	set ZZLN1=ZZLN1-lnoff
+	if PGNO'=ZPGNO set ZZLN2=ZZLN2-lnoff
+	if ZZLN1<1 set ZZLN1=1
+	for I=ZZLN1:1:ZZLN2 do {
+		type Number X
+		type String DATA
+
+		if HIDX(I).exists() do {
+			do NEWHDR(I)
+			do RWHDR
+			}
+		else  if VLC>IOSL do RWHDR
+
+		set X=$$TMPGET(I,0,0,.DATA)
+		write DATA,!
+		set VLC=VLC+1
+		}
+
+	do CLOSE^SCAIO
+
+	write curBTM,"Done" 
+	hang 2
+	quit
+
+
+RWHDR	// Private
+
+	type Public Number PN,VLC
+	type Public String vHDG()
+
+	type Number N
+
+	write #
+	for N=1:1 quit:'vHDG(N).exists()  do HEADER1(vHDG(N))
+	set VLC=N-1,PN=PN+1
+	quit
+
+
+NEWHDR(Number PAGE)	// Private - Switch to new header
+
+	type Public String vHDG()
+
+	type Number I=1
+
+	kill vHDG
+
+	type ResultSet rs=Db.select("DATA","TMPRPTBR","JOBNO=:%ProcessID AND LINENO=0 AND PAGENO=:PAGE AND SEQ>0","SEQ ASC")
+	while rs.next() do {
+		set vHDG(I)=rs.getCol("DATA")
+		set I=I+1
+		}
+	quit
+
+
+PNTALL(Number LN1,	// Private
+	Number LN2)
+
+	type Public Number PGNO
+	type Public String HIDX()
+
+	type Number X
+	type String DATA
+
+	set LN1=1
+	set X=$$TMPGET(0,PGNO+1,0,.DATA)
+	if X set LN2=DATA-1
+	else  set LN2=$$LASTLINE
+
+	// Save unique page header index information
+	type ResultSet rs=Db.select("PAGENO","TMPRPTBR","JOBNO=:%ProcessID AND LINENO=0 AND SEQ=1")
+	while rs.next() do {
+		type Number PAGE=rs.getCol("PAGENO")
+
+		// Get index info for this header
+		type RecordTMPRPTBR tmprptbr=Db.getRecord("TMPRPTBR","JOBNO=:%ProcessID,LINENO=0,PAGENO=:PAGE,SEQ=0",1)
+		set HIDX(+tmprptbr.data)=PAGE
+		}
+
+	if HIDX(1).exists() do {
+		do NEWHDR(1)
+		kill HIDX(1)
+		}
+	quit
+
+
+BROWSE	// Private - Browse function
+
+	do ^DBSRWBR2
+	quit
+
+
+FIND	// Private - Find string
+
+	type Public Number curBTM,PGNO,vcrt
+	type Public String vCOL,vfind
+
+	type Boolean exists
+	type Number QUIT = 0
+	type String FIELD,line,Z
+	
+	// If haven't set up for next page yet, do it	
+	set exists = $$TMPGET(0, $$LASTPAGE, 0, .line)
+	set line = line.piece("|", 1)
+	if line.isNull() set line = 1
+	if $$TMPGET(line, 0 ,0) do INDEX(1)
+	
+	for  do { quit:QUIT
+		// Find? 
+		write curBTM,$$^MSG(1111)
+		#ACCEPT Date=02/08/05; PGM=Dan Russell; CR=13807
+		read vfind if vfind.isNull() set QUIT = 1 quit
+
+		// Select Column ... Return NULL, "ALL" or "S X=$E(X,n,m)"
+		set FIELD="ALL"
+		if vCOL.exists() set FIELD=$$SELCOL(vCOL) quit:FIELD=""
+		set Z="XX"
+		if FIELD="ALL" set Z="X"
+
+		set vfind=$$WILDCARD^DBSTBL(vfind,Z)
+
+		if FIELD'="ALL" set vfind=FIELD_" "_vfind
+		set vcrt=4
+		do FIND1
+		set QUIT=1
+		}
+	quit
+
+
+FIND1	// Private
+
+	type Public Number curBTM,lnoff,PGNO,PN,vcrt,ZPGNO
+	type Public String vfind
+	
+	type Number LN1,LN2,HDRPTR,HIT,NOTNWHDR,QUIT
+
+	for  do { quit:QUIT
+
+		set (HIT,QUIT)=0
+
+		do GETLINE(.LN1,.LN2)
+		if LN1>lnoff set LN1=LN1-lnoff
+
+		// Search current buffer
+		type ResultSet rs=Db.select("DATA","TMPRPTBR","JOBNO=:%ProcessID AND LINENO >= :LN1 AND LINENO <= :LN2 AND PAGENO=0 AND SEQ=0")
+		while rs.next() do { quit:HIT
+			type String X
+			set X=rs.getCol("DATA")
+			#ACCEPT DATE=01/02/03;PGM=Dan Russell;CR=Mark Spier
+			xecute vfind
+			if  set HIT=1
+			}
+
+		if HIT do { quit:QUIT
+
+			type String OP
+
+			kill HDRPTR,LN1,NOTNWHDR
+
+			do FINDHDR(.LN1,.LN2)
+			do PRINT(LN1,LN2)
+			if PGNO=ZPGNO,PN'>0 do {		// Last page
+				set vcrt=1
+				set QUIT=1
+				}
+			else  do {
+				// Page ~p1 Continue
+				set OP=$$YN^DBSMBAR("",$$^MSG("2126",PGNO),1)
+				if 'OP do {			// No
+				
+					type Boolean exists
+					type Number lastpage
+					type String line
+					
+					set vcrt=1
+					set QUIT=1
+					
+					// Clean up possible incomplete index before leaving here
+					set lastpage = $$LASTPAGE
+					set exists = $$TMPGET(0, lastpage, 0, .line)
+					set line = line.piece("|", 1)
+					if line.isNull() set line = 1
+					if '$$TMPGET(line, 0 ,0) do Db.delete("TMPRPTBR", "JOBNO=:%ProcessID AND LINENO=0 AND PAGENO=:lastpage AND SEQ=0")
+					
+					
+					}
+
+				else  if '$$TMPGET(0,PGNO+1,0) do INDEX(0)
+				}
+			}
+
+		// Continue search thru report buffer
+		if $$TMPGET(0,PGNO+1,0) do {
+
+			// Page ~p1
+			write curBTM,$$^MSG("2125",PGNO)
+			set PGNO=PGNO+1,NOTNWHDR=1
+			}
+
+		// End of report buffer but not end of report
+		else  if PN>0 do {
+			set NOTNWHDR=1
+			do INDEX(0)
+			set QUIT=1
+			}
+
+		// End of report ... display last page then quit
+		else  do {
+			set vcrt=1
+			do PRINT(LN1,LN2)
+			set QUIT=1
+			}
+		}
+	quit
+
+
+SELCOL(String vCOL)	// Private
+
+	type Number I,S
+	type String FROM,OP,TO,VAR(),X,Z
+
+	// Any_Column
+	set S=2,VAR(1)=$$^MSG("299")
+
+	for I=1:1 set X=vCOL.piece(",",I) quit:X=""  do {
+		set Z=X.piece("#",1)
+		if Z.extract(1)="[" set Z=Z.piece("]",2),VAR(S)=Z,S=S+1
+		}
+
+	set OP=$$^DBSMBAR(36,"","","",.VAR)
+	if 'OP quit ""
+	if OP=1 quit "ALL"
+
+	set FROM=vCOL.piece(",",OP-1).piece("#",2)
+	set TO=vCOL.piece(",",OP).piece("#",2)-1
+	if TO<FROM set TO=132
+
+	// ~p1~p2,~p3 )
+	quit "S XX=$E(X,"_FROM_","_TO_")"
+
+
+GETLINE(Number LN1,	// Private - Return current page line range
+	Number LN2)
+
+	N HDRPTR,X,N
+
+	if '$$TMPGET(0,1,0) do {
+		set LN1=1
+		set LN2=$$LASTLINE
+		}
+	else  do FINDHDR(.LN1,.LN2)
+	quit
+
+
+FINDHDR(Number LN1,	// Private
+	Number LN2)
+
+	type Public Number HDRPTR,NOTNWHDR,PGNO
+
+	type Number X
+	type String DATA
+
+
+	set X=$$TMPGET(0,PGNO,0,.LN1)
+	set HDRPTR={String}LN1.piece("|",2),LN1=+LN1		// Header status
+	if LN1=0 set LN1=1
+
+	if 'HDRPTR do {						// Check current page
+		set X=$$TMPGET(0,PGNO+1,0,.DATA)
+		if DATA.piece("|",2) do {
+			// Find prev page header
+			type ResultSet rs=Db.select("PAGENO","TMPRPTBR","JOBNO=:%ProcessID AND LINENO=0 AND PAGENO <= :PGNO AND SEQ=1","PAGENO DESC")
+			if rs.isEmpty() set HDRPTR=1
+			else  if rs.next() set HDRPTR=rs.getCol("PAGENO")
+			}
+		}
+
+	// Display new header ?
+	
+	if HDRPTR,'NOTNWHDR.get() do GETHDR
+
+	set X=$$TMPGET(0,PGNO+1,0,.DATA)
+	if X set LN2=DATA-1
+	else  set LN2=$$LASTLINE
+	quit
+
+
+GETHDR	// Private - Load header
+
+	type Public Number HDRPTR,vcrt
+	type Public String vHDG()
+
+	type Number N
+
+	quit:'HDRPTR
+
+	if vcrt.get()=1,vHDG.piece("|",2)="" quit		// Skip header
+	if vcrt.get()=1,vHDG.piece("|",2)=HDRPTR quit		// same header
+	if '$$TMPGET(0,HDRPTR,1) quit				// No header
+
+	write $$CLRXY^%TRMVT
+
+	do NEWHDR(HDRPTR)
+
+	for N=1:1 quit:'vHDG(N).exists()  write vHDG(N),!
+
+	set vHDG=N_"|"_HDRPTR
+
+	do LOCKHDR(vHDG)
+
+	quit
+	
+
+REFRESH	// Private - Refresh screen
+
+	type Number LN1,LN2
+
+	do PNTHDR
+	do GETLINE(.LN1,.LN2)
+	do PRINT(LN1,LN2)
+
+	quit
+
+
+public TMPGET(Number LINE,        // Return report browser data - one row
+       Number PAGE,
+       Number SEQ,
+       String DATA)
+       
+       // Change to private once that feature works in PSL
+
+        type RecordTMPRPTBR tmprptbr=Db.getRecord("TMPRPTBR","JOBNO=%ProcessID,LINENO=:LINE,PAGENO=:PAGE,SEQ=:SEQ",1)
+
+        set DATA=tmprptbr.data
+	quit tmprptbr.getMode()		// Return whether exists or not
+
+
+TMPSET(Number LINE,        // Private - Update report browser table
+	Number PAGE,
+	Number SEQ,
+	String DATA)
+
+        type RecordTMPRPTBR tmprptbr=Db.getRecord("TMPRPTBR","JOBNO=%ProcessID,LINENO=:LINE,PAGENO=:PAGE,SEQ=:SEQ",1)
+
+        set tmprptbr.data=DATA
+        do tmprptbr.bypassSave()
+        quit
+
+
+TMPDEL	// Private - Delete report browser table
+
+	do Db.fastDelete("TMPRPTBR","JOBNO=:%ProcessID")
+	quit
+
+
+LASTPAGE()	// Private - Return highest page number
+
+	type Number PAGE=0
+	
+	type ResultSet rs=Db.select("PAGENO","TMPRPTBR","JOBNO=:%ProcessID AND LINENO=0","PAGENO DESC")
+
+	if rs.next() set PAGE=rs.getCol("PAGENO")
+
+	quit PAGE
+
+
+public LASTLINE()	// Return highest line number
+
+	// Change to private once that feature works in PSL
+
+	// Note - also called by DBSRWSTS
+
+	type Number LINE=1
+
+	type ResultSet rs=Db.select("LINENO","TMPRPTBR","JOBNO=:%ProcessID","LINENO DESC")
+
+	if rs.next() set LINE=rs.getCol("LINENO")
+
+	quit LINE
+
+vSIG()	quit "60842^35326^Dan Russell^18165"	// Signature - LTD^TIME^USER^SIZE

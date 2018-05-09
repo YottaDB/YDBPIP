@@ -1,0 +1,800 @@
+public	UACN
+
+	/* IBS Account lookup utility
+
+	ORIG: CHIANG - 17 APR 1992
+	
+	The input of a partially matching name, a social security
+	number, federal tax ID number, or preconversion (to PROFILE)
+	account number preceded by an alpha identifier will return
+	either the account number or a list of possible account
+	numbers.
+	
+	Depending upon the data entered, the user may be prompted
+	for an account type, and group.
+	
+	INPUTS:
+	
+		. X Input variable   			/TYP=T/NOREQ
+		. %EXT External interface flag  		/TYP=L/NOREQ
+		. ZCLS Product class   			/TYP=T/NOREQ
+		. ZGRP Product group   			/TYP=T/NOREQ
+	
+	RETURNS:
+		. CID   Valid Account Number
+		. ER    Error Flag
+		. RM    Error Message
+	
+	EXAMPLE:
+		S X="ABC",%EXT=1 D ^UACN
+	
+		X - Pattern to match
+	
+		X may consist of several patterns:
+	
+		      nnnn...      An account number.  ^UACN will verify
+	
+		      nn-nnnnnnn   Will provide a list of accounts held
+				   for the customer with a matching
+				   federal tax ID number.
+	
+		      nnn-nn-nnnn  Will provide a list of accounts held
+				   for the customer with a matching
+				   social security number.
+	
+		      aaaa...      An alpha string which will be matched
+				   against other names and provide a list
+				   of accounts.
+
+		      IB-963       **** additional options for IB
+	
+		      *nnnnnnnn   Will provide an account number
+				   stored in ^XACN, the pre-conversion
+				   account number cross reference file.
+	       ^XACN("C",OLDACN)=NEWACN
+
+	
+		      PCS-562   **** additional options for PCS ****
+	
+		      "S"-nnnn...  A serial number, will provide the
+				   associated account number stored in
+				   ^XREF("XSER",...
+	
+		      "C"-nnnn...  A CIF number, will provide a list of
+				   account numbers linked to the customer
+				   stored in ^CIF(ACN,99,...
+	
+	---- Revision History ------------------------------------------------
+	
+	05/07/07 - DHANALAKSHMI R - CR 26948
+		   Modified the section ALPHA2 to remove the "if" block (which
+		   calls the section NEXTPG1) to correct the "No matches 
+		   found" error.
+	
+	07/10/06 - RussellDS - CR22121
+		   Modified code in ALPHA and TAXID sections to eliminate use
+		   of MAX character and replace with use of LIKE in SELECT.
+	
+	03/24/06 - SmithCD - CR 20252
+		   Corrected undefined error on Z variable in FORMAT section 
+		   (occurred when result set was empty). Removed empty() check 
+		   in ALPHA so an error message will be displayed if no matches
+		   are found.
+	
+	01/30/06 - SmithCD - CR 19343 (16890)
+		   Modified ALPHA section to call DISPLAY section if 
+		   uacnlist.data() is not true. This prevents an error with no 
+		   message situation.
+	
+	03/21/05 - RussellDS - CR14908
+		   Modified call to EXT^UPID to pass account object.
+		   
+		   Removed old revision history.
+	
+	02/01/05 - SmithCD
+		   Modified "INVLDACN" error handling (set ER) in EDCHK 
+		   section to prevent "Record not on file" GTM error that 
+		   followed when an invalid account number is specified. 
+		   Removed INIT label (not necessary), and performed some 
+		   cleanup.
+	  
+	12/06/04 - RussellDS - CR13258
+		   Removed references to CUVAR.UACND1M, UACND2M, UACNL1M, and
+		   UACNL2M.  Replace data formatting with use of new DBSTBL.
+		   
+		   Warnings were cleaned up, and some significant changes made
+		   to get this thing to work.  However, the code is still not
+		   in particularly good shape and this could stand a major
+		   rewrite to restructure the code.
+		   
+	*/
+	
+	type Public Boolean %EXT
+	type Public Number CID, ER, OLNTB
+	type Public String %fkey, RM, X, ZCLS, ZGRP
+	
+	type Boolean SQLCODE
+	type Number ACN, COUNT, CUR, I, LOOKUPPG
+	type String CLS, COLHDR, COLS(), D, GRP, HDG, KEY, LKUPFMT, SELECT, TABLES
+	type String uacnlist(), VFMQ, vinput, XACN, Z, ZA
+
+	do Db.fastDelete("TMPRPT2","PID=:%ProcessID")
+
+	// Screen/UTLREAD input
+	if %EXT.exists(),X.get().isNull() set CID="" quit
+
+	// Define keyboard function map
+	if '%fkey.exists() do ZBINIT^%TRMVT()
+	
+	set ER=0 
+	// Default CLS 
+	set CLS=ZCLS.get()
+
+	// Default GRP
+	set GRP=ZGRP.get()
+
+	// Current cursor position
+	if OLNTB.exists() set CUR=OLNTB
+
+	// Calculate based on CRT status
+	else  set CUR=$$CURPOS
+
+	// Default to column 30
+	if CUR#1000=0 set CUR=CUR+30
+
+	// If line>16, clear screen and use full screen for display
+	if CUR>16000 set CUR=30 write $$CLEAR^%TRMVT
+	 
+	type RecordACN acn
+
+	// Build prompts for account
+	set CID="" 
+	set ER=0
+
+	// If not called externally
+	if %EXT.exists(),X?1N.N
+
+	// class and group
+	else  if '%EXT.exists()!(CLS.isNull())!(GRP.isNull()) do { if ER quit 
+		do CLSGRP 
+		if VFMQ="Q" do { quit
+			set ER=1 
+			set CID=X.get()
+			} 
+		if '%EXT.exists() set X=CID
+		}
+	
+	// Input already in account
+	if X?1N.N do { do EXIT quit
+		// format
+		set CID=X
+		do EDCHK(CID,CLS,GRP) 
+		}
+	
+	// Init access keys
+	for I=1:1:2 set KEY(I)=""
+
+	// Maximum entries/page
+	set COUNT=22-(CUR\1000)
+
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+	
+	if X.extract()="*" do { quit:cuvar.xacn'="TAXID"   
+		type Number %MAX
+		type String FILE			     
+
+		set XACN=cuvar.xacn
+
+		quit:cuvar.xacn.isNull()
+	
+		set FILE="ACN"
+		if cuvar.xacn="TAXID" set FILE="CIF"
+		set (CID,X)=$$^XACN(cuvar.xacn,FILE)
+
+		// Invalid conversion account
+		if CID.isNull() do Runtime.setErrMSG("ACN",1291) quit:ER      
+		if GRP.get().isNull() quit 
+		if cuvar.xacn'="TAXID" do {
+			set acn=Db.getRecord("ACN","CID")
+
+			// Account is not in group ~p1
+			if acn.grp'=GRP set ER=1,RM=$$^MSG(8228,GRP) 
+			}
+		}
+	
+	// Term Certificate Number (575)
+
+	// Serial number lookup (CLS=D GRP=CD)
+	if X?1"S-"1N.N set ZA=X.piece("-",2) do { do EXIT quit 
+
+		type ResultSet rs=Db.select("CID","ACN","PBKSN=:ZA")
+		
+		if 'rs.isEmpty(),rs.next() set CID=rs.getCol(1)	
+		if 'CID.isNull() set X=CID quit 
+		
+		// Invalid term certificate number
+		set CID=""
+		do Runtime.setErrMSG("ACN",1492) quit:ER  	
+		}
+
+	// Vehicle Id lookup
+	if X?1"V-".E set ZA=X.piece("-",2) do { do EXIT quit
+		// No matches found 
+		if ZA.isNull() set ER=1,RM=$$^MSG(1955) quit
+		
+		type ResultSet rs=Db.select("CID","LNCOL","ID=:ZA")
+		
+		if 'rs.isEmpty(),rs.next() set CID=rs.getCol(1)		
+		if 'CID.isNull() set X=CID quit 
+	
+		// No matches found
+		do Runtime.setErrMSG("ACN",1955) set CID="" quit:ER  
+		}
+
+	// Customer Number
+	if X?1"C-"1N.N do {
+		set KEY(1)=X.piece("-",2) 
+		set COLHDR=$$^MSG(6814)       
+		}
+
+	if X?2N1"-"7N!(X?3N1"-"2N1"-"4N) set KEY(1)="T"	
+	if X?3N1"-"4N!(X?3N1"-"3N1"-"4N) set KEY(1)="T"       
+	if XACN.get()="TAXID" set KEY(1)="T"     
+	
+	// Alpha Name convert to uppercase first
+	if KEY(1).isNull() do {
+		set KEY(1)="A" 
+		set X=$$UPPER^%ZFUNC(X)    	
+		}
+
+	// CIF Name - TIN/SIN
+	set Z=$S(KEY(1)="A":$$^MSG(6815),KEY(1)="T":$$^MSG(6817),1:COLHDR)
+	
+	if CLS = "L" set LKUPFMT = cuvar.UACNL1F
+	else  set LKUPFMT = cuvar.UACND1F
+	
+	// Add DISTINCT to avoid having DBSTBL add bottom key - remove when done
+	// Account Name
+	if X?1"C-"1N.N set LKUPFMT = "[ACN]LNM/LEN=25/RH="_$$^MSG(6814)_","_LKUPFMT_":DISTINCT"
+	// CIF Name
+	else  set LKUPFMT = "[CIF]XNAME/LEN=25/RH="_$$^MSG(6815)_","_LKUPFMT_":DISTINCT"
+	
+	do UACN^DBSTBL(LKUPFMT, .SELECT, .TABLES, .COLS(), .HDG)
+	
+	set SELECT = SELECT.piece(" ", 2)
+	set HDG = "    "_HDG
+	
+	set vinput=X
+	
+	set LOOKUPPG=1
+
+	do OPEN(.KEY)
+
+	quit
+	
+
+CURPOS()	// Calculate current cursor position
+
+	type Number X, Y
+
+	do CPOS^%TRMVT(.X,.Y)
+	if Y<1!(Y>24) quit ""
+
+	quit (((Y - 1) * 1000) + 30)
+	
+
+EDCHK(CID,CLS,GRP)	// Post-processor to validate account, class, and group
+
+	type Public Number ER
+
+	type String ET
+
+	type ResultSet rs=Db.select("CLS,GRP","ACN","CID=:CID") 
+	    
+	if rs.isEmpty() set ET="INVLDACN" do DSPBP^UTLERR set ER=1 quit 
+		
+	if rs.next() do {
+		if 'CLS.isNull(),rs.getCol(1)'=CLS do { quit
+			set ET="INVLDCLS"
+			do DSPBP^UTLERR 
+			set ER=1
+			}
+		if 'GRP.isNull(),rs.getCol(2)'=GRP do { quit
+			set ET="INVLDGRP"
+			do DSPBP^UTLERR 
+			set ER=1
+			} 
+		}
+
+	quit 
+	
+	
+CLSGRP	// Build prompts for CLASS and GROUP
+
+	type Public Boolean %EXT
+	type Public Number CID, CUR
+	type Public String CLS, GRP
+	
+	type Number %MAX, %PAGE, %PG, NI, OLNTB, vni
+	type String %MOD, %NOPRMT, %OSAVE, %READ, %TAB(), KVAR, PGM, TBL(), VO, VSCRPP, X
+	
+	set OLNTB=CUR
+	set %READ=""
+	kill CID
+
+	if '%EXT.exists() do {
+		set %TAB("CID")=".CIDUACN/XPP=D PP^UACN"     
+		set %READ="@@%FN,,,CID/REQ"
+		}
+
+	if CLS.get().isNull() do {
+		// I18N=OFF
+		set %TAB("CLS")=".CLS3/REQ/TBL=TBL(/XPP=I X="""" S NI=99"
+	   	// I18N=ON
+		type RecordSTBLCLS stblclsd=Db.getRecord("STBLCLS","'D'")
+		set TBL("D")=stblclsd.des
+
+		type RecordSTBLCLS stblclsl=Db.getRecord("STBLCLS","'L'")
+		set TBL("L")=stblclsl.des
+		set %READ=%READ_",CLS"
+		}
+
+	if GRP.get().isNull() do {
+ 			set %TAB("GRP")=".GRP1/TBL=[STBLGRP]GRP:QU ""[STBLGRP]CLS=<<CLS>>"""
+			set %READ=%READ_",GRP"
+	      		}
+	set %NOPRMT="F"
+	do ^UTLREAD
+
+	quit
+	
+
+OPEN(String KEY())	// Request from client/server to return initial access keys
+
+	type Public Boolean SQLCODE
+	type Public String vinput, uacnlist()
+
+	set SQLCODE=0
+	
+	// CIF number
+	if vinput?1"C-"1N.N do { quit
+		
+		type Number ACN
+		
+		set ACN = KEY(1)
+	
+		type ResultSet rs = Db.select("CID", "RELCIF", "ACN=:ACN")
+		while rs.next() do { quit:(SQLCODE = 1)
+			
+			do DSPMC(rs.getCol("CID"))
+			if SQLCODE do { quit
+				do NEXTPG1
+				set SQLCODE=0 
+				kill uacnlist
+			}
+		}
+		
+		if $D(uacnlist) do NEXTPG1
+	
+		do EXIT
+	}
+
+	if KEY(1)="A" do ALPHA quit
+	
+	if KEY(1)="T" do TAXID
+
+	quit
+	
+
+ALPHA	// Alpha Lookup Name
+
+	type Public Boolean SQLCODE
+	type Public String KEY(), vinput, uacnlist()
+
+	type Boolean EXIT
+	type String WHERE
+
+	set EXIT=0
+	
+	set WHERE = "XNAME LIKE '"_vinput_"%'"
+
+	#ACCEPT DATE=12/06/04;PGM=RussellDS;CR=22121
+	type ResultSet rs=Db.select("XNAME,ACN","CIF", WHERE, "XNAME")
+
+	while rs.next() do { quit:(SQLCODE ! EXIT)
+
+		do ALPHA2(rs.getCol("ACN"))
+
+	}
+	
+	if uacnlist.data() do {
+		
+		do NEXTPG1
+	}
+	else  do DISPLAY
+	
+	do EXIT
+
+	quit
+	
+
+TAXID	// Tax ID Lookup
+
+	type Public Boolean SQLCODE
+	type Public String KEY(), vinput, uacnlist()
+
+	type Boolean EXIT
+	type String WHERE
+	
+	set EXIT=0
+	
+	set WHERE = "TAXID LIKE '"_vinput_"%'"
+
+	#ACCEPT DATE=12/06/04;PGM=RussellDS;CR=22121
+	type ResultSet rs=Db.select("XNAME,ACN","CIF", WHERE)
+       
+	quit:rs.isEmpty()
+
+	while rs.next() do { quit:(SQLCODE ! EXIT)
+
+		do ALPHA2(rs.getCol("ACN"))		
+	}
+	       	
+	if (uacnlist.data() > 0) do NEXTPG1
+	
+	do EXIT
+
+	quit
+	
+
+ALPHA2(ACN)	// Alpha Lookup Invalid Account, Wrong Class, Wrong Grp
+
+	type Public Boolean EXIT, SQLCODE
+	type Public String CLS, GRP, uacnlist()
+
+	type ResultSet rs=Db.select("CID,CLS,GRP","RELCIF,ACN","relcif.acn=:ACN AND acn.acn=:ACN AND acn.cid=relcif.cid")
+
+	while rs.next() do { quit:EXIT
+		// Wrong class
+		if 'CLS.isNull(),rs.getCol(2)'=CLS quit
+
+		// Wrong group
+		if 'GRP.isNull(),rs.getCol(3)'=GRP quit
+		
+		// Set display array
+		do FORMAT(rs.getCol(1))
+		}
+   	quit
+   	
+
+NEXTPG1	// Next Page Continued
+
+	type Public Boolean EXIT
+	type Public Number CID, ER, LOOKUPPG
+	type Public String %fkey, COLS(), uacnlist(), X
+	
+	type Boolean DONE
+	type Number I, J, JOB, K, PAGE, Z2, ZCID
+	type String Z, Z1, ZDATA
+
+	// Number of columns
+	set K=COLS("").order(-1)
+
+	// Format data
+	for I=1:1 quit:'uacnlist(I).exists()  do {
+	
+		set ZCID = uacnlist(I).piece($C(1), 2)
+		set ZDATA = uacnlist(I).piece($C(1), 1)
+	
+		set Z="" 
+		for J=1:1:K  do {
+
+			set Z1 = ZDATA.piece("|",J)
+			set Z2 = COLS(J).piece($C(9), 3)
+			set Z1 = Z1.extract(1, Z2)
+			// Right Justify
+			if "N$"[COLS(J).piece($C(9), 2) set Z=Z_$J(Z1,Z2)
+
+			// Left Justifiy
+			else  set Z=Z_Z1_$J("",Z2-$L(Z1))
+
+			// column space
+			if J'=K set Z=Z_"  "
+			}
+		set uacnlist(I)=Z_$C(1)_ZCID
+		}	
+
+	set JOB=%ProcessID
+	set PAGE=LOOKUPPG
+  
+	set DONE=0
+
+	for  do { quit:DONE
+		do DISPLAY
+		set PAGE = LOOKUPPG
+		type DbSet ds=Db.selectDbSet("TMPRPT2","PID=:%ProcessID AND KEY1=:PAGE")
+		if 'X,(%fkey="PDN"!(%fkey="PUP")),'ds.isEmpty() do {  
+			kill uacnlist
+
+			while ds.next() do {
+				
+				type Number SEQ
+				type String REC
+				
+				type RecordTMPRPT2 tmprpt2=ds.getRecord("TMPRPT2")
+				set SEQ=tmprpt2.key2
+				set REC=tmprpt2.data
+
+				set uacnlist(SEQ)=REC
+				}
+			}
+		else  set DONE=1
+		}
+	 
+	if 'X,%fkey.get()="PDN" kill uacnlist
+	
+	if %fkey = "ESC" do {
+		
+		set CID = ""
+		set EXIT = 1
+	}
+	
+	if 'X.isNull() do {
+		set CID = uacnlist(X).piece($C(1), 2)	// Get account number
+		set X = CID
+		set EXIT = 1
+		kill uacnlist
+	}
+	
+	quit
+	
+
+DISPLAY	// Display Lookup Page
+
+	type Public Boolean EXIT
+	type Public Number COUNT, CUR, ER, LOOKUPPG, PAGE
+	type Public String %fkey, HDG, RM, uacnlist(), X
+	
+	type Number N, OLNTB, E67
+	type String uacnxlst()
+
+	// Calculate starting location
+	set OLNTB=CUR
+
+	// Set option (1-20) to length 2
+	set E67=2
+	
+	// No matches found
+	if '$D(uacnlist) do { quit
+		set ER=1 
+		set RM=$$^MSG(1955)
+		set EXIT=1
+		}	
+	
+	set X="" 
+	if $O(uacnlist(""),-1)=COUNT set X="PDN"
+	if LOOKUPPG'=1 set X=$S(X="":"PUP",1:X_",PUP")
+	
+	// Save account number from uacnlist
+	set N = ""
+	for  set N = uacnlist(N).order() quit:N.isNull()  do {
+		
+		set uacnxlst(N) = uacnlist(N).piece($C(1), 2)
+		set uacnlist(N) = uacnlist(N).piece($C(1), 1)
+	}
+	
+	set X=$$^DBSTBL("uacnlist(","","N","","","","","",HDG,X)
+	
+	// Put account number back into uacnlist
+	set N = ""
+	for  set N = uacnlist(N).order() quit:N.isNull()  set uacnlist(N) = uacnlist(N)_$C(1)_uacnxlst(N)
+	
+	// Save what we just looked at for page up/page down
+	if 'X do {
+	
+		type Number I
+		
+		type ResultSet rs=Db.select("KEY1","TMPRPT2","PID=:%ProcessID AND KEY1=:PAGE")
+		if 'rs.isEmpty() quit
+
+ 		for I=1:1 quit:'$D(uacnlist(I))  do {
+				     
+			type RecordTMPRPT2 tmprpt2=Class.new("RecordTMPRPT2")
+
+			set tmprpt2.pid=%ProcessID
+			set tmprpt2.key1=LOOKUPPG
+			set tmprpt2.key2=I
+			set tmprpt2.data=uacnlist(I)
+			do tmprpt2.bypassSave()
+			}	
+		}
+
+	// next screen or last screen and we displayed that page already.
+	set LOOKUPPG=LOOKUPPG+$S(%fkey="PUP":-1,%fkey="PDN":1,1:"")
+	
+	quit
+	
+
+DSPMC(Number CID)	// Set up the information to display accounts
+
+	/*
+	  Set up the information to display accounts linked to "C"IF Number.
+	  If class and group for the current account does not match class and
+	  group specified by cls and grp QUIT.
+	*/
+	
+	type Public String CLS, GRP, KEY(), uacnlist()
+
+	type RecordACN acn=Db.getRecord("ACN","CID=:CID")
+
+	if 'CLS.isNull(),acn.cls'=CLS quit
+	if 'GRP.isNull(),acn.grp'=GRP quit
+	
+	do FORMAT(CID)
+
+	quit
+	
+
+FORMAT(Number CID)
+
+	// Access display format definition from [CUVAR]UACNL1M or UACND1M	
+
+	type Public Boolean SQLCODE
+	type Public Number COUNT
+	type Public String COLS(), SELECT, TABLES, uacnlist(), vinput
+	
+	type Number Z
+	type String WHERE
+
+	if CID.isNull() set SQLCODE=1 quit
+	
+	if TABLES.isLike("%DEP%") do {
+
+		set WHERE = "DEP.CID=:CID"
+		if TABLES.isLike("%ACN%") set WHERE = WHERE_" AND ACN.CID=:CID"
+		if TABLES.isLike("%CIF%") set WHERE = WHERE_" AND DEP.ACN=CIF.ACN"
+		if TABLES.isLike("%PRODDFTD%") set WHERE = WHERE_" AND DEP.TYPE=PRODDFTD.TYPE"
+	}
+	
+	if TABLES.isLike("%LN%") do {
+
+		set WHERE = "LN.CID=:CID"
+		if TABLES.isLike("%ACN%") set WHERE = WHERE_" AND ACN.CID=:CID"
+		if TABLES.isLike("%CIF%") set WHERE = WHERE_" AND LN.ACN=CIF.ACN"
+		if TABLES.isLike("%PRODDFTL%") set WHERE = WHERE_" AND LN.TYPE=PRODDFTL.TYPE"
+	}
+	
+	#ACCEPT DATE=12/06/04;PGM=RussellDS;CR=13258
+	type ResultSet rs = Db.select(SELECT, TABLES, WHERE)
+	if rs.isEmpty() quit
+	
+	if rs.next() do {
+		
+		type Number CNT, I
+		type String row
+		
+		set CNT = COLS("").order(-1)
+		
+		set row = rs.getRow().toString()
+		
+		// Format elements
+		for I = 1:1:CNT do {
+			
+			type Number dec, len
+			type String data, fmt
+			
+			set data = row.piece($C(9), I)
+			set fmt = COLS(I).piece($C(9), 2)
+			
+			if '((fmt = "T") !(fmt = "U") ! (fmt = "F")) do {
+			
+				set dec = COLS(I).piece($C(9), 4)
+				
+				if (fmt = "$"), dec.isNull() set dec = 2
+				
+				set data = $$EXT^%ZM(data, fmt, dec)
+				
+				set row.piece($C(9), I) = data
+			}
+		}
+
+		
+		// Store in lookup() table
+		set Z=$O(uacnlist(""),-1)+1 
+
+		set uacnlist(Z)=row.translate($C(9), "|")_$C(1)_CID
+	}		
+
+	if vinput?1A1"-".E quit 
+
+	// Allow 20 entries/request
+	if Z=COUNT set SQLCODE=1
+
+	quit
+	
+
+EXIT	// Clean-up and quit
+
+	type Public Number CID, ER
+	type Public String %DUP(), %fkey
+	
+	do Db.fastDelete("TMPRPT2","PID=:%ProcessID")
+
+	if (ER > 0) quit
+	
+	// Set ER to avoid DBSCRT8 display a validation message on data type
+	if (CID.get().isNull() ! (%fkey = "ESC")) set ER = 1 quit 
+	
+	do:CID.get() PROT
+ 	
+	if 'ER,'CID.isNull() set %DUP("CID")=CID
+
+	quit
+	
+
+Public PP	// Post-processor for account prompt
+
+	type Public Number ER, NI
+	type Public String CLS, GRP, RM(), X
+
+	if X'?1N.N quit 
+	
+	type ResultSet rs=Db.select("CLS,GRP","ACN","CID=:X")
+      
+	// Invalid account ~p1
+	if rs.isEmpty() do Runtime.setErrMSG("ACN",1259) quit:ER
+		 
+	if rs.next() do {
+		set CLS=rs.getCol(1)
+		set GRP=rs.getCol(2)
+		}
+
+	set RM(1)=CLS_"|2" 
+	set RM(2)=GRP_"|3"  			
+	set NI=99    
+				  
+	quit 
+
+
+Public PROT	// Record Level Protection
+
+	type Public Number CID, CRT, ER
+	type Public String %OSAVE, RM
+	
+	type String CLS, VP
+
+	// NO PROTECTION ON CREATE
+	if %ProcessMode.get()=0,'%OSAVE.exists() quit
+	
+	type RecordACN acn=Db.getRecord("ACN","CID = :CID")
+
+	set VP=""
+     	if acn.cls="D" do EXT^UPID("DEP", .acn)
+	if acn.cls="L" do EXT^UPID("LN", .acn)
+
+	// Record protected
+	if VP("*").get()=2 do {
+		set ER=2 
+		set RM=$$^MSG(2336) 
+	 	}
+	// Record protected
+	if %OSAVE.get()'=2,VP("*").get()=1 do {
+		set ER=2 
+		set RM=$$^MSG(2336)
+		} 
+	
+      	/*
+      	   Function Access Restrictions.
+	   If the account is being accessed through a file maintenance function
+	   check the account record for function restrictions that may apply to
+	   the account.
+	*/
+	quit:(ER!(CRT.get()))
+	
+	set CLS=acn.cls
+	// Non-Teller Screen.
+	do CHECK^FRFLG(CID)
+
+	quit 
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60757^9974^Dhanalakshmi R^16890"	// Signature - LTD^TIME^USER^SIZE

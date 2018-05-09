@@ -1,0 +1,346 @@
+DBSDEUTL(Number OPT,String SID,String FPRE)	//Public;Genearl purpose driver to create,modify and delete tables.
+	/*
+	   ORIG:	CHAPYALAJ - 06/28/94
+	   DESC:	General purpose driver to create,modify and delete records.
+	   
+	   		This procedure calls ^DBSDEUTA, which is a new procedure that
+	   		contains a label for each screen that is called using this
+	   		general purpose screen driver.  
+	   		
+	   		^DBSDEUTA is a compiled routine, and is created by procedure 
+	   		DBSDEUTB.  DBSDEUTB is compiled and run when this procedure is compiled
+	   		using the #execute directive.
+	   		
+	   		See comments in DBSDEUTB for more details.
+	   		
+	 
+	   KEYWORDS:	SCREEN,DATABASE
+	 
+	   ARGUMENTS:
+	  	. OPT  Processing mode		/TYP=N/REQ/MECH=VAL
+	 
+	                 0 = create
+	                 1 = modify
+	                 2 = inquiry
+	                 3 = delete
+	                 4 = print
+	 
+	  	. SID	Screen ID		/TYP=T/REQ/MECH=VAL
+	 
+	  	. FPRE	Filer pre-processor	/TYP=T/NOREQ/MECH=VAL
+	 
+	   INPUTS:
+	  	. %LIBS	Library name		/TYP=T/NOREQ/DEF=^CUVAR(%LIBS)
+	 
+	   EXAMPLE:
+	  	D ^DBSDEUTL(1,"LNFEEGRP")
+	  	D ^DBSDEUTL(0,"UTBLDFT")
+	  	D ^DBSDEUTL(1,"RELCODE","PP^RELUPD")
+	        D ^DBSDEUTL(4,"ARS")
+	 
+	  ---- Revision History -------------------------------------------------
+	  03/08/07 - Giridharanb - CR23305
+	  	     Modified section PROMPT to get banner from DBSGETID for 
+	  	     the function being run.
+	  
+	  02/05/06 - RussellDS - CR19385
+	  	     Fix error in construction of WHERE clause in PP section.
+	  
+	  01/16/06 - RussellDS - CR19021
+	  	     Modified PROMPT section and add PP section to prevent
+	  	     entry of existing entry when in create mode.
+	  
+	  09/08/05 - RussellDS - CR17137
+	  	     Fix look-up logic (TBL=) to work correctly for multi-
+	  	     keyed tables.
+	  
+	  01/19/05 - Pete Chenard - CR14146
+	  	     Converted to PSL.
+	   	      
+	  05/05/04 - RussellDS - CR9172
+	  	     As part of filers to PSL, fixed error where FILER section
+	  	     would be called even if all filing already took place.
+	  	     This is done, for example, by screen DBTBL7 for triggers.
+
+	*/
+	
+
+	// Compile procedure DBSDEUTB (DBSDEUTA Builder)
+	#XECUTE do COMPILE^DBSPROC("DBSDEUTB")
+ 
+	// Generate DBSDEUTA
+	#XECUTE do ^DBSDEUTB
+        
+        type Public Number ER
+        type Public String KEYS(),RM,VFMQ
+        
+	type String ARR,FID,files,files,fsn(),IO,KVAR,PGM,POST,vdd,vfsn,vpgm,X
+	type Number %ProcessMode
+	
+	set %ProcessMode=OPT
+	set FPRE = FPRE.get()
+	
+	if SID.get()="" do GETSID if VFMQ="Q" quit
+	
+	type RecordDBTBL2 dbtbl2 = Db.getRecord("DBTBL2","LIBS='SYSDEV',SID=:SID",1)	
+	if 'dbtbl2.getMode() set ER=1 set RM=$$^MSG(1458,SID) quit
+
+	set files=dbtbl2.pfid
+	set FID=files.piece(",",1)	// primary table
+
+	type RecordDBTBL1 dbtbl1 = Db.getRecord("DBTBL1","%LIBS='SYSDEV',FID=:FID",1)
+	if 'dbtbl1.getMode() set ER=1,RM="Invalid Table" quit
+	
+	set vpgm=dbtbl1.udacc		// Prompt for access keys
+	
+	#ACCEPT Date=01/20/05;PGM=Pete Chenard;CR=14146
+	if 'vpgm.isNull(),OPT set %ProcessMode=0 xecute ("D ^"_vpgm)
+	if vpgm.isNull()!'OPT do PROMPT(.dbtbl1,%ProcessMode,.KEYS())	// prompt for access keys
+	if VFMQ="Q" quit
+	
+	set %ProcessMode = OPT
+	if %ProcessMode=2 do { if VFMQ="Q" quit
+		type String %READ,%TAB
+		
+		set %TAB("IO")=$$IO^SCATAB($I)
+		set %READ="@@%FN,,IO/REQ"
+		do ^UTLREAD
+		}
+	
+	if %ProcessMode = 2, IO '= $I do OPEN^SCAIO	// Open output device
+	// Call utility to process this screen and file data
+	set RM = $$^DBSDEUTA(SID, %ProcessMode, .KEYS(),FPRE)
+	if 'RM.isNull() set ER=1
+	
+	if ER.get()!(VFMQ="Q") do DINAM(FID,.dbtbl1) quit
+	if ER="W" quit
+	do DINAM(FID,.dbtbl1)
+	
+	#ACCEPT Date=01/20/05;PGM=Pete Chenard;CR=14146
+	if KVAR.get()'="" xecute KVAR
+	quit
+
+
+private DINAM(String FID, RecordDBTBL1 dbtbl1)	//Finish up and display messages
+
+	type Public Number ER
+	type Public String RM,VFMQ,vfsn
+	type String DESC,I,J,KEY,keys,P1,Y
+	
+	if ER,'RM.isNull() set ER="W" quit 
+
+
+	set keys=dbtbl1.acckeys
+	set P1=""
+	
+	if keys="" set P1=" "_FID		//Table w/ no access keys (e.g., CUVAR)
+	else  for J=1:1:keys.length(",") do { 
+		set I=keys.piece(",",J)
+		if I = "%LIBS" quit
+		if I.isLiteral() quit		// ignore literal keys
+		set DESC=$$DES^DBSDD(FID_"."_I)	// To get the description of the data item
+		set KEY=@I
+		set P1=P1_" "_DESC_" "_KEY
+		}
+	quit:ER!(%ProcessMode=2)!(%ProcessMode=4)
+	
+	set P1=P1.extract(2,P1.length())
+	if VFMQ="Q" do {
+
+		//~p1 not created
+		if %ProcessMode=0 set RM=$$^MSG(6709,P1) quit
+		//~p1 not modified
+		if %ProcessMode=1 set RM=$$^MSG(6710,P1) quit
+		//~p1 not deleted
+		if %ProcessMode=3 set RM=$$^MSG(6711,P1)
+		}
+	else  do {
+		//~p1 created
+		if %ProcessMode=0 set RM=$$^MSG(6712,P1) quit
+		//~p1 modified
+		if %ProcessMode=1 set RM=$$^MSG(6713,P1) quit
+		//~p1 deleted
+		if %ProcessMode=3 set RM=$$^MSG(3028,P1)
+		}
+
+	set ER="W"
+	quit
+
+
+private GETSID	// Prompt for screen name
+
+	type String %FRAME,%NOPRMT,%READ,%TAB,PGM
+	
+	set %TAB("SID")=".SID1/REQ/TBL=[DBTBL2]"
+	set %READ="@@%FN,,SID/REQ,"
+	set %NOPRMT="F" set %FRAME=2
+	do ^UTLREAD
+	quit
+	
+
+	/* Prompt for Access Keys */
+private PROMPT(RecordDBTBL1 dbtbl1, 
+	Number %ProcessMode, 	// Primary File Record	/REQ/MECH=REF:R
+	String KEYS())		// Access Key Array	/NOREQ/MECH=REF:W
+
+
+	type Public Boolean ER = 0
+	type Public String RM, VFMQ
+
+	type Number I, keycnt, OLNTB, vmode
+	type String %NOPRMT, %READ, %TAB, acckeys, fid, KEY(), keys(), MSG, msghdr, screen
+	
+	
+	set fid = dbtbl1.fid
+
+	
+	// Get access keys
+	set keys = ""
+	set keycnt = $$GETKEYS(dbtbl1.acckeys,.keys)
+
+	// Build UTLREAD info - prompt for primary keys
+	set msghdr = $$BANNER^DBSGETID(%FN)
+	
+	set %READ = "@msghdr/REV/CEN,,"
+	
+	for I = 1:1:keycnt do {
+		
+		type Number size
+		type String key, X
+		
+		set key = keys(I)
+		
+		if key = "%LIBS" set KEYS(I)="SYSDEV" quit	// Don't prompt for Library
+		
+		type RecordDBTBL1D dbtbl1d = Db.getRecord("DBTBL1D","%LIBS=""SYSDEV"", FID = :fid, DI = :key")
+		
+		set size = dbtbl1d.siz
+		if size.isNull() set size = dbtbl1d.len
+		
+		set X = "/DES="_dbtbl1d.des.addQuotes()_"/TYP="_dbtbl1d.typ_"/LEN="_dbtbl1d.len
+		set X = X_"/SIZ="_size
+		
+		if 'dbtbl1d.tbl.isNull() set X = X_"/TBL="_dbtbl1d.tbl
+		else  do {
+			set X = X_"/TBL=["_fid_"]"
+			if (I '= keycnt) set X = X_key_":DISTINCT"
+			if (I > 1) do {
+				
+				// Add queries for higher levels
+				type Number J
+				
+				set X = X_":QU """
+				for J = 1:1:I-1 set X = X_"["_fid_"]"_keys(J)_"=<<"_keys(J)_">> & "
+				set X = X.extract(1, X.length() - 3)_""""
+			}
+		}
+		if %ProcessMode = 0 set X = X_":NOVAL"
+
+		
+		if 'dbtbl1d.min.isNull() set X = X_"/MIN="_dbtbl1d.min
+		if 'dbtbl1d.max.isNull() set X = X_"/MAX="_dbtbl1d.max
+		if 'dbtbl1d.dec.isNull() set X = X_"/DEC="_dbtbl1d.dec
+		if 'dbtbl1d.ptn.isNull() set X = X_"/PAT="_dbtbl1d.ptn
+		set X=X_"/XPP=S KEYS("_I_")=X"	// set key name up
+		
+		// Add check to make sure record doesn't already exist if create mode
+		if (%ProcessMode = 0), (I = keycnt) set X = X_" D PP^DBSDEUTL(fid,.keys,.KEYS)"
+		
+		set X = X_"/REQ"
+		
+		set %TAB(key) = X
+		//set %TAB("KEYS("_I_")") = X
+		set KEYS(I) = ""
+		//set %READ = %READ_"KEYS("_I_"),"
+		set %READ = %READ_key_","
+	}
+	
+
+	set %NOPRMT="F"
+	set vmode=0
+	set OLNTB = 30
+	
+	do ^UTLREAD
+	quit
+	
+	
+private PP(String fid,		// Table name
+	   String keys(),	// Key names
+	   String KEYS())	// Key values
+	   
+	/*
+	Post-processor on create mode to see if record already exists.
+	
+	Returns ER and RM if it does.
+	*/
+	
+	type public Boolean ER
+	type public String RM
+	
+	type Number N
+	type String select, value, where
+	
+	set (N, select, where) = ""
+	for  set N = keys(N).order() quit:N.isNull()  do {
+		
+		set value = KEYS(N).addQuotes("'")
+		
+		set select = select_keys(N)_","
+		set where = where_keys(N)_"="_value_" AND "
+	}
+	
+	set select = select.extract(1, select.length() - 1)
+	set where = where.extract(1, where.length() - 5)
+	
+	/* Accept dynamic select */
+	#ACCEPT Date=01/16/06; PGM=RussellDS; CR=19021
+	type ResultSet rs = Db.select(select, fid, where)
+	
+	if 'rs.isEmpty() do {
+	
+		set ER = 1
+		// Record already exists
+		set RM = $$^MSG(2327)
+	}
+	
+	quit
+	
+	
+private GETKEYS(String acckeys,		// Get access keys and build related select and where
+	String keys(),
+	String select,
+	String where)
+	
+	/*
+	ARGUMENTS:
+		. acckeys	DBTBL1.ACCKEYS		/REQ/MECH=VAL
+		. keys()	Numbered array of	/NOREQ/MECH=REF:W
+				keys
+		. select	Select list		/NOREQ/MECH=REF:W
+		. where		Where clause		/NOREQ/MECH=REF:W
+	*/
+	
+	type Number I, keycnt
+	type String key
+	
+	set keycnt = 0
+	set (select, where) = ""
+	
+	for I=1:1:acckeys.length(",") do {
+		
+		set key = acckeys.piece(",",I)
+		quit:key.isLiteral()		// Ignore literal keys
+
+		set keycnt = keycnt + 1
+		set keys(keycnt) = key
+		
+		set select = select_key_","
+		set where = where _key_"= :KEY("_keycnt_") AND "
+	}
+	
+	set select = select.extract(1, select.length()-1)
+	set where = where.extract(1,where.length()-5)
+				
+	quit keycnt
+
+vSIG()	quit "60697^49902^Badrinath Giridharan^8396"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,816 @@
+BCHGLXFR //Batch BCHRGLXFR - General Ledger Posting File Creation
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 02/01/2007 08:53 - shetyes
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHRGLXFR Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit quit
+ do JOBMGR^BCHUTL(%FN,"BCHRGLXFR",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(TJD,SRC) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHRGLXFR","*","",TJD.get()_","_SRC.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,TJD,SRC)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHRGLXFR","*","",TJD.get()_","_SRC.get(),"",et)
+ }
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,TJD,SRC) //
+	do Runtime.rollback()
+	
+	set ER=0
+	set TGL=SRC
+	
+     	do TGL(TGL)
+
+	quit
+
+	
+TGL(Number TGL)	 // Transaction Source
+
+	// Collate through G/L account numbers
+	
+	type String SRC,MEMO
+
+	set SRC="DTJ,DMJ,CASH,ACCRUAL,FXBASEQV,FXTAXWTH,DARCB,DARCB-REV,IC-CLR,DOVRCB,DOVRCB-REV".piece(",",TGL)
+	
+	type ResultSet rs=Db.select("CRCD,EFD,ACN,CC","TGL","TJD=:TJD AND SRC=:TGL")
+	while rs.next() do {
+		set CRCD=rs.getCol("CRCD")
+		set EFD=rs.getCol("EFD")
+		set ACN=rs.getCol("ACN")
+		set CC=rs.getCol("CC")
+
+		type RecordGLAD glad=Db.getRecord("GLAD","ACN")
+		set MEMO=$S(glad.type="M":2,1:0)
+		
+		do TMP
+		}
+	quit
+
+
+TMP	// Accumulate TGL data into temporary file
+	
+	type Number amt, cnt, i, seq
+	type String dtl, REC, RECSUM, tc, x
+
+	// Get company, cost center and description
+	type RecordUTBLCCNTR utblccntr=Db.getRecord("UTBLCCNTR","CC")
+	set CO=utblccntr.glco
+	if CO="" set CO=GLS
+	
+	set C=CC.piece("/",1)
+	set CD=CC.piece("/",2)
+	
+	// Transfer
+	if CD'="" do {
+		// From cost center: ~p1
+		set CD=$$^MSG(5776,C)
+		set C=CC.piece("/",2)
+		}
+	
+	type RecordTGL tgl=Db.getRecord("TGL","TJD=:TJD,SRC=:TGL,CRCD,EFD,ACN,CC")
+	
+	type RecordTMPRPT6 tmpglsum=Db.getRecord("TMPRPT6","PID=:%ProcessID,KEY1='ACN',KEY2=:CO,KEY3=:CRCD,KEY4=:EFD,KEY5=:CC,KEY6=:ACN",1)
+	set RECSUM=tmpglsum.data
+
+	set dtl=$$DTL(.seq)
+	
+	for i=0,1 do {
+		// Build entries for dr/cr amounts not supported by detail
+		if i=0 do {
+			set cnt=tgl.drcnt
+			set amt=tgl.dramt
+			set RECSUM.piece("|",1)=RECSUM.piece("|",1)+cnt
+			set RECSUM.piece("|",2)=RECSUM.piece("|",2)+amt
+			}
+		else  do {
+			set cnt=tgl.crcnt
+			set amt=tgl.cramt
+			set RECSUM.piece("|",3)=RECSUM.piece("|",3)+cnt
+			set RECSUM.piece("|",4)=RECSUM.piece("|",4)+amt
+			}
+		set tmpglsum.data=RECSUM
+
+		set amt=amt-dtl.piece("|",i+MEMO*2+2) if 'amt quit
+		
+		set cnt=cnt-dtl.piece("|",i+MEMO*2+1)
+		set tc=$S(i:"CR",1:"DR")
+		set cmt=SRC_CD_"REF="_cnt
+		
+		set seq=seq+1
+		
+		type RecordTMPGLXFR tmpxfr2=Class.new("RecordTMPGLXFR")
+
+		set tmpxfr2.pid=%ProcessID
+		set tmpxfr2.co=CO
+		set tmpxfr2.crcd=CRCD
+		set tmpxfr2.efd=EFD
+		set tmpxfr2.cc=CC
+		set tmpxfr2.seq=seq
+		set tmpxfr2.tgldata=ACN_"|"_C_"|"_tc_"|"_amt_"||P/IBS|"_cmt_"|"_%UserID
+
+		do tmpxfr2.bypassSave()
+		}
+
+	type RecordTMPRPT4 tmpglp=Db.getRecord("TMPRPT4","PID=:%ProcessID,KEY1=:CO,KEY2=:CRCD,KEY3=:EFD,KEY4=:CC",1)
+
+	for i=0,1 do {
+		// Update temporary dr/cr/memo transaction counts and amounts
+		new ptr,cnt,amt
+		
+		if i=0 set cnt=tgl.drcnt,amt=tgl.dramt
+		else  set cnt=tgl.crcnt,amt=tgl.cramt
+		
+		set ptr=i+MEMO*2+2
+		set REC=tmpglp.data
+		
+		if ptr=2 set REC.piece("|",1)=REC.piece("|",1)+amt
+		if ptr=6 set REC.piece("|",3)=REC.piece("|",3)+amt
+		if ptr=4 set REC.piece("|",2)=REC.piece("|",2)+amt
+		if ptr=8 set REC.piece("|",4)=REC.piece("|",4)+amt
+		set tmpglp.data=REC
+		}
+
+	do tmpglp.bypassSave()
+	do tmpglsum.bypassSave()
+	
+	quit
+
+	
+DTL(seq)	
+
+	// Send individual transactions to G/L and subtract from net
+	
+	type Number amt, i
+	type String dtl
+	
+	set (dtl,seq)=""
+
+	type ResultSet rs = Db.select("SEQ","TMPGLXFR","PID=:%ProcessID and CO=:CO and CRCD=:CRCD and EFD=:EFD and CC=:CC","SEQ DESC")
+
+	if rs.next() set seq = rs.getCol("SEQ")
+ 	
+	type DbSet ds=Db.selectDbSet("TGLDTL","TJD=:TJD and SRC=:TGL and CRCD=:CRCD and EFD=:EFD and ACN=:ACN and CC=:CC")	
+	while ds.next() do {
+		type RecordTGLDTL tgldtl=ds.getRecord("TGLDTL")
+		set amt=tgldtl.tamt
+
+		set seq=seq+1
+
+		type RecordTMPGLXFR tmpxfr2=Class.new("RecordTMPGLXFR")
+		set tmpxfr2.pid=%ProcessID
+		set tmpxfr2.co=CO
+		set tmpxfr2.crcd=CRCD
+		set tmpxfr2.efd=EFD
+		set tmpxfr2.cc=CC
+		set tmpxfr2.seq=seq
+		set tmpxfr2.tgldata=ACN_"|"_tgldtl.ccntr_"|"_tgldtl.trn_"|"_amt_"||P/IBS|"_$$^MSG(5777,tgldtl.cmt.extract(1,35))_"|"_tgldtl.uid
+
+		set i=$S(tgldtl.trn="DR":0,1:1)+MEMO
+		set dtl.piece("|",i*2+1)=dtl.piece("|",i*2+1)+1
+		set dtl.piece("|",i*2+2)=dtl.piece("|",i*2+2)+amt
+
+		do tmpxfr2.bypassSave()
+		}
+
+     	quit dtl
+
+	
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,TJD,SRC
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set TJD=vRECORD.piece($C(9),1)
+ set SRC=vRECORD.piece($C(9),2)
+ do vPROC(TJD,SRC)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,TJD,SRC
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>32767 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+14>32767 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+	// %EXT defined For End of day process (Batch) (@QUE096)
+	// %EXT not defined for on-line process (@RGLXFR)
+
+	if '%EXT.data() do { set %BatchExit=1 quit
+	
+		set %TAB("SJD")=".DAT1/MAX="_(%SystemDate-1)
+		set %TAB("EJD")=".ENDT1/MAX=<<SJD>>"
+
+		set %READ="@@%FN,,,SJD/REQ,EJD/REQ"
+		do ^UTLREAD if VFMQ="Q" set %BatchExit=1 quit 
+	
+		// Transfer G/L activity from start date through end date
+		for RGLXFRJD=SJD:1:EJD do { 
+
+			#ACCEPT pgm=spier;date=12/09/03
+			type Date %SystemDate=RGLXFRJD
+			
+			type Number %EXT
+			set %EXT=2
+			
+			do DRV^UBCHID("BCHRGLXFR")
+			}
+		}
+
+	// This set is intentional for DAYEND function QUE096
+	if %EXT=1 set XTJD=%SystemDate-1		
+	if %EXT=2 set XTJD=RGLXFRJD
+	
+	do SOURCE^BCHSOURC("BOFF","ALL",.%UserID,.BRCD,.%UserClass)
+	
+	// XFR is called from OPEN because TGL is set from here in order to
+	// collate through GL numbers.
+
+	do XFR(XTJD)
+	
+
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("DISTINCT TJD,SRC","TGL","TGL.TJD=:XTJD")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	type public String RTN
+	
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+	
+	set GLEFDDR=cuvar.glefddr
+	if GLEFDDR="" set GLEFDDR=cuvar.glts
+	set GLCCRO=cuvar.glccro
+	set GLXFR=+cuvar.glxfr
+	set GLS=cuvar.gls
+	
+	if GLXFR=3 do {
+		set RTN=cuvar.cstfmtrtn
+		
+		if RTN="" set ER=1
+		
+		// Routine does not exist		
+		if ER.get() do LOG^UTLEXC($T(+0),"*",$$^MSG(2438),"","",RM.get()))
+		}
+
+	quit
+
+
+XFR(Date XTJD)	 // G/L activity date
+
+	// Transfer PROFILE totals to the G/L
+	
+	type Boolean ER = 0
+	
+	do EOD^TGLMON(XTJD)			// Accum DTJ and DMJ
+	do ^RGLCSH(XTJD)			// Cash rec
+	do ^RGLDARC(XTJD)			// Asset Reclassification 
+	do ^RGLDEPRC(XTJD)			// Deposit Reclassification
+	do ^RGLCNTRA				// Contra Interest Corrections	
+	
+	#if CUVAR.%MCP
+	do ^RGLFXP(XTJD)			// FX positions
+	do ^RGLFXBW(XTJD)			// FX base equiv
+	#endif
+
+	do Db.fastDelete("TMPRPT4","PID=:%ProcessID")
+	do Db.fastDelete("TMPRPT6","PID=:%ProcessID")
+	do Db.fastDelete("TMPGLXFR","PID=:%ProcessID")
+
+	 
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+	
+	// Check if autopost is enabled
+	set POST=$$POST()
+	
+	do GLP
+	
+	set (CO,BATCH,LEN)=""
+
+	if POST,(GLXFR'=1) for  set CO=AUTO(CO).order() quit:CO=""  do {
+		set LEN=AUTO(CO).length()
+		set AUTO(CO)=AUTO(CO).extract(2,LEN)
+
+		if GLXFR=0 set ER=$$FMSPOST^%OSSCRPT(CO,AUTO(CO),"","")
+		else  if GLXFR=2 set ER=$$FMSPOST^%OSSCRPT(CO,"",AUTO(CO),.LIST)
+
+		// No posting occurred
+		if ER do LOG^UTLEXC($T(+0),"*",$$^MSG(1973),"","",RM.get())
+		}
+	quit
+
+	
+POST()	// Determine if autoposting will be utilized
+	
+	// AUTOPOST will be enabled if the user has set the autopost logical
+ 	// in GTMENV1.COM
+	
+	if $$SCA^%TRNLNM("fmspost")="" quit 0
+	
+	quit 1
+	
+GLP	// Create G/L batches
+	
+	type ResultSet rs=Db.select("DISTINCT KEY1,KEY2,KEY3","TMPRPT4","PID=:%ProcessID")
+	if rs.isEmpty() quit
+	
+	while rs.next() do {
+		set CO=rs.getCol("KEY1")
+		set CRCD=rs.getCol("KEY2")
+		set EFD=rs.getCol("KEY3")
+		
+		do BCH
+		}
+	
+	do Db.fastDelete("TMPRPT4","PID=:%ProcessID")
+	do Db.fastDelete("TMPRPT6","PID=:%ProcessID")
+	do Db.fastDelete("TMPGLXFR","PID=:%ProcessID")
+	
+	quit
+
+	
+BCH	// Create G/L posting batch
+
+	type String REC, tot = ""
+	type Number CNT = 0, SEQ = 0
+	
+	if GLXFR=0 do {
+		type RecordGLPBN glpbn=Db.getRecord("GLPBN","CO=:CO",1)
+
+		set glpbn.bn=glpbn.bn+1
+		set BN=glpbn.bn
+		
+		do glpbn.bypassSave()
+		}
+		
+	else  do {
+		do RMS quit:ER
+		
+		if GLXFR=1 use IO write CO_"|"_EFD_"|"_CRCD,!
+
+		if GLXFR=2 do {    // File is for an unlinked PROFILE/FMS
+
+			type String REC, DATE, ZCRCD
+
+			set ZCRCD=$S(%MCP:CRCD,1:"   ")
+			set DATE=$$BLK($$DAT^%ZM(EFD,"MM/DD/YY"),8)
+			set REC=1_$$BLK(CO,12)_DATE_"P/IBS	  132"_ZCRCD
+			set REC=$$BLK(REC,132)
+
+			use IO write REC,!	    	// Header Record
+			}
+			
+		if GLXFR=3 do {
+                        do HEADER^@RTN          // Write Header Record
+                        do VCHHDR^@RTN          // Add Voucher Header Record
+                        }
+		}
+
+	if POST,(GLXFR=0) set AUTO(CO)=AUTO(CO).get()_"|"_BN
+	
+	if POST,(GLXFR=2) do {
+		set AUTO(CO)=AUTO(CO).get()_"|"_POP
+		set LIST(POP)=""
+		}
+ 	
+	type DbSet ds=Db.selectDbSet("TMPRPT4","PID=:%ProcessID and KEY1=:CO and KEY2=:CRCD and KEY3=:EFD")	
+	while ds.next() do {
+		type RecordTMPRPT4 tmpglp=ds.getRecord("TMPRPT4")
+		set CC=tmpglp.key4
+		
+		// Create G/L posting entries
+		if GLXFR'=3 do {
+			type DbSet dsglp2=Db.selectDbSet("TMPGLXFR","PID=:%ProcessID and CO=:CO and CRCD=:CRCD and EFD=:EFD and CC=:CC")
+			while dsglp2.next() do {
+				type RecordTMPGLXFR tmpglp2=dsglp2.getRecord("TMPGLXFR")
+
+				do SET(tmpglp2.tgldata)
+				}
+			}
+		else  do {
+			type DbSet dsglp3=Db.selectDbSet("TMPRPT6","PID=:%ProcessID and KEY1='ACN' and KEY2=:CO and KEY3=:CRCD and KEY4=:EFD and KEY5=:CC") 
+			while dsglp3.next() do {
+				type RecordTMPRPT6 tmpglp3=dsglp3.getRecord("TMPRPT6")
+
+				do SET(tmpglp3.data)
+				}
+			}
+
+		// Balance cost center
+		if GLCCRO do RECONCC(.tmpglp)
+		
+		// Accumulate batch totals
+		set REC=tmpglp.data
+		set tot.piece("|",2)=tot.piece("|",2)+REC.piece("|",1)
+		set tot.piece("|",4)=tot.piece("|",4)+REC.piece("|",2)
+		set tot.piece("|",6)=tot.piece("|",6)+REC.piece("|",3)
+		set tot.piece("|",8)=tot.piece("|",8)+REC.piece("|",4)
+
+		}
+
+	do RECONBN(.tot)	// Balance batch
+	do GLBCHDR(.tot)	// Batch header
+	
+	quit
+
+
+BLK(String VAL,	// Value of field
+    Number N)	// Field size to be returned
+
+	// Fill with blank spaces
+
+	if VAL.length()>N quit VAL.extract(1,N)
+	
+	quit VAL_$J(" ",N).extract(1,N-VAL.length())
+
+
+ZERO(String VAL,  // Value of field
+     Number N)	  // Field size to be returned
+  
+	type Number z=0
+ 
+	if N.get()="" set N=VAL.length()
+	if VAL.length()>N quit VAL.extract(1,N)
+	set Z.piece(0,N)=0 	// Load in a single cent record from 0 to N
+
+	quit Z.extract(1,N-VAL.length())_VAL
+
+	
+RECONCC(RecordTMPRPT4 tmpglp)	
+
+	// Force balance cost centers with suspense
+	
+	type Number amt, itc
+	type String REC, tc, x
+	
+	set REC=tmpglp.data
+	
+	set amt=REC.piece("|",1)-REC.piece("|",2)
+	if 'amt quit
+
+	// Update cost center summary information
+	if amt<0 do {
+		set amt=-amt
+		set itc=0
+		set tc="DR"
+		set REC.piece("|",1)=REC.piece("|",1)+amt
+		}
+	else  do {
+		set itc=1
+		set tc="CR"
+		set REC.piece("|",2)=REC.piece("|",2)+amt
+		}
+		
+	set tmpglp.data=REC
+	
+	if GLXFR'=3 do {
+		set x=GLCCRO_"|"_CC_"|"_tc_"|"_amt_"||P/IBS|"_$$^MSG(4661)_"|"_%UserID
+
+		do SET(x)
+		}
+		
+	/* 
+	For a custom process this new temporary table stores total amounts 
+	processed against a single GL.  For amounts generated by the system in 
+	order to force the balancing of GLs by cost center, this section 
+	provides a record in the summary level format expected by the custom 
+	process.  This calls SET which calls the custom process to write a 
+	record based upon information in this x array.
+	*/
+ 
+	else  do {
+		set x=""
+		if itc do {
+			set x.piece("|",4)=amt
+			set x.piece("|",2)=0
+			}
+		else  do {
+			set x.piece("|",2)=amt
+			set x.piece("|",4)=0
+			}
+
+		set ACN=GLCCRO
+		
+		do SET(x)
+		}
+	quit
+
+	
+private	RECONBN(String tot)	// Batch totals
+
+	// Balance batch
+	
+	type Number amt, cc, itc
+	type String tc, x
+	
+	set amt=tot.piece("|",2)-tot.piece("|",4) if 'amt quit
+	
+	if amt<0 set amt=-amt,itc=0,tc="DR"
+	else  set itc=1,tc="CR"
+	
+	// Update batch totals
+	set tot.piece("|",itc*2+2)=tot.piece("|",itc*2+2)+amt
+	
+	// Use back office cost center
+
+	type RecordUTBLBRCD utblbrcd=Db.getRecord("UTBLBRCD","BRCD=0",1)
+	if utblbrcd.getMode()=1 set cc=+utblbrcd.ccdef
+	else  set cc=0
+	
+	// G/L Offset for Effective-Dated Batch
+	if GLXFR'=3 do {
+		set x=GLEFDDR_"|"_cc_"|"_tc_"|"_amt_"||P/IBS|"_$$^MSG(4664)_"|"_%UserID
+		do SET(x)
+		}
+
+	/*
+	For a custom process this new temporary table stores total amounts 
+	processed against a single GL.  For amounts generated by the system in 
+	order to force the balancing of GLs by batch, this section provides a
+	record in the summary level format expected by the custom process.  
+	This calls SET which calls the custom process to write a record based 
+	upon information in this x array.
+	*/
+
+	else  do {
+		set x=""
+		if itc do {
+			set x.piece("|",4)=amt
+			set x.piece("|",2)=0
+			}
+		else  do {
+			set x.piece("|",2)=amt
+			set x.piece("|",4)=0
+			}
+		set ACN=GLEFDDR
+		
+		do SET(x)
+		}
+	quit
+
+	
+SET(String x)  // Update posting file
+ 
+	if GLXFR=1 use IO write x,!  // Regular RMS G/L Transfer File
+
+	else  if GLXFR=0 do {
+		type RecordGLP glp=Class.new("RecordGLP")
+
+		set SEQ=SEQ+1
+
+		set glp.seq=SEQ
+		set glp.co=CO
+		set glp.bn=BN
+		set glp.acn=x.piece("|",1)
+		set glp.cc=x.piece("|",2)
+		set glp.trn=x.piece("|",3)
+		set glp.tamt=x.piece("|",4)
+		set glp.ref=x.piece("|",5)
+		set glp.sub=x.piece("|",6)
+		set glp.cmt=x.piece("|",7)
+		set glp.uid=x.piece("|",8)
+		set glp.date=x.piece("|",9)
+		set glp.posted=x.piece("|",10)
+
+		do glp.bypassSave()
+		}
+		
+	else  if GLXFR=2 do PROFRMS(x)	 // PROFILE/RMS Transfer File
+
+	else  if GLXFR=3 do {
+		// Write Detail Record
+		do DETAIL^@RTN
+		
+		// Change message number
+		if ER do {  quit
+			
+			// Account not linked
+			do LOG^UTLEXC($T(+0),"*",$$^MSG(133),ACN,"",RM.get()) 
+			set ER=0
+			}
+			
+		// Write Addendum Record
+		do ADDEN^@RTN
+		}
+ 
+	quit
+
+
+PROFRMS(String x)
+	
+	// This section is for correctly writing the file
+	// if the file is for a PROFILE/FMS transfer. 
+ 
+	type String ETC, FILL, MEMO, REC
+	type Number ACCT, TAMT
+	
+	set ACCT=x.piece("|",1)
+	set ETC=x.piece("|",3)
+	set TAMT=x.piece("|",4)
+	
+	if TAMT<0 do {
+		 set TAMT=TAMT*-1
+		 set ETC=$S(ETC="DR":"CR",1:"DR")
+		}
+		
+	type RecordGLAD glad=Db.getRecord("GLAD","ACN=:ACCT",1)
+	if glad.type'="M" set MEMO=0
+	else  set MEMO=1
+
+	set SUM(ETC,MEMO)=SUM(ETC,MEMO).get()+TAMT
+	set CNT=CNT.get()+1
+	set FILL=$$BLK("",30)     // ICA method, misc sub id, reference number
+	set REC=2_$$ZERO(ACCT,12)_$$ZERO(x.piece("|",2),6)_$$BLK(ETC,2)
+
+	if MEMO=0 set MEMO=" "
+	set REC=REC_$$ZERO((TAMT*100),12)_$$BLK(x.piece("|",7),40)_FILL_MEMO
+	set REC=$$BLK(REC,132)
+
+	use IO write REC,!
+ 
+	quit
+
+	
+GLBCHDR(String tot)	// Batch totals	
+
+	// G/L batch header
+	
+	if (GLXFR=1)!(GLXFR=2) do TRAILER
+
+	// Write Voucher Trailer Record
+	if GLXFR=3 do VCHTRLR^@RTN
+
+	// Add trailer record to file
+	if GLXFR=3 do TRAILER^@RTN
+
+	if GLXFR do CLOSE^SCAIO quit		
+
+	type RecordGLP0 glp0=Class.new("RecordGLP0")
+	set glp0.co=CO
+	set glp0.efd=EFD
+	set glp0.bn=BN
+	set glp0.posted=0
+	set glp0.borig="PBS-"_%UserID
+	do glp0.bypassSave()
+
+	type RecordGLP glp=Class.new("RecordGLP")
+	set glp.co=CO
+	set glp.bn=BN
+	set glp.seq=0
+	set glp.acn=SEQ
+	do glp.bypassSave()
+	
+	type RecordGLPHDR glphdr=Class.new("RecordGLPHDR")
+	set glphdr.co=CO
+	set glphdr.bn=BN
+	set glphdr.gtd=EFD
+	set glphdr.gid="PBS-"_%UserID	
+	set glphdr.tc=SEQ,glphdr.ucnt=SEQ
+	set glphdr.date=%SystemDate
+	set glphdr.crcd=CRCD
+	set glphdr.tdr=$P(tot,"|",2),glphdr.utdr=$P(tot,"|",2)
+	set glphdr.tcr=$P(tot,"|",4),glphdr.utcr=$P(tot,"|",4)
+	set glphdr.mdr=$P(tot,"|",6),glphdr.utmdr=$P(tot,"|",6)
+	set glphdr.mcr=$P(tot,"|",8),glphdr.utmcr=$P(tot,"|",8)
+	do glphdr.bypassSave()
+
+	quit
+
+	
+RMS	// Get RMS File name
+	
+	type String %EXT,PARAMS,ZDAT,ZEFD
+	
+	set ZDAT=$$DAT^%ZM(%SystemDate,"MMDD")
+	set ZEFD=$$DAT^%ZM(EFD,"MMDD") 	
+
+	set POP="GLXFR."_CO_"_"_ZDAT_"_"_ZEFD
+
+	#if CUVAR.%MCP set POP=POP_"_"_CRCD
+	
+	// Get and open the FMS RMS file.
+	
+	set PARAMS = "WRITE/NEWV"
+	if $$VALID^%ZRTNS("UCIOENCD") do {
+		
+		// Accept warning if ^UCIOENCD does not exist
+		#ACCEPT Date=07/26/06; Pgm=RussellDS; CR=22121; Group=MISMATCH
+		type String CHARSET = $$^UCIOENCD("Routine", "BCHGLXFR", "*", "*")
+		
+		if 'CHARSET.isNull() set PARAMS = PARAMS_"/OCHSET="_CHARSET
+	}
+	
+	set IO=$$FILE^%TRNLNM(POP,CUVAR.SPLDIR)
+	set X=$$FILE^%ZOPEN(IO,PARAMS,1,132)
+	if 'X set RM=X.piece("|",2),ER=1 quit
+
+	quit
+
+
+TRAILER  // Add trailer at end of file
+ 
+	type String REC,DATE
+	
+	set DATE=$$BLK($$DAT^%ZM(EFD,"MM/DD/YY"),8)
+
+	set REC=9_$$BLK(CO,12)_DATE_"P/IBS	  "
+
+	set REC=REC_$$ZERO((SUM("DR",0).get()*100),15)
+	set REC=REC_$$ZERO((SUM("CR",0).get()*100),15)_$$ZERO(CNT,6)
+	set REC=REC_$$ZERO((SUM("DR",1).get()*100),15)
+	set REC=REC_$$ZERO((SUM("CR",1).get()*100),15)
+	set REC=$$BLK(REC,132)
+
+	use IO write REC,!
+
+	kill SUM
+ 
+	quit
+	
+	
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

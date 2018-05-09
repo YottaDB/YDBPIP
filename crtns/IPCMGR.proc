@@ -1,0 +1,504 @@
+IPCMGR	  /*
+  ORIG: Erik Scheetz - 05/22/2005
+  DESC: M Interrupt Handler
+
+  ---- Comments --------------------------------------------------------
+  This procedure provides a common interrupt handler for M processes.
+  
+  * Note that this procedure relies on the features provided by
+    GT.M 4.4-002.
+  
+  LIBRARY:  REGISTER	Register an M process
+            ISSUE	Issue an action request
+            CLOSE	Close an M registration
+
+  ---- Revision History ------------------------------------------------
+	  
+        05/22/05 - Erik Scheetz - 15677
+		   M Interrupt Handler creation
+		   
+	01/09/06 - Giridharan - 18912
+		   Modified references to processjnl.sysdat to 
+		   processjnl.systemdat.
+ */
+
+	quit
+
+
+Public REGISTER(String PRCTYP,		// /REQ/MECH=VAL
+		String SUBTYP)		// /NOREQ/MECH=VAL
+	/*
+	Register process in Process ID Registration table (PROCESSID) and 
+	redefine interrupt handler ($ZINTERRUPT="INTRPT^IPCMGR").
+
+	ARGUMENTS:
+	     . PRCTYP	Process type
+	     
+			USER	- User process
+			BATCH	- Batch process
+			SERVER	- Server process
+			MONITOR	- Monitor process
+
+	     . SUBTYP	Process sub-type
+	     
+			SERVER sub-types examples
+				SCA$IBS - Sanchez Profile Server
+				SCA$IVR - Voice Response Server
+
+			BATCH sub-types examples
+				SCH - Scheduler process
+				THR - Thread process
+
+			MONITOR sub-types examples
+				TGLMON - G/L transfer
+				UCSMON - Unviversal Customer
+				EVENTMON - Event Monitor
+	*/
+
+	type Public String %EVENT,%FN
+		
+	do Runtime.start("CS")
+
+	type RecordPROCESSID procid = Db.getRecord("PROCESSID","PID=:%ProcessID",1)
+
+	set procid.prctyp = PRCTYP
+	set procid.subtyp = SUBTYP.get()
+	set procid.regdate=%CurrentDate
+	set procid.regtime=%CurrentTime
+	
+	if $$INTRACT^%ZFUNC set procid.mode = "INTERACTIVE"
+	else  set procid.mode = "DETACHED"
+
+	set procid.tlo = $$TLO^UTLO()
+	set procid.usrnam = %UserName
+
+	set procid.userid = %UserID.get()
+	set procid.usrcls = %UserClass.get()
+
+	set procid.func = %FN.get()
+	set procid.event = %EVENT.get()
+
+	do procid.save()
+	
+	do Db.delete("PROCESSACT","PID=:%ProcessID")
+	
+	do Runtime.commit()
+
+	// Define common interrupt handler
+	set $zinterrupt="do INTRPT^IPCMGR"
+	quit
+
+
+Public ISSUE(String ACTREQ,		// /REQ/MECH=VAL
+	      String QUALIF,		// /NOREQ/MECH=VAL
+	      String SELECT())		// /NOREQ/MECH=REFARR:R
+	/*
+	
+	Issue an action request to selected processes.
+
+	ARGUMENTS:
+	     . ACTREQ	Action Request
+	     
+	     		CTRL 	- Control Messages
+			EXAM	- Job examine
+			EXEC	- Execute code
+			STOP	- Stop process
+			TRACE	- Initiate M trace
+
+	     . QUALIF	Action qualifier
+	     
+			Additional information related to a specific
+			action request.
+
+			Executable code if ACTREQ="EXEC"
+			'tag^rtn' trace is activated if ACTREQ="TRACE"
+
+	     . SELECT	Selection criteria
+
+	EXAMPLE:
+	
+	       set SEL("PID")=12345
+	       do ISSUE^IPCMGR("EXAM",,.SEL)
+	       do ISSUE^IPCMGR("TRACE","DAT^%ZM",.SEL)
+	       
+	*/
+
+	type Number PID
+
+	set QUALIF = QUALIF.get()
+
+	// Signal specified PID
+	set PID = SELECT("PID").get()
+
+	if 'PID.isNull() do {
+	
+		type RecordPROCESSID procid = Db.getRecord("PROCESSID","PID=:PID",1)
+		if procid.getMode() = 0 quit
+		
+		if '$$SELECT(.procid,.SELECT) quit
+		do SIGNAL(procid.pid,ACTREQ,QUALIF)
+		}
+		
+	else  do {
+
+		type DbSet ds=Db.selectDbSet("PROCESSID")
+
+		while ds.next() do {
+			type RecordPROCESSID procid
+			set procid=ds.getRecord("PROCESSID")
+
+			if '$$SELECT(.procid,.SELECT) quit
+			do SIGNAL(procid.pid,ACTREQ,QUALIF)
+			}
+		}
+	quit
+
+
+Public SIGNAL(Number PID,	// Process ID 		/REQ/MECH=VAL
+	      String ACTREQ,	// Action Request 	/REQ/MECH=VAL
+	      String QUALIF)	// Action Qualifier	/NOREQ/MECH=VAL
+
+	/*
+
+	Insert ACTREQ in PROCESSACT for specified PID; signal process that
+	an ACTREQ is pending (via call to $$INTRPT^%ZFUNC).
+
+	Valid action requests are those supported in the INTRPT section.  All
+	other actions will be ignored.
+	*/
+
+	type String X
+
+	// Start transaction
+	do Runtime.start("CS")
+
+	type RecordPROCESSACT procact = Class.new("RecordPROCESSACT")
+
+	set procact.pid=PID
+	set procact.seqnum = Db.nextVal("PROCESSACT","PID=:PID")
+
+	set procact.action = ACTREQ
+	set procact.qualif = QUALIF.get()
+	set procact.status = "ISSUED"
+
+	set procact.isspid=%ProcessID
+	set procact.issdate=%CurrentDate
+	set procact.isstime=%CurrentTime
+
+	set procact.isstlo=$$TLO^UTLO
+	set procact.issusrnm=%UserName
+
+	do procact.save()
+
+	// Commit transaction
+	do Runtime.commit()
+
+	// Send interrupt to process
+	set X=$$INTRPT^%ZFUNC(PID)
+	quit
+
+
+Public INTRPT	// Process interrupt ($ZINTERRUPT)
+
+	/*
+	This subroutine is executed by a process when a process receives
+	an interrupt (asynchronous event) triggered by a SIGUSR1 
+	command.
+
+	When an interrupt is detected, the process executes the code that
+	is associated with a particular ACTREQ, specified in table PROCESSACT.
+	*/
+
+	type Public String %INTRPT
+	
+	type String ACTREQ,QUALIF
+	
+	type RecordPROCESSID procid=Db.getRecord("PROCESSID","PID=:%ProcessID")
+	
+	type DbSet ds = Db.selectDbSet("PROCESSACT","PID=:%ProcessID")
+	
+	while ds.next() do {
+		type String STATUS = "PROCESSED"
+		type RecordPROCESSACT procact = ds.getRecord("PROCESSACT")
+
+		set ACTREQ=procact.action
+		set QUALIF=procact.qualif
+
+		do {
+			//  Check for alredy processed interrupts
+			if '%INTRPT(procact.seqnum).get().isNull() quit	
+			
+			catch vzerror {
+				set STATUS = "FAILED"
+				}
+
+			/* 
+			************************************************
+			Interrupts that trigger immediate actions
+				EXAM	- Jobexam
+				EXEC	- Execute M statement
+				TRACE	- Invoke Profile Trace Utility
+			*************************************************
+			*/
+
+			// Job examination
+			if ACTREQ="EXAM" do JOBEXAM(QUALIF) quit
+
+			// Execute M code
+			if ACTREQ="EXEC" do { quit
+		
+				#ACCEPT PGM=EWS
+				xecute QUALIF
+				}
+			
+			// Turn M trace 'on'
+			if ACTREQ="TRACE" do TRACE^SCAUTL(QUALIF) quit
+
+			/* 
+			************************************************
+			Interrupts that trigger actions at specified time
+				STOP	- Shutdown
+				CTRL	- Process Control messages
+			*************************************************
+			*/
+
+			// Stop message (shutdown)
+			if ACTREQ="STOP" set %INTRPT="STOP" quit
+				
+			if ACTREQ="CTRL" set %INTRPT="CTRL" quit
+
+			}
+
+		/*
+		If process is interrupted while within a TP fense, save
+		context information in %INTRPT(seqnum) to file later.  This
+		is to avoid a possible rollback and losing any updates to
+		PROCESSACT and PROCESSJNL.
+		
+		Hooks in application will call back into INTRPT while not under
+		TP to clear out %INTRPT() entries if they exist.
+		*/
+		
+		if $TLevel=0 do {
+
+			do Runtime.start("CS")
+			if '%INTRPT(procact.seqnum).get().isNull() set procact.status = %INTRPT(procact.seqnum).piece("|",1)
+			else  set procact.status=STATUS
+
+			do procact.save()
+			do JNL(.procid,.procact)
+			do Runtime.commit()
+
+			kill %INTRPT(procact.seqnum)
+			}
+			
+		else  set %INTRPT(procact.seqnum)=STATUS_"|"_%CurrentDate_"|"_%CurrentTime
+
+		}
+	quit
+	
+
+JOBEXAM(String FILE)
+
+	type String RESULT
+	
+	/*
+	If passing in a FILE id, section will append process ID to 
+	file name.
+	*/
+	if 'FILE.isNull() set FILE = FILE_"_"_%ProcessID
+
+	#ACCEPT PGM=EWS
+	#bypass
+	set RESULT=$zjobexam(FILE)
+	#endbypass
+	quit
+
+	
+JNL(RecordPROCESSID procid,
+    RecordPROCESSACT procact)
+    
+	/*
+	Log update to PROCESSJNL
+	
+	ARGUMENTS:
+	
+	     . pid	Process ID object	/REQ
+	     . pidact	Process action object	/REQ
+	*/
+
+	type Public String %INTRPT
+
+	type Date DAT
+	type Number PID,SEQ
+	
+	set DAT=%CurrentDate
+	set PID=%ProcessID
+	set SEQ=Db.nextVal("PROCESSJNL","SYSTEMDAT=:DAT,PID=:PID")
+	
+	type RecordPROCESSJNL procjnl=Class.new("RecordPROCESSJNL")
+
+	set procjnl.systemdat=DAT
+	set procjnl.pid=PID
+	set procjnl.jnlseq=SEQ
+
+	set procjnl.regdate=procid.regdate
+	set procjnl.regtime=procid.regtime
+	set procjnl.mode=procid.mode
+	
+	set procjnl.tlo=procid.tlo
+	set procjnl.usrnam=procid.usrnam
+	set procjnl.prctyp=procid.prctyp
+	set procjnl.subtyp=procid.subtyp
+	set procjnl.userid=procid.userid
+	set procjnl.usrcls=procid.usrcls
+
+	set procjnl.func=procid.func
+	set procjnl.event=procid.event
+	
+	set procjnl.action=procact.action
+	set procjnl.qualif=procact.qualif
+	set procjnl.status=procact.status
+	set procjnl.isspid=procact.isspid
+	set procjnl.issdate=procact.issdate
+	set procjnl.isstime=procact.isstime
+	set procjnl.issusrnm=procact.issusrnm
+	set procjnl.isstlo=procact.isstlo
+
+	if '%INTRPT(procact.seqnum).get().isNull() do {
+		set procjnl.prcdate = %INTRPT(procact.seqnum).piece("|",2)
+		set procjnl.prctime = %INTRPT(procact.seqnum).piece("|",3)
+		}
+	else  do {
+		set procjnl.prcdate = %CurrentDate
+		set procjnl.prctime = %CurrentTime
+		}
+
+	do procjnl.save()
+
+	do Db.delete("PROCESSACT","PID=:PID AND SEQNUM=:procact.seqnum")
+	
+	quit
+
+
+Public CLOSE(Number PID)
+	/*
+	This subroutine closes the registration for the specified
+	process.
+
+	ARGUMENTS:
+	     . PID	Process ID		/NOREQ/MECH=VAL/DFT=$J
+	*/
+
+	if PID.get().isNull() set PID=%ProcessID
+	
+	do Runtime.start("CS")
+	do Db.delete("PROCESSID","PID=:PID")
+	do Db.delete("PROCESSACT","PID=:PID")
+	do Runtime.commit()
+	quit
+
+	
+Public FUNC(String FN)
+	/*
+	This subroutine updates the FUNC column for PROCESSID when a Profile
+	function is executed.
+
+	ARGUMENTS:
+
+	     . FN	Function		/NOREQ/MECH=VAL
+	*/
+
+	type Number PID=%ProcessID
+
+	type RecordPROCESSID procid = Db.getRecord("PROCESSID","PID=:PID",1)
+	
+	set procid.func = FN.get()
+	do procid.save()
+	
+	quit
+		
+	
+
+
+SELECT(RecordPROCESSID procid,	// PROCESS ID object	/REQ/MECH=REF
+	String SELECT())	// Selection Criteria	/NOREQ/MECH=REFARR:R
+
+	if '$$VALID^%ZPID(procid.pid) do CLOSE(procid.pid) quit 0
+
+	if 'SELECT("MODE").get().isNull(),procid.mode'=SELECT("MODE") quit 0
+	if 'SELECT("USRNAM").get().isNull(),procid.usrnam'=SELECT("USRNAM") quit 0
+
+	if 'SELECT("PRCTYP").get().isNull(),procid.prctyp'=SELECT("PRCTYP") quit 0
+	if 'SELECT("SUBTYP").get().isNull(),procid.subtyp'=SELECT("SUBTYP") quit 0
+
+	if 'SELECT("USERID").get().isNull(),procid.userid'=SELECT("USERID") quit 0
+	if 'SELECT("USRCLS").get().isNull(),procid.usrcls'=SELECT("USRCLS") quit 0
+
+	if 'SELECT("FUNC").get().isNull(),procid.func'=SELECT("FUNC") quit 0
+	if 'SELECT("EVENT").get().isNull(),procid.event'=SELECT("EVENT") quit 0
+
+	quit 1
+
+
+
+	/*
+	The line tags below ar for information/testing purposes and are
+	not called by the application.
+	*/
+	
+private INTTEST(Number PID)	// Test Interrupt Mechanism
+
+	do SYSVAR^SCADRV0()
+	Type String TLO = $$TLO^UTLO()
+	
+	do REGISTER("USER","TEST")
+	
+	if PID.get().isNull() set PID = %ProcessID
+	do SIGNAL(PID,"EXEC","write !!,""Process Interrupted Successfully"",!!")
+	
+	do CLOSE()
+	quit
+	
+	
+private INTLIST		// Listing of entries in PROCESSID 
+
+	/* 
+	Display processes in PROCESSID and corresponding OS level info
+	*/
+
+	type String oslist()
+	type Number cnt0 = 0,cnt1 = 0
+	type Number pid
+	
+	do ^%ZPID(.oslist)
+	
+	type ResultSet rs = Db.select("PID","PROCESSID")
+	while rs.next() do {
+		set pid = rs.getCol("PID")
+		if oslist(pid).get().isNull() set cnt0 = cnt0 + 1
+		else  set cnt1 = cnt1 + 1
+		write !,pid,$C(9),oslist(pid).get()
+		}
+		
+	write !!,"Valid PROCESSID entries: "_cnt1
+	write !,"Invalid PROCESSID entries: "_cnt0
+	quit
+	
+private CLEANPID	// Clean up PROCESSID entries that are no longer active
+
+	type ResultSet rs = Db.select("PID","PROCESSID")
+	type Number cnt = 0
+	type Number pid
+	
+	while rs.next() do {
+		set pid = rs.getCol("PID")
+		if $$VALID^%ZPID(pid) quit 
+		do CLOSE(pid) 
+		set cnt = cnt + 1
+		}
+		
+	write !!,"Number of PROCESSID entries removed: "_cnt
+	quit
+
+vSIG()	quit "60274^58567^Badrinath Giridharan^10931"	// Signature - LTD^TIME^USER^SIZE

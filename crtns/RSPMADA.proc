@@ -1,0 +1,1189 @@
+RSPMADA	//PBS -LN  - V4.2 - RPA Minimum Annual Distribution Analysis
+	/*
+	-----  Revision History -----------------------------------------------
+
+	03/17/06 - DHANALAKSHMI R - CR20147
+		   Modified the section EXEC by removing the "NOUPDATE/" from 
+		   parameter of iratype.save() method.
+
+	02/22/06 - DHANALAKSHMI R - CR19228
+		   Modified the section EXEC by removing the setting to X,
+		   which is not required.
+		   Modified the section RSPPP by including a declaration for
+		   ACN and X
+		   Modified the section ACNPP by including a declaration for X.
+
+	02/10/06 - DHANALAKSHMI R - CR19480
+		   Modified by added a line "do Db.fastDelete("MADCALCH")"
+		   to delete the records from the table MADCALCH before adding
+		   record into the same, to avoid a GTM error "unique constraint 
+		   violated".
+
+	12/29/03 - CARROLLJ - CR7658
+		   Added #ACCEPT prior to xecute command to correct compile
+		   errors.
+
+	01/31/03 - ZWITKOWITSM - 51349
+		   Changed variable IRATYP to iratype.iratyp in section EXEC
+		   to correct Undefined error.
+
+	11/14/02 - ZWITKOWITSM - 43583
+		   Clean-up.
+
+	06/13/02 - ZWITKOWITSM - 43583
+		   Converted to PSL.
+
+	05/03/02 - BECKERJ - 50430
+		   Added AF as a parameter to NJD^UFRE in EXEC section, so
+		   there is a value to use to calculate the auto distribution
+		   amount.
+
+	03/27/02 - PREMKUMARM - 48761
+		   Rounded the plan owner's age (PAGE) down.
+
+	01/04/02 - BECKERJ - 48827
+		   In this routine the customer's age is calculated based on
+		   the age the customer will be as of Dec. 31st (PAGE).  This
+		   age is then used to look up values in different MAD tables.
+		   The age of the customer should not be rounded up or an
+		   incorrect value will be pulled from the MAD table.
+		   Modified the rounding of PAGE to round down not up.
+
+	12/18/01 - KESTELMANN - 48656
+		   Added new section OPT20 to calculate the required minimum
+		   annual distribution amount based on the new option 20 -
+		   Joint Life Expectancy - Both Recalculated.
+		   Changed code in the section MADA to add option 20 if
+		   $P(fIRATYPE,"|",33) (Minimum Annual Distribution Option)
+		   set to 1.
+
+	07/05/01 - AHMEDS - 43689
+		   Added section OPT30 to calculate required minimum
+		   distribution using uniform lifetime distribution table when
+		   age base option 30 is selected on a retirement plan. Added
+		   (30) for $P(fIRATYPE,"|",35) in the MADA section when
+		   $P(fIRATYPE,"|",33)=1.
+
+	06/14/01 - HALPINJ - 45575
+		   Modified code in RSPPP and EXEC to not remove the values
+		   behind the decimal of variable PAGE because the age
+		   requirement could be 70.5.
+
+	-----------------------------------------------------------------------
+	*/
+
+	new ET,DOB,IAR,%ZTHANG,%ZTSEQ,Q,SWITCH,TMPTBL
+
+	do BLDTBL
+
+	set (%ProcessMode,SWITCH)=0
+
+	set %TAB("LIVE")=".UPDPLN"
+	set %TAB("ACN")=".ACN2/HLP=[IRATYPE]ACN/TBL=[IRATYPE]ACN:DISTINCT:NOVAL/XPP=D ACNPP^RSPMADA"
+	set %TAB("RPASEQ")=".RPASEQ/HLP=[IRATYPE]RPASEQ/TBL=[IRATYPE]RPASEQ:QU ""[IRATYPE]ACN=<<ACN>>""/XPP=D EXT^DBSQRY"
+	set %TAB("IAR")=".IAR"
+	set (ACN,RPASEQ)="ALL"
+
+	set %READ="@@%FN,,,LIVE/REQ,ACN,RPASEQ,IAR"
+	do ^UTLREAD
+	if VFMQ="Q" do END quit
+
+	set SEQBY="[IRATYPE]ACN|[IRATYPE]RPASEQ|[IRATYPE]IRATYP"
+	if $D(Q) do ^DBSQRYA
+
+	if %ProcessMode=2!(%ProcessMode=4)!(VFMQ="Q") do END quit
+
+	// File data
+	if '$D(Q) do {
+
+		do Db.fastDelete("MADCALC")
+		do Db.fastDelete("MADCALCH")
+
+		type RecordMADCALCH madcalch=Class.new("RecordMADCALCH")
+
+		set madcalch.head="*"
+		set madcalch.tjd=%SystemDate
+		set madcalch.live=LIVE
+
+		do madcalch.bypassSave()
+		}
+
+	set (ACN,RPASEQ)=""
+
+	// Next account
+	for  set ACN=Db.nextKey("IRA","ACN") quit:ACN=""  do ACN
+
+	quit
+
+
+ACN	// Process ACN
+
+	catch error {
+
+		new ET,RM
+
+		lock -IRA(ACN)
+
+		set ET=error.type
+
+		if ET["%GTM-" do ZE^UTLERR quit
+
+		set ET=ET_"-"_error.thrownAt
+		set RM=error.description
+
+		do ^UTLERR
+
+		set ER=1
+		// System processing error
+		set RM=$$^MSG(2575)
+
+		do EXC
+		}
+
+	#ACCEPT DATE=12/29/03;PGM=John Carroll
+	if 1 set X="" for  set X=$O(Q(1,X)) quit:X=""  xecute Q(1,X) else  quit
+	else  quit
+
+	lock +IRA(ACN):2
+	else  set ET="RECLOC" do EXC quit
+
+	type RecordCIF cif=Db.getRecord("CIF","ACN")
+
+	if cif.dob="" do { quit
+		// Invalid birth date. Unable to verify age.
+		do Runtime.setErrMSG("DEP",1136)
+		do EXC
+		lock -IRA(ACN)
+		}
+
+	do RSEQ(.cif)
+
+	lock -IRA(ACN)
+
+	do END
+
+	quit
+
+
+RSEQ(RecordCIF cif)	// Next sequence
+
+	type ResultSet rs=Db.select("RPASEQ","IRATYPE","ACN=:ACN")
+
+	if rs.isEmpty() quit
+
+	new RPASEQ
+
+	while rs.next() do {
+
+		set RPASEQ=rs.getCol(1)
+
+		#ACCEPT DATE=12/29/03;PGM=John Carroll
+		if 1 set X="" for  set X=$O(Q(2,X)) quit:X=""  xecute Q(2,X) else  quit
+		else  quit
+
+		do EXEC(.cif)
+		}
+
+	quit
+
+
+Public EXEC(RecordCIF cif)	// Processing
+	/*
+	  INPUT
+			cif     - CIF object		TYP=RecordCIF/REQ
+
+	  		ACN	- Customer number		TYP=N/REQ
+			RPASEQ	- Retirement Plan Account	TYP=N/REQ
+				  Sequence Number
+			PLAN	- Plan ID			TYP=T/REQ
+	*/
+
+	// do not new ET,IAR,LIVE,MODELER,Q,RSPTYP,SWITCH
+	new AF,AGE,AUTAMT,BEGPYR,BEGYR,BEXP,ENDPYR,ENDYR,JEXP,MADA
+	new MAXAUT,MAXLIF,PAGE,PEXP,PYR,SAGE,VAL,XDATE,YR
+
+	type RecordIRATYPE iratype=Db.getRecord("IRATYPE","ACN,RPASEQ")
+
+	set BEGYR=$$BOTY^SCADAT(%SystemDate,1)
+	set ENDYR=$$EOTY^SCADAT(%SystemDate,1)
+	set (MAXLIF,MAXAUT)=""
+	set (BEXP,JEXP,PEXP)=""
+
+	// Minimum Annual Distribution Option
+	if iratype.rspmado=1 set XDATE=ENDYR
+	else  set XDATE=BEGYR
+
+	do Db.fastDelete("MADCALC","ACN,RPASEQ")
+
+	/*
+ 	 use customers age as of end of Tax year for US calculations
+ 	 and as of beginning of Tax year for Canadian
+	*/
+
+	// primary age
+	set PAGE=$$NOY^SCADAT(cif.dob,XDATE,1)
+	// Rounding the owner's age
+	set PAGE=PAGE\1
+	set ER=0
+
+	// not eligible
+	if 'IAR,PAGE<iratype.madage do {
+
+		new DATE,IRACON
+
+		set DATE=$$DAT^%ZM(XDATE)
+		set IRACON=iratype.iracon
+
+		// Not eligible. As of ~p1 customer's age was under ~p2.
+		if PAGE<iratype.iracon do Runtime.setErrMSG("DEP",965,"DATE~IRACON") quit
+		}
+	if ER quit
+
+	// beg of prev.tax year
+	set BEGPYR=$$BOTY^SCADAT($$BOTY^SCADAT(%SystemDate,1)-1,1)
+	// end of tax year
+	set ENDPYR=$$EOTY^SCADAT(BEGPYR,1)
+	set PYR=$$YEAR^SCADAT(ENDPYR,1)
+
+	type RecordIRA ira=Db.getRecord("IRA","ACN,RPASEQ,PYR")
+
+	// calc MAD amount
+	set MADA=$$MADA(.ira,.iratype)
+	if ER,$G(ET)'="RSPMADA1" do EXC quit
+
+	// calc Max amountdo MAXLIF(.iratype)
+	if iratype.iratyp=7 do {
+
+		set MAXLIF=$$MAXLIF(.iratype,VAL,$G(AGE),12)
+
+		if 'ER quit
+
+		do EXC
+		set ER=0
+		}
+
+	// Auto-Distribution Frequency
+	set AUTAMT=MADA
+
+	set AF=0
+	if iratype.autfre'="" set NJD=$$NJD^UFRE(%SystemDate,iratype.autfre,.AF)
+	if ER do EXC quit
+
+	if AF set AUTAMT=$$^SCARND((MADA/AF),,,,2,"-")
+	if AUTAMT<0 set AUTAMT=0
+	if MAXLIF>0,AF set MAXAUT=$$^SCARND((MAXLIF/AF),,,,2,"-")
+
+	// Int only
+	if iratype.autopt=2 set (AUTAMT,MAXAUT)=""
+
+	set SWITCH=1
+
+	type RecordMADCALC madcalc=Class.new("RecordMADCALC")
+
+	// also save in variable X for routine MRPC031.m
+	set madcalc.acn=ACN
+	set madcalc.rpaseq=RPASEQ
+	set madcalc.iratyp=iratype.iratyp
+	set madcalc.nam=cif.nam
+	set madcalc.taxid=cif.taxid
+	set madcalc.planid=iratype.planid
+	set madcalc.planman=iratype.planman
+	set madcalc.madamt=MADA
+	set madcalc.rspmado=iratype.rspmado
+	set madcalc.rspmadb=iratype.rspmadb
+	set madcalc.pvmad=VAL
+	set madcalc.dob=cif.dob
+	set madcalc.madsdob=iratype.madsdob
+	set madcalc.autupd=iratype.autupd
+	set madcalc.autamt=AUTAMT
+	set madcalc.autfre=iratype.autfre
+	set madcalc.autdnd=iratype.autdnd
+	set madcalc.madsat=iratype.madsat
+	set madcalc.origmad=ira.madamt
+	set madcalc.maxlif=MAXLIF
+	set madcalc.maxaut=MAXAUT
+	set madcalc.maxlifp=ira.maxlif
+
+	do madcalc.bypassSave()
+
+	// anticipated
+	if '$G(LIVE) quit
+
+	set YR=$$YEAR^SCADAT(ENDYR,1)
+
+	type RecordIRA ira2=Db.getRecord("IRA","ACN,RPASEQ,YR")
+
+	set ira2.madamt=MADA
+	set ira2.pvmad=VAL
+	set ira2.maxlif=MAXLIF
+
+	do ira2.bypassSave()
+
+	if PEXP!BEXP!JEXP do {
+
+		// Update Plan Term Certain
+		if PEXP set iratype.ptc=PEXP
+		// Update Beneficiary Term Certain
+		if BEXP set iratype.btc=BEXP
+		// Update Joint Term Certain
+		if JEXP set iratype.jtc=JEXP
+
+		do iratype.save("NOTRIGBEF/NOVALREQ/NOVALDD/NOTRIGAFT/NOVALRI/NOINDEX/NOFKCHK/JOURNAL")
+		}
+
+	new AMT,TCMT
+
+	set AMT=$$AUTAMT(.iratype)
+	if +AMT<0 quit
+
+	// no change
+	if iratype.autamt=AMT quit
+
+	set iratype.autamt=AMT
+
+	do iratype.bypassSave()
+
+	// report change in auto dist. amount to CIF history
+	set TCMT="[IRATYPE]AUTAMT:"_iratype.autamt_":"_AMT_":PLAN "_RPASEQ
+
+	do CIFHBLD^CIFFUNCS(TCMT)
+
+	quit
+
+
+AUTAMT(RecordIRATYPE iratype)
+	/*
+	   update IRATYPE.AUTAMT if IRATYPE.AUTUPD
+	   0 - do not update
+	   1 - update with min. if new amount is greater than current amount
+	   10 - min flag set, no update
+	   20 - max flag set, no update
+	   11 - min flag set, update with min amount
+	   21 - max flag set, update with max amount
+	*/
+
+	// do not update (AUTUPD=0,10,20)
+	if +iratype.autupd#10=0 quit -1
+
+	// disopt is interest only.
+	if iratype.autopt=2 quit ""
+
+	// Update IRATYPE.AUTAMT only if new value of AUTAMT is greater than the current value
+	if iratype.autupd=1,(AUTAMT>iratype.autamt) quit AUTAMT
+
+	// max dist (AUTUPD=21)
+	if iratype.autupd=21 quit MAXAUT
+
+	// min dist (AUTUPD=11)
+	if iratype.autupd=11 quit AUTAMT
+
+	quit -1
+
+
+MADA(RecordIRA ira,RecordIRATYPE iratype)
+	/*
+	   Calculate RPA Minimum Annual Distribution Amounts using age base
+	   option (IRATYPE.RSPMADB) and plan value (as of file date).
+	*/
+
+	// find plan value
+	set VAL=$$VALUE()
+	set VAL=$$^SCARND(VAL,0,$G(CID))
+
+	set XDATE=BEGYR
+
+	// Beneficiary DOB for Min Annual Distrib
+	if iratype.madsdob="" set SAGE=0
+
+	else  do {
+		// use age as of end of Tax year for US calculations
+		if iratype.rspmado=1 set XDATE=ENDYR
+		// spouse
+		set SAGE=$$NOY^SCADAT(+iratype.madsdob,XDATE,1)
+		set ER=0
+		}
+
+	// Rounding the spouse's age
+	set SAGE=SAGE\1
+
+	if iratype.rspmado'=1,iratype.rspmado'=2 quit 0
+
+	if iratype.rspmado=2 quit $$OPT2(.iratype)
+
+	set PVMAD=ira.pvmad
+
+	if iratype.rspmadb=1 quit $$OPT1(.iratype)
+	if iratype.rspmadb=11 quit $$OPT11(.iratype)
+	if iratype.rspmadb=20 quit $$OPT20()
+	if iratype.rspmadb=21 quit $$OPT21(.iratype)
+	if iratype.rspmadb=22 quit $$OPT22(.iratype)
+	if iratype.rspmadb=23 quit $$OPT23(.iratype)
+	if iratype.rspmadb=24 quit $$OPT24()
+	if iratype.rspmadb=25 quit $$OPT25(.iratype)
+	if iratype.rspmadb=26 quit $$OPT26(.iratype)
+	if iratype.rspmadb=27 quit $$OPT27(.iratype)
+	if iratype.rspmadb=30 quit $$OPT30(.iratype)
+
+	quit 0
+
+
+OPT1(RecordIRATYPE iratype)
+	// US Calc (IRS Actuarial Tables) plan value / years in life expectancy
+
+	new FACTOR
+
+	set FACTOR=0
+
+	// find years of life expectancy determined by IRATYPE.RSPMADB
+
+	// Age Base Opt for Min Annual Dist Calc
+	if iratype.rspmadb=1 do {
+
+		type ResultSet rs=Db.select("FACTOR","UTBLMADSL","AGE NOT >:PAGE","AGE DESC")
+	
+		if rs.next() set FACTOR=rs.getCol(1)
+		}
+
+	// Age Base Opt for Min Annual Dist Calc
+	if iratype.rspmadb=2 do { if ER quit 0
+
+		if 'SAGE do SAGER quit
+
+		type ResultSet rs=Db.select("FACTOR","UTBLMADJL","OWNAGE NOT >:PAGE AND BENAGE NOT >:SAGE","BENAGE DESC, OWNAGE DESC")
+
+		if rs.next() set FACTOR=rs.getCol(1)
+		}
+
+	if 'FACTOR quit 0
+
+	quit $$^SCARND(VAL/FACTOR)
+
+
+OPT2(RecordIRATYPE iratype)	// New Canadian minimal distribution processing.
+
+	new AGE,PERCENT,TABLE
+
+	set AGE=0
+
+	// find selected age determined by IRATYPE.RSPMADB
+
+	// Age Base Opt for Min Annual Dist Calc
+	if iratype.rspmadb=3 set AGE=PAGE
+
+	// Age Base Opt for Min Annual Dist Calc
+	if iratype.rspmadb=4 do { if 'AGE quit 0
+		set AGE=SAGE
+		if 'AGE do SAGER
+		}
+
+	// Get Table ID.
+	set TABLE=iratype.madpct
+
+	// Retirement plan minimum distribution parameters
+	if TABLE=""!(AGE="") do Runtime.setErrMSG("DEP",935) quit 0
+
+	// get lowest entry in table.
+	type ResultSet rs=Db.select("AGE","UTBLMADPCT","TABLE=:TABLE")
+
+	if rs.isEmpty() quit 0
+
+	if rs.next()
+
+	// must be greater or equal to lowest age
+	if AGE<rs.getCol(1) quit 0
+
+	// get highest entry in table.
+	type ResultSet rs1=Db.select("AGE,FACTOR","UTBLMADPCT","TABLE=:TABLE","AGE DESC")
+
+	// already checked isEmpty() condition above
+
+	if rs1.next()
+
+	// use upper limit
+	if AGE>rs1.getCol(1) set PERCENT=rs1.getCol(2)
+
+	else  do {
+
+		// use age
+		type ResultSet rs2=Db.select("FACTOR","UTBLMADPCT","TABLE=:TABLE AND AGE=:AGE")
+
+		if rs2.isEmpty() set PERCENT="" quit
+
+		if rs2.next() set PERCENT=rs2.getCol(1)
+		}
+
+	// Retirement plan minimum dist % not set for age ~p1
+	if PERCENT="" do Runtime.setErrMSG("DEP",939,"AGE") quit 0
+
+	// Return Minimum Distribution Amount (rounded)
+	quit $$^SCARND(VAL*(PERCENT/100))
+
+
+OPT11(RecordIRATYPE iratype)	// Single Life Expectancy - No Recalculation
+
+	// Get life expectacy where for plan owner
+	if PVMAD="" do {
+
+		type ResultSet rs=Db.select("FACTOR","UTBLMADSL","AGE=:PAGE")
+
+		if rs.isEmpty() set PEXP="" quit
+
+		if rs.next() set PEXP=rs.getCol(1)
+		}
+
+	// Reduce plan term certain by 1
+	if PVMAD'="",iratype.ptc set PEXP=iratype.ptc-1
+
+	if PEXP="" do { quit 0
+		// Life expectancy table not found
+		set RM=$$^MSG(3930)
+		do EXC
+		}
+
+	if PEXP'>0 quit 0
+
+	quit $$^SCARND(VAL/PEXP)
+
+
+OPT20()	// Joint Life Expectancy - Both Recalculated
+
+	type ResultSet rs=Db.select("FACTOR","UTBLMADJL","OWNAGE=:PAGE AND BENAGE=:SAGE AND FACTOR NOT=''")
+
+	if rs.isEmpty() do { quit 0
+		// Life expectancy table not found
+		set RM=$$^MSG(3930)
+		do EXC
+		}
+
+	if rs.next()
+
+	quit $$^SCARND(VAL/rs.getCol(1))
+
+
+OPT21(RecordIRATYPE iratype)	// Joint Life Expectancy -Plan Owner Recalculated
+
+	new BENAGE,OWNAGE
+
+	set (BENAGE,OWNAGE)=""
+
+	if PVMAD="" do {
+
+		type ResultSet rs=Db.select("FACTOR","UTBLMADSL","AGE=:SAGE")
+		if rs.isEmpty() quit
+		if rs.next() do {
+			// Get life expectancy of beneficiary
+			set BEXP=rs.getCol(1)
+			set OWNAGE=PAGE
+			set BENAGE=SAGE
+			}
+		}
+
+	else  do {
+
+		// Use Beneficiary's term certain to get adjusted age
+		set BEXP=iratype.btc-1
+
+		type ResultSet rs=Db.select("AGE","UTBLMADSL","FACTOR<:BEXP")
+		if rs.isEmpty() quit
+		if rs.next() do {
+			set OWNAGE=PAGE
+			set BENAGE=rs.getCol(1)
+			}
+		}
+
+	if OWNAGE=""!(BENAGE="") do { quit 0
+		// Life expectancy table not found
+		set RM=$$^MSG(3930)
+		do EXC
+		}
+
+	type ResultSet rs1=Db.select("FACTOR","UTBLMADJL","OWNAGE=:OWNAGE AND BENAGE=:BENAGE AND FACTOR NOT=''")
+	if rs1.isEmpty() do { quit 0
+		// Life expectancy table not found
+		set RM=$$^MSG(3930)
+		do EXC
+		}
+	if rs1.next()
+
+	quit $$^SCARND(VAL/rs1.getCol(1))
+
+
+OPT22(RecordIRATYPE iratype)	// Joint Life Expectancy -Beneficiary Recalculation
+
+	new BENAGE,OWNAGE
+
+	set (BENAGE,OWNAGE)=""
+
+	if PVMAD="" do {
+
+		type ResultSet rs=Db.select("FACTOR","UTBLMADSL","AGE=:PAGE")
+		if rs.isEmpty() quit
+		// Plan owner term certain from UTBLMADSL
+		if rs.next() do {
+			set PEXP=rs.getCol(1)
+			set OWNAGE=PAGE
+			set BENAGE=SAGE
+			}
+		}
+
+	else  do {
+
+		// Reduce plan term certain by one
+		set PEXP=iratype.ptc-1
+
+		type ResultSet rs=Db.select("AGE","UTBLMADSL","FACTOR<:PEXP")
+		if rs.isEmpty() quit
+		if rs.next() do {
+			set OWNAGE=rs.getCol(1)
+			set BENAGE=SAGE
+			}
+		}
+
+	if OWNAGE=""!(BENAGE="") do { quit 0
+		// Life expectancy table not found
+		set RM=$$^MSG(3930)
+		do EXC
+		}
+
+	type ResultSet rs1=Db.select("FACTOR","UTBLMADJL","OWNAGE=:OWNAGE AND BENAGE=:BENAGE AND FACTOR NOT=''")
+	if rs1.isEmpty() do { quit 0
+		// Life expectancy table not found
+		set RM=$$^MSG(3930)
+		do EXC
+		}
+	if rs1.next()
+
+	quit $$^SCARND(VAL/rs1.getCol(1))
+
+
+OPT23(RecordIRATYPE iratype)	// Joint Life Expectancy(Spouse Beneficiary)(No Recalculation)
+
+	if PVMAD="" do {
+		type ResultSet rs=Db.select("FACTOR","UTBLMADJL","OWNAGE=:PAGE AND BENAGE=:SAGE")
+		if rs.isEmpty() set JEXP="" quit
+		// Select joint life expectancy using plan owner and beneficairy's ages
+		if rs.next() set JEXP=rs.getCol(1)
+		}
+
+	// Reduce joint term certain by one and devide by plan value
+	else  set JEXP=iratype.jtc-1
+
+	if JEXP="" do { quit 0
+		// Life expectancy table not found
+		set RM=$$^MSG(3930)
+		do EXC
+		}
+
+	quit $$^SCARND(VAL/JEXP)
+
+
+OPT24()	// MDIB - Both Recalculated
+
+	new EXP,FACTOR1,FACTOR2
+
+	type ResultSet rs=Db.select("FACTOR","UTBLMDIB","PLNAGE=:PAGE")
+	if rs.isEmpty() set FACTOR1=""
+	else  if rs.next() set FACTOR1=rs.getCol(1)
+
+	type ResultSet rs1=Db.select("FACTOR","UTBLMADJL","OWNAGE=:PAGE AND BENAGE=:SAGE")
+	if rs1.isEmpty() set FACTOR2=""
+	else  if rs1.next() set FACTOR2=rs1.getCol(1)
+
+	// Take the lessor of factors and divide by plan value
+	if FACTOR1>FACTOR2 set EXP=FACTOR2
+	else  set EXP=FACTOR1
+
+	if EXP="" do { quit 0
+		// Life expectancy table not found
+		set RM=$$^MSG(3930)
+		do EXC
+		}
+
+	quit $$^SCARND(VAL/EXP)
+
+
+OPT25(RecordIRATYPE iratype)	// MDIB - Plan Owner Recalculated
+
+	new BENAGE,EXP,MEXP,OWNAGE,PLEXP
+
+	set (BENAGE,OWNAGE)=""
+
+	if PVMAD="" do {
+		type ResultSet rs=Db.select("FACTOR","UTBLMADSL","AGE=:SAGE")
+		if rs.isEmpty() quit
+		if rs.next() do {
+			set BEXP=rs.getCol(1)
+			set OWNAGE=PAGE
+			set BENAGE=SAGE
+			}
+		}
+
+	else  do {
+		// Reduce beneficiary term certain by one
+		set BEXP=iratype.btc-1
+
+		type ResultSet rs=Db.select("AGE","UTBLMADSL","FACTOR<:BEXP")
+		if rs.isEmpty() quit
+		if rs.next() do {
+			set OWNAGE=PAGE
+			set BENAGE=rs.getCol(1)
+			}
+		}
+
+	if OWNAGE=""!(BENAGE="") do { quit 0
+		// Life expectancy table not found
+		set RM=$$^MSG(3930)
+		do EXC
+		}
+
+	type ResultSet rs1=Db.select("FACTOR","UTBLMADJL","OWNAGE=:OWNAGE AND BENAGE=:BENAGE")
+	if rs1.isEmpty() set EXP=""
+	else  if rs1.next() set EXP=rs1.getCol(1)
+
+	type ResultSet rs2=Db.select("FACTOR","UTBLMDIB","PLNAGE=:PAGE")
+	if rs2.isEmpty() set MEXP=""
+	else  if rs2.next() set MEXP=rs2.getCol(1)
+
+	// Take the lessor value and divide by plan value
+	if EXP>MEXP set PLEXP=MEXP
+	else  set PLEXP=EXP
+
+	if PLEXP="" do { quit 0
+		// Life expectancy table not found
+		set RM=$$^MSG(3930)
+		do EXC
+		}
+
+	quit $$^SCARND(VAL/PLEXP)
+
+
+OPT26(RecordIRATYPE iratype)	// MDIB - Beneficiary Recalculated
+
+	new BENAGE,EXP,MEXP,OWNAGE,PLEXP
+
+	set (BENAGE,OWNAGE)=""
+
+	if PVMAD="" do {
+		type ResultSet rs=Db.select("FACTOR","UTBLMADSL","AGE=:PAGE")
+		if rs.isEmpty() quit
+		if rs.next() do {
+			set PEXP=rs.getCol(1)
+			set OWNAGE=PAGE
+			set BENAGE=SAGE
+			}
+		}
+
+	else  do {
+		// Reduce plan term certain by one
+		set PEXP=iratype.ptc-1
+
+		type ResultSet rs=Db.select("AGE","UTBLMADSL","FACTOR<:PEXP")
+		if rs.isEmpty() quit
+		if rs.next() do {
+			set OWNAGE=rs.getCol(1)
+			set BENAGE=SAGE
+			}
+		}
+
+	if OWNAGE=""!(BENAGE="") do { quit 0
+		// Life expectancy table not found
+		set RM=$$^MSG(3930)
+		do EXC
+		}
+
+	type ResultSet rs1=Db.select("FACTOR","UTBLMADJL","OWNAGE=:OWNAGE AND BENAGE=:BENAGE")
+	if rs1.isEmpty() set EXP=""
+	else  if rs1.next() set EXP=rs1.getCol(1)
+
+	type ResultSet rs2=Db.select("FACTOR","UTBLMDIB","PLNAGE=:OWNAGE")
+	if rs2.isEmpty() set MEXP=""
+	else  if rs2.next() set MEXP=rs2.getCol(1)
+
+	if EXP>MEXP set PLEXP=MEXP
+	else  set PLEXP=EXP
+
+	if PLEXP="" do { quit 0
+		// Life expectancy table not found
+		set RM=$$^MSG(3930)
+		do EXC
+		}
+
+	quit $$^SCARND(VAL/PLEXP)
+
+
+OPT27(RecordIRATYPE iratype)	// MDIB - No Recalculation
+
+	new MEXP,PLEXP
+
+	if PVMAD="" do {
+		type ResultSet rs=Db.select("FACTOR","UTBLMADJL","OWNAGE=:PAGE AND BENAGE=:SAGE")
+		if rs.isEmpty() set JEXP="" quit
+		if rs.next() set JEXP=rs.getCol(1)
+		}
+
+	// Reduce joint owner term certain by one
+	else  set JEXP=iratype.jtc-1
+
+	// Use plan owner's age to get value from UTBLMDIB
+	type ResultSet rs1=Db.select("FACTOR","UTBLMDIB","PLNAGE=:PAGE")
+	if rs1.isEmpty() set MEXP=""
+	else  if rs1.next() set MEXP=rs1.getCol(1)
+
+	if JEXP>MEXP set PLEXP=MEXP
+	else  set PLEXP=JEXP
+
+	if PLEXP="" do { quit 0
+		// Life expectancy table not found
+		set RM=$$^MSG(3930)
+		do EXC
+		}
+
+	quit $$^SCARND(VAL/PLEXP)
+
+
+OPT30(RecordIRATYPE iratype)	// ULD - Uniform Lifetime Expectancy Calculated
+
+	// find years of life expectancy (FACTOR) determined by [IRATYPE]RSPMADB
+	new FACTOR
+
+	type ResultSet rs=Db.select("FACTOR","UTBLULD","PLNAGE=:PAGE")
+
+	// Plan owner's age is not in the UTBLULD table
+	if rs.isEmpty() quit 0
+
+	if rs.next() set FACTOR=rs.getCol(1)
+
+	if 'FACTOR quit 0
+
+	quit $$^SCARND(VAL/FACTOR)
+
+
+VALUE()	// find plan value
+
+	if $G(MODELER) quit PLAN
+
+	new TOT
+
+	set TOT=""
+
+	// get all primary owner deposit accounts
+	type ResultSet rs=Db.select("CID","RELCIF","ACN=:ACN AND POI=1 AND DOI=1")
+
+	if rs.isEmpty() quit ""
+
+	new CID
+
+	while rs.next() do {
+
+		set CID=rs.getCol(1)
+
+		type RecordDEP dep=Db.getRecord("DEP","CID")
+
+		// not same plan
+		if dep.rpaseq'=RPASEQ quit
+		// bal + accrued
+		set TOT=TOT+dep.bal+dep.posacr
+		}
+
+	quit TOT
+
+
+EXC	// Log error in exception file
+
+	// Retirement plan minimum annual distribution analysis
+	set DESC=$$^MSG(1110)_"|1"
+
+	if $G(ET)="" set ET=$G(RM)
+
+	do LOG^UTLEXC($T(+0),"*",DESC,$G(ACN),$G(%ZTSEQ),$G(ET),$G(RPASEQ))
+
+	kill ET,%ZTSEQ
+
+	quit
+
+
+END
+	kill %TAB
+
+	if ER!(%ProcessMode=2)!(%ProcessMode=4) quit
+
+	set ER="W"
+	if '$D(INCD) set INCD=""
+
+	if 'SWITCH!(VFMQ="Q") do {
+		// Retirement plan minimum distribution analysis not created
+		if %ProcessMode=0 set RM=$$^MSG(944) quit
+
+		// Retirement plan minimum distribution analysis not modified
+		if %ProcessMode=1 set RM=$$^MSG(950) quit
+
+		// Retirement plan minimum distribution analysis not deleted
+		set RM=$$^MSG(963)
+		}
+
+	if SWITCH do {
+		// Retirement plan minimum distribution analysis created
+		if %ProcessMode=0 set RM=$$^MSG(941) quit
+
+		// Retirement plan minimum distribution analysis modified
+		if %ProcessMode=1 set RM=$$^MSG(948) quit
+
+		// Retirement plan minimum distribution analysis deleted
+		set RM=$$^MSG(954)
+		}
+
+	quit
+
+
+SAGER	// log error if no spouses date-of-birth
+
+	set ER=1
+	set ET="RSPMADA1"
+
+	do EXC
+
+	quit
+
+
+Public MODELER	// Minimum Annual Distribution Modeler (function RPA006)
+
+	new ET,%ZTHANG,%ZTSEQ,Q,SWITCH,RSPTYP,TMPTBL
+
+	do BLDTBL
+
+	set (%ProcessMode,SWITCH)=0
+
+	set %TAB("ACN")=".ACN1/HLP=[IRATYPE]ACN/TBL=[IRATYPE]ACN:DISTINCT:NOVAL/XPP=S %EXT=1 D ^UCIF"
+	set %TAB("RPASEQ")=".RPASEQ1/HLP=[IRATYPE]RPASEQ/TBL=[IRATYPE]RPASEQ:QU ""[IRATYPE]ACN=<<ACN>>""/XPP=D RSPPP^RSPMADA"
+	set %TAB("PLAN")=".PLAN"
+
+	// Update Mode & Ignore Age Requirement = No
+	set (LIVE,IAR)=0
+	set %READ="@@%FN,,,ACN/REQ,RPASEQ/REQ,PLAN"
+
+	do ^UTLREAD
+
+	if VFMQ="Q" do END quit
+
+	if PLAN'="" set MODELER=1
+
+	type RecordCIF cif=Db.getRecord("CIF","ACN")
+
+	do EXEC(.cif)
+	if ER quit
+
+	// Display results
+	set %BLK="/,"_$I_","_ACN_","_RPASEQ_","_RSPTYP
+	set VFMQ=0
+
+	kill POP
+
+	set RID="SCA548"
+
+	do ^URID
+
+	if PGM'="" do {
+		set PGM="^"_PGM
+		do @PGM
+		}
+
+	kill RID,POP,%NOOPEN,%NOCLOSE
+
+	quit
+
+
+Public RSPPP	// Modeler post processor for RPASEQ prompt
+
+	type public Number ACN,X
+	new BEGYR,ENDYR,JD,PAGE
+
+	type RecordCIF cif=Db.getRecord("CIF","ACN")
+	type RecordIRATYPE iratype=Db.getRecord("IRATYPE","ACN,X")
+
+	/*
+ 	 use customers age as of end of tax year for US calulations (RSPMADO=1)
+ 	 and as of beginning of tax year for Canadian
+	*/
+
+	set BEGYR=$$BOTY^SCADAT(%SystemDate,1)
+	set ENDYR=$$EOTY^SCADAT(%SystemDate,1)
+	set JD=BEGYR
+	set RSPTYP=iratype.iratyp
+
+	if iratype.rspmado=1 set JD=ENDYR
+
+	// Invalid birth date. Unable to verify age.
+	if cif.dob="" do { quit
+		do Runtime.setErrMSG("DEP",1136)
+		do EXC
+		}
+
+	// primary age
+	set PAGE=$$NOY^SCADAT(cif.dob,JD,1)
+	set ER=0
+
+	// Not eligible. As of ~p1 customer's age was under ~p2.
+	if PAGE<iratype.madage do {
+
+		new DATE,MADAGE
+
+		set DATE=$$DAT^%ZM(JD)
+		set MADAGE=iratype.madage
+
+		do Runtime.setErrMSG("DEP",965,"DATE~MADAGE")
+		}
+
+	quit
+
+
+Public MAXLIF(RecordIRATYPE iratype,AMT,AGE,MTH)
+	/*
+	  Called from ^IRA and from above.
+
+	  Input:
+	   iratype - Iratype object					TYP=RecordIRATYPE/REQ
+
+	   AMT	   - This will be the amount used for calculating	TYP=N/REQ
+		     the Maximum Annual Distribution Amount
+
+	   AGE     - If a value is present that this will be the age	TYP=N/NOREQ
+	             used to determine the factor from the LIF Max. Annual
+	             Dist. Calc table.  If not supplied the age will be
+	             determined based on the AGE base (spouse or member).
+
+	   MTH     - If a value is present than this will be the	TYP=N/NOREQ
+	             number of months used in the calculation.  If not
+	             supplied the number of months will be calculated using
+	             todays date and December.
+	*/
+
+	new END,FACTOR,AGE
+
+	set AMT=+$G(AMT)
+	if AMT=0 quit 0
+
+	set AGE=$G(AGE)
+	set MTH=+$G(MTH)
+	set END=$$EOTY^SCADAT(%SystemDate,1)
+
+	if MTH=0 do {
+		set MTH=$$NOM^SCADAT(%SystemDate,END,1)
+		if MTH#1 set MTH=MTH\1+1
+		}
+
+	// Maximum LIF % Option
+	set OPT=+iratype.lifpct
+
+	// Missing maximum LIF % option
+	if iratype.lifpct="" do Runtime.setErrMSG("DEP",997) quit 0
+
+	set TABLE=iratype.lifpct
+
+	// Invalid maximum LIF % option, ~p1
+	if 'Db.isDefined("UTBLLIFDESC","TABLE") do Runtime.setErrMSG("DEP",972,"TABLE") quit 0
+
+	// Age Base Opt for Min Annual Dist Calcdo AGE(.cif,.iratype)
+	if AGE="" set AGE=$$AGE(.iratype)
+	if ER quit 0
+
+	type ResultSet rs=Db.select("FACTOR","UTBLLIFPCT","TABLE=:TABLE AND AGE=:AGE")
+
+	// If not hit exactly, see if AGE is greater than upper limit and use upper limit
+	if rs.isEmpty() do {
+
+		type ResultSet rs1=Db.select("AGE,FACTOR","UTBLLIFPCT","TABLE=:TABLE","AGE DESC")
+
+		if rs1.isEmpty() set FACTOR=0 quit
+
+		if rs1.next()
+
+		// quit with upper limit
+		if AGE>rs1.getCol(1) set FACTOR=rs1.getCol(2) quit
+
+		/*
+ 		  AGE is not greater than upper limit, test if below lower.  If lower,
+ 		  we will quit with 0, if not we quit with an error.
+		*/
+		type ResultSet rs2=Db.select("AGE","UTBLLIFPCT","TABLE=:TABLE")
+ 		if rs2.isEmpty() set FACTOR=0 quit
+	 	if rs2.next()
+
+		// AGE is below lower limit
+		if AGE<rs2.getCol(1) set FACTOR=-1
+		// Table is not defined for AGE
+		else  set FACTOR=0
+		}
+
+	// Exact hit
+	else  if rs.next() set FACTOR=rs.getCol(1)
+
+	// AGE less than minimum
+	if FACTOR=-1 quit 0		 
+
+	// Age, ~p1 missing from LIFPCT table ~p2
+	if FACTOR=0 do Runtime.setErrMSG("DEP",973,"AGE~OPT") quit 0
+
+	quit $$^SCARND((AMT/FACTOR*(MTH/12)))
+
+
+AGE(RecordIRATYPE iratype)	// Returns the AGE to be used in the MAXLIF calculation
+
+	// Age base not defined
+	if iratype.rspmadb="" do Runtime.setErrMSG("DEP",974) quit 0
+
+	set AGE=0
+
+	// find selected age determined by IRATYPE.RSPMADB
+
+	// primary age
+	if iratype.rspmadb=3 do {
+
+		new ACN
+
+		set ACN=iratype.acn
+
+		type RecordCIF cif=Db.getRecord("CIF","ACN")
+
+		set AGE=$$NOY^SCADAT(cif.dob,%SystemDate,1)
+		}
+
+	if iratype.rspmadb=4 do {
+
+		// Beneficiary DOB for Min Annual Distrib
+		if +iratype.madsdob=0 do SAGER quit
+
+		// spouse
+		set AGE=$$NOY^SCADAT(iratype.madsdob,%SystemDate,1)
+		}
+
+	set ER=0
+
+	quit AGE\1
+
+
+Public ACNPP	// Post-processor for account
+
+	type public Number X
+
+	if X="" quit
+	if X="ALL" quit
+
+	set %EXT=1
+
+	do ^UCIF
+	do EXT^DBSQRY
+
+	quit
+
+
+BLDTBL	// Build look-up tables for screens
+ 
+        type ResultSet rs=Db.select("ACN,RPASEQ","IRATYPE","")
+ 
+        if rs.isEmpty() quit
+ 
+        while rs.next() set TMPTBL(rs.getCol(1),rs.getCol(2))=""
+ 
+        quit
+
+vSIG()	quit "60341^33812^Dhanalakshmi R^25428"	// Signature - LTD^TIME^USER^SIZE

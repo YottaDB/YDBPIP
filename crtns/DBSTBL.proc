@@ -1,0 +1,1755 @@
+public DBSTBL(String vREF, String vSTR, String vFMT, Number vMIN, Number vMAX, Number vPT, Number vPB, String vHLP, String vHDG, String vUFK)
+
+	/*
+	DATA-QWIK Screen Table Lookup
+	
+	This procedures makes use of a large number of variables that are global
+	throughout the procedure.  To simplify scope management, these variables
+	are carried in the vinfo() array.
+	
+	Because a local array can be used be used as a lookup table, many varibles
+	used throughout this procedure begin with "v", which is a leading character
+	reserved to DATA-QWIK, in order to avoid conflicts.  This does not apply to
+	purely local variables where there is no potential interaction with a
+	local look-up array.
+	
+	ARGUMENTS:
+	
+		. vREF	Lookup reference
+			[Table_name] [Column,...]
+			[^]glvn(key,... [# position]
+			@entryref^routine
+		. vSTR	Input Match String		/NOREQ
+		. vFMT	Data Type - TUFLDC$		/NOREQ/DFT="T"
+		. vMIN	Minumum Value			/NOREQ
+		. vMAX	Maximum Value			/NOREQ
+		. vPT	Page top			/NOREQ/MECH=REFNAM:RW/MIN=10/MAX=16/DFT=OLNTB\1000
+		. vPB	Page Bottom			/NOREQ/DFT=23
+		. vHLP	Alternate item help table	/NOREQ
+			callers.
+		. vHDG	Heading				/NOREQ
+			This parameter was not used in
+			prior versions and now provides
+			a means to pass a heading, as an
+			alternative to passing the public
+			vhdg variable.
+		. vUFK	User Function Key Input		/NOREQ
+		
+	INPUT:
+	
+		. I()	I array from DBSCRT screen handler
+		. OLNTB	Screen position reference from DBSCRT
+		. vhdg	Heading - retained for backward compatibiliity
+	
+	RETURNS:
+		. $$	Value
+	
+	LIBRARY
+
+		. $$VER		Validate lookup table syntax
+
+	EXAMPLE:
+
+		set X=$$^DBSTBL("[UTBLBRCD]")
+		
+	NOTES:  The array vINFO is used to carry much of the necessary shared
+	shared information related to this processing, although there are also
+	a number public scope variables used as well to carry row data, page,
+	and display location information.
+	
+	The vINFO array is structured as follows:
+		
+		vINFO("STR")	= vSTR input value
+		vINFO("FMT")	= vFMT input value
+		vINFO("MIN")	= vMIN input value
+		vINFO("MAX")	= vMAX input value
+		vINFO("UFK")	= vUFK input value
+		vINFO("HLP")	= vHLP input value
+			
+		vINFO("COLCNT")	= number of columns
+		vINFO("COL",SEQ)= per column - NAME,TYPE,SIZE,DEC,DESCRIPTON
+				   where NAME is column name for Select
+				   type lookups.  List is tab delimited.DFTD
+		
+		vINFO("CUB")	= Cursor location based on key length
+		vINFO("FND")	= Find string
+		vINFO("FNDX")	= Find executable string
+		vINFO("HDG")	= heading string
+		vINFO("SEL")	- SEL key executable string
+			
+		vINFO("TYPE")	= "Array" or "Select"
+			
+		vINFO("ARRAY")	= For array, array reference, with V as lowest level
+		vINFO("COLLATE")= For array, collating expression (V=$O(ref(V,-1)))
+		vINFO("PIECE")	= For array, piece for description, default = 1
+		vINFO("V")	= For array, last value of V (collating key)
+		vINFO("START")	= For array, starting value
+		vINFO("STOP")	= For array, stoping value
+			
+		vINFO("SELECT")	= For select, columns list
+		vINFO("TABLES")	= For select, table name (or list of tables)
+		vINFO("WHERE")	= For select, where clause
+		vINFO("ORDERBY")= For select, order by clause
+		vINFO("BTMKEY")	= For select, bottom key
+			
+		vINFO("DESCENDING") = defined if DESCENDING qualifier
+		vINFO("LISTLEN")    = if LIST qualifier, number of elements
+		vINFO("LIST")	    = if LIST qualifier, the list
+		vINFO("NOVALIDATE") = defined if NOVALIDATE qualifier
+		vINFO("QUERY")	    = query string if QUERY qualifier
+	 
+	---- Revision History -------------------------------------------------
+	03/21/06 - RussellDS - CR20234
+		   Modify code so that if using select include DQMODE to avoid
+		   cartesian products if multiple tables involved.
+	
+	01/25/06 - RussellDS - CR19234
+		   Fix undefined error in PICK section.
+		   
+		   Corrected deprecated feature warnings.
+	
+	11/23/05 - RussellDS - CR18065
+		   Added space in front of AND when constructing where clause
+		   with use of MIN or MAX.
+	
+	05/25/05 - RussellDS - CR16071
+		   Modified DINAM section to correct use of parameters.  Do
+		   not use parameters from the table if there are already
+		   ones defined in vREF.
+	
+	05/14/05 - RussellDS - CR15986
+		   Correct logic in PICKLIST section for locating parameters.
+	
+	04/13/05 - RussellDS - CR15428
+		   Corrected errors in LOOKUPPP section.
+		   
+		   Modified DINAM section to support input of the table
+		   reference that contains library.
+	
+	02/28/05 - RussellDS - CR14714
+		   Put .get() around array lookup in FETCH section to prevent
+		   undefined if there is no data at the look-up level of the
+		   array.
+	
+	02/09/05 - RussellDS - CR14439
+		   Modified logic dealing with construction of table validation
+		   where :QUERY qualifier is used to support ",", ":", and "&"
+		   separators between multiple queries.  This will conform to
+		   changes to DBSTRG and bring the handling in line.
+	
+	11/17/04 - RussellDS - CR13258
+		   Convert to PSL.
+		   
+		   Removed SEL section and "SEL" key use in main loop and in PICK.
+		   Didn't seem to have any way to get executed nor was it clear
+		   what it was supposed to do.
+		   
+		   Remove old revision history.
+	-----------------------------------------------------------------------
+	*/
+	
+	// I18N=OFF
+	
+	type Public Number OLNTB
+	type Public String I(), vhdg
+	
+	type String vINFO(), value
+	
+	if vREF.isNull() quit ""
+	
+	// Change data item with date format type <<**>> to D
+	if (vFMT.get() = "T"), I(5).get().isLike("%D EXT^DBSQRY%"), I(1).get().isLike("*QI%") set vFMT = $$TYP^DBSDD(I(2))
+
+	if vFMT.get().isNull() set vFMT = "T"			// Default value
+	
+	if +vPT.get() = 0 do {
+		if OLNTB.exists() set vPT = (OLNTB \ 1000) + 1
+		else  set vPT = 10
+	}
+	if vPT > 16 set vPT = 10
+	
+	if +vPB.get() = 0 set vPB = 23
+	
+	set vINFO("STR") = vSTR.get()
+	set vINFO("FMT") = vFMT
+	set vINFO("MIN") = vMIN.get()
+	set vINFO("MAX") = vMAX.get()
+	set vINFO("HLP") = vHLP.get()
+	set vINFO("UFK") = vUFK.get()
+
+	if 'vHDG.get().isNull() set vINFO("HDG") = vHDG
+	else  set vINFO("HDG") = vhdg.get()
+	
+	set value = $$MAIN(vREF, .vINFO(), vPT, vPB)
+
+	quit value
+	
+	
+MAIN(String vREF,	// Lookup reference [*]
+     String vINFO(),	// vINFO array
+     Number vPT,	// Page top
+     Number vPB)	// Page bottom
+     
+	/*
+	Call from top of DBSTBL to enable error trap
+
+	RETURNS:
+		. $$		Value from table lookup
+	*/
+
+	type Public Boolean ER = 0
+	type Public String %fkey, %fkey(), I(), RM, vhdg
+	
+	type Boolean visDone
+	type Number vreccnt, vredisp, vkeylen
+	type String vFROM, vORDERBY, vSELECT, value, vSTR, vWHERE
+	
+	catch error {
+		set ER = 1
+		set RM = error.type_", "_vREF.get()_" ("_vINFO("STR").get()_")"
+		set value = ""
+		
+		if (error.type [ "%GTM") throw error
+	}
+	
+	set vreccnt = 0
+	set value = ""
+	set vSTR = vINFO("STR")
+
+	if %fkey("").order().isNull() do {
+		do ZBINIT^%TRMVT(.%fkey())
+		set %fkey = "SEL"
+	}
+	
+	if '%ProcessMode.exists() set %ProcessMode = 0
+	
+	do SETUP(vREF, .vINFO()) if ER quit ""
+		
+	set vSELECT = vINFO("SELECT").get()
+	set vFROM = vINFO("TABLES").get()
+	set vWHERE = vINFO("WHERE").get()
+	set vORDERBY = vINFO("ORDERBY").get()
+	
+	if vINFO("TYPE") = "Array" set vINFO("V") = vINFO("START")		// Starting point
+		
+	if (%fkey = "FND") do { if vINFO("FND").get().isNull() do RESMODE quit ""
+		set vINFO("FND") = vSTR
+		do FND(.vINFO())
+	}
+
+	if %fkey = "SEL" do {
+		set vINFO("SEL") = " if $E($P(vdata,$C(9),1),1,"_vSTR.length()_")="
+		if vSTR.isNumber() set vINFO("SEL") = vINFO("SEL")_vSTR
+		else  set vINFO("SEL") = vINFO("SEL")_""""_vSTR_""""
+	}
+
+	set vkeylen = vINFO("COL", 1).piece($C(9), 3)
+
+	set vINFO("CUB") = $$VIDOFF^%TRMVT_$$CUB^%TRMVT(vkeylen)
+	
+	set visDone = 0
+	for  do { quit:visDone
+		
+		type Boolean visDone2
+		type Number voffset, vpagenum, vpagenum(), vrdsp, vreccnt, vrecs, vrownum, vrows, vrptr, vrr
+		type String vr()
+		
+		type ResultSet vrs
+		
+		/*
+		If select, open the result set.  Note that this must be done at this
+		stack level since using a dynamic select (i.e., can't call to sub-routine
+		to do open).  Fetch is OK as a call.
+	
+		After determine if Select or Array, check to see if there's any data.
+		*/
+		#ACCEPT Date=11/29/04;PGM=RussellDS;CR=13258
+		if vINFO("TYPE") = "Select" set vrs = Db.select(vSELECT, vFROM, vWHERE, vORDERBY, "", "/DQMODE=1")
+		
+		set (vpagenum, vrptr) = 1
+		set (visDone2, vpagenum(1), vreccnt, vrecs, vrdsp) = 0
+		
+		for  do { quit:visDone2
+			
+			do DSP(.vrs, .vINFO(), .vr())
+			
+			if vr("").order().isNull() do { quit
+				set ER = 1
+				// No matches found
+				set RM = $$^MSG(1955)
+				set (visDone, visDone2) = 1
+			}
+			
+			set vrownum = vpagenum(vpagenum)
+			set voffset = vPT - vrownum
+			set vrr = vrownum + vrows
+			set vrownum = vrownum + 1
+			
+			if %ProcessMode = 99 do { quit
+				set %fkey = "ESC"
+				set (visDone, visDone2) = 1
+			}
+			
+			do PICK(.vrs, .vINFO(), .vr(), vREF, .value)
+			
+			if vINFO("UFK").isLike("%"_%fkey_"%") set (visDone, visDone2) = 1 quit
+			
+			if %fkey = "KYB" do KYB
+			if %fkey = "PDN" set vpagenum = vpagenum + 1
+			else  if %fkey = "PUP" set vpagenum = vpagenum - 1
+			else  if %fkey = "END" set (visDone, visDone2) = 1
+			else  if %fkey = "FND" set visDone2 = 1
+			else  set (visDone, visDone2) = 1
+		}
+	}
+
+	set vPT = vredisp.get()
+	do RESMODE
+	
+	if (%fkey = "ESC") set value = ""
+	
+	if ('vINFO("LIST").get().isNull()) set value = vINFO("LIST")
+
+	quit value
+
+
+KYB	// Display keyboard menu and choose option
+
+	type Public String %fkey, %fkey()
+	
+	type String ZB
+	
+	set ZB=$$EMULATE^DBSMBAR
+	if ZB.isNull() do {
+		set ZB = 13
+		set %fkey = "ENT"
+	}
+	else  set %fkey=%fkey(ZB)
+	
+	quit
+	
+
+DSP(ResultSet vrs,	// Lookup result set for Select
+    String vINFO(),	// vINFO array
+    String vr())	// Rows already loaded
+
+	/*
+	Fetch records and display to screen (1up or 2up dependant on space)
+	*/
+
+	type Public Number vpagenum, vpagenum(), vrdsp, vrecs, vrows, vPB, vPT
+	
+	type Boolean vadjrows, voverflw
+	type Number vI
+
+	set vrdsp = vpagenum(vpagenum)
+	set vrecs = vPB - vPT
+	
+	if (vINFO("LISTLEN").get() > 0) set vrecs = vrecs - 1
+	
+	do FETCH(.vrs, vrdsp, vrecs + 1, .vINFO(), .vr()) quit:vr("").order().isNull()	// First column
+	
+	set voverflw = $$OVERFLOW(vrdsp + 1, vrecs, .vINFO(), .vr())
+	
+	if 'voverflw do FETCH(.vrs, vrdsp + vrecs + 1, vrecs, .vINFO(), .vr())		// Second column
+	
+	// Calculate number of vrecs to display (1up or 2up)
+	set vadjrows = 0
+	set vrows = vrecs + 1
+	if 'voverflw, vrecs > 1, '$$OVERFLOW(vrdsp + vrecs + 1, vrecs, .vINFO(), .vr()) do {
+		set vrecs = vrecs * 2
+		set vadjrows = 1
+	}
+	if ((vrdsp + vrecs) > vr("").order(-1)) do {
+		set vrecs = vr("").order(-1) - vrdsp
+		set vrows = vrecs + 1
+	}
+	if vadjrows set vrows = ((vrecs / 2) + 1.5) \ 1
+
+	if vpagenum > 1 do {
+		do SETMODE
+		write $$CLR^%TRMVT(vPT + 1, vPB + 1), $$CUP^%TRMVT
+	}
+	if vpagenum = 1 do HEADING(.vINFO())
+
+	write $$CUP^%TRMVT(1, vPT)
+	
+	for vI = 1:1:(vrows - 1) do DSPREC(0, .vINFO(), .vr())
+	
+	if (vrecs '< vrows) do {
+		write $$CUP^%TRMVT(1, vPT)
+		for vI = 1:1:(vrecs + 1 - vrows) do DSPREC(1, .vINFO(), .vr())
+	}
+	
+	if (vr(vrdsp).order() > 0) set vpagenum(vpagenum + 1) = vrdsp
+	
+	if (vINFO("LISTLEN").get() > 0) do LISTDSP(.vINFO())
+	
+	do KEYS(.vINFO())
+	
+	quit
+
+
+KEYS(String vINFO())	// vINFO array
+
+	type Public Number vpagenum, vpagenum()
+	
+	type Number I
+	type String OPTS, OPTS()
+	
+	if (vINFO("LISTLEN").get() > 0) set OPTS = "INS,REM"
+	else  set OPTS = "HLP,FND"
+
+	if %ProcessMode < 2 set OPTS = OPTS_",END|Select"
+
+	set OPTS = OPTS_",ESC"
+	
+	if vpagenum > 1 set OPTS = OPTS_",PUP"
+	if vpagenum(vpagenum).order() > 0 set OPTS = OPTS_",PDN"
+
+	if 'vINFO("UFK").isNull() for I = 1:1:vINFO("UFK").length(",") if 'OPTS.isLike("%"_vINFO("UFK").piece(",", I)_"%") set OPTS = OPTS_","_$P(vINFO("UFK"),",", I)
+	
+	for I = 1:1:OPTS.length(",") set OPTS(I) = OPTS.piece(",", I)
+	
+	write $$SHOWKEY^%TRMVT(.OPTS())
+	
+	quit
+	
+	
+DSPREC(Boolean dispTwo,	// Display two records
+       String vINFO(),	// vINFO array
+       String vr())	// Rows already loaded
+
+	/*
+	Display a record
+	*/
+	
+	type Public Number vrdsp
+	
+	type Number COL
+	type String REC
+
+	write $C(13,10)
+	if dispTwo write $$CUF^%TRMVT(40)
+	
+	set vrdsp = vrdsp + 1
+	set REC = vr(vrdsp)
+	
+	// Justify and display columns
+	for COL = 1:1:vINFO("COLCNT") do {
+
+		type Number length
+		type String DISPLAY, format
+
+		set DISPLAY = REC.piece($C(9), COL)
+		
+		set length = vINFO("COL", COL).piece($C(9), 3)
+		if length > 0 set DISPLAY = DISPLAY.extract(1, length)
+		
+		set format = vINFO("COL", COL).piece($C(9), 2)
+		if ((format = "N") ! (format = "$")), 'DISPLAY.isNull() do {
+			write DISPLAY.justify(length)
+			if COL <> vINFO("COLCNT") write "  "
+		}
+		else  do {
+			write DISPLAY
+			if COL <> vINFO("COLCNT") write $$CUF^%TRMVT(length - DISPLAY.length() + 2)
+		}
+	}
+	
+	quit
+
+
+OVERFLOW(Number ptr,		// Pointer
+	 Number num,		// Rows
+	 String vINFO(),	// vINFO array
+	 String vr())		// Rows already loaded
+	 
+	/*
+	Return row width overflow status
+	
+	RETURNS:
+		. $$		0 = no overflow	
+				1 = overflow
+	*/
+	
+	type Number I, length, width
+
+	if (vINFO("HDG").length() > 40) quit 1				// Heading overflow
+
+	set width = 0
+	for I = 1:1:vINFO("COLCNT") do {
+		
+		set length = vINFO("COL", I).piece($C(9), 3)		
+		set width = width + length + 2
+		I (+length = 0) do {
+			
+			set width = 42 - width				// Maximum to fit
+			set num = ptr + num
+			if 'vr(num).exists() set num = vr("").order(-1)	// End of range
+			for ptr = ptr:1:num if vr(ptr).piece($C(9), I).length() > width set width = 999 quit
+		}
+	}
+	
+	quit (width > 41)
+	
+	
+FETCH(ResultSet vrs,	// Lookup result set for Select
+      Number vptr,	// Current location
+      Number vnum,	// Number of records to add
+      String vINFO(),	// vINFO array
+      String vr())	// Rows already loaded
+      
+	/*
+	Add (vnum) records to the vr(ARRAY).
+	
+	Variable usage:
+		. vrdsp - The highest value of (vrptr) currently by page
+		. vrptr - The current EOF+1 of vr(vrptr).  Set to 0 to indicate at end
+			  of list
+		. reof  - The last value of (vrptr) to put into vr(vrptr)
+	*/
+	
+	type Public Number vrdsp, vreccnt, vrptr 
+	
+	type Number vreof
+
+	quit:(vrptr = 0)
+	
+	set vreof = vptr + vnum
+	
+	quit:(vreof < vrptr)
+	
+	// Retrieve records (from either ResultSet or Array)
+	for  do { quit:((vrptr = 0) ! (vrptr > vreof))
+		
+		type Boolean vbypass = 0
+		type Number vI
+		type String vdata, V
+	
+		if vINFO("TYPE") = "Select" do {
+			
+			if vrs.next() set vdata = vrs.getRow().toString()
+			else  set vrptr = 0
+		}
+		else  do {
+			
+			set V = vINFO("V")			// Last key value
+			#ACCEPT Date=11/29/04;PGM=RussellDS;CR=13258
+			xecute	"set "_vINFO("COLLATE")		// Get next key
+			set vINFO("V") = V			// Save key
+			
+			if V.isNull() set vrptr = 0
+			else  if 'vINFO("STOP").isNull() do {
+			
+				if 'vINFO("DESCENDING").exists() do {
+					if V > vINFO("STOP") set vrptr = 0
+				}
+				else  if V < vINFO("STOP") set vrptr = 0
+			}
+			
+			if (vrptr <> 0) do {
+				
+				set vdata = @vINFO("ARRAY").get()
+				set vdata = V_$C(9)_vdata.piece("|", vINFO("PIECE"))
+			}
+		}
+		
+		quit:(vrptr = 0)
+		
+		// Format elements of vdata
+		for vI = 1:1:vINFO("COLCNT") do {
+			
+			type Number dec
+			type String fmt
+			
+			set fmt = vINFO("COL", vI).piece($C(9), 2)
+			
+			if '((fmt = "T") !(fmt = "U") ! (fmt = "F")) do {
+			
+				set dec = vINFO("COL", vI).piece($C(9), 4)
+				
+				if (fmt = "$"), dec.isNull() set dec = 2
+				
+				set vdata.piece($C(9), vI) = $$EXT^%ZM(vdata.piece($C(9), vI), fmt, dec)
+			}
+		}
+		
+		// If query defined, execute it
+		if ('vINFO("FNDX").get().isNull() ! 'vINFO("SEL").get().isNull()) do {
+		
+			set vreccnt = vreccnt + 1
+			if ((vreccnt # 20) = 0) do {	// Keyboard interrupt
+				
+				type String vin
+				
+				use 0
+				
+				write $$BTM^%TRMVT
+				// ~p1 of ~p2 found ... Press any key to stop
+				write $$^MSG(3062, vrptr - 1, vreccnt)
+				read vin#1:0
+				
+				if (vin.length() + $ZB.length() > 0) do {
+				
+					set vrptr = 0
+					set vbypass = 1
+				}
+			}
+			
+			#ACCEPT Date=11/29/04;PGM=RussellDS;CR=13258
+			if 'vbypass, 'vINFO("FNDX").get().isNull() xecute vINFO("FNDX")  else  set vbypass = 1
+			
+			#ACCEPT Date=11/29/04;PGM=RussellDS;CR=13258
+			if 'vbypass, 'vINFO("SEL").get().isNull() xecute vINFO("SEL")  else  set vbypass = 1
+			
+		}
+		
+		if 'vbypass do {
+		
+			set vr(vrptr) = vdata		// Add string to screen display
+			set vrptr = vrptr + 1
+		}
+	}
+	
+	quit
+	
+
+PICK(ResultSet vrs,	// Lookup result set for Select
+     String vINFO(),	// vINFO array
+     String vr(),	// Rows already loaded
+     String vREF,	// Lookup reference
+     String value)	// Selected value		/MECH=REFNAM:W
+
+	/*
+	Select a menu option from the display, or process function key
+	*/
+
+	type Public Number voffset, vpagenum, vpagenum(), vrdsp, vrecs, vrownum, vrows, vrr
+	type Public String %fkey
+	
+	type Boolean visDone = 0
+	type String vchar, vfmt, vkey, vkeyfmt, vkeylen
+	
+	set vfmt = vINFO("COL", 1).piece($C(9), 2)
+	set vkeylen = vINFO("COL", 1).piece($C(9), 3)
+	
+	for  do { quit:visDone
+	
+		if (vrownum < vrr) write $$CUP^%TRMVT(1, voffset + vrownum)
+		else  write $$CUP^%TRMVT(41, voffset + 1 + vrownum - vrows)
+
+		set vkey = vr(vrownum).piece($C(9), 1)
+	
+		if ((vfmt = "N") ! (vfmt = "$")) set vkeyfmt = vkey.justify(vkeylen)
+		else  set vkeyfmt = vkey.extract(1, vkeylen).justify(vkeylen, -1)
+	
+		write $$VIDREV^%TRMVT, vkeyfmt, vINFO("CUB")			// Display highlighted
+	
+		#ACCEPT Date=11/29/04;PGM=RussellDS;CR=13258
+		if (%InputTimeOut.data() '> 0) set %InputTimeOut = 300
+
+	        read *vchar:%TO
+		if (vchar < 32) set vchar = ""
+		else  set vchar = $C(vchar)
+
+		write vkeyfmt
+		do ZB^%ZREAD						// Read terminator
+	
+		// Find the next occurrance of character vchar
+		if 'vchar.isNull() do { quit
+		
+			type Boolean hit = 0
+			type Number I
+			
+			// See if on current page
+			if (vrownum < vrdsp) do { quit:hit
+				
+				for I = vrownum+1:1:vrdsp do { quit:hit
+					if (vr(I).extract(1).upperCase() = vchar) set hit = 1
+				}
+				if hit set vrownum = I
+			}
+			
+			// Check other pages
+			for I = vpagenum(vpagenum)+1:1:vrownum do { quit:hit
+				if (vr(I).extract(1).upperCase() = vchar) set hit = 1
+			}
+			if hit set vrownum = I
+		}
+		if vINFO("UFK").isLike("%"_%fkey_"%") set visDone = 1 quit
+	
+		if (%fkey = "KBY") do KYB
+		if (%fkey = "CUU") do {
+			set vrownum = vrownum - 1
+			if (vrownum = vpagenum(vpagenum)) set vrownum = vrdsp
+		}
+		else  if (%fkey = "CUD") do {
+			set vrownum = vrownum + 1
+			if (vrownum > vrdsp) set vrownum = vpagenum(vpagenum) + 1
+		}
+		else  if ((%fkey = "CUB") ! (%fkey = "CUF")) do {
+			if (vrecs '< vrows) do {
+				if (vrownum < vrr) set vrownum = vrownum + vrows - 1
+				else  set vrownum = vrownum - vrows + 1
+			} 
+			if (vrownum > vrdsp) set vrownum = vrownum - vrows + 1
+		}
+		else  if (%fkey = "ENT"), (%ProcessMode '= 2) do {
+			set value = vkey
+			set visDone = 1
+		}
+		else  if (%fkey = "FND") do {
+			do FND(.vINFO())
+			if (%fkey '= "ESC") set visDone = 1
+		}
+		else  if (%fkey = "ESC") set visDone = 1
+		else  if (%fkey = "PDN"), (vpagenum(vpagenum).order() > 0) set visDone = 1
+		else  if (%fkey = "PUP"), (vpagenum > 1) set visDone = 1
+		else  if (%fkey = "HLP") do {
+			do HLP(.vrs, .vINFO(), vREF)
+		}
+		else  if (%fkey = "DSP") do {
+			do DSP(.vrs, .vINFO(), .vr())
+		}
+		else  if (%fkey = "PRN") do {
+			do PRN
+		}
+		else  if (%fkey = "INS"), (vINFO("LISTLEN").get() > 0) do {
+			do LISTADD(vkey, .vINFO())
+		}
+		else  if (%fkey = "REM"), (vINFO("LISTLEN").get() > 0) do {
+			do LISTREM(vkey, .vINFO())
+		}
+	}
+	
+	quit
+
+
+HLP(ResultSet vrs,	// Inquiry (List) mode only
+    String vINFO(),	// vINFO array
+    String vr(),	// Rows already loaded
+    String vREF)	// Lookup reference
+
+	// Note that help info must now be in the form of [table] references, not global
+	
+	type Public Number voffset, vpagenum, vpagenum(), vredisp, vrownum, vPB, vPT
+	
+	type Number CNT
+	type String desc, HLP(), HLPTBL, key
+	
+	quit:vrownum.get().isNull()				// Invalid entry
+	
+	if 'vINFO("HLP").isNull() set HLPTBL = vINFO("HLP")
+	else  if (vREF ? 1"["1E.E1"]".E) set HLPTBL = vREF.piece("]", 1).piece("[", 2)
+	else  quit						// Invalid table ref
+	
+	set key = vr(vrownum).get()				// Field selected
+	set desc = key.piece($C(9), 2)				// key_TAB_desc
+	set key = key.piece($C(9), 1)
+	quit:key.isNull()					// Invalid
+	
+	type ResultSet rs = Db.select("SEQ, DOC", "DBTBL12", "%LIBS='SYSDEV' AND FID=:HLPTBL AND CODE=:key", "SEQ ASC")
+	
+	if rs.isEmpty() do { quit
+		// Global is not defined
+		write $$MSG^%TRMVT($$^MSG(1928,key), 1, 1)
+		do KEYS(.vINFO())
+	}
+
+	set HLP(1) = vINFO("COL", 1).piece($C(9), 5)_" "_key_" - "_desc
+	set HLP(2) = ""
+	set CNT = 3
+	
+	while rs.next() do {
+		set HLP(CNT) = rs.getCol("DOC")
+		set CNT = CNT + 1
+	}
+	
+	write $$CUON^%TRMVT
+	
+	do ^DBSHLP("HLP(", .vPT, .vPB)			// Access HELP utility
+	
+	write $$CUOFF^%TRMVT
+	
+	if (+vPT = 0) set vPT = vredisp
+	if (vPT > vredisp) set vPT=vredisp		// Redisply table
+	
+	do HEADING(.vINFO()), DSP(.vrs, .vINFO(), .vr())
+						
+	set voffset = vPT - vpagenum(vpagenum)
+	
+	quit
+
+
+PRN	//  Print window to other device
+
+	do RESMODE
+	do ^DBSTBL1
+	do SETMODE
+	
+	quit
+	
+	
+LISTADD(String key,	// Key to insert
+	String vINFO())	// vINFO array
+
+	/*
+	Add an entry to a list
+	*/
+	
+	// Maximum selections = ~p1
+	if (vINFO("LIST").length(",") > vINFO("LISTLEN")) write $$MSG^%TRMVT($$^MSG(1694, vINFO("LISTLEN")))
+	else  do {
+		
+		// Only add if not already in list
+		if '{List}vINFO("LIST").contains(key) do {
+			if vINFO("LIST").isNull() set vINFO("LIST") = key
+			else  set vINFO("LIST") = vINFO("LIST")_","_key
+		}
+		
+		do LISTDSP(.vINFO())
+	}
+
+	quit
+	
+	
+LISTREM(String key,	// Key to remove
+	String vINFO())	// vINFO array
+
+	/*
+	Remove selection from a list
+	*/
+	
+	type Number I
+	type String NEWLIST, ELEMENT
+	
+	set NEWLIST = ""
+	
+	for I = 1:1:vINFO("LIST").length(",") do {
+		set ELEMENT = vINFO("LIST").piece(",", I)
+		if (ELEMENT '= key) set NEWLIST = NEWLIST_ELEMENT_","
+	}
+	
+	set vINFO("LIST") = NEWLIST.extract(1, NEWLIST.length() - 1)
+
+	do LISTDSP(.vINFO())
+	
+	quit
+	
+
+LISTDSP(String vINFO())	// vINFO array
+
+	/*
+	Redisplay a modified list on the terminal
+	*/
+
+	type Public Number vPB
+
+	write $$MSG^%TRMVT(vINFO("LIST"), "", "", 1, vPB)
+	
+	quit
+
+
+HEADING(String vINFO())	// vINFO array
+
+	/*
+	Clear display window and display underline/heading
+	*/
+
+	type Public Number vrecs, vredisp, vrows, vPB, vPT
+	
+	type String vhdg
+
+	set vhdg = vINFO("HDG").get()
+	set vredisp = vPT
+	
+	do SETMODE
+	
+	write $$LOCK^%TRMVT, $$CLR^%TRMVT(vPT, vPB + 1)
+	
+	if vhdg.isNull() write $$VIDOFF^%TRMVT, $$LINE^%TRMVT(80)
+	else  do {
+		
+		write $$VIDREV^%TRMVT
+		
+		if vrecs '< vrows write vhdg.justify(40, -1)
+		if vrecs < vrows write vhdg.justify(80, -1)
+		else  write vhdg.justify(40, -1)
+		
+		write $$VIDOFF^%TRMVT
+	} 
+	
+	quit
+	
+	
+public VER(String vREF,	// Lookup Reference
+	   String vSTR,	// Input Match String
+	   String vFMT)	// Data Type - TUFLDC$		/NOREQ/DFT="T"
+
+	/*
+	Verify that the value vSTR is in the table TABLE
+	
+	This calls procedure DBSTBLA, which is not embedded here since both
+	DBSTBL and DBSTBLA need to perform dynamic selects.  At the present
+	time, only one is allowed per procedure.
+	
+	RETURNS:
+		. $$	Return null value if not a valid entry
+			or the table entry description
+	EXAMPLE:
+	
+		set X = $$VER^DBSTBL("[UTBLBRCD]", 1234, "T")
+	*/
+	
+	quit $$^DBSTBLA(vREF, vSTR, vFMT.get())
+	
+
+public VALUE(String vREF,	// Lookup reference		/NOREQ/NUL
+	     String vSTR,	// Input Match String		/NOREQ/NUL
+	     String vFMT)	// Data Type - TUFLDC$		/NOREQ/DFT="T"
+
+	/*
+	Return table value - called by screen browser routine
+	
+	RETURNS:
+		. $$	Return null value if not a valid entry
+			or the table entry description
+	
+	EXAMPLE:
+		$$VALUE^DBSTBL("^UTBL(""BRCD"",",1,"N")     =  1  Branch 1
+		$$VALUE^DBSTBL("^UTBL(""BRCD"",",99999,"N") = Null
+	*/
+	
+	if vREF.get().isNull() quit ""
+	if vSTR.get().isNull() quit ""
+	
+	if vFMT.get().isNull() set vFMT = "T"
+	
+	quit $$VER(vREF, vSTR, vFMT)
+
+
+public WILDCARD(String X,	// Pattern to find
+		String V)	// Variable that will contain search string
+		
+	/*
+	Create executable pattern match ( * or ? )
+	*/
+	
+	type Number I
+	type String PATTERN
+
+	if X.isNull() quit ""
+	if X.ascii() < 32 quit ""
+
+	if X?.A do {
+		set X = X.upperCase()
+		set V = "$$UPPER^%ZFUNC("_V_")"
+	}
+
+	if X.isLike("%""%") set X = X.addQuotes()
+
+	if ((X = "*") ! ('X.isLike("%?%"))) quit "if "_V_"["""_X_""""
+	
+	set PATTERN = ""
+	
+	// Change all ABC* syntax to 1"ABC".E syntax
+	for I = 1:1:X.length("*") do {
+		type String Z = X.piece("*", I)
+		if 'Z.isNull() set PATTERN = PATTERN_"1"""_Z_""""
+		if I <> X.length("*") set PATTERN = PATTERN_".E"
+	}
+
+	// Replace all ? with 1E
+	set PATTERN = PATTERN.replace("?", """1E""")
+	
+	// Remove any 1"" elements that got created
+	set PATTERN = PATTERN.replace("1""""", "")
+	
+	quit "if "_V_"?"_PATTERN
+
+
+FND(String vINFO())	// vINFO array
+
+	/*
+	Find a string in a column
+	*/
+
+	type Public Number vpagenum
+	type Public String %fkey
+
+	type Number I, OP
+	type String VAR, X
+	
+	// Find?
+	set X = $$PROMPT(vINFO("FND").get(), $$^MSG(1111))		// Find? message
+
+	if ((%fkey = "ESC") ! X.isNull()) do { quit
+		if vpagenum.exists() do KEYS(.vINFO())
+		set %fkey = "ESC"
+	}
+	
+	set vINFO("FND") = X
+	set %fkey = "FND"
+	
+	if vINFO("FND").get().isNull() set vINFO("FNDX") = "" quit
+	
+	set vINFO("FNDX") = $$WILDCARD(vINFO("FND"), "vdata")
+
+	// Any_Column
+	set VAR(1) = $$^MSG(299)
+
+	for I = 1:1:vINFO("COLCNT") set VAR(I + 1) = vINFO("COL", I).piece($C(9), 5).replace(" ", "_")
+	
+	set OP = $$^DBSMBAR(26, "", "", "", .VAR())
+	do SETMODE
+	
+	if OP.isNull() do {
+		set vINFO("FNDX") = ""
+		set %fkey = "ESC"
+	}
+	else  do {
+		set %fkey = "FND"
+	
+		if (OP '= 1) set vINFO("FNDX")=vINFO("FNDX").piece("vdata", 1)_"($P(vdata,$C(9),"_(OP - 1)_"))"_vINFO("FNDX").piece("vdata",2,99)
+	}
+	
+	quit
+
+
+PROMPT(String DEFAULT,
+       String PROMPT)
+       
+	/*
+	Prompt for a string at the bottom of the screen
+	*/
+	
+	type Public String %fkey
+	
+	type String RETURN
+	
+	do RESMODE
+	
+	write $$BTM^%TRMVT, PROMPT, DEFAULT
+	if 'DEFAULT.isNull() write $$CUB^%TRMVT(DEFAULT.length())
+
+	set RETURN = $$TERM^%ZREAD(DEFAULT)
+	if %fkey = "ESC" set RETURN = ""
+
+	do SETMODE
+
+	quit RETURN
+	
+	
+SETMODE	// Set terminal settings
+
+	write $$CUOFF^%TRMVT
+	
+	use 0:(NOECHO:WIDTH=81:NOWRAP)
+	
+	quit
+	
+
+RESMODE	// Restore terminal settings
+
+	write $$CUON^%TRMVT
+
+	use 0:(ECHO:WIDTH=81:NOWRAP)
+	
+	quit
+	
+
+private SETUP(String vREF,	// Lookup reference
+	      String vINFO())	// Information needed to process lookup		/MECH=REFARR:RW
+
+	/*
+	DATA QWIK Interpretive Table display
+
+	This subroutine builds the vINFO array to return information necessary
+	to process the lookup.  Lookup data can either be in the form of a
+	local array or a database select.
+
+	EXAMPLE:
+
+		set X=$$SETUP("[UTBLBRCD]", .vINFO())
+	*/
+	
+	type Public Boolean ER = 0
+	type Public String RM
+
+	type Number vcol
+	type String vtype, vd
+	
+	set vREF = vREF.trim()
+	set vtype = vREF.extract(1)
+	set vcol = 1
+	
+	if vINFO("FMT") = "U" set vINFO("STR") = vINFO("STR").upperCase()
+
+	if (vtype = "@") do { quit:ER ! vREF.isNull()
+		set ER = $$CALLBACK(.vREF, .vINFO())
+		if 'ER, 'vREF.isNull() set vtype = vREF.extract(1)
+	}
+	
+	if (vtype = ",") set ER = $$PICKLIST(vREF, .vINFO()) quit
+	
+	// Continue to support global look-ups until all are removed
+	if (vtype = "^") set ER = $$ARRAY(vREF, .vINFO()) quit		// Global
+	
+	if (vtype = "[") set ER = $$DINAM(vREF, .vINFO()) quit		// [FID]DI reference
+	
+	if vREF.isLike("%.%") set ER = $$DINAM(vREF, .vINFO()) quit	// FID.DI
+	
+	if ((vtype ? 1A) ! (vtype = "%")) set ER = $$ARRAY(vREF, .vINFO()) quit	// Local array
+
+	set ER = 1
+	set RM = $$^MSG(1396)		// Invalid look-up table syntax
+	
+	quit
+		
+	
+DINAM(String vREF,	// Lookup reference
+      String vINFO())	// Information need to process lookup	/MECH=REFARR:RW
+	
+	/*
+	Build select info for use in dynamic select
+	
+	RETURNS:
+	
+		. $$	Error indicator (0 = no error, 1 = error)
+	*/
+	
+	type Public String %fkey, RM
+	
+	type Boolean distinct, ER
+	type Number I, SEQ
+	type String BTMKEY, COLUMNS, HDG, LASTTBL, params, select, TABLE, TABLES, vWHERE, X
+	
+	set (distinct, ER) = 0
+	set (params, select) = ""
+	
+	if vREF.isLike("%:%") do {
+		set params = vREF.piece(":", 2, 99)
+		set vREF = vREF.piece(":", 1)
+	}
+	
+	if vREF.isLike("[%") do {
+		set TABLE = vREF.piece("[", 2).piece("]", 1)
+		set COLUMNS = vREF.piece("]", 2, 999)
+	}
+	else  do {
+		set TABLE = vREF.piece(".", 1)
+		set COLUMNS = vREF.piece(".", 2, 999)
+	}
+	
+	// Remove library reference, if it exists
+	if TABLE.isLike("%,%") set TABLE = TABLE.piece(",", 2)
+	
+	set (TABLES, LASTTBL) = TABLE
+	
+	// If only file, get default display from DBTBL1
+	if COLUMNS.isNull() do {
+	
+		type RecordDBTBL1 dbtbl1 = Db.getRecord("DBTBL1", "%LIBS=""SYSDEV"",FID=:TABLE")
+	
+		set COLUMNS = dbtbl1.dftdes
+		if 'COLUMNS.isNull(), 'dbtbl1.dftdes1.isNull() do {
+			
+			if (COLUMNS.extract(COLUMNS.length()) '= ",") set COLUMNS = COLUMNS_","
+			set COLUMNS = COLUMNS_dbtbl1.dftdes1
+		}
+		// Only use parameters from table if no other ones already
+		if COLUMNS.isLike("%:%") do {
+			if params.isNull() set params = COLUMNS.piece(":", 2, 999)
+			set COLUMNS = COLUMNS.piece(":", 1)
+		}
+		
+	}
+	
+	// Get bottom key
+	do {
+		type String acckeys, fsn()
+		
+		do fsn^DBSDD(.fsn(), TABLE)
+		
+		set acckeys = fsn(TABLE).piece("|", 3)
+		set BTMKEY = acckeys.piece(",", acckeys.length(","))
+		
+		set vINFO("ORDERBY") = acckeys
+		set vINFO("BTMKEY") = BTMKEY
+	}
+	
+	// If not distinct parameter and bottom key not present, add it to the beginning
+	set distinct = 0
+	for I = 1:1:params.length(":") if $$isCMD("DISTINCT", params.piece(":", I)) set distinct = 1
+	
+	if 'distinct do {
+
+		type Boolean missing = 1
+		type String col
+		
+		for I = 1:1:COLUMNS.length(",") do { quit:'missing
+			set col = COLUMNS.piece(",", I).piece("/", 1)
+			if col = BTMKEY set missing = 0
+		}
+		
+		if missing do {
+			if COLUMNS.isNull() set COLUMNS = BTMKEY
+			else  set COLUMNS = BTMKEY_","_COLUMNS
+		}
+	}
+	
+	if 'params.isNull() do PARSE(params, "", .vINFO())
+	
+	set vINFO("TYPE") = "Select"
+	
+	set HDG = ""
+	set vINFO("COLCNT") = COLUMNS.length(",")
+	for SEQ = 1:1:COLUMNS.length(",") do {
+		
+		type Number dec, len
+		type String COLPARMS, fmt, NAME, rhd, TAB, TABLEREF
+		
+		set TAB = $C(9)
+		
+		set NAME = COLUMNS.piece(",", SEQ)
+		if NAME.isLike("%/%") do {
+			set COLPARMS = NAME.piece("/", 2, 999)
+			set NAME = NAME.piece("/", 1)
+		}
+		else  set COLPARMS = ""
+		
+		if NAME.isLiteral() do {
+			set fmt = "T"
+			set dec = ""
+			set rhd = ""
+			set len = NAME.length()
+			set TABLEREF = ""
+		}
+		else  do {
+			
+			if (NAME.extract(1) = "[") set NAME = NAME.extract(2, NAME.length()).replace("]", ".")
+			
+			if NAME.isLike("%.%") do {
+				set TABLEREF = NAME.piece(".", 1)
+				set NAME = NAME.piece(".", 2)
+			}
+			else  set TABLEREF = LASTTBL
+			
+			set LASTTBL = TABLEREF
+			
+			type RecordDBTBL1D dbtbl1d = Db.getRecord("DBTBL1D","%LIBS=""SYSDEV"",FID=:TABLEREF,DI=:NAME")
+			
+			set fmt = dbtbl1d.typ		// Type
+			set dec = dbtbl1d.dec		// Decimals
+			set rhd = dbtbl1d.rhd		// Header
+			set len = dbtbl1d.siz		// Length
+			if (+len = 0) set len = dbtbl1d.len
+			
+			if 'COLPARMS.isNull() do {	// Override data dictionary values
+			
+				set COLPARMS = "/"_COLPARMS
+				if COLPARMS.isLike("%/LE%") set len = COLPARMS.piece("/LE", 2).piece("=", 2).piece("/", 1)
+				if COLPARMS.isLike("%/RH%") set rhd = COLPARMS.piece("/RH", 2).piece("=", 2).piece("/", 1)
+				if COLPARMS.isLike("%/FM%") set fmt = COLPARMS.piece("/FM", 2).piece("=", 2).piece("/", 1)
+			}
+		}
+			
+		if '{List}TABLES.contains(TABLEREF) set TABLES = TABLES_","_TABLEREF
+		
+		if TABLEREF.isNull() do {		// literal
+			set vINFO("COL", SEQ) = NAME
+			set select = select_NAME.addQuotes()_","
+		}
+		else  do {
+			set vINFO("COL", SEQ) = TABLEREF_"."_NAME
+			set select = select_TABLEREF_"."_NAME_","
+		}
+		
+		set rhd = rhd.extract(1, len)		// Truncate heading
+		set rhd = rhd.replace("@", " ")		// Remove DQ line break indicator
+		
+		set vINFO("COL", SEQ) = vINFO("COL", SEQ)_TAB_fmt_TAB_len_TAB_dec_TAB_rhd
+	
+		// Build heading
+		if ((fmt = "$") ! (fmt = "N")) set HDG = HDG_rhd.justify(len, 1)_"  "	// right
+		else  set HDG = HDG_rhd.justify(len, -1)_"  "				// left
+	}		
+	
+	if vINFO("HDG").isNull() set vINFO("HDG") = HDG.extract(1, HDG.length() - 2)
+	
+	// If distinct, Oracle does not allow items not in select list as part of sort
+	if distinct do {
+		set vINFO("ORDERBY") = select.extract(1, select.length() - 1)
+		set select = "DISTINCT "_select
+	}
+	
+	set vINFO("SELECT") = select.extract(1, select.length() - 1)
+	set vINFO("TABLES") = TABLES
+	
+	// Build WHERE clause
+	set vWHERE = ""
+	if 'vINFO("STR").isNull() do {
+		
+		type String MATCH, X
+		
+		set X = vINFO("STR")
+		
+		if 'distinct set MATCH = BTMKEY
+		else  set MATCH = select.piece(" ", 2).piece(",", 1)
+		
+		if %fkey = "SEL" do {
+			
+			set X = "'"_X_"%'"
+			set vWHERE = vWHERE_MATCH_" LIKE "_X
+		}
+	}
+	
+	if 'vINFO("MIN").isNull() do {
+		
+		if 'vWHERE.isNull() set vWHERE = vWHERE_" AND "
+		
+		set vWHERE = vWHERE_BTMKEY_">="_vINFO("MIN")_" "
+	}
+		
+	if 'vINFO("MAX").isNull() do {
+		
+		if 'vWHERE.isNull() set vWHERE = vWHERE_" AND "
+		
+		set vWHERE = vWHERE_BTMKEY_"<="_vINFO("MAX")_" "
+	}
+	
+	// Handle queries
+	if 'vINFO("QUERY").get().isNull() do {
+	
+		type Number I
+		type String DQQRY(), XWHERE
+	
+		for I=1:1:vINFO("QUERY").length($C(1)) set DQQRY(I) = vINFO("QUERY").piece($C(1), I)
+		
+		set XWHERE = $$WHERE^SQLCONV(.DQQRY(), TABLES)
+		
+		if vWHERE.isNull() set vWHERE = XWHERE
+		else  set vWHERE = vWHERE_" AND "_XWHERE
+	}
+	
+	set vINFO("WHERE") = vWHERE
+
+	if vINFO("DESCENDING").data() set vINFO("ORDERBY") = vINFO("ORDERBY")_" DESC"
+	else  set vINFO("ORDERBY") = vINFO("ORDERBY")_" ASC"
+	
+	quit ER
+
+
+PICKLIST(String vREF,		// Lookup reference
+	 String vINFO())	// Information need to process lookup		/MECH=REFARR:W
+
+	/*
+	List of options are in the string.
+		
+	RETURNS:
+		. $$	Error indicator (0 = no error, 1 = error)
+	
+	Picklist supports only NOVALIDATE, DESCENDING, and LIST qualifiers.
+	
+	Moves data into vlist() array and calls ARRAY section for most of setup.
+	*/
+	
+	type Public String vlist()
+
+	type Boolean ER = 0
+	type Number I
+	type String delim1, delim2, desc, key, params, V
+	
+	/* Picklist may contain quoted string containing ":", so getting commands
+	   is a bit more complex.  Only QUERY command uses quotes, and it does
+	   not apply to picklist.
+	*/
+	set params = ""
+	if vREF.isLike("%:%") do {
+		type String tok
+		
+		set vREF = $$TOKEN^%ZS(vREF, .tok)
+		if vREF.isLike("%:%") do {
+			set params = vREF.piece(":", 2, 99)
+			set params = $$UNTOK^%ZS(params, tok)
+			set vREF = vREF.piece(":", 1)
+		}
+		set vREF = $$UNTOK^%ZS(vREF, tok)
+	}
+
+	set delim1 = ","					// Default delimiters
+	set delim2 = "#"
+	
+	if vREF.extract(2) '? 1AN do {				// Alternate delimiters
+		set delim1 = vREF.extract(1)
+		set delim2 = vREF.extract(2)
+		set vREF = vREF.extract(3, vREF.length())
+	}
+
+	kill vlist
+
+	for I = 1:1:vREF.length(delim1) do {
+
+		set V=vREF.piece(delim1, I)
+		if 'V.isNull() do {
+
+			set key = V.piece(delim2, 1)
+			set desc = V.piece(delim2, 2)
+			set vlist(key) = desc
+		}
+	}
+	
+	set vREF = "vlist("
+	if 'params.isNull() set vREF = vREF_":"_params
+	
+	set ER = $$ARRAY(vREF, .vINFO())
+	
+	quit ER
+
+	
+CALLBACK(String vREF,		// Lookup reference				/MECH=REFNAM:RW
+	 String vINFO())	// Information need to process lookup [*]	/MECH=REFARR:W
+	
+	/*
+	User defined lookup table call back processing logic
+	
+	RETURNS:
+		. $$	Error indicator (0 = no error, 1 = error)
+	
+	The routine in vREF will be called. There are the following options:
+	
+	  1)  The call to vREF updates vINFO() - see SETUP section
+	      above for structure of info. In this case, set vREF="" to
+	      indicate completion.
+	      
+	  2)  The routine called can create a lookup array and modify
+	      the lookup table info in I(3) with a call to CHANGE^DBSMACRO.
+	      Set vREF="" to indicate completion.
+	  
+	  3)  The routine called can validate the data input, setting ER=1
+	      and RM=msg, if it is not valid. The input value is passed in
+	      the public variable X.  Set vREF="" to indicate completion.
+	      
+	  4)  Modify the value of vREF to another valid table lookup syntax
+	      to cause the processing steps at the top of this procedure to
+	      continue.  See SELDI^DBSFUN for an example.
+	      
+	The features of the callback function are different from prior versions.
+	Code that made use of this feature previously may need to be modified.
+	
+	Callback supports only NOVALIDATE, DESCENDING, and LIST qualifiers.
+	*/
+
+	type Boolean ER = 0
+	type String params, X, XSTRING
+	
+	if vREF.isLike("%:%") do { if ER quit 1
+		set params = vREF.piece(":", 2, 99)
+		set vREF = vREF.piece(":", 1)
+		do PARSE(params, "DESCENDING,LIST,NOVALIDATE", .vINFO())
+	}
+
+	set X = vINFO("STR").get()			// Input value (may be null)
+
+	set XSTRING = "do "_vREF.extract(2, 999)
+	#ACCEPT Date=11/29/04;PGM=RussellDS;CR=13258
+	xecute XSTRING					// Execute the program
+	
+	quit ER
+
+
+ARRAY(String vREF,	// Lookup reference
+      String vINFO())	// Information need to process lookup		/MECH=REFARR:W
+
+	/*
+	Local array and global lookup.  Global lookup supported until remove them all.
+		
+	RETURNS:
+		. $$	Error indicator (0 = no error, 1 = error)
+	
+	Populates vINFO.
+	
+	Arrays only support the DESCENDING, LIST, and NOVALIDATE qualifiers.
+	
+	If :QUERY is necessary, convert to table syntax (if was global) or
+	execute query while building array.
+	*/
+	
+	type Public Number E67			// From DATA-QWIK
+	
+	type Boolean ER = 0
+	type Number vdscpce, vkeylen
+	type String vfmt, vTAB
+	
+	set vfmt = "T"
+	set vTAB = $C(9)
+	
+	if ((E67.get() > 0) & (E67.get() < 13)) set vkeylen = E67
+	else  set vkeylen = 12
+	
+	if vREF.isLike("%:%") do { if ER quit 1
+		
+		type String vqualifs = vREF.piece(":", 2, 99)
+		
+		set vREF = vREF.piece(":", 1)
+		do PARSE(vqualifs, "DESCENDING,LIST,NOVALIDATE", .vINFO())
+	}
+	
+	if vREF.isLike("%/%") do {
+		
+		type String vparams = "/"_vREF.piece("/", 2, 99)
+		
+		set vREF = vREF.piece("/", 1)
+		
+		if 'vparams.isNull() do {
+			
+			if vparams.isLike("%/LE%") set vkeylen = vparams.piece("/LE", 2).piece("=", 2).piece("/", 1)
+			if vparams.isLike("%/RH%") set vINFO("HDG") = vparams.piece("/RH", 2).piece("=", 2).piece("/", 1)
+			if vparams.isLike("%/FM%") set vfmt = vparams.piece("/FM", 2).piece("=", 2).piece("/", 1)
+		}
+	}
+		
+	
+	// Piece of node to extract for description
+	set vdscpce = 1
+	if vREF.isLike("%#%") do {
+		set vdscpce = vREF.piece("#", 2)
+		set vREF = vREF.piece("#", 1)
+	}
+	set vINFO("PIECE") = vdscpce
+	
+	set vREF = vREF_"V)"			// Add bottom, collating key
+	
+	set vINFO("TYPE") = "Array"
+	set vINFO("ARRAY") = vREF
+	if vINFO("DESCENDING").exists() do {
+		set vINFO("COLLATE") = "V=$O("_vREF_",-1)"
+				
+		if vINFO("MAX").isNull() set vINFO("START") = ""
+		else  do {
+			
+			type String V = vINFO("MAX")
+			
+			#ACCEPT Date=11/29/04;PGM=RussellDS;CR=13258
+			set vINFO("START") = $O(@vREF)
+		}
+		
+		set vINFO("STOP") = vINFO("MIN")
+	}	
+	else  do {
+		set vINFO("COLLATE") = "V=$O("_vREF_")"
+		
+		if vINFO("MIN").isNull() set vINFO("START") = ""
+		else  do {
+			
+			type String V = vINFO("MIN")
+			
+			set vINFO("START") = $O(@vREF, -1)
+		}
+		
+			set vINFO("STOP") = vINFO("MAX")
+	}
+		
+	set vINFO("COLCNT") = 2
+	set vINFO("COL", 1) = "KEY"_vTAB_vfmt_vTAB_vkeylen_vTAB_""_vTAB_"Key"
+	set vINFO("COL", 2) = "DESCRIPTION"_vTAB_"T"_vTAB_"0"_vTAB_""_vTAB_"Description"
+	
+	quit 0
+	
+
+PARSE(String params,	// Table reference parameters
+      String VALCMDS,	// List of valid commands in this context
+      String vINFO())	// vINFO array					/MECH=REFARR:W
+
+	/*
+	Parse Table reference parameters for commands and set up CMD array
+	*/
+	
+	type Number I
+	type String CMDSTRING, NAME, EXPR, tok
+	
+	// If null, use all valid commands
+	if VALCMDS.isNull() set VALCMDS = "DESCENDING,DISTINCT,LIST,NOVALIDATE,QUERY"
+
+	set params = $$TOKEN^%ZS(params, .tok)
+	
+	for I = 1:1:params.length(":") do {
+
+		set CMDSTRING = params.piece(":", I)		
+		set NAME = CMDSTRING.piece(" ", 1).upperCase()
+		set EXPR = $$UNTOK^%ZS(CMDSTRING.piece(" ", 2, 99), tok)
+	
+		if $$isCMD("LIST", NAME) do {
+			if EXPR.isNull() set EXPR = 9999
+			set vINFO("LISTLEN") = EXPR
+			set vINFO("LIST") = ""
+		}
+		else  if $$isCMD("NOVALIDATE", NAME) set vINFO("NOVALIDATE") = ""
+		else  if $$isCMD("DESCENDING", NAME) set vINFO("DESCENDING") = ""
+		else  if $$isCMD("QUERY", NAME) do {
+			set EXPR = EXPR.stripQuotes()
+			
+			// If multiple queries with "," or ":" separators, replace with &
+			if EXPR.isLike("%,%") set EXPR = EXPR.replace(",", " & ")
+			if EXPR.isLike("%:%") set EXPR = EXPR.replace(":", " & ")
+			
+			
+			if vINFO("QUERY").exists() set vINFO("QUERY") = vINFO("QUERY")_$C(1)_EXPR
+			else  set vINFO("QUERY") = EXPR
+		}
+		else  if $$isCMD("DISTINCT", NAME)		// Legal command, but already handled
+		else  do {
+			
+			type Error error = Class.new("Error")
+		
+			set error.type = "%DQ-E-INVLDTBLLOOKUP"
+			// Invalid command ~p1
+			set error.description = $$^MSG(1287, NAME)
+			throw error
+			
+			break
+		}
+	}
+	
+	quit
+	
+
+isCMD(String CMD,	// Command string
+      String TEST)	// TEST if this is the command
+      
+      /*
+      Determine if TEST is the specified command.
+      
+      For example, CMD = QUERY, TEST = Q, QU, QUE, QUER, or QUERY are all OK.
+      */
+      
+      if TEST.isNull() quit 0
+      
+      quit (CMD.extract(1, TEST.length()) = TEST)
+      
+      
+public UACN(String REF,		// Lookup table string [*]
+	    String SELECT,	// Select list			/MECH=REFNAM:W
+	    String TABLES,	// Table list			/MECH=REFNAM:W
+	    String COLS(),	// Column information [*]	/MECH=REFARR:W
+	    String HDG)		// Heading			/MECH=REFNAM:W
+	    
+	/*
+	Supports UACN and UCIF to return data to allow data access and formatting
+	for account and CIF lookup display.
+	
+	NOTE:  If UACN and UCIF go away at some point because there is no character
+	interface for account lookups, this sub-routine can be eliminated.
+	
+	ARGUMENT NOTES:
+	
+		. REF		Lookup reference, from CUVAR.UACND1F, UACNL1F
+				or UCIF1F.  Format is like:
+			  	  [DEP]CID/RH=Account,BAL,GRP/RH=Group/LE=5,TYPE/RH=Type,CRCD
+			  
+		. COLS(SEQ)	Column information array, in same form at vINFO("COL")
+				Tab delimited - NAME,TYPE,SIZE,DEC,DESCRIPTON
+	*/
+	
+	type Public Boolean ER
+	
+	type Number I
+	type String vINFO()			
+	
+	set vINFO("STR") = ""
+	set vINFO("FMT") = "N"
+	set vINFO("MIN") = ""
+	set vINFO("MAX") = ""
+	set vINFO("HDG") = ""
+	set vINFO("UFK") = ""
+	
+	set ER = $$DINAM(REF, .vINFO()) quit:ER
+	
+	set HDG = vINFO("HDG")
+	set SELECT = vINFO("SELECT")
+	set TABLES = vINFO("TABLES")
+	
+	for I = 1:1:vINFO("COLCNT") set COLS(I) = vINFO("COL", I)
+
+	quit
+
+
+public LOOKUPPP(String FORMAT,	// Input lookup format
+		String FILES,	// Valid tables allowed [*]
+		String ARRAY())	// Converted column headings [*]	/MECH=REFARR:W
+	 
+	 /*
+	 Post-processor used by screen CUVARLOOKUP to validate lookup syntax
+	 
+	 ARGUMENT NOTES:
+	 
+	 	. FILES		First table must be CIF, DEP, or LN
+	 
+	 	. ARRAY()	Returns nodes 1 and 2 with column
+	 			headings for display by screen
+	 			
+	 EXAMPLE:
+	 
+	 	do LOOKUPPP^DBSTBL("[DEP]CID,BAL","DEP",.ARRAY())
+	 	
+	 	Returns:
+	 	
+	 	ARRAY(1)="Seq Name/TAX ID                Account       Balance"
+	;       ARRAY(2)="--- --------------------  ------------  ------------
+	 	
+	 			
+	 NOTE:  While this function is labed public, it is only to be used
+	 	screen CUVARLOOKUP.
+	 */
+      
+	type Public Boolean ER = 0
+	type Public String RM
+	
+	type Number I
+	type String vINFO(), TABLE
+	
+	set vINFO("STR") = ""
+	set vINFO("FMT") = ""
+	set vINFO("MIN") = ""
+	set vINFO("MAX") = ""
+	set vINFO("HLP") = ""
+	set vINFO("UFK") = ""
+
+	//if 'vHDG.get().isNull() set vINFO("HDG") = vHDG
+	//else  set vINFO("HDG") = vhdg.get()
+	
+	set vINFO("HDG") = ""
+	
+	do SETUP(FORMAT, .vINFO()) quit:ER
+	
+	if 'vINFO("HDG").exists() do { quit
+		set ER = 1
+		// Invalid syntax
+		set RM = $$^MSG(1475)
+	}
+	
+	if vINFO("HDG").length() > 80 do { quit
+		set ER = 1
+		// Field length greater than 80
+		set RM = $$^MSG(1077)
+	}
+
+	set ARRAY(1) = vINFO("HDG").justify(79,-1)
+	set ARRAY(2) = "".justify(79)
+	
+	for I = 1:1:ARRAY(1).length() if ARRAY(1).extract(I) '= " " set ARRAY(2).extract(I) = "-"
+	
+	// The first column must be the primary key of the first table
+	
+	set TABLE = FILES.piece(",", 1)
+	
+	if TABLE = "CIF", vINFO("COL", 1).piece($C(9), 1) '= "CIF.ACN" set ER = 1, RM = "CIF.ACN"
+	else  if TABLE = "DEP", vINFO("COL", 1).piece($C(9), 1) '= "DEP.CID" set ER = 1, RM = "DEP.CID"
+	else  if TABLE = "LN", vINFO("COL", 1).piece($C(9), 1) '= "LN.CID" set ER = 1, RM = "LN.CID"
+	// First display column must be the account number ~p1
+	if ER set RM = $$^MSG(1115, RM)
+	
+	quit
+
+vSIG()	quit "60346^58719^Dan Russell^42348"	// Signature - LTD^TIME^USER^SIZE

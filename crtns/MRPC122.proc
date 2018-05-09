@@ -1,0 +1,285 @@
+MRPC122(RETURN,VERSN,PARAMS)
+  /*
+	ORIG: antonovs - 10/14/2002
+	DESC: Escrow Payment Calculation
+
+	KEYWORDS: RPC
+ 
+	ARGUMENTS:
+	   . RETURN	Escrow Payment Amount	/TYP=N/REQ/MECH=REFNAM
+ 
+	   . VERSN      MRPC122 version number	/TYP=N/REQ/MECH=VAL
+	     current version=1
+ 
+	   . PARAMS	Input string		/TYP=T/REQ/MECH=VAL	
+	   
+	   RETURNS:
+	    
+	    . $$	Error Message		/TYP=T
+			Null= No Error
+ 
+	   RELATED:
+
+	   . $$^PBSMRPC - MRPC Service Class Driver
+
+	This procedure supports the calculation of escrow payments for both new
+	and existing loans in Profile. It accepts the normal return and versn 
+	parameters as well as a third complex parameter named "params". This 
+	complex parameter is broken down into individual records.  The first 
+	record pertains to specific loan parameters and all subsequent records
+	pertain to escrow detail:
+
+	Record	Field Position	Field Contents
+	1	1		LN.DIST1FRE - Payment Frequency
+		2		LN.DIST1ND - Next Payment Date
+		3		LN.ANFRE - Analysis Frequency
+		4		LN.APCND - Escrow Analysis Pmt Change Next Date
+	2	1		TRTYPE.TYP - Escrow Transfer Type
+		2		TRTYPE.CREMFRE - Borrower Remittance Frequency
+		3		TRTYPE.SPF - Self-Pay Flag
+		4		RAMT.REMAMT - Remittance Amount
+		5		RAMT.REMDT - Remittance Date
+
+	Each record is semicolon-delimited (";"). Each field within a record is 
+	pipe-delimited ("|"). Record 2 may repeat as necessary. More than one 
+	transfer remittance file record (RAMT) may exist for a particular 
+	escrow transfer type record (TRTYPE).  In this case, additional
+	remittance amount/date pairs will be concatenated onto the record 
+	(i.e., position 4 and 5 refer to pair 1, position 6 and 7 refer to 
+	pair 2, etc.). An example of this format is shown below:
+
+	1MAE|03/30/2002|1YA|10/22/2002;DIS|1MA15|1|500.25|10/15/2002|300|11/15/2002
+
+	---- Revision History ------------------------------------------------
+	
+	11/05/04 - GEORGES - CR13023
+		   This procedure has been introduced to support the 
+		   calculation of escrow payments for both new and existing
+		   loans in Profile.
+		   The PROC section has been modified to include the rounding
+		   utility before returning calculated escrow payment amount.
+		   The FREOCCUR and OFFSET sections were removed and using the
+		   UFRE utility. 
+		   Also section PROC was modified to set variable ANCOUNT to 1
+		   when code reset the analysis through date to be at least
+		   1 year.
+		   
+ */
+
+	// Version number of client message is not compatible with server
+        if VERSN'=1 quit $$ERRMSG^PBSUTL($$^MSG(2951))
+        	
+	type public String ER,RM
+	
+	if ER.get()="" set ER=0
+
+	do SYSVAR^SCADRV0()
+	
+	// Extract data from PARAMS argument and validate it
+	do PARSE quit:ER $$ERRMSG^PBSUTL(RM.get())
+
+	quit "" 
+
+PARSE	// Parse out all information from the PARAMS argument
+	/*
+	   This section parses out all of the information from the PARAMS
+	   argument into STRING array. First index of the array stores record
+	   1 parameters, second index stores record 2, third index stores next
+	   record 2 if it is defined, and so on.
+	   It also check for validity of the data stored in PARAMS.
+	*/
+	
+	type String ANEND,ANFRE,APCND,CREMFRE(),DIST1FRE
+	type String DIST1ND,END,I,PAIR,RAMT(,),REM
+	type String RDT(,),RTYP(),SPF(),START,STRING()
+	type public String ER,ET,PARAMS,RM
+	
+	if '(PARAMS.data()) do SETERR("LN","DIST1FRE") quit
+
+	// Create STRING(I) array where I is a record number
+	set START=$F(PARAMS,";")
+	set STRING(1)=PARAMS.extract(1,START-2)
+	set END=1
+	set I=2
+	while END'=0 do {
+		set END=$F(PARAMS,";",START)
+		if END=0 set STRING(I)=PARAMS.extract(START,$L(PARAMS)) quit
+		set STRING(I)=PARAMS.extract(START,END-2)
+		set START=END
+		set I=I+1
+		}
+
+	if STRING(2)="" do SETERR("TRTYPE","TYP") quit
+
+	// Set values for record 1 fields
+	set DIST1FRE=STRING(1).piece("|",1)
+	if DIST1FRE="" do SETERR("LN","DIST1FRE") quit
+
+	set DIST1ND=STRING(1).piece("|",2)
+	if DIST1ND="" do SETERR("LN","DIST1ND") quit
+	set DIST1ND=$$DSJD^SCADAT(DIST1ND) quit:ER
+
+	set ANFRE=STRING(1).piece("|",3)
+	if ANFRE="" set ANFRE="1YA"
+
+	set APCND=STRING(1).piece("|",4)
+	if APCND'="" do { quit:ER
+		set APCND=$$DSJD^SCADAT(APCND) quit:ER
+		set ANEND=APCND-1
+		}
+	else  set ANEND=$$NJD^UFRE(DIST1ND,ANFRE)-1 quit:ER
+
+	// Set values for multiple record 2 fields
+	set I=2
+	while STRING(I).data() do { quit:ER
+	
+		set RTYP(I)=STRING(I).piece("|",1)
+		if RTYP(I)="" do SETERR("TRTYPE","TYP") quit
+		set CREMFRE(I)=STRING(I).piece("|",2)
+		if CREMFRE(I)="" do SETERR("TRTYPE","CREMFRE") quit
+		set SPF(I)=STRING(I).piece("|",3)
+		if SPF(I)="" do SETERR("TRTYPE","SPF") quit
+	
+		set RDT(I,1)=STRING(I).piece("|",5) 
+		if RDT(I,1)="" do SETERR("RAMT","REMDT") quit
+		else  set RDT(I,1)=$$DSJD^SCADAT(RDT(I,1)) quit:ER
+		set RAMT(I,1)=STRING(I).piece("|",4)
+		if RAMT(I,1)="" do SETERR("RAMT","REMAMT") quit
+		
+		if STRING(I).piece("|",6)'="" do { quit:ER
+			set REM=1
+			set PAIR=0
+			while RAMT(I,REM).data() do { quit:ER
+				set REM=REM+1
+				if STRING(I).piece("|",6+PAIR)="" quit
+				set RAMT(I,REM)=STRING(I).piece("|",6+PAIR)
+				set RDT(I,REM)=STRING(I).piece("|",7+PAIR)
+				if RDT(I,REM)="" do SETERR("RAMT","REMDT") quit
+				else  set RDT(I,REM)=$$DSJD^SCADAT(RDT(I,REM)) quit:ER
+				set PAIR=PAIR+2
+				}
+			}
+		set I=I+1
+		}
+		
+	// Calculate escrow payment amount
+	do PROC quit:ER $$ERRMSG^PBSUTL(RM.get(),ET.get())
+	
+	quit
+	
+PROC	// Calculate Escrow Payment Amount 
+	/*
+	This section calculates an escrow payment amount based on the account
+	information.
+	*/
+	type String AMOUNT,AN1YEAR,ANBEGIN,ANCOUNT,INDEX
+	type String LOWEST,MIN,NJD,PAY1YEAR
+	type public String ANEND,ANFRE,CREMFRE(),DIST1FRE,DIST1ND
+	type public String ER,I,RAMT(,),RDT(,),RETURN,SPF(),STRING() 
+	
+	// Determine ANBEGIN - analysis period beginning date
+	if %SystemDate<DIST1ND set ANBEGIN=DIST1ND
+	else  set ANBEGIN=%SystemDate
+
+	/* 
+	  Determine ANEND - analysis period end date, and ANCOUNT - number of
+	  analysis frequency occurrences per year
+	*/
+	set AN1YEAR=$$NJD^UFRE(ANBEGIN,"1YA")-1 quit:ER
+	set NJD=$$NJD^UFRE(ANBEGIN,ANFRE,.ANCOUNT) quit:ER
+		
+	if ANEND<AN1YEAR do {
+		set ANEND=AN1YEAR
+		set ANCOUNT=1
+		}
+
+		
+	// Calculate number of payments per year
+	set NJD=$$NJD^UFRE(DIST1ND,DIST1FRE,.PAY1YEAR) quit:ER
+		
+	/*
+	  Determine the lowest number of remittance frequency occurrences per
+	  year for all escrow transfer type records (MIN)
+	*/
+	set I=2
+	while STRING(I).data() do { quit:ER
+		set NJD=$$NJD^UFRE(%SystemDate,CREMFRE(I),.LOWEST) quit:ER
+		set LOWEST(I)=LOWEST
+		set I=I+1
+		}
+	
+	set MIN=LOWEST(2)
+	set INDEX=2
+	set I=3
+	while LOWEST(I).data() do {
+		if LOWEST(I)<MIN do {
+			set MIN=LOWEST(I)
+			set INDEX=I
+			}
+		set I=I+1
+		}
+
+	/* 
+	  If the lowest number of remittance frequency occurrences is less
+	  than the number of analysis times per year, then there might be no
+	  remittances in the current analysis period
+	*/
+	if MIN<ANCOUNT do { quit:ER
+		new TEMP
+		set ANCOUNT=MIN
+		set TEMP=$$NJD^UFRE(ANBEGIN,CREMFRE(INDEX)) quit:ER
+		if TEMP>ANEND set ANEND=TEMP
+		}
+
+	// Determine Escrow Payment
+	set I=2
+	set AMOUNT=0
+	while STRING(I).data() do { quit:ER
+		new REM,NEXT
+		if SPF(I)=1 set I=I+1 quit
+		set REM=1
+
+		while RDT(I,REM).data() do {
+			if RDT(I,REM)'>ANEND,RDT(I,REM)'<DIST1ND set AMOUNT=AMOUNT+RAMT(I,REM)
+			set REM=REM+1
+			}
+
+		set NEXT=$$NJD^UFRE(RDT(I,REM-1),CREMFRE(I)) quit:ER
+
+		while NEXT'>ANEND do { quit:ER
+	 		set AMOUNT=AMOUNT+(RAMT(I,REM-1))
+			set NEXT=$$NJD^UFRE(NEXT,CREMFRE(I)) quit:ER
+			}
+		set I=I+1
+		} 
+
+	set AMOUNT=(AMOUNT*ANCOUNT)/PAY1YEAR
+	set RETURN=$$V2LV^MSG($$^SCARND(AMOUNT,0,"",%SystemCurrency,""))
+	
+	quit
+
+SETERR( String TNAM, String COLNAM)	// Set an error
+	/*
+	This section builds error message when required values are missing in
+	PARAMS input arguments. It is stored in variable RM and includes
+	data item description. Example:
+	RM="Missing required data item LN.DIST1FRE (Distribution 1 Frequency)"
+	
+	Arguments:
+ 
+	. TNAM   - Table Name		/TYP=T/REQ/MECH=VAL
+	
+	. COLNAM - Column Name		/TYP=T/REQ/MECH=VAL
+
+	Example:
+ 
+	do SETERR("LN","DIST1FRE")
+ 
+	*/
+	
+		
+	// Missing required data item ~p1
+	do SETERR^DBSEXECU(TNAM,"MSG",1767,TNAM_"."_COLNAM)
+	quit
+
+vSIG()	quit "60296^59787^Laura Hillanbrand^7791"	// Signature - LTD^TIME^USER^SIZE

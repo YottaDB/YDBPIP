@@ -1,0 +1,337 @@
+SRVSTP(Number CID, Number STPTYP, Number FEECAT, String FEETYP)
+	/*
+	ORIG: JARVISG - 11/10/1999
+	CALLED BY: STOP# filers, BCHDLYFEEE
+	PROJ: ARQ 34535
+	DESC: Fee transaction processing procedure
+	Procedure will be used to process automatic stop payment and 
+	daily fees processing
+	
+	---- Revision History------------------------------------------------
+	
+	07/25/07 - DHANALAKSHMI R - CR 28416
+	            Modified the section ETC by correcting the setting in the 
+	            else part to avoid the error while placing a stop payment 
+	            on the account.
+
+	05/01/07 - SharmaR - CR 26824
+	            Declared FCID and set FCID to CID to correct an issue with 
+                    the exception logged.
+                    Removed setting FCID in the EXC section.
+	
+	12/27/06 - MBUIM - CR 24545
+		   Retrofit CR 3110 from Profile01
+		   Modifed section ETC to call extrinsic to get the trans
+		   code. Also added FEETYP to parameter list.
+	
+	08/23/05 - RussellDS - CR16911
+		   Removed obsolete call to CRT4.
+	
+		   Cleaned up code.
+		   
+		   Removed old revision history.
+        
+                    		   
+	---------------------------------------------------------------------
+	*/
+	
+	type Boolean ER
+	type Number FEEAMT, FCID
+	type String ET, FEEPLN, PGM, SCND, TR16
+
+	set (ER, FEEAMT)=0
+	set (PGM, SCND, FEEPLN)=""
+	set CID = CID.get()
+	set FCID = CID
+	set FEETYP = FEETYP.get()
+	set FEECAT = FEECAT.get()
+
+	// Only defined in STOP1-9 triggers
+	set STPTYP = STPTYP.get()
+	
+	type RecordDEP dep = Db.getRecord("DEP","CID")
+	
+	quit:(dep.stat = 4)        	     // Account Closed
+
+	// Account not linked to service fee plan
+	if dep.feepln.isNull() do { quit
+		//Account not linked to service fee plan
+		set ET = $$^MSG(4979)
+		do EXC
+	}
+	
+	// Get fee amounts from feeplan
+	do GETFEE(.dep, FEETYP) if ER.get() do EXC quit
+	
+	if FEEAMT.get() do {
+		do BUILDTR(.dep, FEETYP, FEEAMT)
+		if ER.get() do EXC
+	}
+
+	quit
+	
+
+GETFEE(RecordDEP dep,	// Deposit record
+       String FEETYP)	// Fee type
+       
+       // Check fee plan for feecat 2 and then for STP/DLY fee types
+
+	type Date SCND, SRVDT
+	type String ET, FEEPLN, PGM
+
+	set FEEPLN = dep.feepln
+	set SCND = dep.scnd
+	
+	type ResultSet rs = Db.select("FEEDT", "FEEPLN", "PLAN=:FEEPLN AND FEEDT<=:SCND", "FEEDT DESC")
+	
+	if rs.next() set SRVDT = rs.getCol("FEEDT")
+	else  set SRVDT = ""
+
+	/*
+	  If the fee plan exists in the fee plan user table but the effective
+	  date is not before today (SCND) than it is in the future - log error
+	*/
+	if SRVDT.isNull() do { quit
+		// Fee Plan ~p1 Effective date may not be in the future
+		set ET=$$^MSG(4653,"",FEEPLN)_" "_$$^MSG(876)
+		do EXC
+	}
+	
+	// STP/DLY fee type not defined for the fee plan
+	quit:'Db.isDefined("FEESRV","PLAN=:FEEPLN,FEEDT=:SRVDT,FEECAT=:FEECAT,FEETYP=:FEETYP")
+
+	set PGM = $$FEEPGM^UFID(FEEPLN, SRVDT)
+
+	if PGM.isNull() do { quit
+		// Fee plan not compiled
+		set ET=$$^MSG(2481, FEEPLN)
+		do EXC
+	}
+
+	// Last 2 parameters FEECNT=1 and NOTFSN=0
+	set PGM = "^"_PGM_"(.dep,FEECAT,"""_FEETYP_""",1,0)"
+	
+	do @PGM
+	
+	quit 
+
+
+BUILDTR(RecordDEP dep,	// Deposit record
+	String FEETYP,
+	Number FEEAMT)	// Fee amount
+
+	// Build transaction sets
+
+	/*
+	 Account entered as fee charge account will be CID stored as
+	 dep. If this account has a service fee charge acct SVCFEECID,
+	 SVCFEECID's information will be stored as tempdep.
+	 The fee will be assessed to the SVCFEECID if there is one, else
+	 the original account will be set to tempdep and the tempdep account
+	 will be debited.
+	*/	
+	
+	// Check for Service charge account
+	
+	type public Boolean %MCP
+	
+	type Boolean %ODP, DC
+	type Number CID, DFTCID, EXCAMT, FCID, TAMT
+	type String BRCD, CC, CCODE, CRCD, ETC, GLCID, GLSC, ITC, MSG
+	type String OCC, par, SRC, TCMT, TSCRCID, TSDRCID, TSO, TYPE, x
+	
+	set (CRCD,ETC,GLSC,ITC,TSO,TYPE) = ""
+
+	set TSO = "SRVFEE#"
+	set CID = dep.cid
+	set FCID = dep.svcfeecid
+
+	type RecordDEP tempdep
+
+	// Initialize service fee charge acct
+	if 'FCID.isNull() do {
+	
+		set tempdep = Db.getRecord("DEP", "CID=:FCID")
+		
+		set CID = FCID
+		
+		if tempdep.stat = 4 do {
+			
+			set tempdep = Db.getRecord("DEP", "CID=:dep.cid")
+			set FCID = dep.cid
+		}
+	}
+
+	// Charge original fee account
+	else  do {
+		
+		set tempdep = Db.getRecord("DEP", "CID=:dep.cid")
+		set FCID = CID
+  	}
+	
+	set TYPE = tempdep.type
+	set CRCD = tempdep.crcd
+
+	// Always use EXCAMT exchange amount whether exchange or not
+	set EXCAMT = FEEAMT
+	
+	/*
+	 If service fee charge acct and stop fee charge account are different
+	 currencies, convert fee amount to service fee charge account
+	 currency and build transaction for service fee charge account.
+	*/
+
+	if (tempdep.crcd '= dep.crcd) do {
+	
+		set EXCAMT = $$CONV^CRCDUTL(FEEAMT, tempdep.crcd, dep.crcd)
+		set EXCAMT = EXCAMT.roundCur(tempdep.crcd, "", 0)
+	}
+	
+	set GLSC = tempdep.glsc			// Fee account GL code
+    	set (OCC,CC) = tempdep.cc		// override cost center
+	set TAMT = EXCAMT			// Transaction amount
+	set ETC=$$ETC(TYPE,0,FEETYP)		// DRTRSC Service Fee Debit Tran Code
+	set MSG = $$^MSG(3506)			// Service Fees
+	set TCMT = "FEE-"_FEETYP_": "_MSG	// FEE-feetype: Service Fees
+
+	// Service Fee for account ##### message for fee charge account
+	if (tempdep.cid '= dep.cid) set TCMT = $$^MSG(8435, dep.cid)
+
+	type RecordTRN trn = Db.getRecord("TRN", "ETC=:ETC")
+ 
+	set ITC = trn.itc
+
+	// Debit side of transaction
+
+	type TranSet ts = Class.new("TranSet")
+	type RecordTTX ttx = Class.new("RecordTTX")
+
+	// account to debit
+	set ttx.cid = tempdep.cid
+	set ttx.itc = ITC
+	set ttx.etc = ETC
+	set ttx.tamt = EXCAMT
+	set ttx.tlo = %UserStation
+	set ttx.efd = %SystemDate
+	set ttx.tcmt = TCMT
+	set ttx.cc = tempdep.cc
+
+	if %MCP set ttx.crcd = tempdep.crcd
+
+	set x = ts.copyTran(ttx)
+
+	// Credit Side - G/L account
+
+	// Reset for original acct info for G/L if using service fee chg account
+	if (dep.cid '= tempdep.cid) do {
+	
+		set EXCAMT = FEEAMT
+		set CRCD = dep.crcd
+		set TYPE = dep.type	
+		set CC = dep.cc
+		set GLSC = dep.glsc
+	}
+
+	type RecordUTBLGLSC utblglsc = Db.getRecord("UTBLGLSC", "GLSC=:GLSC")
+
+	// Dep G/L # (Fee Income)
+	set GLCID = utblglsc.dglf
+ 
+ 	set ETC=$$ETC(TYPE,1,FEETYP) 	 
+
+	type RecordTRN trn2 = Db.getRecord("TRN","ETC=:ETC")
+	
+	set ITC = trn2.itc			
+ 
+	// G/L Credit Side
+	set ttx.cid = GLCID
+	set ttx.itc = ITC		
+	set ttx.etc = ETC
+	set ttx.tamt = EXCAMT
+	set ttx.tlo = %UserStation
+	set ttx.efd = %SystemDate
+	set ttx.tcmt = TCMT
+	set ttx.cc = CC
+
+	if %MCP set ttx.crcd = CRCD
+
+	set x = ts.copyTran(ttx)
+	
+	// Set up Posting variables
+
+	set (BRCD, par) = ""
+
+	// Use the service fees batch teller
+	set SRC = "FEE"
+
+	// Get service fees batch teller information
+	do SOURCE^BCHSOURC("FEE", SRC, .%UserID, .BRCD, .%UserClass, .TSDRCID, .TSCRCID, .%ODP)
+
+	type RecordSCAU scau = Db.getRecord("SCAU","%UID")
+	
+	set DFTCID = scau.rocr
+
+	/*
+	  Processing qualifiers
+
+	  IPMODE  Input mode (required)
+	   0 = Batch		3 = System generated
+	   1 = Online		4 = Transaction array (TR)
+	   2 = Store & forward
+	
+	  OPTION  Processing option (required)
+	   0 = Process transactions; do not update database
+	   1 = Do not process transactions; update database
+	   2 = Process transactions; update database
+	*/	
+
+	set par("IPMODE") = 3
+       	set par("OPTION") = 2
+       	
+	do ts.postTSet(%SystemDate, BRCD, .par)  
+	
+	quit
+	
+
+ETC(TYPE,DC,FEETYP)    //       Define transaction code
+
+	type String RETURN
+
+	type RecordPRODCTL prodctl = Db.getRecord("PRODCTL","TYPE")
+
+	if DC do {	
+		set RETURN = prodctl.odtc1		  	// odtc1 OFFSET TRAN GROUP
+		if RETURN.isNull() set RETURN = prodctl.crtrgp  // CR Gen Credit Tran Code
+		}
+
+	else  set RETURN=$$FINDETC^BCHFEEUT(.prodctl,FEETYP)
+
+	quit RETURN
+
+
+EXC	/*
+	   Log error to DAYEND exception with RM  5544 Service Fees error.
+	   FEEAMT will be set to "*" for invalid table values from compiled
+	   fee program
+	*/
+	
+	type public Number CID, FCID, FEEAMT
+	type public String %ZTSEQ, ET, FEETYP, RM
+	
+	if FEEAMT = "*" do {
+		
+		set FEEAMT = ""
+		// Fee lookup table returned no service fee
+		set ET = FEETYP_" "_$$^MSG(50)
+	}
+
+	// Service Fees error
+	set RM = $$^MSG(5544)
+
+	do LOG^UTLEXC($T(+0), "*", RM, FCID, %ZTSEQ.get(), ET.get())
+
+	kill ET, %ZTSEQ
+	
+	quit 
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60837^16784^Dhanalakshmi R^7732"	// Signature - LTD^TIME^USER^SIZE

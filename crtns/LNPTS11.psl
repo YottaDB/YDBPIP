@@ -1,0 +1,122 @@
+LNPTS11(RecordLN ln,		// Loan account			/REF:RW
+	RecordTTX ttx)		// Transaction			/REF:RW
+
+	/*
+	---- Revision History ------------------------------------------------
+
+	06/28/06 - PUTTASWH - CR 27530
+		   Modified UPDVAT section to update LNBIL5 record during 
+		   VAT On Late Charge payments.
+		   
+	04/16/07 - PUTTASWH - CR 26508
+		   Modified UPDVAT section to validate for negative VAT on 
+		   late charge.
+		   
+	03/25/07 - SENTHIL.J KUMAR / SmithCD - CR 24945
+		   Added code to consider possible VAT amount stored in 
+		   ttx.vatlchg (set by the calling procedure, such as 
+		   POSTADJ^LNPTS12). Added public VAT tag, to be called by 
+		   reverse VAT on late charge assessment adjustment 
+		   transaction codes. Cleaned up code to standards, and 
+		   consolidated code.
+
+	06/10/03 - CARROLLJ - 51349
+		   Set BALINT varible to correct undefined error.
+
+	11/14/02 - CARROLLJ - 43583
+		   Modified calls to LNPTSU to pass ttx.
+
+	01/10/02 - CARROLLJ - 43583
+		   Convert to PSL.
+	*/
+	
+	type public Date CUVAR2
+	type public Number ZAMT
+	
+	type Number VATAMT
+
+	// Tran Detail: L:Val Tax Lchg
+	set VATAMT = ttx.vatlchg
+	if VATAMT do UPDVAT(.ln, .ttx, VATAMT)
+	
+	/*
+	Only update Tran Detail: D:Penalty L:Late Charge (ttx.penalty) if a 
+	value is not in ttx.vatlchg, indicating ttx.tamt has not yet been pieced 
+	out.
+	*/
+	if 'VATAMT do GL^LNPTSU(.ttx, ZAMT, 4)
+	
+	do REDUCBL^LNPTS13(.ln, .ttx, "L", ZAMT)
+	
+	set ln.lchg = ln.lchg - ZAMT
+
+	// Transaction results in negative late charge balance
+	if ln.lchg < 0 do Runtime.setErrMSG("TTX", 2739) quit
+
+	// Update Late Charges Assessed YTD / Pr Financial Year
+	#IF CUVAR.YEOFF
+		type Date FIN1 = $$BOFY^SCADAT(CUVAR2, 1)
+		if CUVAR2.get().isNull() set CUVAR2 = CUVAR.TJD
+		if (%EffectiveDate < FIN1) & (CUVAR2 '> (FIN1 + CUVAR.YEOFF - 1)) set ln.papy = ln.papy + ZAMT
+		else  set ln.paytd = ln.paytd + ZAMT
+	#ELSE
+		set ln.paytd = ln.paytd - ZAMT
+	#ENDIF
+
+	/*
+	Late charge assessed tax year-date and prior tax year are NOT defined
+	fields in functional spec. for tax year so far, else will be set here.
+	*/
+	set ln.papl = ln.papl - ZAMT
+	
+	do %HSEQ^LNPTSU(.ttx, "*#L#"_ZAMT)
+	
+	type RecordUTBLICPA utblicpa = Db.getRecord("UTBLICPA", "KEY=:ln.icpa")
+	if utblicpa.prio.extract(6) set ln.balint = ln.balint - ZAMT
+
+	set ZAMT = 0
+	
+	quit 
+	
+
+public VAT(RecordLN ln,			// Loan account		/REF:RW
+	   RecordTTX ttx,		// Transaction		/REF:RW
+	   RecordTRN trn)		// Transaction code	/REF:R
+
+	/*
+	Reverse Tax on Late Charge
+	
+	Called externally by reverse tax assessment on late charge adjustment 
+	transaction codes.
+	*/
+
+	type public Number ZAMT
+	
+	// Update Tran Detail: L:Val Tax Lchg
+	do GL^LNPTSU(.ttx, ZAMT, 17)
+	
+	do UPDVAT(.ln, .ttx, ZAMT)
+	
+	quit
+
+
+UPDVAT(RecordLN ln,		// Loan account			/REF:RW
+       RecordTTX ttx,		// Transaction			/REF:RW
+       Number VATAMT)		// Transaction amount
+       
+	type public Number ZAMT
+
+	do REDUCBL^LNPTS13(.ln, .ttx, "VL", VATAMT)
+	
+	do %HSEQ^LNPTSU(.ttx, "*#VL#"_VATAMT)
+	
+	set ln.vatlchgdue = ln.vatlchgdue - VATAMT
+	
+	// Transaction results in negative VAT on late charge
+	if (ln.vatlchgdue < 0) do Runtime.setErrMSG("LN",6879) quit
+	
+	set ZAMT = ZAMT - VATAMT
+    
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60810^33238^Hema Puttaswamy^2999"	// Signature - LTD^TIME^USER^SIZE

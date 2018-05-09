@@ -1,0 +1,858 @@
+UCPATCH		/*
+	ORIG: FSANCHEZ - 05/01/02
+	DESC: Library of code patching and optimization methods
+
+	KEYWORDS:	DATABASE
+
+	========================================================================
+	Because a separate project to migrate the PSL compiler itself from a set
+	of "M routines" to "PSL	procedurer", is not expected to start in the near
+	future, but the growing complixity of the MDB/RDB support can be much
+	better handled by "PSL" than by "M", this PSL compiler element will be
+	migrated on a per-subroutine basis. The code that has not yet been
+	migrated is embedded in #BYPASS - #ENDBYPASS blocks. The only purpose
+	and justification for these unusally large chunks of #BYPASSed code is
+	this slow migration.
+	========================================================================
+
+	---- Comments ----------------------------------------------------------
+	Patch structures:
+	patch(-3,subRou,var,newPtr,nod)=lvn	Mapped local variable name
+	patch(-1,subRou,lvn)=""			Mapped vars used in subroutine index
+	patch(0,subRou,var,newPtr)=type()	Copy of type array
+	patch(0,subRou,var,newPtr,token)=""	Replacement token index
+
+	patch(token) = msrc_$C(6)_Expression	Original expression
+
+	---------- Revision History ------------------------------------------
+	10/17/06 - Frans S.C. Witte CRs: 22719 / 20613
+		* Modified ResultSet to deal with new RDB code layout
+		* PATCHCHAR changed from $C(9) to $C(6), and added $$isPatch()
+		  and $$hasPatch().
+
+	09/15/06 - Frans S.C. Witte - CRs: 22720 / 22274
+		Converted to PSL. Removed all code that dealt with dbLoad().
+		Removed history entries older than 2004-01-01.
+
+	06/09/06 - Frans S.C. Witte - CRs: 22060 / 22061
+		ResultSet code now independent of leading TAB or SPACE
+
+	05/11/06 - Frans S.C. Witte - CRs: 21101 / 18164
+		ResultSet code now uses "vOid" instead of "object"
+
+	04/04/06 - Frans S.C. Witte - CRs: 20280 / 18164
+		Modified code to replace all patches on a line, not just the
+		first one.
+		Function $$patch(): a noOpti value of "" is now treated as zero.
+		Re-enabled optimization of vOpen0() / vFetch0(), because UCPATCH
+		is now only called once per source unit.
+
+	11/28/05 - Frans S.C. Witte - CRs: 18163 / 18164
+		Record optimization is now handled by UCREC4OP (which is called
+		by UCGM).
+		Changed $$rdb^UCDBRT() to $$rtIsRdb^UCXDD() (2 occurrences)
+
+	09/29/05 - Frans S.C. Witte - CRs: 15592 / 15593
+		Added support for runtime Record class.
+
+	06/07/05 - Frans S.C. Witte - CR16346
+		Added comment to getRecLt, getRecNew, copyDiff, copySame, and
+		DbSet.
+		Modified calls to VIEW^UCDB() and $$getGbl^UCDB()
+		Modified subroutine copyDiff (to reflect changes in UCRECORD!)
+		Added public function $$varSub^UCPATCH()
+		Removed subroutine save (not called)
+		Modified copySame (to reflect changes in UCRECORD), and ResultSet
+		Modified computed to discard optimization for RDB
+
+	03/15/05 - Frans S.C. Witte - CRs: 14919 / 14920
+		Added support for vClose() optimization to subroutine
+		patchparse().
+		$$rdb^UCDB() changed to $$rdb^UCDBRT() (4 occurrence)
+		Replaced 1n.n by 1.N (3 occurrences)
+		Subroutine ResultSet will not remove lines that are marked
+		";=noOpti"
+
+	02/17/05 - Frans S.C. Witte - CRs: 14569 / 14578
+		Function $$patch() has been modified to look for all conditions
+		that may prevent object instance optimization.
+		Subroutine ResultSet: replaced one occ. of '$$rdb^UCDB' by 'rdb'.
+		Corrected several typos in comments.
+
+	02/16/05 - Frans S.C. Witte - CRs: 14185 / 14186
+		Subroutine ResultSet no longer removes the line that NEWs vd,vi
+		when dataprotection code is included.
+		Corrected subroutine rplcvsql().
+
+	02/07/05 - Frans S.C. Witte - CRs: 14401 / 14402
+		Temporarily turned off ResultSet Optimization of Dynamic Selects
+		(vOpen0) if the system uses an RDB, because subroutine ResultSet
+		did not generate the correct code in that case.
+
+	01/19/05 - Frans S.C. Witte - CRs: 11398 / 11399
+		Subroutine getRecCode: Replaced "RECNOFL" by "%PSL-E-RECNOFL".
+		Subroutine patchparse: Added code to force assignment to node
+		patch(-3,subRou,var,newPtr,.1) if PSL source contains one of the
+		ResultSet.getXxxProt() methods.
+		Added accessiblity of all private subroutines and functions.
+
+	12/16/04 - Frans S.C. Witte - CRs: 11445 / 11446
+		Variable 'optFlag' is now NEWed.
+		Added function $$rsDynFlag() that detects if more than one
+		dynamic select occurs in the PSL unit.
+
+	10/20/04 - Frans S.C. Witte - CRs: 11441 / 11442
+		Modified subroutine getPar() to discard leading and trailing
+		spaces in argument syntax.
+		Modified subroutine procPtr() to invoke patchDb() and getRecLt()
+		only if the instantiated object is of a record class.
+
+	10/04/04 - GIRIDHARAN - 12506
+		     Retrofitted changes from profile04 for CR's (11951 & 9217)
+
+	09/29/04 - GIRIDHARAN - 11951
+		     Modified section patchDb to include a rdb check before writing
+		     an entry in the patch array to load default Node when on non M
+		     database.
+
+	06/15/04 - CHENARDP - 9217
+		     Modified ResultSet section to take into account differences in
+		     code generation between GTM and non-GTM databases.
+
+	05/12/04 - RussellDS - CR9676
+		     Move Profile04 version to Profile01 to support single code
+		     base for PSL.
+	*/
+	// I18N=QUIT
+	// *******************************************************************
+	// * IMPORTANT NOTE:                                                 *
+	// * According to the rules that apply to PSL compiler upgrades,     *
+	// * the generated M routine associated with this procedure must be  *
+	// * checked into StarTeam and released with the procedure whenever  *
+	// * changes are made to this procedure.  The M routine from the     *
+	// * crtns directory should be used for this purpose.                *
+	// *                                                                 *
+	// * The M routine will be loaded to the mrtns directory during      *
+	// * upgrades and will then be removed from that directory as part   *
+	// * of the upgrade process.  Therefore, other than during an        *
+	// * upgrade an mrtns version of this routine should not exist.      *
+	// *                                                                 *
+	// * Keep these comments as single line to ensure they exist in the  *
+	// * generated M code.                                               *
+	// *******************************************************************
+
+	type public Primitive commands(,)
+	type public String patch(,,,,)
+
+	type Boolean optFlag = {Boolean}commands("OPTIMIZE","OBJECTS").get(0)
+	type String  subRou = ""
+
+	for  set subRou = patch(0,subRou).order() quit:subRou.isNull()  do procOrd(subRou,optFlag)
+	quit
+
+	// ---------------------------------------------------------------------
+private getPar( local String expr,	// PSL method call or DO argument
+		local Number pos)	// position of parameter to extract
+	/* ---------------------------------------------------------------------
+	Return parameter num
+
+	NOTES:
+	. Also called by getRecord^UCDBSET, getMode^UCRECORD, and
+		ins2me^UCREC4OP
+	*/
+	type String ER, lits	// ER returned by $$TOKEN^%ZS()
+	set expr = $$TOKEN^%ZS( expr, .lits)
+	set expr = expr.piece( "(", 2, 999)		// strip call name and (
+	set expr = expr.extract( 1, expr.length() - 1)	// strip )
+
+	quit $$UNTOK^%ZS( expr.piece( ",", pos), lits).trim()
+
+	// ---------------------------------------------------------------------
+private getSym( local String subRou,	// subroutine where lvn will be scoped
+		local String prefix)	// prefix
+	/* ---------------------------------------------------------------------
+	Return the next lvn that uses var as prefix.
+
+	NOTE:
+	. Also called by varExpr^UCGM()
+	*/
+	type public String patch(,,,,)
+
+	type Number i
+	type String lvn
+
+	for i=1:1 set lvn = prefix_ i quit:'patch( -1, subRou, lvn).data()
+	set patch( -1, subRou, lvn) = ""
+
+	quit lvn
+
+	// ---------------------------------------------------------------------
+private hasPatch( String data)	// arbitrary data
+	/* ---------------------------------------------------------------------
+	Helper function that returns 1 if data contains code that resulted from
+	calls to $$patch(), and returns 0 otherwise.
+	It is considered to contain code created by $$patch() if it contains an
+	even number of patch characters dat.length(PATCHCHAR) is odd).
+	*/
+	type literal String PATCHCHAR = 6.char()
+
+	if data[PATCHCHAR, data.length( PATCHCHAR) # 2 = 1 quit 1
+	quit 0
+
+	// ---------------------------------------------------------------------
+private isPatch( String data)	// arbitrary data
+	/* ---------------------------------------------------------------------
+	Helper function that returns 1 if data satisfies the code that resulted
+	from a call to $$patch(), and returns 0 otherwise.
+	*/
+	type literal String PATCHCHAR = 6.char()
+
+	if data.extract() = PATCHCHAR, data.endsWith(PATCHCHAR), data.extract(2, data.length() - 1)?1.N quit 1
+	quit 0
+
+	// ---------------------------------------------------------------------
+patchTkn( local String code,	// source string
+	local String oVal,	// old value
+	local String nVal) 	// new value
+	/* ---------------------------------------------------------------------
+	Replace all occurrences of token in code.
+	This is a simplified version of String.replace(). It uses the fact that
+	oldVal and newVal will never overlap, and that all occurrences can be
+	replaced, regardless of the context.
+
+	NOTES:
+	. if oVal and nVal must be replaced at M lvn boundaries, then $$varSub()
+		shall be called.
+	*/
+	for  quit:code'[oVal  set code = code.piece( oVal)_ nVal_ code.piece( oVal, 2, code.length())
+	quit code
+
+	// ---------------------------------------------------------------------
+procOrd( local String subRou,
+	local String optFlag)
+	/* ---------------------------------------------------------------------
+	Order and process by instantiation order.
+	The order of declaration is important if an object is passing
+	properties into a method or function. The order() array shuffles
+	into declaration order.
+
+	FSCW CR18163:
+	If the order of declaration is important, the order(,) array shall not
+	only contain the FIRST declaration, but it shall contain all
+	declarations, and the procPtr() shall be called on the combination
+	(newPtr,var).
+	*/
+	type public String patch(,,,,)
+
+	type String var = ""
+	type Number newPtr = ""
+	type String order(,)
+
+	// Step 1: re-order
+	for  set var = patch(0,subRou,var).order() quit:var.isNull()  do {
+		for  set newPtr=$O(patch(0,subRou,var,newPtr)) quit:newPtr.isNull()  set order(+newPtr,var) = ""
+	}
+
+	// Step 2: Process variables in the order in which they are declared
+	set newPtr = ""
+	for  set newPtr = order(newPtr).order() quit:newPtr.isNull()  do {
+		for  set var = order(newPtr,var).order() quit:var.isNull()  do procPtr( subRou, var, newPtr, optFlag)
+	}
+	quit
+
+	// ---------------------------------------------------------------------
+private tokenPop( local String code,	// source string
+		local Number count)	// number of tokens to pop
+	/* ---------------------------------------------------------------------
+	Replace the top count occurrences of pslToken() in code, and remove
+	them from the token stack.
+	*/
+	type literal String TKNPREFIX = "vtkn"
+
+	type public String pslToken(), type(,)
+
+	type Number top = pslToken( "").order( -1)
+
+	for top = top:-1:top-count+1 do {
+		set code = $$varSub( code, TKNPREFIX_ top, pslToken( top))
+		kill pslToken( top), type( PSL.level, TKNPREFIX_ top)
+	}
+	quit code
+
+	// ---------------------------------------------------------------------
+private tokenPush( PSLExpression expr, String class)	// intermediate expressions
+	/* ---------------------------------------------------------------------
+	Add the supplied intermediate expression to the pslToken stack, and to
+	the symbol table (using the supplied class) and return the token.
+
+	OUTPUT:
+	. $$ = expr or new lvn according to the following rules:
+		- If expr is a variable, or a constant, then expr will be
+			returned unchanged.
+		- Else a new lvn will be allocated and declared and the name of
+			that lvn will be added to the symbol table.
+	. pslToken()
+		A new entry will be added at the "top" of the stack. This will
+		be done regardless of the return value, to ensure that every
+		"push" action can be matched to a "pop" action.
+	*/
+	type literal String TKNPREFIX = "vtkn"
+
+	type public String pslToken()
+
+	type Number top = pslToken( "").order( -1) + 1
+
+	set pslToken(top) = expr
+
+	if expr.isVariable() quit expr
+	if expr.isLiteral() quit expr
+
+	/* Need to replace by lvn token
+	   */
+	type String lvn = TKNPREFIX_ top
+
+	do setScope^UCGM( lvn, "", "", "NEW", class.get( "String"))
+	do setInst^UCGM( lvn, "", expr)
+
+	quit lvn
+
+	// ---------------------------------------------------------------------
+private varSub( local String str,	// source string
+		local String oVar,	// old variable name (*2)
+		local String nVar) 	// new variable name (*3)
+	/* ---------------------------------------------------------------------
+	Replace oVar with nVar in str.
+
+	This utility function replaces all occurrences of oVar by nVar in the
+	supplied string. To ensure that an "entire variable" is replaced, and
+	not just an ordinary substring, the occurrence of oVar must be
+	surrounded by the following delimiters:
+		SPACE, COMMA, +, -, *, /, \, #, _, ', =, >, <, [, ], (, ), !, &,
+		?, @, and :
+	The function will tokenize/untokenize str to take care of literals
+
+	ARGUMENTS:
+	(*2) oVar = old variable name
+		Both subscripted and unsubscripted variables are allowed
+		Partial variables will work, provided that its substitution
+		follows the rules with respect to delimiters.
+		eg oVar="vobj(vOid" will replace "vobj(vOid)" as well as
+		"vobj(vOid,node)" by nVar_")" and nVar_",node)" respectively.
+	(*3) nVar = new variable name
+		See oVar.
+
+	OUTPUTS:
+	. $$ = str with all occurrences of oVar replaced by nVar
+	*/
+	type String dels = " +-*/\#_'=><[]()!&,?@:"
+	type String lit
+	type Number y
+	set str = $$TOKEN^%ZS( str, .lit), y = 0
+
+	for  set y = str.find( oVar, y) quit:y=0  do {
+		if dels '[ str.extract( y-oVar.length()-1)!(dels '[ str.extract( y)) quit
+		set str = str.extract( 1, y-oVar.length()-1)_ nVar_ str.extract( y, str.length())
+		set y = y + nVar.length() - oVar.length()
+	}
+
+	quit $$UNTOK^%ZS(str,.lit)
+
+	/* ****************************************************************** */
+	/* CODE BELOW STILL MOSTLY M                                          */
+	/* ****************************************************************** */
+	
+	// ---------------------------------------------------------------------
+procPtr(subRou,var,newPtr,optFlag) ;local void; Proces this variable pointer
+	/* ---------------------------------------------------------------------
+	NOTES:
+	. This subroutine shall be prepared to handle instantiations of variables
+		of all classes that are not implemented as Primitives.
+		In particular this includes classes that are not database related
+		(such as class IO).
+	*/
+	type literal String PATCHCHAR = 6.char()
+
+	type public String msrc(), patch(,,,,), tab
+
+	new class,code,expr,flag,lptr,record,token,x,z
+
+	set z=$G(patch(0,subRou,var,newPtr))
+	set class=$P(z,tab,1)
+
+	set flag='optFlag 				; Global
+	if 'flag set flag=$P(z,tab,10)			; Optimize flag
+	if 'flag,$P(z,tab,3)'="NEW" set flag=1		; Only optimize new scope
+
+	if class="ResultSet" do ResultSet(subRou,var,newPtr,flag) quit
+	if class="DbSet" do ResultSet(subRou,var,newPtr,flag) quit
+	if 'flag,$$isRecord^UCGM(class) set flag=$$paNeedVobj^UCREC4OP( subRou, var, newPtr)
+
+	set token=""
+	for  set token=$O(patch(0,subRou,var,newPtr,token)) quit:token=""  do {
+		set x=patch(token),lptr=$P(x,PATCHCHAR,1),expr=$P(x,PATCHCHAR,2,999)
+		set z=PATCHCHAR_token_PATCHCHAR,code=msrc(lptr)
+		if '(code[z) quit	// *** Find out why this can occur (FRS)
+		if flag set code=$P(code,z,1)_expr_$P(code,z,2,$L(code))
+		else  set code=$$patchparse(code,expr,var,newPtr)
+		set msrc(lptr)=code
+	}
+	quit
+
+	// ---------------------------------------------------------------------
+patchparse(code,expr,var,newPtr) ; parse and patch code
+	/* ---------------------------------------------------------------------
+	ARGUMENTS:
+	. String code = M code containing token to replace	/MECH=VAL
+
+	INPUTS: (!)
+	. String olvn = name of object structure
+	. String struct("s",subRou,newPtr,var) = ResultSet data
+		piece 8 is used to check if the RS is against RDB tables.
+	. String subRou = current subroutine
+	. Number token = token used in generated code
+	. String tab = TAB character
+	*/
+	type literal String PATCHCHAR = 6.char()
+
+	type public String patch(,,,,), struct(,,,), subRou, tab, token
+
+	new i,x,y,z
+	set z = PATCHCHAR_ token_ PATCHCHAR
+
+	// Treat vClose() redirection separately
+	if expr=("vClose(+$G("_var_"))") do { quit code
+
+		// If this ResultSet happens to be against M tables, remove call
+		if '$P(struct("s",subRou,newPtr,var),tab,8) do { quit
+			set x="D "_z_" "
+			if code[x set code=$P(code,x,1)_$P(code,x,2) quit
+			set x=z_","
+			if code[x set code=$P(code,x,1)_$P(code,x,2) quit
+			set x=","_z
+			if code[x set code=$P(code,x,1)_$P(code,x,2) quit
+			if code["D:" set i=0 for  set i=$F(code,"D:",i) quit:i=0  do {
+				set x="D:"_$p($e(code,i,1000)," ",1)_" "_z
+				if code[x set code=$P(code,x,1)_$E($P(code,x,2),2,$L(code))
+			}
+		}
+
+		// add the vCloseR() subroutine if needed
+		new label,p0,p1
+		set label=$$XvCloseC^UCDBR()
+
+		// Replace by returned label.
+		set p0=patch(-3,subRou,var,newPtr,0)	; state = vobj(,0)
+		set p1=patch(-3,subRou,var,newPtr,1)	; curId = vobj(,1)
+		set code=$p(code,z)_label_"(."_p0_","_p1_")"_$p(code,z,2)
+	}
+
+	/* Look for "vobj(" related patches. If expr does not contain that,
+	   just return the original expression (as if optimize=off) */
+	set y = PSL.oLvn_ "("
+	if expr'[y quit $$patchTkn( code, z, expr)
+
+	if '(expr["-150") set x=$P($P(expr,y,2,3),")",1)
+	else  set x=$P($P(expr,y,3,4),")",1)
+
+	if x=("+$G("_var) do {				// Kill syntax
+		/* The assumption is that all patched occurrences of K vobj(var)
+		   can be removed. This is based on the assumption that optimize
+		   will be turned off for all declarations that need vobj().
+		   */
+		set x="K "_z_" "
+		if code[x set code=$P(code,x,1)_$P(code,x,2) quit
+		set x=z_","
+		if code[x set code=$P(code,x,1)_$P(code,x,2) quit
+		set x=","_z
+		if code[x set code=$P(code,x,1)_$P(code,x,2) quit
+		if code["K:" set i=0 for  set i=$F(code,"K:",i) quit:i=0  do {
+			set x="K:"_$p($e(code,i,1000)," ",1)_" "_z
+			if code[x set code=$P(code,x,1)_$E($P(code,x,2),2,$L(code))
+		}
+	}
+	else  do {
+		new lvn,nod
+
+		set nod=$P(x,",",2,999)
+
+		if nod="" set lvn=var
+	
+		/* If the PSL code contains calls to ResultSet.getColProt() or
+		   ResultSet.getRowProt(), but the underlying table does NOT
+		   have an associated protection routine, then the caller will
+		   NOT have created patch(-3,subRou,var,newPtr,.1). Handle this
+		   special case here. Note that due to the absence of protection
+		   code, and the code generated for these methods, we can safely
+		   allocate a variablename, and not worry about initializing it.
+		   */
+		else  do {
+			;;if nod=.1,'$D(patch(-3,subRou,var,newPtr,nod)) set patch(-3,subRou,var,newPtr,nod)=$$getSym(subRou,"vos")
+			if 'patch(-3,subRou,var,newPtr,nod).exists() set patch(-3,subRou,var,newPtr,nod)=$$getSym(subRou,"vos")
+			set lvn=patch(-3,subRou,var,newPtr,nod)
+		}
+
+		set x= PSL.oLvn_ "("_ x_ ")"
+
+		if expr[x set expr=$P(expr,x,1)_lvn_$P(expr,x,2)
+		set code=$$patchTkn(code,z,expr)
+	}
+	quit code
+
+	// ---------------------------------------------------------------------
+private patchNew(var,new,newPtr) // private void; Patch list new command line
+	/* ---------------------------------------------------------------------
+	NOTE:
+	. called by selectDyn^UCDB
+	*/
+	type public String msrc()
+
+	if var["(" b
+	new f,z
+	set z=msrc(newPtr),f="N "_var	; N var syntax
+
+	if '(z["N ") do { quit
+		set f="S "_var
+		set z=$P(z,f,1)_"N "_$E(new,2,$L(new))_f_$P(z,f,2,99)
+		set msrc(newPtr)=z
+	}
+	if '(z[f) do {			; N x,var syntax instead
+		set f=","_var
+		if '(z[f) set new=" N "_$E(new,2,$L(new))
+	}
+	set z=$P(z,f,1)_f_new_$P(z,f,2,999)
+	set msrc(newPtr)=z
+	quit
+
+	// ---------------------------------------------------------------------
+private patch(subRou,var,newLevel,expr) // Patch msrc for 'potential' object reduction
+	/* ---------------------------------------------------------------------
+	If the following conditions are all true, this object instance can be
+	optimized as local variable(s):
+	1. The identifier is not an array (Can't prove)
+	2. No method references (too hard to optimize)
+	3. Scope is New (Not Formal or Global)
+	4. Not actual parameter to function or method (may optimize later)
+	5. Object optimization turned on for this instance
+
+	This function will look at ALL conditions that may prevent optimization.
+	To ensure a consistent set of rules for current and future optimization,
+	all potentially optimizable code shall call this function
+	unconditionally.
+
+	ARGUMENTS:
+	. String subRou = subroutine where expr occurs	/MECH=VAL
+	. String var = object variable			/MECH=VAL
+	. Number newLevel = DO-level where var is NEWed	/MECH=VAL
+	. String expr = expression to be patched		/MECH=VAL
+
+	INPUTS:
+	. msrc = line number of line under construction
+		This value is used to turn object optimization on according
+		to the rule that optimization can be turned on when the
+		value stored in the optimize field is greater than msrc.
+	. patch = auto increment counter
+		Used to generate unique replacement reference
+	. type() = variable descriptions.
+		This structure is not referenced directly, but several
+		calls to $$getXxx^UCGM() are made to obtain attribute
+		values for the supplied var at the specified newLevel.
+	. type(,): used to obtain msrc where NEWed
+
+	OUTPUTS:
+	. $$	= original expr if var cannot be optimized
+		= TAB_patch_TAB as a placeholder for expr
+	. patch
+		Incremented if expr could be optimized
+	. patch(patch) = msrcLineNr TAB expr
+		This node is set only if expr could be optimized
+	. patch(0,subRou,var,newPtr,patch) = ""
+		This node ties the token to the particular
+		variable instance
+	*/
+	type literal String PATCHCHAR = 6.char()
+
+	type public String patch(,,,,), tab
+	type public Number msrc
+
+	if var["(" quit expr				; Array
+
+	type String class
+	type Number newPtr
+	set newPtr=$$getNew^UCGM(var,.newLevel) if newPtr="" quit expr
+
+	/* If object is optimizable, turn optimize on
+	   else quit if object optimization has been turned off for this var
+	   */
+	type Number noOpti = +$$getOpti^UCGM(var,.newLevel)
+	if noOpti>msrc do {	; protect $TEST
+		do setOpti^UCGM(var,.newLevel,0)
+	}
+	else  if noOpti'=0 quit expr
+
+	type Number n
+	set n=$G(patch)+1,patch=n
+	set patch( n) = (msrc+1)_ PATCHCHAR _expr
+	set patch( 0, subRou, var, newPtr, n)=""
+	quit PATCHCHAR_ n_ PATCHCHAR
+
+	// ---------------------------------------------------------------------
+ResultSet( String subRou,
+	PSLIdentifier var,
+	Number newPtr,
+	Boolean flag) 
+	/* ---------------------------------------------------------------------
+	Optimize access to specified resultset object, which implies:
+	- remove all lines that start with a NEW statement,
+		except it the line is flagged with a ";=noOpti" comment
+	- replace all references to vobj(vOid) by references to the object
+		instance variable (var)
+	- replace all references to vobj(vOid,node) by references to a newly
+		generated local variable voN.
+	- in vOpenN() replace the code that returns the object instance i.e.
+			QUIT vOid
+		by
+			QUIT ""		(on MDB)
+			QUIT $G(rsIns)	(on RDB)
+	- replace vFetchN(vOid) by vFetchN()
+		This replacement is also made in all calls to vFetchN()
+	- delete lines that contain assignment to negative nodes vobj(vOid,-N)
+
+	ARGUMENTS:
+	. subRou = subroutine to optimize
+	. var = resultset instance variable to optimize
+	. newPtr = line where var is declared
+	. flag = suppress optimize flag
+		0 = do not suppress optimzation
+		1 = suppress optimization
+	INPUTS:
+	. struct("S",subRou,newPtr,var) = Resultset data (see select^UCDB)
+		This subroutine uses the pieces 1,2, and 5
+	. append( "vOpen"_seqnr,*) = M code generated by UCDB and UCDBR
+	. msrc() = pass 1 code
+		Occurrences of $$vFetchN(vOid) will be replaced by
+		$$vFetchN()
+
+	NOTES:
+	. Unlike the code for Db.getRecord(), code generated for Db.select()
+		still patches the pass 1 code in append(,) directly.
+		This implies that any change to the structure of the code
+		generated by select^UCDB, selectDyn^UCDB, and select^UCDBR
+		may require changes to ResultSet^UCPATCH.
+	*/
+	type literal String PATCHCHAR = 6.char()
+
+	type public String append(,), msrc(), patch(,,,,), struct(,,), tab
+
+	type String code,expr,fexpr,new,test,x,y
+	type Number col,lptr,n,token
+
+	type String z = struct("s",subRou,newPtr,var).get()
+
+	type Number instLine = z.piece( tab)
+	type String seq      = z.piece( tab, 2)
+
+	type Number f = 0, sort = 0
+	type String label = "vOpen"_ seq
+
+	if z.piece( tab, 5) = 1 set flag = 1	// ResultSet from Record.compare()
+	if seq = "" set flag = 1		// Public or multiple open's
+	type Boolean rdb = $$rtIsRdb^UCXDD()
+
+	/* vOpen0() / vFetch0() is used for dynamic selects, and shared by ALL
+	   subroutines in this unit. Find out if this is the only occurrence.
+	   If it is, it is save to leave optimizations on. Otherwise turn it
+	   off.
+	   Also for RDB vOpen0/vFetch0 are used as dispatchers only that contain
+	   all possible RDB variants. However the M/P/R variants will only be
+	   defined in append() if the code is really needed.
+	   So remove all dispatches to code that is not needed.
+	   */
+	if seq.extract() = 0 do {
+		if 'flag set flag=rdb!$$rsDynFlag()
+
+		quit:'rdb  quit:seq'=0
+		set n = 3
+		for  set n = append( label, n).order() quit:n.isNull()  do {
+			set code = append(label,n).translate( tab, " ")
+			for fexpr = "M","P","R" do {
+				if code[("vOpen0"_fexpr),'append("vOpen0"_fexpr).data() kill append(label,n) quit
+				if code[("vFetch0"_fexpr),'append("vOpen0"_fexpr).data() kill append(label,n) quit
+			}
+		}
+	}
+
+	if 'flag do {
+		// ResultSet access can be optimized.
+		// Rewrite the vOpen and vFetch section for this instance
+		set test = PSL.oLvn_ "(vOid"
+		set n = 3
+		for  set n = append( label, n).order() quit:n.isNull()  do {
+			set code = append(label,n).translate( tab, " ")
+
+			/* Lines that start with NEW command, except if flagged
+			   */
+			if code.extract( 1, 3)=" N ",(code'[";=noOpti") kill append(label,n) quit
+
+			/* Line that contains assignment to vOid is line that
+			   instantiates new vobj() entry, and shall be removed
+			   */
+			if code["S vOid=" kill append(label,n) quit
+
+			/* Line in vOpen() that returns the object instance.
+			   Replace by return "" or by $G(rsIns).
+			   NOTE: $G() in ELSE part is essential. An MDB table on
+			   an RDB system will be optimized to no-object, and the
+			   vOpenN() code will not assign a value to vOid, but
+			   an RDB vOpenN() will assign the result of the first
+			   fetch to vOid. */
+			if 'rdb, code = " Q vOid" set (code,append(label,n)) = " Q """""
+			else  if rdb, code = " Q vOid" set (code,append(label,n)) = " Q $G("_var_")"
+			if code[" Q vOid" set (code,append(label,n)) = code.piece(" Q vOid")_ " Q """""_ code.piece(" Q vOid",2)
+			if code[" Q:vEr=100 vOid" set (code,append(label,n)) = code.piece(" Q:vEr=100 vOid")_ " Q:vEr=100 """""_ code.piece(" Q:vEr=100 vOid",2)
+
+			/* References to vsql are replaced by references to
+			   newly allocated voN variables.
+			   FSCW CR22719: It is unlikely that this replacement is
+			   needed. It is certainly not needed for RDB code, and
+			   most likely all vsql references in the exe() array
+			   for MDB open/fetch will have been removed by
+			   select^UCDB. */
+			if code["vsql" set code = $$rplcvsql(code,subRou,var,newPtr), append(label,n) = code do warnGroup^UCGM("INTERNAL","vsql references found and replaced in "_label)
+
+			if sort=0,code["K ^DBTMP($J,vOid)" set sort = n
+
+			/* Replace vFetchN(vOid) label + calls by vFetchN() */
+			if code["vFetch",code["(vOid)" set append(label,n) = code.piece("(vOid)")_ "()"_ code.piece("(vOid)",2) quit
+
+			set y = code.find( test) if y = 0 quit
+
+			/* Delete lines that contain assignments to negative
+			   nodes. */
+			if code.extract( y, y+1)=",-" kill append(label,n) quit
+
+			set code = $$change(code,test,subRou,var,newPtr)
+			if sort = 0, code[("S "_ var_ "=") // set f=n
+			set append(label,n) = code
+		}
+	}
+
+	if f>0 do {				; Parse record into column expressions
+		set code = append(label,f)
+		set code = code.piece("S "_var_"=", 2, 999)
+		for col=1:1:code.length("_$C(9)_") set col(col) = code.piece("_$C(9)_",col)
+	}
+
+	set fexpr="$$vFetch"_seq_"("_var_")"
+
+	// Replace all patch tokens for this ResultSet
+	set token = ""
+	for  set token = patch( 0, subRou, var, newPtr, token).order() quit:token.isNull()  do {
+		set x = patch(token), lptr = x.piece(PATCHCHAR), expr = x.piece(PATCHCHAR, 2, 999)
+		set z = PATCHCHAR_ token_ PATCHCHAR, code = msrc( lptr)
+		if '(code[z) quit	//*** Find out why this can occur (FRS)
+
+		/* FSCW CR20280: replace ALL occurrences, not just first
+		   */
+		if flag set msrc(lptr) = $$patchTkn( code, z, expr) quit
+
+		/* replace vFetchN(oid) by vFetchN()
+		   */
+		if expr = fexpr set expr = expr.piece("(",1)_ "()", msrc(lptr) = $$patchTkn( code, z, expr) quit
+
+		/* try to remap columns to their original value, bypass row
+		   */
+		if f do {
+			type Number ptr=0
+			if col=1,expr=( PSL.oLvn_"("_var_")") set ptr=1
+			if col>1,expr=( PSL.oLvn_"("_var_")") set f=0  ; getRow
+			if expr[",$C(9)," set ptr=$P($P(expr,",$C(9),",2),")",1)
+			if ptr,$D(col(ptr)) set code=$$patchTkn(code,z,col(ptr))
+			else  set code=$$patchparse(code,expr,var,newPtr)
+		}
+		else  set code=$$patchparse(code,expr,var,newPtr)
+		set msrc(lptr)=code
+	}
+
+	if f kill append(label,f)			; Delete row set
+
+	set n="",new=""
+	for  set n=$O(patch(-3,subRou,var,newPtr,n)) quit:n=""  set new=new_","_patch(-3,subRou,var,newPtr,n)
+
+	if 'flag,sort>1 do {
+		set new=new_",vOid"
+		set append(label,sort)=tab_"S vOid=$G(^DBTMP($J))-1,^($J)=vOid K ^DBTMP($J,vOid)"
+	}
+	if 'flag,(seq=0) do {
+		set new=new_",sqlcur"
+		set append(label,3.1)=tab_"set sqlcur="""_subRou_"."_var_""""
+	}
+	if new'="" do patchNew(var,new,newPtr)
+	quit
+
+	// ---------------------------------------------------------------------
+rsDynFlag() ;local Boolean; Return 'flag' value in case of dynamic selects
+	/* ---------------------------------------------------------------------
+	All dynamic selects in a PSL unit share vOpen0() and vFetch0()
+	If there is only one occurrence of a dynamic select in this unit, then
+	it is OK to optimize where possible. Else don't optimize.
+	This function looks for seqnr=0 and stops if it finds the second one.
+
+	INPUTS:
+	. struct("s",subr,declaredAt,rsobj)=assignedAt , seqnr
+
+	OUTPUTS:
+	. $$	1 if more than one dynamic select is detected
+		0 if there is only one dynamic select
+	*/
+	type public String struct(,), tab
+
+	new flag,subRou,newPtr,var
+	set flag=0,(subRou,newPtr,var)=""
+	for  set subRou=$O(struct("s",subRou)) quit:subRou=""  do { quit:flag>1
+		for  set newPtr=$O(struct("s",subRou,newPtr)) quit:newPtr=""  do { quit:flag>1
+			for  set var=$O(struct("s",subRou,newPtr,var)) quit:var=""  do { quit:flag>1
+				if $P(struct("s",subRou,newPtr,var),tab,2)=0 s flag=flag+1
+			}
+		}
+	}
+
+	quit flag>1
+
+	// ---------------------------------------------------------------------
+rplcvsql(code,subRou,var,newPtr) ; Replace vsql lvns
+	/* ---------------------------------------------------------------------
+	*/
+	type public String patch(,,,,)
+
+	new atom,lvn,y,yz
+
+	set y=0
+	for  set y=$F(code,"vsql",y) quit:y=0  do {
+		for yz=y:1 quit:$E(code,yz)'?1N
+		set atom=$E(code,y-4,yz-1) if atom="vsql" quit	; FRS - 06/13/03
+		set lvn=$G(patch(-3,subRou,var,newPtr,atom))
+		if lvn="" set lvn=$$getSym(subRou,"vos"),patch(-3,subRou,var,newPtr,atom)=lvn
+		set code=$E(code,1,y-5)_lvn_$E(code,yz,$L(code))
+	}
+	quit code
+
+	// ---------------------------------------------------------------------
+change(code,test,subRou,var,newPtr) ; Change resultSet generate code
+	/* ---------------------------------------------------------------------
+	*/
+	type public String patch(,,,,)
+
+	new char,lvn,nod,y
+
+	for  set y=$F(code,test) quit:y=0  do {
+		set char=$E(code,y)
+		if char=")" set code=$E(code,1,y-$L(test)-1)_var_$E(code,y+1,$L(code)) quit
+		if char'="," b
+		set nod=$P($E(code,y+1,$L(code)),")",1)
+		set lvn=$G(patch(-3,subRou,var,newPtr,nod))
+		if lvn="" set lvn=$$getSym(subRou,"vos"),patch(-3,subRou,var,newPtr,nod)=lvn
+		set code=$E(code,1,y-$L(test)-1)_lvn_$E(code,y+2+$L(nod),$L(code)) quit
+	}
+	quit code
+
+vSIG()	quit "60576^22069^Frans S.C. Witte^31604"	// Signature - LTD^TIME^USER^SIZE

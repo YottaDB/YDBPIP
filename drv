@@ -1,0 +1,139 @@
+#!/bin/ksh
+# ------------------------------------------------------------------------
+# drv - GT.M and PROFILE/Anyware application driver script.
+#
+# Description: 
+# This script will put the user at the PROFILE/Anyware login screen for
+# the directory in which it resides.
+#
+# Input: None 
+#
+# Output: Places the user at the PROFILE/Anyware login screen.
+#
+# Usage: drv or /directory_path/drv
+#	 $ /ibsprod/drv
+#	 or
+#	 $ cd /ibsprod
+#        $ drv
+# ---------Revision History ----------------------------------------------
+# 04/23/04 - Rick Silvagni 
+#	         Added quotes around mftok to prohibit file substitution.
+# ------------------------------------------------------------------------
+# Processing starts at main()
+ARG0=$0
+if [ ! -f ${ARG0} ] ; then
+   echo "Usage: drv or /directory_path/drv"
+   return 1
+fi
+
+. `dirname ${ARG0}`/gtmenv
+
+main()
+{
+if [ ${START_REPLICATION:-""} = "Y" ]
+    then
+	# Check current status
+	if [ -f ${SCAU_REPL_DIR}/SCA_STATUS.DAT ]
+	    then
+		current_status=`cat ${SCAU_REPL_DIR}/SCA_STATUS.DAT | cut -d"|" -f1 | tr -d " "`
+	    else
+		current_status=UNKNOWN
+	fi
+
+        # Check that gtm_repl_instance is defined
+        if [ ${gtm_repl_instance:-""} = "" ]
+            then
+                echo "\nACCESS DENIED - gtm_repl_instance is not defined\n"
+                exit 1
+        fi
+ 
+        # Check that gtm_repl_instance file exists
+        if [ ! -f ${gtm_repl_instance} ]
+            then
+                echo "\nACCESS DENIED - File $gtm_repl_instance does not exist\n"
+                exit 1
+        fi
+
+	# Check if replication is on if system is PRIMARY
+	if [ ${current_status} = "PRIMARY" ]
+	    then 
+                mftok=`$gtm_dist/mupip ftok -jnl $gtm_repl_instance | grep $gtm_repl_instance`
+                mftokm=`echo "$mftok" | cut -d ":" -f5 | cut -d "[" -f1 | tr -d " "`
+                mftoks=`echo "$mftok" | cut -d ":" -f3 | cut -d "[" -f1 | tr -d " "`
+                ftoks=`$gtm_dist/ftok -id=44 $gtm_repl_instance | cut -d "[" -f2| cut -d "]" -f1 | tr -d "\n" | tr -d " "`
+ 
+                if [ $mftokm = 0 -o $mftoks = 0 ]
+                    then
+                        current_status=OFFLINE
+                        echo "\nACCESS DENIED - PROFILE/Anyware instance is $current_status\n"
+                        exit 1
+                fi
+ 
+		# Locate journal pool private shared memory in ipcs
+		ipcsout=/tmp/ipcs_drv_$$_`date +%H%M%S`.tmp
+		ipcs -m | grep "$mftokm" > $ipcsout 2>&1
+		for i in `cat $ipcsout | awk '{print $2}' | cut -c1-10`
+		do
+			if [ "$i" = "$mftokm" ] ; then
+				mipcsm=1
+				break
+			fi
+		done
+
+		# Locate journal pool private semaphore in ipcs
+		ipcs -s | grep "$mftoks" > $ipcsout 2>&1
+		for i in `cat $ipcsout | awk '{print $2}' | cut -c1-10`
+		do
+			if [ "$i" = "$mftoks" ] ; then
+				mipcss=1
+				break
+			fi
+		done
+
+		# Locate journal pool public semaphore in ipcs
+		ipcs -s | grep "$ftoks" > $ipcsout 2>&1
+		if [ `uname` = "Linux" ] ; then
+			for i in `cat $ipcsout | awk '{print $1}'`
+			do
+				if [ "$i" = "$ftoks" ] ; then
+					ipcss=1
+					break
+				fi
+			done
+		else
+			for i in `cat $ipcsout | awk '{print $3}'`
+			do
+				if [ "$i" = "$ftoks" ] ; then
+					ipcss=1
+					break
+				fi
+			done
+		fi
+		rm -f $ipcsout
+
+                if [ "$mipcsm" != 1 -o "$mipcss" != 1 -o "$ipcss" != 1 ]
+                    then
+                        current_status=OFFLINE
+                fi
+        fi
+
+    else
+	repl_state=`${BUILD_DIR:-"/SCA"}/tools/replication/is_repl | awk '{ if ( $2 == "OPEN" || $2 == "ON" ) print $2 }' | wc -l`
+	if [ ${repl_state} -ne 0 ]
+	    then
+		echo "\nACCESS DENIED -	Invalid Replication State\n"
+		exit 1
+	fi
+	current_status=PRIMARY
+fi
+
+
+if [ ${current_status} != "PRIMARY" ]
+    then
+	echo "\nACCESS DENIED - PROFILE/Anyware instance is $current_status\n"
+	exit 1
+fi
+
+$gtm_dist/mumps -run SCADRV
+}
+main

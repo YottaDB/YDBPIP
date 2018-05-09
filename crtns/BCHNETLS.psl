@@ -1,0 +1,240 @@
+BCHNETLS //Batch BCHNETLOSS - Analysis Net Loss Processing
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 08/30/2007 15:08 - joynerd
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHNETLOSS Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit quit
+ do JOBMGR^BCHUTL(%FN,"BCHNETLOSS",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(CID) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHNETLOSS","*","",CID.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,CID)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHNETLOSS","*","",CID.get(),"",et)
+ }
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,CID) //
+	kill %TRN
+
+	new dep,ts,ttxset,srv,PLTP,SAVSCLD,SCLD,FEEACT,CTL
+
+	type TranSet ts
+ 	set ts=Class.new("TranSet")
+
+ 	set ttxset=0,PLTP=0			// PLTP=0 are service fees
+
+	type RecordDEP dep
+	set dep=Db.getRecord("DEP","CID")
+
+	// Service Charge Last Date
+	set SCLD=dep.scld
+
+	/* 
+	This batch process applies to accounts whose analysis charge option
+	is 5, - Carry Forward/Offset Net Profit/Loss, The analysis type is
+	1 - Lead Account, and the days to settle net loss is not zero. 
+	If these items were modified, then this batch will reset the net
+	loss start date to null and then quit.
+	*/
+
+	if dep.anlchg'=5!(dep.anltyp'=1)!(dep.anlsnl=0) do FILE(.dep) quit
+
+	/* 
+	If we're in the offset period, then the amount to be charged will
+	come from the current period's NETFWDP. During an offset period
+	NETFWDP will be prior period's carryforward. At the end of the 
+	offset period BCHANLOFF sets NETFWDP to the user adjusted Adj. Net
+	Analysis Position (NETFWD). 
+	
+	If no offset days defined on the account,
+	1) NETFWDP is eqaul to NETFWD as calculated on the account's SCND. 
+	2) If net loss end date is on account's SCND, NETFWDP debited will be 
+	from prior period because net loss process is before service fees 
+	in DAYEND process. Thus 0 will be carried forward for new adjusted 
+	net analysis position because prior period carryforward was already 
+	debited. 
+	*/
+
+	new srv
+	type RecordSRV srv
+	set srv=Db.getRecord("SRV","CID,PLTP,SCLD")
+
+	/*
+	Is the carryforward still negative - even if user has modified
+	adj Net Anlaysis Position to a positive amount during an offset period
+	and net loss processing occurs during this offset period, the negative
+	Net P/L Carryforward (prior period amount) will be debited because
+	system doesn't know what the final position will be at end of offset
+	period. The NETFWDP will be set to 0 after net loss processing occurs. 
+	If the user then changes the adjusted Net Anlaysis Position back to a
+	negative amount after the net loss end date but still within the offset
+	period, a new net loss end date will be calculated with the end of the
+	offset period becoming the new netloss start date.
+	*/  
+
+	if srv.netfwdp<0 do {
+		
+		new NLOFF
+
+		set NLOFF=1			// Control flag for BCHFEEUT
+
+		set FEEACT=-srv.netfwdp		// fee amount to collect
+		set CTL=0
+		do BUILDTR^BCHFEEUT(CID,.ts,.dep,NLOFF) if ER quit
+	
+		// ttxset will be set to 1 if a transaction was created
+		if ttxset do { 
+			new par
+			set par("IPMODE")=3
+			set par("OPTION")=2
+			do ts.postTSet(%SystemDate,BRCD,.par)
+
+			do Db.update("SRV","NETFWDP=0","CID=:CID AND PLTP=0 AND SCND=:SCLD")
+
+			do FILE(.dep)
+
+			}
+		}
+
+	// There exist a Net loss entry, but current period netfwdp>0
+	else  do FILE(.dep)  
+
+	quit
+
+FILE(RecordDEP dep)	// Update dep
+
+	do dep.setAuditFlag(1)   // keep track of changes
+	set dep.anllsd=""
+	if $D(FEEACT) set dep.anlstchg=FEEACT
+	do dep.save()
+
+	quit
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,CID
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set CID=vRECORD.piece($C(9),1)
+ do vPROC(CID)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,CID
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>32000 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+13>32000 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+	set XTJD=%SystemDate
+
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("CID","DEP","DEP.ANLLED=:XTJD")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	do SOURCE^BCHSOURC("FEE","FEE",.%UserID,.BRCD,.%UserClass,.TSDRCID,.TSCRCID)
+	if ER quit
+ 
+	quit
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+	do SOURCE^BCHSOURC("FEE","FEE",.%UserID,.BRCD,.%UserClass,.TSDRCID,.TSCRCID)
+	if ER quit
+ 
+	/*
+	Set up entries in ^TTX(TPD,BRCD,%UID) by calling TTXLOK,
+	then release the lock on ^TTX(TPD,BRCD,%UID)
+	*/
+
+	set STATUS=0 do ^TTXLOK if ER quit
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+	do OFFSET^TTXBLD(%SystemDate,BRCD,%UserID,"BCHSRVFEE")
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

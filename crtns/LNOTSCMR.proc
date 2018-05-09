@@ -1,0 +1,2728 @@
+LNOTSCMR //Batch BCHLNOTSCMR - Schedule MR loan Reporting for OTS
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 01/31/2007 12:46 - shetyes
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHLNOTSCMR Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit quit
+ do JOBMGR^BCHUTL(%FN,"BCHLNOTSCMR",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(CID) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHLNOTSCMR","*","",CID.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,CID)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHLNOTSCMR","*","",CID.get(),"",et)
+ }
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,CID) //
+               
+	type Public Number CID
+
+	type RecordACN acn=Db.getRecord("ACN","CID=:CID")
+ 
+	// Problem Account Status
+	if acn.pcidstat quit
+ 
+	// Branch for deposit accounts
+	if acn.cls="D" do DEPOSIT(.acn) quit
+
+	// Quit if a closed loan account.
+	if acn.cls="L",acn.stat=4 quit
+
+	do PROCESS(.acn)
+ 
+	quit
+
+
+PROCESS(RecordLN ln)  // Compute loan account's data
+
+	type Boolean CPF,FIXED,PFLG,SECMTG,TEASER,WARTCHG
+	type Date DIST1ND,ICHND,JD,MDT,NJD,ODT,TREXD
+	type Number ACR,AF,AMBAS,BAL,BALLAMT,CBLBAL,COLTYP,CONVFRE,DIST1AF
+	type Number ER,INTMX,INTMXIC,IRN,IUNT,ONP,ORGBAL,PMTMIN,PSLD,SEC,SINGLE
+	type Number SFEE,SUBCD,TRATE,TYP
+	type String CLS,COLCD,DIST1FRE,FRE,GRP,INDEX,INTFRE,LFPC,LFSC,PTRM
+	type String SFRE,TRM
+	type Public Boolean NAI
+	type Public Cache %CACHE()
+	type Public Number CID,COLL
+
+	set SINGLE=0
+	set CONVFRE=0
+	set ER=0
+
+	set TYP=ln.type 
+	set CLS=ln.cls 
+	set GRP=ln.grp
+
+	set ODT=ln.odt 
+	set ONP=ln.onp      
+	set LFPC=ln.lfpc
+	set LFSC=ln.lfsc 
+	set SUBCD=ln.subcd
+
+	if LFPC="SKIP"!(LFSC="SKIP") quit
+
+	type RecordPRODCTL prodctl=%CACHE("PRODCTL").getRecord("PRODCTL","TYPE=:TYP")
+	
+	// Credit Balance Loan [LN]TRB=0
+	if 'prodctl.trb quit
+
+	set ACR=(+ln.acr)
+	set INTMX=ln.intmx set ICHND=ln.ichnd      
+
+	set COLCD=ln.colcd set COLL=ln.coll        
+
+	if COLCD'="" do {
+		type RecordUTBLCOLCD colcd=Db.getRecord("UTBLCOLCD","GRP=:GRP,KEY=:COLCD",1)
+		set COLTYP=colcd.type
+		}
+
+	// Interest Cap
+	set IRN=+ln.irn
+
+	if ICHND=%SystemDate set INTFRE="1DA"
+	else  set INTFRE=$select(ICHND:(ICHND-%SystemDate)_"DA",1:ln.intfre)
+
+	// Interest Max Percent Incr per Change
+	set INTMXIC=ln.intmxic
+
+	// Payment Term
+	set PTRM=ln.ptrm
+
+	// Interest Change Frequency
+	set SFRE=ln.intfre
+
+	// Teaser Rate
+	set TEASER=0
+
+	if ln.trate'="",ln.trexd>%SystemDate set IRN=ln.trate set TEASER=1
+
+	// Promotional Rate
+	set TRATE=ln.trate
+
+	// Promotional Rate - Expiration Date
+	set TREXD=ln.trexd
+
+	// Distribution 1 Annual Factor
+	set DIST1AF=ln.dist1af
+
+	// Distribution 1 Frequency
+	set DIST1FRE=ln.dist1fre
+
+	// Distribution 1 Next Due
+	set DIST1ND=ln.dist1nd
+
+	// Mortgage Security
+	set SECMTG=ln.secmtg
+
+	// Amortization Base (Number of Payments)
+	set AMBAS=ln.ambas
+
+	// Int/Div Index
+	set INDEX=ln.index
+
+	set CPF=+ln.cpf
+
+	// Minimum Payment Amount
+	set PMTMIN=ln.pmtmin
+
+	// balloon amount
+	set BALLAMT=+ln.ballamt
+
+	if LFPC=""!(LFSC="") set (LFPC,LFSC)="OTH"
+	
+	type RecordSTBLLFSC stbllfsc=Db.getRecord("STBLLFSC","LFPC=:LFPC,KEY=:LFSC",1)
+	if 'stbllfsc.getMode() set (LFPC,LFSC)="OTH"
+
+	// Calculate BALCMP
+	set BAL=ln.balcmp
+
+	// Unearned Interest
+	set IUNT=ln.iunt
+
+	// book value
+	set BAL=BAL-IUNT
+
+	// Nonaccrual Indicator
+	set NAI=ln.nai
+
+	// Delinquent 90 days or over
+	if (%SystemDate-ln.dist1nd)>89 set NAI=1
+
+	// Portion of loan sold to invertor [LN]PFLG ?
+	set PFLG=ln.pflg 
+	set MDT=ln.mdt 
+	set TRM=ln.trm
+
+	// Missing MDT
+	set WARTCHG=0
+	if MDT="" set WARTCHG=1
+
+	if MDT<1,ODT'="",TRM'?." " do {
+		set FRE=TRM 
+		set JD=ODT 
+		set NJD=$$NJD^UFRE(JD,FRE,.AF) quit:ER  
+		set MDT=NJD
+		}
+
+	// Default to 1 month
+	if MDT<1 set MDT=%SystemDate+31
+
+	set SFEE=0
+
+	if PFLG do {
+		// Save balance for SOLD loans point spread calculation
+		set ORGBAL=BAL
+
+		do PRT
+
+		if CBLBAL>0 set BAL=BAL-CBLBAL
+		else  set BAL=$$^SCARND(BAL*(100-PSLD)/100,0,CID)
+
+		set ACR=$$^SCARND(ACR*(100-PSLD)/100,0,CID)
+		}
+
+	set FIXED=$$FIXED()
+
+	// Analyize this loan, skip if unknown category
+	if BAL>0 set SEC=$$SECTION() if SEC'=99 do STAT1(.ln) quit
+
+	if PFLG,LFPC="RE",'NAI set SEC=10-FIXED set BAL=ORGBAL-BAL do STAT1(.ln)
+
+	quit
+
+	
+STAT1(RecordLN ln)	// Accumulate report statistics
+
+	type Date DT1,DT2
+	type Number CAT,IRNAVG,NOP,WALC,WAPC,WARTF,WASF
+	type String I()
+	type Public Boolean WARTCHG
+	type Public Number ACR,BAL,BALLAMT,ER,IRN,INDMRG,INTMX,INTMXIC,PMTMIN,WAPCH
+	type Public Number RICBAL,SEC,SFEE,WART
+	type Public String DIST1FRE,PTRM,TRM,WAIRC
+
+	set CAT=$$CAT(.ln)
+
+	// Calculate REMTERM , IRNAVG , IMAXAVG, PRINADJ
+	// Weighted average IRN
+	set IRNAVG=IRN*BAL
+
+	set WASF=((IRN-SFEE)*100)
+
+	set WALC=0
+	if INTMX set WALC=(INTMX-IRN)*100
+
+	set WAPC=0
+	if INTMXIC set WAPC=INTMXIC*100
+
+	// find WART for open-ended fixed rate loans
+	if WARTCHG,BAL>0,PMTMIN>0,DIST1FRE'="" do { quit:ER
+		set NOP=(BAL/PMTMIN).roundDec(2)
+		set DT1=$$NJD^UFRE(%SystemDate,DIST1FRE) quit:ER
+		set DT2=$$NJD^UFRE(DT1,DIST1FRE) quit:ER
+		set WART=((DT2-DT1)*NOP)/30.4166
+		set WART=WART.roundDec(2)
+		}
+
+	set WARTF=WART
+
+	if (TRM'=PTRM)!(BALLAMT>0) set WARTF=$$WARTF(ln.amodt) if WARTF set WARTF=$$CALTERM(%SystemDate,WARTF)\1
+
+	// Principal Balance
+	set I(1)=BAL
+	// Weigted average remaining term
+	set I(2)=WART*BAL
+	// Weighted average IRN
+	set I(3)=IRNAVG
+	// Weighted average Index Margin
+	set I(4)=INDMRG*BAL
+	// Weighted average payment change term
+	set I(5)=WAPCH*BAL
+	// Weighted average interest change term
+	set I(6)=WAIRC*BAL
+	// Weighted avg maximum rate limit (life)
+	set I(7)=WALC*BAL
+	// Weighted avg rate change limit
+	set I(8)=WAPC*BAL
+	// Weighted average balloon term
+	set I(9)=WARTF*BAL
+	// Weighted average servicing fee (loans sold)
+	set I(10)=WASF*BAL
+
+	set I(11)=""
+
+	// Current Accrual
+	set I(12)=ACR
+
+	for I=13,14,15,16 set I(I)=""
+
+	// Balance for Rate Index Code
+	set I(18)=RICBAL
+	// Index Margin wghtd by Rate Index Code bal
+	set I(19)=INDMRG*RICBAL
+	// 20-Advances for Taxes & Ins(CMR504) 21-Unamort Yield Adj
+	for I=20,21 set I(I)=0
+
+	do CMR503
+
+	// NON ACCRUALS
+	if CAT=10 set SEC=11 do SEC11 quit
+
+	if SEC=1!(SEC=9) do SEC1(.ln) quit
+	if SEC=2!(SEC=10) do SEC2(.ln) quit
+	if SEC=4 do SEC4 quit
+	if SEC=5 do SEC8 quit
+	if SEC=6 do SEC8 quit
+	if SEC=7 do SEC8 quit
+	if SEC=8 do SEC8 quit
+
+	quit
+
+
+SEC1(RecordLN ln)	// First mortgage loans FIXED RATES
+
+	type Date NDT
+	type Number B,R
+	type String SUBT,TRM1
+	type Public Boolean SECMTG
+	type Public Date ODT,TREXD
+	type Public Number CONVFRE,DIST1AF,ER,ONP,SEC,SINGLE,TRATE,WART,WARTF
+	type Public String I(),INDEX,SFRE,TRM
+
+	set R=$$CMRRCAT()
+	set B=1
+	set NDT=ODT
+	set SUBT=ln.subt
+	set TRM1=TRM.extract(1,2)
+
+	// single rate adjustment loan
+	if (INDEX="")&(TRATE'="")&(TREXD'="") set SINGLE=1
+
+	if SEC=9 do { quit
+		do SETSEC1 quit:ER
+		type RecordTMPCMR lncmr=Db.getRecord("TMPCMR","RUNDATE=:%SystemDate,PROCID=:%ProcessID,CLS=:SEC,GRP=:B,CAT=1",1)
+		set lncmr.cmr14=lncmr.cmr14+I(14)
+		set lncmr.cmr15=lncmr.cmr15+I(15)
+		do lncmr.bypassSave()
+		}
+
+	//balloon loans
+	if ((WARTF-WART)>119)!((SFRE'="")&(INDEX'="")&(CONVFRE>5))!(SINGLE=1) do { quit:ER
+		if SECMTG set B=7
+		else  set B=6 
+		do SETSEC1
+		}
+
+	else  do {
+		if 'SECMTG do {
+			if (DIST1AF>25)!(((ONP/DIST1AF)\1)<25) set B=4 do SETSEC1 quit:ER
+			if (INDEX="")&(TRM1'<25)&(DIST1AF<26) set B=1 do SETSEC1 quit:ER
+			}
+
+		else  if SECMTG,INDEX="" do {
+			if (TRM1'<25)&(DIST1AF<26)&(SUBT="C") set B=2 do SETSEC1 quit:ER
+			if (TRM1'<25)&(DIST1AF<26)&((SUBT="F")!(SUBT="V")) set B=3 do SETSEC1 quit:ER
+			if (TRM1'<25)&(DIST1AF>25) set B=5 do SETSEC1 quit:ER
+			if (TRM1<25) set B=5 do SETSEC1 quit:ER
+			}
+		}
+
+	quit
+
+
+SETSEC1	// Extract data for a loan that meets criteria of Section1 loans
+	
+	type String SUBT1
+	type Public Number B,BAL,R,SEC
+	type Public String GRP,I(),SUBT
+
+	set SUBT1=""
+
+	if SUBT'="" do {
+		type RecordUTBLSUBT subt=Db.getRecord("UTBLSUBT","GRP=:GRP,KEY=:SUBT",1)
+		set SUBT1=subt.fhava
+		if ",VA,FHA,"[(","_SUBT1_",") set I(13)=BAL set I(15)=1
+		}
+
+	else  set I(14)=1
+
+	type RecordTMPCMR lncmr=Db.getRecord("TMPCMR","RUNDATE=:%SystemDate,PROCID=:%ProcessID,CLS=:SEC,GRP=:B,CAT=:R",1)
+	set lncmr.cmr1=lncmr.cmr1+I(1)
+	set lncmr.cmr2=lncmr.cmr2+I(2)
+	set lncmr.cmr3=lncmr.cmr3+I(3)
+	set lncmr.cmr10=lncmr.cmr10+I(10)
+	set lncmr.cmr13=lncmr.cmr13+I(13)
+	do lncmr.bypassSave()
+
+	type RecordTMPCMR lncmr=Db.getRecord("TMPCMR","RUNDATE=:%SystemDate,PROCID=:%ProcessID,CLS=11,GRP=1,CAT=1",1)
+	set lncmr.cmr21=lncmr.cmr21+$$LNDEFNET()
+	do lncmr.bypassSave()
+
+	quit
+
+
+SEC2(RecordLN ln)	// First mtg VARIABLE RATES
+
+	type Number B,R
+	type Public Boolean TEASER
+	type Public Number AF,CATGRP,SEC
+	type Public String I()
+
+	//reported to CMR504
+	if SEC=2 do {
+		type RecordTMPCMR lncmr=Db.getRecord("TMPCMR","RUNDATE=:%SystemDate,PROCID=:%ProcessID,CLS=11,GRP=1,CAT=1",1)
+		set lncmr.cmr21=lncmr.cmr21+$$LNDEFNET()
+		do lncmr.bypassSave()
+		}
+
+	set I(17)=0
+	if SEC=10 set I(17)=1
+
+	set B=1
+	if SEC=2,'TEASER set B=2
+
+	if CATGRP=1 do { do SEC2A(.ln) quit
+		if SEC=10 set R=1
+		else  if AF<.5 set R=3
+		else  if AF<2 set R=2 
+		else  set R=1 
+		}
+
+	if SEC=10 set R=2 do SEC2A(.ln) quit
+
+	if AF<12 set R=5
+	else  set R=4
+
+	do SEC2A(.ln)
+
+	quit
+
+
+SEC2A(RecordLN ln)	//
+	
+	type Public Boolean SECMTG
+	type Public Number B,R,SEC,WALC
+	type Public String I()
+
+	type RecordTMPCMR lncmr=Db.getRecord("TMPCMR","RUNDATE=:%SystemDate,PROCID=:%ProcessID,CLS=:SEC,GRP=:B,CAT=:R",1)
+	
+	set lncmr.cmr1=lncmr.cmr1+I(1)
+	set lncmr.cmr2=lncmr.cmr2+I(2)
+	set lncmr.cmr3=lncmr.cmr3+I(3)
+	set lncmr.cmr4=lncmr.cmr4+I(4)
+	set lncmr.cmr5=lncmr.cmr5+I(5)
+	set lncmr.cmr10=lncmr.cmr10+I(10)
+	set lncmr.cmr17=lncmr.cmr17+I(17)
+
+	if SEC=2 set lncmr.cmr18=lncmr.cmr18+I(18)
+
+	do lncmr.bypassSave()
+
+	if SEC=10 quit
+
+	set SEC=3
+
+	// after loan reported to B=8 it is
+	if SECMTG set B=8 do SEC2C
+
+	// processed for coresponding category
+	if 'WALC set B=4 do SEC2C do SEC2B(.ln) quit
+  
+	// as processed before
+	if WALC>400 set B=3 do SEC2C do SEC2B(.ln) quit
+       
+	if WALC>200 set B=2 do SEC2C do SEC2B(.ln) quit
+
+	set B=1 do SEC2C
+
+	do SEC2B(.ln)
+	
+	quit
+
+
+SEC2B(RecordLN ln)	//
+	
+	type Public Number B
+	type Public Number WAPC
+
+	if WAPC set B=5 do SEC2C
+
+	// Interest Max Percent Decr per Change
+	if ln.intmxdc set B=6 do SEC2C
+
+	// Interest Rate - Minimum
+	if ln.intmn set B=7 do SEC2C
+
+	quit
+
+
+SEC2C	//
+	
+	type Public Number B,R,SEC
+	type Public String I()
+
+	type RecordTMPCMR lncmr=Db.getRecord("TMPCMR","RUNDATE=:%SystemDate,PROCID=:%ProcessID,CLS=:SEC,GRP=:B,CAT=:R",1)
+
+	set lncmr.cmr1=lncmr.cmr1+I(1)
+	set lncmr.cmr7=lncmr.cmr7+I(7)
+	set lncmr.cmr8=lncmr.cmr8+I(8)
+
+	do lncmr.bypassSave()
+
+	quit
+
+
+SEC4	// All mortgages loans multi and non
+
+	type Number B,R
+	type String DATA
+	type Public Boolean FIXED
+	type Public Number RIC,SEC,WALC,WART,WARTF
+	type Public String I()
+
+	set R=2
+	if (WARTF-WART)>119 set R=1
+
+	set B=1
+	if FIXED set B=3
+
+	type RecordTMPCMR lncmr=Db.getRecord("TMPCMR","RUNDATE=:%SystemDate,PROCID=:%ProcessID,CLS=:SEC,GRP=:B,CAT=:R",1)	
+	set lncmr.cmr1=lncmr.cmr1+I(1)
+	set lncmr.cmr2=lncmr.cmr2+I(2)
+	set lncmr.cmr3=lncmr.cmr3+I(3)
+	set lncmr.cmr9=lncmr.cmr9+I(9)
+	do lncmr.bypassSave()
+
+	if 'FIXED,WALC,WALC'>300 do {
+		set B=2
+		type RecordTMPCMR lncmr=Db.getRecord("TMPCMR","RUNDATE=:%SystemDate,PROCID=:%ProcessID,CLS=:SEC,GRP=:B,CAT=:R",1)
+		set lncmr.cmr1=lncmr.cmr1+I(1)
+		set lncmr.cmr7=lncmr.cmr7+I(7)
+		do lncmr.bypassSave()
+		}
+
+	if RIC="",FIXED quit
+
+	set B=1
+	type RecordTMPRPT6 tmp=Db.getRecord("TMPRPT6","PID=:%ProcessID,KEY1=:%SystemDate,KEY2='MRRIC',KEY3=:SEC,KEY4=:B,KEY5=:R,KEY6=:RIC",1)
+	set DATA=tmp.data
+	for I=1,4,6,18 set DATA.piece("~",I)=DATA.piece("~",I)+I(I)
+	set tmp.data=DATA
+	do tmp.bypassSave()
+
+	quit
+
+
+SEC8	// Loans serviced
+
+	type Number R
+	type String DATA
+	type Public Date DIST1ND
+	type Public Boolean FIXED,NAI
+	type Public Number COLTYP,RIC,SEC
+	type Public String I(),LFPC,LFSC
+
+	set R=FIXED+1	
+
+	// reported to CMR504
+	if ((SEC=5)&(R=1))!(SEC=6) do { 
+		type RecordTMPCMR lncmr=Db.getRecord("TMPCMR","RUNDATE=:%SystemDate,PROCID=:%ProcessID,CLS=11,GRP=1,CAT=1",1)
+		set lncmr.cmr21=lncmr.cmr21+$$LNDEFNET()
+		do lncmr.bypassSave()
+		}
+
+	// reported to CMR504
+	else  if (SEC=7)!(SEC=8) do {
+		type RecordTMPCMR lncmr=Db.getRecord("TMPCMR","RUNDATE=:%SystemDate,PROCID=:%ProcessID,CLS=11,GRP=2,CAT=1",1)
+		set lncmr.cmr21=lncmr.cmr21+$$LNDEFNET()
+		do lncmr.bypassSave()
+		}
+
+	//CMR580
+	if (SEC=6)&('NAI)&((DIST1ND>%SystemDate)-90)&(LFPC="RE")&((LFSC="O1-4")!(LFSC="R1-4"))&(COLTYP=10) do {
+		type RecordTMPCMR lncmr=Db.getRecord("TMPCMR","RUNDATE=:%SystemDate,PROCID=:%ProcessID,CLS=11,GRP=4,CAT=1",1)
+		set lncmr.cmr1=lncmr.cmr1+I(1)
+		do lncmr.bypassSave()
+		}
+	
+	type RecordTMPCMR lncmr=Db.getRecord("TMPCMR","RUNDATE=:%SystemDate,PROCID=:%ProcessID,CLS=:SEC,GRP=1,CAT=:R",1)
+	set lncmr.cmr1=lncmr.cmr1+I(1)
+	set lncmr.cmr2=lncmr.cmr2+I(2)
+	set lncmr.cmr3=lncmr.cmr3+I(3)
+	set lncmr.cmr4=lncmr.cmr4+I(4)
+	set lncmr.cmr5=lncmr.cmr5+I(5)
+	set lncmr.cmr8=lncmr.cmr6+I(6)
+	set lncmr.cmr7=lncmr.cmr7+I(7)
+	set lncmr.cmr8=lncmr.cmr8+I(8)
+	set lncmr.cmr9=lncmr.cmr9+I(9)
+	set lncmr.cmr10=lncmr.cmr10+I(10)
+	set lncmr.cmr11=lncmr.cmr11+I(11)
+	set lncmr.cmr12=lncmr.cmr12+I(12)
+	do lncmr.bypassSave()
+
+	if RIC="" quit
+
+	type RecordTMPRPT6 tmp=Db.getRecord("TMPRPT6","PID=:%ProcessID,KEY1=:%SystemDate,KEY2='MRRIC',KEY3=:SEC,KEY4=1,KEY5=:R,KEY6=:RIC",1)
+	set DATA=tmp.data
+	for I=1,4,6,18 set DATA.piece("~",I)=DATA.piece("~",I)+I(I)
+	set tmp.data=DATA
+	do tmp.bypassSave()
+
+	quit
+
+
+SEC11	//
+
+	type Number B,R
+	type Public Number SEC
+	type Public String I(),LFPC
+
+	set B=1+(LFPC'="RE")
+	set R=1
+
+	type RecordTMPCMR lncmr=Db.getRecord("TMPCMR","RUNDATE=:%SystemDate,PROCID=:%ProcessID,CLS=:SEC,GRP=:B,CAT=:R",1)
+	set lncmr.cmr1=lncmr.cmr1+I(1)
+	set lncmr.cmr12=lncmr.cmr12+I(12)
+	do lncmr.bypassSave()
+
+	quit
+
+
+CMR503	// Report escrow neg. balance for loans that reported in SC 230-265 (see ^LNOTSSC)
+
+	type Number EBAL,ECID,GOODCID,PLDGAMT,PLDGPCT
+	type Public Boolean PFLG
+	type Public Date MDT
+	type Public Number BAL,CID,COLL,COLTYP
+	type Public String LFPC,LFSC
+
+	set (PLDGAMT,PLDGPCT,GOODCID,EBAL)=0
+	set ECID=""
+	
+	if 'COLL.isNull() do {
+		type RecordLNCOL lncol=Db.getRecord("LNCOL","CID=:CID,COLL=:COLL",1)
+		if lncol.getMode() set PLDGAMT=lncol.pldgamt
+	}
+
+	if BAL'=0 set PLDGPCT=(PLDGAMT/BAL).roundDec(4)*100
+	
+	// escrow info
+	type DbSet ds=Db.selectDbSet("DEP","AREF=:CID")
+	if ds.next() do {
+		type RecordDEP dep=ds.getRecord("DEP")
+		set ECID=dep.cid
+		set EBAL=dep.bal
+		}
+
+	if LFPC="RE",COLTYP=10 do {
+		if (",D1-4,DMULT,DNON,MULT,NON,FRM,DEV,"[(","_LFSC_","))!((LFSC="O1-4")&(MDT>0)&(PLDGPCT'<50))!((LFSC="R1-4")&(MDT="")&(PLDGPCT'<50)) set GOODCID=1
+		}
+	
+	if ECID'="",EBAL<0 do {
+		if GOODCID do {
+			type RecordTMPCMR lncmr=Db.getRecord("TMPCMR","RUNDATE=:%SystemDate,PROCID=:%ProcessID,CLS=11,GRP=1,CAT=1",1)
+			set lncmr.cmr20=lncmr.cmr20+(-EBAL)
+			do lncmr.bypassSave()
+			}
+
+		if PFLG do {
+			type RecordTMPCMR lncmr=Db.getRecord("TMPCMR","RUNDATE=:%SystemDate,PROCID=:%ProcessID,CLS=11,GRP=3,CAT=1",1)
+			set lncmr.cmr1=lncmr.cmr1+(-EBAL)
+			do lncmr.bypassSave()
+			}
+		}
+
+	quit
+
+
+LNDEFNET()	// Extract Net Fee Balance (unamortized balance of net deferred fees) XFEE from LNCYCPTS
+
+	/*
+	   KEYWORDS:  deferred, amount
+
+	   DESC:  Returns Net Fee Balance for particular CID
+
+	   ARGUMENTS:
+
+	   RETURNS:
+	   	 . $$  Net Fee Balance     /TYP=N
+
+	   EXAMPLE:
+	   	 S CID=12345
+	   	 S DEFNET=$$LNDEFNET()
+
+	*/
+
+	type Number DEFNET,SUM
+	type Public Number CID
+	
+	set SUM=0
+
+	type DbSet ds=Db.selectDbSet("LNCYCPTS","CID=:CID")
+	while ds.next() do {
+		type RecordLNCYCPTS pts=ds.getRecord("LNCYCPTS")
+		set DEFNET=pts.nfee
+		if DEFNET<0 set DEFNET=-DEFNET
+		set SUM=SUM+DEFNET
+		}
+
+	quit SUM
+
+
+WARTF(Date ODT)	//
+
+	type Date MDT
+	type Public Number ER
+
+	do ^UMDT
+
+	if ER quit 0
+
+	quit MDT
+
+
+Public CALTERM(Date A,Date B)	// Compute the number of months between dates
+
+	quit ((B-A)/30.4166).roundDec(0)
+
+
+CMRRCAT()	// Determine the rate category
+
+	type Number I,RATE
+	type Public Number IRN
+	type Public String CMRRCAT()
+
+	if 'CMRRCAT.exists() do {
+		type ResultSet rs=Db.select("RATE","UTBLCMRRCAT")
+		while rs.next() set CMRRCAT(rs.getCol("RATE"))=""
+		}
+
+	set RATE=""
+	for I=1:1:5 set RATE=CMRRCAT(RATE).order() quit:RATE=""!(RATE>IRN)
+
+	quit I
+
+
+CAT(RecordLN ln)	// Category for Fixed or variable rate loans
+
+	type Number CATGRP
+	type String INDEX
+	type Public Boolean NAI
+	type Public Date MDT,TERMDT
+	type Public Cache %CACHE()
+	type Public Number BAL,INDMRG,RIC,RICBAL,WAIRC,WAPCH,WART
+
+	// Identify variable rate loan [LN]INDEX'=null
+	set TERMDT=MDT set CATGRP=3 set (INDMRG,RICBAL)=0 set RIC=""
+
+	// Teaser rate [LN]TRATE based on expiration date [LN]TREXD
+	if ln.trexd>%SystemDate set TERMDT=ln.trexd
+
+	// Fixed rate loan based on MTD
+	if 'ln.index.isNull() do {     
+
+		// Int/Div Index
+		set INDEX=ln.index
+	
+		// Int/Div Spread
+		set INDMRG=ln.intspr
+	
+		if INDMRG'="" set INDMRG=(INDMRG*100).roundDec(2)
+	
+		type RecordINDEX index=%CACHE("INDEX").getRecord("INDEX","INDEX=:INDEX")
+	
+		// Lagging MI
+		if index.lag set CATGRP=2
+	
+		// current market indices
+		else  set CATGRP=1
+	
+		// Determine Rate Index Code
+		set RIC=index.cmrindex
+		if RIC="" set RIC=999 do EXC2
+	
+		// Balance per RIC
+		set RICBAL=BAL
+	
+		// Exclude from reporting
+		if '$$RIC(RIC) set RICBAL=0
+	
+		// Maximum rate cap (IRN=INTMX)
+		if ln.intmx-ln.irn<>0 do {       
+	
+			if ln.ichnd.isNull() set TERMDT=MDT
+	
+			// based on ICHND
+			else if ln.ichnd<MDT set TERMDT=ln.ichnd
+		}
+	}
+	
+	// calculate number of months
+	
+	set WAIRC=$$CALTERM(%SystemDate,TERMDT)
+	set WART=$$CALTERM(%SystemDate,MDT)
+
+	if 'ln.pchnd set WAPCH=WART
+	else  set WAPCH=$$CALTERM(%SystemDate,ln.pchnd)
+
+	if NAI quit 10
+
+	quit 1
+
+
+SECTION()	// Identify the report section(s) that this account should be included
+
+	type Public Boolean FIXED
+	type Public Number SUBCD
+	type Public String LFPC,LFSC
+
+	if LFPC="RE",((LFSC="O1-4")!(LFSC="R1-4")),SUBCD<2 quit 2-FIXED
+	if LFPC="RE",",O1-4,R1-4,DEV,"'[(","_LFSC_",") quit 4
+	if LFPC="RE",LFSC="DEV" quit 5
+	if LFPC="RE",((LFSC="O1-4")!(LFSC="R1-4")),SUBCD>1 quit 6
+	if LFPC="COM"!(LFPC="BK")!(LFPC="AG")!(LFPC="ACC")!(LFPC="FGVT")!(LFPC="GVT")!(LFPC="OTH")!(LFPC="LSE")!(LFPC="LOC") quit 7
+	if LFPC="IND" quit 8
+
+	// Log exception
+	do EXC
+
+	// Invalid Code
+	quit 99
+
+
+FIXED()	//
+	
+	type Date DAT1,DAT2,JD,NDT,NJD
+	type String FRE
+	type Public Date ICHND,MDT,ODT,TREXD
+	type Public Number AF,CONVFRE,ER,SINGLE,TRATE
+	type Public String INDEX,INTFRE,LFPC,LFSC,SFRE
+
+	// For consumer loans, no other considerations apply
+	if LFPC="IND",LFSC="OTH" quit $select((INDEX'="")&(INTFRE'=""):0,1:1)
+
+	if INDEX="" quit 1
+
+	if ICHND>MDT quit 1
+
+	if INTFRE="" quit 1
+
+	set FRE=INTFRE set JD=%SystemDate set NJD=$$NJD^UFRE(JD,FRE,.AF) quit:ER 0
+
+	if SFRE'="" do { quit:ER 0
+		set DAT1=$$NJD^UFRE(%SystemDate,SFRE) quit:ER
+		set DAT2=$$NJD^UFRE(DAT1,SFRE) quit:ER
+		set CONVFRE=$$NOY^SCADAT(DAT1,DAT2,1,0)
+		}
+
+	// adjustable rate mortgages with rate change of more than 5 years
+	if CONVFRE>5 quit 1
+
+	// first rate adjustment
+	if (TRATE'="")&(TREXD'="") set SINGLE=1
+
+	set NDT=ODT
+
+	if SFRE'="" do {
+		for  set NDT=$$NJD^UFRE(NDT,SFRE) quit:(SINGLE>1!(NDT'<MDT))  quit:ER  do {
+			if (TREXD'="")&(NDT<TREXD) quit
+			set SINGLE=SINGLE+1
+			}
+		}
+
+	// loans with single rate adjustment
+	if SINGLE=1 quit 1
+
+	quit 0
+
+
+PRT	// Get part information with master loan collateral
+
+	type Number CBLNUM,GSFEE,OPTR
+	type Public Cache %CACHE()
+	type Public Number CBLBAL,CID,PSLD,SFEE
+
+	set (CBLBAL,PSLD,SFEE)=0
+
+	// Also, check if loan was removed from investor's pool
+	type DbSet ds=Db.selectDbSet("LNLS6","CID=:CID AND RFPF<>1 AND INCD IS NOT NULL AND PL IS NOT NULL")
+	while ds.next() do {
+		type RecordLNLS6 lnls6=ds.getRecord("LNLS6")
+
+		set OPTR=lnls6.optr
+		
+		type RecordLNLS2 lnls2=%CACHE("LNLS2").getRecord("LNLS2","INCD=lnls6.incd,PL=lnls6.pl")
+
+		// % SOLD
+		set PSLD=PSLD+lnls2.pp
+		set GSFEE=lnls2.gsfee
+
+		if OPTR set SFEE=OPTR+GSFEE
+		else  set SFEE=lnls2.yield+GSFEE
+
+		// Linked to a contra account?
+		set CBLNUM=lnls6.ccid
+		if CBLNUM'>0 quit
+	
+		if lnls2.picm'=6 quit
+
+		type RecordACN acn=Db.getRecord("ACN","CID=:CBLNUM",1)
+		set CBLBAL=CBLBAL+acn.bal
+		}
+
+	quit
+
+
+RIC(Number RIC)	// Determine whether we should report index margins in CMR 161-165
+
+	// Treasury indeces
+	if RIC<400&(RIC=303!(RIC=306)!(RIC=312)!(RIC=324)!(RIC=336)!(RIC=360)) quit 1
+
+	// LIBOR Indices
+	if RIC<500&(RIC=401!(RIC=403)!(RIC=406)!(RIC=412)) quit 1
+
+	// Cost-of-funds Indicies
+
+	// 11th District FHLB
+	if RIC=811 quit 1
+
+	// Lender's own COF
+	if RIC=812 quit 1
+
+	quit 0
+
+
+Public PTR1	// Post-processor to REPORT DATE field in report SCA436L (Page 1)
+
+	type Date ZCMRDATE
+	type Number CNT,I,J
+	type Public Date CMRDATE
+	type Public Number SEC,SEC(,)
+	type Public String HD()
+	
+	set ZCMRDATE=CMRDATE
+
+	// Define report header
+	set HD(1)=0
+	set CNT=3
+	
+	type ResultSet rs=Db.select("RATE","UTBLCMRRCAT",,"RATE")
+	while rs.next() do { quit:CNT=11
+		set HD(CNT)=rs.getCol("RATE") set HD(CNT-1)=HD(CNT)-.00001
+		set CNT=CNT+2
+		}
+
+	set HD(10)=99.99999
+
+	for I=1:1:35 for J=1:1:21 set SEC(I,J)=""
+	set CNT=0
+	
+	// Accumulate totals by CMR group and rate category 
+	// Section 1
+	type DbSet dsln=Db.selectDbSet("LNCMR","RUNDATE=:CMRDATE AND SECN=1 AND GRP NOT>7 AND RATECAT NOT>5","GRP,RATECAT")
+	while dsln.next() do {
+		type RecordLNCMR lncmr=dsln.getRecord("LNCMR")
+
+		if lncmr.grp=1,lncmr.ratecat=1 set CNT=1
+		else  if lncmr.grp=1,lncmr.ratecat=2 set CNT=2
+		else  if lncmr.grp=1,lncmr.ratecat=3 set CNT=3
+		else  if lncmr.grp=1,lncmr.ratecat=4 set CNT=4
+		else  if lncmr.grp=1,lncmr.ratecat=5 set CNT=5
+		else  if lncmr.grp=2,lncmr.ratecat=1 set CNT=6
+		else  if lncmr.grp=2,lncmr.ratecat=2 set CNT=7
+		else  if lncmr.grp=2,lncmr.ratecat=3 set CNT=8
+		else  if lncmr.grp=2,lncmr.ratecat=4 set CNT=9
+		else  if lncmr.grp=2,lncmr.ratecat=5 set CNT=10
+		else  if lncmr.grp=3,lncmr.ratecat=1 set CNT=11
+		else  if lncmr.grp=3,lncmr.ratecat=2 set CNT=12
+		else  if lncmr.grp=3,lncmr.ratecat=3 set CNT=13
+		else  if lncmr.grp=3,lncmr.ratecat=4 set CNT=14
+		else  if lncmr.grp=3,lncmr.ratecat=5 set CNT=15
+		else  if lncmr.grp=4,lncmr.ratecat=1 set CNT=16
+		else  if lncmr.grp=4,lncmr.ratecat=2 set CNT=17
+		else  if lncmr.grp=4,lncmr.ratecat=3 set CNT=18
+		else  if lncmr.grp=4,lncmr.ratecat=4 set CNT=19
+		else  if lncmr.grp=4,lncmr.ratecat=5 set CNT=20
+		else  if lncmr.grp=5,lncmr.ratecat=1 set CNT=21
+		else  if lncmr.grp=5,lncmr.ratecat=2 set CNT=22
+		else  if lncmr.grp=5,lncmr.ratecat=3 set CNT=23
+		else  if lncmr.grp=5,lncmr.ratecat=4 set CNT=24
+		else  if lncmr.grp=5,lncmr.ratecat=5 set CNT=25
+		else  if lncmr.grp=6,lncmr.ratecat=1 set CNT=26
+		else  if lncmr.grp=6,lncmr.ratecat=2 set CNT=27
+		else  if lncmr.grp=6,lncmr.ratecat=3 set CNT=28
+		else  if lncmr.grp=6,lncmr.ratecat=4 set CNT=29
+		else  if lncmr.grp=6,lncmr.ratecat=5 set CNT=30
+		else  if lncmr.grp=7,lncmr.ratecat=1 set CNT=31
+		else  if lncmr.grp=7,lncmr.ratecat=2 set CNT=32
+		else  if lncmr.grp=7,lncmr.ratecat=3 set CNT=33
+		else  if lncmr.grp=7,lncmr.ratecat=4 set CNT=34
+		else  if lncmr.grp=7,lncmr.ratecat=5 set CNT=35
+		
+		set SEC(CNT,1)=lncmr.cmr1
+		set SEC(CNT,2)=lncmr.cmr2
+		set SEC(CNT,3)=lncmr.cmr3
+		set SEC(CNT,4)=lncmr.cmr4
+		set SEC(CNT,5)=lncmr.cmr5
+		set SEC(CNT,6)=lncmr.cmr6
+		set SEC(CNT,7)=lncmr.cmr7
+		set SEC(CNT,8)=lncmr.cmr8
+		set SEC(CNT,9)=lncmr.cmr9
+		set SEC(CNT,10)=lncmr.cmr10
+		set SEC(CNT,11)=lncmr.cmr11
+		set SEC(CNT,12)=lncmr.cmr12
+		set SEC(CNT,13)=lncmr.cmr13
+		set SEC(CNT,14)=lncmr.cmr14
+		set SEC(CNT,15)=lncmr.cmr15
+		set SEC(CNT,16)=lncmr.cmr16
+		set SEC(CNT,17)=lncmr.cmr17
+		set SEC(CNT,18)=lncmr.cmr18
+		set SEC(CNT,19)=lncmr.cmr19
+		set SEC(CNT,20)=lncmr.cmr20
+		set SEC(CNT,21)=lncmr.cmr21
+		}
+
+	quit
+
+
+Public PTR2	// Post-processor to REPORT DATE field in report SCA436L2 (Page 2)
+
+	type Number CNT,I,J
+	type Public Number SEC
+
+	for I=1:1:50 for J=1:1:21 set SEC(I,J)=""
+	set CNT=0
+
+	// Accumulate totals by CMR group and rate category 
+	// Section 2
+	type DbSet dsln2=Db.selectDbSet("LNCMR","RUNDATE=:CMRDATE AND SECN=2 AND GRP NOT>2 AND RATECAT NOT>5","GRP,RATECAT")
+	while dsln2.next() do {
+		type RecordLNCMR lncmr=dsln2.getRecord("LNCMR")
+		
+		if lncmr.grp=1,lncmr.ratecat=1 set CNT=1
+		else  if lncmr.grp=1,lncmr.ratecat=2 set CNT=2
+		else  if lncmr.grp=1,lncmr.ratecat=3 set CNT=3
+		else  if lncmr.grp=1,lncmr.ratecat=4 set CNT=4
+		else  if lncmr.grp=1,lncmr.ratecat=5 set CNT=5
+		else  if lncmr.grp=2,lncmr.ratecat=1 set CNT=6
+		else  if lncmr.grp=2,lncmr.ratecat=2 set CNT=7
+		else  if lncmr.grp=2,lncmr.ratecat=3 set CNT=8
+		else  if lncmr.grp=2,lncmr.ratecat=4 set CNT=9
+		else  if lncmr.grp=2,lncmr.ratecat=5 set CNT=10
+				
+		set SEC(CNT,1)=lncmr.cmr1
+		set SEC(CNT,2)=lncmr.cmr2
+		set SEC(CNT,3)=lncmr.cmr3
+		set SEC(CNT,4)=lncmr.cmr4
+		set SEC(CNT,5)=lncmr.cmr5
+		set SEC(CNT,6)=lncmr.cmr6
+		set SEC(CNT,7)=lncmr.cmr7
+		set SEC(CNT,8)=lncmr.cmr8
+		set SEC(CNT,9)=lncmr.cmr9
+		set SEC(CNT,10)=lncmr.cmr10
+		set SEC(CNT,11)=lncmr.cmr11
+		set SEC(CNT,12)=lncmr.cmr12
+		set SEC(CNT,13)=lncmr.cmr13
+		set SEC(CNT,14)=lncmr.cmr14
+		set SEC(CNT,15)=lncmr.cmr15
+		set SEC(CNT,16)=lncmr.cmr16
+		set SEC(CNT,17)=lncmr.cmr17
+		set SEC(CNT,18)=lncmr.cmr18
+		set SEC(CNT,19)=lncmr.cmr19
+		set SEC(CNT,20)=lncmr.cmr20
+		set SEC(CNT,21)=lncmr.cmr21
+		}
+
+	// Accumulate totals by CMR group and rate category 
+	// Section 3
+	type DbSet dsln3=Db.selectDbSet("LNCMR","RUNDATE=:CMRDATE AND SECN=3 AND GRP NOT>8 AND RATECAT NOT>5","GRP,RATECAT")
+	while dsln3.next() do {
+		type RecordLNCMR lncmr=dsln3.getRecord("LNCMR")
+		
+		if lncmr.grp=1,lncmr.ratecat=1 set CNT=11
+		else  if lncmr.grp=1,lncmr.ratecat=2 set CNT=12
+		else  if lncmr.grp=1,lncmr.ratecat=3 set CNT=13
+		else  if lncmr.grp=1,lncmr.ratecat=4 set CNT=14
+		else  if lncmr.grp=1,lncmr.ratecat=5 set CNT=15
+		else  if lncmr.grp=2,lncmr.ratecat=1 set CNT=16
+		else  if lncmr.grp=2,lncmr.ratecat=2 set CNT=17
+		else  if lncmr.grp=2,lncmr.ratecat=3 set CNT=18
+		else  if lncmr.grp=2,lncmr.ratecat=4 set CNT=19
+		else  if lncmr.grp=2,lncmr.ratecat=5 set CNT=20
+		else  if lncmr.grp=3,lncmr.ratecat=1 set CNT=21
+		else  if lncmr.grp=3,lncmr.ratecat=2 set CNT=22
+		else  if lncmr.grp=3,lncmr.ratecat=3 set CNT=23
+		else  if lncmr.grp=3,lncmr.ratecat=4 set CNT=24
+		else  if lncmr.grp=3,lncmr.ratecat=5 set CNT=25
+		else  if lncmr.grp=4,lncmr.ratecat=1 set CNT=26
+		else  if lncmr.grp=4,lncmr.ratecat=2 set CNT=27
+		else  if lncmr.grp=4,lncmr.ratecat=3 set CNT=28
+		else  if lncmr.grp=4,lncmr.ratecat=4 set CNT=29
+		else  if lncmr.grp=4,lncmr.ratecat=5 set CNT=30
+		else  if lncmr.grp=5,lncmr.ratecat=1 set CNT=31
+		else  if lncmr.grp=5,lncmr.ratecat=2 set CNT=32
+		else  if lncmr.grp=5,lncmr.ratecat=3 set CNT=33
+		else  if lncmr.grp=5,lncmr.ratecat=4 set CNT=34
+		else  if lncmr.grp=5,lncmr.ratecat=5 set CNT=35
+		else  if lncmr.grp=6,lncmr.ratecat=1 set CNT=36
+		else  if lncmr.grp=6,lncmr.ratecat=2 set CNT=37
+		else  if lncmr.grp=6,lncmr.ratecat=3 set CNT=38
+		else  if lncmr.grp=6,lncmr.ratecat=4 set CNT=39
+		else  if lncmr.grp=6,lncmr.ratecat=5 set CNT=40
+		else  if lncmr.grp=7,lncmr.ratecat=1 set CNT=41
+		else  if lncmr.grp=7,lncmr.ratecat=2 set CNT=42
+		else  if lncmr.grp=7,lncmr.ratecat=3 set CNT=43
+		else  if lncmr.grp=7,lncmr.ratecat=4 set CNT=44
+		else  if lncmr.grp=7,lncmr.ratecat=5 set CNT=45
+		else  if lncmr.grp=8,lncmr.ratecat=1 set CNT=46
+		else  if lncmr.grp=8,lncmr.ratecat=2 set CNT=47
+		else  if lncmr.grp=8,lncmr.ratecat=3 set CNT=48
+		else  if lncmr.grp=8,lncmr.ratecat=4 set CNT=49
+		else  if lncmr.grp=8,lncmr.ratecat=5 set CNT=50
+		
+		set SEC(CNT,1)=lncmr.cmr1
+		set SEC(CNT,2)=lncmr.cmr2
+		set SEC(CNT,3)=lncmr.cmr3
+		set SEC(CNT,4)=lncmr.cmr4
+		set SEC(CNT,5)=lncmr.cmr5
+		set SEC(CNT,6)=lncmr.cmr6
+		set SEC(CNT,7)=lncmr.cmr7
+		set SEC(CNT,8)=lncmr.cmr8
+		set SEC(CNT,9)=lncmr.cmr9
+		set SEC(CNT,10)=lncmr.cmr10
+		set SEC(CNT,11)=lncmr.cmr11
+		set SEC(CNT,12)=lncmr.cmr12
+		set SEC(CNT,13)=lncmr.cmr13
+		set SEC(CNT,14)=lncmr.cmr14
+		set SEC(CNT,15)=lncmr.cmr15
+		set SEC(CNT,16)=lncmr.cmr16
+		set SEC(CNT,17)=lncmr.cmr17
+		set SEC(CNT,18)=lncmr.cmr18
+		set SEC(CNT,19)=lncmr.cmr19
+		set SEC(CNT,20)=lncmr.cmr20
+		set SEC(CNT,21)=lncmr.cmr21
+		}
+
+	quit
+
+
+Public PTR3	// Post-processor to REPORT DATE field in report SCA436L3 (Page 3)
+	
+	type Number CNT,I,J
+	type Public Number SEC
+
+	for I=1:1:14 for J=1:1:21 set SEC(I,J)=""
+	set CNT=0
+	
+	// Accumulate totals by CMR group and rate category 
+	// Section 4
+	type DbSet dsln4=Db.selectDbSet("LNCMR","RUNDATE=:CMRDATE AND SECN=4 AND GRP NOT>3 AND RATECAT NOT>2","GRP,RATECAT")
+	while dsln4.next() do {
+		type RecordLNCMR lncmr=dsln4.getRecord("LNCMR")
+		
+		if lncmr.grp=1,lncmr.ratecat=1 set CNT=1
+		else  if lncmr.grp=1,lncmr.ratecat=2 set CNT=2
+		else  if lncmr.grp=2,lncmr.ratecat=1 set CNT=3
+		else  if lncmr.grp=2,lncmr.ratecat=2 set CNT=4
+		else  if lncmr.grp=3,lncmr.ratecat=1 set CNT=5
+		else  if lncmr.grp=3,lncmr.ratecat=2 set CNT=6
+		
+		set SEC(CNT,1)=lncmr.cmr1
+		set SEC(CNT,2)=lncmr.cmr2
+		set SEC(CNT,3)=lncmr.cmr3
+		set SEC(CNT,4)=lncmr.cmr4
+		set SEC(CNT,5)=lncmr.cmr5
+		set SEC(CNT,6)=lncmr.cmr6
+		set SEC(CNT,7)=lncmr.cmr7
+		set SEC(CNT,8)=lncmr.cmr8
+		set SEC(CNT,9)=lncmr.cmr9
+		set SEC(CNT,10)=lncmr.cmr10
+		set SEC(CNT,11)=lncmr.cmr11
+		set SEC(CNT,12)=lncmr.cmr12
+		set SEC(CNT,13)=lncmr.cmr13
+		set SEC(CNT,14)=lncmr.cmr14
+		set SEC(CNT,15)=lncmr.cmr15
+		set SEC(CNT,16)=lncmr.cmr16
+		set SEC(CNT,17)=lncmr.cmr17
+		set SEC(CNT,18)=lncmr.cmr18
+		set SEC(CNT,19)=lncmr.cmr19
+		set SEC(CNT,20)=lncmr.cmr20
+		set SEC(CNT,21)=lncmr.cmr21
+		}
+
+	// Accumulate totals by CMR group and rate category 
+	// Sections 5 thru 8
+	type DbSet dsln=Db.selectDbSet("LNCMR","RUNDATE=:CMRDATE AND SECN>4 AND SECN<9 AND GRP=1 AND RATECAT NOT>2","SECN,GRP,RATECAT")
+	while dsln.next() do {
+		type RecordLNCMR lncmr=dsln.getRecord("LNCMR")
+		
+		if lncmr.secn=5,lncmr.grp=1,lncmr.ratecat=1 set CNT=7
+		else  if lncmr.secn=5,lncmr.grp=1,lncmr.ratecat=2 set CNT=8
+		else  if lncmr.secn=6,lncmr.grp=1,lncmr.ratecat=1 set CNT=9
+		else  if lncmr.secn=6,lncmr.grp=1,lncmr.ratecat=2 set CNT=10
+		else  if lncmr.secn=7,lncmr.grp=1,lncmr.ratecat=1 set CNT=11
+		else  if lncmr.secn=7,lncmr.grp=1,lncmr.ratecat=2 set CNT=12
+		else  if lncmr.secn=8,lncmr.grp=1,lncmr.ratecat=1 set CNT=13
+		else  if lncmr.secn=8,lncmr.grp=1,lncmr.ratecat=2 set CNT=14
+		
+		set SEC(CNT,1)=lncmr.cmr1
+		set SEC(CNT,2)=lncmr.cmr2
+		set SEC(CNT,3)=lncmr.cmr3
+		set SEC(CNT,4)=lncmr.cmr4
+		set SEC(CNT,5)=lncmr.cmr5
+		set SEC(CNT,6)=lncmr.cmr6
+		set SEC(CNT,7)=lncmr.cmr7
+		set SEC(CNT,8)=lncmr.cmr8
+		set SEC(CNT,9)=lncmr.cmr9
+		set SEC(CNT,10)=lncmr.cmr10
+		set SEC(CNT,11)=lncmr.cmr11
+		set SEC(CNT,12)=lncmr.cmr12
+		set SEC(CNT,13)=lncmr.cmr13
+		set SEC(CNT,14)=lncmr.cmr14
+		set SEC(CNT,15)=lncmr.cmr15
+		set SEC(CNT,16)=lncmr.cmr16
+		set SEC(CNT,17)=lncmr.cmr17
+		set SEC(CNT,18)=lncmr.cmr18
+		set SEC(CNT,19)=lncmr.cmr19
+		set SEC(CNT,20)=lncmr.cmr20
+		set SEC(CNT,21)=lncmr.cmr21
+		}
+
+	quit
+
+
+Public PTR4	// Post-processor to REPORT DATE field in report SCA436L4 (Page 4)
+
+	type Number CNT,I,J
+	type Public Number SEC
+	type Public String HD()
+
+	for I=1:1:11 for J=1:1:21 set SEC(I,J)=""
+
+	set CNT=0 
+
+	// Accumulate totals by CMR group and rate category 
+	// Section 9
+	type DbSet dsln9=Db.selectDbSet("LNCMR","RUNDATE=:CMRDATE AND SECN=9 AND GRP=1 AND RATECAT NOT>5","GRP,RATECAT")
+	while dsln9.next() do {
+		type RecordLNCMR lncmr=dsln9.getRecord("LNCMR")
+		
+		if lncmr.grp=1,lncmr.ratecat=1 set CNT=1
+		else  if lncmr.grp=1,lncmr.ratecat=2 set CNT=2
+		else  if lncmr.grp=1,lncmr.ratecat=3 set CNT=3
+		else  if lncmr.grp=1,lncmr.ratecat=4 set CNT=4
+		else  if lncmr.grp=1,lncmr.ratecat=5 set CNT=5
+		
+		set SEC(CNT,1)=lncmr.cmr1
+		set SEC(CNT,2)=lncmr.cmr2
+		set SEC(CNT,3)=lncmr.cmr3
+		set SEC(CNT,4)=lncmr.cmr4
+		set SEC(CNT,5)=lncmr.cmr5
+		set SEC(CNT,6)=lncmr.cmr6
+		set SEC(CNT,7)=lncmr.cmr7
+		set SEC(CNT,8)=lncmr.cmr8
+		set SEC(CNT,9)=lncmr.cmr9
+		set SEC(CNT,10)=lncmr.cmr10
+		set SEC(CNT,11)=lncmr.cmr11
+		set SEC(CNT,12)=lncmr.cmr12
+		set SEC(CNT,13)=lncmr.cmr13
+		set SEC(CNT,14)=lncmr.cmr14
+		set SEC(CNT,15)=lncmr.cmr15
+		set SEC(CNT,16)=lncmr.cmr16
+		set SEC(CNT,17)=lncmr.cmr17
+		set SEC(CNT,18)=lncmr.cmr18
+		set SEC(CNT,19)=lncmr.cmr19
+		set SEC(CNT,20)=lncmr.cmr20
+		set SEC(CNT,21)=lncmr.cmr21
+		}
+
+	// Accumulate totals by CMR group and rate category 
+	// Section 10
+	type DbSet dsln10=Db.selectDbSet("LNCMR","RUNDATE=:CMRDATE AND SECN=10 AND GRP=1 AND RATECAT NOT>2","GRP,RATECAT")
+	while dsln10.next() do {
+		type RecordLNCMR lncmr=dsln10.getRecord("LNCMR")
+		
+		if lncmr.grp=1,lncmr.ratecat=1 set CNT=6
+		else  if lncmr.grp=1,lncmr.ratecat=2 set CNT=7
+		
+		set SEC(CNT,1)=lncmr.cmr1
+		set SEC(CNT,2)=lncmr.cmr2
+		set SEC(CNT,3)=lncmr.cmr3
+		set SEC(CNT,4)=lncmr.cmr4
+		set SEC(CNT,5)=lncmr.cmr5
+		set SEC(CNT,6)=lncmr.cmr6
+		set SEC(CNT,7)=lncmr.cmr7
+		set SEC(CNT,8)=lncmr.cmr8
+		set SEC(CNT,9)=lncmr.cmr9
+		set SEC(CNT,10)=lncmr.cmr10
+		set SEC(CNT,11)=lncmr.cmr11
+		set SEC(CNT,12)=lncmr.cmr12
+		set SEC(CNT,13)=lncmr.cmr13
+		set SEC(CNT,14)=lncmr.cmr14
+		set SEC(CNT,15)=lncmr.cmr15
+		set SEC(CNT,16)=lncmr.cmr16
+		set SEC(CNT,17)=lncmr.cmr17
+		set SEC(CNT,18)=lncmr.cmr18
+		set SEC(CNT,19)=lncmr.cmr19
+		set SEC(CNT,20)=lncmr.cmr20
+		set SEC(CNT,21)=lncmr.cmr21
+		}
+
+	// Accumulate totals by CMR group and rate category 
+	// Section 11
+	type DbSet dsln11=Db.selectDbSet("LNCMR","RUNDATE=:CMRDATE AND SECN=11 AND GRP NOT>4 AND RATECAT=1","GRP,RATECAT")
+	while dsln11.next() do {
+		type RecordLNCMR lncmr=dsln11.getRecord("LNCMR")
+		
+		if lncmr.grp=1,lncmr.ratecat=1 set CNT=8
+		else  if lncmr.grp=2,lncmr.ratecat=1 set CNT=9
+		else  if lncmr.grp=3,lncmr.ratecat=1 set CNT=10
+		else  if lncmr.grp=4,lncmr.ratecat=1 set CNT=11
+		
+		set SEC(CNT,1)=lncmr.cmr1
+		set SEC(CNT,2)=lncmr.cmr2
+		set SEC(CNT,3)=lncmr.cmr3
+		set SEC(CNT,4)=lncmr.cmr4
+		set SEC(CNT,5)=lncmr.cmr5
+		set SEC(CNT,6)=lncmr.cmr6
+		set SEC(CNT,7)=lncmr.cmr7
+		set SEC(CNT,8)=lncmr.cmr8
+		set SEC(CNT,9)=lncmr.cmr9
+		set SEC(CNT,10)=lncmr.cmr10
+		set SEC(CNT,11)=lncmr.cmr11
+		set SEC(CNT,12)=lncmr.cmr12
+		set SEC(CNT,13)=lncmr.cmr13
+		set SEC(CNT,14)=lncmr.cmr14
+		set SEC(CNT,15)=lncmr.cmr15
+		set SEC(CNT,16)=lncmr.cmr16
+		set SEC(CNT,17)=lncmr.cmr17
+		set SEC(CNT,18)=lncmr.cmr18
+		set SEC(CNT,19)=lncmr.cmr19
+		set SEC(CNT,20)=lncmr.cmr20
+		set SEC(CNT,21)=lncmr.cmr21
+		}
+
+	quit
+
+
+Public PTR5	// Post-processor to REPORT DATE field in report SCA436D
+
+	type Date ZCMRDATE
+	type Number CNT,I,J
+	type Public Date CMRDATE
+	type Public Number SEC
+	type Public String HD
+
+	set ZCMRDATE=CMRDATE
+
+	for I=1:1:19 for J=1:1:10 set SEC(I,J)=""
+
+
+	// Accumulate totals by DEPCAT and SUBCAT 
+	// DEPCAT 1 and 2
+	type DbSet dsdep12=Db.selectDbSet("DEPCMR","RUNDATE=:CMRDATE AND DEPCAT<3 AND SUBCAT<4","DEPCAT,SUBCAT")
+	while dsdep12.next() do {
+		type RecordDEPCMR depcmr=dsdep12.getRecord("DEPCMR")
+		
+		if depcmr.depcat=1,depcmr.subcat=1 set CNT=1
+		else  if depcmr.depcat=1,depcmr.subcat=2 set CNT=2
+		else  if depcmr.depcat=1,depcmr.subcat=3 set CNT=3
+		else  if depcmr.depcat=2,depcmr.subcat=1 set CNT=4
+		else  if depcmr.depcat=2,depcmr.subcat=2 set CNT=5
+		else  if depcmr.depcat=2,depcmr.subcat=3 set CNT=6
+		
+		set SEC(CNT,1)=depcmr.cmr1
+		set SEC(CNT,2)=depcmr.cmr2
+		set SEC(CNT,3)=depcmr.cmr3
+		set SEC(CNT,4)=depcmr.cmr4
+		set SEC(CNT,5)=depcmr.cmr5
+		set SEC(CNT,6)=depcmr.cmr6
+		set SEC(CNT,7)=depcmr.cmr7
+		set SEC(CNT,8)=depcmr.cmr8
+		set SEC(CNT,9)=depcmr.cmr9
+		set SEC(CNT,10)=depcmr.cmr10
+		}
+
+	// Accumulate totals by DEPCAT and SUBCAT 
+	// DEPCAT 3
+	type DbSet dsdep3=Db.selectDbSet("DEPCMR","RUNDATE=:CMRDATE AND DEPCAT=3 AND SUBCAT>1 AND SUBCAT<4","DEPCAT,SUBCAT")
+	while dsdep3.next() do {
+		type RecordDEPCMR depcmr=dsdep3.getRecord("DEPCMR")
+		
+		if depcmr.depcat=3,depcmr.subcat=2 set CNT=7
+		else  if depcmr.depcat=3,depcmr.subcat=3 set CNT=8
+		
+		set SEC(CNT,1)=depcmr.cmr1
+		set SEC(CNT,2)=depcmr.cmr2
+		set SEC(CNT,3)=depcmr.cmr3
+		set SEC(CNT,4)=depcmr.cmr4
+		set SEC(CNT,5)=depcmr.cmr5
+		set SEC(CNT,6)=depcmr.cmr6
+		set SEC(CNT,7)=depcmr.cmr7
+		set SEC(CNT,8)=depcmr.cmr8
+		set SEC(CNT,9)=depcmr.cmr9
+		set SEC(CNT,10)=depcmr.cmr10
+		}
+
+	// Accumulate totals by DEPCAT and SUBCAT 
+	// DEPCAT 4
+	type DbSet dsdep4=Db.selectDbSet("DEPCMR","RUNDATE=:CMRDATE AND DEPCAT=4 AND SUBCAT=3","DEPCAT,SUBCAT")
+	while dsdep4.next() do {
+		type RecordDEPCMR depcmr=dsdep4.getRecord("DEPCMR")
+		
+		if depcmr.depcat=4,depcmr.subcat=3 set CNT=9
+		
+		set SEC(CNT,1)=depcmr.cmr1
+		set SEC(CNT,2)=depcmr.cmr2
+		set SEC(CNT,3)=depcmr.cmr3
+		set SEC(CNT,4)=depcmr.cmr4
+		set SEC(CNT,5)=depcmr.cmr5
+		set SEC(CNT,6)=depcmr.cmr6
+		set SEC(CNT,7)=depcmr.cmr7
+		set SEC(CNT,8)=depcmr.cmr8
+		set SEC(CNT,9)=depcmr.cmr9
+		set SEC(CNT,10)=depcmr.cmr10
+		}
+
+	// Accumulate totals by DEPCAT and SUBCAT 
+	// DEPCAT 5
+	type DbSet dsdep5=Db.selectDbSet("DEPCMR","RUNDATE=:CMRDATE AND DEPCAT=5 AND SUBCAT<4","DEPCAT,SUBCAT")
+	while dsdep5.next() do {
+		type RecordDEPCMR depcmr=dsdep5.getRecord("DEPCMR")
+		
+		if depcmr.depcat=5,depcmr.subcat=1 set CNT=10
+		else  if depcmr.depcat=5,depcmr.subcat=2 set CNT=11
+		else  if depcmr.depcat=5,depcmr.subcat=3 set CNT=12
+		
+		set SEC(CNT,1)=depcmr.cmr1
+		set SEC(CNT,2)=depcmr.cmr2
+		set SEC(CNT,3)=depcmr.cmr3
+		set SEC(CNT,4)=depcmr.cmr4
+		set SEC(CNT,5)=depcmr.cmr5
+		set SEC(CNT,6)=depcmr.cmr6
+		set SEC(CNT,7)=depcmr.cmr7
+		set SEC(CNT,8)=depcmr.cmr8
+		set SEC(CNT,9)=depcmr.cmr9
+		set SEC(CNT,10)=depcmr.cmr10
+		}
+
+	// Accumulate totals by DEPCAT and SUBCAT 
+	// DEPCAT 6 thru 12
+	type DbSet dsdep=Db.selectDbSet("DEPCMR","RUNDATE=:CMRDATE AND DEPCAT>5 AND DEPCAT<13 AND SUBCAT=1","DEPCAT,SUBCAT")
+	while dsdep.next() do {
+		type RecordDEPCMR depcmr=dsdep.getRecord("DEPCMR")
+		
+		if depcmr.depcat=6,depcmr.subcat=1 set CNT=13
+		else  if depcmr.depcat=7,depcmr.subcat=1 set CNT=14
+		else  if depcmr.depcat=8,depcmr.subcat=1 set CNT=15
+		else  if depcmr.depcat=9,depcmr.subcat=1 set CNT=16
+		else  if depcmr.depcat=10,depcmr.subcat=1 set CNT=17
+		else  if depcmr.depcat=11,depcmr.subcat=1 set CNT=18
+		else  if depcmr.depcat=12,depcmr.subcat=1 set CNT=19
+		
+		set SEC(CNT,1)=depcmr.cmr1
+		set SEC(CNT,2)=depcmr.cmr2
+		set SEC(CNT,3)=depcmr.cmr3
+		set SEC(CNT,4)=depcmr.cmr4
+		set SEC(CNT,5)=depcmr.cmr5
+		set SEC(CNT,6)=depcmr.cmr6
+		set SEC(CNT,7)=depcmr.cmr7
+		set SEC(CNT,8)=depcmr.cmr8
+		set SEC(CNT,9)=depcmr.cmr9
+		set SEC(CNT,10)=depcmr.cmr10
+		}
+
+	for I=1:1:9 set SEC(9,8)=SEC(9,8)+SEC(I,1)
+
+	for I=14:1:19 set SEC(18,8)=SEC(18,8)+SEC(I,1)
+
+	set SEC(19,8)=SEC(9,8)+SEC(18,8)+SEC(13,1)
+
+	quit
+
+
+
+FROMDT	// Find first and last day of quarter
+
+	/* 
+	   DESC: Find first and last day of quarter
+
+	   RETURNS:
+
+		. FD     First Date of Quarter          /TYP=N/REQ
+
+	        . LD     Last Date of Quarter           /TYP=N/REQ 
+
+	   Use variable FD to manage quarterly stat
+	*/
+	
+	type Number ZM
+	type String %DS,X
+	type Public Date LD,FD
+
+	set X=$$DAT^%ZM(%SystemDate,"MM/DD/YEAR")
+	set ZM=(((X.piece("/",1)-1)\3)*3)+1
+	set %DS=ZM_"/01/"_X.piece("/",3) 
+	set FD=$$^SCAJD(%DS)
+
+	// Define the last date of the quarter too.
+	if ZM=1 set %DS="3/31/"_X.piece("/",3) set LD=$$^SCAJD(%DS)
+	if ZM=4 set %DS="6/30/"_X.piece("/",3) set LD=$$^SCAJD(%DS)
+	if ZM=7 set %DS="9/30/"_X.piece("/",3) set LD=$$^SCAJD(%DS)
+	if ZM=10 set %DS="12/31/"_X.piece("/",3) set LD=$$^SCAJD(%DS)
+	
+	quit
+
+
+DEPOSIT(RecordDEP dep)	// Process deposit accounts
+
+	type Boolean CMR604,CMR618,CMR633,CMR642,DOEXIST,PBI
+	type Date DLR,ICHLD,ICHND,JD,MDT,NJD,ODT
+	type Number BAL,CAT,CUSTID,EAY,INDMRG,IRN,NEW,POPT,REGD,WAIRC,WARC
+	type Number WDR
+	type String FRE,GRP,IACM,ICF,INDEX,INTFRE,IPF,TRM
+	type Public Number AF,ER,SUBCAT,WART
+
+	// Exclude zero balance deposit accounts
+	set BAL=+dep.bal
+
+	// Check balance for open accounts only
+	if dep.stat'=4,BAL'>0 quit
+
+	// Customer Number
+	set CUSTID=dep.acn
+
+	// Int/Div Change - Last Date
+	set ICHLD=dep.ichld
+
+	// Int/Div Change - Next Date
+	set ICHND=dep.ichnd
+
+	// Int/Div Index
+	set INDEX=dep.index
+
+	// Int/Div Check Frequency
+	set INTFRE=dep.intfre
+
+	// Term
+	set TRM=dep.trm
+
+	// Regulation D Category
+	set REGD=dep.regd
+
+	// Nominal Int/Div Rate
+	set IRN=dep.irn
+
+	// Product Group
+	set GRP=dep.grp
+
+	// Interest Accrual Method
+	set IACM=dep.iacm
+	
+	// Int/Div Compounding Frequency
+	set ICF=dep.icf
+
+	// Int/Div Posting Frequency
+	set IPF=dep.ipf
+
+	// Penalty Calculation Method
+	set POPT=dep.popt
+
+	// Date Last Renewed
+	set DLR=dep.dlr
+	
+	// Passbook Flag
+	set PBI=dep.pbi
+
+	set DOEXIST=1 
+	set (CMR604,CMR618,CMR633,CMR642,EAY,INDMRG,NEW,WAIRC,WARC,WART,WDR)=0
+
+	// Account Maturity Date
+	set MDT=dep.mdt
+
+	// Date Account Opened
+	set ODT=dep.odt
+
+	if MDT<1,ODT'="",TRM'="" set FRE=TRM set JD=ODT set NJD=$$NJD^UFRE(JD,FRE,.AF) quit:ER  set MDT=NJD
+
+	// Default to 1 month
+	if MDT<1 set MDT=%SystemDate+31
+
+	set CAT=$$CATMRD(.PBI,.dep)
+
+	if ER!(CAT=99) do EXCD quit
+
+	// Quit if closed accounts for cells 659-661 and 764,767,770 and 773.
+	if dep.stat=4,CAT>4 quit
+
+	if CAT=1,SUBCAT=1 set CMR604=1
+	if CAT=2,SUBCAT=1 set CMR618=1
+	if CAT=3,SUBCAT=2 set CMR633=1
+	if CAT=4,SUBCAT=3 set CMR642=1
+
+	if dep.stat=4,'CMR604,'CMR618,'CMR633,'CMR642 quit
+
+	if CAT'=6,CAT'>10 do {
+		do HIST(.DOEXIST,.NEW,.WDR)
+		if DOEXIST do EXIST(.NEW)
+		}
+
+	do DSTAT
+
+	if CAT<5,POPT do PEN(.dep)
+
+	quit
+
+
+DSTAT	// Accumulate deposit statistics
+
+	type Public Number BAL,CAT,EAY,INDMRG,NEW,SUBCAT,WAIRC,WARC,WART,WDR
+
+	type RecordTMPCMR depcmr=Db.getRecord("TMPCMR","RUNDATE=:%SystemDate,PROCID=:%ProcessID,CLS='D',GRP=:CAT,CAT=:SUBCAT",1)
+
+	set depcmr.cmr1=depcmr.cmr1+BAL
+	set depcmr.cmr2=depcmr.cmr2+(BAL*EAY)
+	set depcmr.cmr3=depcmr.cmr3+(BAL*WART)
+	set depcmr.cmr4=depcmr.cmr4+(BAL*INDMRG)
+	set depcmr.cmr5=depcmr.cmr5+(BAL*WARC)
+	set depcmr.cmr6=depcmr.cmr6+(BAL*WAIRC)
+	set depcmr.cmr9=depcmr.cmr9+WDR
+	set depcmr.cmr10=depcmr.cmr10+NEW
+	
+	do depcmr.bypassSave()
+
+	quit
+
+
+PEN(RecordDEP dep)	//
+
+	type Date X
+	type Public Date DLR,ODT
+	type Public Number CAT,EAY,POPT
+
+	if POPT=1 set X=$select(DLR:DLR,1:ODT) set EAY=(%SystemDate-X)/30.4166
+	else  if POPT=3!(POPT=8) set EAY=dep.pdys/30.4166
+	else  quit
+
+	set CAT=5
+
+	do DSTAT
+
+	quit
+
+
+CATMRD(PBI,RecordDEP dep)	// Deposit MR categories
+
+	/*
+	   CAT1= Accts Maturing in 3 Months or Less
+	   CAT2= Accts Maturing in 4 to 12 Months
+	   CAT3= Accts Maturing in 13 to 36 Months
+	   CAT4= Accts Maturing in 37 or More Months
+	   CAT5= Accts Subject to Early-Withdrawal Penalties
+	   CAT6= Variable-Rate, Fixed-Maturity Deposit Accounts
+	   CAT7= Interest-Bearing Trans Accts
+	   CAT8= Money Market Accts
+	   CAT9= Passbook Accts
+	   CAT10= Noninterest-Bearing Demand Deposits
+	   CAT11= Escrow Accounts for Mtg Loans
+	   CAT12= Esc Accts for Mtg Serv for Others
+	*/
+	
+	type Number X
+	type Public Number CAT,EAY,ER,IRN,REGD,SUBCAT
+	type Public String GRP
+
+	set SUBCAT=1
+
+	if 'IRN,(GRP'="ESC")&(REGD>0)&(REGD<6) quit 10
+
+	if REGD=6 set CAT=$$CATFIX(.dep) quit CAT
+
+	if IRN set EAY=$$EAY() if ER quit 99
+
+	if REGD=1!(REGD=2)!(REGD=3)&(GRP'="ESC") quit 7
+
+	if REGD=5&(GRP'="ESC") quit 8
+
+	if ((REGD=4)!(REGD=0)!(REGD=""))&(GRP'="ESC")&(PBI=1) quit 9
+
+	if (GRP'="ESC") quit 99
+	
+	set X=$$CATESC(.dep)
+
+	quit X
+
+
+CATESC(RecordDEP dep)	// Categorize escrow
+
+	type Number CID,ORGBAL
+	type Public Number BAL,CAT,CBLBAL,PSLD
+
+	set CID=dep.aref 
+
+	if CID="" quit 11
+	
+	do PRT
+
+	if 'PSLD quit 11
+
+	set ORGBAL=BAL
+	if CBLBAL>0 set BAL=BAL-CBLBAL
+
+	else  set BAL=$$^SCARND(BAL*PSLD/100,0,CID)
+
+	set CAT=12 do DSTAT
+
+	set BAL=ORGBAL-BAL
+
+	quit 11
+
+
+CATFIX(RecordDEP dep)	//
+
+	type Number X
+	type Public Date DLR,MDT,ODT,TERMDT
+	type Public Number CAT,WAFT,WART
+	type Public String INDEX,INTFRE
+
+	set CAT=1
+	if INDEX'="",INTFRE'="" set CAT=6
+
+	set TERMDT=MDT
+	
+	if TERMDT<%SystemDate set WART=((TERMDT-ODT)/30.4166).roundDec(1)
+
+	else  set WART=((TERMDT-%SystemDate)/30.4166).roundDec(1)
+	
+	if 'ODT set ODT=%SystemDate
+
+	set WAFT=((TERMDT-$select(DLR:DLR,1:ODT))/30.4166).roundDec(1)
+
+	if CAT=6 set X=$$DSEC6(.dep)
+	
+	else  set X=$$DCAT91()
+	
+	quit X
+
+
+DCAT91()	//
+
+	type Public Number CAT,EAY,ER,IRN,SUBCAT,WAFT,WART
+
+	if IRN set EAY=$$EAY() if ER quit 99
+
+	set CAT=4 
+	if WART'>3 set CAT=1
+	else  if WART'>12 set CAT=2
+	else  if WART'>36 set CAT=3
+
+	set SUBCAT=3 
+	if WAFT'>12 set SUBCAT=1
+	else  if WAFT'>36 set SUBCAT=2
+
+	quit CAT
+
+
+DSEC6(RecordDEP dep)	//
+
+	type Public Cache %CACHE()
+	type Public Date ICHLD,ICHND
+	type Public Number CAT,INDMRG,RIC,SUBCAT,WAIRC,WARC
+	type Public String INDEX
+
+	// Int/Div Index
+	set INDEX=dep.index
+	// Int/Div Spread
+	set INDMRG=dep.intspr
+
+	if INDMRG'="" set INDMRG=(INDMRG*100).roundDec(2)
+
+	// Determine Rate Index Code
+	type RecordINDEX index=%CACHE("INDEX").getRecord("INDEX","INDEX=:INDEX")
+
+	set RIC=index.cmrindex
+	if RIC="" set RIC=999 do EXC2
+
+	if (ICHND-ICHLD)'>0 set CAT=$$DCAT91() quit       // Maximum rate cap (IRN=INTMX)
+
+	set SUBCAT=RIC
+	set WARC=$$CALTERM(ICHLD,ICHND)
+	set WAIRC=$$CALTERM(%SystemDate,ICHND)
+
+	quit CAT
+
+
+EXC	// Exception Reporting
+
+	type String ET
+	type Public Number CID,SUBCD
+	type Public String LFPC,LFSC
+
+	set ET="Invalid category LFPC="_LFPC_" LFSC="_LFSC_" SUBCD="_SUBCD
+	do LOG^UTLEXC("LNOTSCMR","*","Schedule CMR report",CID,"",ET)
+
+	quit
+
+
+EXC2	//
+
+	type String ET
+	type Public Number CID
+	type Public String INDEX
+
+	set ET="Invalid Interest Rate Index Code INDEX="_INDEX
+	do LOG^UTLEXC("LNOTSCMR","*","Schedule CMR report",CID,"",ET)
+
+	quit
+
+
+EXCD	//
+
+	type String ET
+	type Public Number CID,ER
+	type Public String RM
+
+	set ET="Invalid Deposit classification"
+	do LOG^UTLEXC(%RoutineName,"*","Schedule CMR report",CID,"",ET)
+
+	set ER=0 set ET="" set RM=""
+
+	quit
+
+
+EAY()	// Determine Effective Annual Yield
+
+	type Date JD
+	type Number D,F,IAFA,IAFS
+	type String FIN(),FRE
+	type Public Number AF,ER,IAFA,IRN
+	type Public String IACM,ICF,IPF
+
+	set (IAFA,IAFS)=""
+
+	set FRE="" 
+	if ICF'="" set FRE=ICF
+	else  set FRE=IPF
+
+	if FRE="" set FRE="12MA1"
+
+	set JD=%SystemDate do UFRE if ER quit 0
+
+	if 'IAFA quit 0
+
+	set D=365 
+	if 'IACM.extract() set D=360
+	set FIN(1005)=IRN/(AF*100)
+	set F=$$^DEPCALC("F3",(D/IAFA),FIN(1005),10000,0,"",18)
+
+	quit $$^DEPCALC("F5",1,"",10000,0,F,18)
+
+
+UFRE	//
+
+	type Date NJD
+	type Number AAF,NUM
+	type String SVFRE,X
+	type Public Date JD
+	type Public Number AF,ER,IAFA,IAFS
+	type Public String FRE
+
+	set NUM=1
+
+	if FRE>1,'Db.isDefined("USRFRE","UFRE=:FRE") do {
+		set SVFRE=FRE 
+		set NUM=+FRE 
+		set FRE=1_FRE.piece(NUM,2,999)
+		}
+
+	set NJD=$$NJD^UFRE(JD,FRE,.AF) quit:ER
+
+	set AAF=AF/NUM
+
+	set X=FRE if +X set X=X.piece(+X,2)
+	set X=X.extract()
+	if X'="D" set AF=365/((365/AF)\1)
+
+	// IAFA = Inverse actual annual factor
+	// IAFS = Inverse standard annual factor
+
+	set IAFS=360/AF*NUM
+	set IAFA=365/AF*NUM
+
+	if NUM-1 set FRE=SVFRE set AF=AF/NUM
+
+	quit
+
+
+PP	// Post-processor for TEST utility
+
+	type Number ER
+	type String RM
+	type Public String X
+
+	if X="" quit
+
+	if X?1"A".E quit
+	if X?1N.N1"-"1N.N quit
+	
+	if 'Db.isDefined("ACN","CID=:X") set ER=1 set RM="Invalid Account"
+
+	quit
+
+
+EXIST(Number NEW)	//
+
+	/*
+	   DESC:
+	   This section searches for existing accounts of the same owner.
+
+	   INPUTS:
+
+	   	. CAT 	Category                        /TYP=N/REQ
+
+	   	. CID   Account Number                  /TYP=N/REQ
+
+	   	. CUSTID Customer Number                /TYP=N/REQ
+	   	
+		. FD     First Date of Quarter          /TYP=N/REQ
+
+		. LD     Last Date of Quarter           /TYP=N/REQ
+
+	   RETURNS:
+
+	   	. NEW   Balance of the New Account      /TYP=$/REQ
+	*/
+
+	// No new balances
+	if NEW=0 quit
+	
+	type Number CID2,CURCID(),MDTCNT
+	type Public Date LD,FD
+	type Public Number CAT,CID,CUSTID,SEQ
+	
+	set MDTCNT=0
+	
+	/*
+	Search RELCIF for other accounts held by same owner(s) of
+	same type and term. If the account is not a match, quit the searches.
+	If the account is a match, set NEW to 0.
+	*/
+
+	type ResultSet rs=Db.select("CID","RELCIF","ACN=:CUSTID")
+	while rs.next() do { quit:NEW=0
+		set CID2=rs.getCol("CID")
+		type RecordACN acn=Db.getRecord("ACN","CID=:CID2")
+
+		//Check if ACN.CLS is "D"eposit
+		if acn.cls'="D" quit
+	
+		type RecordDEP dep={RecordDEP}acn
+		
+		//Search for CD accounts
+		if CAT<5 do {
+
+			//is DEP.REGD=6
+			if dep.regd'=6 quit
+
+			//is DEP.INDEX null
+			if dep.index'="" quit
+
+			/* 
+			Keep track of totals.  See comment block at the
+	 		end of the section.
+			*/
+			
+			if $$TRMMATCH(dep.mdt,dep.odt,dep.dlr),$$OWNMATCH(CID2) do {
+				if dep.mdt>(FD-1),dep.mdt<(LD+1) set MDTCNT=MDTCNT+1
+				if dep.mdt>LD do {
+					set SEQ=CURCID("").order(-1)
+					if SEQ'="" set CURCID(CID)=CURCID(SEQ)+1
+					else  set CURCID(CID)=1
+					}
+				}
+			}
+
+		// Search for no fixed maturity deposit accounts
+		else  if CAT>6,CAT<11 do {
+			
+			quit:CID2=CID
+			
+			//not considering escrow accounts
+			if dep.grp="ESC" quit
+
+			//not considering accounts with IRN=0 or null
+			if CAT=7,+dep.irn=0 quit
+			if CAT=10,+dep.irn'=0 quit
+
+			if CAT=7,dep.regd'=1,dep.regd'=2,dep.regd'=3 quit
+			if CAT=8,dep.regd'=5 quit
+			if CAT=9,+dep.regd'=0,dep.regd'=4 quit
+			if CAT=10,dep.regd'=1,dep.regd'=2,dep.regd'=3,dep.regd'=4,dep.regd'=5 quit
+
+			/*
+			If CID2 existed before this quarter (ODT<FD),
+			check account ownership. If ownership
+			matches, then it is not reported as new
+			*/
+
+			if dep.odt'<FD quit
+
+			if '$$OWNMATCH(CID2) quit
+
+			set NEW=0
+			}
+		}
+
+	/*
+	 If this is a CD account (CAT<5), then check the number of
+	 accounts that mature in this quarter against the number of
+	 accounts that mature in the future.  Set NEW=0
+	 (don't count this account) if the number of accounts maturing
+	 in this quarter is greater than or equal to the number of
+	 accounts that mature in the future, for the same term and owner.
+	 This is done for reporting purposes because the accounts are
+	 assumed to be rolled over accounts that were opened under a new
+	 account number.
+	*/
+	if CAT<5,CURCID(CID).exists(),'(CURCID(CID)>MDTCNT) set NEW=0
+	
+	quit
+
+
+HIST(Boolean DOEXIST,Number NEW,Number WDR)	// History Search
+
+	/*
+	   DESC:
+	   This new section will loop backwards through history to the beginning
+	   of the quarter while searching for early withdrawals, title changes,
+	   and term changes.
+
+           It will disregard error corrects and reversals.
+
+	   INPUTS:
+
+	   	. CAT   Category                        /TYP=N/REQ
+
+	   	. CID   Account Number                  /TYP=N/REQ
+
+	   	. FD    First Day of Quarter            /TYP=D/REQ
+
+	   	. ODT   Opening Date                    /TYP=D/REQ
+
+	   	. POPT  Penalty Calculation Method      /TYP=N/REQ
+
+	   	. SUBCAT  Sub Category                  /TYP=N/REQ
+
+	   RETURNS:
+
+	   	. DOEXIST       Account Exists          /TYP=L/REQ
+	     	  If there is a need to check existence of other
+	     	  accounts of the same owner this variable is set to 1.
+	     	  Otherwise it is set to 0.
+
+	   	. NEW   Balance of the New Account      /TYP=$/REQ
+
+	   	. WDR  Withdrawn Amount of Balance      /TYP=$/REQ
+	*/
+
+	type Boolean TITLE
+	type Date OLDDLR,OLDMDT,OLDODT
+	type Number NEWACT,NEWCD,NEWNMDT
+	type String DR,TCMT
+	type Public Number BAL,CAT,CID,POPT,SUBCAT
+	type Public Date FD,ODT
+
+	set (NEWACT,NEWCD,NEWNMDT,OLDDLR,OLDMDT,OLDODT,TITLE)=""
+
+	// New account opened this quarter excluding EC and REV
+	
+	type DbSet ds=Db.selectDbSet("HIST","CID=:CID AND TJD>:FD AND (ITC6=0 OR ITC6 IS NULL) AND (ITC12=0 OR ITC12 IS NULL)","TSEQ DESC")
+	while ds.next() do {
+		type RecordHIST hist=ds.getRecord("HIST")
+
+		// Must be penalty option to consider as early withdrawal
+		if POPT>0,CAT<5 do {
+			//Must be debit
+			if hist.itc1'=0 quit
+
+			//Exclude system generated
+			if hist.itc7=2 quit
+
+			//Sum debits
+			set DR=hist.tamt
+			if DR["#" set DR=DR.piece("#",1)
+			if DR set WDR=WDR+DR
+			}
+
+		set TCMT=hist.tcmt
+		quit:TCMT=""
+
+		// Title change during quarter
+		if 'TITLE,TCMT["[DEP]TITLE" set TITLE=1
+
+		// Term change during quarter may be reported
+		if TCMT["DEP]DLR" set OLDDLR=TCMT.piece(":",2)
+		if TCMT["DEP]MDT" set OLDMDT=TCMT.piece(":",2)
+		
+		// Opening date change during quarter may be reported
+		if TCMT["DEP]ODT" set OLDODT=TCMT.piece(":",2)
+
+		/*
+		 Report any new account opened in this quarter - this check
+		 is for accounts opened in this quarter that might have 
+		 backdated opening dates
+		*/
+		if TCMT["NEW ACCOUNT" set NEWACT=1
+		}
+
+	/* 
+	Title change is a change in the contractual terms and we can
+	report the balance without having to check for pre-existing accounts.
+	*/
+
+	if TITLE set NEW=BAL set DOEXIST=0 quit
+	
+	// New CD account with opening date within this quarter
+	if ODT>(FD-1) set NEW=BAL,DOEXIST=1 quit
+
+	/*
+	 Cells 659,660,661 check for new CD's with opening date outside of
+	 current quarter
+	*/
+	
+	if CAT<5,SUBCAT<4 set NEWCD=1	
+
+	/*
+	 Cells 764,767,770,773 check for opening dates outside of current
+	 quarter
+	*/
+	
+	if (CAT=7)!(CAT=8)!(CAT=9)!(CAT=10),SUBCAT=1 set NEWNMDT=1
+
+	/*
+	 Existing CD may be reported as new if the term has changed to a
+	 different term than the matured CD or opening date was modified
+	 to fall within prior quarter
+	*/
+	
+	if (OLDMDT!OLDODT),NEWCD if '$$TRMMATCH(OLDMDT,ODT,OLDDLR) set NEW=BAL set DOEXIST=1
+
+	/*
+	 New CD opened with opening date backdated prior to this calendar
+	 quarter- this catches backdated openings
+	*/
+	
+	if NEWACT,NEWCD set NEW=BAL set DOEXIST=1
+
+	/*
+	 Cells 764,767,770,773 report all accounts opened this quarter that
+	 were either backdated during opening or had their opening date
+	 modified later to fall within prior quarter
+	*/
+	
+	if (OLDODT!NEWACT),NEWNMDT set NEW=BAL set DOEXIST=1
+
+	quit
+
+
+TRMMATCH(Date OLDMDT,Date ODT,Date OLDDLR)	//
+
+	/*
+	   DESC:
+
+	   This section checks to see if the reporting subcategory of an
+	   account (CID) are the same as any existing account (CID2) or
+	   if the CID has rolled over with contractual term changes
+
+	   ARGUMENT:
+
+	   	. OLDMDT  Old Maturity Date  		/TYP=D/REQ
+	   	. ODT     Date Account Opened  		/TYP=D/REQ
+	   	. OLDDLR  Old Date of Last Renewal 	/TYP=D/REQ
+
+	   INPUTS:
+
+	   	. SUBCAT  Sub Category   		/TYP=N/REQ
+
+	   RETURNS:
+
+	   	. Logical Value    			/TYP=L/REQ
+	   	  Depends on the condition OLDCAT=SUBCAT
+
+	*/
+	
+	type Number CATCALC,OLDCAT
+	type Public Number SUBCAT
+
+	set CATCALC=((OLDMDT-$select(OLDDLR:OLDDLR,1:ODT))/30.4166).roundDec(1)
+
+	// Determine the old Term's reporting category
+	set OLDCAT=3
+
+	if CATCALC'>12 set OLDCAT=1
+	else  if CATCALC'>36 set OLDCAT=2
+
+	/*
+	If the old term category is the same as the current one, then
+	it is not a new account.
+	*/
+
+	quit OLDCAT=SUBCAT
+
+
+OWNMATCH(Number CID2)	//
+
+	/*
+	   DESC:
+
+	   This section checks to see if the owners of the new account (CID) and
+	   the existing account (CID2) matches. If the owners don't match, 0
+	   is returned.
+
+	   ARGUMENT:
+
+	         . CID2  Account Number                  /TYP=N/REQ
+
+	   INPUTS:
+
+	         . CID   Account Number                  /TYP=N/REQ
+
+	   RETURNS:
+
+	         . SAMEOWN   Same Owner                  /TYP=L
+
+
+	*/
+
+	type Boolean SAMEOWN
+	type Public Number CID
+
+	set SAMEOWN=1
+	
+	type ResultSet rs=Db.select("ACN","RELCIF","CID=:CID")
+	while rs.next() do { quit:'SAMEOWN
+		type Number OWNER
+		set OWNER=rs.getCol("ACN")
+		type RecordRELCIF relcif=Db.getRecord("RELCIF","ACN=:OWNER,CID=:CID2",1)
+		if 'relcif.getMode() set SAMEOWN=0
+		}
+
+	type ResultSet rs2=Db.select("ACN","RELCIF","CID=:CID2")
+	while rs2.next() do { quit:'SAMEOWN
+		type Number OWNER
+		set OWNER=rs2.getCol("ACN")
+		type RecordRELCIF relcif=Db.getRecord("RELCIF","ACN=:OWNER,CID=:CID",1)
+		if 'relcif.getMode() set SAMEOWN=0
+		}
+
+	quit SAMEOWN	
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+	type Public String vINPUT
+	type Number CID
+	type String vRECORD
+
+	for  set vRECORD=vINPUT.piece("|",1) quit:vRECORD=""  do {
+		set CID=vRECORD.piece($CHAR(9),1)
+		set vINPUT=vINPUT.piece("|",2,99999)
+        	do vPROC(CID)
+		}
+
+	quit
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+	
+	type Boolean QUIT=0,OBJFLG=0
+	type Number LAST,vlen,XCID
+	type String DATA,vrow
+	type Public Boolean SAMESEQ
+	type Public Number SEQ,TEST
+	type Public String vBUFOVFL,vINPUT
+		
+	type Public ResultSet nextacct
+ 
+	if TEST,'SAMESEQ do {
+		type DbSet dstmp=Db.selectDbSet("TMPRPT3","KEY1=:%SystemDate AND KEY2=:%RoutineName AND KEY3>:SEQ","KEY3")
+		if dstmp.next() do {
+			type RecordTMPRPT3 tmp=dstmp.getRecord("TMPRPT3")
+			set SEQ=tmp.key3
+			set DATA=tmp.data
+			set XCID=DATA.piece("-",1)
+			set LAST=DATA.piece("-",2)
+			if LAST="" set LAST=XCID
+			set nextacct=Db.select("CID","ACN","CID NOT<:XCID AND CID NOT>:LAST")
+			if nextacct.isEmpty() set QUIT=1
+			else  set OBJFLG=1
+			}
+		}
+
+	if QUIT quit
+
+	if 'TEST,'vINPUT.data() do {
+		set nextacct=Db.select("CID","ACN")
+		set OBJFLG=1
+		}
+	
+	set vINPUT=vBUFOVFL.get()
+	set vBUFOVFL="" S vlen=0
+
+	set SAMESEQ=0
+
+	if OBJFLG do {
+		while nextacct.next() do { quit:SAMESEQ
+		set vrow=nextacct.getCol("CID")_"|"
+		set vlen=vlen+vrow.length()
+		if vlen+13>32000 set vBUFOVFL=vrow set SAMESEQ=1
+        	else  set vINPUT=vINPUT_vrow
+        	}
+	}
+	
+	set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+
+	quit
+
+	
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+	type Number I
+	type String %READ,%TAB(),ACCOUNTS(),MSG,OLNTB,RM,VFMQ,X
+	type Public Boolean TEST
+
+	do Db.delete("TMPRPT6","KEY1=:%SystemDate AND KEY2='MRRIC'")
+
+	// Test utility-Function @LNF009 will set TEST to a 1.
+	set TEST=TEST.get()
+
+	if TEST=1 do { set %BatchExit=1 quit
+		set MSG="".justify(20)_"OTS CMR Audit Reports"
+		// /DES=Account (From-To)/TYP=T/LEN=40
+		set %TAB("ACCOUNTS")=".ACCOUNTS2/XPP=D PP^LNOTSCMR"
+		set %READ="@MSG,,,ACCOUNTS*15"
+
+		do ^UTLREAD if VFMQ="Q" set %BatchExit=1 quit
+
+		for I=1:1:15 set X=ACCOUNTS(I) if X'="" do { quit:%BatchExit
+			if X?1"A".E!(X?1"a".E) do { quit
+				// Use function ~p1  (to run for ALL)
+				set RM=$$^MSG(211,"@LNF008")
+				set %BatchExit=1
+				}
+
+			type RecordTMPRPT3 tmp=Db.getRecord("TMPRPT3","PID=:%ProcessID,KEY1=:%SystemDate,KEY2=:%RoutineName,KEY3=:I",1)
+			set tmp.data=X
+			do tmp.bypassSave()
+			}
+
+		set TEST=2
+		do DRV^UBCHID("BCHLNOTSCMR")
+		}
+
+
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("CID","ACN","")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	set %EffectiveDate=%SystemDate
+
+	do FROMDT
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+	if '%BatchRestart.get() do {
+		do Db.fastDelete("TMPCMR","RUNDATE=:%SystemDate")
+		do Db.fastDelete("DEPCMR","RUNDATE=:%SystemDate")
+		do Db.fastDelete("LNCMR","RUNDATE=:%SystemDate")
+		}
+
+	type Number I
+	type Public Boolean SAMESEQ=0
+	type Public Number SEQ=0
+	type Public String TOT()
+
+	for I=1:1:15 set TOT(I)=""
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+	
+	do Db.delete("TMPRPT3","KEY1=:%SystemDate AND KEY2=:%RoutineName")
+
+	/* 
+	Collate through TMPCMR file and accumulate totals for every process
+	ID to update DEPCMR and LNCMR files.
+	*/
+
+	type DbSet dstmp=Db.selectDbSet("TMPCMR","RUNDATE=:%SystemDate")
+	while dstmp.next() do {
+		type RecordTMPCMR tmp=dstmp.getRecord("TMPCMR")
+		if tmp.cls="D" do {
+			type RecordDEPCMR depcmr=Db.getRecord("DEPCMR","RUNDATE=:%SystemDate,DEPCAT=tmp.grp,SUBCAT=tmp.cat",1)
+			type String DEPCMR3
+			
+			set depcmr.cmr1=depcmr.cmr1+tmp.cmr1
+			set depcmr.cmr2=depcmr.cmr2+tmp.cmr2
+			set DEPCMR3=depcmr.cmr3+tmp.cmr3
+			set depcmr.cmr3=DEPCMR3.roundDec()
+			set depcmr.cmr4=depcmr.cmr4+tmp.cmr4
+			set depcmr.cmr5=depcmr.cmr5+tmp.cmr5
+			set depcmr.cmr6=depcmr.cmr6+tmp.cmr6
+			set depcmr.cmr7=depcmr.cmr7+tmp.cmr7
+			set depcmr.cmr8=depcmr.cmr8+tmp.cmr8
+			set depcmr.cmr9=depcmr.cmr9+tmp.cmr9
+			set depcmr.cmr10=depcmr.cmr10+tmp.cmr10
+
+			do depcmr.bypassSave()
+			}
+
+		else  do {
+			type RecordLNCMR lncmr=Db.getRecord("LNCMR","RUNDATE=:%SystemDate,SECN=tmp.cls,GRP=tmp.grp,RATECAT=tmp.cat",1)
+			type String LNCMR2
+			
+			set lncmr.cmr1=lncmr.cmr1+tmp.cmr1
+			set LNCMR2=lncmr.cmr2+tmp.cmr2
+			set lncmr.cmr2=LNCMR2.roundDec()
+			set lncmr.cmr3=lncmr.cmr3+tmp.cmr3
+			set lncmr.cmr4=lncmr.cmr4+tmp.cmr4
+			set lncmr.cmr5=lncmr.cmr5+tmp.cmr5
+			set lncmr.cmr6=lncmr.cmr6+tmp.cmr6
+			set lncmr.cmr7=lncmr.cmr7+tmp.cmr7
+			set lncmr.cmr8=lncmr.cmr8+tmp.cmr8
+			set lncmr.cmr9=lncmr.cmr9+tmp.cmr9
+			set lncmr.cmr10=lncmr.cmr10+tmp.cmr10
+			set lncmr.cmr11=lncmr.cmr11+tmp.cmr11
+			set lncmr.cmr12=lncmr.cmr12+tmp.cmr12
+			set lncmr.cmr13=lncmr.cmr13+tmp.cmr13
+			set lncmr.cmr14=lncmr.cmr14+tmp.cmr14
+			set lncmr.cmr15=lncmr.cmr15+tmp.cmr15
+			set lncmr.cmr16=lncmr.cmr16+tmp.cmr16
+			set lncmr.cmr17=lncmr.cmr17+tmp.cmr17
+			set lncmr.cmr18=lncmr.cmr18+tmp.cmr18
+			set lncmr.cmr19=lncmr.cmr19+tmp.cmr19
+			set lncmr.cmr20=lncmr.cmr20+tmp.cmr20
+			set lncmr.cmr21=lncmr.cmr21+tmp.cmr21
+
+			do lncmr.bypassSave()
+			}
+		}
+
+	do Db.fastDelete("TMPCMR","RUNDATE=:%SystemDate")
+
+
+	// Accumulate statistics	
+	type Number I
+	type Public String TOT()
+
+	// Section 1
+	type DbSet ds1=Db.selectDbSet("LNCMR","RUNDATE=:%SystemDate AND SECN=1 AND GRP<8 AND RATECAT NOT>5")
+	while ds1.next() do {
+		type RecordLNCMR lncmr=ds1.getRecord("LNCMR")
+		set lncmr.cmr1=(lncmr.cmr1+.5)\1 
+		set TOT(1)=TOT(1)+lncmr.cmr1
+		set lncmr.cmr13=(lncmr.cmr13+.5)\1
+		do lncmr.bypassSave()
+		}
+
+	// Section 2
+	type DbSet ds2=Db.selectDbSet("LNCMR","RUNDATE=:%SystemDate AND SECN=2 AND GRP<3 AND RATECAT NOT>5")
+	while ds2.next() do {
+		type RecordLNCMR lncmr=ds2.getRecord("LNCMR")
+		set lncmr.cmr1=(lncmr.cmr1+.5)\1 
+		set TOT(2)=TOT(2)+lncmr.cmr1
+		do lncmr.bypassSave()
+		}
+
+	// Section 3
+	type DbSet ds3=Db.selectDbSet("LNCMR","RUNDATE=:%SystemDate AND SECN=3 AND GRP<9 AND RATECAT NOT>5")
+	while ds3.next() do {
+		type RecordLNCMR lncmr=ds3.getRecord("LNCMR")
+		set lncmr.cmr1=(lncmr.cmr1+.5)\1 
+		set TOT(3)=TOT(3)+lncmr.cmr1
+		do lncmr.bypassSave()
+		}
+
+	// Section 4
+	type DbSet ds4=Db.selectDbSet("LNCMR","RUNDATE=:%SystemDate AND SECN=4 AND GRP<4 AND RATECAT NOT>2")
+	while ds4.next() do {
+		type RecordLNCMR lncmr=ds4.getRecord("LNCMR")
+		set lncmr.cmr1=(lncmr.cmr1+.5)\1 
+		if lncmr.grp'=2 set TOT(4)=TOT(4)+lncmr.cmr1
+		do lncmr.bypassSave()
+		}
+
+	// Sections 5,6,7,8,10
+	type DbSet dsln=Db.selectDbSet("LNCMR","RUNDATE=:%SystemDate AND ((SECN>4 AND SECN<9) OR SECN=10) AND GRP=1 AND RATECAT NOT>2")
+	while dsln.next() do {
+		type RecordLNCMR lncmr=dsln.getRecord("LNCMR")
+		set lncmr.cmr1=(lncmr.cmr1+.5)\1 
+		set TOT(lncmr.secn)=TOT(lncmr.secn)+lncmr.cmr1
+		do lncmr.bypassSave()
+		}
+
+	// Section 9
+	type DbSet ds9=Db.selectDbSet("LNCMR","RUNDATE=:%SystemDate AND SECN=9 AND GRP=1 AND RATECAT NOT>5")
+	while ds9.next() do {
+		type RecordLNCMR lncmr=ds9.getRecord("LNCMR")
+		set lncmr.cmr1=(lncmr.cmr1+.5)\1 
+		set TOT(9)=TOT(9)+lncmr.cmr1
+		do lncmr.bypassSave()
+		}
+
+	// Section 11
+	type DbSet ds11=Db.selectDbSet("LNCMR","RUNDATE=:%SystemDate AND SECN=11 AND GRP<3 AND RATECAT=1")
+	while ds11.next() do {
+		type RecordLNCMR lncmr=ds11.getRecord("LNCMR")
+		set lncmr.cmr1=(lncmr.cmr1+.5)\1
+		set TOT(11)=TOT(11)+lncmr.cmr1
+		set lncmr.cmr12=(lncmr.cmr12+.5)\1
+		set TOT(11)=TOT(11)+lncmr.cmr12
+		set lncmr.cmr20=(lncmr.cmr20+.5)\1
+		set TOT(11)=TOT(11)+lncmr.cmr20
+		set lncmr.cmr21=(lncmr.cmr21+.5)\1
+		set TOT(11)=TOT(11)-lncmr.cmr21
+		do lncmr.bypassSave()
+		}
+
+	type RecordLNCMR lncmr11=Db.getRecord("LNCMR","RUNDATE=:%SystemDate,SECN=11,GRP=3,RATECAT=1",1)
+	set TOT(11)=TOT(11)+lncmr11.cmr1
+
+	// TOTAL SOLD BALANCE
+	type RecordLNCMR lncmr10=Db.getRecord("LNCMR","RUNDATE=:%SystemDate,SECN=10,GRP=1,RATECAT=1",1)
+	set lncmr10.cmr16=TOT(10)+TOT(9)
+	do lncmr10.bypassSave()
+
+	type RecordLNCMR lncmr111=Db.getRecord("LNCMR","RUNDATE=:%SystemDate,SECN=11,GRP=1,RATECAT=1",1)	
+	for I=1,2,4:1:11 set lncmr111.cmr16=lncmr111.cmr16+TOT(I) 
+	do lncmr111.bypassSave()
+
+	for I=1,2 do {
+		type RecordLNCMR lncmr12=Db.getRecord("LNCMR","RUNDATE=:%SystemDate,SECN=:I,GRP=1,RATECAT=1",1)
+		set lncmr12.cmr16=TOT(I)
+		do lncmr12.bypassSave()
+		}
+
+	// Load the weighted values
+	type DbSet dswv=Db.selectDbSet("LNCMR","RUNDATE=:%SystemDate AND SECN<11")
+	while dswv.next() do {
+		type RecordLNCMR lncmrwv=dswv.getRecord("LNCMR")
+		type String LNCMR2
+		if lncmrwv.cmr1 do {
+			set LNCMR2=lncmrwv.cmr2/lncmrwv.cmr1
+			set lncmrwv.cmr2=LNCMR2.roundDec()
+			set lncmrwv.cmr3=lncmrwv.cmr3/lncmrwv.cmr1
+			if lncmrwv.secn=2,lncmrwv.cmr18 set lncmrwv.cmr4=lncmrwv.cmr4/lncmrwv.cmr18
+			else  set lncmrwv.cmr4=lncmrwv.cmr4/lncmrwv.cmr1
+			set lncmrwv.cmr5=lncmrwv.cmr5/lncmrwv.cmr1
+			set lncmrwv.cmr6=lncmrwv.cmr6/lncmrwv.cmr1
+			set lncmrwv.cmr7=lncmrwv.cmr7/lncmrwv.cmr1
+			set lncmrwv.cmr8=lncmrwv.cmr8/lncmrwv.cmr1
+			set lncmrwv.cmr9=lncmrwv.cmr9/lncmrwv.cmr1
+			set lncmrwv.cmr10=lncmrwv.cmr10/lncmrwv.cmr1
+			}
+
+		else  do {
+			set lncmrwv.cmr2=0
+			set lncmrwv.cmr3=0
+			set lncmrwv.cmr4=0
+			set lncmrwv.cmr5=0
+			set lncmrwv.cmr6=0
+			set lncmrwv.cmr7=0
+			set lncmrwv.cmr8=0
+			set lncmrwv.cmr9=0
+			set lncmrwv.cmr10=0
+			}
+		do lncmrwv.bypassSave()
+		}
+
+
+	type String DATA,RIC,X()
+
+	// Change weighted values for RIC for LNCMR
+	type ResultSet rs=Db.select("DISTINCT KEY3,KEY4,KEY5","TMPRPT6","KEY1=:%SystemDate AND KEY2='MRRIC' AND KEY3>3 AND KEY3<9","KEY3,KEY4,KEY5")
+	while rs.next() do {
+		type Number B,PID,R,SEC,XB,XR,XSEC
+		set SEC=rs.getCol("KEY3")
+		set R=rs.getCol("KEY4")
+		set B=rs.getCol("KEY5")
+		/*
+		Collate through the MRRIC info.  This info tracks balances
+		by RIC code.  The X array is keyed by balance and points to
+		the RIC code for that balance.
+		*/
+		type DbSet dsric=Db.selectDbSet("TMPRPT6","KEY1=:%SystemDate AND KEY2='MRRIC' AND KEY3=:SEC AND KEY4=:R AND KEY5=:B")
+		while dsric.next() do {
+			type RecordTMPRPT6 mrric=dsric.getRecord("TMPRPT6")
+			set DATA=mrric.data
+			set RIC=mrric.key6
+			set PID=mrric.pid
+			set X(+DATA.piece("~",1))=RIC_"|"_SEC_"|"_R_"|"_B_"|"_PID
+			}
+
+		set RIC=X("").order(-1)
+		if RIC="" quit
+		
+		type RecordLNCMR lncmr=Db.getRecord("LNCMR","RUNDATE=:%SystemDate,SECN=:SEC,GRP=:R,RATECAT=:B",1)
+		// File the RIC code with the highest balance.
+		set lncmr.cmr11=X(RIC).piece("|",1) 
+		do lncmr.bypassSave()
+
+		set XSEC=X(RIC).piece("|",2)
+		set XR=X(RIC).piece("|",3)
+		set XB=X(RIC).piece("|",4)
+		set PID=X(RIC).piece("|",5)
+		set RIC=X(RIC).piece("|",1)
+
+		type RecordTMPRPT6 tmp=Db.getRecord("TMPRPT6","PID=:PID,KEY1=:%SystemDate,KEY2='MRRIC',KEY3=:XSEC,KEY4=:XR,KEY5=:XB,KEY6=:RIC")
+		set DATA=tmp.data
+			
+		type RecordLNCMR lncmr=Db.getRecord("LNCMR","RUNDATE=:%SystemDate,SECN=:XSEC,GRP=:XR,RATECAT=:XB",1)
+		if DATA.piece("~",1) do {
+			set lncmr.cmr4=DATA.piece("~",4)/DATA.piece("~",1)
+			set lncmr.cmr6=DATA.piece("~",6)/DATA.piece("~",1)
+			}
+
+		else  do {
+			set lncmr.cmr4=0
+			set lncmr.cmr6=0
+			}
+
+		do lncmr.bypassSave()
+		}
+
+
+	//  Original DSET section
+	
+	type Number J,X
+	type String RIC,X()
+	
+	type DbSet dsdep=Db.selectDbSet("DEPCMR","RUNDATE=:%SystemDate AND DEPCAT<13")
+	while dsdep.next() do {
+		type RecordDEPCMR depcmr=dsdep.getRecord("DEPCMR")
+		set depcmr.cmr1=(depcmr.cmr1+.5)\1
+		if +depcmr.cmr1 do {
+			set X=depcmr.cmr2
+			set X=(X/depcmr.cmr1).roundDec(2)
+			set depcmr.cmr2=X
+
+			set X=depcmr.cmr3
+			set X=(X/depcmr.cmr1).roundDec(2)
+			set depcmr.cmr3=X.roundDec()
+
+			set X=depcmr.cmr4
+			set X=(X/depcmr.cmr1).roundDec(2)
+			set depcmr.cmr4=X
+
+			set X=depcmr.cmr5
+			set X=(X/depcmr.cmr1).roundDec(2)
+			set depcmr.cmr5=X
+
+			set X=depcmr.cmr6
+			set X=(X/depcmr.cmr1).roundDec(2)
+			set depcmr.cmr6=X
+			}
+		if ((depcmr.depcat=11)!(depcmr.depcat=12))&(depcmr.subcat=1) do {
+			if +depcmr.cmr2=0 set depcmr.cmr2="0.01"
+			}
+		do depcmr.bypassSave()
+		}
+
+	// Change weighted values for RIC for DEPCMR
+	type DbSet dsdcmr=Db.selectDbSet("DEPCMR","RUNDATE=:%SystemDate AND DEPCAT=6")
+	while dsdcmr.next() do {
+		type RecordDEPCMR depric=dsdcmr.getRecord("DEPCMR")
+		set X(+depric.cmr1)=depric.subcat
+		}
+		
+	set RIC=X("").order(-1)
+	if RIC="" quit
+	set J=X(RIC)
+
+	type RecordDEPCMR depcmr=Db.getRecord("DEPCMR","RUNDATE=:%SystemDate,DEPCAT=6,SUBCAT=:J",1)
+	type RecordDEPCMR depcmr2=depcmr.copy()
+	set depcmr2.subcat=1
+	set depcmr2.cmr7=X(RIC)
+	do depcmr.bypassSave()
+
+	quit
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

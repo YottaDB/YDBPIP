@@ -1,0 +1,464 @@
+DEPPISEG		/*
+	ORIG: RATMANSKYD - 07/08/98
+
+	DESC: Segmented Account Paid-In
+
+	KEYWORDS: Deposit, Segment, Error correct
+
+	I18N=QUIT:   Excluded from I18N standards.
+
+	------ Revision History ------------------------------------------------
+	
+	 04/27/07 - SANTHUMS - CR 26828
+	            Modified WFR section to declare CID as public to avoid 
+		    undefined error.
+	
+	 09/26/05 - RADHIKA - CR 16891
+                    .Eliminated PSL deprecated features and warnings..
+                    .Removed revision history prior to 2004.
+	
+	------------------------------------------------------------------------
+	*/
+
+	quit
+
+
+public INIT(CID)
+	/*
+	  Loads account segments data into SEGMENT array keyed by Segment Start date
+
+	  ARGUMENTS:
+		CID - Account Number			/TYP=N/REQ/MECH=VAL
+
+	  RETURNS:
+	  	SEGMENT() - Array of segments keyed by Segment Start Date.	
+	*/
+
+	type ResultSet rs=Db.select("SEGSTART,SEGMENT","DEPSEG","CID=:CID")
+
+	if rs.isEmpty() quit
+
+	while rs.next() set SEGMENT(rs.getCol(1))=rs.getCol(2)
+
+	quit
+
+
+public DEPOSIT(RecordDEP dep,RecordTTX ttx)
+	/*
+	  This is the main line tag of the routine.  This processes the effects of
+	  the transaction on the account segments.
+
+	  ARGUMENTS:
+		dep - Deposit Account object			/TYP=RecordDEP
+		ttx - Transaction object			/TYP=RecordTTX
+	*/
+
+	new CID,NUM,SEGMENT,SEGP,TEFD,TSO
+	type public Boolean ER
+	
+	set CID=dep.cid
+	if %EffectiveDate set TEFD=%EffectiveDate
+	else  set TEFD=%SystemDate
+
+	// Load segments information
+	do INIT(CID)
+
+	// set up TSO array to avoid extra calls to ^UTSO
+	do OUT^UTSO(.TSO,ttx.tso)
+
+	set SEGP=$G(TSO("SEGP"))
+
+	// If SEGP contains information about segment (Direct Segment Deposit)
+	if SEGP'="" do { quit
+		new AMT
+
+		set NUM=$P(SEGP,":",1)
+		set AMT=$P(SEGP,":",2)
+
+		type RecordDEPSEG depseg=Db.getRecord("DEPSEG","CID,NUM")
+
+		set ER=$$DEPS(.dep,.depseg,.ttx,AMT,0,0)
+
+		if 'ER do depseg.bypassSave()
+		}
+
+	// Withdrawn Funds to be repaid
+	if $$WFR(.dep,.ttx) quit
+
+	// Search for available segment
+	set NUM=$$SEARCH(.dep,TEFD)
+
+	// Segment Found, process and quit
+	if NUM>0 do { quit
+
+		type RecordDEPSEG depseg=Db.getRecord("DEPSEG","CID,NUM")
+
+		// Deposit to the segment
+		set ER=$$DEPS(.dep,.depseg,.ttx,+ttx.tamt,1,0)
+		if ER quit
+
+		// Offer Processing
+		if dep.offproc do OFFPROC(.depseg) quit:ER
+
+		do depseg.bypassSave()
+		}
+
+	// Segment Not Found Create segment, get new NUM
+
+	// Total Number of Segments Equals Maximum Number of Segments
+	if dep.tnums=dep.maxseg do Runtime.setErrXBAD("DEP",232) quit:ER
+
+	set NUM=Db.nextVal("DEPSEG","CID")
+
+	// Call Segment Insert Procedure
+	do INSERT^DEPSEGIN(.dep,dep.cid,%EffectiveDate,ttx.tamt,NUM)
+	
+	if ER quit
+
+	type RecordDEPSEG depseg=Db.getRecord("DEPSEG","CID,NUM")
+
+	// Transactions cannot be processed against a segment with maturity date in the past
+	if depseg.segmdt'="",depseg.segmdt<%SystemDate do Runtime.setErrMSG("DEP",3828) quit
+
+	// Put SEGCREATE into TSO
+	set ttx.tso=$$FIELDIN^UTSO(ttx.tso,"SEGCREATE",NUM)
+
+	// Deposit to the segment
+	set ER=$$DEPS(.dep,.depseg,.ttx,+ttx.tamt,1,1)
+
+	// Segment has balance but no offer date or offer amount
+	if dep.offproc set OVR(dep.cid,"OVR","SEGBAL")=""
+
+	do depseg.bypassSave()
+
+	quit 
+
+
+WFR(RecordDEP dep,RecordTTX ttx)	// Withdrawn Funds Repayment Module
+	/*
+	   INPUT:    TAMT- Transaction amount
+	   RETURNS:  0 if there was no segment with WFR
+		     1 if there was segment(s) with WFR
+	*/
+	
+	type public Boolean ER
+	type public Number CID
+	type Number TOTAMT
+	type Date SEGSTART
+	
+	// No WFR, quit
+	if +dep.totwfr=0 quit 0
+	set TOTAMT=+ttx.tamt
+	set SEGSTART=""
+
+	// FIFO
+	if dep.wdprio=0 for  set SEGSTART=$O(SEGMENT(SEGSTART)) quit:SEGSTART=""!(TOTAMT=0)  do WFRPROC(.dep,.ttx)
+
+	// LIFO
+	if dep.wdprio=1 for  set SEGSTART=$O(SEGMENT(SEGSTART),-1) quit:SEGSTART=""!(TOTAMT=0)  do WFRPROC(.dep,.ttx)
+
+	// Deposit extra funds to Zero Segment
+	if TOTAMT>0 do {
+
+		type RecordDEPSEG depseg=Db.getRecord("DEPSEG","CID,0")
+		set ER=$$DEPS(.dep,.depseg,.ttx,TOTAMT,1,0)
+		if ER quit
+
+		do depseg.bypassSave()
+		}
+
+	// Put WFR into TSO
+	set ttx.tso=$$FIELDIN^UTSO(ttx.tso,"WFR",1)
+
+	quit 1
+
+
+WFRPROC(RecordDEP dep,RecordTTX ttx)	// Withdrawn Funds Repayment processing
+	/*
+	   INPUT:  TOTAMT - Updated Transaction Amount
+		 SEGSTART - Segment Start Date
+	*/
+	
+	type public Boolean ER
+	type public Number CID,TOTAMT
+	type Number NUM
+	
+	set NUM=SEGMENT(SEGSTART)
+
+	// If zero segment quit
+	if NUM=0 quit
+
+	type RecordDEPSEG depseg=Db.getRecord("DEPSEG","CID,NUM")
+
+	// If no WFR quit
+	if depseg.wfr'>0 quit
+
+	if TOTAMT<depseg.wfr do {
+		// Deposit TOTAMT to segment
+		set ER=$$DEPS(.dep,.depseg,.ttx,TOTAMT,1,0)
+		set dep.totwfr=dep.totwfr-TOTAMT
+		set depseg.wfr=depseg.wfr-TOTAMT
+		set TOTAMT=0
+		}
+
+	else  do {
+		// Deposit WFR to segment
+		set ER=$$DEPS(.dep,.depseg,.ttx,depseg.wfr,1,0)
+		set TOTAMT=TOTAMT-depseg.wfr
+		set dep.totwfr=dep.totwfr-depseg.wfr
+		set depseg.wfr=0
+		}
+
+	if ER quit
+
+	do depseg.bypassSave()
+
+	quit 
+
+
+Public SEARCH(RecordDEP dep,TEFD)	// This module is looking for available Non-matured Segment.
+	/*
+	   The effective date must be greater than or equal to the Segment Start
+	   Date (DEP.SEGSTART) and less than the Segment End Date (DEPSEG.SEGEND).
+
+	   ARGUMENTS:
+		dep - Deposit Account object				/TYP=RecordDEP
+	   	TEFD - Effective Date of transaction			/TYP=N/REQ/MECH=VAL
+
+	   RETURNS:	Number of segment if segment was found
+			-1 if segment was not found
+	*/
+
+	type Number CID,NUM
+
+	set CID=dep.cid
+	set NUM=-1
+
+	type ResultSet rs=Db.select("SEGMENT,SEGEND,SEGMDT,DLR","DEPSEG","CID=:CID AND SEGMENT>0 AND SEGSTART>:TEFD")
+
+	if rs.isEmpty() quit NUM
+
+	new DLR,SEG,SEGEND,SEGMDT
+
+	while rs.next() do { quit:NUM>0
+
+		set SEG=rs.getCol(1)
+		set SEGEND=rs.getCol(2)
+		set SEGMDT=rs.getCol(3)
+		set DLR=rs.getCol(4)
+		#IF CUVAR.USEGOPT=1 
+			if NUM'<0 do {	
+				type Date SEGEFD
+				if $$MVER^SEGINIDT(.dep,TEFD) set SEGEFD=$$NBDNM^SEGINIDT(TEFD,dep.nbdc)
+				else  set SEGEFD=TEFD
+				if SEGMDT>SEGEFD set SEGMDT=DLR
+				if SEGEFD=SEGMDT set NUM=SEG
+				}
+		#END IF	
+		if TEFD'<SEGEND quit
+		set NUM=SEG
+		}
+
+	// Return Segment Number or -1 if segment was not found
+	quit NUM
+
+
+DEPS(RecordDEP dep,RecordDEPSEG depseg,RecordTTX ttx,AMT,TSOU,NEWSEG)
+	/*
+	   INPUT: AMT    - Amount
+		  TSOU   - Update TSO (1-yes, 0-no)
+		  NEWSEG - Segment was created by this process (1-yes, 0-no)
+
+	   Updates on Segment:	BAL, CNTCR
+
+	   Updates on Account:	TSMPB/TSNMPB
+
+	   RETURNS:	1 if error occurred
+			0 if no error occurred
+	*/
+
+	new TSOSEG
+
+	// Invalid Segment number
+	if depseg.segment<0 do Runtime.setErrMSG("DEPSEG",3326) quit 1
+
+	// Update Non-Accrual Balance and Expiration Date
+	#IF CUVAR.USEGOPT=1
+		if 'NEWSEG do NOACRUPD^DEPPOSEG(.dep,.depseg,AMT)
+        #END IF
+                
+	set depseg.bal=depseg.bal+AMT
+	set depseg.cntcr=depseg.cntcr+1
+
+	if depseg.segment=0 set dep.tsmpb=dep.tsmpb+AMT
+	else  set dep.tsnmpb=dep.tsnmpb+AMT
+
+	if TSOU=0 quit 0
+
+	// Update TSO field SEGP pass NUM and AMT
+	if $G(TSO("SEGP")) set TSOSEG=TSO("SEGP")_"^"_depseg.segment_":"_AMT
+	else  set TSOSEG=depseg.segment_":"_AMT
+
+	set ttx.tso=$$FIELDIN^UTSO(ttx.tso,"SEGP",TSOSEG)
+
+	quit 0
+
+
+Public DEPOSITEC(RecordDEP dep,RecordTTX ttx)
+	/*
+	  This section will error correct a transaction that induced
+	  segment processing.
+
+	   ARGUMENTS:
+		dep - Deposit Account object			/TYP=RecordDEP
+		ttx - Transaction object			/TYP=RecordTTX
+	*/
+
+	new AMT,CID,COUNT,DELETE,EXIT,NUM,PIECE,SEGMENT,SEGP,TSO
+	type public Boolean ER
+	
+	// set up TSO array to avoid extra calls to ^UTSO
+	do OUT^UTSO(.TSO,ttx.tso)
+
+	set SEGP=$G(TSO("SEGP"))
+
+	// No segment information in the transaction record
+	if SEGP="" do Runtime.setErrMSG("DEP",3334) quit
+
+	set CID=dep.cid
+	set EXIT=0
+
+	for COUNT=1:1 quit:EXIT=1  do {
+
+		set PIECE=$P(SEGP,"^",COUNT)
+		if PIECE="" set EXIT=1 quit
+		set NUM=$P(PIECE,":",1)
+		set AMT=$P(PIECE,":",2)
+
+		type RecordDEPSEG depseg=Db.getRecord("DEPSEG","CID,NUM")
+
+		set ER=$$DEPSEC(.dep,.depseg,AMT,.DELETE)
+
+		if DELETE do Db.delete("DEPSEG","CID=:CID AND SEGMENT=:NUM") quit
+		if 'ER do depseg.bypassSave()
+		}
+
+	quit
+
+
+DEPSEC(RecordDEP dep,RecordDEPSEG depseg,AMT,DELETE)
+	/*
+	   ARGUMENTS:
+		dep - Deposit Account object				/TYP=RecordDEP
+		depseg - Segment object					/TYP=RecordDEPSEG
+	   	AMT - Amount						/TYP=N/REQ/MECH=VAL
+		DELETE - Flag to show if segment should be deleted	/TYP=N/REQ/MECH=REF
+
+	   Updates on Segment:  BAL, CNTCR
+	   Updates on Account:  BAL, BALCOL, TSMPB/TSNMPB
+
+	   RETURNS: 1 if error occurred
+		    0 if no error occurred
+	*/
+	set DELETE=0
+
+	// Invalid Segment number
+	if depseg.segment<0 do Runtime.setErrMSG("DEP",3326) quit 1
+	// Invalid Segment number
+	if depseg.bal="" do Runtime.setErrMSG("DEP",3326) quit 1
+
+	// Update Non-Accrual Balance and Expiration Date
+	#IF CUVAR.USEGOPT=1 
+		do NOACRUPD^DEPPOSEG(.dep,.depseg,-AMT)
+	#END IF 
+
+	// Update Segment Information
+	set depseg.bal=depseg.bal-AMT
+	set depseg.cntcr=depseg.cntcr-1
+
+	// Update Account Information
+	if depseg.segment=0 set dep.tsmpb=dep.tsmpb-AMT
+	else  set dep.tsnmpb=dep.tsnmpb-AMT
+
+	// Withdrawan Funds to be Repaid
+	if $G(TSO("WFR")),depseg.segment'=0 do {
+		set dep.totwfr=dep.totwfr+AMT
+		set depseg.wfr=depseg.wfr+AMT
+		}
+
+	// If the segment was created by this transaction, delete it.
+	if depseg.bal=0,depseg.cntcr=0,depseg.segment set DELETE=1 quit 0
+
+	// Offer Processing
+	if dep.offproc do OFFPROC(.depseg)
+
+	quit 0
+
+
+Public OFFPROC(RecordDEPSEG depseg)	// Offer Processing
+	/*
+	  This section performs offer processing.
+
+	   ARGUMENTS:
+		depseg - Segment object			/TYP=RecordDEPSEG
+	*/
+
+	type Number CID,SPR
+	
+	set CID=depseg.cid
+
+	if depseg.bal=depseg.offamt do { quit
+
+		/*
+		 An open segment is found, and the account is using
+		 off processing, but the offer date does not match
+		*/
+		if %EffectiveDate'=depseg.offdt do { quit 
+
+			// Valid flag "No"
+			set depseg.segval=0
+
+			// Segment has balance but no offer date or offer amount
+			set OVR(CID,"OVR","SEGBAL")=""
+			}
+
+		// Valid Flag
+		set depseg.segval=1
+
+		// Don't need to change
+		if depseg.irn=depseg.offrate quit
+
+		// Interest Rate history
+		new HSEQ
+
+		set HSEQ=Db.nextVal("HIST","CID")
+
+		type RecordHIST hist=Class.new("RecordHIST")
+
+		set hist.cid=CID
+		set hist.tseq=HSEQ
+		set hist.tjd=%SystemDate
+		set hist.efd=%EffectiveDate
+		set hist.tlo=%UserStation
+		set hist.tso="HSEQ#"_HSEQ
+		set hist.tcmt=CID_",200,"_depseg.segment_"[DEPSEG]IRN:"_depseg.irn_":"_depseg.offrate
+		set hist.cdt=%CurrentDate
+		set hist.time=%CurrentTime
+		set hist.uid=%UserID
+		set hist.spr=$G(SPR)
+
+		do hist.save("NOTRIGBEF/NOVALREQ/NOVALDD/NOTRIGAFT/NOUPDATE/NOVALRI/NOINDEX/NOFKCHK/JOURNAL")
+
+		// Update Segment Interest Rate
+		set depseg.irn=depseg.offrate
+		}
+
+	// Valid Flag
+	set depseg.segval=0
+
+	// Segment Balance does not match Offer Amount
+	set OVR(CID,"OVR","OFFERBAL")=""
+
+	quit 
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60754^10504^Sunitha Santhumayor^10316"	// Signature - LTD^TIME^USER^SIZE

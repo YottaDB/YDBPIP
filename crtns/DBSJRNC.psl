@@ -1,0 +1,930 @@
+private DBSJRNC(String PRITABLE,String PSLCODE())
+	/*
+	ORIG: Dan Russell - 06/19/2003
+	PROCEDURE ID: DBSJRNC
+	DESC: Filer Compiler - Journal Section
+	
+	---- Comments --------------------------------------------------------
+	
+	This procedure is called by ^DBSFILB to generate the code for the filer.
+
+
+	ARGUMENTS:
+		. PRITABLE	Primary Table		/REQ/NONULL/MECH=VAL
+		
+		. PSLCODE	Code array to return	/REQ/MECH=REF:W
+		
+	RETURNS:
+		. ER		Error flag		/BOOLEAN
+		
+		. RM		Error message
+		
+	EXAMPLE:
+		do ^DBSJRNC("CIF",.code)
+
+	---- Revision History ------------------------------------------------
+	
+	03/01/07 - RussellDS - CR26386
+		   Corrected use of .data to replace with .exists
+	
+	01/22/07 - RussellDS - CRs: 24902 / 24903 / 24974
+		   Replaced use of variable true with isTrue to avoid conflict
+		   with new PSL intrinsic variable.
+		   
+		   Removed old revision history.
+	
+	08/17/06 - RussellDS - CRs: 22719 / 20613
+		   Eliminate call to $$OBJNAME^UCUTIL.
+		   
+	*/
+	
+	// I18N=OFF
+
+	
+	type Public Number ER=0
+	type Public String RM
+	
+	type Boolean INOREX,OLDORNEW
+	type Date tld = ""
+	type Number COUNT,N,OPT,PRIO
+	type String CMPERR(),EFDOPT,JRNID,JRNIDX(),KEYWORDS(),MODE,PTONAME,SORT(,,,,,),TAB,TRANTYPE
+
+	
+	do SORT(PRITABLE,.SORT(),.JRNIDX(),.COUNT,.tld)
+	quit:'SORT.data()
+
+	// Load keywords
+	type ResultSet jrnfun=Db.select("FUNC,CODE","STBLJRNFUNC")
+	while jrnfun.next() set KEYWORDS(jrnfun.getCol("FUNC"))=jrnfun.getCol("CODE")
+	if KEYWORDS("TableName").exists() set KEYWORDS("TableName")=""""_PRITABLE_""""
+	
+	set PTONAME=PRITABLE.lowerCase()		// Primary table object name
+	
+	set TAB=$C(9)
+
+	set PSLCODE = COUNT_TAB_tld
+	
+	do ADD("VJOURNAL(Record"_PRITABLE_" "_PTONAME_")",PRITABLE_" Journal file entries","H")
+	do ADD("","","H")
+	do ADD(TAB_"type Public Date %EffectiveDate",,"H")
+	do ADD(TAB_"type Public String %TSRC,vpar,vx()",,"H")
+	do ADD(TAB_"type String TSRC,vdi,vdx()",,"H")
+	do ADD("",,"H")
+
+	do ADD(TAB_"if %TSRC.get().isNull() set TSRC=""O""",,"H")
+	do ADD(TAB_"else  set TSRC=%TSRC",,"H")
+	do ADD("",,"H")
+	
+	// Build journal sections
+	set JRNID=""
+	for  set JRNID=JRNIDX(JRNID).order() quit:JRNID.isNull()  do { quit:ER
+		do BLDJRN(PRITABLE,PTONAME,JRNID,JRNIDX(JRNID),.OLDORNEW) quit:ER
+		set JRNIDX(JRNID).piece("|",2)=OLDORNEW
+		}
+	quit:ER
+
+	// Add dispatch logic
+	do DISPATCH(PRITABLE,.SORT(,,,,,),.JRNIDX(),PTONAME)
+		
+	do ADD("","","H")
+	do ADD(TAB_"quit",,"H")
+	do ADD("","","H")
+	
+	quit
+	
+	
+DISPATCH(String PRITABLE,	// Private - Build dispatch logic based on SORT array
+	 String SORT(,,,,,),
+	 String JRNIDX(),
+	 String PTONAME)
+
+	/* If any of the first three levels of SORT are all options for that level,
+	   then we don't need to test that condition, so don't need to build code
+	   for it.
+	   
+	   If there is only one priority at a level, we can optimize updates related
+	   to INCOLUMN by quiting before testing for column changes.
+	*/
+
+	type Boolean MORELVL0,MULTPRIO,VXQUIT
+	type Number EFDCNT,MODECNT,TRANCNT
+	type String CODE,EFDOPT,INCOLUMN,MODE,PRIO,INCOL,JRNID,TAB,TABS,TRANTYPE,X
+	
+	set (TAB,TABS)=$C(9)
+
+	set (EFDOPT,MODE,PRIO,INCOL,JRNID,TRANTYPE)=""
+	set MODECNT=0
+	for  set MODE=SORT(MODE).order() quit:MODE.isNull()  do {
+		if MODE'="I,U,D" do {
+			set CODE="if %ProcessMode="_MODE.translate("IUD","013")_" do {"
+			if MODECNT set CODE="else  "_CODE
+			set MODECNT=1
+			do ADD(TAB_CODE,,"H")
+			set TABS=TABS_TAB
+			}
+			
+		set TRANCNT=0
+		for  set TRANTYPE=SORT(MODE,TRANTYPE).order() do { quit:TRANTYPE.isNull()
+			// Close structured do from MODE, if necessary
+			if TRANTYPE.isNull() do { quit
+				if MODECNT do ADD(TABS_"}",,"H")
+				set TABS=TAB
+				}
+				
+			if TRANTYPE'="F,O,B" do {
+				set CODE="if TSRC="""_TRANTYPE_""" do {"
+				if TRANCNT set CODE="else  "_CODE
+				set TRANCNT=1
+				do ADD(TABS_CODE,,"H")
+				set TABS=TABS_TAB
+				}
+				
+			set EFDCNT=0
+			for  set EFDOPT=SORT(MODE,TRANTYPE,EFDOPT).order() do { quit:EFDOPT.isNull()
+				// Close structured do from TRANTYPE, if necessary
+				if EFDOPT.isNull() do { quit
+					if TRANCNT do ADD(TABS_"}",,"H")
+					set TABS=TABS.extract(1,TABS.length()-1)
+					}
+				
+				if EFDOPT'="N,E" do {
+					set X="EFD.get()"
+					if EFDOPT="N" set X="'"_X
+					set CODE="if "_X_" do {"
+					if EFDCNT set CODE="else  do {"
+					set EFDCNT=1
+					do ADD(TABS_CODE,,"H")
+					set TABS=TABS_TAB
+					}
+					
+				set VXQUIT=0
+				set MULTPRIO=SORT(MODE,TRANTYPE,EFDOPT,"").order()'=SORT(MODE,TRANTYPE,EFDOPT,"").order(-1)
+				for  set PRIO=SORT(MODE,TRANTYPE,EFDOPT,PRIO).order() quit:PRIO.isNull()  do {
+				
+					// Determine if any priorities past this one have journals that
+					// aren't dependend on specific columns (INCOLUMN)\
+					set MORELVL0=0
+					if MULTPRIO do {
+						set X=PRIO
+						for  set X=SORT(MODE,TRANTYPE,EFDOPT,X).order() quit:X=""  if SORT(MODE,TRANTYPE,EFDOPT,X,0).data() set MORELVL0=1 quit
+						}
+						
+					for  set INCOL=SORT(MODE,TRANTYPE,EFDOPT,PRIO,INCOL).order() quit:INCOL.isNull()  do {
+						// If single priority, or if multiple, but no further not-INCOLUMN journals, then
+						// can quit if vx not defined
+						if INCOL,'MORELVL0,'VXQUIT do {
+							do ADD(TABS_"quit:'vx.data()",,"H")
+							set VXQUIT=1		// Only add one quit on vx at EFD level
+							}
+				
+						for  set JRNID=SORT(MODE,TRANTYPE,EFDOPT,PRIO,INCOL,JRNID).order() quit:JRNID.isNull()  do {
+							set CODE="do vj"_+JRNIDX(JRNID)_"(."_PTONAME
+							
+							if 'INCOL set CODE=CODE_")"
+							// If INCOLUMNs, pass added parameter
+							else  do {
+								set INCOLUMN=SORT(MODE,TRANTYPE,EFDOPT,PRIO,INCOL,JRNID)
+								if INCOLUMN["," do {
+									set CODE=CODE_",vdi)"
+									// If not OldValue or NewValue, just one journal entry,
+									// otherwise, entry per column
+									if 'JRNIDX(JRNID).piece("|",2) set CODE=CODE_" quit"
+									}
+								else  set CODE=CODE_","""_INCOLUMN_""")"
+								}
+
+							set CODE=CODE_TAB_"//"
+							set CODE=CODE_" Mode="_MODE
+							set CODE=CODE_" Tran="_TRANTYPE
+							set CODE=CODE_" EFD="_EFDOPT
+							set CODE=CODE_" Seq="_PRIO
+							set CODE=CODE_" JRNID="_JRNID
+							
+							// Do testing for column changes before journal call
+							if INCOL set CODE=$$INCOLCK(INCOLUMN)_" "_CODE
+							do ADD(TABS_CODE,,"H")
+							}
+						}
+					}
+					
+				if EFDOPT'="N,E" do {		// Close this EFD loop
+					do ADD(TABS_"}",,"H")
+					set TABS=TABS.extract(1,TABS.length()-1)
+					}
+				}
+			}
+		}
+	
+	quit
+	
+
+INCOLCK(String INCOLUMN)	// Private -- add check to see if columns defined before journal call
+	
+	type String CODE
+	
+	// Only one column included
+	if INCOLUMN'["," set CODE="if vx("""_INCOLUMN_""").exists()"
+	else  do {
+		type Number I
+			
+		set CODE=""
+		for I=1:1:INCOLUMN.length(",") set CODE=CODE_","""_INCOLUMN.piece(",",I)_""""
+		set CODE="for vdi="_CODE.extract(2,CODE.length())_" if vx(vdi).exists()"
+		}
+		
+	quit CODE
+	
+
+BLDJRN(String PRITABLE,		// Private - Build section for individual journal
+	String PTONAME,
+	String JRNID,
+	Number JRNSEQ,
+	Boolean OLDORNEW)
+	
+	type Public Number ER
+	type Public String PSLCODE(),RM
+	
+	type Boolean ISDO
+	type Number I,SAVELINE
+	type String ACCKEYS,CODE,JRNOBNAM,JRNKEYS(),JRNKEYSX(),JRNTABLE,KEY,KEYS,MAP(),MODE,N
+	type String TAB,TABLES(),TABS,TAG,VARS()
+	
+	set TAB=$C(9)
+	
+	type RecordDBTBL9 dbtbl9=Db.getRecord("DBTBL9","%LIBS=""SYSDEV"",PRITABLE=:PRITABLE,JRNID=:JRNID")
+	
+	set JRNTABLE=dbtbl9.subtable			// Journal table
+
+	type RecordDBTBL1 dbtbl1=Db.getRecord("DBTBL1","%LIBS=""SYSDEV"",FID=:JRNTABLE",1)
+	if 'dbtbl1.getMode() do { quit
+		set ER=1
+		// Invalid table name - ~p1
+		set RM=$$^MSG(1484,JRNTABLE)
+		}
+		
+	// Get journal table keys
+	set JRNKEYS=0
+	set ACCKEYS=dbtbl1.acckeys
+	for I=1:1:ACCKEYS.length(",") do {
+		set KEY=ACCKEYS.piece(",",I)
+		// Ignore literal keys
+		if 'KEY.isLiteral() do {
+			set JRNKEYS=JRNKEYS+1		// Keep track of last key
+			set JRNKEYS(JRNKEYS)=KEY	// Key number map
+			set JRNKEYSX(KEY)=""		// List of columns that are keys
+			}
+		}
+		
+	// Build MAP and determine if any other tables involved
+	type ResultSet rs9d=Db.select("COLNAM,MAP","DBTBL9D","%LIBS='SYSDEV' AND PRITABLE=:PRITABLE AND JRNID=:JRNID")
+	
+	// If use OldValue, NewValue, or FmTable, create separate entries for each modified column
+	set OLDORNEW=0
+	
+	// Only save map for columns that are mapped to some value
+	set TABLES(PRITABLE)=PTONAME
+	set TABLES=1
+	while rs9d.next() if rs9d.getCol("MAP")'="" do {
+		type String VAL
+		
+		set VAL=$$CHKTBLS(rs9d.getCol("MAP"),.TABLES)
+		set MAP(rs9d.getCol("COLNAM"))=VAL
+		if VAL["OldValue" set OLDORNEW=OLDORNEW+1
+		if VAL["NewValue" set OLDORNEW=OLDORNEW+10
+		if VAL["FmTable" set OLDORNEW=OLDORNEW+100
+		}
+	
+	// Set up line tag with reference to object passed to it
+	set TAG="vj"_JRNSEQ_"(Record"_PRITABLE_" "_PTONAME
+	
+	// If INCOLUMN, then include parameter passed as well
+	if dbtbl9.incolumn'="" set TAG=TAG_",String vdi"
+	
+	set TAG=TAG_")"
+	
+	do ADD("")
+	do ADD(TAG_TAB_"// "_JRNID_"  Table "_JRNTABLE_"  "_dbtbl9.des)
+	do ADD("")
+	
+	// If queries or multiple tables, add code to load other objects and execute queries
+	if 'dbtbl9.query1.curVal.isNull()!'dbtbl9.query2.curVal.isNull()!(TABLES>1) do {
+		type String DQQRY()
+		
+		set DQQRY(1)=dbtbl9.query1
+		set DQQRY(2)=dbtbl9.query2
+		if DQQRY(1).isNull() do {
+			set DQQRY(1)=DQQRY(2)
+			kill DQQRY(2)
+			}
+			
+		do QUERY(.TABLES,PRITABLE,PTONAME,.DQQRY)	// Add the query code
+		}
+
+	// If update mode, generate journal for each change
+	if dbtbl9.mode="U" do {
+		do UPDMODE(dbtbl9.excolumn,dbtbl9.incolumn,OLDORNEW,.ISDO)
+		if ISDO set TABS=TAB_TAB
+		else  set TABS=TAB		// No added do level in journal
+		}
+	else  set TABS=TAB
+	
+	do ADD(TABS,"// Save this line for Public datatyping, if needed",.SAVELINE)
+	
+	// Type variables for key values
+	set CODE="type String "
+	if JRNKEYS>1 for I=1:1:JRNKEYS-1 set CODE=CODE_"v"_I_","
+	set CODE=CODE_"vlastkey"
+	do ADD(TABS_CODE)
+	
+	// Handle OldValue/NewValue/FmTable keywords
+	if dbtbl9.mode="U",OLDORNEW do {
+		do ADD("")
+		set CODE="type String "
+		if OLDORNEW#10 set CODE=CODE_"vold,"
+		if (OLDORNEW#100)>9 set CODE=CODE_"vnew,"
+		if OLDORNEW>99 set CODE=CODE_"vfmtable"
+		if CODE.extract(CODE.length())="," set CODE=CODE.extract(1,CODE.length()-1)
+		do ADD(TABS_CODE)
+		do ADD("")
+		if OLDORNEW#10 do ADD(TABS_"set vold=vx(vdi).piece(""|"",1)")
+		if (OLDORNEW#100)>9 do ADD(TABS_"set vnew=vx(vdi).piece(""|"",2)")
+		if OLDORNEW>99 do ADD(TABS_"set vfmtable=vx(vdi).piece(""|"",11)")
+		do ADD("")
+		}
+	
+	// Assign key variables and build key string for journal object
+	set KEYS=""
+	if JRNKEYS>1 do {
+		for I=1:1:JRNKEYS-1 do { quit:ER
+			set KEY=JRNKEYS(I)
+			do ADD(TABS_"set v"_I_"="_$$REF(MAP(KEY),PRITABLE,PTONAME,,.VARS()))
+			set KEYS=KEYS_KEY_"=:v"_I_","
+			}
+		set KEYS=KEYS.extract(1,KEYS.length()-1)	// Strip comma
+		}
+			
+	// Set value to lastkey
+	set KEY=JRNKEYS(JRNKEYS)
+	if MAP(KEY)["NEXTVAL" set CODE="Db.nextVal("""_JRNTABLE_""","""_KEYS_""")"
+	else  set CODE=$$REF(MAP(KEY),PRITABLE,PTONAME,KEY,.VARS())
+	do ADD(TABS_"set vlastkey="_CODE)
+				
+	set JRNOBNAM=JRNTABLE.lowerCase()
+
+	set CODE="type Record"_JRNTABLE_" "_JRNOBNAM_"=Db.getRecord("""_JRNTABLE_""","
+	set KEYS=""
+	if JRNKEYS'=1 do {
+		type Number I
+		
+		for I=1:1:JRNKEYS-1 set KEYS=KEYS_JRNKEYS(I)_"=:v"_I_","
+		}
+	
+	set KEYS=KEYS_JRNKEYS(JRNKEYS)_"=:vlastkey"		// Add last key
+	do ADD(TABS_CODE_""""_KEYS_""",1)")			// Add Db.getRecord(,,1)
+	
+	// Set values into non-key columns
+	set N=""
+	for  set N=MAP(N).order() quit:N.isNull()  if 'JRNKEYSX(N).exists() do {
+		set CODE="set "_JRNOBNAM_"."_$S(N.extract(1)="""":N,1:N.lowerCase())_"="_$$REF(MAP(N),PRITABLE,PTONAME,N,.VARS())
+		do ADD(TABS_CODE)
+		}
+		
+	do ADD("")
+	do ADD(TABS_"do "_JRNOBNAM_".save(""/NOVALFK/NOVALDD/NOVALRI"")")		// Save the record
+	
+	if dbtbl9.mode="U",ISDO do ADD(TABS_"}")		// Close do, if there is one
+	
+	do ADD("")		
+	do ADD(TAB_"quit")
+	do ADD("")
+	
+	// Type other variables as public, with exceptions as noted
+	if VARS.data() do {
+		type String N,N1,X
+		
+		set X=""
+		
+		// vdi, vnew, and vold are not public
+		if VARS("vnew").exists()!VARS("vold").exists() do {
+			set X=X_"vx(),"
+			kill VARS("vnew"),VARS("vold")
+		}
+		kill VARS("vdi")
+		
+		set N=""		
+		for  set N=VARS(N).order() quit:N.isNull()  do {
+			set N1=N
+			if "+-"[N1.extract(1) set N1=N1.extract(2,N1.length())
+			if "$G$g"[N1.extract(1,2) set N1=N1.extract(4,N1.length()-1)
+			if (N1?1A.AN)!(N1?1"%".AN) set X=X_N1_","
+			}
+		set X=X.extract(1,X.length()-1)
+		if 'X.isNull() do {
+			do ADD(TABS_"type Public String "_X,"",SAVELINE)
+		}
+		else  do ADD("",,SAVELINE)
+		}
+	
+	quit
+	
+	
+SORT(String PRITABLE,	// Private - Sort journals into optimal order
+	String SORT(),
+	String JRNIDX(),
+	Number COUNT,
+	Date TLD)
+	
+	type Boolean BREAKE,BREAKM,BREAKT
+	type String CODE,EFDOPT,INCOL,JRNID,MODE,PRIO,SORT1(),TRANTYPE
+		
+	type DbSet ds=Db.selectDbSet("DBTBL9","%LIBS='SYSDEV' AND PRITABLE=:PRITABLE")
+	quit:ds.isEmpty()
+	
+	/* Sort journal entries.  Use a two pass process to optimize final code.  First
+	   sort creates SORT(MODE,TRANTYPE,EFDOPT,PRIO,INCOLUM,JRNID).  Each of the
+	   first three levels may contain multiple options, e.g "I,U,D".  If a level
+	   only consists of all the options, then tests for an option value at are
+	   not necessary, and hence can be optimized.  If that's not the case, then
+	   the elements of that level need to be broken into individual components.
+	   (For example, "I,U" needs to be broken into I and U.  This "break" is done
+	   as a second step in creating the final SORT array.
+	   
+	   Note:  mode = I,U,D
+	   	  trantype = F,O,B
+	   	  efd = N,E
+	   	  
+	   Structure also considers priority order, and allows optimization for journals
+	   which have INCOLUMN values to test prior to call to journal section.
+	*/
+	
+	set COUNT=0
+	while ds.next() do {
+		type RecordDBTBL9 dbtbl9=ds.getRecord("DBTBL9")
+	
+		set CODE = dbtbl9.ifcond
+		if 'CODE.isNull(),'$$ifComp(CODE) quit	// Conditionally include trigger
+		
+		set COUNT=COUNT+1
+		if dbtbl9.tld>TLD set TLD=dbtbl9.tld		// Get most recent update date
+		set JRNIDX(dbtbl9.jrnid)=COUNT
+		set INCOL='dbtbl9.incolumn.isNull()
+		
+		set SORT(dbtbl9.mode,dbtbl9.trantype,dbtbl9.efd,dbtbl9.seq,INCOL,dbtbl9.jrnid)=dbtbl9.incolumn
+		}
+		
+	/* Second pass -- for each of the first three levels (under their current level), if
+	   the level doesn't contain all the options, then break any multiple option values
+	   into individual options.  E.g., break "I,U" into "I" and "U"
+	*/
+	set (EFDOPT,MODE,PRIO,INCOL,JRNID,TRANTYPE)=""
+	if SORT("").order()'="I,U,D"!(SORT("").order(-1)'="I,U,D") do BREAKM(.SORT())
+	for  set MODE=SORT(MODE).order() quit:MODE.isNull()  do {
+		if SORT(MODE,"").order()'="F,O,B"!(SORT(MODE,"").order(-1)'="F,O,B") do BREAKT(.SORT(),MODE)
+		for  set TRANTYPE=SORT(MODE,TRANTYPE).order() quit:TRANTYPE.isNull()  do {
+			if SORT(MODE,TRANTYPE,"").order()'="N,E"!(SORT(MODE,TRANTYPE,"").order(-1)'="N,E") do BREAKE(.SORT(),MODE,TRANTYPE)
+			}
+		}
+		
+	quit
+	
+	
+BREAKM(String SORT())	// Private - break Mode level into components
+
+	type Number I
+	type String EFDOPT,MODE,MODE1,TRANTYPE
+
+	set (EFDOPT,MODE,TRANTYPE)=""
+	for  set MODE=SORT(MODE).order() quit:MODE.isNull()  if MODE["," do {
+		for I=1:1:MODE.length(",") set MODE1=MODE.piece(",",I) do {
+			for  set TRANTYPE=SORT(MODE,TRANTYPE).order() quit:TRANTYPE.isNull()  do {
+				for  set EFDOPT=SORT(MODE,TRANTYPE,EFDOPT).order() quit:EFDOPT.isNull()  do BREAKSET(.SORT(),MODE,MODE1,TRANTYPE,TRANTYPE,EFDOPT,EFDOPT)
+				}
+			}
+		kill SORT(MODE)	// Remove this level now that broken into components
+		}
+	
+	quit
+	
+	
+BREAKT(String SORT(),	// Private - break Trantype mode into components at specific mode level
+	String MODE)
+
+	type Number I
+	type String EFDOPT,TRANTYP1,TRANTYPE
+
+	set (EFDOPT,TRANTYPE)=""
+	for  set TRANTYPE=SORT(MODE,TRANTYPE).order() quit:TRANTYPE.isNull()  if TRANTYPE["," do {
+		for I=1:1:TRANTYPE.length(",") set TRANTYP1=TRANTYPE.piece(",",I) do {
+			for  set EFDOPT=SORT(MODE,TRANTYPE,EFDOPT).order() quit:EFDOPT.isNull()  do BREAKSET(.SORT(),MODE,MODE,TRANTYPE,TRANTYP1,EFDOPT,EFDOPT)
+			}
+		kill SORT(MODE,TRANTYPE)	// Remove this level now that broken into components
+		}
+	
+	quit
+	
+	
+BREAKE(String SORT(),	// Private - break EFD mode into components at specific mode, trantype level
+	String MODE,
+	String TRANTYPE)
+
+	type Number I
+	type String EFDOPT,EFDOPT1
+
+	set EFDOPT=""
+	for  set EFDOPT=SORT(MODE,TRANTYPE,EFDOPT).order() quit:EFDOPT.isNull()  if EFDOPT["," do {
+		for I=1:1:EFDOPT.length(",") set EFDOPT1=EFDOPT.piece(",",I) do {
+			do BREAKSET(.SORT(),MODE,MODE,TRANTYPE,TRANTYPE,EFDOPT,EFDOPT1)
+			}
+		kill SORT(MODE,TRANTYPE,EFDOPT)	// Remove this level now that broken into components
+		}
+	
+	quit
+	
+	
+BREAKSET(String SORT(),	// Private - set lowest levels of "broken" sort
+	 String MODE,
+	 String MODE1,
+	 String TRANTYPE,
+	 String TRANTYP1,
+	 String EFDOPT,
+	 String EFDOPT1)
+	
+	type String INCOL,JRNID,PRIO
+	
+	set (PRIO,INCOL,JRNID)=""
+	for  set PRIO=SORT(MODE,TRANTYPE,EFDOPT,PRIO).order() quit:PRIO.isNull()  do {
+		for  set INCOL=SORT(MODE,TRANTYPE,EFDOPT,PRIO,INCOL).order() quit:INCOL.isNull()  do {
+			for  set JRNID=SORT(MODE,TRANTYPE,EFDOPT,PRIO,INCOL,JRNID).order() quit:JRNID.isNull()  do {
+				set SORT(MODE1,TRANTYP1,EFDOPT1,PRIO,INCOL,JRNID)=SORT(MODE,TRANTYPE,EFDOPT,PRIO,INCOL,JRNID)
+				}
+			}
+		}
+		
+	quit
+		
+
+REF(	String REF,	// Private - Replace REF with PSL code
+	String PRITABLE,
+	String PTONAME,
+	String COLNAME,
+	String VARS())
+	
+	/* Note - previously converted $$^MSG to literal and put into compiled code.
+	   However, this won't work for if in a multi-language environment, so that
+	   logic has been removed and $$^MSG left like any other extrinsic function.
+	*/
+	
+	type Public String KEYWORDS()
+	
+	type String KEYWD
+		
+	if REF.extract(1)="""" quit REF			// "Text"
+	if REF?.N!(REF?.N1"."1.N) quit REF		// Numeric
+		
+	if REF?1"OLD.".E quit PTONAME_"."_REF.piece(".",2).lowerCase()_".oldVal"
+	if REF?1"NEW.".E quit PTONAME_"."_REF.piece(".",2).lowerCase()_".curVal"
+	
+	// Either keyword or $$ reference -- replace keywords
+	set KEYWD=""
+	for  set KEYWD=KEYWORDS(KEYWD).order() quit:KEYWD.isNull()  if REF[KEYWD do {
+		set REF=REF.replace(KEYWD,KEYWORDS(KEYWD))
+		set VARS(KEYWORDS(KEYWD))=""
+		}
+		
+	quit REF
+	
+	
+QUERY(	String TABLES(),	// Private - Add code to handle query
+	String PRITABLE,
+	String OBJNAME,
+	String DQQRY())
+
+	type Boolean DUMMYQRY
+	type Number N,SEQ
+	type String INPUT(),NEWTBLS(),PSLOBJ(),PSLQRY(),TAB,TBLS,VARINS(),VARLIST()
+	
+	set TAB=$C(9)
+	
+	/* Check queries for additional table references and add to TABLES.
+	
+	   If query contains complex variable insertion, e.g., <<$$func(...)>> etc, 
+	   replace variable insertion with a variable in the query and assign the
+	   variable insertion code to the variable.  Otherwise, UQRYBLD can't
+	   handle it.
+	*/
+
+	set N=""
+	for  set N=DQQRY(N).order() quit:N.isNull()  if 'DQQRY(N).isNull() do {
+		type String NEWQRY,TOK,X
+		
+		set NEWQRY=$$CHKTBLS(DQQRY(N),.TABLES)
+		
+		set X=$$TOKEN^%ZS(NEWQRY,.TOK)		// Tokenize to remove quote issues
+		
+		// Substitute any complex variable insertion, get variable list for public typing	
+		if X["<<"  do {
+			type String EXPR,RET
+
+			set RET=""
+			for  do { quit:X.isNull()
+				set RET=RET_X.piece("<<",1)_"<<"
+				set EXPR=X.piece("<<",2).piece(">>",1)
+				// Deal with less than, e.g., X<<<ABC>>
+				if EXPR.extract(1)="<" do {
+					set RET=RET_"<"
+					set EXPR=EXPR.extract(2,EXPR.length())
+					}
+				
+				// Replace if complex expression, otherwise, leave alone
+				if '(EXPR?1A.AN!(EXPR?1"%".AN)) do {
+					set VARINS=VARINS.get()+1
+					set VARINS("VQ"_VARINS)=$$UNTOK^%ZS(EXPR,.TOK)
+					set RET=RET_"VQ"_VARINS_">>"
+					}
+				else  do {
+					set RET=RET_EXPR_">>"
+					set VARLIST(EXPR)=""
+				}
+				
+				set X=X.piece(">>",2,999)
+				if X'["<<" set RET=RET_X,X=""
+				}
+			
+			set DQQRY(N)=$$UNTOK^%ZS(RET,.TOK)
+			}
+		}
+
+	set TBLS=PRITABLE_","
+	for  set N=TABLES(N).order() quit:N.isNull()  if N'=PRITABLE set TBLS=TBLS_N_","
+	set TBLS=TBLS.extract(1,TBLS.length()-1)
+	
+	// If all we are dealing with is a need to load other table info use a dummy query
+	if TABLES>1,DQQRY(1).get().isNull() do {
+		set DUMMYQRY=1
+		set DQQRY(1)="1>0"
+		}
+	else  set DUMMYQRY=0
+
+	// Convert to SQL FROM and WHERE to allow call to UCQRYBLD
+	set INPUT("WHERE")=$$WHERE^SQLCONV(.DQQRY,TBLS)
+	set INPUT("FROM")=$$DQJOIN^SQLCONV(TBLS)
+	
+	do ^UCQRYBLD(.INPUT,PRITABLE_"="_OBJNAME,,.PSLOBJ,.PSLQRY)
+	
+	// Add typing for any <<>> variables
+	if VARLIST.data() do {
+		type String CODE,N
+		
+		set CODE="type Public String "
+		set N=""
+		for  set N=VARLIST(N).order() quit:N=""  set CODE=CODE_N_","
+		set CODE=CODE.extract(1,CODE.length()-1)
+		do ADD(TAB_CODE)
+		do ADD("")
+	}
+	
+	/*If any other tables referenced, instantiate the record.  Replace object names
+	  generated by UCQRYBLD with those used in MAP.
+	   
+	  Also, modify getRecord to use 1 as third parameter to ensure that this won't
+	  fail in the even there is no record.  For journal file mapping, there may be
+	  cases where a related record doesn't exist.  In that case, a journal file
+	  query can be used to not continue if the record doesn't exist.  Or, if null
+	  entries are OK, to continue.  This is the approach used in prior code.  For
+	  an example, see the HIST journal.
+	*/
+	if PSLOBJ.data() do {
+		set (N,SEQ)=""
+		for  set N=PSLOBJ(N).order() quit:N.isNull()  do {
+			for  set SEQ=PSLOBJ(N,SEQ).order() quit:SEQ.isNull()  do {
+				type String CODE
+			
+				set CODE=PSLOBJ(N,SEQ)
+				if SEQ=1 do {
+					type String OBJNEW,OBJOLD
+				
+					set OBJNEW=TABLES(PSLOBJ(N).piece("|",1))
+					set OBJOLD=CODE.piece("=Db.getRecord",1).piece(" ",3)
+					set CODE=CODE.replace(OBJOLD,OBJNEW)
+					set NEWTBLS(OBJOLD)=OBJNEW
+					// Add 1 as third parameter
+					set CODE=CODE.extract(1,CODE.length()-1)_",1)"
+					}
+				do ADD(TAB_CODE)
+				}
+			}
+		do ADD("")
+		}
+		
+	// If any variable substition for queries, set it
+	if VARINS.data() do {
+		type String CODE
+		
+		set CODE="type String "
+		set N=""
+		for  set N=VARINS(N).order() quit:N.isNull()  set CODE=CODE_N_","
+		do ADD(TAB_CODE.extract(1,CODE.length()-1))
+		do ADD("")
+		
+		for  set N=VARINS(N).order() quit:N.isNull()  do ADD(TAB_"set "_N_"="_VARINS(N))
+		do ADD("")
+		}
+	
+	// Insert query logic - for tables instantiated by query logic, replace object names
+	if 'DUMMYQRY do {
+		set (N,SEQ)=""
+		for  set SEQ=PSLQRY(SEQ).order() quit:SEQ.isNull()  do {
+			for  set N=NEWTBLS(N).order() quit:N.isNull()  do {
+				if PSLQRY(SEQ)[N set PSLQRY(SEQ)=PSLQRY(SEQ).replace(N,NEWTBLS(N))
+				}
+			do ADD(TAB_"if "_PSLQRY(SEQ))
+			do ADD(TAB_"else  quit")
+			}
+		}
+		
+	do ADD("")
+	
+	quit
+		
+
+UPDMODE(String EXC,	// Private - Update Mode - generate journal for each column changed
+	String INC,
+	Boolean OLDORNEW,
+	Boolean ISDO)
+
+	/*
+	ARGUMENTS:
+		EXC		columns to exclude		/REQ/MECH=VALUE
+				DBTBL9.EXCOLUMN
+			
+		INC		columns to include		/REQ/MECH=VALUE
+				DBTBL9.INCOLUMN
+			
+		OLDORNEW	indicates column(s) use		/REQ/MECH=VALUE
+				OldValue or NewValue key word
+				
+		ISDO		indicator that we created a	/REQ/MECH=REF:W
+				structure do in this journal
+				section
+	*/
+	
+	type String CODE,TAB
+	
+	set ISDO=1
+	set TAB=$C(9)
+	
+	// No include or exclude - do them all
+	if INC.isNull(),EXC.isNull() do {
+		do ADD(TAB_"type Public String vx()")
+		do ADD(TAB_"type String vdi")
+		do ADD("")
+		set CODE="set vdi="""" for  set vdi=vx(vdi).order() quit:vdi=""""  do {"
+		if 'OLDORNEW set CODE=CODE_" quit"
+		do ADD(TAB_CODE)
+		}
+
+	// All testing/assignments will be done before the call in this case, so just
+	// need to indicate not creating this is a structured do
+	else  if 'INC.isNull() set ISDO=0
+		
+	// Excluded columns
+	else  do {
+		type String CODE
+		do ADD(TAB_"type Public String vx()")	
+		do ADD(TAB_"type String vdi")
+		set CODE="set vdi="""" for  set vdi=vx(vdi).order() quit:vdi="""""
+		// Piece 3 of vx = 1 indicates journal flag off for this column
+		set CODE=CODE_"  if 'vx(vdi).piece(""|"",3)"
+		
+		// Only one column to exclude
+		if EXC'["," set CODE=CODE_" if vdi'="""_EXC_""" do {"
+		else  set CODE=CODE_" if "","_EXC_",""'[("",""_vdi_"","") do {"
+		if 'OLDORNEW set CODE=CODE_" quit"
+		do ADD(TAB_CODE)
+		}
+		
+	quit
+	
+
+CHKTBLS(String REF,	// Private - Locate references to other tables
+	String TABLES())
+
+	// Note - this code copied, in part, from PARSE^UCUTIL
+
+	type Number PTR
+	type String ATOM,DELS,RETURN,TOK
+	
+	set DELS=",()+-*/\#'=><[]\*_"
+	
+	if REF["""" set REF=$$TOKEN^%ZS(REF,.TOK)
+	
+	set PTR=0,RETURN=""
+	for  do { quit:PTR=0
+		set ATOM=$$ATOM^%ZS(REF,.PTR,DELS,.TOK,1)
+		if ATOM.length(".")=3 set ATOM=ATOM.piece(".",2,3)	// Remove library
+		if ATOM?1A.AN.E1".".E.AN do {				// table.column
+			type String TABLE
+			
+			set TABLE=ATOM.piece(".",1)
+			
+			// Ignore OLD.COL, NEW.COL syntax, and NEXTBAL
+			quit:TABLE="OLD"!(TABLE="NEW")!(ATOM["NEXTVAL")
+			
+			// Get table object name
+			if 'TABLES(TABLE).exists() do {
+				set TABLES(TABLE)=TABLE.lowerCase()
+				set TABLES=TABLES+1
+				}
+			// Replace table.column reference with object reference
+			set ATOM=TABLES(TABLE)_"."_ATOM.piece(".",2)
+			set ATOM=ATOM.lowerCase()
+			}
+		set RETURN=RETURN_ATOM
+		}
+		
+	if TOK.exists() set RETURN=$$UNTOK^%ZS(RETURN,.TOK)
+	
+	quit RETURN
+	
+
+ADD(	String DATA,	// Private - Add code to the PSL code array
+	String COMMENT,
+	String LINE)
+	
+	type Public String PSLCODE()
+	
+	// Add to end of header section
+	if LINE.get()="H" set LINE=PSLCODE(1000).order(-1)+1
+	else  if 'LINE.get() do {
+		set LINE=PSLCODE("").order(-1)
+		if LINE<1000 set LINE=1000
+		set LINE=LINE+1
+		}
+	
+	if 'COMMENT.get().isNull() do {
+		if DATA.extract()=$C(9) do {
+			type Number LEN
+			type String X = $C(9,9,9,9,9,9,9,9,9,9)
+		
+			set LEN=((DATA.length($C(9))-1)*7)+DATA.length()
+			if LEN<55 set DATA=DATA_X.extract(1,((63-LEN)\8)-1)
+			}
+		set DATA=DATA_$C(9)_"//"_COMMENT
+		}
+		
+	set PSLCODE(LINE)=DATA
+	
+	quit
+	
+
+ifComp(String code)	// xecute DBTBL9.IFCOMP and return truth
+
+	/* This procedure calls the PSL compiler with the PSL expression
+	contained in code.  The expression is parsed and executed. 
+	The expression can reference the configuration table CUVAR
+	at compile time.  e.g., code = 'CUVAR.%MCP = 1'
+	*/
+
+	type Boolean isTrue = 0
+	do ifCompx(code,.isTrue)
+	quit isTrue
+
+
+ifCompx(String code,	// Error trap protected compile-time condition execution
+	Boolean isTrue)
+
+	type Public Number ER
+	type Public String RM
+	
+	type Number cnt, seq
+	type String cmperr(), m(), psl()
+
+	set psl(1) = " if "_code
+	do cmpA2A^UCGM(.psl,.m,,,,,.cmperr()) if cmperr.get() do { quit
+		set ER = 1
+		set RM = "Journal condition compile error: "_code
+	}
+	
+	/* Check number of generated lines.  We only allow a single line of
+	executable code.  PSL will generate a minimum of two lines, since
+	if adds a "Q" for the last line, so more than two lines is a problem.
+	*/
+	set cnt = 0
+	set seq = ""
+	for  set seq = m(seq).order() quit:seq.isNull()  set cnt = cnt + 1
+	if cnt > 2 do { quit
+		set ER = 1
+		set RM = "Invalid journal condition - multi-line generated code: "_code
+	}
+
+	new $ZT
+	set $ZT = "S ER=1,RM=""Invalid journal condition: ""_code ZG "_($ZL - 1)
+	set cnt = m("").order()				// Get code to execute
+	#ACCEPT DATE=07/07/05; PGM=Dan Russell; CR=16531
+	xecute m(cnt)
+	
+	set isTrue = $T
+	
+	quit 
+
+vSIG()	quit "60726^46471^Dan Russell^26129"	// Signature - LTD^TIME^USER^SIZE

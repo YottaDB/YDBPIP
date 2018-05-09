@@ -1,0 +1,100 @@
+LNPTS25(RecordLN ln, RecordTTX ttx, String CTL)
+
+	/*
+	       ORIG:  David Caliendo (5527) - 07/03/86
+	       
+	       DESC:  Post escrow accrual adjustment through the associated 
+	              loan, generating a secondary accrual adjustment 
+	              transaction to the escrow.
+
+	      ARGUMENTS:
+		.  CTL = Passes control variables 	/TYP=T/REQ/MECH=VAL
+	
+		   0 - Post (positive) interest/dividend
+		   1 - Adjust (positive) interest/dividend accrual
+		   2 - Adjust (positive) interest/dividend paid
+		   3 - Post negative interest
+		   4 - Adjust negative (authorized) interest accrual
+		   5 - Adjust negative (authorized /unauthorized) interest charged
+		   6 - Adjust negative unauthorized interest accrual
+		   7 - Adjust negative uncollected interest accrual
+		   8 - Adjust negative uncollected interest charge
+		   
+	---- Revision History -------------------------------------------------
+
+	01/23/06 - Srinivar / SmithCD - 16890
+		   Replaced $$BIL0^BILFUNCS call with $$ESCACT^^BILFUNCS so the
+		   payment element is searched for containing "ESC" instead of 
+		   equal "ESC".
+		   Cleaned up code and retrofitted the following from p01:
+			04/14/03 - STATTOND/MBUIM - CR2916
+		   Modified to accept a CTL parameter.
+
+	*/
+
+	type public RecordDEP dep, dep()
+	type public Cache %CACHE()
+	type public Boolean ER
+	type public String TB()
+	type public Number ZAMT
+	
+	type literal String TAB = $char(9)
+
+	type Number ELENUM = 0, ESCCID, OESCBAL
+	type String ESCPMTEL, ESCTYP, ETC
+
+	// Pull escrow type from transaction
+	set ESCTYP = $$FIELD^UTSO(ttx.tso, "ESC")
+
+	type RecordLNBIL0 lnbil0 = Db.getRecord("LNBIL0", "CID=:ln.cid")
+	set ESCPMTEL = $$ESCACT^BILFUNCS(.lnbil0, .ELENUM)
+			
+	// If escrow transfer type not defined in transaction, get from 
+	// bill header
+	if ESCTYP.isNull() set ESCTYP = ESCPMTEL.piece(TAB, 2)
+
+	// Escrow type ~p1 not defined for this account
+	if ESCTYP.isNull() ! (ESCTYP '= ESCPMTEL.piece(TAB, 2)) do Runtime.setErrMSG("LNBIL0", 1016, ESCTYP) quit
+
+	set ESCCID = ESCPMTEL.piece(TAB, 1)
+	
+	// Update transfer balance array (used in LNPTS1)
+
+	// Transaction amount
+	set TB(ESCTYP).piece(",", 1) = TB(ESCTYP).get().piece(",", 1) + ZAMT
+	// Transfer account number
+	set TB(ESCTYP).piece(",", 2) = ESCCID
+	// Transaction amount remaining
+	set TB(ESCTYP).piece(",", 3) = TB(ESCTYP).piece(",", 3) + ZAMT
+
+	// Ensure we're using the correct dep object
+	if 'dep.exists() ! (dep.exists() & (ESCCID '= dep.cid)) do {
+		if dep(ESCCID).exists() set dep = dep(ESCCID)
+		else  set dep = Db.getRecord("DEP", "CID=:ESCCID")
+		}
+
+	// Get escrow transaction code from product type
+	set ETC = $$DETC^ESCFUNCS(dep.type, CTL, ttx.itc1) quit:ER
+	
+	// Original escrow balance is used to update ln.teb after posting the 
+	// transaction (dep.bal may or may not have been updated)
+	set OESCBAL = dep.bal
+
+	// Escrow payment suspense
+	do GL^LNPTSU(.ttx, ZAMT, 7)
+	
+	// Update the History Support record (lower level of HIST)
+	do %HSEQ^LNPTSU(.ttx, "*#"_ESCTYP_"#"_ZAMT)
+	
+	// Generate secondary transaction to escrow account
+	do POST^LNTRB(.ttx, ESCCID, ETC, ZAMT, %EffectiveDate, %UserStation, ttx.tso, ttx.tcmt, dep.crcd) quit:ER
+
+	// Total escrow balance
+	set ln.teb = ln.teb + (dep.bal - OESCBAL)
+	
+	// Total secondary balance
+	set ttx.tsb = dep.bal
+
+	quit
+
+vSIG()	quit "60297^71096^Chad Smith^3135"	// Signature - LTD^TIME^USER^SIZE

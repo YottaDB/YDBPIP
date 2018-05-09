@@ -1,0 +1,459 @@
+LNTCP		/* 
+	   Transaction Code Post Processors
+	   Copyright(c)1997 Sanchez Computer Associates, Inc.  All Rights Reserved - 05/21/97 14:12:08 - SMITHC
+	       DESC:
+	
+	  ----------   Revision History   ------------------------------------
+
+	   11/02/06 - SPR - CR 23504
+	   	      Modified PL section to avoid undefined error for the
+	   	      variables LCHG and DFT("AMT"), while processing RPL 
+	   	      transaction.
+	   	      
+	   01/25/06 - Srinivar / SmithCD - CR 16890
+	   	      Cleaned up the deprecated methods and warnings.
+	   	      Included the new section(ESCLDFT) Escrow Default Closeout
+	   	      Amount Post-Processor. Modified public sections to
+	   	      handle potentially non-existant %EffectiveDate.
+
+	   09/02/05 - TITOVE - CR 16844
+		      Modified EXTIAM section to pass four new arguments to
+		      TP^LNAMOAO1.
+
+	   01/13/05 - KELLYP - CR 13667
+	   	      Modified to conform to current PSL standards and removed
+	   	      pre-2002 revision history.  Also cleaned up procedure.
+
+	  -----------------------------------------------------------------------
+	*/
+
+	do P
+
+	quit
+
+
+public P	// Calculate payment amount
+
+	type Public Number CID,DFT()
+	type Public String ER
+
+	type Number BSEQ,I,PDC,PDS,X
+	type String PRI(),XPDC(),Z
+	
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+
+	if 'ln.limit.isNull(),ln.schseq+ln.limit<ln.dseq kill DFT("AMT") quit 
+	
+	type RecordSTBLPCM stblpcm=Db.getRecord("STBLPCM","KEY=:ln.pcm")
+
+	// Open account with disbursement code for ~p1	
+	if 'ln.cntdr,'ln.bal,'ln.acr,stblpcm.pcmp do Runtime.setErrMSG("LN",2106,ln.crlmt.roundCur()) quit:ER
+	
+	// Payment due categories
+	set Z=ln.ppdcat1_$C(9)_ln.ppdcat2_$C(9)_ln.ppdcat3_$C(9)_ln.ppdcat4
+	set Z=Z_$C(9)_ln.ppdcat5_$C(9)_ln.ppdcat6_$C(9)_ln.ppdcat7_$C(9)_ln.ppdcat8
+	set Z=Z_$C(9)_ln.ppdcat9_$C(9)_ln.ppdcat10
+	
+	for I=1:1:ln.npc do {
+		set XPDC(Z.piece($C(9),I+ln.npc))=I 
+		set PRI(I)=Z.piece($C(9),I)
+		}
+
+	set PDS=ln.oseq-ln.schseq-1
+	set X=XPDC("").order()
+	
+	if PDS'>X set PDC=1
+	else  do {
+		set X=XPDC("").order(-1)
+		if PDS'<X set PDC=ln.npc quit
+		set X=PDS-1
+		set X=XPDC(X).order()
+		set PDC=XPDC(X)
+		}
+
+	if ln.dist1nd>ln.lbdd,'stblpcm.pcmp.extract(5) do LCHG1(.ln) quit
+
+	type RecordTTX ttx=Class.new("RecordTTX")
+
+	type Number DPMT
+	set DPMT=ln.dpmt
+
+	if ln.dist1nd>ln.lbdd set DPMT=$$AMT^LNBLDE(.ln,.ttx,CID) quit:ER 
+	
+	// Default pymt amount = DPMT-PPA-UNAPF
+	set DFT("AMT")=(DPMT-ln.ppa-ln.unapf).roundCur()
+	if DFT("AMT")'>0 set DFT("AMT")=(DPMT-ln.ppa).roundCur()
+	
+	do LCHG1(.ln)
+
+	quit 
+	
+
+public KILL	// Remove default payment amount
+	
+	type Public Number DFT()
+	
+	kill DFT("AMT")
+
+	quit 
+
+	
+public PC	// Determine default amount for Payment (Include all Charges)
+
+	type Public Number CID,DFT()
+	
+	type Number LCHG
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+	do P1(.ln)
+	set DFT("AMT")=(DFT("AMT")+LCHG+$$MCNB^LNCO3(.ln,CID)).roundCur()
+
+	quit 
+
+	
+public PCO	// Determine default amount for Payment (Preauthorized transfer)
+
+	type Public Number CID,DFT()
+	
+	type Number LCHG
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")	
+	do LCHG1(.ln)
+	set DFT("AMT")=(LCHG+$$MCNB^LNCO3(.ln,CID)).roundCur()
+
+	quit 
+
+	
+public PM	// Determine default amount for Payment (Include Miscellaneous Charges)
+	
+	type Public Number CID,DFT()
+	type Number FEEAMT
+	
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+	do P1(.ln)
+	set FEEAMT=$$MCNB^LNCO3(.ln,CID)
+	set DFT("AMT")=DFT("AMT")+FEEAMT.roundCur()
+
+	quit 
+
+	
+public PMO	// Determine default amount for Payment (Miscellaneous Charges Only)
+	
+	type Public Number CID,DFT()
+	type Number FEEAMT
+	
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+	if 'DFT("AMT").exists() set DFT("AMT")=0
+	set FEEAMT=$$MCNB^LNCO3(.ln,CID)
+	if 'DFT("AMT").get() set DFT("AMT")=FEEAMT.roundCur()
+
+	quit 
+
+	
+public PL	// Determine default amount for Payment (Include Late Charges)	
+	
+	type Public Number CID,DFT()
+	
+	type Number LCHG
+	
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+	
+	do P1(.ln)
+	
+	if 'DFT("AMT").exists() set DFT("AMT")=0
+	set DFT("AMT")= (DFT("AMT")+LCHG.get()).roundCur()
+
+	quit 
+
+	
+public PLO	// Determine default amount for Payment (Late Charges Only)
+
+	type Public Number CID,DFT()
+	
+	type Number LCHG
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+	do LCHG1(.ln)
+	set DFT("AMT")=LCHG.roundCur()
+
+	quit 
+	
+
+public D	// Determine default amount for Disburse/Undisburse
+
+	type Public Number CID,DFT()
+	type Public String ER,%MSKD
+	
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+
+	// Transaction cannot be processed prior to disbursement date ~p1
+	if %EffectiveDate.get(),%EffectiveDate<ln.odd do Runtime.setErrMSG("LN",447,$$DAT^%ZM(ln.odd,%MSKD.get())) quit:ER
+	
+	if ln.maxdrct=1,'ln.cntdr set DFT("AMT")=ln.crlmt.roundCur()
+	else  kill DFT("AMT")
+
+	quit 
+
+	
+public LCHG	// Calculate default late charge amount that can be paid
+
+	type Public Number CID,DFT(),LCHG
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+	set LCHG=ln.lchg
+
+	// Calc pre-tran EFD late charge
+	type RecordTTX ttx=Class.new("RecordTTX")
+	if %EffectiveDate.get()<%SystemDate set LCHG=$$PRELCHG^LNUEFD(.ln,.ttx)
+
+	// Check min/max amounts
+	set LCHG=$$LCHGADJ^LNPO2(.ln,CID,LCHG)
+	
+	if 'DFT("AMT").exists() set DFT("AMT")=0
+
+	quit 
+	
+
+public IA	// Default accrued interest
+
+	type Public Number CID,DFT()
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+	set DFT("AMT")=ln.acr.roundCur()
+	quit 
+
+
+public MFRSEQ	
+	/*
+	Post-processor for miscellaneous field RSEQ used for charge-off	
+	Used for charge-off and charge-off reduction transactions.
+	Validate existence of a restructured loan record.
+	*/
+
+	type Public Number CID,X
+	type Public String ER
+
+	if X.isNull() quit 
+
+	type RecordLNPL3A lnpl3a=Db.getRecord("LNPL3A","CID=:CID,RSEQ=:X",1)
+	
+	// Invalid restructured loan sequence
+	if lnpl3a.rseq.isNull() do Runtime.setErrMSG("LNPL3A",1451) quit:ER
+
+	quit 
+
+	
+public EXTPMT	// Calculate default extension payment amount
+
+	type Public Number CID
+	
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")	
+
+	do EXTOPT(.ln)
+
+	quit
+
+
+EXTOPT(RecordLN ln)	// Obtain extension parameters
+
+	type Public Number CID,DFT()
+
+	type Number EXTPMT
+
+	// Load product information related to extension processing
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:ln.type")
+	if prodctl.cls'="L" quit
+	if prodctl.extopt.isNull() quit
+	
+	// Use extension percentage to default extension payment amount
+	if prodctl.extopt set EXTPMT=ln.balcmp*prodctl.extpct/100
+	
+	// Use one full period's interest
+	else  do {
+		// Uses ^UAVB so that rate changes are considered
+		type RecordTTX ttx=Class.new("RecordTTX")
+		if 'ln.iam do {
+			type String UAVB()
+			do INIT^UAVB(.ln,CID,ln.dist1ld,ln.dist1nd-1,"110111110001111111")
+			set EXTPMT=UAVB(2).piece("|",15)-UAVB(2).piece("|",10)
+			}
+	
+		// Uses ^LNAMOAO1 for add-on/discount loans
+		else  set EXTPMT=$$EXTIAM(.ln,.ttx,CID)
+		}
+	
+	// Default extension payment amount into AMT
+	set EXTPMT=EXTPMT.roundCur()
+	set DFT("AMT")=EXTPMT
+
+	quit 
+	
+	
+EXTIAM(RecordLN ln,RecordTTX ttx,Number CID)
+
+	// Call TP^LNAMOAO1 to perform interest calculation based upon IAM
+	
+	type Number %AMT	
+	type String AM()
+
+	type RecordLNBIL1 lnbil1=Db.getRecord("LNBIL1","CID=:CID,SCHSEQ=:ln.dseq",1)	
+	
+	if 'ln.dseq!(ln.dseq>ln.bseq) do EXEC^LNBLDE(.ln,.ttx,CID,%SystemDate,"00",.lnbil1)
+
+	set AM(ln.dseq).piece("|",1)=lnbil1.cpib
+	set AM(ln.dseq).piece("|",2)=lnbil1.cpib
+	
+	do TP^LNAMOAO1(.ln,1,0,ln.dseq-1-ln.exttot,0)
+	
+	quit %AMT
+
+
+LCHG1(RecordLN ln)
+
+	type Public Number CID,DFT(),LCHG
+
+	set LCHG=ln.lchg
+
+	// Calc pre-tran EFD late charge
+	type RecordTTX ttx=Class.new("RecordTTX")
+	if %EffectiveDate.get()<%SystemDate set LCHG=$$PRELCHG^LNUEFD(.ln,.ttx)
+
+	// Check min/max amounts
+	set LCHG=$$LCHGADJ^LNPO2(.ln,CID,LCHG)
+ 
+	if 'DFT("AMT").exists() set DFT("AMT")=0
+
+	quit
+
+
+P1(RecordLN ln)
+
+	type Public Number CID,DFT()
+	type Public String ER
+
+	type Number BSEQ,I,PDC,PDS,X
+	type String PRI(),XPDC(),Z
+
+	if 'ln.limit.isNull(),ln.schseq+ln.limit<ln.dseq kill DFT("AMT") quit 
+	
+	type RecordSTBLPCM stblpcm=Db.getRecord("STBLPCM","KEY=:ln.pcm")
+	
+	// Open account with disbursement code for ~p1
+	if 'ln.cntdr,'ln.bal,'ln.acr,stblpcm.pcmp do Runtime.setErrMSG("LN",2106,ln.crlmt.roundCur()) quit:ER
+
+	// Payment due categories
+	set Z=ln.ppdcat1_$C(9)_ln.ppdcat2_$C(9)_ln.ppdcat3_$C(9)_ln.ppdcat4
+	set Z=Z_$C(9)_ln.ppdcat5_$C(9)_ln.ppdcat6_$C(9)_ln.ppdcat7_$C(9)_ln.ppdcat8
+	set Z=Z_$C(9)_ln.ppdcat9_$C(9)_ln.ppdcat10
+	
+	for I=1:1:ln.npc do {
+		set XPDC(Z.piece($C(9),I+ln.npc))=I 
+		set PRI(I)=Z.piece($C(9),I)
+		}
+
+	set PDS=ln.oseq-ln.schseq-1
+	set X=XPDC("").order()
+	
+	if PDS'>X set PDC=1
+	else  do {
+		set X=XPDC("").order(-1)
+		if PDS'<X set PDC=ln.npc quit
+		set X=PDS-1
+		set X=XPDC(X).order()
+		set PDC=XPDC(X)
+		}
+
+	if ln.dist1nd>ln.lbdd,'stblpcm.pcmp.extract(5) do LCHG1(.ln) quit
+
+	type RecordTTX ttx=Class.new("RecordTTX")
+
+	type Number DPMT
+	set DPMT=ln.dpmt
+
+	if ln.dist1nd>ln.lbdd set DPMT=$$AMT^LNBLDE(.ln,.ttx,CID) quit:ER 
+	
+	// Default pymt amount = DPMT-PPA-UNAPF
+	set DFT("AMT")=(DPMT-ln.ppa-ln.unapf).roundCur()
+	if DFT("AMT")'>0 set DFT("AMT")=(DPMT-ln.ppa).roundCur()
+	
+	do LCHG1(.ln)
+
+	quit 
+	
+
+public ESCLDFT(String TCCTL)	// Transaction code control indicators
+
+	/*
+	Escrow Default Closeout Amount Post-Processor
+
+	This post-processor determines the default closeout transaction 
+	amount (through associated loan) for escrow closeout 
+	with or without interest transaction codes. The amount returned 
+	will reflect balances as of the effective date (unwind the account 
+	backward for effective dates in the past; project the account 
+	forward for future effective dates).
+	
+	Arguments:
+	. TCCTL
+	 	Position 1: Not used currently
+		Position 2: Include interest
+			     0 - Do not include interest
+			     1 - Include interest
+		Position 3: Debit/credit balance
+			     0 - Debit balance closeout
+			     1 - Credit balance closeout
+	Returns:
+	. DFT("AMT") Default transaction amount
+	*/
+
+	type public Number CID
+	type public Boolean ER
+	type public String DFT()
+
+	type RecordDEP dep()
+	type Number ESCCID,NEGACR,NEGACRUN,POSACR,UNCACR
+        
+	set DFT("AMT")=0	
+	
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+
+	// Load escrow accounts	
+	type ResultSet rs=Db.select("CID","DEP","AREF=:ln.cid")
+	if rs.next() do {
+		// Load only the first deposit account, but must pass as an array
+		set ESCCID=rs.getCol("CID")
+		set dep(ESCCID)=Db.getRecord("DEP","CID=:ESCCID")
+		}
+	else  quit
+
+	// Backdated transaction
+ 	if %EffectiveDate.get()<%SystemDate do EXEC^LNUEFD(.ln,,,%EffectiveDate.get(),,,,.dep()) quit:ER
+
+ 	// Future dated transaction
+ 	if %EffectiveDate.get()>%SystemDate do EXEC^UANTIC(.ln,,,%EffectiveDate,,,,,.dep()) quit:ER
+		
+	 // Ledger balance of the target account 	
+ 	set DFT("AMT")=DFT("AMT")+dep(ESCCID).bal
+		  
+ 	// Include interest
+	if TCCTL.extract(2)=1 do {
+ 		set NEGACR=(dep(ESCCID).negacr).roundCur()
+ 		set NEGACRUN=(dep(ESCCID).negacrun).roundCur()
+ 		set POSACR=(dep(ESCCID).posacr).roundCur()
+ 		set UNCACR=(dep(ESCCID).uncacr).roundCur()
+ 			
+ 		// INT=DEP.POSACR-DEP.NEGACR-DEP.NEGACRUN-DEP.UNCACR
+		set DFT("AMT")=DFT("AMT")+POSACR-NEGACR-NEGACRUN-UNCACR
+		}
+			
+	// Closeout amount is negative
+	if TCCTL.extract(3)=1,(DFT("AMT")<0) do Runtime.setErrMSG("DEP",555) quit
+
+	// Closeout amount is not negative
+	if TCCTL.extract(3)=0,(DFT("AMT")>0) do Runtime.setErrMSG("DEP",556) quit
+			
+	if DFT("AMT")<0 set DFT("AMT")=-DFT("AMT")
+		
+        quit
+
+vSIG()	quit "60576^6219^Renga SP^10889"	// Signature - LTD^TIME^USER^SIZE

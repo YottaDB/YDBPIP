@@ -1,0 +1,488 @@
+LNU
+	/*
+	  Loan Processing Utilities
+
+	   ORIG:  LOCKE -  6 MAR 1993
+	
+	---- Revision History -------------------------------------------------
+	
+	03/28/07 - SmithCD - CR 24945
+		   Added lnfeep.subtovat (position 62) to DATA string in FEEPLN
+		   section for the Value Added Tax enhancement, also accounting
+		   for the obsleted column (position 61).
+	
+	03/21/07 - chhabris - CR24680
+		   Modified FEEPLN section to add value for the new columns
+		   ccfdt, ccfct and ccfiat to the variable DATA. These columns
+		   were added to the table LNFEEP for credit card processing.
+	
+	03/28/06 - SkariahV - CR19599
+		   Modified the ECID section to prevent Record not found
+		   error on LNBIL0 table during transfer of accounts.
+
+	11/24/05 - Srinivar - CR16890
+		   Modified the section LNEA to pass ELENUM as second
+		   parameter while calling ESCACT^BILFUNCS.
+		   Modified the section NEXTECID to change the 
+		   calling section  from BIL0ELE^BILFUNCS(.lnbil0)
+		   to $$BIL0ELE^BILFUNCS(.lnbil0) to prevent
+		   the GTM error. 
+			
+	10/06/05 - SwarnalathaP - CR16708
+		   Modified ECID section to prevent the loss of scope of the 
+		   object lnbil0 from the if condition.
+
+	04/19/05 - Kini - CR15524	
+		   Modified ESCSPF section to prevent undefined TYP.
+		   Modified IBPY section to remove SCHSEQ from parameter list
+		   and restore original logic.
+		   Eliminated FREQHIT section as unused.
+		   Cleaned up to comply with DBI standards.
+	
+	01/15/04 - RussellDS - CR 7514
+		   Corrected ECID section.  Was extracting piece 5 (#) for
+		   escrow account number.  Corrected to piece 2.
+		   
+		   In same section, correct variable name from ESCID to ECID.
+	
+	03/13/03 - CARROLLJ - 51349
+		   Added FEEPLN linetag back into procedure.
+
+	07/11/02 - CARROLLJ - 43583
+		   PSL conversion cleanup.
+
+	01/09/02 - CARROLLJ - 43583
+		   Convert to PSL.
+	
+	  -----------------------------------------------------------------------
+	*/
+	
+	quit
+	
+	
+public	DIST1FRE(String NPFRE,	// New Pmt Freq 
+		 String BLOFF,	// Billing offset
+		 Date LBDD,	// Last bill due 
+		 Date DIST1ND,	// Next due date 
+		 Date SCHND,	// Next sched date 
+		 Date DIST1LD)	// Last sched date
+		 
+	// Payment frequency change
+
+	/*
+	     RETURNS:
+	           . $$ New values for:
+	    LN.DIST1AF | LN.BNDT | LN.SCHND | LN.DIST1ND | LN.DIST1LD
+	
+	   Change fields BNDT, DIST1AF, DIST1ND, SCHND, DIST1LD on change to DIST1FRE.
+	   Do not change next date fields if already changed, since may have been
+	   changed by specialized functions.	
+	*/
+	
+	type public String ER
+	type Date RSCHND,RBNDT
+	type Number RAF
+	
+	if NPFRE="" quit ""
+	
+	/*
+	RAF    = revised annual factor
+	RBNDT  = revised next billing cutoff
+	RSCHND = revised next scheduled date
+
+	Continually bump last bill due date by new frequency to derive
+	revised next scheduled date.  Stop when the new date less the
+	billing offset is greater than or equal to system date.
+	*/	
+
+	set DIST1LD=$G(DIST1LD)
+	
+	// Start by backing off RCHND one cycle before bumping
+	set RSCHND=$$NJD^UFRE(LBDD,"-"_NPFRE) 
+	for  do { quit:$G(ER)  if RBNDT'<%SystemDate quit 
+		set RSCHND=$$NJD^UFRE(RSCHND,NPFRE,.RAF) quit:$G(ER) 
+		if $G(SCHND) set RSCHND=SCHND
+		if BLOFF="1P" set RBNDT=$$NJD^UFRE(RSCHND,"-"_NPFRE) quit:$G(ER)
+		set RBNDT=RSCHND-BLOFF
+		}
+	if $G(ER) quit ""
+	
+	/*
+	If LBDD is greater than today then the account next scheduled payment
+	date should be equal to its current value.  This is because its
+	current value is one of the dates already found in the bill file so
+	it should not change.  Otherwise it should be set equal to the
+	calculated value RSCHND.
+	New next sch pmt date
+	If DIST1ND is equal to or less than the value of LBDD then DIST1ND
+	should not change because it represents an actual date billed.
+	*/	
+	
+	// New next payment due date
+	if DIST1ND>LBDD set DIST1ND=RSCHND
+	
+	// New last payment due date
+	if DIST1LD'<DIST1ND for  set DIST1LD=$$NJD^UFRE(DIST1ND,"-"_NPFRE) quit:(($G(ER))!(DIST1LD<DIST1ND)) 
+	
+	quit RAF_"|"_RBNDT_"|"_RSCHND_"|"_DIST1ND_"|"_DIST1LD
+	
+
+public	PERIOD(Date CJD,	// Starting Julian date
+	       String DATA,	// Period in days,month,payments
+	       String DIST1FRE)	// Distribution 1 Frequency
+	       
+	// Calculate next julian date based on a period
+
+	/*	
+	     RETURNS:
+	   . $$ Next julian date based on the period		
+	*/
+	
+	type public String ER
+	type Date DDATE
+	type String DMP,TIM
+	type Number I
+	
+	set DDATE=$G(CJD)
+
+	// Length of time
+	set TIM=$E(DATA,1,$L(DATA)-1)
+
+	// Period (Days,Months,Payments)
+	set DMP=$E((DATA),$L(DATA))
+	
+	// Days
+	if DMP="D" set DDATE=$G(CJD)+TIM
+
+	// Months
+	if DMP="M" set DDATE=$$EXT^UMDT(DATA,$G(CJD))
+
+	// Period
+	if DMP="P" do {
+		for I=1:1:(TIM-1) set DDATE=$$NJD^UFRE(DDATE,DIST1FRE) quit:ER 
+		}
+	
+	quit DDATE
+	
+
+public	ESC(String ELMNT)	// Returns indicator if escrow acct
+	
+	set ELMNT=$G(ELMNT)
+	
+	if ELMNT="" quit ""
+	
+	if Db.isDefined("LNFEEP","ELMNT") quit ""
+
+	set ELMNT=$$TT(ELMNT)
+	if (ELMNT="I")!(ELMNT="P")!(ELMNT="L") quit ""
+
+	if 'Db.isDefined("LNTRS","ELMNT") quit ""
+
+	quit 1
+	
+
+public	ELEFRE(Number CID,	// Account Number
+	       String ELE) 	// Payment Element
+	
+	type public String ER
+	type Number AF,CURRAMT,ECID
+	type String BDATA,FRE
+	type Date ND,NJD
+
+	Type RecordLNBIL0 lnbil0=Db.getRecord("LNBIL0","CID")
+	Type RecordLN ln=Db.getRecord("LN","CID")
+
+	set BDATA=$$BIL0^BILFUNCS(.lnbil0,ELE)
+	
+	if $G(BDATA)="" quit ""
+	
+	set FRE=$P(BDATA,"#",4)
+	
+	if FRE=""!(FRE=1) do {
+		set FRE=ln.dist1fre
+		set ND=ln.dist1nd
+		}
+	else  do {
+		if FRE=2 do {
+			set ND=ln.dist2nd 
+			set FRE=ln.dist2fre
+			}
+		if FRE=3 do {
+			set ND=ln.dist3nd
+			set FRE=ln.dist3fre
+			}
+		if FRE=4 do {
+			set ND=ln.dist4nd
+			set FRE=ln.dist4fre
+			}
+		if ND>ln.dist1nd do {
+			new JD
+			if FRE=2 set FRE=ln.dist2fre
+			if FRE=3 set FRE=ln.dist3fre
+			if FRE=4 set FRE=ln.dist4fre
+			for  set ND=$$NJD^UFRE(ND,FRE,,1) quit:ER!(ND<ln.dist1nd)
+			}
+		}
+	set NJD=$$NJD^UFRE(%SystemDate,FRE,.AF) if $G(ER) quit ""
+	
+	if $P(BDATA,"#",2) do {
+		set ECID=$P(BDATA,"#",2) 
+		Type RecordDEP dep=Db.getRecord("DEP","ECID")
+		set CURRAMT=dep.curramt
+		set $P(BDATA,"#",3)=CURRAMT
+		}
+		
+	quit FRE_"|"_ND_"|"_AF_"|"_$P(BDATA,"#",3)
+	
+
+public	INDDATA(RecordLN ln)	// Return index data concatenated together
+
+	type String ZDATA=""
+	
+	set ZDATA=$$INDFILE(ln.index,ln.intspr,ln.rndmtd)
+	if ZDATA="  " set ZDATA=""
+	
+	quit ZDATA
+	
+
+public	INDFILE(String INDEX,	// Name of the Index
+		String INTSPR,	// Spread
+		String RNDMTD)	// Rounding Method
+		
+	// Return index data concatenated together
+
+	// This is set up to do the same as the INDDATA section for loans only.
+	// It will be called from the filer using data items and not the node.
+	
+	type String ZDATA=""
+	
+	if INTSPR="" do {
+		if RNDMTD="" set ZDATA=INDEX
+		else  set ZDATA=INDEX_" "_RNDMTD
+		}
+	else  do {
+		if $E(INTSPR)?.N set INTSPR="+"_INTSPR
+		if RNDMTD="" set ZDATA=INDEX_" "_INTSPR
+		else  set ZDATA=INDEX_" "_INTSPR_" "_RNDMTD
+		}
+	
+	if ZDATA="  " set ZDATA=""
+	
+	quit ZDATA
+
+
+public	TOPFEE(String FEE,	// Fee Plan 
+	       String CTL)	// Control Variable	
+		
+	// Return top-level fee
+	
+	type String BASIS,TOPFEE
+	type Boolean QUIT
+
+	set CTL=$G(CTL)
+	set TOPFEE=FEE set QUIT=0
+
+	type ResultSet rs=Db.select("LFEE,BASIS","LNFEEP","FEETYP=:TOPFEE")
+	if rs.isEmpty() quit ""
+	while rs.next() do { quit:QUIT
+		if 'rs.getCol(1) set QUIT=1 quit
+		set BASIS=rs.getCol(2)		
+		if '$E(CTL),(BASIS="I")!(BASIS="P") set QUIT=1 quit 
+		set TOPFEE=BASIS
+		}
+		
+	quit TOPFEE
+	
+
+public	TT(String TRTYPE)	// Return transfer type
+
+	type Number I,L
+	
+	set L=$L(TRTYPE)
+	for I=L:-1:1 quit:$E(TRTYPE,I)'?.N 
+
+	quit $E(TRTYPE,1,I)
+	
+
+public	ECID(Number CID,		// Account Number
+	     String ELE,		// Escrow Payment Element
+	     RecordLNBIL0 lnbil0)	// LNBIL0 record
+	
+	type Number ECID=""
+	type String ESCDATA
+
+	if 'lnbil0.exists() do {
+		type RecordLNBIL0 lnbil0=Db.getRecord("LNBIL0","CID",1)
+		set ESCDATA=$$BIL0^BILFUNCS(.lnbil0,ELE)
+	}
+	else  set ESCDATA=$$BIL0^BILFUNCS(.lnbil0,ELE)
+	set ECID=$P(ESCDATA,"#",2)
+
+	quit ECID
+	
+
+public	ESCA(Number LCID,		// Loan Account Number
+	     Number ECID,		// Escrow Account Number
+	     RecordLNBIL0 lnbil0)	// LNBIL0 record
+	
+	type String ESC,ESCDATA
+	type Number ELENUM=0
+	
+	
+	if 'lnbil0.exists() do {
+		type RecordLNBIL0 lnbil0=Db.getRecord("LNBIL0","CID=:LCID",1)
+		set ESCDATA=$$ESCACT^BILFUNCS(.lnbil0,ELENUM)
+		}
+	else  set ESCDATA=$$ESCACT^BILFUNCS(.lnbil0,ELENUM)
+	set ESC=$P(ESCDATA,$C(9),2)
+
+	quit ESC
+	
+
+public	NEXTECID(Number LCID,	// Loan Account Number
+	         Number ECID,	// Escrow Account Number
+	         String ARRAY)	// Payment Elements Array
+	
+	type Number PC
+	type String ROW
+
+	Type RecordLNBIL0 lnbil0=Db.getRecord("LNBIL0","CID=:LCID")
+	
+	set ROW=$$BIL0ELE^BILFUNCS(.lnbil0)
+
+	for PC=1:1:20 if $P($P(ROW,$C(9),PC),"#",2)  do {
+		set ARRAY($P($P(ROW,$C(9),PC),"#",2))=$P($P(ROW,$C(9),PC),"#",1)
+		}
+	set ECID=$O(ARRAY(ECID))
+	
+	quit ECID
+
+	
+public	ESCSPF(Number CID,	// Account Number
+	       String X)	// Escrow Transfer Type
+
+	// If the transfer type is passed, only that specific transfer
+	// type will be checked.
+
+	type Boolean ESPF, RES
+	
+	set RES=0
+	set ESPF=1
+	
+	if '(X.get().isNull()) do { quit RES
+		type RecordTRTYPE trtype=Db.getRecord("TRTYPE","CID=:CID,TYP=:X")
+		if trtype.spf set RES=1
+		}
+
+	type ResultSet rs=Db.select("SPF","TRTYPE","CID=:CID")
+	if rs.isEmpty() quit 0
+	while rs.next() if 'rs.getCol("SPF") set ESPF=""
+
+	if ESPF quit 1
+
+	quit 0
+
+	
+public	VALRTN(String RTN)	// Valid routine
+	
+	type public String ER,RM
+	
+	// Invalid routine
+	if '$$VALID^%ZRTNS($P(RTN,"^",2)) set ER=1 set RM=$$^MSG(5424)
+
+	quit 'ER
+
+	
+public	IBPY(Number CID)	// Account Number
+
+	// Interest Billed Prior Year
+
+	type Date DEC31PR,JAN1
+	
+	set JAN1=$$BOYJD^SCADAT(%SystemDate,1)
+	set DEC31PR=$$BOYJD^SCADAT(JAN1-1,1) - 1
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+
+	if '(ln.bseq > 0) quit ""
+
+	type Number INT,SEQ,TOTINT
+	type String SUBELE
+
+	set TOTINT=""
+
+	// Do not load bill sequences beyond ln.bseq
+	for SEQ=1:1:ln.bseq do {
+		type RecordLNBIL1 lnbil1=Db.getRecord("LNBIL1","CID=:CID,SCHSEQ=:SEQ",1)
+		if lnbil1.getMode()=0 quit
+
+		// Get Interest Pmt Element (lnbil1.pe*) e.g., I##50.00#50.00
+		set SUBELE=$$SUB^BILFUNCS("I",.lnbil1)
+
+		set INT=$P(SUBELE,"#",3)  // Interest Total Amount Billed
+		if (lnbil1.cdpd > DEC31PR) , (lnbil1.cdpd < JAN1) set TOTINT=TOTINT+INT
+		}
+
+	quit TOTINT
+
+	
+public	DEDPPY(Number CID)	// Deduct all Loan Fees Paid Prior Year
+
+	/*
+	
+	   This routine will loop through an accouunts loan fees and check
+	   to see if the fees are deductable.  If so, then it will accumulate
+	   the deductable fees and returns the total amount.
+	
+	*/
+	
+	type Number TOTFEE=0
+	
+	type ResultSet rs=Db.select("FEETYP,FEEPY,DED","LNFEE,LNFEEP","lnfee.cid=:CID and lnfee.feetyp=lnfeep.feetyp")
+	if rs.isEmpty() quit ""
+	while rs.next() do {
+		if 'rs.getCol(3) quit
+		set TOTFEE=TOTFEE+rs.getCol(2)
+		}
+		
+	quit TOTFEE
+
+	
+public	DEDPPTY(Number CID)	// Deductable Loan Fees Paid Prior Tax Year
+	
+	type Number TOTFEE=0
+	
+	type ResultSet rs=Db.select("FEETYP,FEEPTY,DED","LNFEE,LNFEEP","lnfee.cid=:CID and lnfee.feetyp=lnfeep.feetyp")
+	if rs.isEmpty() quit ""
+	while rs.next() do {
+		if 'rs.getCol(3) quit
+		set TOTFEE=TOTFEE+rs.getCol(2)
+		}
+		
+	quit TOTFEE
+
+
+public	FEEPLN(String FEE)	// Return loan fee plan data
+
+	type String DATA
+	
+	type RecordLNFEEP lnfeep=Db.getRecord("LNFEEP","FEETYP=:FEE",1)
+	if lnfeep.getMode()=0 quit ""
+
+	set DATA=lnfeep.desc_"|"_lnfeep.dtst_"|"_lnfeep.cfre_"|"_lnfeep.amth_"|"_lnfeep.cfunc_"|"_lnfeep.cfwa_"|"_lnfeep.aprf_"|"
+	set DATA=DATA_lnfeep.trgrp_"|"_lnfeep.andf_"|"_lnfeep.rnd_"|"_lnfeep.dfeepl_"|"_lnfeep.basis_"|"_lnfeep.lfee_"|"
+	set DATA=DATA_lnfeep.fpoff_"|"_lnfeep.feemin_"|"_lnfeep.fminop_"|"_lnfeep.feemax_"|"_lnfeep.fmaxop_"|"_lnfeep.famt_"|"
+	set DATA=DATA_lnfeep.cbmf_"|"_lnfeep.ridd_"|"_lnfeep.glfr_"|"_lnfeep.glfi_"|"_lnfeep.glfdi_"|"_lnfeep.hdesc_"|"
+	set DATA=DATA_lnfeep.gltrop_"|"_lnfeep.comfdt_"|"_lnfeep.mtgfdt_"|"_lnfeep.lnfdt_"|"_lnfeep.cblfdt_"|"_lnfeep.rcfdt_"|"
+	set DATA=DATA_lnfeep.dmfdt_"|"_lnfeep.comfct_"|"_lnfeep.mtgfct_"|"_lnfeep.lnfct_"|"_lnfeep.cblfct_"|"_lnfeep.rcfct_"|"
+	set DATA=DATA_lnfeep.dmfct_"|"_lnfeep.rinc_"|"_lnfeep.definc_"|"_lnfeep.amomet_"|"_lnfeep.amond_"|"_lnfeep.amold_"|"
+	set DATA=DATA_lnfeep.amonum_"|"_lnfeep.amofre_"|"_lnfeep.comfiat_"|"_lnfeep.mtgfiat_"|"_lnfeep.lnfiat_"|"
+	set DATA=DATA_lnfeep.cblfiat_"|"_lnfeep.rcfiat_"|"_lnfeep.dmfiat_"|"_lnfeep.late_"|"_lnfeep.darc_"|"_lnfeep.feeicrtc_"|"
+	set DATA=DATA_lnfeep.feeidrtc_"|"_lnfeep.eppfee_"|"_lnfeep.ded_"|"_lnfeep.ccfdt_"|"_lnfeep.ccfct_"|"_lnfeep.ccfiat_"||"
+	set DATA=DATA_lnfeep.subtovat
+
+	quit DATA
+
+	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60717^37621^Chad Smith^12091"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,309 @@
+LETSTMT		/* myersk 7/2000
+ 
+	   This procedure creates system generated statements to DocuCorp on
+	   a daily basis.  There are several batch definition calls which
+	   create statement(s) based on established criteria, most of
+	   which stem from DAYEND tables produced through triggers.  All
+	   statement records are stored in the LETSTMT table keyed by date, 
+	   company code, form ID, and variation. This table is used to
+	   create the flat file which is sent to DocuCorp.
+
+	   The function @LETSTMT is to be placed in the dayend queue
+	   and calls the top of this procedure. This procedure will prompt
+	   for a company code and a form.  If no company code or form is 
+	   entered at the prompt an extract will be produced for all 
+	   company codes and forms which have not yet been produced.
+	   If no form is entered the naming convention will be 
+	   co_LETSTMT_MMDDYY.EXT.  If a form is entered the convention 
+	   will be co_LETSTMT_form_MMDDYY.EXT.
+
+	   This will also file entries in the LETTERSTMTTOT table for total
+	   TRN reocrds, Account Records, and Transaction records on
+	   statements produced base on variations. 
+
+        ---Revision History---------------------------------------------
+	03/23/07 - SHANKK - CR26568
+		Added total billed to table LETSTMTTOT for report LETSTMTTOT
+	
+	03/19/07 - SHANKK - CR26004
+		   Added total records to table LETSTMTTOT for report LETSTMTTOT.
+	
+	12/21/06 - PUTTASWH - CR 24538		
+		   Modified to remove compilation errors.
+		   
+	01/30/06 Radhika - CR 17423
+		 .Eliminated PSL deprecated features and warnings.
+		 .Removed revision history prior to 2004.		 
+        */
+  	
+	type Date XTJD
+	type String COMPANY,%EXT,FORM,MSG,%READ,%TAB,VFMQ,XIO,XCO
+
+	set COMPANY=CUVAR.co
+	set XTJD=%SystemDate
+
+	set %TAB("XTJD")=".EFD2"
+	set %TAB("XCO")=$$DI^SCATAB("[UTBLCO]CO",,,"[UTBLCO]")
+        set %TAB("FORM")="[STBLFORMS]FORM/TBL=[STBLFORMS]/XPP=D POST^LETSTMT(X,XCO)/NOREQ"
+	set %TAB("XIO")=$$IO^SCATAB() 
+ 
+	// 11/05/00 myersk - modify post-processor logic on XIO
+        set %READ="@@%FN/CEN/REV,,XTJD,XCO,FORM,XIO/NOREQ/XPP=I X'="""" set %EXT=1 do ^SCAIO"
+	do ^UTLREAD quit:VFMQ="Q"
+
+        do %EXT(XCO,FORM,XIO,XTJD)
+
+        quit
+
+
+%EXT(String XCO,String XFORM,String XIO,Date XTJD)        // External entry call
+	
+	type public Number SEQ
+	type String REC995()
+	type Date TIME
+	type String REC,R995,XVAR	
+	
+        catch vERROR {
+                type String ET,RM
+                set ET=vERROR.type
+                if ET["%GTM-" do ZE^UTLERR quit
+                set ET=ET_"-"_vERROR.thrownAt
+                set RM=vERROR.description
+                do ^UTLERR
+                }
+
+	if XTJD.get().isNull() set XTJD=%SystemDate
+	set TIME=%CurrentTime.toString("2460")
+	set SEQ=0
+
+	type IO io=Class.new("IO")
+
+	//11/05/00 myersk - Use formatted date in extract file name
+	if XIO.get().isNull() set XIO=XCO_"_LETTER_"_XFORM_"_"_XTJD.toString("MMDDYY")_".EXT"
+	else  set io.directory=""
+
+	set io.fileName=XIO
+	set io.recordSize=1000
+	set io.openParams="WRITE/NEWV"
+
+	do io.open()
+
+	if XFORM.isNull() do ALL(.io,XCO)
+	else  do ONE(.io,XCO,XFORM)
+
+	// myersk/ofaltr 45845 - write 995 Records
+        set (R995,XCO,XFORM,XVAR)=""
+        for  set XCO=REC995(XCO).order() quit:XCO.isNull()  do {
+                for  set XFORM=REC995(XCO,XFORM).order() quit:XFORM.isNull()  do {
+                        for  set XVAR=REC995(XCO,XFORM,XVAR).order() quit:XVAR.isNull()  do {
+                                set R995="995"_$$BLK^FIL(XCO,12)
+                                set R995=R995_$$BLK^FIL(XFORM,12)_$$ZERO^FIL(XVAR,3)
+                                set R995=R995_$$ZERO^FIL(REC995(XCO,XFORM,XVAR),13)
+                                do io.write(R995)           
+				set SEQ=SEQ+1
+                                }
+                        }
+                }
+ 
+	// ofaltr - 07/26/01 create 0 entry in LETSTMTTOT
+	if SEQ=0 set (XCO,XFORM,XVAR)="*" do TOT(.io,0,0,0,0,0)
+	// Trailer record with number of lines including trailer record
+	set REC=$$ZERO^FIL(SEQ+1,13)_XTJD.toString("MMDDYEAR")
+	do io.write(REC)
+
+	do io.close()
+
+	quit
+
+
+ALL(IO io,String CO)	// Prints all forms to extract file
+	
+	type public Date XTJD
+	type public Number SEQ
+	type Number TOTBILL,TOTSTM,TOTCID,TOTREC,TOTTRN,VAR
+	type String REC,RTYP,XCO,XFORM,XVAR
+	
+	type ResultSet rs2=Db.select("DISTINCT CO","LETSTMT","SJD=:XTJD")
+	if 'rs2.isEmpty() while rs2.next() do {
+		set XCO=rs2.getCol("CO")
+		if 'CO.isNull(),XCO'=CO quit
+
+		type ResultSet rs3=Db.select("DISTINCT FORM","LETSTMT","SJD=:XTJD AND CO=:XCO")
+		if 'rs3.isEmpty() while rs3.next() do {
+			set XFORM=rs3.getCol("FORM")
+			
+			type RecordLETSTMT0 letstm = Db.getRecord("LETSTMT0","SJD=:XTJD,CO=:XCO,FORM=:XFORM",1) 
+			if letstm.getMode(),letstm.flg do Runtime.setErrMSG("LETSTMT0",4451) quit  	
+			
+			type ResultSet rs4=Db.select("DISTINCT VAR","LETSTMT","SJD=:XTJD AND CO=:XCO AND FORM=:XFORM")
+			if 'rs4.isEmpty() while rs4.next() do {
+				set XVAR=rs4.getCol("VAR")
+				set (TOTBILL,TOTSTM,TOTCID,TOTTRN,TOTREC)=0
+				
+				type ResultSet rs5=Db.select("RECORD,RECTYPE","LETSTMT","SJD=:XTJD AND CO=:XCO AND FORM=:XFORM AND VAR=:XVAR")
+				if 'rs5.isEmpty() while rs5.next() do {
+					set REC=rs5.getCol("RECORD")
+					set RTYP=rs5.getCol("RECTYPE") 
+					do io.write(REC) 
+					set SEQ=SEQ+1
+					if RTYP="TRN" set TOTSTM=TOTSTM+1
+					if ((RTYP="300")!(RTYP="400")) set TOTCID=TOTCID+1
+					if RTYP="710" set TOTTRN=TOTTRN+1
+					set TOTREC=TOTREC+1  //KS 03/19/07
+					if RTYP="790" set TOTBILL=TOTBILL+(REC.extract(250,261)/100)  //KS 03/22/07
+					}
+				do TOT(io,TOTSTM,TOTCID,TOTTRN,TOTREC,TOTBILL)
+				}
+			do LETZERO(XTJD,XCO,XFORM)
+			}
+		}
+	quit
+
+
+ONE(IO io,String CO,String XFORM)    // Prints one form to an extract file
+ 
+	type public Date XTJD
+	type public Number SEQ
+	type Number TOTBILL,TOTSTM,TOTCID,TOTREC,TOTTRN,XVAR
+	type String REC,RTYP,XCO
+	
+	type ResultSet rs=Db.select("DISTINCT CO","LETSTMT","SJD=:XTJD")
+	if 'rs.isEmpty() while rs.next() do {
+		set XCO=rs.getCol("CO")
+		if 'CO.isNull(),XCO'=CO quit
+		
+		type RecordLETSTMT0 letstm = Db.getRecord("LETSTMT0","SJD=:XTJD,CO=:XCO,FORM=:XFORM",1) 
+		if letstm.getMode(),letstm.flg do Runtime.setErrMSG("LETSTMT0",4451) quit 	
+
+		type ResultSet rs1=Db.select("DISTINCT VAR","LETSTMT","SJD=:XTJD AND CO=:XCO AND FORM=:XFORM")
+		if 'rs1.isEmpty() while rs1.next() do {
+			set XVAR=rs1.getCol("VAR")
+			set (TOTBILL,TOTSTM,TOTCID,TOTTRN,TOTREC)=0
+	
+			type ResultSet rs2=Db.select("RECORD,RECTYPE","LETSTMT","SJD=:XTJD AND CO=:XCO AND FORM=:XFORM AND VAR=:XVAR")
+			if 'rs2.isEmpty() while rs2.next() do {
+				set REC=rs2.getCol("RECORD")
+				set RTYP=rs2.getCol("RECTYPE")
+				do io.write(REC)
+				set SEQ=SEQ+1
+	
+				if RTYP="TRN" set TOTSTM=TOTSTM+1
+				if ((RTYP="300")!(RTYP="400")) set TOTCID=TOTCID+1
+				if RTYP="710" set TOTTRN=TOTTRN+1
+				set TOTREC=TOTREC+1  //KS 03/19/07
+				if RTYP="790" set TOTBILL=TOTBILL+REC.extract(250,261)/100  //KS 03/22/07
+				}
+
+			do TOT(io,TOTSTM,TOTCID,TOTTRN,TOTREC,TOTBILL)
+			}
+		do LETZERO(XTJD,XCO,XFORM)
+		}
+	quit
+
+
+LETZERO(Date XTJD,String XCO,String XFORM) // Builds LETTER0 after each form
+ 
+        type RecordLETSTMT0 letstmt0=Class.new("RecordLETSTMT0")
+ 
+        set letstmt0.sjd=XTJD
+        set letstmt0.co=XCO
+        set letstmt0.form=XFORM
+        set letstmt0.flg=1
+
+        do letstmt0.bypassSave()
+        quit
+ 
+
+TOT(IO io,Number TOTSTM,Number TOTCID,Number TOTTRN,Number TOTRECS,Number TOTBILL)	// write totals to LETSTMTTOT
+	
+	type public Date XTJD
+	type public String REC995(),XFORM,XCO
+	type public Number XVAR
+	
+        type RecordLETSTMTTOT tot=Class.new("RecordLETSTMTTOT")
+ 
+        set tot.sjd=XTJD
+        set tot.extract=io.fileName
+        set tot.co=XCO
+        set tot.form=XFORM
+        set tot.var=XVAR
+        set tot.totstm=TOTSTM
+	set tot.totcid=TOTCID
+	set tot.tottrn=TOTTRN
+        set tot.dat=%CurrentDate
+        set tot.tim=%CurrentTime
+        set tot.totrecs=TOTRECS.get()  //KS 03/19/07
+        set tot.totbill=TOTBILL.get()   //KS 03/22/07
+
+	do tot.bypassSave()
+
+	//ofaltr - 07/26/01
+	if (XCO="*"),(XFORM="*"),(XVAR="*") quit
+
+	// myersk 45845 - store total in local array
+	set REC995(XCO,XFORM,XVAR)=TOTSTM
+
+	do REC799(io,TOTSTM,TOTCID,TOTTRN)
+
+	quit
+
+
+REC799(IO io,Number TOTSTM,Number TOTCID,Number TOTTRN)	// create 799 record and write to IO	
+	
+	type public Number SEQ,XVAR 				
+	type public String XFORM,XCO
+	type Number VAR
+	type String CO,FORM,REC
+	
+	set CO=XCO
+	set FORM=XFORM
+	set VAR=XVAR
+	set REC=$$799^LETTERF()
+	do io.write(REC)
+
+	// kph 4/18/01
+	set SEQ=SEQ+1
+	
+	// file 799 record to LETSTMT with CID and STMGRP all 9's
+	// to ensure 799 record is last record per CO/FORM/VAR combination
+	do FILESTM^LETTERU(999999999999,,FORM,CO,VAR,799,1,999,REC)
+
+	quit
+
+
+POST(String XFORM,String XCO,String XCOMPANY)
+ 	
+ 	type public Date XTJD
+ 	type public String COMPANY,RM
+ 	type Date DATE
+	type Number CVAR,FLG
+	type String COMP,ER,XIO
+	
+	set FLG=0
+	
+	if XTJD.get().isNull() set XTJD=%SystemDate 	
+        set DATE=XTJD.toString("MMDDYY")
+ 
+	if XCO.isNull() set COMP=COMPANY
+	else  set COMP=XCO
+        if XFORM.isNull() set XIO=COMP_"_LETSTMT_ALL_"_DATE_".EXT"
+        else  set XIO=COMP_"_LETSTMT_"_XFORM_"_"_DATE_".EXT"
+
+	do DEFAULT^DBSMACRO("@XIO",XIO)
+
+	if XFORM.isNull() quit
+
+	if (XCO.isNull())!(XFORM.isNull()) quit
+	
+	type RecordLETSTMT0 letstm = Db.getRecord("LETSTMT0","SJD=:XTJD,CO=:XCO,FORM=:XFORM",1)
+	//Form has already been printed today
+	if letstm.getMode() set FLG=letstm.flg
+	if FLG do Runtime.setErrMSG("LETSTMT0",4451) quit
+	
+	set CVAR=Db.currVal("LETSTMT","XTJD,XCO,XFORM")
+
+	// myersk 43728 - set ER to "W" to avoid "Abort" message in DAYEND
+        if CVAR.isNull() set ER="W",RM=$$^MSG(4452)
+        quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60733^51498^Keith Shank^9364"	// Signature - LTD^TIME^USER^SIZE

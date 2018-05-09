@@ -1,0 +1,551 @@
+INTMAT
+	/*
+	       ORIG: Anna Maltepes
+	       DESC: Interest Matrix Maintenance
+
+	   MATRIX: MATRIX ARRAY - MATRIX(N)=ROW|COL|SPREAD  N=1...n
+	   MATRIX: Contains all the new Matrix information
+
+	---- Revision History -------------------------------------------------
+
+	12/04/06 - SANTHUMS - CR 24324
+		   Modified TWODIM section to add not condition to
+		   (SEQ#%REPEAT = 0) + (SEQ \ %REPEAT) since 
+		   wrong page numbers were getting displayed in functions
+		   @MAT002-@MAT004.	
+	
+	26/05/06 - SANTHUMS - CR 21520
+		   Modified VER section to delete matrix entries (temporarily) 
+		   if it is in anticipated mode and delete process mode. 
+		   So LOADAX^MATRIXMC doesn't pick it up.	
+	
+	26/05/06 - SANTHUMS - CR 21348
+		   Modified ONEDIM,TWODIM sections to add temporary array to
+		   display the data in order while executing the Interest 
+		   Matrix maintenance.
+	         
+	04/24/06 - SmithCD - CR 20866
+		   Replaced code that saves matrix data with code moved in 
+		   from MATRIXMC (tweaked to prevent Unique constraint 
+		   violations). This way we will consistently save the matrix 
+		   itself data one way whether we're backdating or not. 
+		   Previously we were saving the data twice for backdated 
+		   matrix changes. Removed ERR section to prevent ETUNDEF 
+		   error when reporting another error.
+	
+	04/10/06 - SmithCD - CR 20682
+		   Fixed general error handling and "Matrix ~P1 is not valid 
+		   for ~P2" error checking, which was clobbered by the last 
+		   change.
+	   
+	03/17/06 - SmithCD - CR 20124
+		   . Fixed undefined error in CHK2 section
+		   . Changed check on linked accounts to use ACN table instead 
+		     of DEP
+		   . Re-worked ONEDIM and TWODIM sections to load MATRIX() 
+		     properly
+		   . Made %READ, %TAB, TXT() public in DFT section to prevent 
+		     undefined errors
+	   
+	07/28/05 - Srinivasan Rajesh - CR 16726
+	   	   Modified the following with respect to Interest Rates System
+	   	   area.	
+	   	   .Modified the FILE2 section to update the UTBLMATATT1 table
+	   	    with the keys since the look up table for the effective
+	   	    date fetches the value from the UTBLMATATT1 table.
+	   	   .Modified the FILE2 section to declare the following arrays
+	   	    MATRIX(), NEWARR(,), OLDARR(,) as public so that it will 
+	   	    not get out of scope when entering the FILE2 section. 
+	   	    The above change will allow the data to be stored in 
+	   	    UTBLMATATT2.	
+	   
+	04/21/05 - SmithCD - CR 15305
+	   	   . Added NAME to parameter list in call to MATRIXMC to 
+	   	     prevent undefined error
+	   	   . Removed PREEFD section, which was empty, and the call 
+	   	     to it
+	   	   . Added private labels to tags that are called from 
+	   	     within the Interest Rates system area
+	   	   . Fixed problem with several if / else instances, in 
+	   	     which both the if and else conditions could get 
+	   	     executed
+	   	   . Removed quits from several while constructs that 
+	   	     caused it to erroneously execute a maximum of one time
+	   	   . Removed extraneous parameters from sections DEL1, 
+	   	     FILE1, and FILE2 (and from calls to those sections)
+	   	   . Removed old revision history
+		   . Modified to comply with current PSL standards
+		      
+	*/
+
+	quit
+
+
+private	NEW 	// Add Rates by Effective Date
+
+	do INIT(0)
+
+	quit
+
+
+private	UPD 	// Modify Rates by Effective Date
+
+	do INIT(1) 
+
+	quit
+
+
+private	INQ 	// Display Rates by Effective Date
+
+	do INIT(2) 
+
+	quit
+
+
+private	DEL 	// Delete Rates by Effective Date
+
+	do INIT(3) 
+
+	quit
+
+
+INIT(Number %ProcessMode)	// Trigger processing to maintain matrix
+
+	type public Boolean ER
+
+	type Boolean ANT, DFT, FINISH
+	type Number %PAGE, %PG, %REPEAT, MATXSEQ, OLNTB
+	type String VFMQ
+	
+	type RecordUTBLMATATT fUTBLMAT
+	type RecordUTBLMATATT1 fUTBLMT1
+	type RecordUTBLMATATT2 fUTBLMT2
+		
+	set %PG = -1
+	set %PAGE = 1
+	set %REPEAT = 12
+
+	set (ANT, DFT) = 0
+	
+        set FINISH = 0
+	for  do { quit:FINISH
+		if %PG < 0 do VPG01 if VFMQ = "Q" set FINISH = 1 quit
+		
+		if %PG = 0 do VPG00 if VFMQ = "Q" set FINISH = 1 quit
+		
+		if %PG > 0 do { if VFMQ = "Q" set FINISH = 1 quit
+			do VPG001(.fUTBLMAT, .fUTBLMT1, .fUTBLMT2)
+			if ER set VFMQ = "Q"
+			}
+		
+		if "DFQ".isLike("%"_VFMQ_"%") do { quit
+			do VER
+			set FINISH = 1
+			}
+		
+		set %PG = %PG + 1
+		}
+
+	quit
+
+
+VPG01 	// Set up screen for Matrix and effective date
+
+	type String %OSAVE, %READ, %TAB
+
+	set %TAB("NAME") = ".NAME/HLP=[UTBLMATATT1]NAME/TBL=[UTBLMATATT]NAME/TBL=[UTBLMATATT]"
+	set %TAB("EFD") = ".EFD1/XPP=D POEFD^INTMAT/TBL=[UTBLMATATT1]EFD:DISTINCT:NOVAL:QU ""[UTBLMATATT1]NAME=<<NAME>>"""
+
+	set %READ = "@@%FN,,,NAME/REQ,EFD/REQ"
+	set %OSAVE = %ProcessMode
+
+	do ^UTLREAD 
+
+	quit
+
+
+VPG00	// Test and set up for anticipated run
+
+	type public Boolean ANT
+	
+	type String %NOPRMT, %READ, %TAB, TXT()
+	type Number OLNTB
+
+	if %EffectiveDate '< %SystemDate quit
+
+	// Inquiry  mode
+	if (%ProcessMode = 2) ! (%ProcessMode = 4) quit
+
+	// No accounts linked
+	type ResultSet rs = Db.select("INTMAT", "ACN", "INTMAT=:NAME")
+	if rs.isEmpty() quit
+
+	set ANT = 1
+
+	// For important information, press HELP and select Function_Doc	
+	set TXT(1) = $$^MSG(5502)
+
+	set TXT(1) = $$CJ^%ZTEXT(TXT(1), 79)
+
+	set %TAB("ANT") = ".ANT1"
+	set OLNTB = 8038
+	set %READ = "@TXT(1),,,ANT" 
+	set %NOPRMT = "N"
+
+	// Create or update mode
+	if %ProcessMode < 2 do DFT
+
+	do ^UTLREAD
+
+	quit
+
+
+VPG001(RecordUTBLMATATT fUTBLMAT,  // Interest/Dividend Matrix Def	/REFNAM:W
+       RecordUTBLMATATT1 fUTBLMT1, // Interest/Dividend Matrix by EFD 1	/REFNAM:W
+       RecordUTBLMATATT2 fUTBLMT2) // Interest/Dividend Matrix by EFD 1	/REFNAM:W
+	
+	type public String ER, NAME
+	type public Number %PG, %REPEAT, MATCOL
+	type public Boolean DFT
+
+	// Screen set up for data entry
+	type Number %MODS
+	
+	set fUTBLMAT = Db.getRecord("UTBLMATATT", "NAME=:NAME", 1)
+	set fUTBLMT1 = Class.new("RecordUTBLMATATT1", "NAME=:NAME")
+	set fUTBLMT2 = Class.new("RecordUTBLMATATT2", "NAME=:NAME")
+
+	// Matrix Column
+	set MATCOL = fUTBLMAT.matcol
+
+	// Every 12th (%REPEAT) item set VPG
+	set %MODS = ((%PG * %REPEAT) - %REPEAT) + 1
+
+	// Two-dimensional matrices
+	if MATCOL do { quit:ER
+		do TWODIM(DFT) quit:ER
+		do DRV^USID(%ProcessMode, "UTBLMATATT2", .fUTBLMAT, .fUTBLMT2)
+		}
+
+	// One-dimensional matrices
+	if 'MATCOL do { quit:ER
+		do ONEDIM(DFT) quit:ER
+		do DRV^USID(%ProcessMode, "UTBLMATATT1", .fUTBLMT1, .fUTBLMAT)
+		}
+
+	quit
+
+
+ONEDIM(Boolean DFT)	// Set data entry for one dimensional matrix
+
+	type public String MATRIX(),NAME
+	type public Number MATXSEQ
+
+	type Date DATE
+	type Number SEQ
+	type String ROW,TMPMAT()
+
+	set SEQ = ""
+	set DATE = %EffectiveDate + 1
+
+	do GETDATE
+
+	if DATE.isNull() quit
+
+	// Load from DAYEND record
+	if DFT do LOADD(NAME, MATXSEQ) quit
+
+	type ResultSet rs = Db.select("COL", "UTBLMATATT2", "NAME=:NAME AND EFD=:DATE")
+
+	// Matrix is not 1-dimensional, "Matrix ~P1 is not valid for ~P2"
+	if rs.next() do { quit
+		type Date DATESTR
+		set DATESTR = DATE.toString()
+		do Runtime.setErrMSG("UTBLMATATT2", 3223, "NAME~DATESTR") quit
+		}
+
+	type DbSet ds = Db.selectDbSet("UTBLMATATT1", "NAME=:NAME AND EFD=:DATE")
+	
+	while ds.next() do {
+		type RecordUTBLMATATT1 utblmatatt1 = ds.getRecord("UTBLMATATT1")
+		set TMPMAT(utblmatatt1.row)=utblmatatt1.spread
+		}
+	
+	set SEQ = 0
+	
+	set ROW=""
+	
+	for  set ROW = TMPMAT(ROW).order() quit:ROW.isNull()  do {
+
+		set SEQ = SEQ + 1
+		set MATRIX(SEQ) = ROW_"||"_TMPMAT(ROW)
+		}
+	
+	quit
+
+
+TWODIM(Boolean DFT)	// Set Data Entry for the two-dimensional matrix
+
+	type public Boolean ER
+	type public String MATRIX(), NAME
+	type public Number %PAGE, %REPEAT, MATXSEQ
+	
+	type Date DATE
+	type Number SEQ
+	type String COL,ROW,TMPMAT(,)
+	
+	set DATE = %EffectiveDate + 1
+
+	do GETDATE
+
+	if DATE.isNull() quit
+
+	// Load from DAYEND record
+	if DFT do LOADD(NAME, MATXSEQ) quit
+	
+	// Nothing defined for this date
+	type ResultSet rs = Db.select("ROW", "UTBLMATATT1", "NAME=:NAME AND EFD=:DATE")
+	if rs.next() do { quit:ER
+		type DbSet ds = Db.selectDbSet("UTBLMATATT2", "NAME=:NAME AND EFD=:DATE")
+		if ds.isEmpty() do { quit
+			type Date DATESTR = DATE.toString()
+
+			// Matrix is not 2-dimensional, "Matrix ~P1 is not valid for ~P2"
+			do Runtime.setErrMSG("UTBLMATATT2", 3223, "NAME~DATESTR") quit
+			}
+		
+		while ds.next() do { quit:ER
+			type RecordUTBLMATATT2 utblmatatt2 = ds.getRecord("UTBLMATATT2")
+
+			set TMPMAT(utblmatatt2.row,utblmatatt2.col)=utblmatatt2.spread
+			}
+		}
+	
+	set SEQ = 0
+	set ROW=""
+	
+	for  set ROW = TMPMAT(ROW).order() quit:ROW.isNull()  do {
+
+		set COL=""
+		for  set COL = TMPMAT(ROW,COL).order() quit:COL.isNull()  do {
+
+			set SEQ = SEQ + 1
+			set MATRIX(SEQ) = ROW_"|"_COL_"|"_TMPMAT(ROW,COL)
+			}
+		}
+	
+	if %ProcessMode set %PAGE = ('(SEQ#%REPEAT = 0)) + (SEQ \ %REPEAT)
+
+	quit
+
+
+LOADD(String NAME, Number MATXSEQ)	// Load from dayend file
+
+	type public String MATRIX()
+
+	type Number CHGSEQ
+	
+	type DbSet ds = Db.selectDbSet("DAYENDMAT1", "TJD=:%SystemDate AND NAME=:NAME AND MATXSEQ=:MATXSEQ", "CHGSEQ DESC")
+	
+	while ds.next() do {
+		type RecordDAYENDMAT1 dayendmat1 = ds.getRecord()
+		
+		set CHGSEQ = dayendmat1.chgseq
+
+		set MATRIX(CHGSEQ).piece("|", 1) = dayendmat1.rownew
+		set MATRIX(CHGSEQ).piece("|", 2) = dayendmat1.colnew
+		set MATRIX(CHGSEQ).piece("|", 3) = dayendmat1.spreadnew
+		}
+
+	quit
+
+
+private	POEFD	// Effective date post processor
+
+	type public String I(), NAME
+	type public Boolean %OSAVE
+	type public Date X
+	
+	type String DATE
+
+	if X.isNull() quit
+
+	type ResultSet rs = Db.select("EFD", "UTBLMATATT1", "NAME=:NAME AND EFD=:X", "EFD")
+	
+	set DATE = X.toString()
+
+	// Invalid date ~p1
+	if %OSAVE, rs.isEmpty() do Runtime.setErrMSG("UTBLMATATT1", 1308, DATE) quit
+
+	// Matrix ~p1 already exists for ~p2
+	if '%OSAVE, 'rs.isEmpty() do Runtime.setErrMSG("UTBLMATATT1", 3249, "NAME~DATE") quit
+	
+	set I(3) = ""
+	
+	quit
+
+
+DFT	// Test for existing info on dayend file
+
+	type public Boolean DFT
+	type public String %READ, %TAB, NAME, TXT()
+	type public Number MATXSEQ
+
+	/*
+	Only default from dayend global if there is match on the index 
+	effective date.
+	*/
+	
+	type ResultSet rs = Db.select("MATXSEQ", "DAYENDMAT", "TJD=:%SystemDate AND NAME=:NAME AND ANT=1 AND EFD=:%EffectiveDate", "MATXSEQ DESC")
+	
+	if rs.next() set MATXSEQ = rs.getCol("MATXSEQ"), DFT = 1
+	else  set DFT = 0
+
+	// Not Anticipated
+	if 'DFT quit
+
+	// Default values exist from a previous anticipated run
+	set TXT(6) = $$^MSG(6768)
+	set %TAB("DFT") = ".DFT3"
+	set %READ = %READ_",,@TXT(6),,DFT"
+
+	quit
+
+
+GETDATE	// Get the most recent date
+
+	type public Date DATE
+
+	type ResultSet rs = Db.select("EFD", "UTBLMATATT1", "NAME=:NAME AND EFD<:DATE", "EFD DESC")
+	if rs.next() set DATE = rs.getCol("EFD")
+
+	quit
+
+
+VER	// Process mass matrix changes and file data
+
+	type public String ER, MATRIX(), NAME, VFMQ
+	type public Boolean ANT
+	type public Number MATCOL
+	
+	type Number CHGSEQ, COL, ROW, SEQ, SPR
+	
+	if (%ProcessMode = 2) ! (%ProcessMode = 4) ! (VFMQ = "Q") do END quit
+
+	if (%ProcessMode = 3) do {
+		do Db.fastDelete("UTBLMATATT1", "NAME=:NAME,EFD=:%EffectiveDate")
+		do Db.fastDelete("UTBLMATATT2", "NAME=:NAME,EFD=:%EffectiveDate")
+		}
+		
+	if %EffectiveDate < %SystemDate do ^MATRIXMC(.MATRIX(), %EffectiveDate, NAME) quit:ER
+
+	if (ANT)&(%ProcessMode = 3) do {
+		
+		set (CHGSEQ) = ""
+		for  set CHGSEQ = MATRIX(CHGSEQ).order() quit:CHGSEQ.isNull()  do {
+			set ROW = MATRIX(CHGSEQ).piece("|", 1)
+			if ROW.isNull() quit
+		
+			set COL = MATRIX(CHGSEQ).piece("|", 2)
+			set SPR = MATRIX(CHGSEQ).piece("|", 3)
+		
+			// Always save to single-dimensional matrix for look-up
+			type RecordUTBLMATATT1 matatt1 = Db.getRecord("UTBLMATATT1", "NAME=:NAME,EFD=:%EffectiveDate,ROW=:ROW", 1)
+		
+			// But only save spread if single-dimensional matrix
+			if COL.isNull() set matatt1.spread = SPR
+			else  set matatt1.spread = ""
+		
+			do matatt1.bypassSave()
+		
+			// Not a two-dimensional matrix
+			if COL.isNull() quit
+		
+			// Two-dimensional matrix - save spread
+			type RecordUTBLMATATT2 matatt2 = Db.getRecord("UTBLMATATT2", "NAME=:NAME,EFD=:%EffectiveDate,ROW=:ROW,COL=:COL", 1)
+			set matatt2.spread = SPR
+			do matatt2.bypassSave() 
+			}
+		}
+		
+	if 'ANT do FILE(.MATRIX())
+		
+	do END
+	
+	quit
+	
+	
+FILE(String MATRIX())		// Matrix screen data			/REF:R
+
+	type public String NAME
+
+	type Number CHGSEQ, COL, ROW, SPR
+	
+	do Db.fastDelete("UTBLMATATT1", "NAME=:NAME,EFD=:%EffectiveDate")
+	do Db.fastDelete("UTBLMATATT2", "NAME=:NAME,EFD=:%EffectiveDate")
+	
+	// No new data to file if deleting
+	if %ProcessMode = 3 quit
+	
+	set (CHGSEQ) = ""
+	for  set CHGSEQ = MATRIX(CHGSEQ).order() quit:CHGSEQ.isNull()  do {
+		set ROW = MATRIX(CHGSEQ).piece("|", 1)
+		if ROW.isNull() quit
+		
+		set COL = MATRIX(CHGSEQ).piece("|", 2)
+		set SPR = MATRIX(CHGSEQ).piece("|", 3)
+		
+		// Always save to single-dimensional matrix for look-up
+		type RecordUTBLMATATT1 matatt1 = Db.getRecord("UTBLMATATT1", "NAME=:NAME,EFD=:%EffectiveDate,ROW=:ROW", 1)
+		
+		// But only save spread if single-dimensional matrix
+		if COL.isNull() set matatt1.spread = SPR
+		else  set matatt1.spread = ""
+		
+		do matatt1.bypassSave()
+		
+		// Not a two-dimensional matrix
+		if COL.isNull() quit
+		
+		// Two-dimensional matrix - save spread
+		type RecordUTBLMATATT2 matatt2 = Db.getRecord("UTBLMATATT2", "NAME=:NAME,EFD=:%EffectiveDate,ROW=:ROW,COL=:COL", 1)
+		set matatt2.spread = SPR
+		do matatt2.bypassSave() 
+		}
+
+	quit
+
+
+END	// End of processing
+
+	type public String ER, NAME, RM, VFMQ
+
+	set NAME = NAME.get()
+	if ER.get() ! (%ProcessMode = 2) ! (%ProcessMode = 4) quit
+
+	set ER = "W"
+	if VFMQ = "Q" do {
+		// Rates for matrix ~p1 not created
+		if %ProcessMode = 0 set RM = $$^MSG(3253, NAME) quit
+
+		// Rates for matrix ~p1 not modified
+		if %ProcessMode = 1 set RM = $$^MSG(3254, NAME) quit
+
+		// Rates for matrix ~p1 not deleted
+		if %ProcessMode = 3 set RM = $$^MSG(3255, NAME) quit
+		}
+	else  do {
+
+		// Rates for matrix ~p1 created
+		if %ProcessMode = 0 set RM = $$^MSG(3250, NAME) quit
+
+		// Rates for matrix ~p1 modified
+		if %ProcessMode = 1 set RM = $$^MSG(3251, NAME) quit
+
+		// Rates for matrix ~p1 deleted
+		if %ProcessMode = 3 set RM = $$^MSG(3252, NAME) quit
+		}
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60604^2375^Sunitha Santhumayor^13487"	// Signature - LTD^TIME^USER^SIZE

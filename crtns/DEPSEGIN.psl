@@ -1,0 +1,195 @@
+DEPSEGIN	
+	/* --- Revision History -------------------------------------------
+
+	05/11/07 - SANTHUMS - CR 27044              
+	           Modified INSERT section to insert a record into 
+	           DAYENDINP, since, interest was not getting posted 
+	           on the next interest posting date whenever segmented 
+	           deposit accounts were created.
+	           
+	02/05/07 - chhabris - CR24680
+		   Modified INSERT section to update depseg.cls column to
+		   'D'. This is required as ACNSEG.tbl is the super file
+		   type for DEPSEG.tbl and LNSEG.tbl. The column CLS will
+		   differentiate the account class (Loan/Deposit) for the 
+		   records in ACNSEG.tbl.
+
+	10/13/05 - RADHIKA - 16891 
+                   .Eliminated PSL deprecated features and Warnings.
+                   .Removed revision history prior to 2004.
+                   .Removed all references to UPD variable
+		    	
+	------------------------------------------------------------------ */
+	
+	quit
+
+private INSERT(RecordDEP dep,CID,SEGSTART,TAMT,SEGMENT,fDEPSEG)
+     /*	INPUTS:
+		. CID			/TYP=N/REQ/MECH=VAL
+		  Account Number
+
+		. SEGSTART		/TYP=D/NOREQ/MECH=VAL
+		  Segment Start (Default TJD)
+
+		. TAMT			/TYP=N/NOREQ/MECH=VAL
+		  Transaction Amount 
+
+		. SEGMENT		/TYP=N/NOREQ/MECH=REF
+		  Segment Number
+
+		. fDEPSEG		/TYP=T/NOREQ/MECH=REF
+		  Segment Array
+
+	RETURNS:
+		. SEGMENT
+		. fDEPSEG
+
+	EXAMPLE:
+
+		D INSERT^DEPSEGIN(CID,SEGSTART,TAMT,.SEGMENT,.fDEPSEG)
+
+	------------------------------------------------------------------- */
+
+	type public Boolean ER
+	type Number INTPOS,KSEG(),RATE
+	type String PAR()
+	
+	if $g(CID)="" quit
+	if +$g(SEGSTART)=0 set SEGSTART=%SystemDate
+	set SEGMENT=$g(SEGMENT)
+	if SEGMENT'="",(Db.isDefined("DEPSEG","CID,SEGMENT")),'$D(KSEG(SEGMENT)) do Runtime.setErrMSG("DEP",964,CID) quit
+	if SEGMENT="" set SEGMENT=Db.nextVal("DEPSEG",CID)
+	
+	// Cannot create new segment.  Account ~p1 must have a term defined.
+	if dep.trm="" do Runtime.setErrMSG("DEP",3749,CID) quit
+
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+	type RecordDEPSEG depseg=Class.new("RecordDEPSEG")
+	set INTPOS=cuvar.intpos
+ 
+ 	set depseg.cls="D"
+	set depseg.cid=CID
+	set depseg.segment=SEGMENT
+	set depseg.segstart=SEGSTART
+
+	// For Zero segment, different defaults apply
+	if SEGMENT=0 do ZSEG(.depseg,.dep)
+	if SEGMENT>0 do NOZSEG(.depseg,.dep)
+
+	// Perform special processing if CUVAR.USEGOPT is defined and the
+	// call comes in from transaction processing
+	#IF 'CUVAR.USEGOPT.isNull()  
+		if TAMT.get(),CUVAR.USEGOPT=1 do SEGUPD^SEGINIDT(TAMT,.dep,.depseg)
+		if $g(ER) quit
+	#END IF
+	
+	if depseg.ipf'="" do {
+		new NJD
+		set NJD=$$FRSTDATE^ACNFUNCS(SEGSTART,depseg.ipf,INTPOS) quit:ER
+		set depseg.inp=NJD
+
+		set NJD=$$NJD^UFRE(depseg.inp,depseg.ipf,,1) quit:ER
+		if NJD<SEGSTART set NJD=SEGSTART
+		set depseg.ipld=NJD
+
+		new XTJD				// JMB - 49109
+		set XTJD=depseg.inp
+		type RecordDAYENDSEGIP dayndseg=Db.getRecord("DAYENDSEGIP","TJD=:XTJD,CID=:CID,POSTING=2,SEG=:SEGMENT",1)
+		if 'dayndseg.getMode() do dayndseg.save()
+		type RecordDAYENDINP dayendinp=Db.getRecord("DAYENDINP","TJD=:XTJD,CID=:CID,POSTING=2",1)
+		if 'dayendinp.getMode() do dayendinp.save()
+		}
+
+	if $g(ER) quit
+    
+	// ICHND - Interest Next Chage Date, ICHLD - Interest Last Change Date
+	if depseg.intfre'="" do {
+		new NJD
+		set NJD=$$FRSTDATE^ACNFUNCS(SEGSTART,depseg.intfre,1) quit:ER
+		set depseg.ichnd=NJD
+
+ 		set NJD=$$NJD^UFRE(depseg.ichnd,depseg.intfre,,1) quit:ER
+		if NJD<SEGSTART set NJD=SEGSTART
+		set depseg.ichld=NJD
+		}
+	else  if dep.segacr=0 set depseg.ichld=SEGSTART
+	   
+	// Default first interest rate if INDEX is not null
+	if depseg.index'="" do {
+		set PAR("INDEX")=depseg.index
+		set PAR("SPREAD")=depseg.intspr
+		set PAR("ROUND")=depseg.rndmtd
+		set PAR("IXLOAD")=0
+		set PAR("NOTSER")=0
+		set PAR("IPMODE")=0
+		set PAR("ROUND")=0
+		set PAR("LIMIT")=1
+		set PAR("MATRIX")=depseg.intmat
+		do CTL^UINDX(.dep,depseg.ichld,depseg.bal,.PAR)
+		set depseg.irn=RATE
+		}
+
+	if $g(ER) quit
+
+	/* Segment account set to accrue at segment level should bear 
+	   interest if the account is accruing at the segment level. */
+	// Account accruing int/div must have int/div rate
+	if 'dep.offproc,depseg.irn="",'dep.segacr do Runtime.setErrXBAD("DEPSEG","IRN") quit:ER
+
+	if depseg.aiipf'="" do {
+		new NJD
+		set NJD=$$FRSTDATE^ACNFUNCS(SEGSTART,depseg.aiipf,INTPOS) quit:ER
+		set depseg.aiinp=NJD
+
+		set NJD=$$NJD^UFRE(depseg.aiinp,depseg.aiipf,,1) quit:ER
+		if NJD<SEGSTART set NJD=SEGSTART
+		set depseg.aiipld=NJD
+
+		new XTJD				// JMB - 49109
+		set XTJD=depseg.aiinp
+		type RecordDAYENDSEGIP dayndseg=Db.getRecord("DAYENDSEGIP","TJD=:XTJD,CID=:CID,POSTING=3,SEG=:SEGMENT",1)
+		if 'dayndseg.getMode() do dayndseg.save()
+		type RecordDAYENDINP dayendinp=Db.getRecord("DAYENDINP","TJD=:XTJD,CID=:CID,POSTING=3",1)
+		if 'dayendinp.getMode() do dayendinp.save()
+		do dayndseg.save()
+		}
+
+	if $g(ER) quit
+	if dep.offproc set depseg.segval=0
+	else  set depseg.segval=1
+	do depseg.bypassSave() 
+	quit
+
+ZSEG(RecordDEPSEG depseg,RecordDEP dep)	//Zero Segment Defaults
+	if dep.segacr=1 quit
+	if dep.segzirn'="" do {			//cds 4/18/00
+		//Ignore index-related columns when segzirn is defined
+		set depseg.irn=dep.segzirn
+          	set depseg.ipf=dep.ipf
+         	set depseg.aiipf=dep.aiipf
+          	}
+	else  do INTDEF(.depseg,.dep)
+        quit
+
+NOZSEG(RecordDEPSEG depseg,RecordDEP dep)  //Non-Zero Segment Defaults
+	type public Boolean ER
+	if 'dep.segacr=1 do INTDEF(.depseg,.dep) 
+	set depseg.segterm=dep.trm
+	set depseg.prena=dep.prena
+	set depseg.segend=$$EXT^UMDT(dep.segper,depseg.segstart) quit:ER
+	if dep.segmdd=0 set depseg.segmdt=$$EXT^UMDT(depseg.segterm,depseg.segstart) quit:ER
+	else  set depseg.segmdt=$$EXT^UMDT(depseg.segterm,depseg.segend) quit:ER	
+	quit
+
+INTDEF(RecordDEPSEG depseg,RecordDEP dep)
+	set depseg.irn=dep.irn		
+	set depseg.ipf=dep.ipf
+	set depseg.aiipf=dep.aiipf
+	set depseg.index=dep.index
+	set depseg.intfre=dep.intfre
+	set depseg.intmat=dep.intmat
+	set depseg.intspr=dep.intspr
+	set depseg.rndmtd=dep.rndmtd	
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60764^7661^Sunitha Santhumayor^5804"	// Signature - LTD^TIME^USER^SIZE

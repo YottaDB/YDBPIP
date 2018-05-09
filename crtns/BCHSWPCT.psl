@@ -1,0 +1,791 @@
+BCHSWPCT //Batch BCHSWPPCT - Investment Account Percentage Sweep
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 08/30/2007 15:09 - joynerd
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHSWPPCT Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ set vBCHSTS=$$STATUS^BCHUTL("BCHSWPPCT")
+ if vBCHSTS=1 set ER=1,RM=$$^MSG(3410) quit
+ if vBCHSTS=2 set ER=1,RM=$$^MSG(3414) quit
+ if vBCHSTS=0 set %BatchRestart=1
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit do EXIT^BCHUTL("BCHSWPPCT") quit
+ do JOBMGR^BCHUTL(%FN,"BCHSWPPCT",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ do EXIT^BCHUTL("BCHSWPPCT")
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(CID) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHSWPPCT","*","",CID.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ if %BatchRestart,$$CHKLOG^BCHUTL(%SystemDate,%FN,"BCHSWPPCT",CID.get()) do { quit
+ do LOG^BCHUTL(%SystemDate,%FN,"BCHSWPPCT",CID.get(),"Record already processed")
+ }
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,CID)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHSWPPCT","*","",CID.get(),"",et)
+ }
+ do UPDLOG^BCHUTL(%SystemDate,%FN,"BCHSWPPCT",CID.get(),vCONTEXT)
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,CID) //
+	type Public String ER
+
+	do EXEC if ER do EXC quit
+
+	quit
+
+
+EXEC
+	type Public Boolean nopost
+	type Public Number CID
+	type Public String BRCD,ER,RM
+
+	type String CCRCD,DESWPF(),PORDER(),RELTD(),TC()
+	type Number CSTAT,CTYPE,DIVPOST,EMPTY,EXSEQ,INVTOT,NEG,RUNPCT
+	type Number RUNTOT,SWPAMT
+
+	type RecordDEP dep=Db.getRecord("DEP","CID=:CID",1)
+	if 'dep.getMode() quit
+	if dep.stat=4 quit
+ 	if dep.swpopt<2!(dep.swpopt>4) quit
+	if dep.swpopt=2,'$$CHKNBDC(dep.cid) quit
+
+	set (RUNTOT,RUNPCT,EMPTY,NEG,DIVPOST)=0
+
+	set CTYPE=dep.type
+	set CCRCD=dep.crcd
+	set CSTAT=dep.stat
+
+	// load local TC array with necessary tran codes
+	do LOADTC(CTYPE) quit:ER
+
+	type ResultSet dep101
+	set dep101=Db.select("ICID,PCT","DEP101","CID=:dep.cid")
+
+	// build related account data into RELTD array
+	while dep101.next() do {
+		type Number ICID,PCT
+
+		set ICID=dep101.getCol(1)
+		set PCT=dep101.getCol(2)
+
+		type RecordDEP idep=Db.getRecord("DEP","CID=:ICID",1)
+		if 'idep.getMode() quit
+		if idep.stat=4 quit
+		do BUILD(.RELTD,.idep,PCT)
+		}
+
+	// no related accounts
+	quit:'$D(RELTD)
+
+	// sum of percentage allocations must be 0% or 100%
+	if RUNPCT,RUNPCT'=100 set ER=1,RM=$$^MSG(2852) quit
+	
+	// post dividends and empty if in status 5 or percentages total 0
+	if CSTAT=5!('RUNPCT) set DIVPOST=1,EMPTY=1
+
+	set SWPAMT=$$SWPAMT(.dep)
+
+	// total invested balance after sweep
+	set INVTOT=RUNTOT+SWPAMT
+
+	if SWPAMT<0 set NEG=1,SWPAMT=-SWPAMT	// Negative (rempt.) sweep flag
+
+	/*
+	If this is a negative sweep and the sweep amount is not less than
+	the total in the investment accounts, set the EMPTY flag
+	*/
+	if NEG,SWPAMT'<RUNTOT set EMPTY=1
+
+	if EMPTY set SWPAMT=RUNTOT
+
+	type RecordTTX ttx()
+
+	// redistribute funds between related investment accounts
+	if 'EMPTY do EXCHANGE(.ttx(),RUNTOT)
+
+	// save last exchange transaction sequence + 1
+	set EXSEQ=$O(ttx(""),-1)+1
+
+	type Number AMTRAW,ICID,TRTOT,TAMT
+	
+	set ICID="",TRTOT=0
+
+	if SWPAMT do { quit:ER
+		for  set ICID=$O(RELTD(ICID)) quit:ICID=""  do {  quit:ER
+			do LOADVAR(.ICID)
+			if EMPTY do {  quit
+				// Post accrued dividends
+				if DIVPOST do DIV(.ttx(),.ICID) quit:ER
+				set TAMT=ICID("BAL")
+				quit:'TAMT
+				set TRTOT=TRTOT+TAMT
+				do REDEEM(.ttx(),.ICID,TAMT)
+				}
+			set AMTRAW=INVTOT*(ICID("PCT")/100)
+			set AMTRAW=AMTRAW-ICID("BAL")
+			set TAMT=$$^SCARND(AMTRAW,0,ICID)
+			if NEG do {
+				set TAMT=-TAMT
+				if TAMT>ICID("BAL") set TAMT=ICID("BAL")
+				do REDEEM(.ttx(),.ICID,TAMT) quit:ER
+				}
+			if 'NEG do PURCH(.ttx(),.ICID,TAMT) quit:ER
+			set TRTOT=TRTOT+TAMT
+			}
+		}
+	
+	if 'ttx($O(ttx(""),-1)).exists() quit
+
+	type Number DIFF
+	
+	set DIFF=SWPAMT-TRTOT
+	if DIFF do BALANCE(.ttx(),DIFF,NEG,EXSEQ) quit:ER
+
+	// Anticipated run
+	if nopost.get() do ANTCPTD quit
+
+	if SWPAMT do OFFSET(.ttx(),SWPAMT) quit:ER
+
+	// Post transaction set
+	if ttx($O(ttx(""),-1)).exists() do TRNSET^TRNDRV(.ttx(),%SystemDate,BRCD,4)
+	if ER quit
+ 
+	do SWPFFILE
+
+	quit
+
+
+BALANCE(RecordTTX ttx(),Number DIFF,Number NEG,Number EXSEQ)	// Balance transaction amounts
+
+	type Public String ER,PORDER(),RELTD(),RM
+
+	type Number ICID,ORD,PCT,SEQ,TAMT
+	
+	if (NEG)&(DIFF<0)!('NEG)&(DIFF>0) set ORD=-1
+	else  set ORD=1
+
+	set PCT=""
+	for  set PCT=$O(PORDER(PCT),ORD) quit:PCT=""  do {  quit:'DIFF
+		set ICID=""
+		for  set ICID=$O(PORDER(PCT,ICID),-1) quit:ICID=""  do {  quit:'DIFF
+			set SEQ=""
+			for  set SEQ=$O(ttx(SEQ),-1) quit:SEQ<EXSEQ  do {  quit:'DIFF
+				if ICID'=ttx(SEQ).cid quit
+
+				set TAMT=ttx(SEQ).tamt
+				set TAMT=TAMT+DIFF
+
+				if NEG,TAMT>$P(RELTD(ICID),"|",1) quit
+
+				if 'TAMT kill ttx(SEQ)
+				else  set ttx(SEQ).tamt=TAMT
+
+				set DIFF=0
+				}
+			}
+		}
+
+	// Transaction array (TR) invalid
+	if DIFF set ER=1,RM=$$^MSG(3772)
+
+	quit
+
+
+OFFSET(RecordTTX ttx(),Number TAMT)	// Set up offsetting transaction for main Transaction Account
+
+	type Public Number CID,CTYPE,EMPTY,NEG
+	type Public String CCRCD,TC()
+
+	type String LETC,TCMT
+
+	if NEG!(EMPTY) set LETC=$P(TC(CTYPE),"|",1),TCMT=$$^MSG(2916)
+	else  set LETC=$P(TC(CTYPE),"|",2),TCMT=$$^MSG(2923)
+	do BUILDTR(.ttx(),CID,TAMT,LETC,TCMT,CCRCD)
+
+	quit
+
+
+BUILD(String RELTD(),RecordDEP dep,Number pct)	// Build related account data into local RELTD() array
+
+	type Public String PORDER()
+	type Public Number RUNPCT,RUNTOT
+	
+	type String rec
+
+	type RecordPRODDFTD dtype=Db.getRecord("PRODDFTD","TYPE=:dep.type",1)
+	if 'dtype.getMode() quit
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:dep.type",1)
+	if 'prodctl.getMode() quit
+	set rec=dep.bal_"|"_pct_"|"_dep.type_"|"_dep.crcd_"|"_dep.stat
+	set rec=rec_"|"_dep.acn_"|"_dep.cc_"|"_$E(prodctl.des,1,20)
+	set rec=rec_"|"_dtype.swpni_"|"_dep.posacr
+
+	// set up percentage order array
+	set PORDER(pct,dep.cid)=""
+
+	set RELTD(dep.cid)=rec
+
+	// Generate total of all related account balances
+	set RUNTOT=RUNTOT+dep.bal
+
+	// Generate total of all related account percentages
+	set RUNPCT=RUNPCT+pct
+
+	quit
+
+
+LOADVAR(String ICID())	// Load related account variables from RELTD() array
+
+	type Public String RELTD()
+
+	set ICID("BAL")=$P(RELTD(ICID),"|",1)     // Current ledger balance
+	set ICID("PCT")=$P(RELTD(ICID),"|",2)     // Account sweep percentage
+	set ICID("TYPE")=$P(RELTD(ICID),"|",3)    // Product type
+	set ICID("CRCD")=$P(RELTD(ICID),"|",4)    // Currency code
+	set ICID("STAT")=$P(RELTD(ICID),"|",5)    // Account status
+	set ICID("ACN")=$P(RELTD(ICID),"|",6)     // Customer ID
+	set ICID("CC")=$P(RELTD(ICID),"|",7)      // Cost Center
+	set ICID("SDESC")=$P(RELTD(ICID),"|",8)   // Short description
+	set ICID("SWPNI")=$P(RELTD(ICID),"|",9)   // Non-institutional account
+	set ICID("POSACR")=$P(RELTD(ICID),"|",10) // Positive accrued interest
+	
+	quit
+	
+	
+DIV(RecordTTX ttx(),String ICID())	// Post and transfer accrued dividends
+
+	type Public Number CID,CTYPE
+	type Public String CCRCD,ER,TC()
+
+	type Number INTAMT
+	type String LETC,TCMT
+
+	// Get accrued dividend amount
+	set INTAMT=$$^SCARND(ICID("POSACR"),0,ICID) quit:INTAMT=0
+
+	// Set up tran codes
+	if '$D(TC(ICID("TYPE"))) do LOADTC(ICID("TYPE")) quit:ER
+	
+	// Set up dividend credit to ledger balance in ttx() array
+	set LETC=$P(TC(ICID("TYPE")),"|",3)	// CRTRIN
+	set TCMT=$$^MSG(2792)			// Dividend
+	do BUILDTR(.ttx(),ICID,INTAMT,LETC,TCMT,ICID("CRCD")) quit:ER
+	
+	// Set up debit to accrued dividend/interest balance in ttx() array
+	set LETC=$P(TC(ICID("TYPE")),"|",4)	// DRADIN
+	set TCMT=$$^MSG(2792)			// Dividend
+	do BUILDTR(.ttx(),ICID,INTAMT,LETC,TCMT,ICID("CRCD")) quit:ER
+
+	// Set up interest transfer credit to CID in ttx() array
+	set LETC=$P(TC(CTYPE),"|",5)		// CRTRDV
+	set TCMT=$$^MSG(3939,ICID)		// Transfer from ~p1
+	do BUILDTR(.ttx(),CID,INTAMT,LETC,TCMT,CCRCD) quit:ER
+
+	// Set up interest transfer debit to ICID in ttx() array
+	set LETC=$P(TC(ICID("TYPE")),"|",6)	// DRTRDV
+	set TCMT=$$^MSG(3940,CID)		// Transfer to ~p1
+	do BUILDTR(.ttx(),ICID,INTAMT,LETC,TCMT,ICID("CRCD")) quit:ER
+
+	quit
+
+
+PURCH(RecordTTX ttx(),String ICID(),Number TAMT)	// Create purchase transaction
+
+	// Create credit transaction to ICID for TAMT
+
+	type Public Number CID
+	type Public String DESWPF(),ER,TC()
+
+	type String TCMT,LETC
+
+	// Set up tran codes if necessary
+	if '$D(TC(ICID("TYPE"))) do LOADTC(ICID("TYPE")) quit:ER
+
+	set LETC=$P(TC(ICID("TYPE")),"|",1)
+	set TCMT=$$^MSG(2931,CID)		// Purchase sweep from ~p1
+	do BUILDTR(.ttx(),ICID,TAMT,LETC,TCMT,ICID("CRCD")) quit:ER
+
+	// Build entry in DESWPF() array if non-institutional account
+
+	if ICID("SWPNI") do {
+		type String REC
+		type Number SEQ
+
+		set REC=ICID("ACN")_"|"_ICID_"|"_ICID("CC")_"|"_ICID("TYPE")
+		set REC=REC_"|"_ICID("CRCD")_"|"_TAMT_"|1|"_ICID("SDESC")
+		set SEQ=$O(DESWPF(""),-1)+1
+		set DESWPF(SEQ)=REC
+		}
+
+	quit
+
+
+REDEEM(RecordTTX ttx(),String ICID(),Number TAMT)	// Create redemption transaction
+
+	// Create debit transaction to ICID for TAMT
+
+	type Public Number CID
+	type Public String DESWPF(),ER,TC()
+
+	type String TCMT,LETC
+
+	// Set up tran codes if necessary
+	if '$D(TC(ICID("TYPE"))) do LOADTC(ICID("TYPE")) quit:ER
+
+	set LETC=$P(TC(ICID("TYPE")),"|",2)
+	set TCMT=$$^MSG(2915,CID)		// Redemption sweep to ~p1
+	do BUILDTR(.ttx(),ICID,TAMT,LETC,TCMT,ICID("CRCD")) quit:ER
+
+	// Build entry in DESWPF() array if non-institutional account
+
+	if ICID("SWPNI") do {
+
+		type String REC
+		type Number SEQ
+
+		set TAMT=-TAMT
+		
+		set REC=ICID("ACN")_"|"_ICID_"|"_ICID("CC")_"|"_ICID("TYPE")
+		set REC=REC_"|"_ICID("CRCD")_"|"_TAMT_"|2|"_ICID("SDESC")
+		set SEQ=$O(DESWPF(""),-1)+1
+		set DESWPF(SEQ)=REC
+		}
+
+	quit
+
+
+EXCHANGE(RecordTTX ttx(),Number RUNTOT)	// Create exchange transactions
+
+	type Public String DESWPF(),ER,ET,PORDER(),RELTD(),TC()
+
+	type Number ICID,DECTOT,EXTOT
+	type String EXCH()
+	
+	set ICID="",DECTOT=RUNTOT,EXTOT=0
+	for  set ICID=$O(RELTD(ICID)) quit:ICID=""  do {
+		type Number BAL,TAMT
+		do LOADVAR(.ICID)
+		
+		set BAL=RUNTOT*(ICID("PCT")/100)
+		set BAL=$$^SCARND(BAL,0,ICID)
+		set DECTOT=DECTOT-BAL
+		set TAMT=BAL-ICID("BAL")
+		quit:'TAMT
+		set EXCH(ICID)=TAMT_"|"_ICID("BAL")
+		set EXTOT=EXTOT+TAMT
+		}
+
+	if DECTOT do {  quit:ER
+
+		type Number DONE,ICID,ORD,PCT,TMPAMT
+		
+		set DONE=0
+		if DECTOT<0 set ORD=1
+		else  set ORD=-1
+
+		set PCT=""
+		for  set PCT=$O(PORDER(PCT),ORD) quit:PCT=""  do {  quit:DONE
+			set ICID=""
+			for  set ICID=$O(PORDER(PCT,ICID),-1) quit:ICID=""  do {  quit:DONE
+				quit:'$D(EXCH(ICID))
+				set TMPAMT=$P(EXCH(ICID),"|",1)+DECTOT
+				if (TMPAMT+$P(EXCH(ICID),"|",2))<0 quit
+				set $P(EXCH(ICID),"|",1)=TMPAMT,DONE=1
+				}
+			}
+
+		if 'DONE set ER=1,ET=$$^MSG(3772)
+		}
+
+	quit:ER
+
+	// process EXCH array
+	set ICID=""
+	for  set ICID=$O(EXCH(ICID)) quit:ICID=""  do {
+
+		type Number DC,LETC,TAMT,TCMT,TYP
+		
+		do LOADVAR(.ICID)
+		set TAMT=$P(EXCH(ICID),"|",1)
+
+		// update local RELTD array with new balance
+		set $P(RELTD(ICID),"|",1)=$P(RELTD(ICID),"|",1)+TAMT
+
+		// Set up tran codes if necessary
+		if '$D(TC(ICID("TYPE"))) do LOADTC(ICID("TYPE")) quit:ER
+
+		if TAMT>0 set TYP=3,LETC=$P(TC(ICID("TYPE")),"|",1)
+		else  set TYP=4,LETC=$P(TC(ICID("TYPE")),"|",2)
+		set TCMT=$$^MSG(2937)		// Exchange sweep
+		do BUILDTR(.ttx(),ICID,TAMT,LETC,TCMT,ICID("CRCD")) quit:ER
+
+		if ICID("SWPNI") do {
+			type String REC
+			type Number SEQ
+			
+			set REC=ICID("ACN")_"|"_ICID_"|"_ICID("CC")_"|"
+			set REC=REC_ICID("TYPE")_"|"_ICID("CRCD")_"|"
+			set REC=REC_TAMT_"|"_TYP_"|"_ICID("SDESC")
+			set SEQ=$O(DESWPF(""),-1)+1
+			set DESWPF(SEQ)=REC
+			}
+
+		}
+
+	quit
+
+
+BUILDTR(RecordTTX ttx(),Number XCID,Number TAMT,String LETC,String TCMT,String XCRCD)	// Build transaction into ttx() array
+
+	type Public Cache %CACHE()
+	type Public String %CRCD,ER,RM
+
+	type String ETC
+	type Number SEQ
+
+	quit:'TAMT
+
+	set ETC=LETC
+	// Invalid Transaction Code
+	if ETC="" set ER=1,RM=$$^MSG(3592) quit
+
+	if TAMT<0 set TAMT=-TAMT
+
+	set SEQ=$O(ttx(""),-1)+1
+
+	type RecordTRN trn=%CACHE("TRN").getRecord("TRN","ETC=:ETC")
+
+	// Insert array data
+	set ttx(SEQ)=Class.new("RecordTTX")
+	set ttx(SEQ).cid=XCID
+	set ttx(SEQ).itc=trn.itc
+	set ttx(SEQ).etc=ETC
+	set ttx(SEQ).tamt=TAMT
+	set ttx(SEQ).tlo=%UserStation
+	set ttx(SEQ).tcmt=TCMT
+	#if CUVAR.%MCP if XCRCD'=%CRCD set ttx(SEQ).crcd=XCRCD
+
+	quit
+
+
+SWPFFILE	// File DESWPF array into DAYENDSWPF file
+
+	type Public String DESWPF()
+
+	type Number LSEQ
+
+	set LSEQ=""
+	for  set LSEQ=$O(DESWPF(LSEQ)) quit:LSEQ=""  do {
+		
+		type RecordDAYENDSWPF swpf=Class.new("RecordDAYENDSWPF")
+
+		set swpf.tjd=%SystemDate
+		set swpf.seq=Db.nextVal("DAYENDSWPF",%SystemDate)
+		set swpf.acn=$P(DESWPF(LSEQ),"|",1)
+		set swpf.cid=$P(DESWPF(LSEQ),"|",2)
+		set swpf.cc=$P(DESWPF(LSEQ),"|",3)
+		set swpf.type=$P(DESWPF(LSEQ),"|",4)
+		set swpf.crcd=$P(DESWPF(LSEQ),"|",5)
+		set swpf.tamt=$P(DESWPF(LSEQ),"|",6)
+		set swpf.swtype=$P(DESWPF(LSEQ),"|",7)
+		set swpf.sdesc=$P(DESWPF(LSEQ),"|",8)
+		do swpf.save()
+		}
+
+	quit
+
+
+ANTCPTD	// File DESWPF array into DAYENDSWPFA file
+
+	/* 
+	The Anticipated Sweep Transaction file DAYENDSWPFA is updated,
+	and the ttx() array will not be posted to the PROFILE account
+	*/ 
+
+	type Public String DESWPF()
+
+	type Number LSEQ
+	
+	set LSEQ=""
+	for  set LSEQ=$O(DESWPF(LSEQ)) quit:LSEQ=""  do {
+
+ 		type RecordDAYENDSWPFA swpfa=Class.new("RecordDAYENDSWPFA")
+
+ 		set swpfa.tjd=%SystemDate
+ 		set swpfa.seq=Db.nextVal("DAYENDSWPFA",%SystemDate)
+ 		set swpfa.acn=$P(DESWPF(LSEQ),"|",1)
+ 		set swpfa.cid=$P(DESWPF(LSEQ),"|",2)
+ 		set swpfa.cc=$P(DESWPF(LSEQ),"|",3)
+ 		set swpfa.type=$P(DESWPF(LSEQ),"|",4)
+ 		set swpfa.crcd=$P(DESWPF(LSEQ),"|",5)
+ 		set swpfa.tamt=$P(DESWPF(LSEQ),"|",6)
+ 		set swpfa.swtype=$P(DESWPF(LSEQ),"|",7)
+ 		set swpfa.sdesc=$P(DESWPF(LSEQ),"|",8)
+ 		do swpfa.save()
+		}
+ 
+	quit
+
+
+Public CHKNBDC(Number CID)	// Check the date for next valid business date
+
+	/* 
+	This subsection returns the next business date according to two
+	non-business date calendars: dep.nbdc and cuvar.brknbdc.
+	*/
+
+	type Date DATE1,DATE2
+	type String CAL1,CAL2
+
+	
+	type RecordDEP dep=Db.getRecord("DEP","CID=:CID",1)
+	if 'dep.getMode() quit
+	set CAL1=dep.nbdc
+	
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+	set CAL2=cuvar.brknbdc
+	
+	set DATE1=$$BD^UNBD(%SystemDate,CAL1)
+	set DATE2=$$BD^UNBD(%SystemDate,CAL2)
+
+	if DATE1,DATE2 quit 1
+
+	quit 0
+
+
+LOADTC(Number TYPE)	// Load necessary tran codes into TC array
+
+	/*
+
+	Layout of TC array:
+
+		Piece 1 - CRTRCS : Sweep Transfer Credit
+				   - defaults to CRTRGP if not set up
+		Piece 2 - DRTRCS : Sweep Transfer Debit
+				   - defaults to DRTRGP if not set up
+		Piece 3 - CRTRIN : Dividend/Interest Credit
+				   - defaults to CRTRGP if not set up
+		Piece 4 - DRADIN : Interest Accrual Adjustment Debit
+		Piece 5 - CRTRDV : Dividend Interest Transfer Credit
+		Piece 6 - DRTRDV : Dividend Interest Transfer Debit
+	*/
+
+	type Public String ER,RM,TC()
+
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:TYPE",1)
+	if 'prodctl.getMode() quit
+
+	// Product ~p1 missing transaction code - ~p2
+	if prodctl.dradin="" set ER=1,RM=$$^MSG(2268,TYPE,"DRADIN") quit
+	if prodctl.crtrdv="" set ER=1,RM=$$^MSG(2268,TYPE,"CRTRDV") quit
+	if prodctl.drtrdv="" set ER=1,RM=$$^MSG(2268,TYPE,"DRTRDV") quit
+
+	set TC(TYPE)=prodctl.crtrcs_"|"_prodctl.drtrcs_"|"
+	set TC(TYPE)=TC(TYPE)_prodctl.crtrin_"|"_prodctl.dradin_"|"
+	set TC(TYPE)=TC(TYPE)_prodctl.crtrdv_"|"_prodctl.drtrdv
+
+	if prodctl.crtrcs="" set $P(TC(TYPE),"|",1)=prodctl.crtrgp
+	if prodctl.drtrcs="" set $P(TC(TYPE),"|",2)=prodctl.drtrgp
+	if prodctl.crtrin="" set $P(TC(TYPE),"|",3)=prodctl.crtrgp
+
+	quit
+	
+	
+Public SWPAMT(RecordDEP dep)
+        /*
+          Determine amount to sweep to/from transaction account. The amount
+          returned is positive if purchase is required (transaction account is
+          over funded), and negative if redemption is required (transaction
+          account is short funds).
+ 
+        */
+ 
+        type Number BALTA,SWPAMT,SWPTR,SWPT
+ 
+        set SWPAMT=0
+        set SWPTR=dep.swptr                     // Redemption Threshold Amount
+        set SWPT=dep.swpt                       // Purchase Threshold Amount
+
+        if SWPTR="" set SWPTR=dep.swpt
+
+	// use proper balance transfer amount per Sweep Balance Option
+        if 'dep.swpbo set BALTA=dep.bal
+        if dep.swpbo=1 set BALTA=dep.balcol
+        if dep.swpbo=2 set BALTA=dep.balavl
+
+	if BALTA<SWPTR do {
+		// 48654 - Sweep to purchase threshold when DEP.SWPROPT=1
+		if dep.swpropt=1 set SWPTR=SWPT
+
+                // below redemption threshold - redeem
+                set SWPAMT=BALTA-SWPTR
+
+		/* only transfer in increments of <redemption increment>
+                   making sure new balance will be no less than threshold
+                   amount
+                */ 
+                if dep.swri>0 set SWPAMT=(SWPAMT\dep.swri)*dep.swri
+		if (BALTA-SWPAMT)<SWPTR set SWPAMT=SWPAMT-dep.swri
+                }
+        else  do {
+                /* bal to transfer is greater than or equal to the redemption
+                   threshold - purchase if greater than purchase threshold
+                */
+                type Number comp
+ 
+                /* comparison amount should not exceed amount Ineligible for
+                   Investment Funds
+                */
+                if dep.swpile>SWPT set comp=dep.swpile
+                else  set comp=SWPT             // Purchase Threshold Amount
+ 
+                /* if balance transfer amount exceeds comparison amount,
+                   only sweep the excess
+		*/
+                if BALTA>comp set SWPAMT=BALTA-comp
+ 
+                // only transfer in increments of <purchase increment>
+                if dep.swpi>0 set SWPAMT=(SWPAMT\dep.swpi)*dep.swpi
+                }
+ 
+        quit SWPAMT
+
+
+EXC     // Log exceptions
+ 
+ 	type Public String %FN,CID,ET,RM
+ 
+        type String DESC,TMPFN
+ 
+        set DESC=""
+ 
+        if %FN.get()'="" do {
+                set TMPFN=%FN
+                type RecordSCATBL function=Db.getRecord("SCATBL","FN=:TMPFN",1)
+                if 'function.getMode() quit
+                set DESC=function.desc
+                }
+ 
+        do LOG^UTLEXC($T(+0),"*",DESC,CID.get(),"",$S(ET.get()'="":ET,1:RM.get()))
+ 
+        quit		
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,CID
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set CID=vRECORD.piece($C(9),1)
+ do vPROC(CID)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,CID
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>32767 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+13>32767 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("DISTINCT CID","DEP101","DEP101.SWPOPT>1")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	type Public String %ODP,BRCD
+
+	do SOURCE^BCHSOURC("BOFF","SWP",.%UserID,.BRCD,.%UserClass,,,.%ODP)
+	quit
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+	type Public String BRCD,RM
+	type Public Boolean ER
+
+	do SOURCE^BCHSOURC("BOFF","SWP",.%UserID,.BRCD,.%UserClass)
+
+	// Deposit Sweep teller not set up in source table.
+	if %UserID="" set ER=1,RM=$$^MSG(3510) quit
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

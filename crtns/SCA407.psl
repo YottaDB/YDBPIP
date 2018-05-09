@@ -1,0 +1,194 @@
+public SCA407
+	/*
+	 ORIG: KELLYP
+	 DESC: This procedure builds the data for the SCA407 report (REP407)
+	 and stores it in the SCA407 table for the report.  This report displays
+	 account data items which vary from the product-defined defaults.
+
+	---- Comments --------------------------------------------------------
+
+	The following inputs are entered in the report's query screen and are
+	used to determine which accounts should be displayed on the report.
+
+	INPUTS:
+		VIN2 - Branch of Ownership (BRCD)
+		VIN3 - Product Class (DTJNA.CLS)
+		VIN4 - Product Group (DTJNA.GRP)
+		VIN5 - Product Type (DTJNA.TYP)
+		VIN6 - Account Number (DTJNA.CID)
+		VIN7 - Effective Date (DTJNA.TJD)
+
+	---- Revision History ------------------------------------------------
+
+	08/02/06 - KELLYP - CR 22048
+		Modified LOAD section to eliminate DYNAMIC warning.
+
+	01/10/06 - KELLYP - CR 18140
+		Modified entire procedure to use the new SCA407 table instead
+		of TMPRPT7.  This change was necessary to support proper data
+		typing for the various key columns in the SCA407 report.
+
+	11/15/05 - KELLYP - CR 18140
+		Initial revision.
+
+	*/
+
+	// Delete existing report data for this process
+	do Db.delete("SCA407","PID=:%ProcessID")
+	
+	do LOAD
+	
+	quit
+	
+LOAD
+	/*
+	 Load the query data submitted via the SCA407 report into a 
+	 DbSet and then iterate through the set, checking each account
+	 to determine if it should be displayed in the report.
+	*/
+
+	type public Date DT
+	type public Number CID,TYP
+	type public String VIN3,VIN4,VIN5,VIN6,VIN7
+
+	type String DIARRY(,),WHERE
+	
+	set WHERE="GRP<>'CIF' AND "	// Exclude CIF's in DTJNA
+	
+	// Build the dynamic where clause for selecting DTJNA records
+	if VIN3.get()'="ALL" set WHERE=WHERE_"CLS=:VIN3 AND "
+	if VIN4.get()'="ALL" set WHERE=WHERE_"GRP=:VIN4 AND "
+	if VIN5.get()'="ALL" set WHERE=WHERE_"TYP=:VIN5 AND "
+	if VIN6.get()'="ALL" set WHERE=WHERE_"CID=:VIN6 AND "
+	if VIN7.get()'="ALL" set WHERE=WHERE_"TJD=:VIN7 AND "
+
+	set WHERE=WHERE.extract(1,WHERE.length()-5)	// Remove the trailing " AND "
+
+	#ACCEPT DATE=08/02/06;PGM=KELLYP;CR=18140
+	type DbSet ds=Db.selectDbSet("DTJNA",WHERE,"TJD,CLS,GRP,TYP,CID")
+	while ds.next() do {
+		type RecordDTJNA dtjna=ds.getRecord("DTJNA")
+		do CHKACCT(.dtjna)
+		}
+		
+	quit
+	
+	
+CHKACCT(RecordDTJNA dtjna)	// Determine if account should be included in SCA407 report
+
+	type public String DIARRY(,),VIN2
+
+	type String ACCTVAL,DI,PRODVAL
+
+	type RecordACN acn=Db.getRecord("ACN","CID=:dtjna.cid")
+
+	set VIN2=VIN2.get()
+	if VIN2'="ALL",acn.boo'=VIN2 quit	// Wrong branch code
+
+	do SETUPARR(.acn)	// Set up DIARRY for this type of account
+
+	set DI=""
+	
+	// Collate through the product type default array and determine
+	// if any account level columns are different than the product's.
+	for  set DI=DIARRY(acn.type,DI).order() quit:DI.isNull()  do {
+
+		set PRODVAL=DIARRY(acn.type,DI).piece("|",2)
+		
+		if acn.cls="D" do {
+			type RecordDEP dep={RecordDEP}acn
+			set ACCTVAL=dep.@DI
+			}
+		if acn.cls="L" do {
+			type RecordLN ln={RecordLN}acn
+			set ACCTVAL=ln.@DI
+			}
+
+		if ACCTVAL-PRODVAL=0 quit	// Match
+		if ACCTVAL=PRODVAL quit		// Match
+		
+		// Save the record as there's a difference b/w account
+		// and product values.
+		do SAVEDIFF(.acn,dtjna.tjd,DI,ACCTVAL,PRODVAL)
+		}
+
+	quit
+	
+	
+SETUPARR(RecordACN acn)
+	/*
+	 This section creates the DIARRY array record for columns that default
+	 to an account from the account's product type during creation.  The
+	 DIARRY produced has the following form:
+	 
+		DIARRY(TYPE,DI)=DES|PRODVALUE
+		
+	 Note that this section is only performed if the product type hasn't
+	 already been set up in the array.
+	*/
+
+	type public String DIARRY(,)
+
+	type String DI,FID,TMPSTR
+
+	if DIARRY(acn.type).data() quit
+
+	if acn.cls="L" set FID="PRODDFTL"
+	if acn.cls="D" set FID="PRODDFTD"
+
+	// Build array of columns for product default values
+	type DbSet ds=Db.selectDbSet("DBTBL1D","%LIBS='SYSDEV' AND FID=:FID AND NOD>'48'","DI")
+	while ds.next() do {
+		
+		type RecordDBTBL1D dbtbl1d=ds.getRecord("DBTBL1D")
+		
+		set TMPSTR=""
+		
+		// Don't include columns that aren't currency, numeric, date, or logical
+		if '("$,N,D,L"[dbtbl1d.typ) quit
+		
+		set DI=dbtbl1d.di
+		
+		set TMPSTR.piece("|",1)=dbtbl1d.des
+		
+		if acn.cls="L" do {
+			type RecordPRODDFTL proddftl=Db.getRecord("PRODDFTL","TYPE=:acn.type")
+			set TMPSTR.piece("|",2)=proddftl.@DI
+			}
+		if acn.cls="D" do {
+			type RecordPRODDFTD proddftd=Db.getRecord("PRODDFTD","TYPE=:acn.type")
+			set TMPSTR.piece("|",2)=proddftd.@DI
+			}
+		
+		// Don't include columns that don't have a value defined
+		if TMPSTR.piece("|",2).isNull() quit
+		
+		set DIARRY(acn.type,DI)=TMPSTR
+		}
+
+	quit
+	
+
+SAVEDIFF(RecordACN acn,Date DT,String DI,String ACCTVAL,String PRODVAL)
+
+	/*
+	 Data is stored for the SCA407 report using SCA407.TBL and is stored
+	 in the following format:
+		^TMP(PID,BRCD,DT,CLS,GRP,TYP,CID,DI)=DESC|PRODVAL|ACCTVAL
+	*/
+
+	type public String DIARRY(,)
+	
+	type String TMPSTR = ""
+
+	type RecordSCA407 sca407=Class.new("RecordSCA407","PID=:%ProcessID,BOO=:acn.boo,ODT=:DT,CLS=:acn.cls,GRP=:acn.grp,TYP=:acn.type,CID=:acn.cid,DI=:DI")
+
+	set sca407.didesc=DIARRY(acn.type,DI).piece("|",1)	// DI Description
+	set sca407.prodval=PRODVAL	// Product-level value
+	set sca407.acctval=ACCTVAL	// Account-level value
+
+	do sca407.bypassSave()
+	
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60479^60360^Pat Kelly^5072"	// Signature - LTD^TIME^USER^SIZE

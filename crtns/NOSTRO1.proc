@@ -1,0 +1,285 @@
+public NOSTRO1
+	/*
+	 ORIG: KELLYP
+	 DESC: Nostro Report Driver
+
+	---- Comments --------------------------------------------------------
+
+	Populates the NOSTROREP table for the Projected Nostro Summary Report
+	(SCA499).
+
+	---- Revision History ------------------------------------------------
+	
+	   11/13/06 - KUMARB - CR 23191
+	   	    Modified in the beginning of the procedure to
+	   	    initialize variable SDATE with %SystemDate.
+	   	    Modified section TR to change the case for 
+	   	    variable index, the parameter for $$POSTDEAL
+	   	    is changed to match the calling routine and
+	   	    also modified the input parameter ttx object
+	   	    to an array type.
+	   	    Modified section PROCD to change .ttx object to
+	   	    array type.
+	
+	   07/31/06 - KELLYP - CR 22048
+	   	    Modified TR section to eliminate XECUTE warning.
+	
+	   02/07/06 - KUMARB - 19055
+	   	    In section FPMTS, modified the reference of
+	   	    DAYENDEFT to EFTPAY.
+	   
+	   11/02/05 - SAHOOU - CR 17050
+	   	    Modified PROCT section by replacing this line 
+		    "set ttx={RecordTTX}ttxfdt" by this "set ttx=ttxfdt.copy()" 
+		    as it was showing one casting error.
+		    		    		    
+	   09/16/05 - KELLYP - CR 17050
+		    Converted to PSL.
+	*/
+
+	type public Date X
+
+	type Date MAXJD, SDATE
+		
+	set SDATE=%SystemDate
+	
+	if X'>(SDATE-1) do Runtime.setErrMSG("NOSTROREP",6047) quit
+	set MAXJD=X		// Prompt from SCA499 Report
+	
+	// Delete temporary report data
+	do Db.delete("NOSTROREP","PID=:%ProcessID")
+	
+	do FXDEAL
+	
+	quit
+
+
+FXDEAL	// Projections must consider foreign exchange deals
+
+	type public Date MAXJD,SDATE
+
+	type Date JD
+	type String DEALTBL(,),NOINT
+
+	type DbSet dsfwd=Db.selectDbSet("DEALENT","DEALTYPE='FORWARD' AND BUYSELL='*' AND OFFTYPE='VALUE'","SEQ ASC")
+	while dsfwd.next() do {
+		type RecordDEALENT dealent1=dsfwd.getRecord("DEALENT")
+		if dealent1.cid["NOSTRO" set DEALTBL("FORWARD",dealent1.seq)=""
+		}
+	
+	type DbSet dsspot=Db.selectDbSet("DEALENT","DEALTYPE='SPOT' AND BUYSELL='*' AND OFFTYPE='VALUE'","SEQ ASC")
+	while dsspot.next() do {
+		type RecordDEALENT dealent2=dsspot.getRecord("DEALENT")
+		if dealent2.cid["NOSTRO" set DEALTBL("SPOT",dealent2.seq)=""
+		}
+
+	/*
+	 First, check deals that were entered today.  If there are any that
+	 have a back-dated value date, we have to include them on the
+	 report for the 1st day.
+	*/
+	
+	set JD=SDATE
+	type DbSet dsedt=Db.selectDbSet("DEAL1","EDT=:SDATE")
+	while dsedt.next() do {
+		type RecordDEAL1 deal1=dsedt.getRecord("DEAL1")
+		if deal1.vdt<JD do PROCD(JD,.deal1)
+		}
+
+	set JD=SDATE-1	
+	type DbSet dsvalue=Db.selectDbSet("DEAL1","VDT>:JD AND VDT<=:MAXJD")
+	while dsvalue.next() do {
+		type RecordDEAL1 deal1a=dsvalue.getRecord("DEAL1")
+		do PROCD(deal1a.vdt,.deal1a)
+		}
+
+	set JD=SDATE-1
+	type DbSet dsitnosx=Db.selectDbSet("ITNOSX","TJD>:JD AND TJD<=:MAXJD")
+	while dsitnosx.next() do {
+		type RecordITNOSX itnosx=dsitnosx.getRecord("ITNOSX")
+		do PROCT(itnosx.tjd,.itnosx)
+		}
+		
+	do FPMTS
+
+	quit
+
+
+FPMTS	// Projections must consider foreign payments
+
+	type public Date JD,MAXJD,SDATE
+	
+	set JD=SDATE-1
+		
+	type ResultSet rs=Db.select("CID,SEQ,PROCDT","EFTPAY","PROCDT>:JD AND PROCDT<=:MAXJD and EFTTYPE='NDPO'")
+	while rs.next() do NDPO(rs.getCol("CID"),rs.getCol("SEQ"),rs.getCol("PROCDT"))
+
+	do BAL
+
+	quit
+
+
+BAL	// Collate through and compute each day's beginning balance
+
+	type public Boolean ER
+	type public Number PREVBAL
+	type public String RM
+
+	type Number BAL,CID,DAY
+	type String CRCD
+
+	type ResultSet rs=Db.select("CRCD,CID","NOSTROREP","PID=:%ProcessID")
+	while rs.next() do {
+		set CRCD=rs.getCol("CRCD")
+		set CID=rs.getCol("CID")
+		
+		type RecordDEP dep=Db.getRecord("DEP","CID=:CID")
+		set BAL=+dep.bal
+		set DAY=0
+		
+		type DbSet ds=Db.selectDbSet("NOSTROREP","PID=:%ProcessID AND CRCD=:CRCD AND CID=:CID","JD ASC")
+		while ds.next() do {
+			type RecordNOSTROREP nostrorp=ds.getRecord("NOSTROREP")
+			set DAY=DAY+1
+			if DAY=1 set nostrorp.beg=BAL
+			else  set nostrorp.beg=PREVBAL
+
+			set PREVBAL=nostrorp.beg+nostrorp.dealdr-nostrorp.dealcr+nostrorp.clndr-nostrorp.clncr+nostrorp.fcvdr-nostrorp.fcvcr
+
+			do nostrorp.save()
+			}
+		}
+
+	set ER=0
+	kill RM
+	
+	quit
+	
+PROCD(Date JD,RecordDEAL1 deal1)
+
+	/*
+	 For this fx deal, find the transactions that will be posted on the
+	 value date.
+	*/
+
+	type public Boolean ER
+	type public String DEALTBL(,)
+
+	type Number SEQ
+	type String DTYPE
+	type RecordTTX ttx()
+	
+	do TR(.deal1,.ttx()) quit:ER
+
+	set DTYPE=deal1.type
+
+	set SEQ=""
+	for  set SEQ=DEALTBL(DTYPE,SEQ).order() quit:SEQ.isNull()  do {
+		if 'ttx(SEQ).exists() quit
+		do ACCUM(.ttx(SEQ),0)
+		}
+
+	quit
+
+PROCT(Date JD,RecordITNOSX itnosx) // Include FCVs in this report.
+
+	type RecordTTX ttx
+
+	if JD>%SystemDate do {
+		type RecordTTXFDT ttxfdt=Db.getRecord("TTXFDT","TJD=:JD,BRCD=:itnosx.brcd,UID=:itnosx.uid,TSEQ=:itnosx",1)
+		set ttx=ttxfdt.copy()
+		}
+	else  set ttx=Db.getRecord("TTX","TJD=:JD,BRCD=:itnosx.brcd,UID=:itnosx.uid,TSEQ=:itnosx",1)
+
+	if 'ttx.getMode() quit
+
+	if '$$NOSTRO^TTXFDT(ttx.cid) quit	// Only include nostro accounts
+
+	do ACCUM(.ttx,2)
+	
+	quit
+	
+
+NDPO(Number CID,Number PSEQ,Date JD)
+	/*
+	 Execute the foreign payment processing routine in "anticipated" mode;
+	 that is, build the transactions, but do not post (nopost=1).
+	*/
+
+	type public Boolean ER
+
+	type Number SEQ
+	type RecordTTX ttx1(),ttx2()
+
+	type RecordEFTPAY eftpay=Db.getRecord("EFTPAY","CID=:CID,SEQ=:PSEQ",1)
+	if 'eftpay.getMode() quit
+
+	if (eftpay.status="A")!(eftpay.status="V") quit	// Status check
+
+	// Process the foreign payment in anticipated mode
+	do XEFTNDPO^EFTNDPO(CID,PSEQ,0,0,0,.ttx1(),.ttx2()) quit:ER
+
+	// Accumulate totals for transactions to nostro accounts
+	for  set SEQ=ttx2(SEQ).order() quit:SEQ.isNull()  do {
+		if $$NOSTRO^TTXFDT(ttx2(SEQ).cid.length()) do ACCUM(ttx2(SEQ),1)
+		}
+
+	quit
+
+
+ACCUM(RecordTTX ttx,Number TYPE)  // Accumulate amounts.
+
+	type public Date JD
+
+	type Number AMT,CID
+	type String COL
+
+	if 'ttx.exists() quit
+
+	set CID=ttx.cid
+	if CID=CUVAR.glts set CID=999999	// dummy account to accumulate amounts
+
+	if TYPE=0 set COL=$S('ttx.itc:"DEALDR",1:"DEALCR")
+	if TYPE=1 set COL=$S('ttx.itc:"CLNDR",1:"CLNCR")
+	if TYPE=2 set COL=$S('ttx.itc:"FCVDR",1:"FCVCR")
+
+	type RecordNOSTROREP nostrorp=Db.getRecord("NOSTROREP","PID=:%ProcessID,CRCD=:ttx.crcd,CID=:CID,JD=:JD",1)
+	
+	set AMT=(nostrorp.@COL)+ttx.tamt
+	
+	set nostrorp.@COL=AMT
+
+	do nostrorp.save()
+	
+	quit
+
+
+TR(RecordDEAL1 deal1,RecordTTX ttx())
+
+	/*
+	 Use the ^DEALENT table for VALUE date to see which transactions in the
+	 TR array are the nostro transactions.
+	*/
+
+	type Number BRCD
+	type String BUYSELL,INDEX,OFFTYPE,PGM,XECUTE
+
+	set INDEX="VALUE"
+	set BRCD=CUVAR.bobr
+
+	set BUYSELL=deal1.dealps
+	set BUYSELL=$S(BUYSELL="S":"S",1:"P")
+	set OFFTYPE=""
+
+	set PGM=$$GET^UBCHID("BCHDEALEOD") if PGM.isNull() quit
+	
+	set XECUTE="S ER=$$POSTDEAL^"_PGM_"(.deal1,.ttx)"
+	#ACCEPT DATE=9/16/05;PGM=Pat Kelly;CR=17050
+        xecute XECUTE
+
+	quit
+	
+
+	
+
+vSIG()	quit "60620^24650^Balasubramonian Sankar^6620"	// Signature - LTD^TIME^USER^SIZE

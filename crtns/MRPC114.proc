@@ -1,0 +1,241 @@
+MRPC114(RETURN,VERSN,CID,COLS,WHERE,NUMROWS,MORE,FM,OPT)
+
+  /*
+	ORIG: YURKOVICG - 04/03/2001
+	DESC: History/STFHOST Transaction Journals RPC
+	KEYWORDS: RPC, HISTORY, STF
+
+	This RPC is a public RPC that will return transaction journal records
+	for an account, using the input parameters to define what data should 
+	be returned and what filters should be used when gathering the data. 
+	The MRPC will return both regular transaction journal records, from 
+	the HIST (Transaction History) table, and store-and-forward records, 
+	from the STFHOST (Host Store and Forward File) table, if they exist.
+
+	Prior to querying the HIST table, the MRPC will check to see if the 
+	system is operating in store-and-forward mode.  If it is, it will 
+	check the STFHOST table to see if entries for the account being 
+	queried against exist.  If entries exist, they will be returned by 
+	the MRPC using the input parameters to filter records.  If a column 
+	specified in the COLS parameter does not exist in the STFHOST table, 
+	it will be returned as a null value in the return record.  This allows 
+	the client calling the MRPC to query the same columns and use the same
+	filters for both STFHOST and HIST records.
+
+	After any STFHOST records have been retrieved, the MRPC will use the 
+	same input parameters to retrieve records from the HIST table if the 
+	number of rows already gathered has not exceeded the maximum defined 
+	in the NUMROWS input parameter.  The same columns will be retrieved 
+	and the same filters will be used by applying the WHERE clause.  
+
+	If any customization is needed, copy MRPC114 to ZMRPC114.  Add custom 
+	code to ZMRPC114 and then compile it.  Then recompile MRPC114.  
+	ZMRPC114 will be called directly from MRPC114 if it exists.  There 
+	is no need to modify the entries in the M Remote Procedures Call 
+	Table (SCATBL5).
+
+
+	ARGUMENTS:
+
+		. RETURN   Return Value                 /TYP=T/REQ/MECH=REFNAM
+
+		. VERSN    Version Number               /TYP=N/REQ/MECH=VAL
+			   current version=1
+
+		. CID      Account Number               /TYP=N/REQ/MECH=VAL
+
+		. COLS     Columns from HIST/STFHOST    /TYP=T/REQ/MECH=VAL
+
+		. WHERE    Valid SQL WHERE clause	/TYP=T/NOREQ/MECH=VAL
+			   used to filter records
+
+		. NUMROWS  Maximum number of total	/TYP=N/NOREQ/MECH=VAL
+			   rows to be returned
+
+		. MORE     More Token			/TYP=N/NOREQ/MECH=VAL
+
+		. FM       File Maintenance Indicator   /TYP=N/NOREQ/DFT=0
+			     0=Exclude File Maintenance
+			     1=Include File Maintenance
+			     2=Include File Maintenance Only
+
+		. OPT	   Service Option Value		/TYP=N/NOREQ/MECH=VAL
+			     1=	Interactive Voice Response (IVR)
+			     2=	Automated Teller Machine (ATM)
+
+	---- Revision History ------------------------------------------------
+   
+   	07/10/06 - RussellDS - CR22121
+		   Modified length checking against 31000 to consider bytes,
+		   not characters to be Unicode compliant.
+		   
+		   Removed old revision history.
+   ----------------------------------------------------------------------
+
+ */
+	new RET
+
+	// Check for Custom Routine and call it if it exists.
+	#if $$VALID^%ZRTNS("ZMRPC114")
+	do START^ZMRPC114
+	#else
+	do START
+	#endif
+
+	if $G(ER) quit $$ERRMSG^PBSUTL(RM)
+	set RETURN=$$V2LV^MSG(RET)
+	quit ""
+
+START
+	new FILE,QUIT,ROWCNT,SAVSEQ,XCID,XSEQ,ETC
+	type ResultSet rs
+	new par,sqlcnt,sqldta,sqlsta
+	set (ER,QUIT,ROWCNT)=0
+	set (FILE,RM,RET,RETURN,SAVSEQ,XSEQ,par,sqlsta)=""
+
+	// Version number of client message is not compatible with server
+	if $G(VERSN)'=1 set ER=1,RM=$$^MSG(2951) quit
+
+	// Invalid account number
+	set XCID=$G(CID)
+	if 'Db.isDefined("ACN","XCID") set ER=1,RM=$$^MSG(7774) quit
+
+	// Columns Cannot be NULL
+	if $G(COLS)="" set ER=1,RM=$$^MSG(8557) quit
+
+	// Initialize WHERE clause and add Account Number to it
+	set WHERE=$G(WHERE)
+	if WHERE'["CID=" do {
+		if WHERE'="" set WHERE=WHERE_" AND CID=:XCID" quit
+		set WHERE="CID=:XCID"
+	}
+
+	// Initialize variables to defaults if not defined.
+	if $G(NUMROWS)="" set NUMROWS=40
+	set FM=+$G(FM)
+	if FM'=1 set WHERE=WHERE_" AND FM="_$S(FM=2:1,1:0)
+
+	// If MORE token is present, retrieve place marker.
+	set MORE=$G(MORE) if MORE'="" do GETMORE quit:ER
+
+	if (FILE'="HIST"),$G(%STFHOST) do GETSTF set XSEQ="" quit:ER
+	if 'QUIT do GETHIST quit:ER
+
+	set RET=ROWCNT_$C(9)_MORE_$C(13,10)_RET
+	quit
+
+
+GETSTF  // Retrieve Store-and-Forward Records 
+
+	new SQLSTMT,STFCOLS,STFWHR
+
+	// STFSEQ must be retrieved, since it is needed for more token.
+	set STFCOLS="STFSEQ,"_$$VERCOLS(COLS,"STFHOST")
+	set STFWHR=WHERE
+
+	if XSEQ'="" set STFWHR=STFWHR_" AND STFSEQ<:XSEQ"
+	if STFWHR'["ORDER BY" set STFWHR=STFWHR_" ORDER BY STFSEQ DESC"
+
+	// Open cursor and fetch one record at a time.
+	set SQLSTMT="MRPC114 as SELECT "_STFCOLS_" FROM STFHOST WHERE "_STFWHR
+	do OPEN^SQL(SQLSTMT,,.sqlsta,.sqldta)
+	if (ER)!(sqlsta>99) do CLOSE^SQL("MRPC114") quit
+	for  do FETCH^SQL("MRPC114",.par,.sqlsta,.sqldta,.sqlcnt) quit:sqlcnt=0  do {  quit:(ER)!(QUIT)
+		set SAVSEQ=$P(sqldta,$C(9),1)
+ 		set RET=RET_"0"_$C(9)_$E(sqldta,$F(sqldta,$C(9)),$L(sqldta))_$C(13,10)
+		set ROWCNT=ROWCNT+1
+		if (RET.toByteString().length()<31000),(ROWCNT<NUMROWS) quit
+		set MORE=$$SETMORE("STFHOST",SAVSEQ)
+		set QUIT=1
+	}
+	do CLOSE^SQL("MRPC114")
+	quit
+
+
+GETHIST // Retrieve History Records
+
+	new SQLSTMT,TSEQFLG
+	set SAVSEQ=""
+
+	// TSEQ must be retrieved, since it is needed for more token.
+	if COLS'["TSEQ" set COLS="TSEQ,"_COLS,TSEQFLG=-1
+	else  set TSEQFLG=$L($P(COLS,"TSEQ,",1),",")
+
+	if XSEQ'="" set WHERE=WHERE_" AND TSEQ<:XSEQ"
+	if WHERE'["ORDER BY" set WHERE=WHERE_" ORDER BY TSEQ DESC"
+
+	// Open cursor and fetch one record at a time.
+	set SQLSTMT="MRPC114 as SELECT "_COLS_" FROM HIST WHERE "_WHERE
+	do OPEN^SQL(SQLSTMT,,.sqlsta,.sqldta)
+	if (ER)!(sqlsta>99) do CLOSE^SQL("MRPC114") quit
+	for  do FETCH^SQL("MRPC114",.par,.sqlsta,.sqldta,.sqlcnt) quit:sqlcnt=0  do {  quit:(ER)!(QUIT)
+		if TSEQFLG<0 set SAVSEQ=$P(sqldta,$C(9),1),sqldta=$E(sqldta,$F(sqldta,$C(9)),$L(sqldta))
+
+		// filter the transaction history records
+		// check made against UTBLSRTC. 
+		// Transaction code must be in the user table under
+		// the service option, unless the service option
+		// does not exist at all in the table, in which
+		// case no filtering will occur.
+
+		if TSEQFLG>0 set SAVSEQ=$P(sqldta,$C(9),TSEQFLG)
+		if $G(OPT)="" set RET=RET_"1"_$C(9)_sqldta_$C(13,10)
+		if $G(OPT)'="" do {
+			set ETC=Db.getOneRow("ETC","HIST","CID,SAVSEQ")
+			type ResultSet rs=Db.select("SROPT,TRNCD","UTBLSRTC","SROPT=:OPT AND TRNCD=:ETC")
+			if 'rs.isEmpty() set RET=RET_"1"_$C(9)_sqldta_$C(13,10)
+			type ResultSet rs=Db.select("SROPT","UTBLSRTC","SROPT=:OPT")
+			if rs.isEmpty() set RET=RET_"1"_$C(9)_sqldta_$C(13,10)
+		}
+
+		set ROWCNT=ROWCNT+1
+		if (RET.toByteString().length()<31000),(ROWCNT<NUMROWS) quit
+		set MORE=$$SETMORE("HIST",SAVSEQ)
+		set QUIT=1
+	}
+	do CLOSE^SQL("MRPC114")
+	quit
+
+
+VERCOLS(C,F)
+
+	/* 
+	   This function will verify the columns listed in variable C
+	   are valid data items in the file definition F, replacing the 
+	   invalid column names with a null character.
+
+	   Example: set COLS=$$VERCOLS("TJD,TOT,TCMT","STFHOST")
+	*/
+
+	new di,fsn,i
+	do fsn^SQLDD(.fsn,F) I ER Q
+	for i=1:1:$L(C,",") if '$$VER^SQLDD(F,$P(C,",",i),.fsn) set $P(C,",",i)="''"
+	quit C
+
+
+GETMORE // Use More token to continue gathering data
+
+	new MORETKN
+	set MORETKN=Db.getOneRow("FLD1,FLD2","MORETKN","MORE")
+	do Db.fastDelete("MORETKN","MORE")
+
+	set FILE=$P(MORETKN,$C(9),1)		// Get File ID (STFHOST/HIST)
+	set XSEQ=$P(MORETKN,$C(9),2)		// Get Sequence Number
+	set MORE=""				// Reset MORE Token
+	quit
+
+
+SETMORE(FLD1,FLD2) // Get More token and save data
+
+	set MORE=$$MORETKN^UTLMRPC(%ProcessID)	// Get New Token
+ 
+	// Create MORETKN record in database
+	type RecordMORETKN moretkn=Class.new("RecordMORETKN")
+	set moretkn.more=MORE			
+	set moretkn.fld1=FLD1			// Store File ID (STFHOST/HIST)
+	set moretkn.fld2=FLD2			// Store Sequence Number
+	do moretkn.bypassSave()
+
+	quit MORE
+
+vSIG()	quit "60461^55006^Dan Russell^7609"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,413 @@
+Public DBSRWQRY(RecordDBTBL5H dbtbl5h,String PQINFO(),String WHERE)
+	/*
+
+	ORIG: RUSSELL - 08/31/02
+	PROCEDURE ID: DBSRWQRY
+	DESC: DATA-QWIK Report Query Parser
+
+	Approach to dealing with queries for report writer:
+
+	  1)  If SQL syntax query, return as single string WHERE clause.  Note
+	      that SQL syntax queries cannot have run-time user input (<<*>>
+	      and <<**>> syntax>).
+
+	  2)  If not SQL syntax and does not contain any run-time double
+	      wild-card (<<**>>) prompts, build single WHERE clause with
+	      variable substitution for any <<*>> syntax.
+
+	  3)  If contains <<**>> syntax, return information to allow building
+	      of dynamic SQL WHERE clause at run-time.  This will be available
+	      in PQINFO.
+	
+	---- Comments --------------------------------------------------------
+	ARGUMENTS:
+
+		. dtblt5h	DBTBL5H record		/REQ/NONULL/MECH=REF:R
+
+		. PQINFO	Prompt/query info,	/REQ/MECH=REFARR:W
+				if any.  Used to create
+				%TAB for UTLREAD and to
+				construct data to print
+				banner page
+
+				PQINFO = 0 => no queries
+				         1 => queries (either fixed or wild-card)
+
+				PQINFO(SEQ)=variable name|pqtype|DI if pqtype=WC
+					  ,1)=tab info
+					  ,2)= not defined if UV
+					       query line if F
+					       operator if WC1
+					       null if WC2
+
+					pqtype - UV  = user variable
+						 WC1 = single wild card
+						 WC2 = double wild card
+						 F   = fixed
+
+				TAB info = |LEN|DFT|HELP|TBL||POST|PRE|TYPE|PROMPT|REQ|MIN|MAX|DEC|SUPPRESS
+
+		. WHERE		Where clause - if no 	/REQ/MECH=REFARR:W
+				queries contain double
+				wild cards, which require
+				use of dynamic SQL
+
+	RETURNS:
+		. $$		Return message		/TYP=T/NULL
+				Null if no errors,
+				value if error
+
+	------ Revision History ------------------------------------------------
+	
+	10/02/06 - RussellDS - CR23342
+		   Added checks for prompts with leading quotes to remove them.
+
+        07/26/05 - SkariahV- CR16679
+	           Removed #WARN directive.
+	              
+	03/17/05 - RussellDS - CR14987
+		   Modify to remove leading tabs as well as spaces.
+	
+	01/18/05 - RussellDS - CR13817
+		   Fix problem in construction of %TAB info.
+		   
+		   Corrected PSL warnings.
+		   
+	03/10/03 - Dan Russell - 51351
+		   Correct various problems.
+
+	08/24/02 - Dan Russell - 49794
+		   Old version totally rewritten with move into PSL.
+		   Removed old change history.
+
+	------------------------------------------------------------------------
+	*/
+
+
+	type Number ER=0
+	type String RM=""
+	type Number DBLWILD,N,SEQ
+	type String BEGQRY,DQQRY(),FROM,par,RAWQRY(),RID,TABLES,vd,vdd()
+
+	kill PQINFO
+	set PQINFO=0
+
+	set WHERE=""			// Return null if going to use dynamic where
+
+	set RID=dbtbl5h.rid
+	// Load raw query
+
+	type DbSet ds=Db.selectDbSet("DBTBL5PR","RID=:RID AND SEQ>'30.999' AND SEQ<'50'","SEQ ASC")
+ 
+ 	set BEGQRY=""			// For continuation lines - end in ;, join to next line
+	set SEQ=1
+        while ds.next() do {
+		type String X
+		
+		type RecordDBTBL5PR dbtbl5pr = ds.getRecord("DBTBL5PR")
+		
+		set X=dbtbl5pr.data
+		set X=X.replace($C(9), " ")
+		set X=X.trim(0)	// Remove leading and trailing spaces
+		quit:X=""!(X.extract(1)=";")!(X.extract(1,2)="//")
+		if BEGQRY'="" do {
+			set X=BEGQRY_X
+			set BEGQRY=""
+			}
+		// If continuation query, save to add to next line
+		if X.extract(X.length())=";" do { quit
+			set X=X.extract(1,X.length()-1)
+			set BEGQRY=BEGQRY_X
+			}
+		set RAWQRY(SEQ)=X
+		set SEQ=SEQ+1
+		}
+
+	// For SQL query syntax, simply return query as WHERE clause
+	if dbtbl5h.msql do { quit RM
+		set WHERE=""
+		for SEQ=1:1 quit:'$D(RAWQRY(SEQ))  do { quit:ER
+			// <<*>> and <<**>> run-time input not allowed for MSQL syntax
+			if RAWQRY(SEQ)["<<*" do { quit
+				set ER=1
+				// Invalid query syntax
+				set RM=$$^MSG(1434)_" "_RAWQRY(SEQ)
+				}
+			set WHERE=WHERE_RAWQRY(SEQ)_" "
+			}
+		set WHERE=WHERE.extract(1,WHERE.length()-1)
+		}
+
+	set TABLES=dbtbl5h.pfid
+	set DBLWILD=0					// Double wild cards
+
+	// Parse prompts and queries to validate and return data to build prompts
+	for SEQ=1:1 quit:'$D(RAWQRY(SEQ))  do {
+		type String QRYLINE
+
+		set QRYLINE=RAWQRY(SEQ)
+
+		// Remove () if only on outer portion - not necessary and
+		// affects SQLCONV
+		if QRYLINE?1"(".E1")",QRYLINE.extract(2,QRYLINE.length())'["(" set QRYLINE=QRYLINE.extract(2,QRYLINE.length()-1)
+
+		// User-define variable - value entered at run-time
+		if QRYLINE?1"&<<".E do {
+			type Number I,KWNUM
+			type String EXPR,KEYWRDS,PARAMS,TAB,TOK,VAR,X
+
+			// Parse parameters and build PQINFO
+			set VAR=QRYLINE.piece(">>",1).piece("<<",2)	// Variable name
+			set X=QRYLINE.piece(">>",2,99)
+			set X=X.trim(0)
+			// Tokenize to avoid embedded quotes
+			set PARAMS=$$TOKEN^%ZS(X,.TOK)
+			set TAB="|255|||||||T"				// Default values
+			// Decode keywords and build TAB
+			do KEYWRDS(PARAMS,.TAB) quit:ER
+			set TAB=$$UNTOK^%ZS(TAB,.TOK)
+			// Remove quotes from around prompt
+			if TAB.piece("|",10).beginsWith("""") set TAB.piece("|",10)=TAB.piece("|",10).stripQuotes()
+			// If prompt missing, replace with question marks
+			if TAB.piece("|",10)="" set TAB.piece("|",10)="??"
+			set PQINFO(SEQ)=VAR_"|UV"
+			set PQINFO(SEQ,1)=TAB
+			}
+
+		// Fixed query - input within report
+		else  if QRYLINE'?.E1"<<*".E1">>".E do {
+			type String WHERE
+			// Validate query syntax
+			set WHERE=$$WHERE^SQLCONV(QRYLINE,TABLES)
+			if ER write !,RM.get(),"  ",QRYLINE,!
+			else  do {
+				set PQINFO=1
+				set PQINFO(SEQ)="|F"
+				set PQINFO(SEQ,2)=QRYLINE
+				}
+			}
+
+		/* Wild card query - <<*>> or <<**>>
+		   Format is [TABLE]COL operator <<* or ** plus /parameters
+		   Accept TABLE.COL and old format of
+		     <<**,PROMPT,DEFAULT,USER VARIABLE,DATE CONVERSION>>
+		*/
+		else  do {
+			type String DI,OP,PARAMS,TAB,WCT
+
+			// Get just data item reference - deal with syntaxes
+			// like [LIB,TBL]COL=<<*>> and [TBL]COL= <<*>>
+			do GETINFO(QRYLINE,.DI,.OP,.PARAMS)
+			if OP="" do {			// Double wild card
+				set WCT="WC2"
+				set DBLWILD=1
+				}
+			else  set WCT="WC1"		// Single wild card
+
+			// Validate query for <<*>> syntax.  Replace <<*>> with
+			// <<X>> for test.  <<**>> will be validated at run-time.
+			if WCT="WC1" do { quit:ER
+				type String WHERE,X
+				// set X=QRYLINE.piece("<<*",1)_"<<X>>"
+				set X=DI_" "_OP_" <<X>>"
+				set WHERE=$$WHERE^SQLCONV(X,TABLES)
+				if ER write !,RM.get(),"  ",QRYLINE,!
+				}
+			// Create %TAB info for wild card
+			do BLDTAB(WCT,DI,OP,PARAMS,.TAB)
+
+			// Input required for <<*>>
+			if WCT="WC1" set TAB.piece("|",11)=1
+
+			// Save prompt/query info.  Will build up query from
+			// variable name, data item, and operation
+			set PQINFO=1
+			set PQINFO(SEQ)="VIN"_SEQ_"|"_WCT_"|"_DI
+			set PQINFO(SEQ,1)=TAB
+			set PQINFO(SEQ,2)=OP
+			}
+		}
+
+	if ER quit RM
+
+	// If there are any double wild cards, requires dynamic SQL, which will
+	// be built at run-time.
+	if DBLWILD quit RM
+
+	// Buld WHERE clause from queries
+	set N="",SEQ=1
+	for  set N=PQINFO(N).order() quit:N=""  do {
+		quit:PQINFO(N,2).get()=""		// No query
+		// If fixed query, use as is
+		if PQINFO(N).piece("|",2)'="WC1" set DQQRY(SEQ)=PQINFO(N,2)
+		else  do {				// Single wild card
+			type String X
+			set X=PQINFO(N).piece("|",3)_" "		// DI
+			set X=X_PQINFO(N,2)_" "				// Operator
+			set X=X_"<<"_PQINFO(N).piece("|",1)_">>"	// Variable
+			set DQQRY(SEQ)=X
+			}
+		set SEQ=SEQ+1
+		}
+
+	set FROM=$$DQJOIN^SQLCONV(TABLES) quit:ER RM
+	set WHERE=$$WHERE^SQLCONV(.DQQRY,TABLES)
+
+	quit RM
+
+
+GETINFO(String X,		// Private - get data reference & operator & parameters
+	String DI,
+	String OP,
+	String PARAMS)
+
+	type Number PTR
+
+	set X=X.trim(0)			// Remove leading/trailing spaces
+	set PARAMS="<<*"_X.piece("<<*",2,999)
+	set X=X.piece(PARAMS,1)			// Get data reference and operator
+	set X=X.translate(" ")			// Remove any spaces
+	// If double wild card, should be no operator, but some code has =, so remove
+	if PARAMS?1"<<**".E set DI=$TR(X,"="),OP=""
+	else  do {				// Single wild card
+		// Deal with [TABLE] syntax since [ and ] can also be operators.
+		if X.extract(1)="[" do {		
+			set PTR=X.find("]")-1   
+			set DI=X.extract(1,PTR)
+			//set X=X.extract(PTR+1,X.length())
+			}
+		else  set DI=""
+
+		set DI=DI_$$ATOM^%ZS(X,.PTR,"[]'=><?")
+		if PTR set OP=X.extract(PTR+1,X.length())
+		else  set OP="="		// Default operator for <<*>>
+		}
+
+	// Remove library reference if it exists
+	if DI.extract()="[",DI["," set DI="["_DI.piece(",",2)
+
+	quit
+
+
+BLDTAB(	String WCTYPE,		// Private - Build TAB info
+	String DI,
+	String OP,
+	String PARAMS,
+	String TAB)
+
+	// Old Syntax = <<*,PROMPT,DEFAULT,USER_VAR,DTCONV>>
+        // New Syntax = <<*/keyword=.../keyword=...>>
+
+	type Public Number ER
+	type Public String vdd()
+	
+	type String ATTR,DATACONV,HLP,POSTPROC,TBL,TOK
+
+	set PARAMS=$$TOKEN^%ZS(PARAMS,.TOK)
+
+	set ATTR=$$DI^DBSDD(DI,"",.vdd)
+	set HLP=DI
+        set TBL=ATTR.piece("|",5)
+        if TBL'="" set TBL=TBL_":NOVAL"
+	// Otherwise, may be key lookup
+        else  if ATTR.piece("|",1)["*" set TBL=DI_":DISTINCT:NOVAL"
+
+	set TAB="|"_ATTR.piece("|",2)_"||"_HLP_"|"_TBL_"||||"_ATTR.piece("|",9)
+
+	// Create variable description
+	do { quit:ER
+ 		type Boolean DONE
+ 		type Number PTR
+ 		type String X,Z
+
+		// Get next >> until equal number of << and >>
+		set (DONE,PTR)=0
+		for  set PTR=PARAMS.find(">>",PTR) quit:'PTR  do { quit:DONE
+			set X=PARAMS.extract(1,PTR-1)
+			if X.length("<<")=X.length(">>") set DONE=1
+			}
+
+		if 'PTR set Z=PARAMS
+		else  set Z=PARAMS.extract(1,PTR-3)
+ 
+		if Z["**" set Z=Z.piece("**",2,9)	// &<<var>>/...* syntax
+		else  set Z=Z.piece("*",2,9)
+
+		set Z=Z.trim(0)			// Trim leading and trailing blanks
+
+		if Z.extract()="/" do { quit:ER		// New format
+			do KEYWRDS(Z,.TAB)
+		}
+
+		// Deal with old format -
+		// <<**,Prompt,Default,User Variable,Date Conversion>>
+		else  if Z.piece(",",2,99)'="" do {
+			type String POSTPROC,UDVAR
+			set TAB.piece("|",10)=Z.piece(",",2)	// Description
+			set TAB.piece("|",3)=Z.piece(",",3)	// Default
+			set UDVAR=Z.piece(",",4)		// User defined variable
+			if Z.piece(",",5) do {
+				set POSTPROC="S X=$$^SCAJD(X)"	// Date conversion
+				if UDVAR'="" set POSTPROC=UDVAR_" "_POSTPROC
+				}
+			else  set POSTPROC=UDVAR
+			set TAB.piece("|",7)=POSTPROC
+			}
+		}
+
+	if TAB.piece("|",7)?.E1"@["1E.E1"]".E set TAB.piece("|",7)=""
+
+	set POSTPROC=TAB.piece("|",7)
+
+	if WCTYPE="WC2" do {				// Handle double wild card
+
+		// Set default to "ALL" if no other default
+		if TAB.piece("|",3)="" set TAB.piece("|",3)="""ALL"""
+		if TAB.piece("|",10)="" set TAB.piece("|",10)=ATTR.piece("|",10)	// Prompt
+		set TAB.piece("|",2)=255,TAB.piece("|",9)="T"
+		// Query post processor (QRYPOS)
+		if TAB.piece("|",16)'="" do {
+			set POSTPROC=TAB.piece("|",16)_" "_POSTPROC
+			set TAB.piece("|",16)=""
+			}
+		// For double wild card, use EXT^DBSQRY to validate input
+		if POSTPROC="" set POSTPROC="D EXT^DBSQRY"
+		else  set POSTPROC=POSTPROC_" D EXT^DBSQRY"
+		set TAB.piece("|",7)=POSTPROC
+		}
+
+	// Single wild card
+	else  if TAB.piece("|",10)="" do {	// Add prompt if missing
+		type RecordDBCTLQRY dbctlqry=Db.getRecord("DBCTLQRY","QTYP=0,QNAM=:OP")
+		set TAB.piece("|",10)=ATTR.piece("|",10)_" "_dbctlqry.qdes
+		}
+
+	set TAB=$$UNTOK^%ZS(TAB,.TOK)
+	
+	// Remove quotes from around prompt
+	if TAB.piece("|",10).beginsWith("""") set TAB.piece("|",10)=TAB.piece("|",10).stripQuotes()
+
+        quit
+
+
+KEYWRDS(String X,String TAB)	// Private - Parse X for keywords and build TAB
+
+	type Public Number ER
+	type String EXPR,I,KEYWRDS,KWNUM
+
+	// Remove leading << and trailing >> if any
+	if X.extract(1,2)="<<" set X=X.extract(3,X.length())
+	if X?.E1">>" set X=X.extract(1,X.length()-2)
+
+	set KEYWRDS=",LENGTH/TYP=N/MAX=255,DEFAULT/NOQWT,HELP,TABLE,PATTERN,POST,PRE,FORMAT,PROMPT,REQUIRED/TYP=L,MINIMUM,MAXIMUM,DECIMAL/TYP=N,SUPPRESS,QRYPOS,TBL"
+	for I=2:1:X.length("/") do { quit:ER
+		set EXPR=X.piece("/",I)
+		set KWNUM=$$PAR^DBSQRYA(.EXPR,KEYWRDS) quit:ER
+		if KWNUM=12!(KWNUM=13),EXPR?1A.AN.E!(EXPR?1"%".AN.E) set EXPR="<<"_EXPR_">>"
+		if KWNUM=17 set KWNUM=5			// Change /TBL to /TAB
+		set TAB.piece("|",KWNUM)=EXPR
+	}
+
+	quit
+
+vSIG()	quit "60540^67425^Dan Russell^11454"	// Signature - LTD^TIME^USER^SIZE

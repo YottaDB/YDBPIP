@@ -1,0 +1,907 @@
+LNPTSU
+
+	/*
+	       ORIG:  Tom Locke (2424) - 09/15/87
+	       DESC:  Transaction Processing Utility
+
+	  ---- Revision History ------------------------------------------------
+
+	   10/13/06 - Ravindra Rathi - CR 23494
+	              Modified the the INTA section to set payment calculation 
+	              method parameter from 'if stblpcm.pcmp.extract(1)'=1' to 
+	              'if stblpcm.pcmp.extract(2)'=1' for correcting negative 
+	              accrual adjustment (ln.inta).
+
+	   05/25/06 - DESHPANDE S K - CR 20748
+		      Replaced public variable %TRNHSEQ with call to 
+		      ttx.getStoredValue("HistSeq").
+		   		  
+	   01/28/06 - SmithCD - CR 19343 (16890)
+	   	      Fixed %HSEQ and %HSEQ2 sections to update / create the 
+	   	      correct SLSEQ sequence in HISTSB. Modified %HSEQ section 
+	   	      to increment SLSEQ by .0001 instead of 1 (histsb.slseq 
+	   	      table was changed to have 4 decimal places to coincide 
+	   	      with the query on the table).Removed old revision 
+	   	      history and performed some minor cleanup.
+
+           07/26/05 - SkariahV- CR16679
+	              Removed #WARN and #OPTIMIZE directives.
+	              
+	   05/06/05 - KinI - 15524
+	   	      Modified BLTFR4 section to replace lnbil1.bp1 pieces with 
+	   	      direct lnbil1 sub-fields update per DBI standards.
+	   	      Replaced depreciated Db.prevKey and Db.next Key methods 
+	   	      with Db.select in %HSEQ and CALC sections.
+
+	*/
+
+	quit
+
+
+public %HSEQ(RecordTTX ttx,	// Transaction				/REF:R
+	     String PEVAL)	// Payment element value
+	
+	type Number SLSEQ, LTRNHSEQ = ttx.getStoredValue("HistSeq")
+
+	// Determine next sequence
+	type ResultSet rs=Db.select("SLSEQ","HISTSB","CID=:ttx.cid AND SLN=:LTRNHSEQ AND SLSEQ>.9999 AND SLSEQ<2","SLSEQ DESC")
+	if rs.next() set SLSEQ=rs.getCol("SLSEQ")
+	// If no records in HISTSB - create first one
+	else  do %HSEQ2(.ttx,LTRNHSEQ,1,PEVAL) quit
+
+	// If record exists, check how many elements have values
+	// If less than 5, add the element to the record and update the record
+
+	type RecordHISTSB histsb=Db.getRecord("HISTSB","CID=:ttx.cid,SLN=:LTRNHSEQ,SLSEQ=:SLSEQ")
+	
+	if histsb.pe01.isNull() set histsb.pe01=PEVAL
+	else  if histsb.pe02.isNull() set histsb.pe02=PEVAL
+	else  if histsb.pe03.isNull() set histsb.pe03=PEVAL
+	else  if histsb.pe04.isNull() set histsb.pe04=PEVAL
+	else  if histsb.pe05.isNull() set histsb.pe05=PEVAL
+	// If all five elements are set, create a new record with the next seq
+	else  do %HSEQ2(.ttx, LTRNHSEQ, (SLSEQ+.0001), PEVAL) quit
+
+	// Otherwise, save the update
+	do histsb.bypassSave()
+
+	quit
+
+
+%HSEQ2(RecordTTX ttx,		// Transaction				/REF:R
+       Number SLN,		// History sequence
+       Number SLSEQ,		// Sub-ledger sequence
+       String PEVAL)		// Payment element value
+       
+	// Create the History Support record
+	
+	type RecordHISTSB histsb=Class.new("RecordHISTSB")
+	
+	set histsb.cid=ttx.cid
+	set histsb.sln=SLN
+	set histsb.slseq=SLSEQ
+	set histsb.pe01=PEVAL
+	
+	do histsb.bypassSave()
+
+	quit
+
+
+public HSEQ(RecordTTX ttx)		// Transaction			/REF:R
+
+	// Find the history entry for this transaction
+	
+	type public Number HSEQ
+
+	// Get last history transaction sequence number
+	type ResultSet rs=Db.select("TSEQ","HIST","CID=:ttx.cid","TSEQ DESC")
+	if rs.next() set HSEQ=rs.getCol("TSEQ")
+	else  set HSEQ=""
+
+	quit
+
+
+public INTA(RecordTTX ttx, RecordLN ln, Number %BAL)
+
+	/*
+	Calculate Interest adjustment amount.
+	Called from principal only payments, disbursement, or error 
+	correct of either.
+
+	Arguments:
+
+	 . ttx 	   - Transaciton Object 	/TYP=RecordTTX/REQ/MECH=REF	 
+	 . ln      - Loan Account Object	/TYP=RecordLn/REQ/MECH=REF
+	 . %BAL    - Amount 			/TYP=$/REQ/MECH=VAL 
+
+	Input:
+	 %Systemdate
+	 %Effectivedate
+
+	Output:
+		%INTA     - Interest adjustment amount.
+
+	*/
+	
+	type public Number %INTA
+
+	type Boolean INCRS
+	type String %DPO
+
+	set %INTA=0
+
+	// Add-on/discount - do not adjust
+	if ln.iam quit
+
+	//Commitments may not have payment date or frequency.
+	if ln.dfp.isNull()!(ln.dist1fre.isNull()) quit
+
+	// If P&I Indicator not equal to 1, quit.
+
+	type RecordSTBLPCM  stblpcm=Db.getRecord("STBLPCM","ln.pcm")		
+
+	// Payment Calculation Method Parameter
+	if stblpcm.pcmp.extract(2)'=1 quit
+	
+	// Transaction debit/credit indicator
+	set INCRS=$$DC^UTRB(ttx.itc1,ln.trb)
+
+	/*
+	Find direct principal option (disbursement - ln.dpdo or 
+	payment - ln.deppo)
+	*/
+	
+	// Direct Principal Payment Option
+	if INCRS set %DPO=ln.dppo 
+	// Direct Principal Debit Option
+	else  set %DPO=ln.dpdo		
+
+	// No adjustment
+	if %DPO.extract(1)=1 quit
+	
+	if %BAL<0 set %BAL=0-%BAL
+
+	do TEST(.ln,ttx.itc,%DPO,%BAL)
+	
+	quit
+
+
+TEST(RecordLN ln,ITC,%DPO,%BAL)
+	/*
+	Find the last bill generated.
+	
+	ARGUMENTS:
+	 . ln      - Loan Account Object        	/TYP=RecordLn/REQ/MECH=REF
+	 . ITC 	   - Internal Transaction Code  	/TYP=T/REQ
+	 . %DPO	   - Direct Principal Payment Option	/TYP=T/REQ
+	 . %BAL    - Amount                     	/TYP=$/REQ/MECH=VAL	
+
+	INPUT:
+	 %SystemDate
+	 %EffectiveDate
+
+	*/
+	
+	type public Boolean ER
+
+	type Date BPSD,JD,NJD,X
+	type String FRE
+
+	/*
+	We need to know if the bill for this period has been generated.
+	BPSD is the last bill due date or, if a new account, last scheduled
+	date.
+	*/
+
+	// Billing period start date
+	set BPSD=$select(ln.lbdd:ln.lbdd,1:ln.schld)	
+
+	/*
+	Positive adj returned (unless interest is not yet billed).
+	Ignore any odd days interest period.
+	*/
+	set JD=ln.dfp 
+	set FRE="-"_ln.dist1fre 
+	set NJD=JD.nextFreqDate(FRE) quit:ER 
+	set X=ln.amodt
+	if X>NJD set X=NJD
+
+	if %EffectiveDate<X set %EffectiveDate=X
+	if %EffectiveDate>%SystemDate quit
+	
+	do INTA1(.ln,BPSD,ITC,%DPO,%BAL)
+
+	quit
+
+
+INTA1(RecordLN ln, Date BPSD, String ITC, String %DPO, Number %BAL)
+	/*
+	Calculate adjustment.
+ 
+	ARGUMENTS:
+	 . ln      - Loan Account Object        	/TYP=RecordLn/REQ/MECH=REF
+ 	 . BPSD	   - Bill's date			/TYP=D/REQ
+	 . ITC     - Internal Transaction Code  	/TYP=T/REQ
+	 . %DPO	   - Direct Principal Payment Option	/TYP=T/REQ
+	 . %BAL    - Amount                             /TYP=$/REQ/MECH=VAL
+
+	INPUT:
+	 %EffectiveDate
+ 
+	*/
+	
+	type public Boolean ER
+
+	type Date %LD,%ND
+	type Boolean NEG
+
+	if BPSD'>%SystemDate,'ln.icm do INTA2(.ln,ITC,BPSD,%DPO,%BAL) quit
+
+	/*
+	NEG is used to determine if the adjustment amount should be
+	negative.  This variable is needed especially when the from
+	and to dates are equal.  In this case, there is no way to
+	calculate a negative amount.
+	*/
+
+	set NEG=0
+
+	/*
+	Bill has been generated for the current period.
+	This section must return a positive amount.
+	*/
+
+	set %LD=%EffectiveDate 
+	set %ND=BPSD 
+	if ln.icm  set %ND=BPSD.nextFreqDate(ln.dist1fre) quit:ER
+
+	set %ND=%ND-1
+
+	// Adjust for full period
+	if %DPO.extract(1)=2,%LD>ln.schnd set %LD=ln.schnd
+	do CALC(.ln,ITC,%DPO,%BAL)
+
+	quit
+
+
+INTA2(RecordLN ln,ITC,BPSD,%DPO,%BAL)	
+
+	/*
+	 Bill has not been generated for the current period.
+
+	Arguments:	 
+	   . ln      - Loan Account Object		/TYP=RecordLN/REQ/MECH=REF
+	   . ITC     - Internal Transaction Code 	/TYP=T/REQ/MECH=VAL 
+	   . BPSD    - Bill's date                      /TYP=D/REQ
+	   . %DPO    - Direct Principal Payment Option  /TYP=T/REQ
+	   . %BAL    - Amount                           /TYP=$/REQ/MECH=VAL
+
+	INPUT:
+	 %EffectiveDate
+	*/
+
+	set NEG=1
+
+	// This section must return a negative amount.
+	if %EffectiveDate<BPSD do { quit
+		set %LD=%EffectiveDate 
+		set %ND=BPSD-1 
+		// effective dated to prior period
+		do CALC(.ln,ITC,%DPO,%BAL)        
+		}
+
+	/*
+	If this is a full-period adjustment, %INTA need not be calculated,
+	because the bill has not yet been generated.
+	*/
+
+	if %DPO.extract(1)=2 quit
+
+	if ln.amodt'>ln.schld,%EffectiveDate'>ln.amodt quit
+
+	if %EffectiveDate=BPSD quit
+
+	// within current period 
+	set %LD=%EffectiveDate set %ND=BPSD
+	do CALC(.ln,ITC,%DPO,%BAL) 
+
+	quit
+
+
+CALC(RecordLN ln,	// Loan Account Object
+     String ITC,	// Internal Transaction Code 
+     String %DPO,	// Direct Principal Payment Option 
+     Number %BAL)	// Amount	
+
+	// Calculate Interest Adjustment Amount
+	
+	type public Number %INT,%INTA
+	type public Boolean ER,NEG
+
+	type Number EC, INCRS, INT, PRN
+	type String I1, P1
+
+	set %INT = $$^UIC(%BAL,%LD,%ND,ln.iacm,ln.irn,0,ln.dist1af,ln.dist1fre,ln.icpf,ln.schnd,ln.schld) quit:ER  
+	set %INTA = %INTA+%INT.roundDec(5)
+	if (NEG) , (%INTA > 0) set %INTA = -%INTA
+	if ('NEG) , (%INTA < 0) set %INTA = -%INTA
+
+	// Do not adjust current bill
+	if '%DPO.extract(2) quit
+
+	// The bill for the current period will always be one greater than
+	// the scheduled sequence number.
+	
+	// Find first sequense after SCHSEQ.
+	type Number AMT,CURRSEQ
+	
+	type ResultSet rs = Db.select("SCHSEQ","LNBIL1","CID=:ln.cid AND SCHSEQ>:ln.schseq","SCHSEQ ASC")
+	if rs.next() set CURRSEQ = rs.getCol("SCHSEQ")
+        
+	if CURRSEQ.get().isNull() quit
+
+	// Greater than Billing - Last Sequence Number 
+	if CURRSEQ > ln.bseq quit
+
+	// Do not adjust bill if P & I payments have affected it.
+
+ 	type RecordLNBIL1 lnbil1=Db.getRecord("LNBIL1","ln.cid,SCHSEQ=:CURRSEQ")
+
+	/*
+	 If the total amount of principal and interest included in this internal 
+	 bill (CPIB) greater that the total amount of principal and interest in
+	 this internal bill for which payment has not been received from the 
+	 borrower (CPID), quit
+	*/
+	if (lnbil1.cpib-lnbil1.cpid) quit
+
+	// Pmt Element 1 - Total Amount Billed
+	set INT = $$GETFIELD^BILFUNCS(1,.lnbil1).piece("#",3)	
+
+	// Pmt Element 2 - Total Amount Billed
+	set PRN = $$GETFIELD^BILFUNCS(2,.lnbil1).piece("#",3)	
+
+	/*
+	Since the bill file will not be adjusted if it has not yet
+	been generated for the current period, %INTA is positive.
+	Based on whether this is a payment or disbursement, %INTA
+	will either decrease the interest or increase the interest
+	portion of the bill.
+	*/
+	set %INTA = %INTA.roundCur()
+	set EC = ITC.extract(6) + ITC.extract(12)
+
+	// Transaction debit/credit indicator
+	set INCRS = $$DC^UTRB(ITC.extract(),ln.trb)
+
+	if (INCRS - EC) do {
+		set AMT = %INTA 
+		if (AMT > PRN) set AMT = PRN 
+		set PRN = PRN - AMT 
+		set INT = INT + AMT
+		}
+	else  do {
+		set AMT = %INTA 
+		if (AMT > INT) set AMT = INT 
+		set PRN = PRN + AMT 
+		set INT = INT - AMT
+		}
+	set %INTA = %INTA - AMT
+
+	set I1 = "#"_INT_"#"_INT
+	set P1 = "#"_PRN_"#"_PRN
+
+	// Pmt Element 1
+	do SETELMT^BILFUNCS(.lnbil1,1,I1)
+
+	// Pmt Element 2
+	do SETELMT^BILFUNCS(.lnbil1,2,P1)
+
+	do lnbil1.bypassSave()
+
+	// Interest Calc Principal Adjustments
+	do B^LNPTS(.ln) quit:ER
+
+	quit
+
+
+public	LBF(RecordLN ln, Number BALCMP)
+
+	/*
+	Zero or negative balance restriction
+	
+	Arguments:
+		 . ln      - Loan Account Object	/TYP=RecordLN/REQ/MECH=REF	 
+		 . BALCMP  - Balance computed		/TYP=N/NOREQ/MECH=VAL
+	Output:
+	      	  ER,RM,OVR
+	*/
+	
+	type public String OVR(,,)
+
+	type Number X
+	
+	if BALCMP>0 quit
+	
+	set X=$select(BALCMP:ln.nbf,1:ln.nobf)
+
+	if 'X do { quit
+		// Negative balance not allowed
+		if BALCMP do Runtime.setErrMSG("LN","3023")
+		//Zero balance not allowed
+		else  do Runtime.setErrMSG("LN","5608")
+		}
+		
+	// Balance of $0 or less requires approval
+	if X=1 set OVR(ln.cid,"OVR","MINBAL")=""
+
+	quit
+
+
+public GL(RecordTTX ttx, Number X, Number P1, Number P2)	
+
+	/*
+	Set amount into correct transaction piece for G/L reporting.
+
+	Arguments:
+		 . ttx     - Transaction Object		/TYP=RecordTTX/REQ/MECH=REF	 
+		 . X	   - Amount			/TYP=N/NOREQ/MECH=VAL
+		 . P1	   - Piece number 1		/TYP=N/REQ/MECH=VAL
+		 . P2      - Piece number 2		/TYP=N/NOREQ/MECH=VAL		
+	Output:
+	      	  updated TAMT
+
+	*/
+
+	quit:'X
+
+	type String TAMT
+
+	// Transaction Amount
+	set TAMT=ttx.tamt
+	set TAMT.piece("#",P1)=TAMT.piece("#",P1)+X
+	if P2.get() set TAMT.piece("#",P2)=TAMT.piece("#",P2)+X
+	set ttx.tamt=TAMT
+
+	quit
+
+
+public FBP(RecordLN ln, Number TAMT)	
+	/*
+	Transfer payment amount if [LTYPE]FBP=2
+
+	Arguments:
+		 . ln      - Loan Account Object	/TYP=RecordLN/REQ/MECH=REF
+		 . TAMT    - Amount 			/TYP=$/REQ/MECH=VAL 
+
+	Output:	      
+
+	*/
+
+	type public Cache %CACHE()
+	
+	if 'TAMT quit
+
+	// Maturity Transfer Account
+	if 'ln.tracn quit
+
+	type String DI
+	type Number FBP,VCID,X
+
+	type RecordPRODCTL prodctl=%CACHE("PRODCTL").getRecord("PRODCTL","TYPE=:ln.type")
+
+	//Fixed Bullet Product
+	if prodctl.fbp-2 quit
+
+	// Controlling variable
+	set VCID=ln.tracn
+
+	type RecordLN ln1=Db.getRecord("LN","CID=:VCID")
+	
+	type RecordSTBLPCM stblpcm=Db.getRecord("STBLPCM","KEY=:ln1.pcm")		
+	// Payment Calculation Method Parameter
+	set X=stblpcm.pcmp.extract(3)
+	
+	if X'=2,X'=3 quit
+
+	type RecordPRODCTL prodctl1=%CACHE("PRODCTL").getRecord("PRODCTL","ln1.type")
+
+	set FBP=prodctl1.fbp
+
+	if X=2 set DI="PMTORG" 	// Position 2 - Interest Calculation
+	if X=3 set DI="FPA" 	// Position 3 - Principal Calculation
+
+	do FBP2(.ln,.ln1,TAMT,FBP)
+
+	do ln.save()
+	do ln1.save()
+
+	quit
+
+
+FBP2(RecordLN ln, RecordLN ln1, Number TAMT, Number FBP)
+
+	/*
+	Arguments:
+		 . ln	- Principal Loan Account Object		/TYP=RecordLN/REQ/MECH=REF
+		 . ln1	- Maturity Transfer Account Object 	/TYP=RecordLN/REQ/MECH=REF	 
+		 . TAMT - Amount				/TYP=$/REQ/MECH=VAL
+		 . FBP	- Fixed Bullet Product			/TYP=N/REG/MECH=VAL
+	 */
+	 
+	type public Number ADJ	
+
+	type Date MDT
+	
+	// Account Maturity Date
+	if TAMT>0 do {
+		do FBP3(.ln1,TAMT,FBP) 
+		if ADJ=0 quit
+		do FBP4(.ln,.ln1,ADJ)
+		set MDT=ln1.mdt
+		do FFPA(.ln1,MDT,ADJ)
+		do FBP5(ln.cid,ADJ)
+		}
+
+	if TAMT<0 do {
+		do FBP3(.ln,-TAMT,FBP)
+		if ADJ=0 quit 
+		do FBP4(.ln,.ln1,ADJ)
+		set ADJ=-ADJ 
+		do BLTFR(.ln,.ln1)
+		}
+
+	quit
+
+
+FBP3(RecordLN ln, Number TAMT, Number FBP)
+
+	/*
+	Adjust PMTORG or FPA
+
+	Arguments:
+		 . ln   - Loan Account Object        /TYP=RecordLN/REQ/MECH=REF
+		 . TAMT - Amount                     /TYP=$/REQ/MECH=VAL
+		 . FBP  - Fixed Bullet Product       /TYP=N/REG/MECH=VAL	
+
+	Input:
+	 	X - Payment Calculation Method Parameter
+
+	Output:
+		ADJ - Adjustment for PMTORG or FPA
+
+	 */
+	 
+	type public Number %BAL,ADJ,X
+
+	set %BAL=ln.bal 	// Unadvanced Balance
+	if ln.aruf set %BAL=%BAL-ln.udbal
+	if FBP-2 set %BAL=%BAL-$$UNPPRN^LNPTS4(.ln)
+	
+	if %BAL=0 set ADJ=0 quit
+	if X=2 set ADJ=(TAMT/%BAL*ln.pmtorg).roundCur() 
+	if X=3 set ADJ=(TAMT/%BAL*ln.fpa).roundCur()
+
+	quit
+
+
+FBP4(RecordLN ln, RecordLN ln1, Number ADJ)	
+	/*
+	Update Principal Account and Maturity Transfer Account.
+
+	Arguments:
+		 . ln	- Loan Account Object			/TYP=RecordLN/REQ/MECH=REF
+		 . ln1	- Maturity Transfer Account Object 	/TYP=RecordLN/REQ/MECH=REF	 
+		 . ADJ  - Adjustment		 		/TYP=$/REQ/MECH=VAL
+
+	*/
+	
+	if DI="PMTORG" do {
+		set ln.pmtorg=ln.pmtorg+ADJ
+		set ln1.pmtorg=ln1.pmtorg+ADJ
+		}
+	else  do {
+		set ln.fpa=ln.fpa+ADJ
+		set ln1.fpa=ln1.fpa+ADJ
+		}
+
+	quit
+
+
+FBP5(CID,ADJ)	//Process Loan Account Payment Schedule table (LNPS1).
+
+	type Boolean D3F=0
+
+	type ResultSet rs=Db.select("PDD","LNPS1","CID=:CID")	
+	while rs.next() do { quit:D3F
+		set JD=rs.getCol("PDD")
+		type RecordLNPS1 lnps1=Db.getRecord("LNPS1","CID=:CID,PDD=:JD")
+		set D3F=lnps1.d3f
+		if D3F do {
+			set lnps1.fpc=lnps1.fpc+ADJ
+			// Update LNPS1 record.
+			do lnps1.bypassSave()
+			}
+		}
+
+	quit
+
+
+BLTFR(RecordLN ln,RecordLN ln1)
+	
+	/*
+	Transfer all principal bill amounts from the bullet to
+	the variable loan.
+	
+	Arguments:
+	. ln	- Principal Loan Account Object		/TYP=RecordLN/REQ/MECH=REF
+	. ln1	- Maturity Transfer Account Object 	/TYP=RecordLN/REQ/MECH=REF	 
+	*/
+
+	type Number %BSEQ,L,OFF,PC,VPC,Z
+	type String bil0,bilv
+
+	type RecordLNBIL0 lnbil0=Db.getRecord("LNBIL0","ln.cid")
+	type RecordLNBIL0 lnbilv=Db.getRecord("LNBIL0","ln1.cid")
+	
+	// LNBIL0 record for Principal Account
+	set bil0=$translate($$BIL0ELE^BILFUNCS(.lnbil0),$char(9),"|")
+
+	// LNBIL0 record for Maturity Transfer Account	
+	set bilv=$translate($$BIL0ELE^BILFUNCS(.lnbilv),$char(9),"|")	
+	
+	// Number of elements in LNBIL0 (Principal Account)
+	set L=bil0.length("|")	
+
+	// Number of elements in LNBIL0 (Maturity Transfer Account)
+	for I=2:1:bilv.length("|") do {
+		set Z=bilv.piece("|",I) 
+		if 'Z.isNull() set VPC(Z.piece("#",1))=I
+		}
+			 
+	set OFF=ln1.schseq-ln.schseq  
+
+	// Internal Bill Oldest Unsatisfied Seq Nbr
+	set %BSEQ=ln.oseq
+
+	type Boolean END
+
+	do BLTFR2(ln.cid,ln1.cid,%BSEQ)
+
+	if END.get()=1 quit
+	do ^LNPTS(.ln1)
+
+	quit
+
+
+BLTFR2(CID,VCID,%BSEQ)	
+	/*
+	Update bills for the Principal and Maturity Transfer Accounts and 
+	create history records for these account.
+	
+	Arguments:
+	. CID	- Principal Loan Account			/TYP=N/REQ/MECH=VAL
+	. VCID  - Maturity Transfer Account			/TYP=N/REQ/MECH=VAL
+	. %BSEQ	- Internal Bill Oldest Unsatisfied Seq Nbr	/TYP=N/REQ/MECH=VAL
+
+	Input:
+
+	 L - Number of elements in LNBIL0 (Principal Account) 
+
+	 VPC - Array of elements of the Maturity Transfer Account.
+	 Example:
+		^BIL(800,0)="|I|ESC1#800015132|P"
+ 		 VPC("ESC1")=3
+		 VPC("I")=2
+		 VPC("P")=4
+
+
+	*/
+	
+	type public Boolean END
+	type public Number L
+
+	type String B
+	type Number PC,PCNXT,PR
+	
+	// get bill with the seq = %BSEQ - Principal Loan Account
+	type RecordLNBIL1 lnbil1=Db.getRecord("LNBIL1","CID,%BSEQ",1)
+	if lnbil1.getMode()=0 set END=1 quit
+
+	// get bill with the seq = %BSEQ+OFF - Maturity Transfer Account
+	type RecordLNBIL1 lnbilnext=Db.getRecord("LNBIL1","VCID,%BSEQ+OFF",1)
+	if lnbilnext.getMode()=0 set END=1 quit
+	
+	for PC=2:1:L do {
+		set B=$$GETFIELD^BILFUNCS(PC,.lnbil1)
+		// amount still due
+		if 'B.piece("#",4) quit
+		// element acronym
+		set PR=B.piece("#",1)
+		if PR'="I" do {
+			set PCNXT=VPC(PR).get()
+			do BLTFR3(.lnbil1,.lnbilnext,PC,PCNXT)	
+			if "IP"'[PR quit	
+			do BLTFR4(.lnbil1,.lnbilnext)
+			}
+		do SETELMT^BILFUNCS(.lnbil1,PC,B)
+		}
+
+	do lnbil1.bypassSave()
+	do lnbilnext.bypassSave()
+
+	quit
+
+
+BLTFR3(RecordLNBIL1 lnbil1,RecordLNBIL1 lnbilnext,PC,PCNXT)	
+	/*
+	Create history records for these account.
+
+	Arguments:
+	. lnbil1     - Bill object (Principal Loan Account)	/TYP=RecordLNBIL1/REQ/MECH=REF
+	. lnbilnext  - Bill object (Maturity Transfer Account)	/TYP=RecordLNBIL1/REQ/MECH=REF 
+	. PC         - Piece number of lnbil1
+	. PCNXT      - Piece number of lnbilnext
+
+	*/
+
+	new ACR,B,CMT,DI,NV,OV,X
+	type String DT
+	type Date CDPD
+	type Number I
+
+	set B=$$GETFIELD^BILFUNCS(PC,.lnbil1)
+	set X=$$GETFIELD^BILFUNCS(PCNXT,.lnbilnext)
+
+	// Create HIST record for maturity transfer account	
+	set OV=X.piece("#",4)	
+	set NV=OV+B.piece("#",4)   
+	set DI="PEO"_(PCNXT-1)_"AD"
+	// Pmt Due Date
+	set CDPD=lnbilnext.cdpd
+	set DT=CDPD.toString()
+	// Element acronym
+	set ACR=B.piece("#",1) 
+	// ~p1 bill, ~p2  -~p3  to ~p4
+	set CMT=$$^MSG("4220",DT,ACR,OV,NV)
+	do HIST(lnbilnext.cid,CMT)
+
+	// Create HIST record for Principal Account
+	set OV=B.piece("#",4) 
+	set NV="0.00" 
+	set DI="PEO"_(PC-1)_"AD"
+	// ~p1 bill, ~p2  -~p3  to 0.00
+	set CMT=$$^MSG("4220",DT,ACR,OV,NV)
+	do HIST(lnbil1.cid,CMT)
+
+	for I=3,4 set X.piece("#",I)=X.piece("#",I)+B.piece("#",I)
+	do SETELMT^BILFUNCS(.lnbilnext,PCNXT,X)
+
+	quit
+
+
+BLTFR4(RecordLNBIL1 lnbil1,     // Bill object (Principal Loan Account)
+       RecordLNBIL1 lnbilnext)	// Bill object (Maturity Transfer Account)
+
+	// Update bills for the Principal and Maturity Transfer Accounts.
+	// Input: string B (section BLTFR2)
+	
+	type public String B
+
+	// Increase variable loan's bill - Maturity Transfer Account 
+	set lnbilnext.casd = lnbilnext.casd + B.piece("#",4)
+	set lnbilnext.cpid = lnbilnext.cpid + B.piece("#",4)
+	set lnbilnext.ctab = lnbilnext.ctab + B.piece("#",3)
+	set lnbilnext.cpib = lnbilnext.cpib + B.piece("#",3)
+	
+	// Decrease bullet's bill (piece 1) - Principal Account	
+	set lnbil1.casd = lnbil1.casd - B.piece("#",4)
+	set lnbil1.ctab = lnbil1.ctab - B.piece("#",4)
+	set lnbil1.cpid = lnbil1.cpid - B.piece("#",4)
+	set lnbil1.cpib = lnbil1.cpib - B.piece("#",4)
+
+	quit
+
+
+FFPA(RecordLN ln,EJD,ADJ)	
+	/*
+	This subroutine may be called when a commercial loan's payment
+	schedule is to be reduced for a specific period of time, due
+	to the creation of a bullet.
+
+	Arguments:
+		 . ln      - Loan Account Object	/TYP=N/REQ/MECH=REFARRAY	 
+		 . EJD     - Bullet's maturity date	/TYP=D/REQ/MECH=VAL
+		 . ADJ     - Payment adjustment amount	/TYP=$/REQ/MECH=VAL
+	Output:
+		 Updated LNPS1 and HIST tables
+
+	*/
+	
+	if ln.dist1fre'="*" quit	// Distribution 1 Frequency
+
+	new X,FFPA,JD
+				
+	// Last Bill - Loan Due Date Billed
+	set JD=ln.lbdd			
+	// Fixed Principal Amount
+	set FFPA=ln.fpa	      	
+
+	do %FFPA(ln.cid,JD,EJD-1,-ADJ)
+	do %FFPA(ln.cid,EJD,99999,ADJ)
+
+	quit
+
+
+public %FFPA(CID,FD,TD,ADJ)	
+	/*
+	Set up file maintenance transaction for Fixed Principal Change Value
+
+	Arguments:
+		 . CID     - Account number		/TYP=N/REQ/MECH=VAL
+	 	 . FD	   - From Date			/TYP=D/REQ/MECH=VAL
+		 . TD      - To Date			/TYP=D/REQ/MECH=VAL
+		 . ADJ     - Payment adjustment amount	/TYP=$/REQ/MECH=VAL
+
+	Input:
+		FFPA - Fixed Principal Amount		/TYP=$/REQ/MECH=VA
+
+	Output:
+		 Updated LNPS1 and HIST tables.
+
+	*/	
+	new JD
+
+	set JD=FD-1
+
+	//Process Loan Account Payment Schedule table
+	type ResultSet rs
+	set rs=Db.select("PDD","LNPS1","CID=:CID AND PDD>:JD")	
+	if rs.isEmpty() quit
+			   
+	while rs.next() do { quit:(JD>TD)
+
+		set JD=rs.getCol(1)
+		if (JD>TD) quit
+
+		type RecordLNPS1 lnps1=Db.getRecord("LNPS1","CID,JD")
+		if JD=TD,'lnps1.fpc set lnps1.fpc=FFPA
+		if 'lnps1.fpc quit
+		set FFPA=lnps1.fpc
+		set FFPA=FFPA+ADJ
+		
+		// Create HIST record
+		new TCMT
+		set TCMT=$$DAT^%ZM(JD)_" "_"pmt;"_"Prin:"_lnps1.fpc_FFPA
+		do HIST(CID,TCMT)
+
+		// Update LNPS1 record.
+		set lnps1.fpc=FFPA
+		do lnps1.bypassSave()
+		}
+
+	quit
+
+
+HIST(CID,TCMT) // Create HIST record
+	
+	new SEQ
+
+	// Get next available history transaction sequence number.
+	set SEQ=Db.nextVal("HIST","CID")
+
+	type RecordHIST hist=Class.new("RecordHIST")
+	set hist.cid=CID
+	set hist.tseq=SEQ
+  	set hist.tjd=%SystemDate
+  	set hist.efd=%EffectiveDate
+ 	set hist.tlo=%UserStation
+  	set hist.tcmt=TCMT
+  	set hist.cdt=%CurrentDate
+  	set hist.time=%CurrentTime
+  	set hist.uid=%UserID
+  	do hist.bypassSave()
+
+	quit
+
+vSIG()	quit "60551^21771^Ravindra Rathi^20661"	// Signature - LTD^TIME^USER^SIZE

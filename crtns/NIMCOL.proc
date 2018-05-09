@@ -1,0 +1,331 @@
+public	NIMCOL	
+	/*
+	ORIG:	KLINEB - 11/27/96
+	DESC:	Net Interest Margin Report Collating
+	
+	This procedure will collate through the matrix for the 
+	aggregate definitions (NIM) and (NIMITS) associated with the Net 
+	Interest Margin Report (SCA554). This will allow reporting to be 
+	based on currency code (CRCD.CRCD), rather than by row 
+	(DBTBL22R.ROW), by setting the temporary report table tmprpt2.
+
+	----- Revision History ------------------------------------------------
+	
+	02/28/06 - Carrie Baildon - 16889
+		   Removed AGID from the SQL where clause in the dynamic select
+		   statements in sections START and COLUMN. The file definition
+		   uses the aggregate ID as a literal first key and so no such
+		   AGID column exists.
+	
+		   Modified COLUMN to build the list of columns to select from
+		   the aggregate definition (DBTBL22C). Previously it tried
+		   to select the columns COL and SUM which do not exist in the
+		   generic DQA* tables built internally in this version.
+		
+		   Modified SUM to accumulate the detail data into the totals
+		   data record. Previously it was taking the data to 
+		   accumulate from the totals record, which effectively
+		   totaled nothing.
+	
+	10/17/05 - RussellDS - CR17418
+	
+		   Modified to use new aggregate tables (DQA*).
+		   
+		   Removed code to delete aggregate data since that is now
+		   included in the aggregate runtime routine.
+	
+	09/14/05 - SmithCD - CR 16889
+		   Converted to PSL. Combined AGID* sections into private AGID 
+		   section, accepting a parameter (to be called from 
+		   profitability reports). Brought some sections in-line.
+
+	*/
+
+	type public String AGID, AGID1
+	type public Number DAYS, DIY, TIBAR, TIEAR
+
+	do Db.fastDelete("TMPRPT2", "PID=:%ProcessID")
+
+	// Total Interest Earning Assets Row
+	type ResultSet rs = Db.select("ROW", "UTBLALM", "TTLTYP=1")
+	if rs.next() set TIEAR = rs.getCol("ROW")
+	else  set TIEAR = "" quit
+	
+	// Total Interest Bearing Accounts Row
+	type ResultSet rs1 = Db.select("ROW", "UTBLALM", "TTLTYP=2")
+	if rs1.next() set TIBAR = rs1.getCol("ROW")
+	else  set TIBAR = "" quit
+
+	do DAYS(%SystemDate)		// Monthly and Yearly Calculation
+
+	do START(AGID)			// Net Interest Margin Definition
+	do START(AGID1)			// Net Interest Margin ITS Definition
+
+	do TOTAL(AGID)			// Set up Total Lines
+	do ZZZ				// Weighted Average Weights for "ZZZ"
+
+	quit
+
+
+START(String AGID)	// Net int margin (internal /external) aggregate name
+	
+	/* 
+	Collate through the aggregate definition associated with Net Interest 
+	Margin report (SCA554), sum daily and month to date balance and 
+	interest amounts, do any currency conversions, and set the temporary 
+	report data
+	*/
+
+	type String CRCD, FID, ROWDATA
+	type Number ROW, TYPE
+
+	do AGTBLS^DBSAG(AGID, .FID)
+	
+	quit:'Db.isDefined("DBTBL1", "%LIBS='SYSDEV',FID=:FID")
+	
+	#ACCEPT DATE=09/20/05;PGM=SmithCD
+	type ResultSet rs1 = Db.select("ROW,CRCD,TYPE", FID)
+	while rs1.next() do {
+		set ROW = rs1.getCol("ROW")
+		set CRCD = rs1.getCol("CRCD")
+		set TYPE = rs1.getCol("TYPE")
+		
+		type RecordTMPRPT2 tmprpt2 = Db.getRecord("TMPRPT2", "PID=:%ProcessID,KEY1=:CRCD,KEY2=:ROW", 1)
+		set ROWDATA = tmprpt2.data
+
+		do COLUMN(.ROWDATA, FID, AGID, ROW, TYPE, CRCD)
+		do WAR(.ROWDATA)
+
+		set tmprpt2.data = ROWDATA		
+		do tmprpt2.bypassSave()
+		}
+
+	quit
+
+
+COLUMN(String ROWDATA,		// Temporary report row data		/REF:RW
+       String FID,		// Net int Aggregate table name
+       String AGID,		// Net int margin aggregate name
+       Number ROW,		// Matrix row
+       Number TYPE,		// Product type
+       String CRCD)		// Currency code
+
+	/*
+	Collate through the aggregate definition associated with Net Interest 
+	Margin report (SCA554) at the column level, sum daily and month to date 
+	balance and interest amounts
+        */
+
+	type public String TRANSCCY
+
+	type Number EXCAMT, IND, SUM, TOT
+	type String COL, ROWDATAZ, SLCT
+
+	type RecordTMPRPT2 tmprpt2z = Db.getRecord("TMPRPT2", "PID=:%ProcessID,KEY1='ZZZ',KEY2=:ROW", 1)
+	set ROWDATAZ = tmprpt2z.data
+	
+	set SLCT = ""
+	type ResultSet rsdbc =  Db.select("COL", "DBTBL22C", "%LIBS='SYSDEV' AND AGID=:AGID")
+ 	if rsdbc.isEmpty() quit
+ 	while rsdbc.next() set SLCT = SLCT_","_rsdbc.getCol("COL")
+	set SLCT = SLCT.extract(2,SLCT.length())
+	if SLCT = "" quit
+	#ACCEPT DATE=09/20/05;PGM=SmithCD
+	type ResultSet rs2 = Db.select(SLCT, FID, "ROW=:ROW AND TYPE=:TYPE AND CRCD=:CRCD")
+	while rs2.next() do {
+		set SUM = ""
+		set TOT = ""
+		for IND = 1:1:SLCT.length(",") do {
+			set SUM = rs2.getCol(IND)
+		
+			if SUM.isNull() quit
+
+			if 'TRANSCCY.get().isNull() do {
+			do EXC^CRCDUTL(TRANSCCY, CRCD, SUM, 0, 2, 11, , , 1)
+			set (SUM, TOT) = EXCAMT.get()
+			}
+			else  do {
+				do EXC^CRCDUTL(%SystemCurrency, CRCD, SUM, 0, 2, 11, , , 1)
+				set TOT = EXCAMT.get()
+				}
+
+			set ROWDATAZ.piece("|", IND) = ROWDATAZ.piece("|", IND) + TOT
+
+			set ROWDATA.piece("|", IND) = ROWDATA.piece("|", IND) + SUM
+		}
+	}
+	set tmprpt2z.data = ROWDATAZ
+	do tmprpt2z.bypassSave()
+
+	quit
+	
+	
+WAR(String ROWDATA)	// Temporary report row data		/REF:RW
+
+	// Calculate and store daily / monthly weighted average rate
+	
+	type public Number DAYS, DIY
+
+	type Number DBAL, DINT, DWAR, MBAL, MINT, MWAR
+		
+	// Set up variables for weighted average rate calculation
+	set DBAL = ROWDATA.piece("|", 1)	// Daily Balance
+	set DINT = ROWDATA.piece("|", 2)	// Daily Interest
+	set MBAL = ROWDATA.piece("|", 3)	// Monthly Balance
+	set MINT = ROWDATA.piece("|", 4)	// Monthly Interest
+
+	// Calculate Daily Weighted Average Rate
+	if 'DBAL set DWAR = DBAL
+	else  set DWAR = $$^SCARND((DINT / 1 * DIY / DBAL), 0, 0, 0, 8) * 100
+	set ROWDATA.piece("|", 5) = DWAR
+
+	// Calculate Monthly Weighted Average Rate
+	if 'MBAL set MWAR = MBAL
+	else  set MWAR = $$^SCARND((MINT / DAYS * DIY / MBAL), 0, 0, 0, 8) * 100
+	set ROWDATA.piece("|", 6) = MWAR
+
+	quit
+
+
+DAYS(Date %SystemDate)
+
+	// Calculate Number of Days in Month to Previous Day's system date
+	
+	type public Number DAYS, DIY
+	
+	type Date BOMJD, DATE
+
+	// Date is Previous Day's System Date
+	set DATE = %SystemDate - 1
+
+	set BOMJD = $$BOMJD^SCADAT(DATE, 1)		// Beginning of Month Date
+	set DAYS = $$NOD^SCADAT(DATE, BOMJD) + 1	// Number of Days
+	set DIY = $$NODY^SCADAT(DATE, 1)		// Days in Year
+
+	quit
+
+
+TOTAL(String AGID)	// Net int margin (internal /external) aggregate name
+
+	/*
+	Determine rows to total based on the rows defined in UTBLALM 
+	for the total row. Note: This must be done for TIEAR and TIBAR.
+
+	EADBAL	Interest Earning Assets Daily Balance
+	EADINT	Interest Earning Assets Daily Interest
+	EAMBAL	Interest Earning Assets Monthly Balance
+	EAMINT	Interest Earning Assets Monthly Interest
+	IBDBAL	Interest Bearing Accounts Daily Balance
+	IBDINT	Interest Bearing Accounts Daily Interest
+	IBMBAL	Interest Bearing Accounts Monthly Balance
+	IBMINT	Interest Bearing Accounts Monthly Interest
+	
+	tmprpt2.data (detail / total)
+		TIEAR: EADBAL|EADINT|EAMBAL|EAMINT 		
+		TIBAR: IBDBAL|IBDINT|IBMBAL|IBMINT
+
+	*/
+
+	type String ROWS
+	type Number ROW, ROWLEN, ROWNUM
+
+	type DbSet ds = Db.selectDbSet("UTBLALM", "AGID=:AGID")
+
+	while ds.next() do {
+		type RecordUTBLALM utblalm = ds.getRecord("UTBLALM")
+
+		set ROWS = utblalm.rows
+		set ROWLEN = ROWS.length(",")
+
+		for ROWNUM = 1:1:ROWLEN do {
+			set ROW = ROWS.piece(",", ROWNUM)
+			do SUM(ROW, utblalm.row)
+			}
+		}
+
+	quit
+
+
+SUM(Number ROW,		// Matrix row
+    Number TOTROW)	// Matrix totals row
+
+	// Sum the rows defined in the total row
+
+	type String CRCD, ROWDATA, TROWDATA
+	type Number STRPOS
+
+	type DbSet ds = Db.selectDbSet("TMPRPT2", "PID=:%ProcessID AND KEY2=:ROW")
+	while ds.next() do {
+		type RecordTMPRPT2 dtlrow = ds.getRecord("TMPRPT2")
+
+		set CRCD = dtlrow.key1
+		set ROWDATA = dtlrow.data
+		
+		type RecordTMPRPT2 totrow = Db.getRecord("TMPRPT2", "PID=:%ProcessID,KEY1=:CRCD,KEY2=:TOTROW", 1)
+		set TROWDATA = totrow.data
+		
+		for STRPOS = 1:1:4 set TROWDATA.piece("|", STRPOS) = TROWDATA.piece("|", STRPOS) + ROWDATA.piece("|", STRPOS)
+
+		// Calculate and store daily / monthly weighted average rate
+		do WAR(.TROWDATA)
+
+		set totrow.data = TROWDATA
+		do totrow.bypassSave()
+		}
+
+	quit
+
+
+ZZZ	/*
+	Collate through tmprpt2 for the currency code "ZZZ"
+	(Totals Page) for the calculation of Daily and Monthly Weighted
+	Average Rate for "ZZZ"
+	*/
+	
+	type String ROWDATAZ
+
+	type DbSet ds = Db.selectDbSet("TMPRPT2", "PID=:%ProcessID AND KEY1='ZZZ'")
+	while ds.next() do {
+		type RecordTMPRPT2 tmprpt2z = ds.getRecord("TMPRPT2")
+		set ROWDATAZ = tmprpt2z.data
+		
+		do WAR(.ROWDATAZ)
+		
+		set tmprpt2z.data = ROWDATAZ
+		do tmprpt2z.bypassSave()
+		}
+
+	quit
+
+
+private	AGID(String AGID)		// Aggregate name
+
+	/*
+	Determine which defintion to build for the external information for the
+	Net Interest Margin report, then execute the aggregate's program to 
+	rebuild the Definition (called by profitability-related reports)
+	
+	This section is called by report SCA554.
+	*/
+	
+	type public String X
+	type public Boolean REGEN
+	type public Number ER
+	
+	type String AGPGM
+
+	if 'REGEN quit
+
+	// Aggregate Program Name
+	type RecordDBTBL22 dbtbl22 = Db.getRecord("DBTBL22", "%LIBS='SYSDEV',AGID=:AGID", 1)
+
+	// Invalid value
+	if 'dbtbl22.getMode() do Runtime.setErrMSG("DBTBL22", 7609) quit
+
+	set AGPGM = dbtbl22.rtn
+	
+	do ^@AGPGM
+
+	quit
+
+vSIG()	quit "60334^61989^Carrie Baildon^8815"	// Signature - LTD^TIME^USER^SIZE

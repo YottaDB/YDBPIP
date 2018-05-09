@@ -1,0 +1,2443 @@
+public MRPC155(String RETURN, Number VERSN, String EXPR)
+ 	/*
+	ORIG: Jim Joyce - 04/06/2000
+	DESC: SQL SELECT Interpreter
+
+	---- Comments --------------------------------------------------------
+
+	   . RETURN	Return Value	/NOREQ/MECH=REF
+
+	   . VERSN	Version Number	/REQ/MECH=VAL
+
+	   . EXPR	SQL Query	/REQ/MECH=VAL
+
+
+	   RETURNS:
+	   . $$     	Error Message		/TYP=T
+	     Null= No Error
+	
+	   RELATED:
+	   . $$^PBSMRPC 		- MRPC Service Class Driver
+	
+	   EXAMPLE:
+	   S RM=$$^MRPC155(.RETURN,1,"SELECT CID,BAL FROM DEP")
+
+	---- Revision History ------------------------------------------------
+
+	  03/22/05 - Jim Joyce 
+	  	Created new MRPC to seperate this function from other 
+	  	development RPC functions (MRPC121). 
+	  	
+	*/
+
+	type public Boolean ER = false		// Error indicator
+	type public String RM = ""		// Error message (if any)
+	type Literal String LF = $c(10)		// Unix / Linux record delimiter
+	type Number vstart = $$GETTIM^%ZFUNC	// Start time of code execution, set below
+
+	set RETURN = $$SELECT(EXPR)
+	set RETURN = "<div id='Runtime'>%SQL-Runtime: " _ (($$GETTIM^%ZFUNC - vstart)/1000000) _ " Seconds</div>" _ LF _ RETURN
+
+	quit RM
+
+public SELECT(String expr)    //         Run Interactive SQL
+
+	/* This utility outputs SQL SELECT statements to a file in either
+	   HTML or plain text format.  It replaces and extends the green
+	   screen SQL browser (^SQLI) and the Data-Qwik Qwik-report
+	   functionality.
+
+	   The SQL SELECT syntax is extended to allow STATEMENT and
+	   COLUMN qualifiers.  STATEMENT qualifiers follow a comment
+	   string (//).  COLUMN qualifiers are enclosed in brackets ([])
+	   immediately following the column expression.
+	*/
+
+	type String outputBuffer = ""
+	// Capture execution error and return with results
+	catch error {
+	
+		type Public String outputBuffer
+		// quit $ZS _ outputBuffer.get()
+	}
+	
+	type Literal String LF = $c(10)			// Unix / Linux record delimiter
+	type Literal String CRLF = $c(13,10)		// CrLf String
+	type Literal String TAB = $c(9)
+
+	type Public String %MSKE,MSKN,%MSKL,%MSKD,%MSKC
+
+	type Number ER = 0
+
+	type Boolean altbg,code,plan
+	type Number I,IORM,PN,break,cache,col,i,line,match,rows,sqlcnt,sqlsta,tot()
+	type String exe(),fsn(),ovf(),pars(),vdd(),vsql(),xcol()
+	type String colgrp,cursor,hdg,msk,par,parms,sqldta,sqlind,title,tok,typ,d,z
+	type String SELECT,FROM,WHERE,ORDER,GROUP,RM
+
+	type String IO = ""
+	type Number IOSL = 0
+
+	set cursor = 0 					// Enhance when cursor option is enabled
+
+	type Literal String PARMS ="BREAK,CACHE,CAPTION,CODE,COLS,DEBUG,DQMODE,HEADINGS,LAYOUT,MARKUP,MATCH,OUTPUT,PAGE,PLAN,ROWS,STYLE,TEMPLATE,TITLE"
+
+	set expr = $$TOKEN^%ZS(expr,.tok)		// Tokenize quoted Strings
+
+	if expr.contains("//") do {
+		set parms = expr.piece("//",2,expr.length()), expr = expr.piece("//",1)
+		if parms.contains($c(0)) set parms = $$UNTOK^%ZS(parms,.tok)
+
+		do parse(parms, .pars(), "/", "=", true, 0, 1, PARMS)
+	} 
+
+	// Parse our special column definition syntax
+
+	while expr.contains("{") do { if ER quit
+
+		type Number colNum = expr.piece("{",1).length(",")
+
+		if 'expr.contains("}") do ERROR("Column Qualifier terminator '}' expected on column # " _ colNum,"") quit
+
+		set parms = expr.piece("{",2).piece("}",1)
+		if parms.contains($c(0)) set parms = $$UNTOK^%ZS(parms,.tok)
+
+		set expr = expr.piece("{",1) _ expr.piece("}",2,expr.length())
+		do dispOpts(parms, colNum, .xcol(), .tok)
+	}
+
+	if ER quit outputBuffer
+
+	// FRS - May not be necessary to untokenize here, check this out
+	if expr.contains($c(0)) set expr = $$UNTOK^%ZS(expr,.tok)
+	set expr = $$SQL^%ZS(expr,.tok)
+
+	if ER do ERROR(RM.get()) quit outputBuffer
+
+	set expr = expr.extract("SELECT ".length() + 1, expr.length()).trim()
+
+	type Boolean isHTML = true			// Default markup
+	if (pars("MARKUP").get().upperCase() = "TEXT") set isHTML = false
+
+	type Boolean isPortrait = false
+	if (pars("LAYOUT").get().lowerCase() = "portrait")  set isPortrait = true
+
+	if 'pars("TEMPLATE").get().isNull() do template(pars("TEMPLATE"), .pars())
+	if ER quit outputBuffer
+
+	if 'pars("DEBUG").get().isNull() do { if ER quit outputBuffer
+
+		if (pars("DEBUG").lowerCase() = "syntax") do showPars(.pars(), .xcol(), .isHTML) quit
+
+		type String msg()
+		do RUN^SQLTESTS(expr,0,.msg,.par,.tok)
+		do caption("Debug SQL Statement", "UT", isHTML, 40) 
+
+		for I = 1:1 quit:'msg(I).exists()  do writeln(LF _ msg(I))
+		do section(80,isHTML)
+		set ER = (ER = 2)
+	}
+	
+	set SELECT = $$TOK^SQL(expr,"FROM,WHERE,ORDER,GROUP",.tok)
+	if ER do ERROR(RM.get()) quit outputBuffer
+
+	if SELECT.isNull() do ERROR($$^MSG(8569),"") quit outputBuffer
+	if FROM.get().isNull() do ERROR($$^MSG(8561),"") quit outputBuffer
+
+	type Boolean distinct = SELECT.beginsWith("DISTINCT ")
+
+	if distinct set SELECT = SELECT.extract("DISTINCT ".length() + 1, SELECT.length())
+	else  if SELECT.beginsWith("ALL ") set SELECT = SELECT.extract("ALL ".length() + 1, SELECT.length())
+
+	if SELECT.beginsWith("*") do { if ER quit outputBuffer
+
+		if (SELECT = "*") set SELECT = $$COLLIST^DBSDD(FROM,0,1,0)
+		else  set SELECT = $$selectWild(SELECT, FROM, .xcol(), .fsn(), .tok)
+	}
+
+	// Build the columm array col()
+	do bldcol(SELECT, FROM, ORDER.get(), .col(), .xcol(), .pars(), .tok, .fsn, .vdd)
+	if ER quit outputBuffer
+
+	if 'pars("TITLE").get().isNull() set pars("title") = $$bldTitle(pars("TITLE"), isHTML, .col(), .pars(), FROM, WHERE.get(), .tok)
+
+	set IORM = 0							// Initialize right margin	
+
+	set hdg = $$bldhdg(.col(),.xcol(),isHTML,.IORM,.colgrp,.tot(), isPortrait) if ER quit outputBuffer
+
+	set rows = pars("ROWS").get() do rangeCheck(rows,"0:","Rows")
+	set code = pars("CODE").get() if code.isNull() set code = pars("CODE").exists()
+	set cache = pars("CACHE").get() if cache.isNull() set cache = pars("CACHE").exists()
+	set plan = pars("PLAN").get() if plan.isNull() set plan = pars("PLAN").exists()
+
+	if (plan & cache) set cache = 0 do writeln(LF _ " *** Cache disabled to display plan ***")
+
+	if rows.isNull() set rows = 1000        // Default 1000 rows
+
+	// Remove and/or set these parameters to fix bug in SQL
+	kill pars("ROWS")
+	set pars("CACHE") = cache
+
+	set expr = SELECT _ " FROM " _ FROM
+	if 'WHERE.get().isNull() set expr = expr _ " WHERE " _ WHERE
+	if 'ORDER.get().isNull() set expr = expr _ " ORDER " _ ORDER
+	if 'GROUP.get().isNull() set expr = expr _ " GROUP " _ GROUP
+
+	if distinct set expr = ("DISTINCT " _ expr)
+
+	do SELECT^SQL(expr,.pars(),.sqlsta,.sqldta,.sqlcnt,.sqlind,.tok,-1)
+
+	if ER do ERROR(RM.get()) quit outputBuffer
+
+	If plan do plan(.pars(), .vsql(), isHTML)
+	if code do code(.pars(), .vsql(), .exe(), isHTML)
+
+	if (rows = 0) ! (vsql = 0) do writeln("Complete :| 0 rows processed. ") quit outputBuffer  
+
+	if 'pars("OUTPUT").get().isNull() do { if ER do ERROR(RM.get()) quit outputBuffer
+
+		type String X = pars("OUTPUT")
+
+		type String AUXPTR,HDG,IOHDG,IOPAR,IOSUB,IOTYP,mod
+
+		type Number %EXT = 1
+
+		do writeln("Output directed to: " _ X)
+		do ^SCAIO
+		use IO
+	}                            
+
+	// Format heading for HTML table output and start table
+	if (isHTML = true) do newTable(.pars(), "RS", colgrp)
+
+	set altbg = 'pars("xstyle").get().getSub("alt-row-color",";",":").isNull()
+
+	if (isPortrait = true)  do portrait(hdg, isHTML, altbg, .col(), .pars(), IO, IOSL, IORM, rows) quit outputBuffer
+
+	set PN = 0, line = 0						// Initialize
+	set sqlind = ""							// Protection indicator
+
+	if 'pars("CAPTION").get().isNull() do caption(pars("CAPTION"), "RS", isHTML) set line = (line + pars("CAPTION").length(LF))
+
+	for sqlcnt = 1:1 do { if (vsql(0) = 100) quit
+
+		set vsql = $$^SQLF(.exe,.sqldta,.sqlind) if (vsql = 0) set sqlcnt = (sqlcnt - 1) quit
+
+		if sqlind.contains(1) set sqldta = $$protect(sqldta,sqlind)
+		if isHTML set sqldta = $$escape(sqldta) 		// Process HTML escapes
+
+		set d = $$bldRow(sqldta, .col(), isHTML, .tot(), .break)
+		do wrtRow(d, hdg, isHTML, .pars(), .break, .line, altbg, .IOSL, IORM, .PN)
+
+		if 'rows.isNull() set rows = (rows - 1) if (rows = 0) set vsql(0) = 100
+	}
+
+	do totals(.tot(), hdg, .col(), isHTML, IOSL, IORM, line, altbg, PN, .pars())
+	do close(cursor, isHTML, IO, sqlcnt, true)
+	quit outputBuffer
+
+
+
+bldRow(String rowdta, String col(), Boolean isHTML, String tot(), Number break)	// Format a row
+
+	/* 
+	This function returns a formatted row in either plain text or HTML
+	format.  It applies the column formatting attributes to the row
+	*/
+
+	type Public String %MSKD
+
+	type Literal String TAB = $c(9)
+	type Literal String LF = $c(10)
+	type Literal String COLPAR = "length,type,decimal,format,align,merge,space,math,wrap,repeat,null,break,style,heading,title,minus"
+
+	type Number I
+	type Number cptr = 0 
+
+	set break = 0
+
+	type Row colrec,accum
+
+	type String z
+	type String d = "", ovf = ""
+
+	for I = 1:1:col do {
+
+		set colrec = col(I).toRow(COLPAR,TAB)
+
+		set z = rowdta.piece(TAB,I)
+
+		if (z.isNull() & 'colrec.null.isNull()) set z = colrec.null 
+
+		if '(colrec.math.isNull() ! z.isNull()) do {			// Process accumulators
+
+			set accum = tot(I).toRow("flags,count,sum,max,min",$c(9))
+			// if "N$".contains(colrec.type) & z.contains(".") set z = +z
+
+			// Save for histogram
+			if (accum.flags.extract(5) = 1) set tot(I,z) = tot(I,z).get() + 1 
+			if 'accum.flags.extract(1,4).contains(1) quit
+
+			if (accum.flags.extract(1) = 1) set accum.count = accum.count + 1
+			if (accum.flags.extract(2) = 1) set accum.sum = accum.sum + z	
+
+			if (accum.flags.extract(3) = 1) do {	// MAX
+				if accum.max.isNull() set accum.max = z 
+				else  if "N$DC".contains(colrec.type) set:(z > accum.max) accum.max = z
+				else  if z.follows(accum.max) set accum.max = z
+			}
+
+			if (accum.flags.extract(4) = 1) do {	// MIN
+				if accum.min.isNull() set accum.min = z
+				else  if "N$DC".contains(colrec.type) set:(z < accum.min) accum.min = z
+				else  if accum.min.follows(z) set accum.min = z
+			}
+
+			set tot(I) = accum.toString()
+		}
+
+		if (colrec.break & '(col(I,0).get() = z)) do {			// Break line
+
+			type Number i
+
+			if 'col(I,0).get().isNull()  do {
+				if (colrec.break < 0) set break = colrec.break
+				else  if (colrec.break > break) & '(break < 0) set break = colrec.break
+			} 
+
+			set col(I,0) = z, colrec.repeat = 1
+
+			// Force columns to the right always repeat after break
+			for i = I+1:1:col if col(i,0).exists() set col(i,0) = ""
+		}
+
+		if (colrec.length = 0) set col(I,0) = z quit			// Save value and quit
+
+		if (colrec.repeat = 0) do {					// Repeat option
+			
+			//if 'IOSL.isNull() & (line + 1 > IOSL) set col(I,0) = ""
+
+			if (col(I,0).get() = z) set z = ""				// Null if same as last
+			else  set col(I,0) = z
+		}
+
+		if z.isNull() do { quit						// Null column
+
+			if 'colrec.merge.isNull() quit
+
+			if isHTML set d = d _ "<td>" 
+			else  set cptr = (cptr + colrec.length + colrec.space)
+		}
+
+		if 'colrec.minus.isNull() &  (z >= 0) set colrec.minus = ""
+		if 'colrec.format.isNull() do {					// FOrmat value
+
+			if ("N$".contains(colrec.type)) set z = $$NUM^%ZM(z,colrec.decimal,colrec.format)
+			else  if (colrec.type = "D") set z = $$DAT^%ZM(z,colrec.format)
+			else  if (colrec.type = "L") set z = $$LOG^%ZM(z,colrec.format)
+			else  if (colrec.type = "C") do {			// Oracle time handling
+
+				if 'colrec.format.contains("DATE") set z = $$TIM^%ZM(z,colrec.format)
+				// 21550= 01/01/1900 DATE0 format (ORACLE datetime format)
+				else  if colrec.format.contains("DATE0") set z = $$DAT^%ZM(21550,%MSKD) _ $$TIM^%ZM(z,colrec.format.piece("DATE0",2))
+				else  set z = $$DAT^%ZM(+$H,%MSKD) _ $$TIM^%ZM(z,colrec.format.piece("DATE",2))
+			}
+			else  if ("MTU".contains(colrec.type)) set z = $$STRFormat(z, colrec.format)
+
+		}
+
+		else  if 'colrec.decimal.isNull() set z = $j(z,0,colrec.decimal)
+
+		if isHTML do {
+
+			if (colrec.wrap = 2) set z = z.extract(1,colrec.length)			//Truncate
+			if 'colrec.minus.isNull() set z = "<span style=" _ colrec.minus _ ">" _ z _ "</span>"
+
+			if colrec.merge.isNull() set d = d _ "<td>" _ z
+
+			else  do {
+				if 'colrec.style.isNull() set z = "<span style=" _ colrec.style _ ">" _ z _ "</span>"
+				set d = d _ colrec.merge _ z
+			}
+
+		}
+
+		else  do {
+
+			if 'colrec.align.isNull() do {
+	
+				if colrec.align = "right" set z = z.justify(colrec.length,1)	// Right
+				else  if colrec.align = "center" set z = "".justify((colrec.length - z.length()) \ 2) _ z
+			}
+
+			if 'colrec.merge.isNull() do {
+
+				set z = colrec.merge _ z
+
+				type Number i
+				for i = I-1:-1:1 set colrec = col(i).toRow(COLPAR,TAB) if (colrec.merge.isNull() & (colrec.length > 0)) quit
+
+				set cptr = (cptr - colrec.length - colrec.space)		// Reset position
+
+				// Prepend prior overflow
+				for i = ovf.length(LF):-1:1 if (ovf.piece(LF,i).length() > cptr) set z = LF _ ovf.piece(LF,i).extract(cptr + 1, 9999) _ z, ovf.piece(LF,i) = ovf.piece(LF,i).extract(1,cptr)
+				set z = d.extract(cptr + 1,d.length()) _ z			// Concatenate to prior column
+
+				if z.beginsWith(" ") set z = z.trim(-1) 			// Remove leading whitespace
+				set d = d.extract(1,cptr)
+			}
+
+			if z.contains(LF) do {
+
+				type Number i1,i2
+				for i1 = 1:1:ovf.length(LF) if (ovf.piece(LF,i1).length() <= cptr) quit
+				for i2 = 2:1:z.length(LF) set ovf.piece(LF,i1) = ovf.piece(LF,i1) _ "".justify(cptr - ovf.piece(LF,i1).length()) _ z.piece(LF,i2), i1 = i1 + 1
+				set z = z.piece(LF,1)
+			}
+
+			if (colrec.wrap > 0) & (z.length() > colrec.length) do {
+
+				if (colrec.wrap = 2) set z = z.extract(1,colrec.length)		// Truncate
+				else  set z = $$overflow(z,cptr,colrec.length,.ovf)		// Wrap
+			}
+
+			set d = d _ "".justify(cptr - d.length()) _ z, cptr = (cptr + colrec.length + colrec.space)
+		}
+	}
+
+	set d = (d _ LF)
+
+	if isHTML set d = ("<tr>" _ d)
+	else  if 'ovf.isNull() set d = (d _ ovf _ LF)
+
+	quit d
+
+
+STRFormat(String str, String format)	// String format
+	
+	// May want to 'beef up'the url syntax and either add "http:..." and/or
+	// remove attributes onthe displayed portion.  May also wantot add masks.
+
+	if format = "URL" quit "<a href=" _ str.addQuotes() _ "> " _ str _ "</a>"
+	if format = "IMAGE" quit "<img src=" _ str.addQuotes() _ ">"
+	if format = "HTML" quit $$unEscape(str)
+	quit str
+
+
+overflow(String val, Number cptr, Number len, String ovf) // Data overflow with orphan control
+
+	type Literal String LF = $c(10)
+
+	type Number i,j
+	type String x
+
+	set x = val.extract(len + 1, val.length())
+	set val = val.extract(1,len)
+
+	// Append a single orphan character after break to the current string 
+	// or back up halfway through the string and find a break delimiter
+	if " ,".contains(x.extract(2)) set val = val _ x.extract(1),  x = x.extract(2,x.length())
+	if x.endsWith(" ") set x = x.trim(1)
+
+	if 'x.isNull() do {
+
+		for j = len:-1:1 if " ,".contains(val.extract(j)) quit
+		if  set x = val.extract(j + 1, val.length()) _ x, val = val.extract(1,j)
+	}
+
+	if x.beginsWith(" ") set x = x.trim(-1)
+	if x.isNull() quit val
+
+	for i=1:1 do { if x.isNull() quit
+
+		set ovf.piece(LF,i) = ovf.piece(LF,i).justify(cptr,-1," ") _ x.extract(1,len).trim(-1)
+		set x = x.extract(len + 1,x.length())
+
+		if " ,".contains(x.extract(2)) set ovf.piece(LF,i) = ovf.piece(LF,i) _ x.extract(1),  x = x.extract(2,x.length())
+		if x.endsWith(" ") set x = x.trim(1)
+
+		if 'x.isNull() do {
+			type Number start = ovf.piece(LF,i).length()
+			type Number end = (start - len + 1)
+
+			for j = start:-1:end if " ,".contains(ovf.piece(LF,i).extract(j)) quit
+			if  set x = ovf.piece(LF,i).extract(j + 1, ovf.piece(LF,i).length()) _ x, ovf.piece(LF,i) = ovf.piece(LF,i).extract(1,j)
+		}
+	}
+
+	quit val
+
+
+wrtRow(String rd, String hdg, Boolean isHTML, String pars(), Number break, Number line, Boolean altbg, Number IOSL, Number IORM, Number PN)	// Output a row
+
+	type literal String LF = $c(10)
+
+	if ((isHTML = true) & altbg & (line#2)) set rd = "<tr class=d1" _ rd.extract("<tr>".length(),rd.length())
+
+	if (break & (line > 0)) do {
+
+		if (break < 0) do {	quit				// Form-Feed value (-1)
+
+			if IOSL.isNull() set IOSL = 0			// No heading - just FF
+			else  set line = (IOSL + 1)			// Force heading & FF
+			set break = 0
+		}
+
+		if (isHTML = true) set rd = ("<tr>" _ rd)	
+		else  set rd = "".justify(break,1,LF) _ rd, line = (line + break)
+	}
+
+	if isHTML set line = line + 1
+	else  set line = (line + rd.length(LF) - 1)			// Consider overflow
+
+	if 'IOSL.isNull() & (line > IOSL) do {
+
+		if break set rd = rd.piece(LF,(break + 1),rd.length())	// Remove break Linefeed on new page
+ 
+		set PN = (PN + 1)
+
+		set hdg = $$title(.pars(), isHTML, IORM, PN) _ hdg
+
+		if (IOSL  = 0) do {
+			set IOSL = pars("PAGE").get()		// First line
+			if isHTML set hdg = (LF _ "<thead>" _ LF _ "<tr>" _ hdg _ LF _ "<tbody>")
+		}
+
+		else  set hdg = ($s(isHTML:"<tr>",1:$c(12)) _ hdg)	// Form-feed
+
+		set line = $s(isHTML:1,1:hdg.length(LF))
+		set rd = (hdg _ rd)
+	}
+
+	do writeln(rd)
+	quit
+
+
+
+protect(String sqldta, String sqlind)	// Set protected columns to Null
+
+	type Number y = 0
+	for  set y = sqlind.find(1,y) quit:y = 0  set sqldta.piece($c(9),y - 1) = ""
+	quit sqldta
+
+
+title(String pars(), Boolean isHTML, Number IORM, Number PN)	// Display title
+	
+	// This is a structured element that was is created by the bldTitle procedure
+
+	type Literal String DR = $c(0)				// Delimiter - Record
+	type Literal String DF = $c(1)				// Delimiter - Field
+	type Literal String TAB = $c(9)
+	type Literal String LF = $c(10)
+
+	type String x,dec,fmt,var,typ,style
+	type Number i
+
+	type String title = pars("title").get()
+	if title.isNull()  quit ""
+
+	// Perform Variable substitution in title
+
+	type List vars
+
+	set vars = title.piece(DR,1), title = title.piece(DR, 2, title.length())
+
+	for i = 1:1:vars.length(DF) do {
+
+		set x = vars.piece(DF,i)			// Get the variable
+
+		set typ = x.piece("|",2), dec = x.piece("|",3), style = x.piece("|",4), fmt = x.piece("|",5)
+
+		#ACCEPT DATE=12/04/07; PGM=Frank Sanchez; CR=unknown
+		xecute ("set var=" _ x.piece("|",1))
+
+		if ("N$".contains(typ)) set var = $$NUM^%ZM(var,dec,fmt)
+		else  if (typ = "D") set var = $$DAT^%ZM(var,fmt)
+		else  if (typ = "L") set var = $$LOG^%ZM(var,fmt)
+		else  if (typ = "C") set var = $$TIM^%ZM(var,fmt)
+
+		if 'style.isNull() & isHTML  set var = "<span style="_ style.addQuotes() _ ">" _ var _ "</span>"
+
+		set title = title.piece(DF,1) _ var _ title.piece(DF, 2, title.length())
+
+		}
+	
+	if ('isHTML & title.contains(TAB)) do {				// Adjust padding for variables, right float
+
+		type Number i
+		for i = 1:1:title.length(LF) do {
+
+			set x = title.piece(LF,i)
+			if x.contains(TAB) do {
+				set x = x.piece(TAB,1) _ "".justify(IORM - x.length() + 1) _ x.piece(TAB,2)
+				set title.piece(LF,i) = x
+			}
+		}
+	}
+
+	quit title
+
+
+close(String cursor, Boolean isHTML, String IO, Number sqlcnt, Boolean complete)
+
+
+	do CLOSE^SQLM(cursor)                                           // Close SQL cursor
+
+	if (isHTML = true) do writeln("</table>")
+
+	if (complete = true) do paragraph("Complete :> "_ sqlcnt _ " rows processed.", "RS", isHTML)
+	quit
+
+
+border(String col(), String chr)	// Return border break line
+
+	// This function returns a formatted plain text line
+
+	type Literal String TAB = $c(9)
+	type Literal String COLPAR = "length,type,decimal,format,align,merge,space,math,wrap,repeat,null,break,style,heading,name"
+
+	type Number I
+	type Number cptr = 0
+	type Row colrec
+	type String d = ""
+
+	set d = ""
+	for I = 1:1:col do {
+
+		set colrec = col(I).toRow(COLPAR,TAB)
+
+		if '(colrec.length & colrec.merge.isNull()) quit
+
+ 		if (cptr > 0) set d = (d _ "".justify(cptr - d.length()))
+		set d = d _ "".justify(colrec.length, "", chr)
+		set cptr = (cptr + colrec.length + colrec.space)
+	}
+
+	quit d
+
+
+caption(String text, String class, Boolean isHTML, Number length)	// Output a table caption
+
+	type Literal String LF = $c(10)
+	type Literal String SP = "&nbsp;"
+
+	if (isHTML = true) set text = "<caption><p class=PSL-" _ class _ ">" _ text.replace("  ",(SP _ SP)).replace(LF,"<BR>") _ "</p></caption>"
+	else  set text = "*** " _ text _ " ***", text = ("".justify((length - text.length()) \ 2) _ text)
+
+	do writeln(LF _ text _ LF)
+	quit
+
+
+paragraph(String text, String class, Boolean isHTML)	// Output a paragraph
+	
+	type Literal String LF = $c(10)
+	type Literal String SP = "&nbsp;"
+
+	if (isHTML = true) set text = "<p class=PSL-" _ class _ ">" _ text.replace("  ",(SP _ SP)).replace(LF,"<BR>") _ "</p>"
+	do writeln(LF _ text _ LF)
+	quit
+
+
+section(Number length, Boolean isHTML)	// Output a section break (horizontal rule)
+	
+	type Literal String LF = $c(10)
+
+	type String text	
+	if (isHTML = true) set text = "<br><hr /><br>"
+	else  set text = "".justify($s((length < 80):80,1:length),"","-") 
+	do writeln(LF _ text _ LF)
+	quit
+
+
+totals(String tot(), String hdg, String col(), Boolean isHTML, Number IOSL, Number IORM, Number line, Boolean altbg, Number PN, String pars())	// output totals
+
+	if tot("").order().isNull() quit
+ 
+	type Literal String LF = $c(10)
+	type Literal String TAB = $c(9)
+	type Literal String COLPAR = "length,type,decimal,format,align,merge,space,math,wrap,repeat,null,break,style,heading,title,minus"
+	type Number I,i,break,colNum
+	type String fl,func,rd,row(),x,xcol(),z
+	type Row accum,colrec
+
+	set xcol = col
+
+	// Lay out the row / function map
+	for I = 1:1:col  do {
+
+		set colrec = col(I).toRow(COLPAR,TAB)
+		
+		set fl = colrec.math		// function list
+
+		if fl.isNull() quit
+
+		for i = 1:1:fl.length(";") do {
+			set x = row(i).get()
+			set x.piece(TAB,I) = fl.piece(";",i)
+			set row(i) = x
+		}
+	}
+
+	if row(0).order().isNull() quit
+
+	// Output underlines or empty row
+	if (isHTML = true) set break = 1	// In HTML force an empty row
+	else  do {				// In text mode, output underlines
+		set rd = ($$border(.col(),"=") _ LF), break = 0
+		do wrtRow(rd, hdg, isHTML, .pars(), break, .line, altbg, .IOSL, IORM, .PN)
+	}
+
+	type String n = ""
+
+	for  set n = row(n).order() quit:n.isNull()  do {
+
+		set rd = ""
+		set colNum = 0
+
+		// First generate rows to map the functions
+		for I = 1:1:col  do {
+
+
+			set colrec = col(I).toRow(COLPAR,TAB)
+
+			if ((colrec.length = 0) ! 'colrec.merge.isNull())  quit
+
+			set colNum = colNum + 1
+			set func = row(n).piece(TAB,I)
+	
+			set colrec.math = "", colrec.break = "", colrec.repeat= "", colrec.null = ""
+			if func.isNull() set xcol(colNum) = colrec.toString() quit
+
+			set colrec.title = func _ "(" _ $$escape(colrec.title).piece(" ",1) _")"
+
+			set accum = tot(I).toRow("flags,count,sum,max,min",TAB)
+
+			if func = "COUNT" set z = accum.count
+			else  if func = "SUM" set z = accum.sum
+			else  if func = "MAX" set z = accum.max
+			else  if func = "MIN" set z = accum.min
+			else  if func = "AVG" do {
+
+				if (accum.count > 0) set z = (accum.sum / accum.count)
+				else  set z = ""
+
+				if z.contains(".") & colrec.decimal.isNull() set colrec.decimal = 2			
+			}
+
+			else  if func = "UNIQUE" do {		// Count unique
+
+				type Number v = ""
+				for z = 0:1 set v = tot(I,v).order() quit:v.isNull()
+			}
+
+			else  if func = "MED" do {		// Find median
+
+				type Number t = (accum.count / 2)
+				type Number c = 0
+				type Number v = ""
+				set z = ""
+
+				for  set v = tot(I,v).order() quit:v.isNull()  set c = (c + tot(I,v)) quit:(c > t)  set z = v
+				if 'v.isNull() set z = $s(t#1:v,1:((z + v) / 2)))
+
+				if z.contains(".") & colrec.decimal.isNull() set colrec.decimal = 2
+			}
+
+			else  if func = "LEAST" do {		// Find least popular value
+
+				type Number n = tot(I,"").order() if n.isNull() set z = "" quit
+				type String v = tot(I,n)
+
+				set z = n
+				for  set n = tot(I,n).order() quit:n.isNull()  do {
+					if (tot(I,n) < v) set v = tot(I,n), z = n
+					else  if (tot(I,n) = v) set z = (z _ LF _ n)
+				}
+			}
+
+			else  if func = "MOST" do {		// Find most popular value
+
+				type Number n = tot(I,"").order() if n.isNull() set z = "" quit
+				type String v = tot(I,n)
+
+				set z = n
+				for  set n = tot(I,n).order() quit:n.isNull()  do {
+					if (tot(I,n) > v) set v = tot(I,n), z = n
+					else  if (tot(I,n) = v) set z = (z _ LF _ n)
+				}
+			}
+
+			else  if func = "COUNT-LEAST" do {		// Find # occurrances of least popular value
+
+				type Number v = tot(I,"").order() if v.isNull() set z = "" quit
+				set z = tot(I,v)
+
+				for  set v = tot(I,v).order() quit:v.isNull()  if (tot(I,v) < z) set z = tot(I,v)
+			}
+
+			else  if func = "COUNT-MOST" do {		// Find # occurrances of most popular value
+
+				type Number v = tot(I,"").order() if v.isNull() set z = "" quit
+				set z = tot(I,v)
+
+				for  set v = tot(I,v).order() quit:v.isNull()  if (tot(I,v) > z) set z = tot(I,v)
+			}
+
+			else  if func.beginsWith("t-") do {	// Special 'tie value' syntax
+
+				set colrec.title = "t-" _ (func.piece("t-",2) - 5) _ "(" _ colrec.title.piece("(",2,999)
+
+				set z = {String}accum.piece(TAB,func.piece("t-",2))
+				if "$NDCL".contains(colrec.type) set z = $$EXT^%ZM(z,colrec.format,colrec.decimal), colrec.format = "", colrec.decimal = ""
+				set z = ("t-" _ z)		//Display ties
+			}
+
+			if {List}"COUNT,COUNT-LEAST,COUNT-MOST,UNIQUE".contains(func) set colrec.decimal = ""
+
+			set xcol(colNum) = colrec.toString()
+
+			// Results contain more than one value, insert rows to handle and shift down
+			if z.contains(LF) do {
+
+				type Number t = 5
+				type Number r = n
+				type Number s = ""
+				type String x,y
+				type String xaccum = accum.toString()
+
+				// Shift rows down within this column (start at end)
+				for  set s = row(s).order(-1) quit:(s = r)  do {
+
+					set x = row(s)
+					if x.piece(TAB,I).isNull() quit		// No function for column
+					set y = row(s + z.length(LF) - 1).get()
+					set y.piece(TAB,I) = x.piece(TAB,I)
+					set row(s + z.length(LF) - 1) = y
+				}
+
+				for i = 2:1:z.length(LF) do {
+
+					set t = (t + 1)
+					set r = (r + 1)
+
+					type String y = accum.toString()		// PSL error forces this
+					set xaccum.piece(TAB,t) = z.piece(LF,i)		// Add value to accumm (sic y)
+					set x = row(r).get()
+					set x.piece(TAB,I) = ("t-" _ t)
+					set row(r) = x
+				}
+
+				set tot(I) = xaccum
+				set z = z.piece(LF,1)
+			}
+
+
+			set rd.piece(TAB,colNum) = z
+		}
+
+		set xcol = colNum
+		set rd = $$bldRow(rd, .xcol(), isHTML)
+
+		if (isHTML = true) do {							// Poke titles into columns
+
+			for I = 1:1:colNum  do {
+
+				set colrec = xcol(I).get().toRow(COLPAR,TAB)
+				if 'colrec.title.isNull() set rd = rd.piece("<td", 1, I) _ "<td title=" _ colrec.title _ rd.piece("<td", I + 1, rd.length())
+			}
+		}
+
+		do wrtRow(rd, hdg, isHTML, .pars(), break, .line, altbg, .IOSL, IORM, PN)
+		set break = 0
+	}
+
+	quit
+
+
+
+bldcol(String sel, String from, String order, String col(), String xcol(), String pars(), String tok, String fsn(), String vdd())	// Return internal column array
+
+	// This procedure returns a column array based on the data dictionary 
+	// and overridden by xcol
+
+	type Literal String COLPAR = "length,type,decimal,format,align,merge,space,math,wrap,repeat,null,break,style,heading,title,minus"
+	type Literal String CLASSES = "blob,logical,currency,date,frequency,memo,number,text,time,upper"
+	type Literal String TAB = $c(9)
+
+	type Public Number ER
+	type String RM = ""
+
+	set from = $$^SQLJ(from,,.fsn,,.tok) 
+	if ER do ERROR(RM) quit
+
+	type Number length,ptr
+	type String agf,att,align,break,class,datatype,format,name,hdg,str,style,title,n,p,x,z
+        type Row colrec,forext,schema
+
+	type Boolean isError = false					// Group error indicator
+	
+	// Initialize format to %MSK global formats
+	
+	type String dftAtts = $$dftFormat()				// Initialize %MASK global formats
+	if pars("COLS").exists() set dftAtts = dftAtts _ "," _  pars("COLS")
+
+	type String zpars(),gcol()
+	do parse(dftAtts, .zpars(), ",", "=", false, "none", "default", COLPAR)
+
+	/* To simplify lookup and cascading logic, copy attributes into records
+	   keyed by class in the same structure as the column record.  Then merge
+	   root attributes with class attributes.
+	*/
+
+	set n = ""
+	for  set n = zpars(n).order() quit:n.isNull()  do {
+
+		if ER set isError = true, ER = 0		// Mark error & continue
+
+		set class = n.piece(".",1), att = n.piece(".",2)
+		set z = zpars(n) 
+
+		if att.isNull() set att = class, class = "."
+		else  if class.isNull() set class = "."
+
+		set p = {List}COLPAR.position(att)
+		if 'p do ERROR("Invalid Column Parameter",n) quit
+
+		if (z = "default") set z = ",,,,, ,2,,1,1,,1,,".piece(",",p)
+
+		// Save for title or other formatting if necessary
+		if (att = "format") set pars(class _ "." _ att) = z
+
+		//if z.piece(":",2,2,"""").isNull() set z = "mask:" _ z 
+
+		// Move this into the appropriate column in gcol
+		set x = gcol(class).get(), x.piece(TAB,p) = z, gcol(class) = x
+
+
+	}
+
+
+	if 'gcol(".").get().isNull() do {			// Merge Root & classes
+
+		type Number i
+		type Number n = "."
+
+		type String x,z 
+		set x = gcol(".")				// Root class record
+
+		for  set n = gcol(n).order() quit:n.isNull()  do {
+
+			set z = gcol(n)				// Class record
+			for i=1:1:x.length(TAB) if 'x.piece(TAB,i).isNull() set z.piece(TAB,i) = $$mergeProperties(x.piece(TAB,i), z.piece(TAB,i))
+			set gcol(n) = z
+		}
+	}
+
+	if (isError = true) set ER = 1
+
+	if ER quit
+
+	if pars("BREAK").exists() do {				// Initialize orderby to set-up auto break
+
+		type string table = from.piece(",",1)
+		type String keys = fsn(table).piece("|",3)
+
+		if order.isNull() set order = keys
+
+		for col = 1:1:order.length(",") do { if ER quit
+			set str = order.piece(",",col).piece(" ",1).trim()
+			set str = $$MCOL^SQLCOL(str, from,,,, .fsn , , , .tok, .vdd, 1)
+			set order.piece(",",col) = str.piece($c(1),2)	
+		}
+
+		if order.piece(",",col) = (table _ "." _ keys.piece(",",keys.length(","))) set order = order.piece(",",1,order.length(",") - 1)
+	}
+
+	set ptr = 0
+
+        for col = 1:1 set str = $$GETCOL^SQLCOL(sel,.ptr) do { if (ptr > sel.length()) quit
+
+		if ER set isError = true, ER = 0			// Mark error & continue
+
+		set colrec = "".toRow(COLPAR,TAB)			// Initialize column record
+		set length = "", datatype = ""
+
+		// For aggregate functions, get the root column
+		if str.contains("(") set agf = str.piece("(",1), str = str.piece("(",2).piece(")",1)
+		else  set agf = ""
+
+		set str = $$MCOL^SQLCOL(str, from, .length, .datatype,, .fsn , , , .tok, .vdd, 1)
+		if ER do ERROR(RM) quit
+
+		if length.isNull() set length = str.length()
+		if datatype.isNull() set datatype = $s(str=+str:"N",1:"T")
+
+		set class = $$getClass(datatype)
+
+		/* Cascading precedence is: 1) [columnQualifiers] 
+                                            2) /COLS=StatementQualifiers
+                                            3) /TEMPLATE=templates 
+                                            4) Data-Qwik schema [DBTB1D] and format defaults from %MSK*
+		*/
+
+		set forext = xcol(col).get().toRow(COLPAR,TAB)
+		if 'forext.type.isNull() set class = forext.type.lowerCase(), datatype = $$getType(class)
+
+		set forext = $$getColAtts(class, .gcol(), forext.toString()).toRow(COLPAR,TAB)
+		
+		// Support one global shift of datatype - could be implemented to be recursive (trap a-->b-->a)
+		if '(forext.type.isNull() ! (forext.type.lowerCase() = class)) do {
+
+			set class = forext.type.lowerCase(), datatype = $$getType(class)
+			set forext = $$getColAtts(class, .gcol(), forext.toString()).toRow(COLPAR,TAB)
+		}
+
+		if datatype.isNull() do ERROR("Invalid DataType",class) quit
+
+		set colrec.type = datatype
+	
+		if str.contains($c(1)) set name = str.piece($c(1),2)
+		else  set name = str
+
+		set schema = vdd(name).get().toRow("nod,len,dft,dom,tbl,ptn,,,typ,des,,min,max,dec,req,cmp,,ofs,siz,del,pos,rhd,,,ltd","|")
+
+
+		set hdg = forext.heading					// User attribute input
+		if (hdg = "none") set hdg = ""
+		else  if hdg.isNull() set hdg = schema.rhd.translate("@"," ").trim() if 'agf.isNull() set hdg = agf _ " " _ hdg
+		set colrec.heading = hdg
+
+
+		set title = forext.title					// User attribute input
+		if (title = "none") set title = ""
+		else  if title.isNull() do {
+
+			if 'agf.isNull() set name = (agf _ "(" _ name _ ")")
+
+			set title = name  _ " " _ class
+
+			if '"BLDCM".contains(datatype) do {			// Add length and decimal schema values
+
+				set title = title _ "(" _ schema.len
+
+				if 'schema.dec.isNull() set title = title _ "," _ schema.dec
+				set title = title _ ")"
+			}
+
+			if schema.nod.contains("*") set title = title _ " Primary-Key"
+			if 'schema.tbl.isNull() do {
+
+				if schema.tbl.beginsWith("[") set title = title _ " Table-Ref: " _ schema.tbl.piece("[",2).piece("]",1)
+				if schema.tbl.beginsWith(",") set title = title _ " Enum-List: " _ schema.tbl.extract(2,999).addQuotes()
+			}
+
+			if 'schema.cmp.isNull() set title = title _ " Computed: " _ schema.cmp
+		}
+		set colrec.title = title
+
+		// Length can be set to zero to hide the column (no output)
+		if 'forext.length.isNull() set length = forext.length		// User attribute input
+		if (length = "none") set length = 0
+		if (length = 0) set forext.space = 0, forext.math = ""		// Hidden column
+		set colrec.length = length
+
+
+		set align = $S("CLDF".contains(datatype):"center","N$".contains(datatype):"right",1:"")
+		if 'forext.align.isNull() set align = forext.align.lowerCase()
+		if (align = "left" ! (align = "none")) set align = ""		// Always default in output
+		set colrec.align = align
+
+		set break = forext.break					// User attribute input
+		if (break = "none") set break = 0
+		else  if (break.isNull() & pars("BREAK").exists()) set break = $s((order.piece(",",col) = name):pars("BREAK"),1:0)
+		if (break = "page") set break = -1
+		set colrec.break = break
+
+		set style = forext.style
+		if (style = "none") set style = ""
+		else  if 'style.isNull() do {
+
+			set z = style.getSub("minus-color", ";",":")
+			if 'z.isNull() set style = $$remProperty(style,"minus-color"), colrec.minus = "color:" _ z
+		}
+		set colrec.style = style
+
+		set format = forext.format					// User attribute input
+		if (format = "none") set colrec.format = "", colrec.decimal = ""
+		else  do {
+			set colrec.decimal = $$getProperty("decimal-size", format, schema.dec)
+			set colrec.format = $$getFormat(class, format)
+		}
+
+
+		if (forext.wrap = "none") set forext.wrap = 0
+		else  if forext.wrap.isNull() set forext.wrap = 1
+		else  if "truncate".beginsWith(forext.wrap) set forext.wrap = 2
+
+		if (forext.math = "none") set forext.math = ""
+		if (forext.null = "none") set forext.null = ""
+
+		if (forext.space = "none") set forext.space = 0
+		else  if forext.space.isNull() set forext.space = 2
+
+		if (forext.merge = "none") set forext.merge = ""
+		if (forext.repeat = "none") set forext.repeat = 0
+
+		set colrec.repeat = forext.repeat
+		set colrec.null = forext.null
+		set colrec.wrap = forext.wrap
+		set colrec.math = forext.math.upperCase()
+		set colrec.merge = forext.merge
+		set colrec.space = forext.space
+
+		// If break or norepeat are specified, set the other default
+		if (colrec.repeat.isNull() & colrec.break) set colrec.repeat = 0
+		else  if (colrec.break.isNull() & (colrec.repeat = 0)) set colrec.break = 1
+
+		set col(col) = colrec.toString()
+	}
+
+	if (isError = true) set ER = 1					// Signal to return error
+
+	quit
+
+
+bldhdg(String col(),				// Default column atttributes
+	String xcol(), 				// User override
+	Boolean isHTML,				// Is HTML output
+	Number IORM,				// Calculated right margin
+	String colgrp,				// HTML column group
+	Number tot(),				// Initialized totals
+	Boolean isPortrait)			// Portrait more flag
+
+	// This utility generates a heading and other returned parameters
+
+	type Literal String COLPAR = "length,type,decimal,format,align,merge,space,math,wrap,repeat,null,break,style,heading,title,minus"
+	type literal String TAB = $c(9)
+	type literal String LF = $c(10)
+
+	type Number I,i
+	type Row colrec
+
+	type String d,z
+	type String hdg = ""
+
+	set colgrp = ""
+
+	for I = 1:1:col do {						// Patch & validate format options
+
+		set colrec = col(I).toRow(COLPAR,TAB)
+
+		// Don't display this column, typically used for keys if imbedded in heading
+		if (colrec.length = 0) quit
+
+		if 'colrec.math.isNull() set tot(I) = $$initMath(.colrec.math)
+
+		// This section ignores the linebreak '@' defined in the report heading and
+		// constructs the heading based on the available field length.  It will also
+		// expand the field length to fit the longest word in the heading. 
+ 
+		type String label = colrec.heading
+
+		if label.contains("  ") set label = label.replace("  "," ")		// Remove extra whitespace
+
+		// if 'isHTML do {
+
+		// Minimum field length must at least fit the longest heading word
+		for i = 1:1:label.length(" ") if (label.piece(" ",i).length() > colrec.length) do {
+	
+			set colrec.length = label.piece(" ",i).length()
+			set col(I) = colrec.toString()
+		}
+
+		// Starting at the end, fit as many words into each line as possible
+		if (label.length() > colrec.length) do {		
+
+			type Number p = label.length(" ")
+			for i = (p - 1):-1:1 if (label.piece(" ",i,p).length() > colrec.length) set label = label.piece(" ",1,i) _ LF _ label.piece(" ",i + 1,999), p = i 
+		}
+
+		if label.contains(TAB) do {						// Check for markup type
+
+			if (label.piece(TAB,1).upperCase() = "HTML") set label = label.piece(TAB,2,label.length())
+			else  if (isHTML = true) set label = $$escape(label)
+		}
+
+		if 'colrec.merge.isNull() & (I > 1) do { quit				// Merge with prior column
+
+			type String merge = colrec.merge
+			if (merge ?1N.E) set merge = $$ASCIItoHTML(merge, isHTML)
+
+			if (isHTML = true) do {							// Modify heading & title
+
+				if merge.contains("  ") set merge = merge.replace("  "," &nbsp;")
+
+				if 'label.isNull() set hdg = hdg.extract(1, hdg.length() - 5) _ merge _ label _ "</th>"
+
+				// Patch the title to add the column header info
+				type String p = "<th title="				// Pattern to patch, get last occurrance
+				type Number c = hdg.length(p)
+				type String z = hdg.piece(p,c) 
+				type String h = z.piece(">",2,99)
+				type String s = z.piece(" style=",2)			// Parse out style= qualifier
+
+				set z = z.piece(">",1)
+				if 's.isNull() set z = z.piece(" style=",1)
+
+				set z = (z.stripQuotes() _ LF _ $$escape(colrec.title)).addQuotes()
+				if 's.isNull() set z = (z _ " style=" _ s)
+
+				set hdg.piece(p,c) = (z _ ">" _ h)
+			}
+
+			else  do {							// Text Markup
+
+				set merge = merge.replace("<br>",LF)
+				set merge = merge.replace("<BR>",LF)
+
+				if label.isNull() quit
+
+				type Number pcol
+				type Row pcolrec
+
+				for pcol = I-1:-1:1 set pcolrec = col(pcol).toRow(COLPAR,TAB) if (pcolrec.merge.isNull() & (pcolrec.length > 0)) quit
+
+				// Modify merge 'into' column length to fit merged columns
+
+				set IORM = (IORM - pcolrec.length - pcolrec.space)
+
+				set col(pcol) = pcolrec.toString()
+
+				// merge heading to prior heading
+				set label = hdg.piece(LF,5).extract(IORM + 1, 999) _ merge _ label
+				set hdg.piece(LF,5) = hdg.piece(LF,5).extract(1, IORM)
+
+				type Number p
+
+				for p = 4:-1:1 if (hdg.piece(LF,p).length() > IORM) do {
+					set label = hdg.piece(LF,p).extract(IORM + 1, 999) _ LF _ label
+					set hdg.piece(LF,p) = hdg.piece(LF,p).extract(1,IORM)
+				}
+
+				set p = label.length(LF)
+
+				for i = p:-1:1 do {
+					set z = label.piece(LF,i)
+					set d = hdg.piece(LF,(5 + i - p))
+
+					if (IORM > 0) set d = d _ "".justify(IORM - d.length())		// Pad
+					if (colrec.align = "right") set z = z.justify(colrec.length,1)	// Right
+					else  if (colrec.align = "center") set z = "".justify((colrec.length - z.length()) \ 2) _ z
+					set hdg.piece(LF,(5 + i - p)) = (d _ z)
+				}
+
+				set d = hdg.piece(LF,6).extract(1,IORM) _ "".justify(pcolrec.length,"","-") _ "".justify(pcolrec.space)
+				set hdg.piece(LF,6) = d
+
+				set IORM = (IORM + pcolrec.length + pcolrec.space)
+			}
+
+		set colrec.merge = merge
+		set colrec.math = ""
+		set colrec.align = ""
+		set col(I) = colrec.toString()
+		}
+
+		if (isHTML = true) do {
+
+			set label = label.replace(LF,"<br>")
+
+			set hdg = hdg _ LF _ "<th"
+			if 'colrec.title.isNull() set hdg = hdg _ " title=" _ $$escape(colrec.title).addQuotes() 
+			if 'colrec.style.isNull() set hdg = hdg _ " style=color:black"
+			set hdg = hdg _ ">" _ label _ "</th>"			
+
+			if isPortrait.get() quit
+
+			set colgrp = colgrp _ "<col"
+
+			if 'colrec.align.isNull() set colgrp = (colgrp _ " align=" _ colrec.align)
+			if 'colrec.style.isNull() set colgrp = (colgrp _ " style=" _ colrec.style.translate("= ",":;").addQuotes())
+
+			set colgrp = (colgrp _ ">" _ LF)
+		}
+
+		else  do {								// Create plain text heading
+
+			type Number p = label.length(LF)
+
+			for i = p:-1:1 do {
+				set z = label.piece(LF,i)
+				set d = hdg.piece(LF,(5 + i - p))
+
+				if (IORM > 0) set d = d _ "".justify(IORM - d.length())		// Pad
+				if (colrec.align = "right") set z = z.justify(colrec.length,1)	// Right
+				else  if (colrec.align = "center") set z = "".justify((colrec.length - z.length()) \ 2) _ z
+				set hdg.piece(LF,(5 + i - p)) = (d _ z)
+			}
+
+			set d = hdg.piece(LF,6) _ "".justify(IORM - d.length()) _ "".justify(colrec.length,"","-") _ "".justify(colrec.space)
+			set hdg.piece(LF,6) = d
+		}
+	
+		set IORM = (IORM + colrec.length + colrec.space)	// Nominal Right margin
+	}
+
+	if hdg.beginsWith(LF) set hdg = hdg.trim(-1,LF)
+	quit hdg _ LF
+
+
+
+bldTitle(String title, Boolean isHTML, String col(), String pars(), String from, String where, String tok)	// Initialize title 
+
+	// Format title from fixed template and pre-process variable substitution
+
+	type Literal String COLPAR = "length,type,decimal,format,align,merge,space,math,wrap,repeat,null,break,style,heading,title,minus"
+
+	type Literal String DR = $c(0)				// Delimiter - Record
+	type Literal String DF = $c(1)				// Delimiter - Field
+	type Literal String TAB = $c(9)
+	type Literal String LF = $c(10)
+
+
+	type Number i,y,yz
+	type String v,var,cakwd(),class,parms,L1,L2,R1,R2
+	type Row colrec
+
+	if (title = "default") do {				// Generate a default title
+
+		type String table = $$UNTOK^%ZS(from.piece(" ",1).piece(",",1),.tok)
+ 		type RecordDBTBL1 dbtbl1 = Db.getRecord("DBTBL1","%LIBS = ""SYSDEV"" ,FID=:table",1)
+		set title = dbtbl1.des
+		if 'where.isNull() set title = title _ " ( " _ $$UNTOK^%ZS(where,.tok) _ ")"
+	}
+	
+	type Boolean txtHTML = false				// Title is in HTML text format
+
+	if title.contains(TAB) do {
+
+		if (title.piece(TAB,1).upperCase() = "HTML") set txtHTML = true, title = title.piece(TAB,2,title.length())
+		if title.contains(TAB) set title = title.replace(TAB," ")
+	}
+
+	set L1 = ""
+	#IF 'CUVAR.CONAM.isNull() set L1 = CUVAR.CONAM
+	
+	if ((%SystemDate = %CurrentDate) ! %SystemDate.isNull()) set R1 = ""
+	else  set R1 = "Effective: <:%SystemDate>" 
+
+	if (pars("PAGE").get() > 0) set R1 = (R1 _ "  Page: <:PN>")
+	set R2 = "Run Date: <:%CurrentDate>   <:%CurrentTime>"
+
+	if (isHTML = true) do {
+
+		if 'L1.isNull() set title = (L1 _ LF _ title)
+		if 'R1.isNull() set R2 = (R1 _ LF _ R2)
+
+		set title = (title _ TAB _ R2)
+	}
+
+	else  do {
+
+		if 'R1.isNull() set L1 = (L1 _  TAB _ R1)
+		if 'R2.isNull() set title.piece(LF,1) = (title.piece(LF,1) _  TAB _ R2)
+		set title = (title _ LF)
+		if 'L1.isNull() set title = (L1 _ LF _ title _ LF)
+	}
+
+	type List vars = ""
+	
+	set y = 0
+	for  set y = title.find("<:",y) quit:(y = 0)  do {			// Parse variable insertion
+
+		set yz = title.find(">",y) if (yz = 0) quit
+		set v = title.extract(y,yz - 2)		// element expression
+
+		set parms = v.piece(" ",2,v.length()).trim(), var = v.piece(" ",1)
+
+		if var.contains(".") do {					// Find Column reference in column title
+			set var = var.upperCase()
+			for i=1:1:col set colrec = col(i).toRow(COLPAR,TAB) if (colrec.title.piece(" ",1) = var) set var = i quit
+		}
+
+		if var?1N.N & col(var).exists() set colrec = col(var).toRow(COLPAR,TAB), var = ("col(" _ var _ ",0)")
+
+		else if var.beginsWith("%") do { quit:var.isNull()
+
+			set var = $$kwdRow^UCDTAUTL(var,.cakwd()) if var.isNull() do ERROR("Invalid variable syntax",v) quit
+			set colrec = "".toRow(COLPAR,TAB)
+			set colrec.type =  $s(var.piece("|",4) = "Time":"C",1:var.piece("|",4).extract(1))
+			set class = $$getClass(colrec.type)
+			set colrec.format = $$getFormat(class, pars(class _ ".format").get())
+ 
+			set var = var.piece("|",2)
+		}
+
+		else  if '(var = "PN") do ERROR("Invalid variable syntax",v) quit // Could add more local vars if required (e.g., sqlcnt)
+
+		if 'var.beginsWith("$") set var = "$G(" _ var _")"		// Prevent undefined errors
+
+		if 'parms.isNull() do {
+
+			type String format,style
+
+			set class = $$getClass(colrec.type)
+
+			do parse(parms, pars(), ",", "=",,,, "format,style")
+			set format = pars("format").get(), style = pars("style").get()
+
+			if format.isNull() set format = colrec.format
+			else  if (format = "none") set format = ""
+			else  set format = $$getFormat(class, format)
+
+			set colrec.decimal = $$getProperty("decimal-size", format, colrec.decimal)
+			//if (colrec.decimal = "none") set colrec.decimal = ""
+			set colrec.format = format, colrec.style = style
+		}
+
+	set vars = vars.add(var _ "|"_ colrec.type _ "|"_ colrec.decimal _ "|" _ colrec.style _ "|" _ colrec.format, DF)
+	set title = title.extract(1,y - 3) _ DF _ title.extract(yz,title.length())
+	}
+
+	if (txtHTML = false & (isHTML = true)) set title = $$escape(title)		// Escape HTML chars
+	if (txtHTML = true  & (isHTML = false)) do {	
+	// Insert code to replace HTML tags with appropriate plain text (e.g., alternate text)
+	}
+
+	if (isHTML = true) do {
+
+		set title = title.replace(LF,"<br>")
+		set title = ("<div style=float:left;color:black>" _ title.piece(TAB,1) _ "</div><div style=float:right;color:black>" _ title.piece(TAB,2) _ "</div>")
+	
+		// Count the number of unhidden and unmerged columns for colspan
+		type Number i
+		type Number c = 0
+
+		for i = 1:1:col set colrec = col(i).toRow(COLPAR,TAB) if ((colrec.length > 0) & colrec.merge.isNull()) set c = (c + 1)
+		set title = ("<tr><th colspan=" _ c _ " align=left>" _ title _"</th></tr>" _ LF)
+	}
+
+	set title = vars _ DR _ title
+
+	quit title
+
+
+
+plan(String pars(), String vsql(), Boolean isHTML) // Display execution IO plan
+
+	type Literal String COLPAR = "length,type,decimal,format,align,merge,space,math,wrap,repeat,null,break,style,heading,title"
+	type Literal String TAB = $c(9)
+	type Literal String LF = $c(10)
+
+	type String d,colgrp,hdg
+	type String i,z
+	type String index = ""
+	type String xcol(),sort()
+
+	type Number IORM = 0
+
+	type Row colrec = "".toRow(COLPAR,TAB)
+
+	set xcol = 5
+	set colrec.space = 2
+	set colrec.type = "T"
+
+	set colrec.length = 12
+	set colrec.align = "left"
+	set colrec.heading = "Index"
+
+	set xcol(1) = colrec.toString()
+
+	set colrec.length = 30
+	set colrec.heading = "Primary Keys"
+	set xcol(2) = colrec.toString()
+
+	set colrec.length = 7
+	set colrec.align = "center"
+	set colrec.heading = "Cost"
+	set xcol(3) = colrec.toString()
+
+	set colrec.length = 4
+	set colrec.heading = "Code"
+	set xcol(4) = colrec.toString()
+
+	set colrec.length = 20
+	set colrec.align = "left"
+	set colrec.heading = "Distribution"
+	set xcol(5) = colrec.toString()
+
+	set hdg = $$bldhdg(.xcol(),,isHTML,.IORM,.colgrp)
+
+	if (isHTML = true) do newTable(pars(), "UT", colgrp)
+
+	// First sort index by cost
+	for i = 1:1 set index = vsql("P",index).order() quit:index.isNull()  do {
+
+		set z = vsql("P",index)
+		set sort(z.piece("|",4) + (i / 100)) = index
+	}
+
+	do caption("Display SQL IO Access Plan - " _ (i - 1) _ " Indexes", "UT", isHTML, IORM) 
+	do writeln(LF _ hdg)	
+
+	type String n = ""
+	for  set n = sort(n).order() quit:n.isNull()  do {
+
+		set index = sort(n)
+		set z = vsql("P",index)
+		set d = index _ TAB _ z.piece("|",2) _ TAB _ ((z.piece("|",4) + .05) \ 1) _ TAB _ z.piece("|",5) _ TAB _ z.piece("|",3)
+		if (isHTML = true) set d = $$escape(d)
+		do writeln($$bldRow(d, .xcol(), isHTML))
+	}
+
+	if (isHTML = true) do writeln(LF _ "</table>")
+	do section(IORM,isHTML)
+	Quit
+
+
+dftCSS(String pars(), String class)	// Default CSS
+
+	type Literal String LF = $c(10)
+	type Literal String LT = $c(10,9)
+
+	type Public Number ER
+
+	type String n,m
+	type String alt,css(),hstyle,tstyle,xstyle
+
+	// Frank's hard-coded default style sheet
+	set tstyle = "border-width:1px;padding:2px;border-spacing:;border-style:inset;border-color:#788cb3;border-collapse:collapse;background-color:#FCFDFE;font-family:Verdana;font-size:80%"
+
+	// Process user declaration of style attributes
+	if (class = "RS") do parse(pars("STYLE").get(), .css(), ";", ":", false, "none", "default", "")
+
+	if ER quit
+ 
+	// Add additional table level custom properties for alt-row (not standard css, move to xstyle)
+
+	set xstyle = ""
+	set n = "alt-row-", m = n
+
+	for  set m = css(m).order() quit:'m.beginsWith(n)  do {
+		if (css(m) = "none") set xstyle = $$remProperty(xstyle, m)
+		else  set xstyle = $$setProperty(xstyle, m, css(m))
+		kill css(m)
+	}
+
+	set n = ""
+	for  set n = css(n).order() quit:n.isNull()  set tstyle = $$setProperty(tstyle, n, css(n)) if n.beginsWith("@") set tstyle = n
+
+	set hstyle = $$setProperty(tstyle,"padding","3px")
+	set hstyle = $$setProperty(hstyle,"background-color","#EBEEF4")
+
+	if class = "UT" set tstyle = $$setProperty(tstyle,"border-color","#d2b48c")
+
+	// Output style sheet in HTML format
+
+	do writeln((LF _ "<style type=""text/css"">" _ LF))
+	do writeln((LF _ "table.PSL-" _ class _ " {" _ tstyle.replace(";",(";" _ LT)) _ "}" _ LF))
+	do writeln((LF _ "table.PSL-" _ class _" th {" _ hstyle.replace(";",(";" _ LT)) _ "}" _ LF))
+
+	// Alternate row background modifies the bottom border of the table
+	set alt = xstyle.getSub("alt-row-color",";",":")	// Alternate Row backround
+	if (alt = "default") set alt = "#EFFFDF"
+
+	if (alt = tstyle.getSub("background-color",";",":")) set alt = ""	// Same as alternate row
+
+	if (alt.isNull() ! (alt = "none")) set xstyle = $$remProperty(xstyle,"alt-row-color")
+	else  set tstyle = $$setProperty(tstyle,"border-bottom-color", alt)
+  
+	do writeln((LF _ "table.PSL-" _ class _ " td {" _ tstyle.replace(";",(";" _ LT)) _ "}" _ LF))
+
+	if 'alt.isNull() do writeln((LF _ "table.PSL-" _ class _" tr.d1 td {background-color:" _ alt _ "}" _ LF))
+
+	if 'xstyle.translate(";","").isNull() do {
+
+		do writeln((LT _ "/* PROFILE-SQL extended style properties" _ LT))
+		do writeln(xstyle.replace(";",(";" _ LT)))
+		do writeln(("*/" _ LF))
+	}
+
+	do writeln(LF _ "</style>" _ LF)
+
+	set pars("tstyle") = tstyle
+	set pars("xstyle") = xstyle
+
+	quit
+
+
+dftFormat()	// Return application format defaults derived from %MSK* runtime variables
+
+	type Public String %MSKC,%MSKD,%MSKE,%MSKL,%MSKN
+	if %MSKN.get().isNull() set %MSKN = "."
+	if %MSKE.get().isNull() set %MSKE = "."
+	if %MSKD.get().isNull() set %MSKD = "MM/DD/YEAR"
+	if %MSKC.get().isNull() set %MSKC = "12:60 AM"
+	if %MSKL.get().isNull() set %MSKL = "NY"
+
+	type String format
+
+	// Set the application default to global masks %MSK*
+
+	set format = "number.format=decimal-separator:" _ %MSKN.extract(1).addQuotes()
+	if %MSKN.length() > 1 set format = format _ ";group-separator:" _ %MSKN.extract(2).addQuotes() _ ";group-size:3"
+	if %MSKN.length() > 2 set format = format _ ";minus-sign:" _ %MSKN.extract(3).addQuotes()
+
+	set format = format _ ",currency.format=decimal-separator:" _ %MSKE.extract(1).addQuotes()
+	if %MSKE.length() > 1 set format = format _ ";group-separator:" _ %MSKE.extract(2).addQuotes() _ ";group-size:3"
+	if %MSKE.length() > 2 set format = format _ ";minus-sign:" _ %MSKE.extract(3).addQuotes()
+
+ 	if '%MSKC.get().isNull() set format = format _ ",time.format=" _ %MSKC.addQuotes()
+ 	if '%MSKD.get().isNull() set format = format _ ",date.format=" _ %MSKD.addQuotes()
+ 	if '%MSKL.get().isNull() set format = format _ ",logical.format=" _ %MSKL.addQuotes()
+
+	quit format
+
+
+getFormat(String class, String format)	// Return internal format from external format
+
+	if class = "currency" ! (class = "number") do {
+	
+		type Number z
+
+		// Note: group-size is specified but not implemented, will default to 3 in NUM^%ZM
+		set z = $$getProperty("decimal-separator", format)
+		set z = z _ $$getProperty("group-separator", format)
+		set z = z _ $$getProperty("minus-sign", format)
+
+		set format = z if format = "." set format = ""			// Standard decimal
+	}
+
+	// else  set format = $$getProperty("mask", format)
+	// if z.piece(":",2,2,"""").isNull() set z = "mask:" _ z 
+	// Other formats don't have multiple properties
+
+	if (format = "none") set format = ""
+	else  set format = format.upperCase()
+
+	quit format
+
+
+getProperty(String property, String input, String default)	// Return property value
+
+	if 'input.beginsWith(";") set input = ";" _ input
+ 
+	type String value = input.piece((";" _ property _ ":"),2,2,"""").piece(";",1,1,"""")
+ 
+	if value.contains("""") set value = value.stripQuotes()
+
+	if ((value = "default") ! value.isNull()) set value = default.get()
+	if (value = "none") set value = ""
+ 
+	quit value
+
+
+setProperty(String expr, String name, String val, String tok)	// Insert or update a property in expr
+
+	/* Add or update a property to a string using the delimiter ';'
+	   to seperate properties and ':' to seperate property names from values.
+
+	   New properties are added to the end, found properties are changed in place.
+	*/
+
+	type Boolean isTokenized = true
+
+	if (tok.get().isNull() & expr.contains("""")) set isTokenized = false, expr = $$token(expr,.tok)
+
+	if val.isNull() quit name
+	if (val.contains(":") ! (val.contains(";"))) set val = val.addQuotes("""")	// Quote to protect delimiters
+
+	set name = (";" _ name _ ":"), expr= (";" _ expr)
+
+	if expr.endsWith(";") set expr = expr.extract(1,expr.length() - 1)
+
+	if '(";" _ expr _ ":").contains(name) set expr = (expr _ name _ val)	// Insert at end
+	else  set expr = expr.piece(name,1) _ name _ val _ ";" _ expr.piece(name,2,999).piece(";",2,999)
+
+	set expr = expr.trim(-1,";")
+
+	if (isTokenized = false) set expr = $$UNTOK^%ZS(expr,.tok)
+
+	quit expr
+
+
+mergeProperties(String expr, String add, String tok)	// Merge or add column attributes (properties) to expr
+
+	type Public Number ER
+	if add.isNull() quit expr
+
+	if {List}"none,default".contains(expr.lowerCase()) set expr = ""
+	if expr.isNull() quit add
+
+	set ER = 0
+
+	type Boolean isTokenized = true
+
+	if (tok.get().isNull() & expr.contains("""")) set isTokenized = false, expr = $$token(expr,.tok)
+
+	type Number i
+	type String z
+	for i = 1:1:add.length(";") set z = add.piece(";",i), expr = $$setProperty(expr, z.piece(":",1), z.piece(":",2,z.length()), .tok)
+
+	if (isTokenized = false) set expr = $$UNTOK^%ZS(expr,.tok)
+
+	if ER do ERROR("Syntax Error Merging Properties: ",add)
+
+	quit expr
+
+ 
+remProperty(String expr, String name, String tok)	// Remove a property from an expression
+
+	type Boolean isTokenized = true
+
+	if (tok.get().isNull() & expr.contains("""")) set isTokenized = false, expr = $$token(expr,.tok)
+
+	set name = (";" _ name _ ":")
+	if 'expr.beginsWith(";") set expr = (";" _ expr)
+	set expr = expr.piece(name,1) _ ";" _ expr.piece(name,2,999).piece(";",2,999)
+	if expr.beginsWith(";") set expr = expr.extract(2,expr.length())
+
+	if (isTokenized = false) set expr = $$UNTOK^%ZS(expr,.tok)
+
+	quit expr
+
+
+token(String expr, String tok)	// Tokenize a string
+
+	if expr.contains("""") set expr = $$TOKEN^%ZS(expr,.tok,"""")
+
+	// Issue with two string delimiters, disable single quote for now at least
+	// if expr.contains("'") set expr = $$TOKEN^%ZS(expr,.tok,"'")
+	quit expr
+
+
+parse(String input, String return(), String de, String dv, Boolean upCase, String falseText, String trueText, List valid)	// Parse string into array
+
+	/* Generate a return(tag) = value array
+	   - Alway returns untokenized values
+
+	input :== expression <de> expression
+	        expression :== tag <dv> value
+
+	- Whitespace is stripped from tags and values
+	- Allows either single or double quotes, one layer of quotes is stripped
+	- Tags are converted to either upper or lower case (default = lower)
+	- Tags with space characters moves afterSpace string to value, e.g.
+	  
+	  input="heading HTML='<br> Myheading'"  ==>  return("heading")="HTML" _ $c(9) _ "<br> Myheading"
+
+	*/
+
+	type Number i
+	type String a,c,x
+
+	if de.get().isNull() set de = ","
+	if dv.get().isNull() set dv = "="
+	if upCase.get().isNull() set upCase = false
+	if falseText.get().isNull() set falseText = "none"
+	if trueText.get().isNull() set trueText = "default"
+
+	set valid = valid.get()
+
+	if (input = "?") do ERROR(valid,"?") quit
+
+	type Number y = 0, yz = 1
+
+	for  set y = input.find(de, y) do { if (y > input.length()) quit
+
+		if (y = 0) set y = input.length() + 2
+
+		if '(input.extract(yz, y - 1).length("""")#2) quit
+
+		set x = input.extract(yz,y - 2).trim(), yz = y 
+		if x.isNull() quit
+		set a = x.piece(dv,1).trim(1)
+		set x = x.piece(dv,2,x.length()).trim(-1)
+
+		if a.contains(".") set c = a.piece(".",1) _ ".", a = a.piece(".",2)
+		else  set c = ""
+
+		if """'".contains(x.extract(1)) set x = x.stripQuotes(x.extract(1))
+
+		if a.contains(" ") set x = a.piece(" ",2,a.length()) _ $c(9) _ x, a = a.piece(" ",1)
+		if a.isNull() do ERROR("Property name or tag expected",input.piece(de,i)) quit
+
+		if upCase set a = a.upperCase()
+		else  set a = a.lowerCase()
+
+		if x.isNull() do {
+
+			if (upCase = true & a.beginsWith("NO")) set x = falseText, a = a.extract(3,a.length())
+			else  if a.beginsWith("no") set x = falseText, a = a.extract(3,a.length())
+			else  set x = trueText
+			}
+
+		if '(valid.isNull() ! valid.contains(a)) do ERROR("Invalid property name or tag",a) quit
+
+		// Join the class back to the property, if this is a root property change all classes
+		// Implemented through 'brute-force' scan (should be OK unless list is very large)
+
+		if 'c.isNull() set a = c _ a if (c = ".") do {
+
+			type String n = ""
+			for  set n = return(n).order() quit:n.isNull()  if n.contains(a) set return(n) = $$mergeProperties(return(n), x)
+		}
+
+
+		// Multi-value syntax (tag:value;)
+		if ('(dv = ":") & return(a).exists()) set x = $$mergeProperties(return(a), x)
+
+		set return(a) = x
+	}
+
+	quit
+
+
+code(String pars(), String vsql(), String exe(), Boolean isHTML)		  // Display SQL code and data region
+
+	type Literal String COLPAR = "length,type,decimal,format,align,merge,space,math,wrap,repeat,null,break,style,heading,title"
+	type Literal String LF = $c(10)
+	type Literal String TAB = $c(9)
+
+	type String d,hdg,colgrp,n,m
+	type String xcol()
+
+	type Number IORM = 0
+
+	type Row colrec = "".toRow(COLPAR,TAB)
+
+	set xcol = 2
+
+	set colrec.type = "T"
+	set colrec.space = 2
+	set colrec.align = "left"
+
+	set colrec.length = 4
+	set colrec.heading = "Line"
+	set xcol(1) = colrec.toString()
+
+	set colrec.length = 74
+	set colrec.heading = "Code"
+	set colrec.title = "exe(line)"
+	set xcol(2) = colrec.toString()
+
+	if '(exe.get() = exe("").order(-1)) do writeln(LF _ "** Program pointer is: " _ exe)
+
+	set hdg = $$bldhdg(.xcol(), , isHTML, .IORM, .colgrp)
+
+	if (isHTML = true) do newTable(pars(), "UT", colgrp)
+
+	do caption("Show SQL Executable Code ", "UT", isHTML, IORM) 
+	do writeln(LF _ hdg)
+
+	set n = ""
+	for  set n = exe(n).order() quit:n.isNull()  do {
+
+		set d = n _ TAB _ exe(n)
+		if (isHTML = true) set d = $$escape(d)
+		do writeln($$bldRow(d, .xcol(), isHTML))
+	}
+
+	if (isHTML = true) do writeln(LF _ "</table>" _ LF)
+
+	do section(IORM, isHTML)
+
+	// Display vsql array 
+
+	set IORM = 0
+
+	set colrec.length = 12
+	set colrec.heading = "Key"
+	set colrec.title = "vsql(key)"
+	set xcol(1) = colrec.toString()
+
+	set colrec.length = 40
+	set colrec.heading = "Value"
+	set xcol(2) = colrec.toString()
+
+	set hdg = $$bldhdg(.xcol(), , isHTML, .IORM, .colgrp)
+
+	if (isHTML = true) do newTable(pars(), "UT", colgrp)
+
+	do caption("Show Data Context", "UT", isHTML, IORM)
+	do writeln(LF _ hdg)
+
+	set n = "", m = ""
+	for  set n = vsql(n).order() quit:n.isNull()  do {
+
+		if (vsql(n).exists() # 2) do {
+
+			set d = n _ TAB _ vsql(n).addQuotes()
+			if (isHTML = true) set d = $$escape(d)
+			do writeln($$bldRow(d, .xcol(), isHTML))
+		}
+
+		if (n = "P") quit				// Don't show access plan
+
+		for  set m = vsql(n,m).order() quit:m.isNull()  do {
+	
+			if (vsql(n,m).exists() # 2) do {
+
+				set d = n _ "," _ m _ TAB _ vsql(n,m).addQuotes()
+				if (isHTML = true) set d = $$escape(d)
+				do writeln($$bldRow(d, .xcol(), isHTML))
+			}
+		}
+	}
+
+	if (isHTML = true) do writeln(LF _ "</table>")
+	do section(IORM, isHTML)
+	quit
+
+
+showPars(String pars(), String xcol(), Boolean isHTML)	// Show user parameter input
+
+	// This procedure outputs input parameters
+	// For table and column properties
+
+	type Literal String COLPAR = "length,type,decimal,format,align,merge,space,math,wrap,repeat,null,break,style,heading,title"
+	type Literal String TAB = $c(9)
+	type Literal String LF = $c(10)
+
+	type String d,n,hdg,colgrp
+	type String zcol()
+
+	type Number i,IORM
+
+	type Row colrec = "".toRow(COLPAR,TAB)
+
+	// Display // Table level qualifiers
+
+	set zcol = 2, IORM = 0
+
+	set colrec.space = 2
+	set colrec.length = 12
+	set colrec.heading = "Name"
+	set zcol(1) = colrec.toString()
+
+	set colrec.length = 40
+	set colrec.heading = "Value"
+	set zcol(2) = colrec.toString()
+
+	set hdg = $$bldhdg(.zcol(), ,isHTML, .IORM, .colgrp)
+
+	if (isHTML = true) do newTable(pars(), "UT", colgrp)
+
+	do caption("Show Input Table Qualifiers", "UT", isHTML, IORM) 
+	do writeln(LF _ hdg)
+
+	set n = ""
+	for  set n = pars(n).order() quit:(n.isNull() ! (n?1L.E))  if (pars(n).exists() # 2)  do {
+
+		set d = n _ TAB _ pars(n)
+		if (isHTML = true) set d = $$escape(d)
+	 	do writeln($$bldRow(d, .zcol(), isHTML))
+	}
+
+	if (isHTML = true) do writeln(LF _ "</table>")
+
+	do section(IORM, isHTML)
+
+	// Display [ Column qualifiers]
+
+	type String colpar = COLPAR
+
+	set colrec.length = 6
+	set colrec.type = "N"
+	set colrec.heading = "Column"
+	set zcol(1) = colrec.toString()
+
+	set colrec.type = "T"
+	set colrec.length = 8
+
+	for i = 1:1:colpar.length(",") set colrec.heading = colpar.piece(",", i), zcol(i + 1)  = colrec.toString()
+ 		
+	set zcol = (i + 1), IORM = 0
+
+	set hdg = $$bldhdg(.zcol(), ,isHTML, .IORM, .colgrp)
+
+	if (isHTML = true) do newTable(pars(), "UT", colgrp)
+
+	do caption("Show Input Column Properties", "UT", isHTML, IORM) 
+	do writeln(LF _ hdg)
+
+	set n = ""
+	for  set n = xcol(n).order() quit:n.isNull()  if (xcol(n).exists() # 2) do {
+
+		set d = n _ TAB _ xcol(n)
+		if (isHTML = true) set d = $$escape(d)
+	 	do writeln($$bldRow(d, .zcol(), isHTML))
+	}
+	if (isHTML = true) do writeln(LF _ "</table>")
+
+	do section(IORM, isHTML)
+	quit
+
+
+newTable(String pars(), String class, String colgrp)	// Start a new HTML table
+
+	type Literal String LF = $c(13)
+	if 'pars("css",class).exists() do dftCSS(pars(), class) set pars("css",class) = ""
+	do writeln(LF _ "<table class=PSL-" _ class _ ">" _ LF _ colgrp)
+	quit
+
+
+escape(String str) // Escape HTML characters
+
+	if str.contains("&") set str = str.replace("&","&amp;")
+	if str.contains("<") set str = str.replace("<","&lt;")
+	if str.contains(">") set str = str.replace(">","&gt;")
+	if str.contains("""") set str = str.replace("""","&quot;")
+
+	quit str
+
+
+unEscape(String str)	// Unescape HTML characters
+
+	type Number y = 0
+	type String x
+
+	for  set y = str.find("&",y) quit:(y = 0)  do {
+		set x = str.extract(y,y + 4)
+	
+		if x.beginsWith("lt ") set str = str.extract(y - 2) _ "<" _ str.extract( y + 3, str.length())
+		else  if x.beginsWith("gt ") set str = str.extract(y - 2) _ ">" _ str.extract( y + 3, str.length())
+		else  if x.beginsWith("amp ") set str = str.extract(y - 2) _ "&" _ str.extract( y + 4, str.length())
+		else  if x = "apos " set str = str.extract(y - 2) _ "'" _ str.extract( y + 5, str.length())
+		else  if x = "quot " set str = str.extract(y - 2) _ """" _ str.extract( y + 5, str.length())
+		}
+
+	quit str
+
+
+ASCIItoHTML(String expr, Boolean isHTML)	// Convert an ASCII string to chars then to html HTML 
+
+	type Number i
+	type String chars = $c(expr.piece(",",1))
+	if expr.length(",") > 1 for i = 2:1:expr.length(",") set chars = chars _ $c(expr.piece(",",i))
+
+	if 'isHTML quit chars.replace("<br>",$c(10))		// Leave in ASCII 
+	
+	if chars.contains($c(13,10)) set chars = chars.replace($c(13,10),"<br>")
+	if chars.contains($c(10)) set chars = chars.replace($c(10),"<br>")
+	if chars.contains($c(13)) set chars = chars.replace($c(13),"<br>")
+
+	quit chars
+
+
+dispOpts(String parms, String index, List xcol(), String tok)	// Specify display options
+
+	type Public String TAB = $c(9)
+	type Public Number ER
+
+	if parms.isNull() quit
+	if parms.contains($c(0)) set parms = $$UNTOK^%ZS(parms,.tok)
+
+	type String data,x,tag,pars()
+
+	type List record = "length,type,,format,align,merge,space,math,wrap,repeat,null,break,style,heading,title"
+
+	do parse(parms, .pars(), ",", "=", false, "none", "default", record)
+
+	set tag = "", data= ""
+	for  set tag = pars(tag).order() quit:tag.isNull()  do {
+
+		set x = pars(tag)
+		if x = "default" set x = ",,,,,32,2,,1,1,,1,,".piece(",",record.position(tag))
+
+		set data.piece(TAB,record.position(tag)) = x
+	}
+
+	set xcol(index) = data
+	Quit
+
+
+rangeCheck(Number val, String ranges, String par)	// Perform valid  range check on input
+
+	// Validate input against ranges
+	//                        ranges == range[,...]
+	//                                  range == min[:max]
+
+	if val.isNull() quit
+
+	if '{String}val.isNumber() do ERROR("Number Expected",val,par) quit
+
+	type Public Number ER
+	type Boolean isRange = true
+
+	if ranges.contains(":") do {
+
+		type Number i,min,max
+		type String range
+
+		for i=1:1:ranges.length(",") do { if (isRange = false) quit
+
+			set range = ranges.piece(",",i)
+			set min = range.piece(":",1), max = range.piece(":",2)
+			if ('min.isNull() & (val < min)) set isRange = false
+			else  if ('max.isNull() & (val > max)) set isRange = false
+		}
+	}
+
+	else  if '{List}ranges.contains(val) set isRange = false		// Simple list
+
+	if isRange = false do ERROR("Not in valid range (" _ ranges _ ")",val,par)
+	quit
+
+
+template(String url, String pars())	// Process an external and default templates
+
+	/* Templates can recursively reference other templates.  If so, qualfiers will
+	   aggregate but later (caller) qualifiers will supercede called template qualifiers.
+	*/
+
+	if {List}pars("templates").get().contains(url) quit			// Circular recursion
+	set pars("templates") = pars("templates").get() _ url _ "," 		// Add name to list
+	
+	type Literal String PARMS ="BREAK,CACHE,CAPTION,CODE,COLS,DEBUG,DQMODE,FORMAT,HEADINGS,LAYOUT,MARKUP,MATCH,OUTPUT,PAGE,PLAN,ROWS,STYLE,TEMPLATE,TITLE"
+
+	type Public String %MSKE
+	type Public String ER
+
+	type String tpars()
+
+	if url.contains(".") do {
+
+		type String ok,parms,x
+
+		set ok = $$FILE^%ZOPEN(url,"READ")
+		if 'ok.piece("|",1) do ERROR(ok.piece("|",2)) quit
+
+		set parms = ""
+
+		use url
+		while '$ZEOF read x set parms = parms _ x
+		close url
+
+		set parms = parms.translate($c(9,10,13),"   ")			// Translate all whitspace to space
+
+		do parse(parms, .tpars(), "/", "=", true, 0, 1, PARMS)
+
+		if 'tpars("TEMPLATE").get().isNull() do {			// Recursive iteration
+
+			type String n,zpars()
+
+			set n =""
+			for  set n = tpars(n).order() quit:n.isNull()  set zpars(n) = tpars(n)
+			do template(pars("TEMPLATE"), .zpars()) if ER quit
+			for  set n = zpars(n).order() quit:n.isNull()  set tpars(n) = zpars(n)
+		}
+	}
+
+	// Application hard-coded templates (since these are not parsed, don't use [NO]qualifier syntax)
+
+	else  do {
+		set url = url.upperCase()
+
+		if (url = "REPORT") do {
+
+			type String grpsep = %MSKE.get().extract(2)
+			if grpsep.isNull() set grpsep = ","
+
+			set tpars("STYLE") = "alt-row-color:default"
+			set tpars("TITLE") = "default"
+			set tpars("BREAK") = "1"
+			set tpars("COLS") = "currency.math=SUM,currency.format=group-separator:""" _ grpsep _""",currency.style=minus-color:red"
+		}
+
+		// Include additional hard-coded templates as appropriate
+
+		else  do ERROR("Invalid Template",url)
+	}
+
+	// These two add or accumulate properties
+	if tpars("STYLE").exists() set pars("STYLE") = tpars("STYLE") _ ";" _ pars("STYLE").get()
+	if tpars("COLS").exists() set pars("COLS") = tpars("COLS") _ "," _ pars("COLS").get()	
+
+ 	kill tpars("STYLE"), tpars("COLS")				// Remove these to, merged above
+
+	type String n = ""
+	for  set n = tpars(n).order() quit:n.isNull()  if 'pars(n).exists()  set pars(n) = tpars(n)
+	quit
+
+		
+initMath(String parms)	// Initialize internal MATH accumulation structures
+
+	/*
+	 Validate: AVG,COUNT,HSTO,LEAST,MAX,MED,MIN,MOST,STD,SUM,UNIQUE
+
+	Sample syntax example, math = count; sum break
+
+	ctl - Accumulation control string
+		byte #1 - Count
+		byte #2 - Total
+		byte #3 - Maximum value
+		byte #4 - Minimum value
+		byte #5 - Histogram accumulate
+	*/
+				
+	type Number i
+	type String func,x
+	type String ctl = ""
+
+	for i = 1:1:parms.length(";") do {
+
+		set x = parms.piece(";",i).trim() if x.isNull() quit
+
+		set func = x.piece(" ",1), x = x.piece(" ",2,x.length())
+		if func.isNull() do ERROR("Math function expected",x) quit
+
+		if func = "COUNT" set ctl.extract(1) = 1
+		else  if func = "SUM" set ctl.extract(2) = 1
+		else  if func = "MAX" set ctl.extract(3) = 1
+		else  if func = "MIN" set ctl.extract(4) = 1
+		else  if func = "AVG" set ctl.extract(1) = 1, ctl.extract(2) = 1
+		else  if func = "MED" set ctl.extract(1) = 1, ctl.extract(5) = 1
+		else  if {List}"HSTO,LEAST,MOST,STD,UNIQUE,COUNT-LEAST,COUNT-MOST".contains(func) set ctl.extract(5) = 1
+
+		else  do ERROR("Invalid Math function",func) quit
+
+		set parms.piece(";",i) = func
+
+		if x.isNull() quit	// No qualifiers
+		if x.isNumber() & {List}"MAX,MIN".contains(func) set ctl.extract(5) = 1
+		// Need to add RUNNING / BREAK
+	}
+
+	quit ctl
+
+
+selectWild(String sel, String from, String xcol(), String fsn(), String tok)	// Return Data-QWik default list or keys and description
+
+	type Public Number ER
+
+	type Number fnum,i
+	type String keys,more,table,typ
+	type String columns = ""
+
+	if tok.get().isNull() set sel = $$TOKEN^%ZS(sel,.tok)
+
+	set typ = sel.piece(",",1).trim(1)
+	set sel = sel.piece(",",2,sel.length())
+
+	for fnum = 1:1:from.length(",") do {
+
+		set table = from.piece(",",fnum)
+		if 'fsn(table).exists() do fsn^SQLDD(.fsn(),table) if ER quit
+
+		set keys = fsn(table).piece("|",3)
+
+		if fnum > 1 set columns = (columns _ ",")
+		set columns = columns _ keys			// Always include primary keys
+
+		if typ = "*LIST" set more = $$selectDefault(table, .tok)
+		else  if typ.contains($c(0)) set more = $$selectQuery(table, typ, .tok)
+		else  set more = ""
+
+		for i=1:1:more.length(",") if '{List}columns.contains(more.piece(",",i)) set columns = columns _ "," _ more.piece(",",i)
+	}
+
+	if sel.isNull() quit columns
+
+	// If additional columns are specified, add them to the list if they aren't already
+	//  on it and move the external formatting to new column location if appropriate
+
+	// First move any formatting to an 'illegal' location
+	type Number n = ""
+	for  set n = xcol(n).order() quit:n.isNull()  set xcol(-n + 1) = xcol(n) kill xcol(n)
+
+	for i = 1:1:sel.length(",") do {
+		type String di = sel.piece(",",i).trim()
+ 		if di.contains($c(0)) set di = $$UNTOK^%ZS(di,.tok).stripQuotes()
+		if '{List}columns.contains(di) set columns = (columns _ "," _ di)
+		if xcol(-i).exists() set xcol({List}columns.position(di)) = xcol(-i) kill xcol(-i)
+	}
+
+	quit columns
+
+
+selectDefault(String table, String tok)	// Select default list
+
+	type Number i
+
+ 	type RecordDBTBL1 dbtbl1 = Db.getRecord("DBTBL1","%LIBS = ""SYSDEV"" ,FID=:table")
+
+	type String dftdes = dbtbl1.dftdes
+	type String dftord = dbtbl1.dftord			// Solve this later
+
+	if "^,#".contains(dftdes.extract(1)) set dftdes = ""
+
+	if dftdes.isNull() do {
+
+		type String di
+		type ResultSet rs = Db.select("DI","DBTBL1D","FID=:table and DI BETWEEN 'D' and 'E'")
+		while rs.next() set di = rs.getRow().toString() if "DESCRIPTION".beginsWith(di) set dftdes = di
+		}
+
+	else  for i = 1:1:dftdes.length(",") set dftdes.piece(",",i) = dftdes.piece(",",i).piece("/",1)
+
+	quit dftdes
+
+
+selectQuery(String table, String whr, String tok)	// Select default list
+
+	type Public Number ER
+	type String columns = ""
+
+	while whr.contains($c(0)) set whr = $$UNTOK^%ZS(whr, .tok)
+
+	do {
+		catch error {
+			do ERROR(error.description)
+		}
+
+		set whr = whr.extract(2,whr.length()).stripQuotes().trim()
+		set whr = "FID ='" _ table _ $s(whr.isNull():"'",1:"' AND " _ whr)
+
+		#ACCEPT DATE=12/04/07; PGM=Frank Sanchez; CR=unknown
+		type ResultSet rs = Db.select("DI","DBTBL1D",whr,"NOD,POS,DI")
+		while rs.next() set columns = (columns _ rs.getRow().DI _ ",")
+	}
+
+	quit columns.extract(1, columns.length() - 1)
+
+
+testMask(String class, String mask)	// Test format masks
+
+	// Calls format mask and traps GTM errors generated by invalid mask
+	// Doesn't seem to coordinate the error trap correctly, doesn't return ER
+
+	type Public Number ER
+
+	do {
+		catch error {
+			set ER = 1
+		}
+	
+		if (class = "currency") & $$NUM^%ZM(0, 0, mask)
+		else  if (class ="number") & $$NUM^%ZM(0, 0, mask)
+		else  if (class ="date") & $$DAT^%ZM(0, mask)
+		else  if (class ="logical") & $$LOG^%ZM(0, mask)
+		else  if (class ="time") & $$TIM^%ZM(0, mask)
+	}
+
+	quit
+
+
+ERROR(String des, String val, String par)	// Output Error message & set ER
+
+	type Literal String LF = $c(10)
+
+	type Public Number ER
+	set ER = 1
+
+	// Try to patch legacy error description syntax to get consistent display
+	if des.contains("-") & val.get().isNull() set val = des.piece("-",2,99).trim(), des = des.piece("-",1).trim()
+
+	if 'val.get().isNull() set des = des _ ": " _ val
+	if 'par.get().isNull() set des = "Parameter: " _ par _ " - "_ des
+
+	do writeln(LF _ "%SQL-E-" _ des)
+	quit
+
+
+portrait(String hdg, Boolean isHTML, Boolean altbg, String col(), String pars(), String IO, Number IOSL, Number IORM, Number rows)
+
+	/* Moved portrait mode to its own procedure.  Removed break and totals options since not relevant
+	   Left IOSL, IORM and PN IO properties, as these may be implemented later
+	*/
+
+	type Literal String LF = $c(10)
+	type Public String exe(), vsql()
+	type Number break,line,sqlcnt,PN
+	type String d,sqldta,sqlind
+
+	set break = 0, line = 0, PN = 0
+
+	if 'pars("CAPTION").get().isNull() do caption(pars("CAPTION"), "RS", isHTML) set line = (line + pars("CAPTION").length(LF))
+
+	set sqlind = ""
+	for sqlcnt = 1:1 do { if (vsql(0) = 100) quit
+
+		set vsql = $$^SQLF(.exe,.sqldta,.sqlind) if (vsql = 0) set sqlcnt = (sqlcnt - 1) quit
+
+		if sqlind.contains(1) set sqldta = $$protect(sqldta,sqlind)
+		if (isHTML = true) set sqldta = $$escape(sqldta) 		// Process HTML escapes
+
+		set d = $$bldRow(sqldta, .col(), isHTML, , 0)
+		do writeln($$wrtPort(d, hdg, isHTML, .pars(), 0 , .line, altbg, .IOSL, IORM, .PN))
+		if 'rows.isNull() set rows = (rows - 1) if (rows = 0) set vsql(0) = 100
+		
+	}
+
+	do close(0, isHTML, IO, sqlcnt, false)
+
+
+	quit
+
+
+wrtPort(String rd, String hdg, Boolean isHTML, String pars(), Number break, Number line, Boolean altbg, Number IOSL, Number IORM, Number PN)	// Output a row
+
+	type literal String LF = $c(10)
+	type Number cellNum
+	type String page = ""
+	
+	type String trOpen = "<tr>"
+	type String trClose = "</tr>"
+	
+	if altbg set trOpen = "<tr class=d1>"
+	
+	set rd = rd.piece("<tr>",2) // remove tr from row data
+
+	set hdg = hdg.replace("<br>"," ")
+	//set hdg = $$title(.pars(), isHTML, IORM, PN) _ hdg
+	
+	for cellNum = 1:1:hdg.length(LF) do {
+		
+		type String rowh,rowd
+		set rowh = hdg.piece(LF,cellNum)
+		if rowh="" quit
+		set rowd = rd.piece("<td>",cellNum+1)
+		
+		set page = page _ trOpen _ rowh _ "<td>" _rowd _ "</td>" _ trClose _ LF
+		
+	}
+
+	quit page _ "<tr><td><hr/></td><td><hr/></td></tr>"
+
+
+writeln(String lineOfText)	// Concatenate line to outbuffer
+
+	type public String outputBuffer	
+	set outputBuffer = outputBuffer _ lineOfText
+	quit
+
+
+getClass(String typ)	// Return the class that corresponds to type
+
+	type Literal String CLASSES = "text,currency,date,number,logical,time,frequency,memo,upper,blob"
+	quit CLASSES.piece(",","T$DNLCFMUB".find(typ) - 1)
+
+
+getType(String class)	// Return the internal type associated with an external type
+
+	type Literal String CLASSES = "text,string,currency,date,number,integer,logical,boolean,time,frequency,memo,upper,blob"
+
+	quit "TT$DNNLLCTMTB".extract({List}CLASSES.position(class))
+
+
+getColAtts(String class, String gcol(), String input, String tok)	// Build column record 
+
+	type Literal String TAB = $c(9)
+	type Number i
+
+	type String classProps = gcol(class).get()
+	if classProps.isNull() set classProps = gcol(".").get()
+
+	if classProps.isNull() quit input
+
+	for i = 1:1:classProps.length(TAB) set input.piece(TAB,i) = $$mergeProperties(classProps.piece(TAB,i), input.piece(TAB,i) ,.tok)
+
+	quit input
+
+vSIG()	quit "61024^48559^e0101711^72905"	// Signature - LTD^TIME^USER^SIZE

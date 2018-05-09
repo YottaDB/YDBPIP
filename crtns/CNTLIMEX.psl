@@ -1,0 +1,387 @@
+CNTLIMEX		/*
+	Consolidated Limits Calculations
+		
+	  ---- Revision History ------------------------------------------------
+
+	   07/31/07 - KumarSS - CR 28304
+	   	      Modified UPD section to apply the same fix that has been
+	   	      introduced for CR 25920, if TSOAMT has value.
+
+	   04/19/07 - KinI - CR 25920
+	   	      Modified UPD section to apply the same fix that has been
+	   	      introduced under CR 22934 in NC section: added a check if 
+	   	      UTBLCNTRYLIM does not exist to not create the EXPCNTRY.
+	
+	   11/29/06 - chhabris - CR 21762
+	   	      Modified UPD section. Replaced Db.update with Db.getRecord
+		      and obj.bypassSave(). There was an out of balance caused
+		      (TGL was not getting updated) for the transactions other
+		      than base currency as UPD^CNTLIMEXT is called from RGLSUM.
+	   
+	   09/25/06 - Hillanbrand - CR 22934
+	              Modified NC section. Added a check if UTBLCNTRYLIM does
+	              not exist to not create the EXPCNTRY.  This corrects
+	              the errror (%PSL-E-DBFILER) Referential integrity error 
+	              EXPCNTRY(CNTRY) -> UTBLCNTRYLIM in function RGLXFR when 
+	              the country found in cif.pcntry does not exist in 
+	              UTBLCNTRYLIM.tbl which means limit checking
+	              is not set up for that country.
+	   	
+	   09/28/05 - KumarSS - CR 16667
+	              Changed NC section to create data in EXP* tables for 
+	              each new non-CBL loans.	  
+	  
+	   01/10/03 - Spier 51423
+		      Removed db.update inthe code (changed to getrecord)
+		      which was not compiling correctly with new compiler.
+
+	   01/10/02 - SCHWARTZC - 43583
+		      PSL Conversion
+		      Removed sections NEGDEP and PROC as they are no longer
+		      called by anything in PROFILE.
+
+	   12/18/00 - Allan Mattson - 43176
+	              Converted calls to ^SQL to direct global references to
+	              improve performance.
+	
+	              Removed unnecessary calls to $$^SCARND in subroutine NC
+	              (TOTOUTEXP was unnecessarily rounded).
+	
+	              Replaced variables TOTCOMEXP and TOTOUTEXP with variables
+	              TOTCOMEX and TOTOUTEXP, respectively, to conform to eight
+	              character variable name limitation.
+	
+	              Eliminated duplicate code and added TP and restart
+	              capability to subroutine NEGDEP.  Removed the use
+	              of array DONE(CID) as the size of the array could
+	              negatively affect performance.
+	
+	              Deleted pre-2000 revision history
+	
+	              Miscellaneous general clean-up.
+	
+	   04/26/00 - REEDD - 35321
+		      Modified the NEGDEP section to properly process the
+	              DAYEND entries.  Previously it was checking TJD-1 and
+	              TJD-2.  Changed this to look at TJD and TJD-1.
+	
+	   02/25/00 - BECKERW - 35821
+	              TOTCOMEXP and TOTOUTEXP need to rounded to the precision
+	              indicated by the currency code.  It was causing decimal
+	              format errors.  Added rounding function when inserting or
+	              updating EXPCNTRY.
+	*/
+	
+	quit
+
+	//----------------------------------------------------------------------
+SUM	// Country Limits Exception Report (SCA579)
+	//----------------------------------------------------------------------
+
+	new CNTRY,COMEXP,JOB,OUTEXP,RID,X,Y
+
+	set JOB=%ProcessID
+
+	do Db.fastDelete("TMPCNTREXP","JOB")
+
+	type ResultSet rs=Db.select("CNTRY","EXPCNTRY")
+	if rs.isEmpty() quit
+	while rs.next() do {
+		set CNTRY=rs.getCol(1)
+		if 'Db.isDefined("UTBLCNTRYLIM","CNTRY") quit
+
+		set X=Db.getOneRow("AMT","UTBLCNTRYLIM","CNTRY")
+		set Y=Db.getOneRow("TOTCOMEXP,TOTOUTEXP","EXPCNTRY","CNTRY")
+		set COMEXP=$P(Y,$C(9),1)
+		set OUTEXP=$P(Y,$C(9),2)
+
+		if X<$P(Y,"|",1)!(X<$P(Y,"|",2)) do {
+			type RecordTMPCNTREXP tmp=Db.getRecord("TMPCNTREXP","JOB=:JOB,CNTRY=:CNTRY",1)
+			if tmp.getMode()=0 quit
+			set tmp.total=X
+			set tmp.totcomexp=COMEXP
+			set tmp.totoutexp=OUTEXP
+			do tmp.save()
+			}
+		}
+	set RID="SCA579"
+	do DRV^URID
+	quit 
+	
+	//----------------------------------------------------------------------
+public 	START	//
+	//----------------------------------------------------------------------
+	
+	new ACN,CR,ER,JOB
+
+	set JOB=%ProcessID
+
+        do Db.fastDelete("TMPCNTREXP1","JOB")
+
+	type ResultSet rs=Db.select("ACN","CIF","PCNTRY=:CNTRY")
+	if rs.isEmpty() quit
+	while rs.next() do {
+		set ACN=rs.getCol(1)
+		do ACCUM(ACN)
+		do EXPOS(ACN)
+		}
+	quit
+
+	//----------------------------------------------------------------------
+ACCUM(ACN)	// Accumulate commitment amounts and outsanding balances.
+	//----------------------------------------------------------------------
+	/*
+	   ARGUMENTS:
+	       . ACN Customer number   /TYP=N/REQ/MECH=VAL
+
+	   This sub-procedure  accumulates commitment amounts and outstanding
+	   balance by product type, product group, and customer.  This sub-
+	   procedure is called directly for IBS transactions and from NONIBS
+	   for NON-IBS transactions.
+	  ----------------------------------------------------------------------
+
+	*/
+	new CID,CLS,DATA,MDT,MCOL,TMP,TOTCOL,TYPE
+
+	new tmpcn1
+	type RecordTMPCNTREXP1 tmpcn1=Class.new("RecordTMPCNTREXP1")
+	set tmpcn1.job=%ProcessID
+	set tmpcn1.acn=ACN
+
+	type ResultSet rs=Db.select("CID","RELCIF","ACN=:ACN")
+	if rs.isEmpty() quit
+	while rs.next() do {
+		set CID=rs.getCol(1)
+
+		set DATA=Db.getOneRow("TYPE,CLS,MDT","DEP","CID")
+
+		set TYPE=$P(DATA,$C(9),1)
+		set CLS=$P(DATA,$C(9),2)
+		set MDT=$P(DATA,$C(9),3)
+
+		if CLS="L" do {
+			set TMP=$$LOAN^PROCLIM(CID,0)
+			set TOTCOL=$P($$XLN16^LNCDI(CID),"|",3)
+			set MCOL=$$MCOL^LNCDI(CID)
+			}
+		else  do {
+			set TMP=$$DEPOSIT^PROCLIM(CID,0)
+			set (TOTCOL,MCOL)=""
+			}
+
+		set tmpcn1.cid=CID
+		set tmpcn1.type=TYPE
+		set tmpcn1.totcomexp=$P(TMP,"|",1)
+		set tmpcn1.totoutexp=$P(TMP,"|",2)
+		set tmpcn1.mdt=MDT
+		set tmpcn1.totcol=TOTCOL
+		set tmpcn1.mcol=MCOL
+
+		do tmpcn1.bypassSave()
+		}
+	quit 
+
+	//----------------------------------------------------------------------
+EXPOS(ACN)	// ITS/IMEX exposure data
+	//----------------------------------------------------------------------
+
+	new CID,COMAMT,CRCD,DATA,INTPROD,OUTBAL,RECID,SYS
+
+	new tmpcn1
+	type RecordTMPCNTREXP1 tmpcn1=Class.new("RecordTMPCNTREXP1")
+
+	set tmpcn1.job=%ProcessID
+	set tmpcn1.acn=ACN
+
+	type ResultSet rs=Db.select("SYS,INTPROD,RECID","EXPOS","ACN=:ACN")
+	if rs.isEmpty() quit
+	while rs.next() do {
+		set SYS=rs.getCol(1)
+		set INTPROD=rs.getCol(2)
+		set RECID=rs.getCol(3)
+
+		set DATA=Db.getOneRow("COMEXP,OUTEXP,CRCD","EXPOS","ACN,SYS,INTPROD,RECID")
+		set COMAMT=$P(DATA,$C(9),1)
+		set OUTBAL=$P(DATA,$C(9),2)
+		set CRCD=$P(DATA,$C(9),3)
+
+		if CRCD="" set CRCD=%SystemCurrency
+
+		// Convert outstanding balance and comittment amount to system base currency code.
+		if CRCD'=%SystemCurrency do {
+			if OUTBAL do EXC^CRCDUTL(%SystemCurrency,CRCD,OUTBAL,0,2,11,,,1) set OUTBAL=$G(EXCAMT)
+			if COMAMT do EXC^CRCDUTL(%SystemCurrency,CRCD,COMAMT,0,2,11,,,1) set COMAMT=$G(EXCAMT)
+			}
+
+		if COMAMT!OUTBAL do {
+			set tmpcn1.cid=RECID
+			set tmpcn1.type=INTPROD
+			set tmpcn1.totcomexp=COMAMT
+			set tmpcn1.totoutexp=OUTBAL
+			do tmpcn1.bypassSave()
+			}
+		}
+	quit 
+
+
+public	UPD(Number AMT,		// Transaction Amount
+	    Number ITC,		// Internal Transaction Code
+	    Number CID,		// Account Number
+	    String TSO)		// Transaction Source
+
+	// Update Country, Industry and Sovereign Risk limits tables
+	// during transaction processing
+
+	type Number ACN, TOTCOM, TOTOUT, TSOAMT
+	type String CNTRY, CRCD, IND
+	type Boolean GOVT
+	
+	type ResultSet rs=Db.select("CRCD,ACN","LN","CID=:CID")
+	if rs.next() do {
+		set CRCD=rs.getCol("CRCD")
+		set ACN=rs.getCol("ACN")
+		}
+
+	if CRCD.isNull() set CRCD=%SystemCurrency
+
+	type ResultSet rs1=Db.select("PCNTRY,SIC,GOVT","CIF","ACN=:ACN")
+	if rs1.next() do {
+		set CNTRY=rs1.getCol("PCNTRY")
+		set IND=rs1.getCol("SIC")
+		set GOVT=rs1.getCol("GOVT")
+		}
+
+	set TSOAMT=$$FIELD^UTSO(TSO,"EXPCOM")
+
+	if CRCD'=%SystemCurrency do {
+		type Number EXCAMT
+		
+		do EXC^CRCDUTL(%SystemCurrency,CRCD,AMT,0,2,11,,,1) set AMT=EXCAMT.get()
+		do EXC^CRCDUTL(%SystemCurrency,CRCD,TSOAMT,0,2,11,,,1) set TSOAMT=EXCAMT.get()
+		}
+
+	do Runtime.start("CS")
+
+	if ITC.get().extract() set AMT=-AMT
+	
+	type RecordUTBLCNTRYLIM utblcntrylim=Db.getRecord("UTBLCNTRYLIM","CNTRY=:CNTRY",1)
+	if utblcntrylim.getMode() do {
+		type RecordEXPCNTRY expcntry=Db.getRecord("EXPCNTRY","CNTRY=:CNTRY",1)
+		set expcntry.totoutexp=expcntry.totoutexp+AMT
+		do expcntry.bypassSave()
+		}
+		
+	if IND.extract() do {                        // Industry
+		type RecordEXPIND expind=Db.getRecord("EXPIND","IND=:IND",1)
+		set expind.totoutexp=expind.totoutexp+AMT
+		do expind.bypassSave()
+		}
+
+	if GOVT do {                           // Sovereign Risk
+		type RecordEXPCNSOV expcnsov=Db.getRecord("EXPCNSOV","CNTRY=:CNTRY",1)
+		set expcnsov.totoutexp=expcnsov.totoutexp+AMT
+		do expcnsov.bypassSave()
+		}
+
+	if TSOAMT do {
+		type RecordUTBLCNTRYLIM utblcntrylim=Db.getRecord("UTBLCNTRYLIM","CNTRY=:CNTRY",1)
+		if utblcntrylim.getMode() do {
+			type RecordEXPCNTRY expcntry=Db.getRecord("EXPCNTRY","CNTRY=:CNTRY",1)
+			set expcntry.totcomexp=expcntry.totcomexp+TSOAMT
+			do expcntry.bypassSave()
+			}
+
+		if IND.extract() do {                       // Industry
+			type RecordEXPIND expind=Db.getRecord("EXPIND","IND=:IND",1)
+			set expind.totcomexp=expind.totcomexp+TSOAMT
+			do expind.bypassSave()
+			}
+
+		if GOVT do {                          // Sovereign Risk
+			type RecordEXPCNSOV expcnsov=Db.getRecord("EXPCNSOV","CNTRY=:CNTRY",1)
+			set expcnsov.totcomexp=expcnsov.totcomexp+TSOAMT
+			do expcnsov.bypassSave()
+			}
+		}
+
+	do Runtime.commit()
+
+	quit 
+
+	//-----------------------------------------------------------------------
+public	NC(Boolean DIR,			// Closed Account
+           String CRCD,			// Currency Code
+           Number CID)			// Account Number
+	//-----------------------------------------------------------------------
+
+	/*
+	   New/Closed accounts
+	   If DIR=0 - New account, If DIR=1 - Closed account
+	*/
+
+	type Boolean GOVT
+	type Number ACN,CRLIM,EXCAMT
+	type String CNTRY,IND
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+
+	set ACN=ln.acn
+	set CRLIM=ln.crlmt
+
+	if CRCD="" set CRCD=%SystemCurrency
+	if CRCD'=%SystemCurrency do EXC^CRCDUTL(%SystemCurrency,CRCD,CRLIM,0,2,11,,,1) set CRLIM=EXCAMT.get()
+
+	type RecordCIF cif=Db.getRecord("CIF","ACN=:ACN")
+
+        set CNTRY=cif.pcntry
+        set IND=cif.sic
+        set GOVT=cif.govt
+
+	// Closed account
+	if DIR set CRLIM=-CRLIM
+
+	type RecordEXPCNTRY expcntry=Db.getRecord("EXPCNTRY","CNTRY=:CNTRY",1)
+
+	if '(expcntry.totcomexp+CRLIM),'expcntry.totoutexp do Db.fastDelete("EXPCNTRY","CNTRY=:CNTRY")
+	else  do {
+
+		type RecordUTBLCNTRYLIM utblcntrylim=Db.getRecord("UTBLCNTRYLIM","CNTRY=:CNTRY",1)
+		if 'utblcntrylim.getMode() quit
+
+		set expcntry.cntry=CNTRY
+		set expcntry.totcomexp=(expcntry.totcomexp+CRLIM).roundDec()
+		
+		do expcntry.save()
+		}
+
+	// Industry
+	if IND.get() do {
+
+		type RecordEXPIND expind=Db.getRecord("EXPIND","IND=:IND",1)
+
+		if '(expind.totcomexp+CRLIM),'expind.totoutexp do Db.fastDelete("EXPIND","IND=:IND")
+		else  do {
+			
+			set expind.ind=IND
+			set expind.totcomexp=(expind.totcomexp+CRLIM).roundDec()
+			
+			do expind.save()
+			}
+		}
+
+	// Sovereign Risk
+	if GOVT do {
+
+		type RecordEXPCNSOV expcnsov=Db.getRecord("EXPCNSOV","CNTRY=:CNTRY",1)
+		
+		if '(expcnsov.totcomexp+CRLIM),'expcnsov.totoutexp do Db.fastDelete("EXPCNSOV","CNTRY=:CNTRY")
+		else  do {
+
+			set expcnsov.cntry=CNTRY
+			set expcnsov.totcomexp=(expcnsov.totcomexp+CRLIM).roundDec()
+			
+			do expcnsov.save()
+		}
+	quit 
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60842^50262^Sudanthiran S. Kumar^11172"	// Signature - LTD^TIME^USER^SIZE

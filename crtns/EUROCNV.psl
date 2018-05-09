@@ -1,0 +1,2486 @@
+EUROCNV	//
+
+	/*
+	ORIG: kumarss - 09/26/2005
+	DESC: Convert CRCD to EURO standard
+	
+	---- Comments --------------------------------------------------------
+	
+	---- Revision History ------------------------------------------------
+	
+	06/05/07 - KUMARB - CR 27339
+		   Modified section TRARRAY to remove prodctl.crtrea in the 
+		   settings of TRN variable.
+	
+	02/12/07 - RussellDS - CR 25044
+		   Remove change related to CR22464.  Check holds will not
+		   be suppressed.
+	
+	08/28/06 - KUMARB - CR 22464
+		   Modify section HOLDS in the check COLUMNS("DEP21")'=""
+		   to suppress the Check Hold record creation if Check Hold
+		   is not defined in Available Calculation Formula for the 
+		   account.
+	
+	07/25/06 - Pete Chenard - 22385
+		   Removed unsupported parameters from .char() methods.  
+		   Replaced calls to $char with the .char() method.
+	
+	05/15/06 - RussellDS - CR21296
+		   Changed to use cache array instead of %CACHE, which is
+		   reserved for PSL record objects.
+
+	09/26/05 - KumarSS - 21085
+		   Revised the logic if LNBIL section to eliminate the usage 
+		   of LNBIL1 record and to utilize the resutlset opened from 
+		   LNBIL1 table itself.
+		   Modified LN section to pass LN record as parameter to 
+		   EXEC^LNUBIL.
+		   Modified DEPSEG to use a different variable name for 
+		   SEGMENT as the same name is used for one array.
+
+	09/26/05 - KumarSS - 16668
+		   Converted to PSL.
+		   Removed revision history prior to 2004.
+	
+	----------------------------------------------------------------------
+	*/
+	
+ 	quit
+
+
+	//----------------------------------------------------------------------
+public EXEC(Number CID)		// Account Number
+	//-----------------------------------------------------------------------
+
+	/*
+	Process accounts.
+	
+	INPUTS:
+		.BOBR		Back-Office Branch	/TYP=N
+		.DFTTHRC	Default product		/TYP=L
+				threshold (from CUVAR)
+		.EMUCRCD	Euro Currency Code	/TYP=T
+		.EUREFD		Conversion effect date	/TYP=D
+		.EURRNDCR				/TYP=N
+		.EURRNDDR	Euro G/L 		/TYP=N
+		.INTEG		Integrity check flag	/TYP=L
+		.RFC		Rounding Factor - Conv	/TYP=N
+		.RMC		Rounding Method - Conv	/TYP=T
+		.RFR		Rounding Factor - Revs	/TYP=N
+		.RMR		Rounding Method - Revs	/TYP=T
+		.TJD		System date		/TYP=D
+		.cache("CRCD"	Currency and rate info	/TYP=ARRAY
+		.cache("EFD"	Columns to change	/TYP=ARRAY
+		.cache("EURINT"  Index mapping
+	*/
+
+	type public Boolean DFTTHRC,INTEG
+	type public Date EUREFD
+	type public IO iologfil
+	type public Number BOBR,EURLOG,EURRNDCR,LOGCNT,RFC,RFR
+	type public String $ZL,cache(,,),CNVOPT,EMUCRCD,LOGFILE,RMC,RMR
+
+	type Boolean ER
+	type Number ACN,BOO,CC,CNVDECP,CNVRATE,EURSTAT,TYPE,RNDFAC
+	type String $ZT,str,CLS,CRCD,NEWCRCD,OLDCRCD,ORGCRCD,GLSC,GRP,RNDMET
+
+	set $ZT="ZG "_$ZL_":ZTPROC^EUROCNV"
+
+	set ER=0
+
+	do Runtime.start("BA","vobj","SAVEPTR")
+
+	type RecordACN acn=Db.getRecord("ACN","CID=:CID")
+
+	if acn.stat=4 do Runtime.rollback("SAVEPTR") quit
+
+	set TYPE=acn.type
+	set CLS=acn.cls
+	set GRP=acn.grp
+	set CC=acn.cc
+	set CRCD=acn.crcd
+	set GLSC=acn.glsc
+
+	set BOO=acn.boo
+	set ACN=acn.acn
+
+	set EURSTAT=acn.eurstat
+	set ORGCRCD=acn.orgcrcd
+
+	if LOGFILE.get()'="" do {
+		set LOGCNT=LOGCNT+1
+
+		if LOGCNT>EURLOG do iologfil.close() kill LOGFILE quit
+		
+		set str=13.char()_10.char()_13.char()_10.char()_CID_9.char()_EURSTAT_9.char()_CRCD
+		do iologfil.write(str)
+		}
+
+	if CNVOPT="ALL",EURSTAT="" do {
+		set EURSTAT=1
+
+		set acn.eurstat=1
+		set acn.eurefd=EUREFD
+		set acn.eureqdat=EUREFD
+
+		do acn.save()
+		}
+
+	// Only process requests for conversion/reversal
+	if EURSTAT'=1,EURSTAT'=3 do Runtime.rollback("SAVEPTR")  quit
+
+	type RecordDEP dep=Db.getRecord("DEP","CID=:CID")
+
+	// Reversals of segmented accounts not supported
+	if EURSTAT'=1,dep.segflg do Runtime.rollback("SAVEPTR")  quit
+
+	// Account is not an 'IN' currency account
+	if EURSTAT=1,'cache("CRCD",CRCD).piece("|",2) do {
+
+		// EMU member flag = N
+		do Runtime.setErrMSG("DEP",3557)
+		do EXC
+		quit
+		}
+
+	if EURSTAT=1 set NEWCRCD=EMUCRCD,RNDMET=RMC,RNDFAC=RFC
+	else  set NEWCRCD=ORGCRCD,RNDMET=RMR,RNDFAC=RFR
+	set OLDCRCD=CRCD
+
+	// Decimal precision rate
+	set CNVDECP=+cache("CRCD",NEWCRCD)
+	set CNVRATE=cache("CRCD",CRCD,NEWCRCD)
+
+	if CLS="D" do DEP(CID)
+	if CLS="L" do LN(CID)
+	if ER.get() do EXC quit
+
+	do Runtime.commit()
+
+	// Update x-ref outside of TP to avoid TP restarts
+	do Db.delete("XREFXCRCD","CLS=:CLS AND GRP=:GRP AND TYPE=:TYPE AND CRCD=:OLDCRCD AND CID=:CID")
+	
+	type RecordXREFXCRCD xrfxcrcd=Db.getRecord("XREFXCRCD","CLS=:CLS,GRP=:GRP,TYPE=:TYPE,CRCD=:NEWCRCD,CID=:CID",1)
+
+	set xrfxcrcd.cls=CLS
+	set xrfxcrcd.grp=GRP
+	set xrfxcrcd.type=TYPE
+	set xrfxcrcd.crcd=NEWCRCD
+	set xrfxcrcd.cid=CID
+
+	do xrfxcrcd.save()
+	
+	quit
+
+
+	//---------------------------------------------------------------------
+DEP(Number CID)			// Account Number
+	//---------------------------------------------------------------------
+
+	/*
+	Deposit Conversion
+
+	ARGUMENTS:
+		.CID	Account number			/TYP=//N/REQ/MECH=VAL
+
+	RETURNS:
+		. ER		Error flag		/TYP=L
+		. RM		Error message if ER=1	/TYP=T
+	*/
+
+	type public Date EUREFD
+	type public Boolean ER
+	type public Number INTEG
+	type public String NEWCRCD,OLDCRCD
+	
+	type Boolean SEGFLG
+	type Number BAL,EURSTAT
+	type String oldval(),CRCD
+
+	if INTEG do EXT^DBSFILER("DEP",2,"/NOVALDD/NOVALRI") quit:ER
+
+	type RecordDEP dep=Db.getRecord("DEP","CID=:CID")
+
+	set BAL=dep.bal
+	set SEGFLG=dep.segflg
+
+	if SEGFLG do {
+
+		set oldval("BAL")=dep.bal
+		set oldval("INTAVLNCR")=dep.intavlncr
+		}
+
+	if EURSTAT=1 do {
+
+		set dep.crcd=NEWCRCD
+		set dep.eurcnvd=EUREFD
+		set dep.eurstat=2
+		set dep.orgcrcd=OLDCRCD
+		set dep.eurcvinbal=BAL
+
+		set CRCD=NEWCRCD
+		}
+	else  do {
+
+		set dep.crcd=NEWCRCD
+		set dep.eurcnvd=""
+		set dep.eurstat=4
+		set dep.orgcrcd=""
+		set dep.eurcvinbal=0
+		set dep.eurevdt=EUREFD
+
+		set CRCD=NEWCRCD
+		}
+
+	do dep.save()
+
+	do DEXFR(0) quit:ER			// G/L transfer (out)
+	do DEPOSIT(CID) quit:ER			// Deposit specific tables
+	if SEGFLG do DEPSEG(CID) quit:ER	// Straight conversion, DEPSEG
+	do DEXFR(1) quit:ER			// G/L transfer (in)
+
+	do RELCIF quit:ER			// Straight conversion, RELCIF
+
+	do HOLDS quit:ER			// Straight conversion, HLD*, PHLD*
+	do EFTPAY quit:ER   			// Straight conversion, EFTPAY file
+	do DAYEND(CID) quit:ER			// Straight conversion, DAYEND*
+
+	do SRV quit:ER				// Straight conversion, SRV, SRV0, SRVD*
+	do SRVSUM quit:ER			// Straight conversion, SRVSUM, SRVSUM3
+
+	do ARS quit:ER				// Straight conversion, ARS*
+	do PAA(CID) quit:ER			// Straight conversion, PAA
+	do KITE quit:ER				// Straight conversion, KITE
+
+	do RATESCH(CID) quit:ER			// Rate schedule conversion
+	do EXEC^EUROEFD quit:ER    		// Conversion of EFD file
+
+	if INTEG do EXT^DBSFILER("DEP",2,"/NOVALDD/NOVALRI") quit:ER
+	if EURSTAT=3 do ROUNDING
+
+	quit
+
+
+	//---------------------------------------------------------------------
+LN(Number CID)			// Account Number
+	//---------------------------------------------------------------------
+
+	/*
+	Loan Conversion
+
+	ARGUMENTS:
+		.CID	Account number			/TYP=//N/REQ/MECH=VAL
+
+	RETURNS:
+		. ER		Error flag		/TYP=L
+		. RM		Error message if ER=1	/TYP=T
+	*/
+
+	type public Boolean ER
+	type public Date EUREFD
+	type public Number INTEG
+	type public String NEWCRCD,OLDCRCD
+
+	type Boolean ARUF,CPF,REVF
+	type Number BAL,BALCMP,CCL,EURSTAT,UDBAL
+	type String CRCD
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+
+	set CPF=ln.cpf
+	set CCL=ln.ccl
+
+	// Commercial commitment with linked loans
+	if CPF!CCL do Runtime.setErrMSG("LN",1635) quit
+
+	if INTEG do EXT^DBSFILER("LN",2,"/NOVALDD/NOVALRI") quit:ER
+
+	set ARUF=ln.aruf
+	set BAL=ln.bal
+	set REVF=ln.revf
+	set UDBAL=ln.udbal
+	
+	set BALCMP=$$BALCMP^LNCDI(ARUF,BAL,UDBAL)
+
+	if EURSTAT=1 do {
+
+		set ln.crcd=NEWCRCD
+		set ln.eurcnvd=EUREFD
+		set ln.eurstat=2
+		set ln.orgcrcd=OLDCRCD
+		set ln.eurcvinbal=BALCMP
+
+		set CRCD=NEWCRCD
+		}
+	else  do {
+
+		set ln.crcd=NEWCRCD
+		set ln.eurcnvd=""
+		set ln.eurstat=4
+		set ln.orgcrcd=""
+		set ln.eurcvinbal=0
+		set ln.eurevdt=EUREFD
+
+		set CRCD=NEWCRCD
+		}
+
+	do ln.save()
+
+	do DEXFR(0) quit:ER		// G/L transfer (out)
+	do LOAN(CID) quit:ER		// Loan specific tables
+	do DEXFR(1) quit:ER		// G/L transfer (in)
+
+	do RELCIF quit:ER		// Straight conversion, RELCIF
+
+	do HOLDS quit:ER		// Straight conversion, HLD*, PHLD*
+	do LNBIL(CID) quit:ER		// Straight conversion, LNBIL*
+	do LNBLP(CID) quit:ER		// Threshold Rounding Option, LNBLP
+
+	do LNENT(CID) quit:ER		// Straight conversion, LNENT
+	do LNFEED(CID) quit:ER		// Straight conversion, LNFEED
+	do LNVRCHG(CID) quit:ER		// Straight conversion, LNVRCHG
+	do LNPTCHG(CID) quit:ER		// Straight conversion, LNPTCHG
+	do LNRACHG(CID) quit:ER		// Straight conversion, LNRACHG
+	do LNYR(CID) quit:ER		// Straight conversion, LNYR file
+
+	do EFTPAY quit:ER   		// Straight conversion, EFTPAY file
+	do DAYEND(CID) quit:ER		// Straight conversion, DAYEND*
+
+	do PAA(CID) quit:ER		// Straight conversion, PAA
+	do SUSPENSE(CID) quit:ER	// Straight conversion, SUSPENSE
+
+	do RATESCH(CID) quit:ER		// Rate schedule conversion
+	do EXEC^EUROEFD quit:ER 	// Conversion of EFD file
+	do EXEC^LNUBIL(.ln) quit:ER		// Recalculate values into loan accounts
+
+	if INTEG do EXT^DBSFILER("LN",2,"/NOVALDD/NOVALRI") quit:ER
+	if EURSTAT=3 do ROUNDING
+
+	quit
+
+
+	//---------------------------------------------------------------------
+DEPOSIT(Number CID)		// Account Number
+	//----------------------------------------------------------------------
+
+	// Deposit specific tables (ACN)
+
+	type public Boolean ER
+	type public String DATA,COLUMNS(),PROC()
+	
+	type String EXMPLN,SWPCID,YEAR
+
+	set (EXMPLN,SWPCID,YEAR)=""
+
+	type RecordDEP dep=Db.getRecord("DEP","CID=:CID")
+
+	// Table DEP - straight
+	if COLUMNS("DEP1")'="" do {  quit:ER
+
+		do SELECT(PROC("DEP1"),.DATA) quit:ER
+		do CONVERT("DEP",COLUMNS("DEP1"),"",.DATA,1,1)
+		}
+
+	// Table DEP - threshhold
+	if COLUMNS("DEP2")'="" do {  quit:ER
+
+		do SELECT(PROC("DEP2"),.DATA) quit:ER
+		do CONVERT("DEP",COLUMNS("DEP2"),"",.DATA,2,1)
+		}
+
+	// Table DEP - round
+	if COLUMNS("DEP3")'="" do {  quit:ER
+
+		do SELECT(PROC("DEP3"),.DATA) quit:ER
+		do CONVERT("DEP",COLUMNS("DEP3"),"",.DATA,3,1)
+		}
+		
+	// Table DEP - def from prod
+	if COLUMNS("DEP4")'="" do {  quit:ER
+
+		set DATA=""
+		do CONVERT("DEP",COLUMNS("DEP4"),"",.DATA,4,1)
+		}
+		
+	// Table ROLLOVR - straight
+	if COLUMNS("DEP65")'="" do {  quit:ER
+
+		if dep.cod.isNull(),dep.scn.isNull(),dep.nock.isNull(),dep.cktyp.isNull(),dep.ckc.isNull() quit
+
+		do SELECT(PROC("DEP65"),.DATA) quit:ER
+		do CONVERT("ROLLOVR",COLUMNS("DEP65"),"",.DATA,1,1)
+		}
+		
+	// Table ROLLOVR - threshhold
+	if COLUMNS("DEP26")'="" do {  quit:ER
+
+		if dep.cod.isNull(),dep.scn.isNull(),dep.nock.isNull(),dep.cktyp.isNull(),dep.ckc.isNull() quit
+
+		do SELECT(PROC("DEP26"),.DATA) quit:ER
+		do CONVERT("ROLLOVR",COLUMNS("DEP26"),"",.DATA,2,1)
+		}
+		
+	// Table DEPINV - straight
+	if COLUMNS("DEP13")'="" do {  quit:ER
+
+		type ResultSet inv=Db.select("SWPCID","DEPINV","CID=:CID")
+		
+		while inv.next() do {
+
+			set SWPCID=inv.getCol("SWPCID")
+
+			do SELECT(PROC("DEP13"),.DATA) quit:ER
+			do CONVERT("DEPINV",COLUMNS("DEP13"),"SWPCID=:SWPCID",.DATA,1,1)
+			}
+		}
+		
+	// Table DEPEXPLN - straight
+	if COLUMNS("DEP59")'="" do {  quit:ER
+
+		type ResultSet exmpln=Db.select("EXMPLN","DEPEXPLN","CID=:CID")
+
+		while exmpln.next() do {
+
+			set EXMPLN=exmpln.getCol("EXMPLN")
+
+			do SELECT(PROC("DEP59"),.DATA) quit:ER
+			do CONVERT("DEPEXPLN",COLUMNS("DEP59"),"",.DATA,1,1)
+			}
+		}
+
+	// Table DEPYR - straight & threshhold
+	if COLUMNS("DEP67")'=""!(COLUMNS("DEP68")'="") do {  quit:ER
+
+		type ResultSet yr=Db.select("YEAR","DEPYR","CID=:CID")
+
+		while yr.next() do {
+
+			set YEAR=yr.getCol("YEAR")
+			
+			// Table DEPYR - straight
+			if COLUMNS("DEP67")'="" do {  quit:ER
+				do SELECT(PROC("DEP67"),.DATA) quit:ER
+				do CONVERT("DEPYR",COLUMNS("DEP67"),"YEAR=:YEAR",.DATA,1,1)
+				}
+				
+			// Table DEPYR - threshold
+			if COLUMNS("DEP68")'="" do {  quit:ER
+				do SELECT(PROC("DEP68"),.DATA) quit:ER
+				do CONVERT("DEPYR",COLUMNS("DEP68"),"YEAR=:YEAR",.DATA,2,1)
+				}
+			}
+		}
+	quit
+
+
+	//----------------------------------------------------------------------
+DEPSEG(Number CID)		// Account Number
+	//----------------------------------------------------------------------
+
+	// Straight conversion - table DEPSEG.
+
+	type public Boolean ER
+	type public String DATA,COLUMNS(),PROC(),SEGMENT(,)
+	
+	type String SEG
+	 
+	if COLUMNS("DEP71")="" quit
+
+	type ResultSet seg=Db.select("SEGMENT,SEGVAL,SEGSTART","DEPSEG","CID=:CID")
+	
+	while seg.next() do { quit:ER
+
+		set SEG=seg.getCol("SEGMENT")
+		
+		do SELECT(PROC("DEP71"),.DATA) quit:ER
+		do CONVERT("DEPSEG",COLUMNS("DEP71"),"SEGMENT=:SEG",.DATA,1,1)
+
+		// Array of valid segments ordered by segment start date
+		if seg.getCol("SEGVAL") set SEGMENT(seg.getCol("SEGSTART"),SEG)=""
+		}
+
+	do EXEC^EUROSEG(CID,.SEGMENT()) quit:ER
+
+	do WTHAUT(CID)
+	quit
+
+
+	//----------------------------------------------------------------------
+RELCIF	// Straight Conversion - table RELCIF.
+	//----------------------------------------------------------------------
+
+	type public Boolean ER
+	type public Number CID
+	type public String DATA,COLUMNS(),PROC()
+	
+	type Number ACN
+	
+	if COLUMNS("DEP23")="" quit
+
+	type ResultSet relcif=Db.select("ACN","RELCIF","CID=:CID")
+
+	while relcif.next() do { quit:ER
+
+		set ACN=relcif.getCol("ACN")
+
+		do SELECT(PROC("DEP23"),.DATA) quit:ER
+		do CONVERT("RELCIF",COLUMNS("DEP23"),"ACN=:ACN",.DATA,1,1)
+		}
+
+	quit
+
+
+	//----------------------------------------------------------------------
+ARS	// Straight Conversion - tables ARS. ARSB, ARSH and ARSCID.
+	//----------------------------------------------------------------------
+
+	type public Boolean ER
+	type public Number CID
+	type public String DATA,COLUMNS(),PROC()
+
+	type Date ACTDT,ARSNDT
+	type Number CKNO,CSEQ
+
+	set (ACTDT,ARSNDT,CKNO,CSEQ)=""
+
+	// Table ARS - straight
+	if COLUMNS("DEP9")'="" do {  quit:ER
+	
+		type ResultSet ars=Db.select("CKNO","ARS","CID=:CID")
+
+		while ars.next() do { quit:ER
+		
+			set CKNO=ars.getCol("CKNO")
+			
+			do SELECT(PROC("DEP9"),.DATA) quit:ER
+			do CONVERT("ARS",COLUMNS("DEP9"),"CKNO=:CKNO",.DATA,1,0)
+			}
+		}
+
+	// Table ARSB - straight
+	if COLUMNS("DEP10")'="" do {  quit:ER
+			
+		type ResultSet arsb=Db.select("ARSNDT","ARSB","CID=:CID")
+
+		while arsb.next() do { quit:ER
+
+			set ARSNDT=arsb.getCol("ARSNDT")
+
+			do SELECT(PROC("DEP10"),.DATA) quit:ER
+			do CONVERT("ARSB",COLUMNS("DEP10"),"ARSNDT=:ARSNDT",.DATA,1,0)
+			}
+		}
+
+	// Table ARSH - straight
+	if COLUMNS("DEP11")'="" do {  quit:ER
+
+		type ResultSet arsh=Db.select("ACTDT,CKNO,CSEQ","ARSH","CID=:CID")
+
+		while arsh.next() do { quit:ER
+
+			set ACTDT=arsh.getCol("ACTDT")
+			set CKNO=arsh.getCol("CKNO")
+			set CSEQ=arsh.getCol("CSEQ")
+
+			do SELECT(PROC("DEP11"),.DATA) quit:ER
+			do CONVERT("ARSH",COLUMNS("DEP11"),"ACTDT=:ACTDT AND CKNO=:CKNO AND CSEQ=:CSEQAND",.DATA,1,0)
+			}
+		}
+
+	// Table ARSCID - straight
+	if COLUMNS("DEP12")'="" do {  quit:ER
+
+		do SELECT(PROC("DEP12"),.DATA) quit:ER
+		do CONVERT("ARSCID",COLUMNS("DEP12"),"",.DATA,1,0)
+		}
+		
+	quit
+
+
+	//----------------------------------------------------------------------
+KITE	// Straight Conversion - table KITE.
+	//----------------------------------------------------------------------
+
+
+	type public Boolean ER
+	type public Number CID
+	type public String DATA,COLUMNS(),PROC()
+	
+	type Date ADAT
+	
+	if COLUMNS("DEP8")="" quit
+
+	type ResultSet kite=Db.select("ADAT","KITE")
+
+	while kite.next() do { quit:ER
+
+		set ADAT=kite.getCol("ADAT")
+		
+		if 'Db.isDefined("KITE","ADAT=:ADAT AND CID=:CID") quit
+
+		do SELECT(PROC("DEP8"),.DATA) quit:ER
+		do CONVERT("KITE",COLUMNS("DEP8"),"ADAT=:ADAT",.DATA,1,0)
+		}
+	quit
+
+
+	//----------------------------------------------------------------------
+SRV	// Straight Conversion - tables SRV, SRV0, SRVD, SRVD1 and SRVDTL
+	//----------------------------------------------------------------------
+
+	type public Boolean ER
+	type public Number CID
+	type public String DATA,COLUMNS(),PROC()
+
+	type Date SCND
+	type Number FEECAT,PLTP,SEQ
+	type String FEETYP
+
+	if COLUMNS("DEP14")="",COLUMNS("DEP15")="",COLUMNS("DEP16")="",COLUMNS("DEP17")="",COLUMNS("DEP88")="" quit
+
+	type ResultSet srv=Db.select("PLTP,SCND","SRV","CID=:CID")
+	
+	while srv.next() do { quit:ER
+
+		set PLTP=srv.getCol("PLTP")
+		set SCND=srv.getCol("SCND")
+
+		// Table SRV
+		if COLUMNS("DEP14")'="" do {  quit:ER
+
+			do SELECT(PROC("DEP14"),.DATA) quit:ER
+			do CONVERT("SRV",COLUMNS("DEP14"),"PLTP=:PLTP AND SCND=:SCND",.DATA,1,0)
+			}
+
+		// Table SRV0
+		if COLUMNS("DEP15")'="" do {  quit:ER
+
+			do SELECT(PROC("DEP15"),.DATA) quit:ER
+			do CONVERT("SRV0",COLUMNS("DEP15"),"PLTP=:PLTP AND SCND=:SCND",.DATA,1,0)
+			}
+
+		type ResultSet sfcat=Db.select("FEECAT,FEETYP","SRVD","CID=:CID AND PLTP=:PLTP AND SCND=:SCND")
+
+		while sfcat.next() do { quit:ER
+
+			set FEECAT=sfcat.getCol("FEECAT")
+
+			// Table SRVD1
+			if COLUMNS("DEP16")'="" do {  quit:ER
+
+				do SELECT(PROC("DEP16"),.DATA) quit:ER
+				do CONVERT("SRVD1",COLUMNS("DEP16"),"PLTP=:PLTP AND SCND=:SCND AND FEECAT=:FEECAT",.DATA,1,0)
+				}
+					
+			set FEETYP=sfcat.getCol("FEETYP")
+
+			// Table SRVD
+			if COLUMNS("DEP88")'="" do {  quit:ER
+
+				do SELECT(PROC("DEP88"),.DATA) quit:ER
+				do CONVERT("SRVD",COLUMNS("DEP88"),"PLTP=:PLTP AND SCND=:SCND AND FEECAT=:FEECAT AND FEETYP=:FEETYP",.DATA,1,0)
+				}
+
+			if COLUMNS("DEP17")'="" do {  quit:ER
+
+				type ResultSet sfdtl=Db.select("SEQ","SRVDTL","CID=:CID AND PLTP=:PLTP AND SCND=:SCND AND FEECAT=:FEECAT AND FEETYP=:FEETYP")
+
+				while sfdtl.next() do { quit:ER
+
+					set SEQ=sfdtl.getCol("SEQ")
+
+					// Table SRVDTL
+					do SELECT(PROC("DEP17"),.DATA) quit:ER
+					do CONVERT("SRVDTL",COLUMNS("DEP17"),"PLTP=:PLTP AND SCND=:SCND AND FEECAT=:FEECAT AND FEETYP=:FEETYP AND SEQ=:SEQ",.DATA,1,0)
+					}
+				}
+			}
+		}
+	quit
+
+
+	//----------------------------------------------------------------------
+SRVSUM	// Straight Conversion - tables SRVSUM and SRVSUM3.
+	//----------------------------------------------------------------------
+
+	type public Boolean ER
+	type public Number CID
+	type public String DATA,COLUMNS(),PROC()
+
+	type Date SCND
+	type Number PLTP
+	type String TRNGRP
+
+	if COLUMNS("DEP18")="",COLUMNS("DEP19")="" quit
+
+	type ResultSet srvsum=Db.select("PLTP,SCND","SRVSUM","CID=:CID")
+
+	while srvsum.next() do { quit:ER
+		
+		set PLTP=srvsum.getCol("PLTP")
+		set SCND=srvsum.getCol("SCND")
+
+		// Table SRVSUM
+		do SELECT(PROC("DEP18"),.DATA) quit:ER
+		do CONVERT("SRVSUM",COLUMNS("DEP18"),"PLTP=:PLTP AND SCND=:SCND",.DATA,1,0)
+
+		if COLUMNS("DEP19")="" quit
+
+		type ResultSet srvsum3=Db.select("TRNGRP","SRVSUM3","CID=:CID AND PLTP=:PLTP AND SCND=:SCND")
+
+		while srvsum3.next() do { quit:ER
+
+			set TRNGRP=srvsum3.getCol("TRNGRP")
+
+			// Table SRVSUM3
+			do SELECT(PROC("DEP19"),.DATA) quit:ER
+			do CONVERT("SRVSUM3",COLUMNS("DEP19"),"PLTP=:PLTP AND SCND=:SCND AND TRNGRP=:TRNGRP",.DATA,1,0)
+			}
+	}
+
+	quit
+
+
+	//----------------------------------------------------------------------
+HOLDS	// Straight Conversion - tables PHLD, HLD7, HLD8, PHLD9, HLDD
+	//----------------------------------------------------------------------
+
+	type public Boolean ER
+	type public Number CID,CNVDECP,CNVRATE
+	type public String DATA,COLUMNS(),PROC()
+
+	type Date EXPDT,NJD,TJD
+	type Number CHKSEQ,CNVAMT,HLDSEQ,J,SEQ,TOTHLD
+	type String CHKFLT,CNV
+
+	// Table PHLD
+	if COLUMNS("DEP31")'="" do {  quit:ER
+
+		type ResultSet phld=Db.select("SEQ","PHLD","CID=:CID")
+
+		while phld.next() do { quit:ER
+			
+			set SEQ=phld.getCol("SEQ")
+			
+			do SELECT(PROC("DEP31"),.DATA) quit:ER
+			do CONVERT("PHLD",COLUMNS("DEP31"),"SEQ=:SEQ",.DATA,1,0)
+			}
+		}
+
+	// Table HLD7
+	if COLUMNS("DEP20")'="" do {  quit:ER
+
+		//N TOTHLD
+		set TOTHLD=0
+
+		type ResultSet hld7=Db.select("EXPDT","HLD7","CID=:CID")
+
+		while hld7.next() do { quit:ER
+
+			set EXPDT=hld7.getCol("EXPDT")
+
+			do SELECT(PROC("DEP20"),.DATA) quit:ER
+			do CONVERT("HLD7",COLUMNS("DEP20"),"EXPDT=:EXPDT",.DATA,1,0)
+			}
+		kill hld7
+
+		// Modify the current total hold amount for rounding differences
+		type ResultSet hld7=Db.select("EXPDT,AMT,TOTAMT","HLD7","CID=:CID","EXPDT DESC")
+		if hld7.isEmpty() quit
+		
+		while hld7.next() do { quit:ER
+			
+			if 'hld7.getCol("TOTAMT").isNull() quit
+			
+			set EXPDT=hld7.getCol("EXPDT")
+			set TOTHLD=TOTHLD+hld7.getCol("AMT")
+			}
+			
+		if hld7.getCol("TOTAMT")'=TOTHLD do {
+
+			type RecordHLD7 rechld7=Db.getRecord("HLD7","CID=:CID,EXPDT=:EXPDT")
+
+			set rechld7.totamt=TOTHLD
+
+			do rechld7.save()
+			}
+		}
+
+	// Table HLD8
+	if COLUMNS("DEP21")'="" do {  quit:ER
+
+		set TOTHLD=0
+
+		type ResultSet hld8=Db.select("EXPDT","HLD8","CID=:CID")
+
+		while hld8.next() do { quit:ER
+
+			set EXPDT=hld8.getCol("EXPDT")
+
+			do SELECT(PROC("DEP21"),.DATA) quit:ER
+			do CONVERT("HLD8",COLUMNS("DEP21"),"EXPDT=:EXPDT",.DATA,1,0)
+			}
+		kill hld8
+
+		// Modify the current total hold amount for rounding differences
+		type ResultSet hld8=Db.select("EXPDT,AMT,TOTAMT","HLD8","CID=:CID","EXPDT DESC")
+		if hld8.isEmpty() quit
+		
+		while hld8.next() do { quit:ER
+
+			if 'hld8.getCol("TOTAMT").isNull() quit
+			
+			set EXPDT=hld8.getCol("EXPDT")
+			set TOTHLD=TOTHLD+hld8.getCol("AMT")
+			}
+
+		if hld8.getCol("TOTAMT")'=TOTHLD do {
+
+			type RecordHLD8 rechld8=Db.getRecord("HLD8","CID=:CID,EXPDT=:EXPDT")
+
+			set rechld8.totamt=TOTHLD
+
+			do rechld8.save()
+
+			type RecordDEP dep=Db.getRecord("DEP","CID=:CID")
+
+			set dep.chkhld=TOTHLD
+
+			do dep.save()
+			}
+		}
+
+	// Table PHLD9
+	if COLUMNS("DEP30")'="" do {  quit:ER
+
+		type ResultSet phld9=Db.select("SEQ","PHLD9","CID=:CID")
+
+		while phld9.next() do { quit:ER
+
+			set SEQ=phld9.getCol("SEQ")
+
+			do SELECT(PROC("DEP30"),.DATA) quit:ER
+			do CONVERT("PHLD9",COLUMNS("DEP30"),"SEQ=:SEQ",.DATA,1,0)
+			}
+		}
+
+	// Table HLDD
+	if COLUMNS("DEP22")'="" do {  quit:ER
+
+		type ResultSet hldd=Db.select("TJD,HLDSEQ,CHKSEQ,CHKFLT","HLDD","CID=:CID")
+
+		while hldd.next() do { quit:ER
+
+			set NJD=hldd.getCol("TJD")
+			set HLDSEQ=hldd.getCol("HLDSEQ")
+			set CHKSEQ=hldd.getCol("CHKSEQ")
+
+			do SELECT(PROC("DEP22"),.DATA) quit:ER
+			do CONVERT("HLDD",COLUMNS("DEP22"),"TJD=:NJD AND HLDSEQ=:HLDSEQ AND CHKSEQ=:CHKSEQ",.DATA,1,0)
+
+			/*
+			Update the CHKFLT complex field
+			Format string#date#$$.$$ - repeats up to 5 times, "~" delimited.
+			*/
+			set CHKFLT=hldd.getCol("CHKFLT")
+
+			for J=1:1:CHKFLT.length("~") do {
+
+				set CNVAMT=CHKFLT.piece("~",J).piece("#",3)
+				quit:(CNVAMT="")!(CNVAMT=0)
+
+				set CNVAMT=(CNVAMT*CNVRATE).toString(0,CNVDECP)
+
+				set CNV=CHKFLT.piece("~",J)
+				set CNV.piece("#",3)=CNVAMT
+				set CHKFLT.piece("~",J)=CNV
+				}
+
+			type RecordHLDD rechldd=Db.getRecord("HLDD","TJD=:NJD,CID=:CID,HLDSEQ=:HLDSEQ,CHKSEQ=:CHKSEQ")
+			
+			set rechldd.chkflt=CHKFLT
+			
+			do rechldd.save()
+			}
+		}
+
+	quit
+
+
+	//----------------------------------------------------------------------
+EFTPAY	// Straight conversion - table EFTPAY.
+	//----------------------------------------------------------------------
+
+	type public Boolean ER
+	type public Number CID
+	type public String DATA,NEWCRCD,COLUMNS(),PROC()
+
+	type Number SEQ
+	type String STATUS
+
+	if COLUMNS("DEP66")="" quit
+
+	type ResultSet rseftpay=Db.select("SEQ,CRCD,EFTTYPE,STATUS,AMTTYP","EFTPAY","CID=:CID")
+
+	while rseftpay.next() do { quit:ER
+
+		set SEQ=rseftpay.getCol("SEQ")
+
+		if rseftpay.getCol("CRCD")=NEWCRCD quit
+		if rseftpay.getCol("EFTTYPE")["NDPO" quit
+
+		set STATUS=rseftpay.getCol("STATUS")
+		if "|A|PP|PR|SUP|Y|"'[("|"_STATUS_"|") quit
+
+		// Update currency code
+		type RecordEFTPAY eftpay=Db.getRecord("EFTPAY","CID=:CID,SEQ=:SEQ")
+
+		set eftpay.crcd=NEWCRCD
+		
+		do eftpay.save()
+
+		if rseftpay.getCol("AMTTYP")>3 quit
+
+		do SELECT(PROC("DEP66"),.DATA) quit:ER
+		do CONVERT("EFTPAY",COLUMNS("DEP66"),"SEQ=:SEQ",.DATA,1,1)
+		}
+	quit
+
+
+	//----------------------------------------------------------------------
+LOAN(Number CID)			// Account Number
+	//----------------------------------------------------------------------
+
+	// Loan specific tables (ACN)
+
+	type public Boolean ARUF,ER,REVF
+	type public Number BAL,BALCMP,CNVRATE,CNVDECP
+	type public String DATA,COLUMNS(),PROC()
+
+	type Date PDD,SDD
+	type Number ADV,ROSEQ,UDBAL
+	type String FEETYP,TYP
+
+	set (ADV,FEETYP,PDD,ROSEQ,SDD,TYP)=""
+
+	// Table LN - straight
+	if COLUMNS("LN1")'="" do {  quit:ER
+
+		do SELECT(PROC("LN1"),.DATA) quit:ER
+		do CONVERT("LN",COLUMNS("LN1"),"",.DATA,1,1)
+		}
+
+	// Table LN - threshhold
+	if COLUMNS("LN2")'="" do {  quit:ER
+
+		do SELECT(PROC("LN2"),.DATA) quit:ER
+		do CONVERT("LN",COLUMNS("LN2"),"",.DATA,2,1)
+		}
+
+	// Table LN - round
+	if COLUMNS("LN3")'="" do {  quit:ER
+
+		do SELECT(PROC("LN3"),.DATA) quit:ER
+		do CONVERT("LN",COLUMNS("LN3"),"",.DATA,3,1)
+		}
+
+	// Table LN - def from prod
+	if COLUMNS("LN4")'="" do {  quit:ER
+
+		set DATA=""
+		do CONVERT("LN",COLUMNS("LN4"),"",.DATA,4,1)
+		}
+
+	if COLUMNS("DEP92")'="" do {  quit:ER
+
+		type ResultSet lnps1=Db.select("PDD","LNPS1","CID=:CID")
+
+		while lnps1.next() do { quit:ER
+
+			set PDD=lnps1.getCol("PDD")
+
+			do SELECT(PROC("DEP92"),.DATA) quit:ER
+			do CONVERT("LNPS1",COLUMNS("DEP92"),"PDD=:PDD",.DATA,1,0)
+			}
+		}
+
+	if COLUMNS("DEP40")'=""!(COLUMNS("DEP44")'="") do {  quit:ER
+		
+		type ResultSet lnrenew=Db.select("ROSEQ","LNRENEW","CID=:CID")
+
+		while lnrenew.next() do { quit:ER
+
+			set ROSEQ=lnrenew.getCol("ROSEQ")
+
+			// Table LNRENEW - straight
+			if COLUMNS("DEP40")'="" do {  quit:ER
+
+				do SELECT(PROC("DEP40"),.DATA) quit:ER
+				do CONVERT("LNRENEW",COLUMNS("DEP40"),"ROSEQ=:ROSEQ",.DATA,1,1)
+				}
+
+			// Table LNRENEW - threshold
+			if COLUMNS("DEP44")'="" do {  quit:ER
+
+				do SELECT(PROC("DEP44"),.DATA) quit:ER
+				do CONVERT("LNRENEW",COLUMNS("DEP44"),"ROSEQ=:ROSEQ",.DATA,2,1)
+				}
+			}
+		}
+
+	// Table LNAMOAO - straight
+	if COLUMNS("DEP55")'="" do {  quit:ER
+
+		type ResultSet lnamoao=Db.select("TYP","LNAMOAO","CID=:CID")
+
+		while lnamoao.next() do { quit:ER
+
+			set TYP=lnamoao.getCol("TYP")
+
+			do SELECT(PROC("DEP55"),.DATA) quit:ER
+			do CONVERT("LNAMOAO",COLUMNS("DEP55"),"TYP=:TYP",.DATA,1,0)
+			}
+		}
+
+	// Table LNFEE - straight
+	if COLUMNS("DEP52")'="" do {  quit:ER
+
+		type ResultSet lnfee=Db.select("FEETYP","LNFEE","CID=:CID")
+
+		while lnfee.next() do { quit:ER
+
+			set FEETYP=lnfee.getCol("FEETYP")
+
+			do SELECT(PROC("DEP52"),.DATA) quit:ER
+			do CONVERT("LNFEE",COLUMNS("DEP52"),"FEETYP=:FEETYP",.DATA,1,0)
+			}
+		}
+
+	// Table LNDS1 - straight
+	if COLUMNS("DEP60")'="" do {  quit:ER
+
+		type ResultSet lnds1=Db.select("SDD","LNDS1","CID=:CID")
+
+		while lnds1.next() do { quit:ER
+
+			set SDD=lnds1.getCol("SDD")
+
+			do SELECT(PROC("DEP60"),.DATA) quit:ER
+			do CONVERT("LNDS1",COLUMNS("DEP60"),"SDD=:SDD",.DATA,1,0)
+			}
+		}
+
+	// Table LNADV - straight
+	if COLUMNS("DEP47")'="" do {  quit:ER
+
+		type ResultSet lnadv=Db.select("ADV","LNADV","CID=:CID")
+
+		while lnadv.next() do { quit:ER
+
+			set ADV=lnadv.getCol("ADV")
+
+			do SELECT(PROC("DEP47"),.DATA) quit:ER
+			do CONVERT("LNADV",COLUMNS("DEP47"),"ADV=:ADV",.DATA,1,0)
+			}
+		}
+
+	/*
+	Calculate LN.UDBAL and LN.BALCMP
+
+	Must be done after other values converted since it depends on those
+	values and cannot be simply converted directly.  Note that BALCMP
+	is not - N[ewed] as it is used in DEXFR.
+	*/
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+	set BAL=ln.bal
+
+	// CRLMT-TDR
+	if 'REVF set UDBAL=ln.crlmt-ln.tdr
+	// CRLMT-BAL
+	else  if 'ARUF set UDBAL=ln.crlmt-BAL
+	// Convert as method 1
+	else  do {
+
+		set UDBAL=ln.udbal
+		if UDBAL set UDBAL=(UDBAL*CNVRATE).toString(0,CNVDECP).toNumber(".",1)
+		}
+
+	set BALCMP=$$BALCMP^LNCDI(ARUF,BAL,UDBAL)
+	
+	set ln.udbal=UDBAL
+
+	do ln.save()
+	
+	quit
+
+
+	//----------------------------------------------------------------------
+LNBIL(Number CID)			// Account Number
+	//----------------------------------------------------------------------
+
+	// Straight Conversion - tables LNBIL0, LNBIL1 and LNBIL5.
+
+	type public Boolean ARUF,ER,REVF
+	type public Number CNVDECP,CNVRATE
+	type public String DATA,COLUMNS(),PROC()
+
+	type Boolean DUEAMT
+	type Number CASD,CPIB,CPID,CTAB,ELM,ORG,I,IDP,REM,SCHSEQ
+	type String pe,BL,FEETYP,X
+
+	if COLUMNS("DEP45")="",COLUMNS("DEP46")="" quit
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+
+	set IDP=ln.idp
+
+	// Table LNBIL0 - straight
+	do SELECT(PROC("DEP46"),.DATA) quit:ER
+	do CONVERT("LNBIL0",COLUMNS("DEP46"),"",.DATA,1,1)
+
+	type ResultSet rslnbil1=Db.select("SCHSEQ,CPIB,CPID,PE01,PE02,PE03,PE04,PE05,PE06,PE07,PE08,PE09,PE10,PE11,PE12,PE13,PE14,PE15,PE16,PE17,PE18,PE19,PE20","LNBIL1","CID=:CID")
+
+	while rslnbil1.next() do { quit:ER
+
+		set SCHSEQ=rslnbil1.getCol("SCHSEQ")
+
+		// Table LNBIL1 - straight
+		do SELECT(PROC("DEP45"),.DATA) quit:ER
+		do CONVERT("LNBIL1",COLUMNS("DEP45"),"SCHSEQ=:SCHSEQ",.DATA,1,1)
+
+		type ResultSet lnbil5=Db.select("DUEAMT,FEETYP","LNBIL5","CID=:CID AND SCHSEQ=:SCHSEQ")
+
+		while lnbil5.next() do { quit:ER
+
+			set DUEAMT=lnbil5.getCol("DUEAMT")
+			set FEETYP=lnbil5.getCol("FEETYP")
+
+			// Table LNBIL5 - straight
+			do SELECT(PROC("DEP90"),.DATA) quit:ER
+			do CONVERT("LNBIL5",COLUMNS("DEP90"),"SCHSEQ=:SCHSEQ AND DUEAMT=:DUEAMT AND FEETYP=:FEETYP",.DATA,1,1)
+			}
+		kill lnbil5
+
+		// Sum components (after conversion) to calculate the following columns:
+
+		// CASD - Payment Amount Due
+		// CTAB - Total Amount Billed
+		// CPIB - Total P&if Amount Billed
+		// CPID - Total P&if Amount Due
+
+		set (CASD,CPIB,CPID,CTAB)=0
+
+		if IDP do {
+
+			set CPID=(rslnbil1.getCol("CPID")*CNVRATE).toString(0,CNVDECP).toNumber(".",1),CASD=CPID
+			set CPIB=(rslnbil1.getCol("CPIB")*CNVRATE).toString(0,CNVDECP).toNumber(".",1),CTAB=CPIB
+			}
+
+		for I=2:1:20 do {
+
+			if I<10 set pe="PE0"_I
+			else  if I>9 set pe="PE"_I
+
+			set X=""
+			set X=rslnbil1.getCol(pe)
+
+			if X.isNull() quit
+
+			set ELM=X.piece("#",1)
+			set ORG=X.piece("#",3)
+			set REM=X.piece("#",4)
+
+			set CASD=CASD+REM,CTAB=CTAB+ORG
+			if 'IDP,ELM="P"!(ELM="I") set CPID=CPID+REM,CPIB=CPIB+ORG
+			}
+
+		type ResultSet lnbil5=Db.select("BFAMT,BRFAMT","LNBIL5","CID=:CID AND SCHSEQ=:SCHSEQ AND DUEAMT=1")
+
+		while lnbil5.next() do {
+
+			set CTAB=CTAB+lnbil5.getCol("BFAMT")
+			set CASD=CASD+lnbil5.getCol("BRFAMT")
+			}
+
+		type RecordLNBIL1 reclnbl1=Db.getRecord("LNBIL1","CID=:CID,SCHSEQ=:SCHSEQ")
+
+		set reclnbl1.casd=CASD
+		set reclnbl1.ctab=CTAB
+		set reclnbl1.cpid=CPID
+		set reclnbl1.cpib=CPIB
+
+		do reclnbl1.save()
+		}
+	quit
+
+
+	//----------------------------------------------------------------------
+LNBLP(Number CID)			// Account Number
+	//----------------------------------------------------------------------
+
+	// Straight Conversion - table LNBLP.
+
+	type public Boolean ARUF,ER,REVF
+	type public Number CNVDECP,CNVRATE
+	type public String DATA,COLUMNS(),PROC()
+
+	type Date BILDT
+	type Number TYPE,UDBAL
+	type String X
+
+	if COLUMNS("DEP48")="",COLUMNS("DEP49")="" quit
+
+	type ResultSet lnblp=Db.select("BILDT,TYPE,CRLMT,LBLB,UDBAL","LNBLP","CID=:CID")
+
+	while lnblp.next() do { quit:ER
+
+		set BILDT=lnblp.getCol("BILDT")
+		set TYPE=lnblp.getCol("TYPE")
+
+		// Straight
+		if COLUMNS("DEP48")'="" do {  quit:ER
+
+			do SELECT(PROC("DEP48"),.DATA) quit:ER
+			do CONVERT("LNBLP",COLUMNS("DEP48"),"BILDT=:BILDT AND TYPE=:TYPE",.DATA,1,0)
+			}
+
+		// Straight and round
+		if COLUMNS("DEP49")'="" do {  quit:ER
+
+			do SELECT(PROC("DEP49"),.DATA) quit:ER
+			do CONVERT("LNBLP",COLUMNS("DEP49"),"BILDT=:BILDT AND TYPE=:TYPE",.DATA,3,0)
+			}
+
+		/*
+		Update LNBLP.UDBAL
+		Note that since we don't have TDR in the bill print file, if we
+		have a non-revolving loan, we convert UDBAL directly.  This may
+		result in a slightly incorrect value, but it's the best we can do.
+		*/
+
+		if REVF,'ARUF set UDBAL=lnblp.getCol("CRLMT")-lnblp.getCol("LBLB")
+		else  do {
+
+			set UDBAL=lnblp.getCol("UDBAL")
+			if UDBAL set UDBAL=(UDBAL*CNVRATE).toString(0,CNVDECP).toNumber(".",1)
+			}
+
+		type RecordLNBLP reclnblp=Db.getRecord("LNBLP","BILDT=:BILDT,TYPE=:TYPE,CID=:TYPE")
+
+		set reclnblp.udbal=UDBAL
+
+		do reclnblp.save()
+		}
+	quit
+
+
+	//----------------------------------------------------------------------
+LNENT(Number CID)			// Account Number
+	//----------------------------------------------------------------------
+
+	//Straight Conversion - table LNENT.
+
+	type public Boolean ER
+	type public String DATA,COLUMNS(),PROC()
+
+	type String USESRC
+
+	if COLUMNS("DEP53")="" quit
+
+	type ResultSet lnent=Db.select("USESRC","LNENT","CID=:CID")
+
+	while lnent.next() do { quit:ER
+
+		set USESRC=lnent.getCol("USESRC")
+
+		do SELECT(PROC("DEP53"),.DATA) quit:ER
+		do CONVERT("LNENT",COLUMNS("DEP53"),"USESRC=:USESRC",.DATA,1,0)
+		}
+	quit
+
+
+	//----------------------------------------------------------------------
+LNFEED(Number CID)			// Account Number
+	//----------------------------------------------------------------------
+
+	//Straight Conversion - table LNFEED.
+
+	type public Boolean ER
+	type public String DATA,COLUMNS(),PROC()
+
+	type Number FEESEQ
+	type String FEETYP
+
+	if COLUMNS("DEP54")="" quit
+
+	type ResultSet lnfeed=Db.select("FEETYP,FEESEQ","LNFEED","CID=:CID")
+
+	while lnfeed.next() do { quit:ER
+
+		set FEETYP=lnfeed.getCol("FEETYP")
+		set FEESEQ=lnfeed.getCol("FEESEQ")
+
+		do SELECT(PROC("DEP54"),.DATA) quit:ER
+		do CONVERT("LNFEED",COLUMNS("DEP54"),"FEETYP=:FEETYP AND FEESEQ=:FEESEQ",.DATA,1,0)
+		}
+	quit
+
+
+	//----------------------------------------------------------------------
+LNVRCHG(Number CID)			// Account Number
+	//----------------------------------------------------------------------
+
+	//Straight Conversion - table LNVRCHG.
+
+	type public Boolean ER
+	type public String DATA,COLUMNS(),PROC()
+
+	type Date ICHND
+
+	if COLUMNS("DEP56")="" quit
+
+	type ResultSet lnvrchg=Db.select("ICHND","LNVRCHG","CID=:CID")
+
+	while lnvrchg.next() do { quit:ER
+
+		set ICHND=lnvrchg.getCol("ICHND")
+
+		do SELECT(PROC("DEP56"),.DATA) quit:ER
+		do CONVERT("LNVRCHG",COLUMNS("DEP56"),"ICHND=:ICHND",.DATA,1,0)
+		}
+	quit
+
+
+	//----------------------------------------------------------------------
+LNPTCHG(Number CID)			// Account Number
+	//----------------------------------------------------------------------
+
+	//Straight Conversion - table LNPTCHG.
+
+	type public Boolean ER
+	type public String DATA,COLUMNS(),PROC()
+
+	type Date PCHND
+
+	if COLUMNS("DEP57")="" quit
+
+	type ResultSet lnptchg=Db.select("PCHND","LNPTCHG","CID=:CID")
+
+	while lnptchg.next() do { quit:ER
+
+		set PCHND=lnptchg.getCol("PCHND")
+
+		do SELECT(PROC("DEP57"),.DATA) quit:ER
+		do CONVERT("LNPTCHG",COLUMNS("DEP57"),"PCHND=:PCHND",.DATA,1,0)
+		}
+	quit
+
+
+	//----------------------------------------------------------------------
+LNRACHG(Number CID)
+	//----------------------------------------------------------------------
+
+	//Straight Conversion - table LNRACHG.
+
+	type public Boolean ER
+	type public String DATA,COLUMNS(),PROC()
+
+	type Date RAND
+
+	if COLUMNS("DEP58")="" quit
+
+	type ResultSet lnrachg=Db.select("RAND","LNRACHG","CID=:CID")
+
+	while lnrachg.next() do { quit:ER
+
+		set RAND=lnrachg.getCol("RAND")
+
+		do SELECT(PROC("DEP58"),.DATA) quit:ER
+		do CONVERT("LNRACHG",COLUMNS("DEP58"),"RAND=:RAND",.DATA,1,0)
+		}
+	quit
+
+
+	//----------------------------------------------------------------------
+LNYR(Number CID)
+	//----------------------------------------------------------------------
+
+	// Straight conversion - table LNYR
+
+	type public Boolean ER
+	type public String DATA,COLUMNS(),PROC()
+
+	type Number YEAR
+
+	if COLUMNS("DEP69")'="" do {  quit:ER
+
+		type ResultSet lnyr=Db.select("YEAR","LNYR","CID=:CID")
+
+		while lnyr.next() do { quit:ER
+
+			set YEAR=lnyr.getCol("YEAR")
+
+			do SELECT(PROC("DEP69"),.DATA) quit:ER
+			do CONVERT("LNYR",COLUMNS("DEP69"),"YEAR=:YEAR",.DATA,1,0)
+			}
+		}
+	quit
+
+
+	//----------------------------------------------------------------------
+DAYEND(Number CID)
+	//----------------------------------------------------------------------
+
+	//Straight Conversion - tables LNDELP, LNDIDE, DAYENDLNRP, DAYENDNEG,
+	// DAYENDRCLS, DAYENDDARCB and DAYENDDARCBF.
+
+	type public Boolean ER
+	type public String CLS,DATA,COLUMNS(),PROC()
+
+	type Date BDD,NJD
+	type Number ACN,BOO,TSEQ
+	type String CRCD,DIDI
+
+	set NJD=CUVAR.TJD-2
+	set (BDD,BOO,DIDI,TSEQ)=""
+	
+	// Table LNDELP
+	if CLS="L",COLUMNS("DEP50")'="" do {  quit:ER
+
+		type ResultSet lndelp=Db.select("EFD,TSEQ","LNDELP","CID=:CID AND EFD>=:NJD AND EFD <=:EUREFD")
+
+		while lndelp.next() do { quit:ER
+
+			set NJD=lndelp.getCol("EFD")
+			set TSEQ=lndelp.getCol("TSEQ")
+
+			do SELECT(PROC("DEP50"),.DATA) quit:ER
+			do CONVERT("LNDELP",COLUMNS("DEP50"),"EFD=:NJD AND TSEQ=:TSEQ",.DATA,1,1)
+			}
+		}
+
+	// Table LNDIDE
+	if CLS="L",COLUMNS("DEP51")'="" do {  quit:ER
+
+		type ResultSet lndide=Db.select("EFD,BDD,DIDI","LNDIDE","CID=:CID AND EFD>=:NJD AND EFD <=:EUREFD")
+
+		while lndide.next() do { quit:ER
+
+			set NJD=lndide.getCol("EFD")
+			set BDD=lndide.getCol("BDD")
+			set DIDI=lndide.getCol("DIDI")
+
+			do SELECT(PROC("DEP51"),.DATA) quit:ER
+			do CONVERT("LNDIDE",COLUMNS("DEP51"),"EFD=:NJD AND BDD=:BDD AND DIDI=:DIDI",.DATA,1,1)
+			}
+		}
+
+	// Table DAYENDNEG
+	if COLUMNS("DEP63")'="" do {  quit:ER
+
+		type ResultSet dayendneg=Db.select("EFD","DAYENDNEG","CID=:CID AND EFD>=:NJD AND EFD <=:EUREFD")
+
+		while dayendneg.next() do { quit:ER
+
+			set NJD=dayendneg.getCol("EFD")
+
+			do SELECT(PROC("DEP63"),.DATA) quit:ER
+			do CONVERT("DAYENDNEG",COLUMNS("DEP63"),"EFD=:NJD",.DATA,1,1)
+			}
+		}
+
+	// Table DAYENDRCLS
+	if COLUMNS("DEP64")'="" do {  quit:ER
+
+		type ResultSet dercls=Db.select("TJD,BOO,CRCD","DAYENDRCLS","CID=:CID AND TJD>=:NJD AND TJD <=:EUREFD")
+
+		while dercls.next() do { quit:ER
+
+			set NJD=dercls.getCol("TJD")
+			set BOO=dercls.getCol("BOO")
+			set CRCD=dercls.getCol("CRCD")
+
+			do SELECT(PROC("DEP64"),.DATA) quit:ER
+			do CONVERT("DAYENDRCLS",COLUMNS("DEP64"),"TJD=:NJD AND BOO=:BOO AND CRCD=:CRCD",.DATA,1,1)
+			}
+		}
+
+	// Table DAYENDLNRP
+	if COLUMNS("DEP62")'="" do {  quit:ER
+
+		type ResultSet delnrp=Db.select("PROVNPDT","DAYENDLNRP","CID=:CID AND (PROVNPDT=:PROVLPDT OR PROVNPDT=:PROVNPDT)")
+		
+		while delnrp.next() do { quit:ER
+
+			set NJD=delnrp.getCol("PROVNPDT")
+
+			do SELECT(PROC("DEP62"),.DATA) quit:ER
+			do CONVERT("DAYENDLNRP",COLUMNS("DEP62"),"PROVNPDT=:NJD",.DATA,1,1)
+			}
+		}
+
+	// Table DAYENDDARCB
+	if COLUMNS("DEP61")'="" do {  quit:ER
+
+		type ResultSet dedarcb=Db.select("NPDT,ACN","DAYENDDARCB","CID=:CID AND (NPDT=:DARCLPDT OR NPDT=:DARCNPDT)")
+
+		while dedarcb.next() do { quit:ER
+
+			set NJD=dedarcb.getCol("NPDT")
+			set ACN=dedarcb.getCol("ACN")
+
+			do SELECT(PROC("DEP61"),.DATA) quit:ER
+			do CONVERT("DAYENDDARCB",COLUMNS("DEP61"),"NPDT=:NJD AND ACN=:ACN",.DATA,1,0)
+			}
+		}
+	
+	// Table DAYENDDARCBF
+	if COLUMNS("DEP91")'="" do {  quit:ER
+
+		type ResultSet dedarcbf=Db.select("NPDT,ACN","DAYENDDARCBF","CID=:CID AND (NPDT=:DARCLPDT OR NPDT=:DARCNPDT)")
+
+		while dedarcbf.next() do { quit:ER
+
+			set NJD=dedarcbf.getCol("NPDT")
+			set ACN=dedarcbf.getCol("ACN")
+
+			do SELECT(PROC("DEP91"),.DATA) quit:ER
+			do CONVERT("DAYENDDARCBF",COLUMNS("DEP91"),"NPDT=:NJD AND ACN=:ACN",.DATA,1,0)
+			}
+		}
+	quit
+
+
+	//----------------------------------------------------------------------
+RATESCH(Number CID)			// Account Number
+	//----------------------------------------------------------------------
+
+	// Conversion of rate schedules
+
+	type RecordACN acn=Db.getRecord("ACN","CID=:CID")
+
+	if acn.orgsch.isNull() do EXEC^EUROSCH(CID) quit
+	do EURRSCH^EUROSCH(CID)
+
+	quit
+
+
+	//----------------------------------------------------------------------
+SUSPENSE(Number CID)			// Account Number
+	//----------------------------------------------------------------------
+
+	//Straight Conversion - table SUSPENSE.
+
+	type public Boolean ER
+	type public String DATA,COLUMNS(),PROC()
+
+	type Date EOM
+
+	if COLUMNS("DEP27")="" quit
+
+	type ResultSet suspense=Db.select("EOM","SUSPENSE","CID=:CID")
+
+	while suspense.next() do { quit:ER
+
+		set EOM=suspense.getCol("EOM")
+
+		do SELECT(PROC("DEP27"),.DATA) quit:ER
+		do CONVERT("SUSPENSE",COLUMNS("DEP27"),"EOM=:EOM",.DATA,1,0)
+		}
+	quit
+
+
+	//----------------------------------------------------------------------
+PAA(Number CID)				// Account Number
+	//----------------------------------------------------------------------
+
+	//Straight Conversion - table PAA.
+
+	type public Boolean ER
+	type public String DATA,COLUMNS(),PROC()
+
+	type Date EFD
+
+	if COLUMNS("DEP72")="" quit
+
+	set EFD=CUVAR.LPLD
+	
+	type ResultSet paa=Db.select("EFD","PAA","CID=:CID AND EFD>:EFD")
+
+	while paa.next() do { quit:ER
+
+		set EFD=paa.getCol("EFD")
+
+		do SELECT(PROC("DEP72"),.DATA) quit:ER
+		do CONVERT("PAA",COLUMNS("DEP72"),"EFD=:EFD",.DATA,1,0)
+		}
+	quit
+
+
+	//----------------------------------------------------------------------
+WTHAUT(Number CID)			// Account Number
+	//----------------------------------------------------------------------
+
+	//Straight Conversion - table WTHAUT.
+
+	type public Boolean ER
+	type public String DATA,COLUMNS(),PROC()
+
+	type Number AUTNUM
+
+	if COLUMNS("DEP70")="" quit
+
+	type ResultSet wihaut=Db.select("AUTNUM","WTHAUT","CID=:CID")
+
+	while wihaut.next() do { quit:ER
+
+		set AUTNUM=wihaut.getCol("AUTNUM")
+
+		do SELECT(PROC("DEP70"),.DATA) quit:ER
+		do CONVERT("WTHAUT",COLUMNS("DEP70"),"AUTNUM=:AUTNUM",.DATA,1,0)
+		}
+	quit
+
+
+	//----------------------------------------------------------------------
+SELECT(String PROC,			// Procedure ID
+       String DATA)			// Data
+	//----------------------------------------------------------------------
+
+	/*
+	Select data
+	
+	 ARGUMENTS:
+		.PROC	Procedure ID			/TYP=T/REQ/MECH=VAL
+		.DATA	Selected data			/TYP=T/REQ/MECH=REF
+
+	 RETURNS:
+		.ER	Error flag
+		.RM	Reurn message
+	*/
+
+	type String x
+	
+	kill DATA
+
+	set x=$$^SQL("EXECUTE "_PROC,,,.DATA)
+	quit
+
+
+	//----------------------------------------------------------------------
+public CONVERT(String TABLE,			// Table ID
+               String COLUMNS,			// Column List
+               String WHERE,			// Where Clause
+               String DATA,			// Data
+               Number CNVMET,			// Conversion Methods
+               Number UPDOPT)			// Update Options
+	//----------------------------------------------------------------------
+
+	/*
+	 Convert data
+	
+	 ARGUMENTS:
+		.TABLE		Table (File ID)			/TYP=T/REQ/MECH=VAL
+		.COLUMNS	List of columns names		/TYP=T/REQ/MECH=VAL
+		.WHERE		Where clause			/TYP=T/NOREQ/MECH=VAL
+		.DATA		Data values			/TYP=T/NOREQ/MECH=REF
+		.CNVMET		Conversion method		/TYP=//N/REQ/MECH=VAL
+				1 = Straight conversion
+				2 = Threshhold conversion
+				3 = Straight conversion// round 
+				4 = Product default (non-currency columns)
+	
+		.UPDOPT		Update option			/TYP=//N/REQ/MECH=VAL
+				0 = UPDATE^SQL (default)
+				1 = Direct global sets (requires special coding)
+				2 = Update data string 'DATA' with converted values
+				    (used by EUROSEG for segmented account conversion
+				    & EUROEFD for effective dated file maintenance.)
+	*/
+
+	type public IO iologfil
+	type public Date BDD,NJD
+	type public Number ACN,BOO,CID,CNVDECP,CNVRATE,DUEAMT,EURSTAT,FEETYP,RNDFAC,RNDMET,ROSEQ,SCHSEQ,SEGMENT,SEQ,SWPCID,TSEQ,TYPE,YEAR,newdft,olddft
+	type public String cache(,,),CRCD,DIDI,EXPLN,LOGFILE,NEWCRCD,data()
+
+	type Number cnt,column,dec,decp
+	type String col,del,new,set,sfd,str,sub,typ,val,x
+
+	set DATA=DATA.get()
+	if DATA.translate(9.char())="",(CNVMET'=4) quit
+
+	if LOGFILE.get()'="" do {
+
+		set str=13.char()_10.char()
+		set str=str_9.char()_9.char()_9.char()_TABLE_9.char()_CNVMET_9.char()_$$WHERE(WHERE)
+		
+		do iologfil.write(str)
+		}
+
+	if CNVMET=2!(CNVMET=4),newdft.get()'=CID do {
+		//N data
+
+		kill newdft
+
+		set newdft=CID
+		set data("ACN")=ACN
+		set data("BOO")=BOO
+		set data("TYPE")=TYPE
+		set data("CRCD")=NEWCRCD
+
+		do ^UPRODDFT(.data,.newdft)
+		}
+
+	set cnt=0
+	set set=""
+
+	for column=1:1:COLUMNS.length(",") do {
+
+		set col=COLUMNS.piece(",",column)
+		set val=DATA.piece(9.char(),column)
+
+		/*
+		No need to convert zero or null values for
+		conversion method 1 (straight) or 3 (round).
+		*/
+		if 'val,CNVMET#2 quit
+
+		if UPDOPT do {
+
+			if cache("EUROCNV",TABLE,col).exists() do {
+
+				set x=cache("EUROCNV",TABLE,col)
+
+				set typ=x.piece("|",1)
+				set dec=x.piece("|",2)
+				set sfd=x.piece("|",5)
+				}
+			else  do {
+
+				type RecordDBTBL1D dbtbl1d=Db.getRecord("DBTBL1D","%LIBS=""SYSDEV"",FID=:TABLE,DI=:col")
+
+				set typ=x.piece("|",9)
+				set dec=x.piece("|",14)
+				set sfd=x.piece("|",18)
+				}
+
+			if CNVMET=1 do {
+
+				set decp=CNVDECP
+
+				if typ="//N",dec>decp set decp=dec
+				if EURSTAT=3,typ="$",CNVDECP=0 set decp=CNVDECP
+
+				set new=(val*CNVRATE).toString(0,decp).toNumber(".",1)
+				}
+
+			if CNVMET=2 set new=$$THRSH(col,val,.newdft,.olddft)
+			if CNVMET=3 set new=$$ROUND(RNDMET,val*CNVRATE,RNDFAC,TABLE,col)
+			if CNVMET=4 set new=newdft(TABLE_"."_col).get()
+
+			// No change
+			if new=val quit
+
+			// Update DATA string with new value
+			if UPDOPT=2 set DATA.piece(9.char(),column)=new quit
+
+			// If log file is defined, log detail
+			if LOGFILE.get()'="" do {
+			
+				set str=13.char()_10.char()
+				set str=str_9.char()_9.char()_9.char()_9.char()_9.char()_9.char()_col_9.char()_val_9.char()_new
+				
+				do iologfil.write(str)
+				}
+
+			If TABLE="DEP" do {
+
+				type RecordDEP dep=Db.getRecord("DEP","CID=:CID",1)
+
+				set dep.@col=new
+				do dep.save()
+				}
+
+
+			If TABLE="LN" do {
+
+				type RecordLN ln=Db.getRecord("LN","CID=:CID",1)
+
+				set ln.@col=new
+				do ln.save()
+				}			
+
+			if TABLE="LNBIL0" do {
+
+				set del=sfd.piece("~",2)
+				set sub=sfd.piece("~",4)
+				
+				type RecordLNBIL0 lnbil0=Db.getRecord("LNBIL0","CID=:CID",1)
+
+				set lnbil0.@col=new
+				do lnbil0.save()								
+				}
+
+			if TABLE="LNBIL1" do {
+
+				set del=sfd.piece("~",2)
+				set sub=sfd.piece("~",4)
+
+				type RecordLNBIL1 lnbil1=Db.getRecord("LNBIL1","CID=:CID,SCHSEQ=:SCHSEQ",1)
+
+				set lnbil1.@col=new
+				do lnbil1.save()
+				}
+
+			if TABLE="LNBIL5" do {  quit
+
+				type RecordLNBIL5 lnbil5=Db.getRecord("LNBIL5","CID=:CID,SCHSEQ=:SCHSEQ,DUEAMT=:DUEAMT,FEETYP=:FEETYP",1)
+
+				set lnbil5.@col=new
+				do lnbil5.save()
+				}
+
+			if TABLE="EFTPAY" do {  quit
+
+				type RecordEFTPAY eftpay=Db.getRecord("EFTPAY","CID=:CID,SEQ=:SEQ",1)
+
+				set eftpay.@col=new
+				do eftpay.save()
+				}
+
+			if TABLE="RELCIF" do {  quit
+
+				type RecordRELCIF relcif=Db.getRecord("RELCIF","ACN=:ACN,CID=:CID",1)
+
+				set relcif.@col=new
+				do relcif.save()
+				}
+
+			if TABLE="ROLLOVR" do {  quit
+
+				type RecordROLLOVR rollovr=Db.getRecord("ROLLOVR","CID=:CID",1)
+
+				set rollovr.@col=new
+				do rollovr.save()
+				}
+
+			if TABLE="DEPINV" do {  quit
+
+				type RecordDEPINV depinv=Db.getRecord("DEPINV","CID=:CID,SWPCID=:SWPCID",1)
+
+				set depinv.@col=new
+				do depinv.save()
+				}
+
+			if TABLE="DEPEXPLN" do {  quit
+
+				type RecordDEPEXPLN depexpln=Db.getRecord("DEPEXPLN","CID=:CID,EXMPLN=:EXPLN",1)
+
+				set depexpln.@col=new
+				do depexpln.save()
+				}
+
+			if TABLE="DEPSEG" do {  quit
+
+				type RecordDEPSEG depseg=Db.getRecord("DEPSEG","CID=:CID,SEGMENT=:SEGMENT",1)
+
+				set depseg.@col=new
+				do depseg.save()
+				}
+
+			if TABLE="DEPYR" do {  quit
+
+				type RecordDEPYR depyr=Db.getRecord("DEPYR","CID=:CID,YEAR=:YEAR",1)
+
+				set depyr.@col=new
+				do depyr.save()
+				}
+
+			if TABLE="LNRENEW" do {  quit
+
+				type RecordLNRENEW lnrenew=Db.getRecord("LNRENEW","CID=:CID,ROSEQ=:ROSEQ",1)
+
+				set lnrenew.@col=new
+				do lnrenew.save()
+				}
+
+			// Dayend Conversions
+			if TABLE="DAYENDNEG" do {  quit
+
+				type RecordDAYENDNEG deneg=Db.getRecord("DAYENDNEG","EFD=:NJD,CID=:CID",1)
+
+				set deneg.@col=new
+				do deneg.save()
+				}
+
+			if TABLE="LNDELP" do {  quit
+
+				type RecordLNDELP lndelp=Db.getRecord("LNDELP","EFD=:NJD,CID=:CID,TSEQ=:TSEQ",1)
+
+				set lndelp.@col=new
+				do lndelp.save()
+				}
+
+			if TABLE="LNDIDE" do {  quit
+
+				type RecordLNDIDE lndide=Db.getRecord("LNDIDE","EFD=:NJD,CID=:CID,BDD=:BDD,DIDI=:DIDI",1)
+
+				set lndide.@col=new
+				do lndide.save()
+				}
+
+			if TABLE="DAYENDRCLS" do {  quit
+
+				type RecordDAYENDRCLS dercls=Db.getRecord("DAYENDRCLS","TJD=:NJD,BOO=:BOO,CRCD=:CRCD,CID=:CID",1)
+
+				set dercls.@col=new
+				do dercls.save()
+				}
+
+			if TABLE="DAYENDLNRP" do {  quit
+
+				type RecordDAYENDLNRP delnrp=Db.getRecord("DAYENDLNRP","PROVNPDT=:NJD,CID=:CID",1)
+
+				set delnrp.@col=new
+				do delnrp.save()
+				}
+
+			}
+		else  do {
+			// Straight conversion
+			set new=(val*CNVRATE).roundDec(0,CNVDECP)
+
+			// Striaght conversion with rouding factors applied
+			if CNVMET=3 set new=$$ROUND(RNDMET,new,RNDFAC,TABLE,col)
+
+			set cnt=cnt+1,set.piece(",",cnt)=col_"="_new
+
+			// If log file is defined, log detail
+			if LOGFILE.get()'="" do {
+
+				set str=13.char()_10.char()
+				set str=str_9.char()_9.char()_9.char()_9.char()_9.char()_9.char()_col_9.char()_val_9.char()_new
+
+				do iologfil.write(str)
+				}
+			}
+		}
+
+	if set="" quit
+	
+	if WHERE="" set WHERE="CID=:CID"
+	else  set WHERE=WHERE_" AND "_"CID=:CID"
+
+	do UPDATE^SQL(""_TABLE_" SET "_set_" WHERE "_WHERE,"/NOJOURNAL/NOVALDD/NOVALRI/NOFKCHK/NOTRIGBEF/NOTRIGAFT")
+
+	quit
+
+
+	//----------------------------------------------------------------------
+THRSH(String col,		// Column Name
+      Number val,		// Column Value
+      Number newdft,		// Default Value for New Currency
+      Number olddft)		// Default Value for Old Currency
+	//----------------------------------------------------------------------
+
+	type public Number ACN,BOO,CID,CNVRATE,RNDFAC,RNDMET,TYPE
+	type public String DFTTHRC,OLDCRCD,TABLE,data()
+
+
+	// Get value from product default for new currency (even if <null>)
+	if DFTTHRC quit newdft(TABLE_"."_col).get()
+
+	// No need to convert
+	if val=""!(val=0) quit val
+
+	if olddft.get()'=CID do {
+
+		//N data
+		kill olddft
+
+		set data("ACN")=ACN
+		set data("BOO")=BOO
+		set data("TYPE")=TYPE
+		set data("CRCD")=OLDCRCD
+
+		do ^UPRODDFT(.data,.olddft)
+		set olddft=CID
+		}
+
+	// Special handling for column INDEX
+	if col="INDEX" quit $$INDEX(TABLE,val,olddft(TABLE_"."_col).get(),newdft(TABLE_"."_col).get())
+
+	// If the value is equal, get value from product type where CRCD='EUR'
+	if val=olddft(TABLE_"."_col).get() set val=newdft(TABLE_"."_col).get() quit val
+
+	// Otherwise, convert/round the value in the account record
+	set val=val*CNVRATE,val=$$ROUND(RNDMET,val,RNDFAC,TABLE,col)
+	quit val
+
+
+	//----------------------------------------------------------------------
+INDEX(String TABLE,		// Table Name
+      String INDEX,		// Index from account record
+      String INDEXA,		// Index from product based on current account currency
+      String INDEXB)		// Index from product based on new account currency
+	//----------------------------------------------------------------------
+
+	/*
+	Interest Index conversion for [DEP,LN] files when DFTTHRC is set to 0
+
+	ARGUMENTS:
+		.INDEX		Index from account record
+		.INDEXA		Index from product based on current account currency
+		.INDEXB		Index from product based on new account currency
+	*/
+
+	type public Number CID,UPDOPT
+
+	type String NEWINDEX,OIND,ORGINDEX
+
+	set OIND=INDEX
+	
+	type RecordACN acn=Db.getRecord("ACN","CID=:CID")
+	set ORGINDEX=acn.orgindex
+
+	if ORGINDEX'="" set NEWINDEX=ORGINDEX,OIND=""
+	else  if INDEX=INDEXA set NEWINDEX=INDEXB
+	else  do {
+
+		type RecordUTBLEURINT eurint=Db.getRecord("UTBLEURINT","INDEX=:INDEX")
+
+		if 'eurint.getMode() quit INDEX
+		set NEWINDEX=eurint.indexeur
+		}
+
+	/*
+	TABLE="DEP" or "LN" and UPDOPT=2 when coming from EUROEFD.m
+	When coming from EUROEFD.m DEP and LN should not be updated.
+	*/
+	
+	quit:UPDOPT=2 NEWINDEX
+
+	do UPDATE^SQL(""_TABLE_" SET INDEX='"_NEWINDEX_"',ORGINDEX='"_OIND_"' WHERE CID=:CID")
+	quit NEWINDEX
+
+
+	//----------------------------------------------------------------------
+DEXFR(Number XFLG)		// Transfer flag
+	//----------------------------------------------------------------------
+
+	/*
+	 G/L transfer information
+	 
+	 ARGUMENTS:
+		. XFLG	Transfer flag		/TYP=//N/REQ/MECH=VAL
+			0 = "From" currency
+			1 = "To" currency
+	
+	 Accumulate G/L transfer information into EUROSUM and EURODTL tables.
+	 This information maps to table DAYENDXFR and will be moved into this table 
+	 by routine EUROACC after all of the threads have completed processing.
+
+	 Detail information
+	 EURODTL(EUREFD,$J,XFLG,CRCD1,CRCD2,TYPE,CC,GLSC,TRB,CID)=data
+	
+	 Summary information
+	 EUROSUM(EUREFD,$J,XFLG,CRCD1,CRCD2,TYPE,CC,GLSC,TRB)=data
+	*/
+
+	type public Date EUREFD
+	type public Number CC,CID,TYPE
+	type public String cache(,),CLS,GLSC,NEWCRCD,OLDCRCD
+
+	type Number DECP,TRB,feebal,feerec,amt
+	type String CRCD1,CRCD2
+
+	if XFLG=0 set CRCD1=OLDCRCD,CRCD2=NEWCRCD
+	if XFLG=1 set CRCD1=NEWCRCD,CRCD2=OLDCRCD
+
+	set (feebal,feerec,amt)=0
+	
+	type RecordACN acn=Db.getRecord("ACN","CID=:CID")
+
+	set TRB=acn.trb
+	set DECP=+cache("CRCD",CRCD1)
+
+	type RecordEUROSUM fEUROSUM=Db.getRecord("EUROSUM","EUREFD=:EUREFD,PID=:%ProcessID,XFLG=:XFLG,CRCD=:CRCD1,CCRCD=:CRCD2,PTYPE=:TYPE,CC=:CC,GLSC=:GLSC,TRB=:TRB",1)
+	type RecordEURODTL fEURODTL=Db.getRecord("EURODTL","EUREFD=:EUREFD,PID=:%ProcessID,XFLG=:XFLG,CRCD=:CRCD1,CCRCD=:CRCD2,PTYPE=:TYPE,CC=:CC,GLSC=:GLSC,TRB=:TRB,CID=:CID",1)
+
+	if CLS="D" do {
+
+		type RecordDEP dep=Db.getRecord("DEP","CID=:CID")
+
+		set fEURODTL.bal=dep.bal.roundDec(0,DECP)
+		set fEURODTL.acr=(dep.posacr-dep.negacr-dep.negacrun).roundDec(0,DECP)
+		set fEURODTL.negacr=dep.negacr.roundDec(0,DECP)
+		set fEURODTL.intavlncr=dep.intavlncr.roundDec(0,DECP)
+		set fEURODTL.negacrun=dep.negacrun.roundDec(0,DECP)
+		set fEURODTL.resint=dep.resint.roundDec(0,DECP)
+
+		set fEUROSUM.bal=fEUROSUM.bal+fEURODTL.bal
+		set fEUROSUM.acr=fEUROSUM.acr+fEURODTL.acr
+		set fEUROSUM.negacr=fEUROSUM.negacr+fEURODTL.negacr
+		set fEUROSUM.intavlncr=fEUROSUM.intavlncr+fEURODTL.intavlncr
+		set fEUROSUM.negacrun=fEUROSUM.negacrun+fEURODTL.negacrun
+		set fEUROSUM.resint=fEUROSUM.resint+fEURODTL.resint
+		}
+
+	if CLS="L" do {
+
+		type RecordLN ln=Db.getRecord("LN","CID=:CID")
+
+		set fEURODTL.bal=ln.bal.roundDec(0,DECP)
+		set fEURODTL.acr=ln.acr.roundDec(0,DECP)
+		set fEURODTL.lchg=ln.lchg.roundDec(0,DECP)
+		set fEURODTL.udbal=ln.udbal.roundDec(0,DECP)
+		set fEURODTL.coa=ln.coa.roundDec(0,DECP)
+		set fEURODTL.rec=ln.rec.roundDec(0,DECP)
+		set amt=$$IUNT^LNCDI(ln.iam,ln.stat,ln.iun,ln.ipl)
+		set fEURODTL.intavlncr=amt.roundDec(0,DECP)
+		set fEURODTL.unapf=ln.unapf.roundDec(0,DECP)
+		set amt=0,amt=$$NDFREC^LNFUNCS(CID)
+		set fEURODTL.ndfrec=amt.roundDec(0,DECP)
+		set amt=0,amt=$$FRCSTR^LNFUNCS(CID)		
+		set fEURODTL.frcstr=amt.roundDec(0,DECP)
+
+		set fEUROSUM.bal=fEUROSUM.bal+fEURODTL.bal
+		set fEUROSUM.acr=fEUROSUM.acr+fEURODTL.acr
+		set fEUROSUM.lchg=fEUROSUM.lchg+fEURODTL.lchg
+		set fEUROSUM.udbal=fEUROSUM.udbal+fEURODTL.udbal
+		set fEUROSUM.coa=fEUROSUM.coa+fEURODTL.coa
+		set fEUROSUM.rec=fEUROSUM.rec+fEURODTL.rec
+		set fEUROSUM.intavlncr=fEUROSUM.intavlncr+fEURODTL.intavlncr
+		set fEUROSUM.unapf=fEUROSUM.unapf+fEURODTL.unapf
+		set fEUROSUM.ndfrec=fEUROSUM.ndfrec+fEURODTL.ndfrec
+		set fEUROSUM.frcstr=fEUROSUM.frcstr+fEURODTL.frcstr
+		}
+
+	// Summary info
+	do fEUROSUM.save()
+	// Detail info
+	do fEURODTL.save()
+
+	quit
+
+
+	//----------------------------------------------------------------------
+ROUND(Number MET,		// Rounding Method - Conversion / Reversal
+      Number AMT,		// Rounding Amount
+      Number FAC,		// Rounding Factor - Conversion / Reversal
+      String FID,		// Table Name
+      String DI)		// Column Name
+	//----------------------------------------------------------------------
+
+	/*
+	Variables OPT and NUM will be set depending on EURSTAT.
+	If EURSTAT=1,MET=RMC/(Rounding Method-Conversion),FAC=RFC/(Rounding Factor-Conversion).
+	If EURSTAT=3,MET=RMR/(Rounding Method-Reversal),FAC=RFR/(Rounding Factor-Reversal).
+	*/
+
+	if MET=1 quit (AMT/FAC).roundDec(0,,0)*FAC
+	if MET=2 quit (AMT/FAC).roundDec(0,"+",0)*FAC
+	if MET=3 quit (AMT/FAC).roundDec(0,"-",0)*FAC
+	
+	type RecordDBTBL1D dbtbl1d=Db.getRecord("DBTBL1D","%LIBS=""SYSDEV"",FID=:FID,DI=DI")
+	quit AMT.roundDec(0,dbtbl1d.dec)
+
+
+	//----------------------------------------------------------------------
+ROUNDING	//
+	//----------------------------------------------------------------------
+
+	/*
+	When reversing Euro conversion account, determine if conversion amount
+	is different than balance in History when there isn't any transactions
+	in Euro Currency.
+	*/
+
+	type public Number CID
+	type public String NEWCRCD
+
+	type Number ACCBAL,HISTBAL,hit
+	type String HISTCRCD
+
+	set hit=0
+
+	type ResultSet rshist=Db.select("ITC,ETC,TAMT,CRCD,ENDBAL","HIST","CID=:CID","TSEQ DESC")
+	
+	while rshist.next() do { quit:hit
+
+		if rshist.getCol("ITC").isNull() quit
+		if rshist.getCol("ETC").isNull() quit
+		if rshist.getCol("TAMT").isNull() quit
+
+		set hit=1
+		}
+
+	quit:'hit
+
+	type RecordACN acn=Db.getRecord("ACN","CID=:CID")
+
+	set ACCBAL=acn.bal
+	set HISTBAL=rshist.getCol("ENDBAL")
+	set HISTCRCD=rshist.getCol("CRCD")
+	
+	if HISTCRCD=NEWCRCD,ACCBAL'=HISTBAL do TRARRAY(ACCBAL,HISTBAL)
+	
+	quit
+
+
+	//----------------------------------------------------------------------
+TRARRAY(Number ACCBAL,			// Account Balance
+        Number HISTBAL)			// History Balance
+	//----------------------------------------------------------------------
+	
+	/*
+	Build TR Array when there is a difference between converted amount and
+	Balance in History during Euroconversion Reversals.
+	*/
+
+	type public Date TJD
+	type public Number CID,EURRNDCR,EURRNDDR,TYPE,par()
+	type public String CLS,NEWCRCD
+	type public RecordDEP dep
+	type public RecordLN ln
+
+	type Date EFD
+	type Number BRCD,DIFF,TRB
+	type String %UCLS,%UID,CRCD,ETC,ITC,TAMT,TCMT,TR(),TRN,TSO
+
+	set DIFF=HISTBAL-ACCBAL   //how much is bal off from history
+
+	if CLS="L" do {
+
+		type RecordPRODDFTL proddftl=Db.getRecord("PRODDFTL","TYPE=:TYPE")
+		
+		set TRB=proddftl.trb
+		}
+
+	if CLS="D" do {
+
+		type RecordPRODDFTD proddftd=Db.getRecord("PRODDFTD","TYPE=:TYPE")
+		
+		set TRB=proddftd.trb
+		}
+
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:TYPE")
+	
+	if 'TRB do {
+
+		if DIFF>0 do {
+
+			set TRN=prodctl.crtrgp_"|"_prodctl.crtrpr_"|"_prodctl.crtrin_"|"_prodctl.crtrpe_"|"_prodctl.crtrdc
+			set TRN=TRN_"|"_prodctl.crtrmi_"|"_prodctl.crtrts_"|"_prodctl.crtrci_"|"_prodctl.crtrrl_"|"_prodctl.crtrfr
+			set TRN=TRN_"|"_prodctl.crtrir_"|"_prodctl.crtrcd_"|"_prodctl.crtrdm_"|"_prodctl.crtraf_"|"_prodctl.crtrri
+			set TRN=TRN_"|"_prodctl.crtvrt_"|"_prodctl.crtrit_"|"_prodctl.crtrot_"|"_prodctl.crtrmu_"|"_prodctl.crtrsc
+			set TRN=TRN_"||"_prodctl.crtric_"|"_prodctl.crtrcs_"|"_prodctl.crtrpv_"|"_prodctl.crtrcp
+			set TRN=TRN_"|"_prodctl.crtrcf_"|"_prodctl.crtria_"|"_prodctl.crtrpp_"|"_prodctl.crtrna_"|"_prodctl.crtrei
+			set TRN=TRN_"|"_prodctl.crtrcv_"|"_prodctl.crtros_"|"_prodctl.crtacn1_"|"_prodctl.crtacn2_"|"_prodctl.crtrmp
+			set TRN=TRN_"|"_prodctl.crtrpf_"|"_prodctl.crtprec_"|"_prodctl.crtreuec_"|"_prodctl.crtreulc_"|"_prodctl.crtlcr
+			set TRN=TRN_"|"_prodctl.crtrdi_"|"_prodctl.crtrdfia_"|"_prodctl.drtus_"|"_prodctl.crtrsp_"|"_prodctl.crtrppa
+			set TRN=TRN_"|"_prodctl.crtrls_"|"_prodctl.crbtgp
+
+			set TAMT=DIFF
+			}
+		else  do {
+
+			set TRN=prodctl.drtrgp_"|"_prodctl.drtros_"|"_prodctl.drtrin_"|"_prodctl.drtrpe_"|"_prodctl.drtrdc
+			set TRN=TRN_"|"_prodctl.drtrmi_"|"_prodctl.drtrts_"|"_prodctl.drtrci_"|"_prodctl.drtrrl_"|"_prodctl.drtrfr
+			set TRN=TRN_"|"_prodctl.drtrir_"|"_prodctl.drtrcd_"|"_prodctl.drtrdm_"|"_prodctl.drtraf_"|"_prodctl.drtrri
+			set TRN=TRN_"||"_prodctl.drtrit_"|"_prodctl.drtrot_"|"_prodctl.drtrrc_"|"_prodctl.drtrsc_"|"_prodctl.drtrip
+			set TRN=TRN_"|"_prodctl.drirad_"|"_prodctl.drtrcs_"|"_prodctl.drters_"|"_prodctl.drodpet_"|"_prodctl.drtrcf
+			set TRN=TRN_"||"_prodctl.drtrna_"||"_prodctl.drtrei_"|"_prodctl.drtrcv_"||"_prodctl.drtacn1_"|"_prodctl.drtacn2
+			set TRN=TRN_"|||"_prodctl.drtprec_"|"_prodctl.drtreuld_"|"_prodctl.drtreued_"||"_prodctl.drtrdi_"|"_prodctl.drtrdfda
+			set TRN=TRN_"|"_prodctl.crtus_"||"_prodctl.drtrppp_"|"_prodctl.drtrgpseg_"|"_prodctl.drnmpseg_"|"_prodctl.drbtgp
+			set TRN=TRN_"|"_prodctl.drcinpi_"|"_prodctl.drcinpni_"|"_prodctl.drcipi_"|"_prodctl.drcipni
+
+			set TAMT=-DIFF
+			}
+		}
+
+	if TRB do {
+		if DIFF>0 do {
+
+			set TRN=prodctl.drtrgp_"|"_prodctl.drtros_"|"_prodctl.drtrin_"|"_prodctl.drtrpe_"|"_prodctl.drtrdc
+			set TRN=TRN_"|"_prodctl.drtrmi_"|"_prodctl.drtrts_"|"_prodctl.drtrci_"|"_prodctl.drtrrl_"|"_prodctl.drtrfr
+			set TRN=TRN_"|"_prodctl.drtrir_"|"_prodctl.drtrcd_"|"_prodctl.drtrdm_"|"_prodctl.drtraf_"|"_prodctl.drtrri
+			set TRN=TRN_"||"_prodctl.drtrit_"|"_prodctl.drtrot_"|"_prodctl.drtrrc_"|"_prodctl.drtrsc_"|"_prodctl.drtrip
+			set TRN=TRN_"|"_prodctl.drirad_"|"_prodctl.drtrcs_"|"_prodctl.drters_"|"_prodctl.drodpet_"|"_prodctl.drtrcf
+			set TRN=TRN_"||"_prodctl.drtrna_"||"_prodctl.drtrei_"|"_prodctl.drtrcv_"||"_prodctl.drtacn1_"|"_prodctl.drtacn2
+			set TRN=TRN_"|||"_prodctl.drtprec_"|"_prodctl.drtreuld_"|"_prodctl.drtreued_"||"_prodctl.drtrdi_"|"_prodctl.drtrdfda
+			set TRN=TRN_"|"_prodctl.crtus_"||"_prodctl.drtrppp_"|"_prodctl.drtrgpseg_"|"_prodctl.drnmpseg_"|"_prodctl.drbtgp
+			set TRN=TRN_"|"_prodctl.drcinpi_"|"_prodctl.drcinpni_"|"_prodctl.drcipi_"|"_prodctl.drcipni
+
+			set TAMT=DIFF
+			}
+			
+		else  do {
+
+			set TRN=prodctl.crtrgp_"|"_prodctl.crtrpr_"|"_prodctl.crtrin_"|"_prodctl.crtrpe_"|"_prodctl.crtrdc
+			set TRN=TRN_"|"_prodctl.crtrmi_"|"_prodctl.crtrts_"|"_prodctl.crtrci_"|"_prodctl.crtrrl_"|"_prodctl.crtrfr
+			set TRN=TRN_"|"_prodctl.crtrir_"|"_prodctl.crtrcd_"|"_prodctl.crtrdm_"|"_prodctl.crtraf_"|"_prodctl.crtrri
+			set TRN=TRN_"|"_prodctl.crtvrt_"|"_prodctl.crtrit_"|"_prodctl.crtrot_"|"_prodctl.crtrmu_"|"_prodctl.crtrsc
+			set TRN=TRN_"||"_prodctl.crtric_"|"_prodctl.crtrcs_"|"_prodctl.crtrpv_"|"_prodctl.crtrcp
+			set TRN=TRN_"|"_prodctl.crtrcf_"|"_prodctl.crtria_"|"_prodctl.crtrpp_"|"_prodctl.crtrna_"|"_prodctl.crtrei
+			set TRN=TRN_"|"_prodctl.crtrcv_"|"_prodctl.crtros_"|"_prodctl.crtacn1_"|"_prodctl.crtacn2_"|"_prodctl.crtrmp
+			set TRN=TRN_"|"_prodctl.crtrpf_"|"_prodctl.crtprec_"|"_prodctl.crtreuec_"|"_prodctl.crtreulc_"|"_prodctl.crtlcr
+			set TRN=TRN_"|"_prodctl.crtrdi_"|"_prodctl.crtrdfia_"|"_prodctl.drtus_"|"_prodctl.crtrsp_"|"_prodctl.crtrppa
+			set TRN=TRN_"|"_prodctl.crtrls_"|"_prodctl.crbtgp
+
+			set TAMT=-DIFF
+			}
+		}
+
+	set ETC=TRN.piece("|",1)
+	set EFD=TJD
+	set TSO=""
+	set TCMT=""
+	set CRCD=NEWCRCD
+
+	set TR(1)=$$TTX^TTXEXT()
+	set TR(1).piece("|",7)=$$FIELDIN^UTSO(TSO,"EURRND")
+
+	set ITC=TR(1).piece("|",2).extract(1)
+	set TR(2)=TR(1)
+
+	if ITC.extract() do {
+		set TR(2).piece("|",1)=EURRNDDR
+		set TR(2).piece("|",2)=0
+		set TR(2).piece("|",3)="MDR"
+		}
+	else  do {
+		set TR(2).piece("|",1)=EURRNDCR
+		set TR(2).piece("|",2)=1
+		set TR(2).piece("|",3)="MCR"
+		}
+
+	type RecordUTBLSRC utblsrc=Db.getRecord("UTBLSRC","SRCTYP=""BOFF"",KEY=""EUROCNV""")
+	
+	set BRCD=utblsrc.brcd
+	set %UID=utblsrc.uid
+	
+	if BRCD="" set BRCD=CUVAR.BOBR
+	// Invalid teller ID
+	if %UID="" do Runtime.setErrMSG("UTBLSRC",3533) quit
+
+	type RecordSCAU scau=Db.getRecord("SCAU","UID=:%UID")
+	// Invalid teller ID
+	if 'scau.getMode() do Runtime.setErrMSG("UTBLSRC",3533) quit
+
+	set %UCLS=scau.%ucls
+
+	set par("IPMODE")=3
+	set par("OPTION")=2
+
+	type RecordTTX ttx=Class.new("RecordTTX")	
+
+	set ttx.cid=CID
+	set ttx.itc=ITC
+	set ttx.etc=ETC
+	set ttx.tamt=TAMT
+	set ttx.efd=EFD
+	set ttx.tlo=%UserStation
+	set ttx.tso=TSO
+	set ttx.tcmt=TCMT
+	set ttx.crcd=CRCD
+
+	if CLS="D" do TRNSINGL^TRNDRV(.ttx,.dep,%SystemDate,BRCD,2)
+	else  if CLS="L" do TRNSINGL^TRNDRV(.ttx,.ln,%SystemDate,BRCD,2)
+	
+	quit
+
+
+	//-----------------------------------------------------------------------
+WHERE(String where)	// Parse WHERE clause
+	//-----------------------------------------------------------------------
+
+	type Number i
+	type String $ZT,string,val,var,x
+
+	set $ZT="ZG "_$ZL_":ZTQUIT^EUROCNV"
+
+	if where="" quit ""
+	set string=""
+
+	for i=1:1:$L(where," ") do {
+		set x=where.piece(" ",i) if x'["=:" quit
+		set var=x.piece("=:",1)
+		set val=x.piece("=:",2)
+		set val=@val
+
+		set string=string_var_"="_val_" "
+		}
+
+	quit string
+
+
+	//-----------------------------------------------------------------------
+BATCH	//
+	//-----------------------------------------------------------------------
+	
+	do ^EUROACC
+	Halt
+	quit
+
+
+	//-----------------------------------------------------------------------
+SUB	//
+	//-----------------------------------------------------------------------
+	
+	type Number VX
+	type String zjob
+
+	set zjob="BATCH^EUROCNV"
+	set VX=$$^%ZJOB(zjob,"PRO=EUROCNV",1)
+	
+	quit
+
+
+	//-----------------------------------------------------------------------
+ZTPROC	// Error trap at account level
+	//-----------------------------------------------------------------------
+
+	do ZE^UTLERR
+	do EXC
+	quit
+
+
+	//-----------------------------------------------------------------------
+EXC	// Log error to DAYENDEXC
+	//-----------------------------------------------------------------------
+
+	type public IO iologfil
+	type public Number CID
+	type public String %ZTSEQ,ET,LOGFILE,RM,"SAVEPTR"
+
+	if $TLevel do Runtime.rollback("SAVEPTR") quit
+
+	if ET.get()="" set ET=RM.get()
+	// Error in account, not processed
+	if ET="" do Runtime.setErrMSG("UTBLSRC",3511)
+
+	type RecordACN acn=Db.getRecord("ACN","CID=:CID")
+
+	do LOG^UTLEXC(%RoutineName,"*","",CID,%ZTSEQ.get(),ET,acn.bal)
+	kill %ZTSEQ
+
+	// Set EURSTAT = 'Rejected'
+	set acn.eurstat=7
+	
+	do acn.save()
+
+	if LOGFILE.get()'="" do iologfil.write("***ERROR - Account not converted ***")
+	quit
+
+
+	//-----------------------------------------------------------------------
+ZTQUIT	// Error trap to avoid logging error
+	//-----------------------------------------------------------------------
+
+	quit ""
+ 	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60786^18997^Balasubramonian Sankar^62378"	// Signature - LTD^TIME^USER^SIZE

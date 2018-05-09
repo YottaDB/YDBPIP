@@ -1,0 +1,191 @@
+LNDEL2	//Loan Delinquency Determination - NCUA method
+	/*
+	       ORIG:  Chuck Hardy (6721) - 02/02/86
+	       DESC:
+	      INPUT: LNDRM,JOB,DRC()
+	     OUTPUT: ^TMP( JOB, 1 ... )
+
+	       AIR  - Amount in arrears
+	       DELI - Delinquent installments
+	       MINAMT  - Minimum discrepancy between sched & act to be on report
+
+	Uses delinquency categories ( [CUVAR]DRC1 - [CUVAR]DRC20 ), report
+	option ( [CUVAR]LNDRBY ), and report method ( [CUVAR]LNDRM ) to 
+	determine which loans are delinquent according to those categories.
+         
+	^TMP(JOB,1 = Detail report data, by group and type
+
+	DRC(sequence)  = minimum | maximum
+	DRCD(sequence,1 and 2) = julian dates of values in DRC(sequence)
+
+	---- Revision History -------------------------------------------------
+	
+	   05/12/05 - HILLANBRAND - 13281
+	              Change declare of ER from Number to Boolean per
+	              code review comments.
+	   
+	   03/30/05 - HILLANBRAND - 13281
+	   	      Rewrote per PSL standards while correcting several
+	   	      functional issues and errors found in UT.
+	   
+	   02/05/03 - GRAY - 51349
+		      Removed unnecessary 'where' clause from DbSet command.
+
+	   05/15/02 - VETSENM - 49794
+		Converted to PSL.         
+
+	   08/28/00 - Carrie Baildon - 35996
+	        Modified EXCL to exclude problem loan sub-accounts.
+	        Delinquency will be reported on the customer view account
+	        and should not be considered on its linked sub-accounts.
+	        Replaced $ZP command with $O(,-1).  Replaced references to
+	        ^UFRE with NJD^UFRE.
+
+	*/
+
+	type Public String DRC, ET, JOB
+	type Public Boolean ER
+	
+	type Number DPM
+
+
+	if CUVAR.LNDRBY'="M" set ER=1 set ET="LNDEL2" quit
+
+	// Days per month
+	set DPM=30.416666666667
+
+	
+	type DbSet ds=Db.selectDbSet("LN")
+	if ds.isEmpty() quit
+	while ds.next() do {
+		type RecordLN ln=ds.getRecord("LN") 
+		do EXCL(.ln)
+		}
+
+	quit		
+
+EXCL(RecordLN ln)	//Exclude accounts from analysis
+	
+	type Public Number AIR, JOB
+	type Public String DRC
+	
+	type Number MON, SCHBAL
+	
+	// Sched Bal Due $
+	if ln.bal<1!(ln.schbal'<ln.bal) quit
+
+	// Ignore delinqunecy on problem loan sub-accounts
+	if ln.pcidstat>0 quit
+
+	// Calculate delinquency status
+	set SCHBAL=ln.schbal
+	if SCHBAL<0 set SCHBAL=0
+	
+        // Skip if less than minimum required for reporting
+	if 'ln.pmtpi,ln.gtdue<CUVAR.MINAMT quit
+	if ln.pmtpi,ln.bal-ln.schbal<CUVAR.MINAMT quit
+
+	if 'ln.pmtpi do RC(.ln)
+
+	if ln.pmtpi do NOTRC(.ln)
+
+        // Skip if less than minimum required for reporting	
+	if ln.bal-SCHBAL<CUVAR.MINAMT quit     
+
+	// How many 'months' delinquent?
+	do MONTHS
+
+	if MON#1 set MON=MON+1 set MON=$P(MON,".",1)
+	set MON=MON-1
+
+	// Not in selected reporting ranges
+	if DRC<1 quit    
+
+	// Detail report record
+        type RecordLNTDELQ lntdelq=Class.new("RecordLNTDELQ")
+        set lntdelq.job=JOB
+        set lntdelq.efd=%SystemDate
+        set lntdelq.grp=ln.grp
+        set lntdelq.deli=MON
+        set lntdelq.cid=ln.cid
+        set lntdelq.air=AIR
+        set lntdelq.amtlc=ln.gtdue
+        do lntdelq.bypassSave()
+
+	quit
+
+NOTRC(RecordLN ln)	//Not revolving credit
+
+	type Public Number AIR, DPM, MON
+	
+	type Boolean ER
+	type Date MDT, NJD
+	type Number AF, PMTDEL
+	
+	set AIR=ln.bal-ln.schbal
+
+	// Distribution 1 Annual Factor
+	set AF=ln.dist1af
+
+	// ^UFRE returns AF (annual factor)
+	set NJD=$$NJD^UFRE(%SystemDate,ln.dist1fre,,.AF)
+
+	if ER quit
+
+	set MDT=ln.MDT
+	if MDT="" set MDT=%SystemDate
+
+	if MDT<%SystemDate set PMTDEL=(%SystemDate-MDT)/DPM
+	else  set PMTDEL=0
+
+	set MON=((AIR/ln.pmtpi)/(AF*12))+PMTDEL
+
+	quit
+
+
+RC(RecordLN ln)	//Revolving credit processing
+
+	type Public Number AIR, DPM, ER, MON
+	
+	type Date MDT, NJD
+	type Number AF, PMTDEL
+
+	set AIR=ln.gtdue
+	
+	// Distribution 1 Annual Factor
+	set AF=ln.dist1af	
+
+	// ^UFRE returns AF (annual factor)
+	set NJD=$$NJD^UFRE(%SystemDate,ln.dist1fre,,.AF)
+
+	if ER quit
+
+	set MDT=ln.mdt
+	if MDT="" set MDT=%SystemDate
+
+	if MDT<%SystemDate set PMTDEL=(%SystemDate-MDT)/DPM
+	else  set PMTDEL=0
+
+	set MON=(AIR/(AF*12))+PMTDEL
+
+	quit
+
+MONTHS	//How many months behind?
+
+	type Public Number DRC, MON, SINGLE
+	
+	set DRC=0
+	if 'SINGLE do { quit
+		for  set DRC=$O(DRC(DRC)) quit:DRC=""  quit:MON<+DRC(DRC)
+		// Always in last category
+		if DRC="" set DRC=$O(DRC(""),-1)
+        	else  set DRC=DRC-1
+		}
+
+	if MON<$P(DRC(1),"|",1) quit
+	if MON>$P(DRC(1),"|",2) quit
+	set DRC=1
+
+	quit
+
+vSIG()	quit "60032^34703^Laura Hillanbrand^4114"	// Signature - LTD^TIME^USER^SIZE

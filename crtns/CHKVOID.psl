@@ -1,0 +1,242 @@
+CHKVOID	// Check register maintenance
+	/*
+	       ORIG:  Allan R. Mattson (6915) - 08/29/86
+	       DESC:
+ 
+	  ---- Revision History ------------------------------------------------
+	  
+	   10/17/05 - PUTTASWH - 17011	   	      
+	  	      Modified INIT section to contain the code of VPG and 
+	  	      VPG0 sections. Removed VPG and VPG0 sections.
+	   	      Modified VPG01 section to store the X value of GL, while 
+	   	      accepting the input. 	   	      
+	   	      
+	   07/16/03 - GRAY - 51351
+		      Replaced use of file CHKREG3 with file CHKREG1.
+
+	   05/29/02 - KRISHNAG - ARQ# 49794
+		      Converted to PSL	
+	
+	   01/03/01 - HALPINJ - 42989
+		      Fetch generation of routine prior to SQL code.
+		      SQL coding was inefficient.
+
+	*/
+
+VOID 	//
+	set CKSTS=2 
+
+	do INIT 
+	quit
+
+CLR 	//
+	set CKSTS=1 
+
+	do INIT 
+	quit
+
+OUT 	//
+	set CKSTS=0 
+
+	do INIT 
+	quit
+
+INIT	//
+	type Boolean FINISH=0
+	type Number GL
+	type String CO
+	
+	set %PG=1 
+	set %PAGE=1 
+	set %ProcessMode=1	
+
+	kill OLNTB,VFMQ
+	
+	set PROID=%ProcessID
+
+	do Db.delete("CHKVOID","JOB=:PROID")
+	
+	for  do { quit:FINISH		
+		
+		do VPG01(.CO,.GL) 
+	
+		if "DFQ"[$G(VFMQ)!$G(ER) do VER(CO,GL) set FINISH=1 quit
+		set %PG=%PG+1
+	
+		}
+	
+	quit
+	
+ 	// Set up
+VPG01(String CO,	// Company Code
+	Number GL)	// GL Code
+	
+	set %TAB("CO")=".CO2/TBL=[CHKREG1]CO:DISTINCT:QU/XPP=S CO=X"
+	set %TAB("GL")=".GL1/TBL=[CHKREG1]GL:DISTINCT:QU ""[CHKREG1]CO=<<CO>>""/XPP=S GL=X D PPGL^CHKVOID(CO,GL)"
+	set %TAB("MIN")=".MIN1/TBL=[CHKREG1]CKNO,[CHKREG1]PAYEE:QU ""[CHKREG1]CO=<<CO>> AND [CHKREG1]GL=<<GL>>"""
+	set %TAB("MAX")=".MAX1/TBL=[CHKREG1]CKNO,[CHKREG1]PAYEE:QU ""[CHKREG1]CO=<<CO>> AND [CHKREG1]GL=<<GL>>"""
+	set %TAB("IO")=$$IO^SCATAB($I)
+
+	set %READ="@@%FN,,,CO/REQ,GL/REQ,MIN/REQ,MAX/REQ,IO/REQ"
+
+	do ^UTLREAD 
+
+	if VFMQ="Q" set CO="",GL=0 set ER=1 quit
+	quit
+
+VER(String CO,		// Company Code
+	Number GL) 	// GL Code
+
+	if VFMQ="Q" do END quit
+
+	set CKNO=MIN-1
+	
+	do EXEC(CO,GL)
+	
+	quit
+
+EXEC(String CO,		// Company Code
+	Number GL)	//  GL Code	
+	
+	type ResultSet rs=Db.select("CKNO","CHKREG1","CO=:CO AND GL=:GL AND CKNO>:CKNO","CKNO")
+
+	if rs.isEmpty() do REP quit
+
+	if 'rs.isEmpty(),rs.next() do { if CKNO>MAX do REP quit
+		set CKNO=rs.getCol(1)
+		if (CKNO>MAX) quit
+			
+		type RecordCHKREG1 chkreg1=Db.getRecord("CHKREG1","CO=:CO,GL=:GL,CKNO=:CKNO")
+		
+		type RecordCHKVOID chkvoid=Class.new("RecordCHKVOID")
+		
+		set chkvoid.job=PROID
+		set chkvoid.co=CO
+		set chkvoid.gl=GL
+		set chkvoid.ckno=CKNO
+		set chkvoid.tjd=chkreg1.tjd
+		set chkvoid.efd=chkreg1.efd
+		set chkvoid.uid=chkreg1.uid
+		set chkvoid.brcd=chkreg1.brcd
+		set chkvoid.trc=chkreg1.trc
+		set chkvoid.tamt=chkreg1.tamt
+		set chkvoid.cid=chkreg1.cid
+		set chkvoid.payee=chkreg1.payee
+		set chkvoid.ctype=chkreg1.ctype
+		set chkvoid.status=chkreg1.status
+		set chkvoid.clear=chkreg1.clear
+		
+		do chkvoid.bypassSave()
+				
+		set CID=chkreg1.cid
+
+		do FILE(.chkreg1) 
+
+		if ER quit		
+
+		// Check ~p1 not processed		
+		set chkvoid.payee=$$^MSG(6708,CKNO)
+		
+		do chkvoid.bypassSave()
+		
+		set ER=0
+		} 
+	quit
+
+FILE(RecordCHKREG1 chkreg1)	// Move filing to support REPOST
+
+	set chkreg1.status=CKSTS
+	do chkreg1.bypassSave()
+
+	quit:CKSTS=0
+	quit:'AEC
+	quit:'CID
+
+	type RecordDEP dep=Db.getRecord("DEP","CID=:CID")
+	set dep.intchk=""
+
+	do dep.save("/NOJOURNAL")
+
+	if ER do ERR quit
+	quit
+
+	//Post processor for GL account
+PPGL(String CO,		// Company code
+	Number GL)	// GL Code 
+	
+	quit:'X  
+	
+	type ResultSet rs=Db.select("CKNO","CHKREG1","CO=:CO AND GL=:GL")
+	if rs.isEmpty() quit
+
+	type ResultSet rs=Db.select("CHKS","UTBLCHKS")
+	  // G/L account ~p1 not set up in ^UTBL(""CHKS""
+	if rs.isEmpty() set ER=1 set RM=$$^MSG(1154,X) quit
+
+	while rs.next() do {
+		
+		set N=rs.getCol(1)
+		type RecordUTBLCHKS utblchks=Db.getRecord("UTBLCHKS","CHKS=:N")
+
+		if utblchks.cid=X quit
+
+
+		set AP=utblchks.ap
+		set AEC=utblchks.aec
+	}
+
+	quit
+
+ERR	//
+	set ER=1 
+	set ET="CHKLOC" 
+
+	do DSPBP^UTLERR
+	quit
+
+REP	//
+	kill %TAB 
+
+	set RID="CHKVOID" 
+
+	do ^URID
+
+	set %ED=%SystemDate
+
+	// Change Check Status to Outstanding
+	if CKSTS=0 set RN=$$^MSG(6715)
+
+	// Change Check Status to Cleared
+	else  if CKSTS=1 set RN=$$^MSG(6714)
+
+	// Change Check Status to Void
+	else  set RN=$$^MSG(6716)
+
+	set %OSAVE=%ProcessMode 
+
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+	set CONAM=cuvar.conam
+
+	do V0^@PGM 	
+
+	do Db.delete("CHKVOID","JOB=:PROID")
+		
+	set %ProcessMode=%OSAVE
+	
+	do END
+	
+	quit
+
+END	//
+	quit:ER!(%ProcessMode=2)!(%ProcessMode=4)  
+
+	// Check register not modified
+	if VFMQ="Q" set RM=$$^MSG(537)
+
+	// Check register modified
+	else  set RM=$$^MSG(536)
+
+	set ER="W"
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60284^21797^Hema Puttaswamy^4303"	// Signature - LTD^TIME^USER^SIZE

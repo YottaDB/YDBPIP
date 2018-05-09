@@ -1,0 +1,300 @@
+public	LNCUSNOT(RecordLN ln,CID,TRAN) // Loan Delinquency Custom Notice
+
+	/*
+
+	ORIG:	Laura Hillanbrand
+	
+	DESC: 	This routine is executed during accruals (BTTLN) and through
+		transaction processing (LNPTS2).  Loan delinquency notice
+		entries are set in the dayend file [DAYENDLNDA] based on
+		the requirements of the Hire Purchase ACT.  This routine
+		uses the user defined values in the file [UTBLCUSNOT] and is
+		called when the loan account is delinquent and a value exist
+		in the account data item [LN]CUSTNOT.
+	
+	PARAMETERS:
+
+		CID - Loan Account Number
+	
+		TRAN - Transaction processing flag
+
+			2 = Process coming from transaction processing (LNPTSR).
+			    Refer to value of [UTBLCUSNOT]RVBLDELQ to determine
+			    if a notice should be generated.
+			1 = Process coming from transaction processing (LNPTS2).
+			    Base notice production on values in Monetary
+			    Transaction Delinquency [UTBLCUSNOT]MTDDELQ.
+			    Use FSN and KFSN array to update [DAYENDLNDA].
+			0 = Process coming from accruals (BTTLN).
+	
+	---- Revision History ------------------------------------------------
+	
+	03/10/06 - HILLANBRAND - CR 20016
+	           Removed type RecordUTBLCUSNOT utblcusnot(,) in the top
+	           section since it is also declared public.  Added a
+	           quit at the end of the section FRSTDELQ to correct the
+	           Undefined local variable: vos1 as it removes the code that
+	           was trying to close the object from the TRANNOT section.
+
+	01/05/06 - SmithCD - CR 18783
+		   Made top of procedure public to avoid warning on BTTDRV.
+
+	12/08/05 - HILLANBRAND - 18560
+		   Corrected undefined in PYMTS by adding if rs.next() after
+		   the db.select.
+	
+	04/28/05 - HILLANBRAND - 13281
+	           Correct undefined in INIT on %UID when SRC was not defined.
+	
+	09/23/03 - CARROLLJ - 51630
+		   Remove the use of the to and from array.
+
+	06/09/03 - CARROLLJ - 51349
+		   Removed the use of the BL array.
+
+	05/03/02 - EDWARDSM - 48484
+		   Modified FRSTDELQ section by newing BL, if it does not
+		   already exist. Previously, the BL would be changed in that
+ 		   section so that only two elements remained. The BL would
+		   eventually overwrite the ^BIL record and create integrity
+		   errors on the account. 
+
+
+	----------------------------------------------------------------------
+	*/
+
+	new CAT,DATA,DDATE,DIST1FRE,DIST1ND,DOD,DMP,DSEQ,MDT,NC,NOTICE,PPA
+
+	// Input variables CID,SEQ,CID,ITC,ETC,TAMT,EFD,TLO,TSO,TCMT
+
+	new STOP,TIM,OSEQ,MINNOTBA,FDDT
+	set TRAN=$G(TRAN)
+	if 'TRAN new %UID,TLO
+
+	type Public RecordUTBLCUSNOT utblcusnot(,)
+
+	do INIT(.ln)
+	quit:ER	
+
+	quit:NOTICE="" 
+	
+	// See if a tempoary reminder notice exist for tomorrow. If it does,
+	// create dayend notice array.
+	if 'TRAN do REM^CUSNOTPR(CID,(TJD+1))
+
+	set (CAT,NC,MINNOTBA)=""
+	if TRAN=2 do REVTRNOT quit			// reversed transaction
+	
+	// Loop thru UTBLNOTICE - Return NC (notice category) if meet parameters.
+	for  set CAT=$O(utblcusnot(NOTICE,CAT)) quit:CAT=""  quit:NC  do {
+		set FDDT=DIST1ND
+		set MINNOTBA=utblcusnot(NOTICE,CAT).minnotba
+		if MINNOTBA set FDDT=$$FRSTDELQ(OSEQ,MINNOTBA)
+		quit:FDDT=""
+		quit:FDDT>TJD				// not delinquent
+		if TRAN do TRANNOT			// monetary transaction
+		if 'TRAN do CAT				// accruals
+		quit:'NC 
+		// Create notice
+		if TRAN do TRNOT quit			// transaction processing
+		new SAVLCEFD
+		set SAVLCEFD=FDDT			// used in LNDELNDA filer
+		do FILE^CUSNOTPR((TJD+1),NC,CID)	// accruals
+		}
+	
+	quit 
+	
+	//----------------------------------------------------------------------
+INIT(RecordLN ln) // Initialize necessary variables
+	//----------------------------------------------------------------------
+	
+	// Define TLO and %UID
+	if 'TRAN do {
+		set TLO="BATCH"
+		new rs
+		type ResultSet rs=Db.select("UID","UTBLSRC","SRCTYP='BOFF' AND KEY='NOTICE'")
+		if rs.next() set %UserID=rs.getCol(1)
+		// ~p1 posting source not set up
+		else  set ER=1,RM=$$^MSG(1184,"NOTICE")
+		}
+
+	quit:ER	
+
+	new ACN
+	set ACN=ln.acn
+	new rs
+	type ResultSet rs=Db.select("DOD","CIF","ACN=:ACN")
+	if rs.next() set DOD=rs.getCol(1)	// Date of Death
+	else  set DOD=""
+
+	set NOTICE=ln.custnot quit:NOTICE=""	// Custom Notice Production
+	set DIST1FRE=ln.dist1fre		// Distribution 1 Frequency
+	set DIST1ND=ln.dist1nd			// Distribution 1 Next Due
+	set OSEQ=ln.oseq			// Internal Bill Oldest Unsatisfied Seq Nbr
+	set DSEQ=ln.dseq			// Internal Bill Seq Nbr Next Due Date
+	set PPA=ln.ppa				// Payment - Partial Amount
+	set MDT=ln.mdt				// Account Maturity Date
+	
+	// Initialize [UTBLNOTICE] - Accrual process will only read once.
+	if '$D(utblcusnot(NOTICE)) do INIUTBL(NOTICE)
+	quit 
+	
+	//-----------------------------------------------------------------------
+FRSTDELQ(OSEQ,MINNOTBA) // Determine first valid delinquent bill date
+	//----------------------------------------------------------------------
+	type ResultSet rs=Db.select("CDPD","LNBIL1","CID=:CID AND SCHSEQ>=:OSEQ and casd>=:MINNOTBA")
+	if rs.next() quit rs.getCol(1)
+	else  quit ""
+	quit
+	
+	//-----------------------------------------------------------------------
+TRANNOT // Monetary Transaction Delinquency
+	//-----------------------------------------------------------------------
+	
+	type Public RecordUTBLCUSNOT utblcusnot(,)
+	type Public String CAT,NOTICE
+
+	// Transaction processing, delete future dated reminder and future dated
+	// notices.
+
+	if utblcusnot(NOTICE,CAT).delrem do {
+		new RCAT
+		set RCAT=utblcusnot(NOTICE,CAT).rnotcat
+		do DELREM^CUSNOTPR(TJD,RCAT,CID)
+		do DELNOT^CUSNOTPR(TJD,CAT,CID)
+		}
+	
+	set DDATE=$$DEL(utblcusnot(NOTICE,CAT).mtdelq,1,FDDT)              // Monetary Transaction
+	if 'DDATE!(DDATE>TJD) quit 
+	set NC=CAT
+	quit 
+	
+	//-----------------------------------------------------------------------
+REVTRNOT // Reversed Transaction Delinquency
+	//-----------------------------------------------------------------------
+
+	type Public RecordUTBLCUSNOT utblcusnot(,)
+	type Public String CAT,NOTICE
+
+	for  set CAT=$O(utblcusnot(NOTICE,CAT),-1) quit:CAT=""  quit:NC  do {
+		set FDDT=DIST1ND
+		set MINNOTBA=utblcusnot(NOTICE,CAT).minnotba
+		if MINNOTBA set FDDT=$$FRSTDELQ(OSEQ,MINNOTBA)
+		quit:FDDT=""
+		quit:FDDT>TJD				// not delinquent
+		set DDATE=$$DEL(utblcusnot(NOTICE,CAT).rvtrdelq,1,FDDT)
+		if DDATE,DDATE'>TJD set NC=CAT
+		quit:'NC
+
+		// Check for less severe notice and remove	- nph 3/10/00
+		new TST,TDT,KEY,CNT,END
+		set TDT=TJD+1
+		set END=NC-1
+		for CNT=1:1:END do {
+			set KEY="LND"_CNT
+			set TST=Db.isDefined("LNDELNDA","TDT,KEY,CID")
+			if TST do DLTRNOT(TDT,KEY,CID)
+			}
+
+		// Create notice
+		do TRNOT
+		}
+	quit 
+	
+	//-----------------------------------------------------------------------
+CAT // Notice Category - Based on deceased customer, final payment, or delinquency
+	//-----------------------------------------------------------------------
+	
+	type Public RecordUTBLCUSNOT utblcusnot(,)
+	type Public String CAT,NOTICE
+
+	if DOD'="" set DDATE=$$DEL(utblcusnot(NOTICE,CAT).decdelq,1,FDDT)   // Deceased
+	else  if MDT<TJD set DDATE=$$DEL(utblcusnot(NOTICE,CAT).fidelq,0,FDDT)     // Final Installment
+	else  set DDATE=$$DEL(utblcusnot(NOTICE,CAT).delq,1,FDDT)        // Delinquency
+	if DDATE=TJD set NC=CAT
+	quit 
+
+	//-----------------------------------------------------------------------
+DEL(P,FP,FDDT) // Delinquency Period
+	//-----------------------------------------------------------------------
+	//
+	// P  - Delinquency Period - Days (2D), Months (3M), or Payments (1P)
+	//
+	// FP - Full Period Flag
+	//	1 = Delinquency period is in payments (2P) and not
+	//	    a final installment.
+	//	0 = Delinquency period is in days (3D) or months (4M).
+	//	    Or the delinquency period is for a final installment.
+	//
+	// FDDT - First valid delinquent bill date
+	//
+	//-----------------------------------------------------------------------
+	
+	if P="" quit 0
+	set TIM=$E(P,1,$L(P)-1)          // Length of time
+	set DMP=$E((P),$L(P))            // Period (Days,Months,Payments)
+	if DMP="D" set DDATE=FDDT+TIM          // Days
+	else  if DMP="P" set DDATE=$$PYMTS(TIM,$G(FP),FDDT)    // Payments
+	else  if DMP="M" set DDATE=$$EXT^UMDT(DATA,FDDT)       // Months
+	quit DDATE
+	
+	//----------------------------------------------------------------------
+TRNOT // Set up new notice entry in filgen array
+	//----------------------------------------------------------------------
+	
+	new FGSEQ,TDT
+	set TDT=TJD+1
+	set FGSEQ=$O(filgen(CID,""),-1)+1
+	set filgen(CID,FGSEQ)="N SAVLCEFD,EFD,KEY,CID S SAVLCEFD="_FDDT_",EFD="_TDT_",KEY=""LND"_NC_""",CID="_CID_" D ^DAYLNFL(0)"
+	
+	quit 
+       
+	//----------------------------------------------------------------------
+DLTRNOT(JD,KEY,XCID) // Set up to delete a notice entry in filgen array
+	//----------------------------------------------------------------------
+ 
+        new FGSEQ
+        set FGSEQ=$O(filgen(CID,""),-1)+1
+        set filgen(CID,FGSEQ)="N EFD,KEY,CID S EFD="_JD_",KEY="""_KEY_""",CID="_XCID_" D ^DAYLNFL(3)"
+ 
+        quit
+	
+	//-----------------------------------------------------------------------
+PYMTS(TIM,FP,FDDT) // Convert Payments
+	//-----------------------------------------------------------------------
+	
+	new BLDT,DATE,DAYS,PYMTS,SEQ
+	
+	set BLDT=FDDT
+
+	// If a partial payment exist, get next due bill for full payments due.
+	// Final installment period does not use full payment logic so partial
+	// payment is not needed in the period calculation.
+	if $G(FP),PPA do {
+		type ResultSet rs=Db.select("CDPD","LNBIL1","CID=:CID AND SCHSEQ>=:DSEQ")
+		if rs.next() set BLDT=rs.getCol("CDPD")
+		else  set BLDT=$$NJD^UFRE(FDDT,DIST1FRE) quit:ER		
+		}
+	
+	set DDATE=BLDT
+	F I=1:1:(TIM-1) set DDATE=$$NJD^UFRE(BLDT,DIST1FRE) quit:ER  set BLDT=DDATE
+	quit DDATE
+	
+	//-----------------------------------------------------------------------
+INIUTBL(NOTICE) // Initialize UTBL local array
+	//-----------------------------------------------------------------------
+	
+	new CAT
+
+	type Public RecordUTBLCUSNOT utblcusnot(,)
+	type ResultSet rs=Db.select("NOTCAT","UTBLCUSNOT","NOTICE=:NOTICE")
+
+	for  quit:'rs.next()  do {
+		
+		set CAT=rs.getCol(1)
+		set utblcusnot(NOTICE,CAT)=Db.getRecord("UTBLCUSNOT","NOTICE,CAT")
+		}
+
+	quit 
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60334^40921^Laura Hillanbrand^9731"	// Signature - LTD^TIME^USER^SIZE

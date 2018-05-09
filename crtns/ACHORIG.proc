@@ -1,0 +1,991 @@
+ACHORIG	  /*
+ORIG: MYERSK - 10/11/2000
+DESC: ACH Origination
+
+---- Comments --------------------------------------------------------
+ 
+        This routine will create ACH origination files, using the payment
+        system (EFTOUT and EFTPAY) as the source.  There are a number of
+        of assumptions and setup dependencies within the Payment System
+        to use this file. Please see document ACHOUT.doc in OZ/ICGCOMMON
+        for details.
+ 
+        This routine was originally customized in 5.3 for Bluehen.
+	
+	It is standard as of 6.1
+ 
+---- Revision History ------------------------------------------------
+
+	09/15/05 - Satyanas - 16675
+		   Removed the Unscoped and Deprecated Warnings and converted 
+		   to PSL Standard.
+
+	06/09/03 - Dan Russell - 51351
+		   Removed use of schema class methods and replaced
+		   references to temporary table ZACHTMP with TMPRPT3.
+
+	10/03/02 - Spier - 51089
+		   Corrected psl syntax errors found by new compiler
+
+	04/24/01 - burnsm - 44592
+		   Modified section PROC to popluate the amount field in the
+		   detail record with EFTOUT.TAMT. Previously, EFTPAY.AMOUNT 
+		   was used which would be zero for Standing Collection Orders 
+		   using payment option 4 Total Due. 
+
+	10/11/00 - myersk
+		   Consolidated various customized versions of ZACHORIG to make
+		   standard in 6.1 and converted to PSL
+
+		   Changed PROC section to write records to file ACHF for
+		   reconciliation purposes.  The Report ZACHFLST will remain
+		   custom.  Clients who use this report should change the
+		   Global field on the Control Page of the File Definition from
+		   ^ZACHF to ^ACHF
+
+ */        
+        // Prompts
+        
+	type public String %FN,%READ,%TAB,VFMQ
+	type Boolean METH,RPRT,TEST
+	type Date FRDT,TODT
+	type Number ER
+	type String MOPT,ROPT(),RRES
+	
+	// I18N = off
+	set RRES(0) = "Live Run (updates PROFILE)"
+	set RRES(1) = "Test Run (no updates to PROFILE)"
+	set MOPT(0) = "All Detail Records in One Batch"
+	set MOPT(1) = "One Batch for Credits and Another Batch for Debits"
+	set ROPT(0) = "No"
+	set ROPT(1) = "Yes"
+	set FRDT = %SystemDate-1
+	set TODT = %SystemDate
+	set TEST = 1
+	set METH = 0
+	set RPRT = 0
+	
+	if '%FN.exists() set %FN = "ACHORIG"
+	
+	set %TAB("FRDT") = ".TJD/LEN = 20/TYP = D/DES = From Date/REQ"
+	set %TAB("TODT") = "/LEN = 20/TYP = D/DES = To Date/REQ"
+	set %TAB("METH") = "/TBL = MOPT(/LEN = 1/DES = Output Method/REQ"
+	set %TAB("TEST") = ".TEST/TBL = RRES(/LEN = 1/DES = Restore Account/REQ"
+	set %TAB("RPRT") = "/TBL = ROPT(/LEN = 1/DES = Create Custom Report/REQ"
+	set %READ = "@%FN/CEN/REV,,,FRDT,TODT,METH,TEST,RPRT"
+	
+	// I18N = on
+	do ^UTLREAD
+	
+	if VFMQ.get() = "Q" set ER = 2 quit
+
+        do START(FRDT,TODT,METH,TEST,RPRT)
+
+        quit
+        
+        
+        //---------------------------------------------------------------------
+START(XTJD,ZZTJD,METH,TEST,RPRT)   // Start Creation of ACH Batch
+        /* --------------------------------------------------------------------
+
+               Input Parameters
+        
+               XTJD  - Processing From Date	Required
+        
+                      There are two ways to call this routine,
+                      One for Intra-day file creation (TJD  =  ^CUVAR(2)),
+                      and one as a beginning of day function for the
+                      prior day (TJD  =  ^CUVAR(2)-1).  The beginning of day
+                      function will either create the batch for the entire
+                      day (if there were no Intra-day batches created), or
+                      create a batch of the remaining transactions from
+                      the prior day (If Intra-day was used).  A batch
+                      with no detail records in it will be created if
+                      there are no transactions to output.
+              
+              ZZTJD - Processing To Date        Not Required
+ 
+                      Date to Process up to.  If not Passed, Most recent date
+                      in EFTOUT file will be assumed
+
+	      METH - Processing Method		Not Required
+
+		      0  =  All Records Processed in one Batch
+		      1  =  One Batch for Credits and Another Batch for Debits
+
+		      If not passed, 0 is assumed
+
+              TEST - Test Flag			Required
+       
+                      0  =  Live Run (flag EFTOUT records as processed,
+                          update file creation info in ZACHORIG).
+                      1  =  Test - Create Test file, do not update database.
+ 
+	      RPRT - Report Flag		Not Required
+
+		      0  =  Do not store records in ^ZACHF for ZACHFLST Report
+		      1  =  Store records in ^ZACHF for ZACHFLST Report
+	*/
+	
+	type Boolean ER,LOCK
+	type Date JD,KEYTJD,TODAY
+	type Number BCHCNT,BCHCR,BCHDR,BCHHASH,BCHNUM,ENDSEQ,FILCNT,FILCR,FILDR,FILHASH,FCN,RECTOT,TSEQ
+	type String COID,DES,DFIID,ET,ITC1,TRNTYP
+		
+        if XTJD.get() = "" set ER = 1,ET = "INVLDDT" do ZTEND quit
+        
+        if XTJD>%SystemDate set ER = 1,ET = "INVLDDT" do ZTEND quit
+        
+	if ZZTJD.get() = "" set ZZTJD = Db.currVal("EFTOUT")
+	
+        if TEST.get() = "" set ER = 1,ET = "NULVAL",DES = "TEST" do ZTEND quit
+        
+	if '("01".find(TEST)) set ER = 1,ET = "INVLD" do ZTEND quit
+	
+	if METH.exists() = 1,'("01".find(METH)) set ER = 1,ET = "INVLD" do ZTEND quit
+	
+	set METH =  + METH.get()
+	
+	if RPRT.exists() = 1,'("01".find(RPRT)) set ER = 1,ET = "INVLD" do ZTEND quit
+	
+	set RPRT =  + RPRT.get()
+
+        // File ACHORIG will be locked to prevent two processes
+        // running at the same time.
+        /*
+        if TEST = 0 lock  + ^ZACHORIG:5  else  set ER = 1,ET = "RECLOC" do ZTEND Q
+        set FCN = $G(^ZACHORIG(XTJD)) + 1              ; file creation number
+        */
+
+	set TODAY = %SystemDate
+	
+	type RecordACHORIG achorig1 = Db.getRecord("ACHORIG","SJD = :TODAY")
+	set FCN = achorig1.fcn + TEST
+	set LOCK = achorig1.lock
+
+	if LOCK set ER = 1,ET = "RECLOC" do ZTEND quit
+
+	type RecordACHORIG achorig = Class.new("RecordACHORIG")
+	set achorig.sjd = TODAY
+	set achorig.fcn = FCN
+	set achorig.lock = 1
+	do achorig.bypassSave()
+
+	catch vERROR {
+		
+		type RecordACHORIG unlock = Class.new("RecordACHORIG")
+		set unlock.sjd = TODAY
+		set unlock.fcn = FCN
+		set unlock.lock = 0
+
+		do unlock.bypassSave()
+
+		do ZE^UTLERR
+		
+		do EXC
+		quit
+		}
+
+	do Db.fastDelete("TMPRPT3","PID = :%ProcessID")
+	
+	/* if splitting out Debits and Credits into separate batches, set up
+	   Temp Table TMPRPT3.  Otherwise just insert on record with TRNTYP = A
+	   to indicate ALL records in one batch. */
+
+	if METH do {
+		for JD = XTJD:1:ZZTJD do {
+			type RecordEFTOUT0 eftout0 = Db.getRecord("EFTOUT0","SJD = :JD")
+			set ENDSEQ = eftout0.endseq
+			type ResultSet rs = Db.select("TJD,TSEQ,TSO,ITC","EFTOUT","TJD = :JD AND TSEQ>:ENDSEQ")
+        		if 'rs.isEmpty() while rs.next() do {
+				set KEYTJD = rs.getCol(1)
+				set TSEQ = rs.getCol(2)
+				set ITC1 = rs.getCol(4)
+				if $$FIELD^UTSO(rs.getCol(3),"VAR")' = 99 do ZCRDR
+				}
+			quit:TEST = 1
+			type RecordEFTOUT0 eftseq = Class.new("RecordEFTOUT0")
+			set eftseq.sjd = JD
+			set eftseq.endseq = TSEQ
+			do eftseq.bypassSave()
+			}
+		}
+		
+ 	if 'METH do {
+		type RecordTMPRPT3 tmprpt3 = Class.new("RecordTMPRPT3")
+		set tmprpt3.pid = %ProcessID
+		
+		// TRNTYP
+		set tmprpt3.key1 = "A"		
+		
+		// TJD
+		set tmprpt3.key2 = XTJD		
+		
+		// TSEQ
+		set tmprpt3.key3 = 0		
+		set TSEQ = 0
+		do tmprpt3.bypassSave()
+		}
+		
+	// Total Records in file (for blocking)
+	set RECTOT = 0			
+        do IOFILE(FCN) quit:ER
+        
+        // Build File Header
+        do FHDR(FCN) quit:ER
+        		
+	set TRNTYP = ""
+	type DbSet ds = Db.selectDbSet("TMPRPT3","PID = :%ProcessID AND KEY1>:TRNTYP","KEY1")
+	if 'ds.isEmpty() do {
+        while ds.next() do {
+                        type RecordTMPRPT3 tmprpt3 = ds.getRecord("TMPRPT3")
+                        set TRNTYP = tmprpt3.key1
+                        set BCHCR = 0
+                        set BCHDR = 0
+                        
+                        // Build Batch Header
+                        do BHDR quit:ER  
+                               
+                        // Detail Records
+                        do DETAIL    
+                                   
+                        // Build Batch Trailer	          
+                        do BTLR  		
+		        }
+		}
+		
+	// Build File Trailer
+	do FTLR	
+				
+	// Fill up block with 9 records
+        do NINEREC			
+        
+        do CLOSE^SCAIO
+        
+	set achorig.lock = 0
+	do achorig.bypassSave()
+
+        quit
+
+        //---------------------------------------------------------------------
+IOFILE(FCN)     // Open Outgoing File
+        /* --------------------------------------------------------------------
+        
+        Input Parameters:
+        
+              FCN - File Creation Number
+        
+        Open file for ACH Origination, where the file name will be
+        ACH_julian date_sequence.OUT. For example:
+        
+         ACH_57735_02.OUT
+
+        */
+        
+        type public Boolean ER,TEST
+        type public Date ZZTJD
+	type Date ZSENTDT
+	type Number RECSIZ,ZFCN,ZSENT
+	type String IO,IOPAR,IOTYP,SPOOL
+	
+	set ZFCN = "00".extract(1,2-FCN.length())_FCN
+	
+	if TEST set ZFCN = 99
+	
+	set IO = "ACH_"_ZZTJD_"_"_ZFCN_".OUT"
+	set ZSENT = ZFCN
+	set ZSENTDT = ZZTJD
+
+	type RecordCUVAR cuvar = Db.getRecord("CUVAR")
+	set SPOOL = cuvar.spldir
+	set IO = $$FILE^%TRNLNM(IO,SPOOL)
+	set RECSIZ = 94,IOPAR = "WRITE/NEWVERSION",IOTYP = "RMS",ER = 0
+	do OPEN^SCAIO if ER do ERR("",$$^MSG(2799,IO))
+
+        quit
+        
+        
+        //---------------------------------------------------------------------
+FHDR(FCN)       //       File Header Record
+        /* --------------------------------------------------------------------
+        
+        Input Parameter
+        
+              FCN - File Creation Number
+        
+        File Header Record Format
+        
+        Start End  Desc                       Notes
+        -----------------------------------------------------------------------
+        1      1   Record Type                '1'
+        2      3   Priority Code              '01'
+        4     13   Immediate Dest.            CUVAR.FDEST
+        14    23   Immediate Orig.            CUVAR.FORIG
+        24    29   File Creation Date         YYMMDD
+        30    33   File Creation Time         HHMM
+        34    34   File ID Modifier           A thru Z, # of file today.
+        35    37   Record Size                '094'
+        38    39   Blocking Factor            '10'
+        40    40   Format Code                '1'
+        41    63   Immediate Dest. Name       UTBLACHRT.INAME (FDEST)
+        64    86   Immediate Orig. Name       UTBLACHRT.INAME (FORIG)
+        87    94   Reference Code             blank
+        ----------------------------------------------------------------------
+        */
+        
+        type public Number FILCNT,FILDR,FILHASH,RECTOT,RECTYPE
+        type public String IO
+        type Date CRDATE
+        type Number BLKFCT,FMTCODE
+        type String CRTIME,FDEST,FDESTNAM,FILMOD,FILCR,FORIG,FORIGNAM,PRIO,REC,REFCODE,RECSIZ
+        
+        // Use variable names, even for hardcoded values, for future changes.
+        set RECTOT = RECTOT + 1
+        
+        // Record Type
+        set RECTYPE = 1	
+        			
+        // Priority Code
+        set PRIO = "01"				
+        
+        // Get R&T Numbers from CUVAR, and their descriptions from UTBLACHRT
+        
+        // Destination Codes and Description
+        
+        type RecordCUVAR cuvar = Db.getRecord("CUVAR")
+        set FDEST = cuvar.fdest
+           
+        // Imediate Dest. Name 
+        type RecordUTBLACHRT utblachrt = Db.getRecord("UTBLACHRT","KEY = :FDEST") 
+        set FDESTNAM = utblachrt.iname
+        
+        // Immediate Dest. Code
+        set FDEST = $$ZEROFIL(FDEST,10)		
+        
+        // Dest. Name
+        set FDESTNAM = $$BLKFIL(FDESTNAM,23)	
+        
+        // Origin Code and Description
+        set FORIG = cuvar.forig
+	
+	// Immediate Orig. Name
+	type RecordUTBLACHRT utblachrtforig = Db.getRecord("UTBLACHRT","KEY = :FORIG")	
+        set FORIGNAM = utblachrtforig.iname
+        
+        // Immediate Orig. Code
+        set FORIG = $$ZEROFIL(FORIG,10)		
+        
+        // Orig. Name
+        set FORIGNAM = $$BLKFIL(FORIGNAM,23)	
+        
+        // Creation Date
+        set CRDATE = %CurrentDate.toString("YYMMDD") 
+        
+        // Creation Time
+        set CRTIME = $$TIM^%ZM(%CurrentTime,"2460")   
+        
+        // File ID Modifier
+        set FILMOD = $CHAR(64 + FCN)	  	
+        
+        // Record Size
+        set RECSIZ = "094"			
+        
+        // Blocking Factor
+        set BLKFCT = 10				
+        
+        // Format Code
+        set FMTCODE = 1				
+        
+        // Reference Code
+        set REFCODE = $$BLKFIL("",8)		
+        
+        set REC = RECTYPE_PRIO_FDEST_FORIG_CRDATE_CRTIME_FILMOD
+        set REC = REC_RECSIZ_BLKFCT_FMTCODE_FDESTNAM_FORIGNAM_REFCODE
+        
+        use IO write REC,!
+        
+        // Initialize File Counters:
+        
+        // No of Detail Records
+        set FILCNT = 0				
+        
+        // Credit Total
+        set FILCR = 0				
+        
+        // Debit Total
+        set FILDR = 0				
+        
+        // Hash Total
+        set FILHASH = 0				
+
+        quit
+        
+
+        //---------------------------------------------------------------------
+BHDR    // Create Batch Header Record
+        /* --------------------------------------------------------------------
+        
+        Batch Header Record Format
+        
+        Start End  Desc                       Notes
+        ----------------------------------------------------------------------
+        1      1   Record Type                '5'
+        2      4   Service Class Code         '200'
+        5     20   Company Name
+        21    40   Co. Discretionary Data
+        41    50   Company ID                 Unique number
+        51    53   Standard Entry Class Code  'PPD'
+        54    63   Company Entry Desc.        'TRANSFER','PAYMENT', or 'COLLECTION'
+        64    69   Company Descriptive Date   blank
+        70    75   Effective Entry Date       proc date
+        76    78   Settlement Date            blank
+        79    79   Originator Status Code     '1'
+        80    87   Originator DFI Id.         CUVAR.BORIG
+        88    94   Batch Number               '1'
+        ----------------------------------------------------------------------
+        */
+        
+        type public Date XTJD
+        type public Number BCHCNT,FCN,RECTOT
+        type public String IO
+        type Boolean STAT
+        type Date CODATE,EFDATE,STLDATE
+        type Number BCHCR,BCHDR,BCHHASH,BCHNUM,RECTYPE,SCC
+        type String BORIGNAM,CDD,CED,COID,COMPNAM,DFIID,REC,SEC,TRNTYP,ZBTCHHDR
+        
+       // Use variable names, even for hardcoded values, for future changes.
+        set RECTOT = RECTOT + 1
+        
+        // Record Type
+        set RECTYPE = 5				
+        
+        // Service Class Code
+        set SCC = 200				
+
+        // CUVAR.BORIG, Batch Origination, will be used for the
+        // Originator DFI Id. field.
+
+	type RecordCUVAR cuvar = Db.getRecord("CUVAR")
+	set DFIID = cuvar.borig
+	type RecordUTBLACHRT utblachrt = Db.getRecord("UTBLACHRT","KEY = :DFIID")
+	set BORIGNAM = utblachrt.iname
+	set COMPNAM = $$BLKFIL(BORIGNAM,16)
+	
+	// Company Name
+        set BORIGNAM = COMPNAM.extract(1,16)		
+        
+        // Company Disc. Data
+        set CDD = $$BLKFIL("",20)			
+        
+        // Unique # per file	
+        set COID = 9_XTJD_$$ZEROFIL(FCN,4)		
+        
+        // Standard Entry Class
+        set SEC = "PPD"					
+	set CED = $S(TRNTYP = "A":"TRANSFER",TRNTYP = "C":"PAYMENT",TRNTYP = "D":"COLLECTION",1:"")
+	
+	// Co. Entry Desc.
+        set CED = $$BLKFIL(CED,10)			
+        
+        // Descriptive Date
+        set CODATE = $$BLKFIL("",6)			
+        
+        // Effective Entry Date
+        set EFDATE = XTJD.toString("YYMMDD")		
+        
+        // Settlement Date
+        set STLDATE = $$BLKFIL("",3)			
+        
+        // Status Code
+        set STAT = 1					
+        
+        // DFI ID (Length 8)
+        set DFIID = $$ZEROFIL(DFIID.extract(1,8),8)		
+        set BCHNUM = $$ZEROFIL("1",7)
+        set REC = RECTYPE_SCC_BORIGNAM_CDD_COID_SEC_CED_CODATE_EFDATE
+        set REC = REC_STLDATE_STAT_DFIID_BCHNUM
+        set ZBTCHHDR = RECTYPE_SCC_BORIGNAM_CDD_COID
+        set ZBTCHHDR = ZBTCHHDR_SEC_CED_CODATE_EFDATE
+        set ZBTCHHDR = ZBTCHHDR_STLDATE_STAT_DFIID_BCHNUM
+        
+        use IO write REC,!
+        
+        // Initialize Batch Counters:	
+        
+        // No of Detail Records
+        set BCHCNT = 0					
+        
+        // Credit Total
+        set BCHCR = 0					
+        
+        // Debit Total
+        set BCHDR = 0					
+        
+        // Hash Total
+        set BCHHASH = 0					
+        
+	quit
+	
+        
+        //---------------------------------------------------------------------
+DETAIL  // Detail Records
+        /* --------------------------------------------------------------------
+        
+	Assumes XTJD and ZZTJD were set to Beginnig and Ending Processing Dates
+
+	If METH = 1 (Splitting Debits and Credits to Separate Batches), this
+	routine will collate through TMPRPT3.
+
+	Otherwise (All Records in One Batch), it will collate through EFTOUT
+	*/
+	
+	type public Boolean METH,TEST
+	type public Date XTJD,ZZTJD
+        type Date JD,JD1
+        type Number ENDSEQ
+        type String TSEQ
+       
+	if METH do { quit
+		type ResultSet rs = Db.select("KEY2,KEY3","TMPRPT3","PID = :%ProcessID AND KEY1 = :TRNTYP")
+		quit:rs.isEmpty()
+		
+		while rs.next() do {
+        
+			catch vERROR2 {
+				do ZE^UTLERR
+				do EXC
+                		quit
+        			}
+			
+			set JD = rs.getCol("KEY2")
+			set TSEQ = rs.getCol("KEY3")
+			type RecordEFTOUT eftout = Db.getRecord("EFTOUT","JD,TSEQ")
+			do PROC(eftout)
+			}
+		}
+		
+	for JD = XTJD:1:ZZTJD do {
+		type RecordEFTOUT0 eftout0 = Db.getRecord("EFTOUT0","SJD = :JD")
+		set ENDSEQ = eftout0.endseq
+		type ResultSet rs = Db.select("TJD,TSEQ","EFTOUT","TJD = :JD AND TSEQ>:ENDSEQ")
+		quit:rs.isEmpty()
+		
+		while rs.next() do {
+
+                        catch vERROR2 {
+				do ZE^UTLERR
+				do EXC
+                                quit
+                        	}
+                        	
+			set JD1 = rs.getCol(1)
+			set TSEQ = rs.getCol(2)
+			type RecordEFTOUT eftout = Db.getRecord("EFTOUT","JD1,TSEQ")
+			do PROC(eftout)
+			}
+			
+		quit:TEST = 1
+		type RecordEFTOUT0 eftseq = Class.new("RecordEFTOUT0")
+		set eftseq.sjd = JD
+		set eftseq.endseq = TSEQ
+		do eftseq.bypassSave()
+                }
+                
+	quit
+	
+
+        //---------------------------------------------------------------------
+PROC(RecordEFTOUT eftout)	// Process Detail Record
+        /* --------------------------------------------------------------------
+
+	Detail Record Format
+
+	Start End  Desc                       Notes
+	----------------------------------------------------------------------
+	1      1   Record Type                '6'
+	2      3   Transaction Code           EFTPAY.CONSTANT
+	4     11   Receiving DFI Id.          1st 8 digits of EFTPAY.SPECIFIC
+	                                      or EFTPAY.RECINST
+	12    12   Check Digit                9th digit of EFTPAY.SPECIFIC
+	                                      or EFTPAY.RECINST
+	13    29   DFI Account Number         EFTPAY.RECACCT
+	30    39   Amount ($$$$$$$cc)         EFTOUT.TAMT 
+	40    54   Individual ID Number       EFT.CID
+	55    76   Individual Name            ACN.LNM from EFT.CID
+	77    78   Discretionary Data         blank
+	79    79   Addenda Record Indicator   '0'
+	80    94   Trace Number               (sequential w/in batch)
+        ----------------------------------------------------------------------
+	*/
+	
+	type public Boolean ER,RPRT,TEST
+	type public Date ZSENTDT,ZZTJD
+        type public Number BCHCNT,BCHCR,BCHHASH,RECTOT,ZSENT
+        type public String DFIID,IO,ITC1,TSEQ,TSO,UTSO,UTSO2,ZBTCHHDR
+        type Number ADDENDA,BCHDR,CID,IDNUM,RECTYPE,SEQ,SPECIFIC,TAMT
+        type String DISC,ETC,LNM,REC,RECACCT,TRACE,UNIQTSO,ZSEQ
+        
+        set ER = 0
+        do OUT^UTSO(.UTSO,eftout.tso)			
+        
+        // EFTPAY Sequence
+        set SEQ = UTSO("SEQ").get()				
+        set CID =  + UTSO("FCID").get()
+        if SEQ = "" do ERR("EFTPAY Sequence",,TSEQ.get()) set ER = 0 quit
+        if CID = 0 do ERR("Account Number",,TSEQ.get()) set ER = 0 quit
+	
+	// Load EFTPAY Record
+	type RecordEFTPAY eftpay = Db.getRecord("EFTPAY","CID,SEQ")      
+        
+        set RECTOT = RECTOT + 1
+
+        // Define Variables for Record
+
+	// Record Type
+        set RECTYPE = 6					
+        
+        // Transaction Code
+        set ETC = eftpay.constant				
+        set ETC = $$ZEROFIL(ETC.extract(1,2),2)		
+        
+        // Receiving DFI  +  chk	
+        set SPECIFIC = eftpay.specific			
+        
+        // Use EFTINST if 0.
+        if SPECIFIC = 0 set SPECIFIC = eftpay.recinst	
+        
+        // ABA Number
+        set SPECIFIC = $$ZEROFIL(SPECIFIC.extract(1,9),9)	
+        
+        // Batch Hash Total
+        set BCHHASH = BCHHASH + SPECIFIC.extract(1,8)		
+        set BCHHASH = BCHHASH.extract(BCHHASH.length()-9,BCHHASH.length()) 
+        
+        // DFI Account
+        set RECACCT = eftpay.recacct			
+        set RECACCT = $$BLKFIL(RECACCT.extract(1,17),17) 
+        
+	// burnsm - 04/24/01 - Replaced eftpay.amount with eftout.tamt
+	
+	// Amount
+	set TAMT = $$ZEROFIL(eftout.tamt*100,10)	
+	
+	// Ind. ID Number	
+        set IDNUM = $$ZEROFIL(CID,15)			
+        
+        // Account Name
+        type RecordACN acn = Db.getRecord("ACN","CID = :CID")
+        set LNM = $$BLKFIL(LNM,22)
+        
+        // Discretionary
+        set DISC = $$BLKFIL("",2)			
+        
+        // Addenda Record	
+        set ADDENDA = 0					
+        
+        // Increment Counter
+        set BCHCNT = BCHCNT + 1				
+
+	// 10/00 myersk - new logic for Trace Number
+	set UNIQTSO = eftpay.uniqtso
+	if UNIQTSO' = "" do OUT^UTSO(.UTSO2,UNIQTSO)
+	if UTSO2("ZTRACE").get()' = "" set TRACE = DFIID_$$ZEROFIL(TSO("ZTRACE"),7)
+	else  set TRACE = DFIID_ZZTJD.extract(5)_$$ZEROFIL(BCHCNT,6)
+        
+        set REC = RECTYPE_ETC_SPECIFIC_RECACCT_TAMT_IDNUM
+        set REC = REC_LNM_DISC_ADDENDA_TRACE
+
+        if RPRT,'TEST do {
+		
+		type RecordACHF achf = Class.new("RecordACHF")
+
+		set ZSEQ = ZSEQ.get() + 1
+		set achf.effdt = eftpay.efd
+
+		/*  No FileDef for third layer of ^EFTPAY and all values were
+			null in piece 57
+		set ZLOADDT = $P(^EFTPAY(CID,SEQ,0),"|",57)
+        	set:ZLOADDT = "" ZLOADDT = %SystemDate
+		set achf.loaddt = ZLOADDT
+		*/
+
+		set achf.loaddt = %SystemDate
+		set achf.recinst = eftpay.recinst
+		set achf.seq = ZSEQ
+
+		// write batch header record
+		set achf.recdtyp = 5
+		set achf.record = ZBTCHHDR
+		do achf.bypassSave()
+
+                // write addenda record
+                set achf.recdtyp = 7
+                set achf.record = ADDENDA
+                do achf.bypassSave()
+
+		// write detail record
+		set achf.recdtyp = 6
+		set achf.record = REC
+		set achf.sent = ZSENT
+		set achf.sentdt = ZSENTDT
+		do achf.bypassSave()
+		}
+
+        use IO write REC,!	
+
+	// Credit Amount
+        if eftout.itc1 set BCHCR = BCHCR + TAMT		
+        
+        // Debit Amount
+        else  set BCHDR = BCHDR + TAMT			
+
+        quit
+        
+
+        //---------------------------------------------------------------------
+BTLR    // Create Batch Trailer Record
+        /* --------------------------------------------------------------------
+
+	Batch Trailer Record Format
+
+	Start End  Desc                       Notes
+	----------------------------------------------------------------------
+	1      1   Record Type                '8'
+	2      4   Service Class Code         '200'
+	5     10   Entry/Addenda Count        BCHCNT
+	11    20   Entry Hash                 BCHHASH
+	21    32   Total Debits               BCHDR
+	33    44   Total Credits              BCHCR
+	45    54   Company ID                 COID
+	55    73   Message Auth. Code         blank
+	74    79   Reserved                   blank
+	80    87   Originator DFI ID          DFIID
+	88    94   Batch Number               BCHNUM
+	----------------------------------------------------------------------
+	*/
+	
+	type public Number BCHCR,BCHCNT,BCHDR,BCHNUM,FILCNT,FILCR,FILDR,FILHASH,RECTOT 
+        type public String COID,DFIID,IO,REC,RECTYPE
+        type Number SCC,BCHHASH
+        type String MAC
+       
+       	// Use variable names, even for hardcoded values, for future changes.
+	set RECTOT = RECTOT + 1
+	
+	// Record Type
+	set RECTYPE = 8					
+	
+	// Service Class Code
+	set SCC = 200					
+	
+	// # of '6' records
+	set BCHCNT = $$ZEROFIL(BCHCNT,6)		
+	
+	// Batch Hash	
+	set BCHHASH = $$ZEROFIL(BCHHASH,10)		
+	
+	// Debit Total
+	set BCHDR = $$ZEROFIL(BCHDR,12)			
+	
+	// Credit Total
+	set BCHCR = $$ZEROFIL(BCHCR,12)			
+	
+	// Message Auth Code
+	set MAC = $$BLKFIL("",25)				
+
+	set REC = RECTYPE_SCC_BCHCNT_BCHHASH_BCHDR_BCHCR_COID_MAC_DFIID_BCHNUM
+
+	use IO write REC,!
+
+	set FILHASH = FILHASH + BCHHASH
+	set FILHASH = FILHASH.extract(FILHASH.length()-9,FILHASH.length())
+	set FILCNT = FILCNT + BCHCNT
+	set FILDR = FILDR + BCHDR
+	set FILCR = FILCR + BCHCR
+
+	quit
+	
+
+	//---------------------------------------------------------------------
+FTLR    // File Trailer
+	/* --------------------------------------------------------------------
+
+	Filer Record Format
+
+	Start End  Desc                       Notes
+	----------------------------------------------------------------------
+	1      1   Record Type                '9'
+	2      7   Batch Count                '1'
+	8     13   Block Count                ???
+	14    21   Entry/Addenda Count        FILCNT
+	22    31   Entry Hash                 FILHASH
+	32    43   Total Debits               FILDR
+	44    55   Total Credits              FILCR
+	56    94   Reserved                   blank
+	----------------------------------------------------------------------
+	*/
+	
+	type public Number FILCNT,FILCR,FILDR,FILHASH,RECTOT,RECTYPE
+	type public String IO,REC
+	type Number BCHNUM,BLANK,BLKNUM
+	
+	//Use variable names, even for hardcoded values, for future changes.
+	set RECTOT = RECTOT + 1
+	
+	// Record Type
+	set RECTYPE = 9					
+	
+	// # of Batches
+	set BCHNUM = $$ZEROFIL("1",6)			
+	
+	// Number of Blocks
+	set BLKNUM = (RECTOT + (10-(RECTOT#10)))/10		
+	
+	// # of Blocks
+	set BLKNUM = $$ZEROFIL(BLKNUM,6)			
+	
+	// # of 6 Records
+	set FILCNT = $$ZEROFIL(FILCNT,8)		
+	
+	// Batch Hash	
+	set FILHASH = $$ZEROFIL(FILHASH,10)		
+	
+	// Debit Total
+	set FILDR = $$ZEROFIL(FILDR,12)			
+	
+	// Credit Total
+	set FILCR = $$ZEROFIL(FILCR,12)			
+	
+	// Blank
+	set BLANK = $$BLKFIL("",39)			
+	set REC = RECTYPE_BCHNUM_BLKNUM_FILCNT_FILHASH_FILDR_FILCR_BLANK
+
+        use IO write REC,!
+
+	quit
+	
+        
+	//---------------------------------------------------------------------
+NINEREC // Fill up last Block
+	/* --------------------------------------------------------------------
+
+	Based on a blocking factor of 10, fill up last block with 9
+	records if block is not complete.
+	*/
+	type public Number RECTOT
+	type public String IO,REC
+	type Number I,NUM
+		
+	// # of records needed
+	set NUM = 10-(RECTOT#10)			
+	
+	// Block Full	
+	quit:NUM = 0					
+	set REC = ""
+	set REC.piece("9",94) = 9
+	
+	for I = 1:1:NUM use IO write REC,!
+
+	quit
+	
+
+	//---------------------------------------------------------------------
+ZCRDR	// Population of Temporary Global based on Debit and Credit Records
+	/* --------------------------------------------------------------------
+
+	If METH = 1 then all EFTOUT credit records will be stored under TRNTYP "C"
+		and all EFTOUT debit records will be stored under TRNTYP "D"
+	
+	Inputs:
+		ITC1: 	EFTOUT.ITC1
+		KEYTJD:	EFTOUT.TJD
+		TSEQ:	EFTOUT.TSEQ
+
+	*/
+	
+	type public Date KEYTJD
+	type public Number TSEQ
+	type public String ITC1
+	
+	type RecordTMPRPT3 tmprpt3 = Class.new("RecordTMPRPT3")
+	set tmprpt3.pid = %ProcessID
+	set tmprpt3.key1 = $S(ITC1:"C",1:"D")
+	set tmprpt3.key2 = KEYTJD
+	set tmprpt3.key3 = TSEQ
+	do tmprpt3.bypassSave()
+
+	quit
+	
+
+	//---------------------------------------------------------------------
+ZEROFIL(VAL,N)
+	//---------------------------------------------------------------------
+	
+	type public String X
+	type Number I
+	
+	
+	if VAL.length()>N quit VAL.extract(1,N)			
+	for I = 1:1:N set X = X.get()_0
+	quit X.extract(1,N-VAL.length())_VAL
+	
+
+	//---------------------------------------------------------------------
+BLKFIL(VAL,N)   
+	//---------------------------------------------------------------------
+
+	if VAL.length()>N quit VAL.extract(1,N)			
+	quit VAL_$J(" ",N).extract(1,N-VAL.length())
+	
+
+	//---------------------------------------------------------------------
+ERR(N,ET,S)	// Processing error, log to dayend
+	/* --------------------------------------------------------------------
+		N  - text to be added to generic "required" error message
+		ET - text to indicate error message
+		S  - EFTOUT sequence number
+	-----------------------------------------------------------------------
+	*/
+	
+	type public Boolean ER
+	
+	set ER = 1
+	if S.get() set S = S_"-"
+	
+	if ET.get() = "" set ET = S.get()_"ACH "_N.get()_" required"
+	
+	// attach EFTOUT seq number to error - psg 2/97
+	else  set ET = S.get()_ET	
+	do EXC
+
+	quit
+	
+
+	//--------------------------------------------------------------------- 
+ZTEND	// Error Handling
+	//--------------------------------------------------------------------- 
+	
+	do ZE^UTLERR
+	
+	do EXC
+	quit
+	
+
+	//--------------------------------------------------------------------- 
+EXC	// Log error to DAYEND
+	//---------------------------------------------------------------------
+	
+	type public String ET,%ZTSEQ
+	type public Number CID
+	type String DESC
+	
+	set DESC = "Create ACH Orig Files"
+	
+	do LOG^UTLEXC(%RoutineName,"*",DESC,CID.get(),%ZTSEQ.get(),ET.get())
+	kill ET,%ZTSEQ
+
+	quit
+	
+	
+
+vSIG()	quit "60177^30211^Sethy, Satyanarayan^28731"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,207 @@
+PBSFSSP(reply,stfflg,record,rectyp,contxt)	// FSSP Service Class Driver
+	/*
+	   ORIG: MATTSON - 11/08/93
+
+	   ARGUMENTS:
+	       . reply   Reply message  	/TYP=T/REQ/MECH=REFNAM:W
+	       . stfflg  STF flag		/TYP=T/REQ/MECH=VAL
+	       . record  Input message  	/TYP=T/REQ/MECH=VAL
+	       . rectyp  Input record type 	/TYP=N/REQ/MECH=VAL
+			 0 = Native 1 = Foreign
+	       . contxt  Context   		/TYP=T/NOREQ/MECH=VAL
+
+	   RETURNS:
+	       . $$  	 Message reply status 	/TYP=N/LEN=1
+
+	   EXAMPLE:
+	       S ER=$$^PBSFSSP(.REPLY,0,msg,0)
+
+
+	  ---- Revision History -------------------------------------------------
+
+	   12/18/03 - CARROLLJ - CR7239
+		      Modified STFGBL section to correct undefined error.
+
+	   07/09/02 - DATTAR - ARQ 49794
+		      Converting to PSL
+
+	   04/20/00 - TANY - 39446
+	              Optimized performance by passing additional
+	              parameter to ^SCADAT.
+
+ 	 -------------------------------------------------------------------------
+
+	*/
+	
+	new field,FN,i,INPUT,MSGS,ptr,sub
+
+	if $G(%STFHOST) do { quit ER
+		// Access not allowed for service class ~p1 at this time
+		set ER=1 set RM=$$^MSG(3246,2)
+		set reply=$$ERRMSG^PBSUTL($G(RM),$G(ET))
+		}
+
+	set ptr=$$LV2V^MSG(record,.field)
+	set FN=$G(field(1)) 
+	if FN="" set reply=$$CSERR^PBSUTL("SV_INVLDSFC") quit 1
+
+	set ptr=$$LV2V^MSG($G(field(2)),.sub)
+	set INPUT="" 
+	for i=1:1 quit:'$D(sub(i))  set $P(INPUT,"|",i)=sub(i)
+
+	//I18N=OFF
+	if rectyp do {
+
+		// Foreign client
+		set %IPMODE="NOINT:ORDER INPUT/NULL=127"
+
+		// NULL = new change
+		set %OPMODE="DEVICE FC"
+		}
+	
+	else  do {
+		set %IPMODE="NOINT:NOVAL:ORDER INPUT"
+		set %OPMODE="NOOUT"
+		set %NOLOCK=1
+		}
+	
+	//I18N=ON
+	
+	do {
+		new record,stfflg
+		do EXEC
+		}
+	
+	if $G(ER) do { quit ER
+		set reply=$$ERRMSG^PBSUTL($G(RM),$G(ET))
+		if stfflg do STF(record,.reply)
+
+		}
+
+	if $G(MSGS)'="" do {
+		kill field
+		for i=1:1:$L(MSGS,"|") set field(i)=$P(MSGS,"|",i)
+		set reply=$$V2LV^MSG(.field)
+
+		}
+	else  set reply=$$V2LV^MSG($G(RM))
+	quit 0
+
+
+EXEC	// Execute function
+
+	catch vERROR { 
+        	new ET,RM 
+       	 	set ET=vERROR.type 
+
+		if ET["%GTM-" do ZE^UTLERR quit 
+
+		set ET=ET_"-"_vERROR.thrownAt 
+		set RM=vERROR.description 
+		do ^UTLERR 
+		}
+
+	// Execute standard function call
+	do EXT^SCADRV0(%UserID,FN) lock
+
+	quit
+
+
+STF(pkt,reply) 	//Private; Log original message and reply in exception file
+
+	/*
+	This subroutine logs the original client message to an exception
+	RMS file along with the application reply when the message is a
+	store and foward message and rejects.
+	*/
+	
+	catch vERROR { 
+        	new ET,RM 
+       	 	set ET=vERROR.type 
+
+		if ET["%GTM-" do { quit
+			do ZE^UTLERR 
+			do STFGBL(pkt,.reply)
+			}
+		set ET=ET_"-"_vERROR.thrownAt 
+		set RM=vERROR.description 
+		do ^UTLERR 
+		do STFGBL(pkt,.reply)
+		}
+
+	new CONT,fn,JD,x,X
+
+	set JD=%CurrentDate
+	set X=$$DAY^SCADAT(JD,1)_$$MON^SCADAT(JD,1)_$$YEAR^SCADAT(JD,1)
+	set fn=$$SCAU^%TRNLNM("SPOOL","STF_"_X_".FSSP")
+
+	type IO io=Class.new("IO")
+	set io.fileName=fn
+	set io.openParams="WRITE/APPEND/SHARED"
+	set io.timeout=2
+	set io.recordSize=16384
+	do io.open()
+
+	// I18N=OFF
+
+	// Log original client message to RMS
+	set REC=$C(13,10)_pkt
+	do io.write(.REC)
+
+	set REC=$C(13,10)_reply_$C(13,10)
+	do io.write(.REC)
+
+	do io.close()
+
+	// I18N=OFF
+
+	set ER=0 set reply=""
+	
+	quit
+
+
+STFGBL(pkt,reply)	// File record to global
+
+	new I,SEQ,STFMSG,SQ,UID
+
+	set SQ=0
+	set UID=%UserID
+	lock +STF(UID)
+	
+	set SQ=Db.nextVal("STF1","UID=:UID")
+	
+	type RecordSTF1 stf1=Class.new("RecordSTF1")
+	set stf1.uid=UID
+	set stf1.seq=SQ
+	set stf1.tlo=%UserStation
+	do stf1.bypassSave()
+	lock -STF(UID)
+
+	set SEQ=0
+	for I=1:400:$L(pkt) do {
+		set SEQ=SEQ+1
+		set STFMSG=$E(pkt,I,I+399)
+		type RecordSTF stf=Class.new("RecordSTF")
+		set stf.uid=UID
+		set stf.seq=SQ
+		set stf.sseq=SEQ
+		set stf.stfmsg=STFMSG
+		do stf.bypassSave()
+		}
+
+	 for I=1:400:$L(reply) do {
+                set SEQ=SEQ+1
+                set STFMSG=$E(reply,I,I+399)
+		type RecordSTF stf=Class.new("RecordSTF")
+                set stf.uid=UID
+                set stf.seq=SQ
+                set stf.sseq=SEQ
+                set stf.stfmsg=STFMSG
+                do stf.bypassSave()
+                }
+
+	set ER=0 set reply=""
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "59886^43595^Sanchez SCM Administrator^3920"	// Signature - LTD^TIME^USER^SIZE

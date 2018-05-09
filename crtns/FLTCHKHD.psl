@@ -1,0 +1,184 @@
+FLTCHKHD(RecordACN acn,RecordTTX ttx,RecordTRN trn)
+	/*
+	ORIG: CONARTYR - 09/14/2000
+	DESC: Float/Check Hold Posting Program
+
+	---- Comments --------------------------------------------------------
+
+	---- Revision History ------------------------------------------------
+
+	11/28/05 - NATRAJAH - 13734
+		   General DBI3 cleanup.   
+		   
+	01/06/05 - TITOVE - CR 13734
+	   	Cleaned up logic as part of DBI2 project.
+	
+	12/18/03 - CARROLLJ - CR7239
+		Cleanup compile errors.
+
+	06/27/03 - ZWITKOWITSM - 51349
+		Removed references to %A, FSN, and TR().  General clean-up.
+
+	04/29/02 - GARBERB ARQ 49411
+		Modified section INIT to initialize the local variable ZERO.
+		ZERO variable was causing an Undefined error, when it does 
+		not enter the DETAIL line tag, due to this is the only place 
+		the ZERO variable is being set up.
+ 										
+	02/12/00 - myersk ARQ 43555
+		Modified section PLACHOLD to check TSO field CAL for the
+		calendar to use when calculating the hold expiration date
+
+	11/17/00 - ofaltr ARQ 42882
+		Modified section PLACHOLD to fix infinite loop when setting 
+		Expiration Date.
+
+	10/24/00 - ofaltr ARQ 42377
+		Modified section PLACHOLD to make a call into HLDFILE^UHLDSCA
+		to build HLD array.
+		
+	*/
+
+	type Number tamt,XAMT,XCHKFLT,XCID,ZERO
+	type String ETC,TSO,UTSO
+
+	if ttx.exists()="" quit
+
+	set XCHKFLT=""
+	set ZERO=""
+	set XCID=ttx.cid
+	set ETC=ttx.etc
+	set XAMT=ttx.tamt
+	set UTSO=ttx.tso
+	set TSO=ttx.tso
+
+	do OUT^UTSO(.UTSO,TSO)
+
+	if $G(UTSO("FLT"))'="" do DETAIL(.acn,.ttx,"FLT",UTSO("FLT"))
+	if $G(UTSO("CHK"))'="" do DETAIL(.acn,.ttx,"CHK",UTSO("CHK"))
+
+	do FILETOT(.acn,.ttx,.tamt,ZERO,XCID,XCHKFLT)
+
+	quit
+
+
+DETAIL(RecordACN acn,RecordTTX ttx,typ,hdata)
+	// Hold Detail Processing from TSO
+
+
+	type Number days,hamt,x
+	type Public Number tamt,ZERO
+	type Public String XCHKFLT
+
+    	set days=0
+	set tamt(typ)=0
+ 
+	for x=1:1:$L(hdata,"^") do {
+		set hamt=$P(hdata,"^",x)
+		if x=1 set ZERO=hamt quit
+		if hamt'>0 quit
+		set tamt(typ)=tamt(typ)+hamt
+		do PLACHOLD(.acn,.ttx,x-1,hamt,typ,.XCHKFLT)
+		}
+
+	quit
+
+
+PLACHOLD(RecordACN acn,RecordTTX ttx,DAYS,XAMT,XTYP,XCHKFLT)
+	/*
+	Place Hold(s)
+	
+	Returns:
+		   HLDADJ - primary hold allocation array
+	*/
+
+	type Public Number %IDENT,SEQ
+	type Public Date TPD
+	type Public String UTSO
+	type Date HEFD,XEXP
+	type Number KEY,OLDAMT,TOTAMT
+	type String TTXHLD,XCAL
+
+	
+	if $G(%IDENT)="" set %IDENT=""
+
+	// transaction effective date
+	if $G(TPD)="" set TPD=%SystemDate
+	set HEFD=ttx.efd if HEFD="" set HEFD=TPD
+
+	// calculate hold expiration date
+	set DAYS=$G(DAYS) 
+	if DAYS'>0 quit
+
+	set XEXP=HEFD
+	set DAYS=DAYS+1
+	set KEY=$S(XTYP="FLT":7,1:8)
+
+        set XCAL=$G(UTSO("CAL"))
+	if XCAL="" do {
+		if KEY = 7 set XCAL = "IBS"
+		// Check holds use different calendar
+		else  set XCAL = "FED"
+	}
+	
+        for XEXP=TJD:1 if $$BD^UNBD(XEXP,XCAL) set DAYS=DAYS-1 if DAYS=0 quit
+
+	// set up [HLDD]CHKFLT field
+	set XCHKFLT=$G(XCHKFLT)_XTYP_"#"_XEXP_"#"_XAMT_"~"
+
+	set OLDAMT=0
+
+	do HLDFILE^UHLDSCA(KEY,HEFD,XEXP,XAMT,.TTXHLD,SEQ)
+
+	if KEY=7 set acn.balcol=acn.balcol-XAMT
+	else  set acn.chkhld=acn.chkhld+XAMT
+
+	quit
+
+
+FILETOT(RecordACN acn,RecordTTX ttx,XAMT,ZERO,XCID,XCHKFLT)
+	// File total amounts to DAYENDRCC0, HLDD, & HLDDTL
+
+	type Public Date XTJD
+	type Public String TTXHLDD,UTSO
+	type Public Number BRCD,HLDD
+	type String UID,XCHKAMT,XRT
+	type Number CHKSEQ,HLDSEQ,XCHKTYP
+
+	if $G(XTJD)="" set XTJD=%SystemDate
+
+	set XCHKAMT=ttx.tamt
+	set (CHKSEQ,HLDSEQ)=+ttx.trc
+	set XRT=$G(UTSO("RT"))
+	set XCHKTYP=ttx.chktyp
+	set ZERO=+$G(ZERO)
+
+	// allows use check hold amount unless zero then use float hold amount
+
+	set XAMT=$G(XAMT("CHK"))
+	if XAMT="" set XAMT=$G(XAMT("FLT"))
+
+	if HLDSEQ=0 set HLDSEQ=Db.prevKey("HLDD","XTJD,XCID,999999999999")+1
+	if CHKSEQ=0 set CHKSEQ=$O(HLDD(XCID,HLDSEQ,""),-1)+1
+
+	if $G(BRCD)="" set BRCD=ttx.brcde
+	set UID=ttx.uidt
+
+	// only update HLDD if holds were placed (vs. zero day amount)
+	if XAMT>0 set TTXHLDD(XCID,HLDSEQ,CHKSEQ)=XCHKTYP_"|"_XRT_"|"_XCHKAMT_"|"_XAMT_"|"_XCHKFLT
+
+	// only update DAYENDRCC0 if check holds were placed
+	if '$G(XAMT("CHK")) quit
+
+	if acn.regcc'=1 quit
+
+	type RecordDAYENDRCC0 dercc0=Db.getRecord("DAYENDRCC0","XTJD,XCID",1)
+
+	set dercc0.agg=dercc0.agg+XCHKAMT
+	set dercc0.one=dercc0.one+ZERO
+
+	do dercc0.bypassSave()
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60232^21899^Hari Natrajan^4022"	// Signature - LTD^TIME^USER^SIZE

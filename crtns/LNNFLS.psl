@@ -1,0 +1,240 @@
+LNNFLS(RecordLN ln,NFBRCD,NFUID,NFTRC)	//Recognize Net Fee Portion of Loan Sold
+	/*
+
+	This routine is called by ^LNLS5A.  As loans are sold, the portion on
+	net fee income deferred which is associated with the portion sold may
+	be taken into income.  This entry will be posted by the normal net fee
+	teller.
+
+	----------   Revision History   ------------------------------------
+
+	01/13/04 - Erik Scheetz - CR7798
+		   Replaced references to LNCYC (obsoleted) and replace
+		   with appropriate LNCYC* table.	
+		
+	01/09/03 - GRAY - 51351
+		   Modified call at the top to include the variables NFBRCD,
+		   NFUID and NFTRC which are set up in LNLS5A.
+	
+	10/16/02 - GRAY - 49794
+		   Rewrote most of converted procedure.
+	
+	04/05/02 - VETSENM - 49794
+                   Converted to PSL.	 
+
+	*/
+
+	set ER=0
+	if 'ln.ptsp quit
+
+	new CRCD,I,LCITEM,P,PAYEE,PLAN,S
+	set CRCD=ln.crcd
+	
+	type RecordLNCYCPTS lncycpts=Db.getRecord("LNCYCPTS","CID=:CID,TYP='PTS'",1)
+	set PAYEE=lncycpts.payee
+	set PLAN=lncycpts.plan
+
+	if (PAYEE="")!(PLAN="") do LOGERR(.ln) do NX quit
+
+	if '$D(PTS(PLAN)) do PINI(.ln,PLAN)
+	if ER do LOGERR(.ln) do NX quit
+
+	// Is the loan already sold? Percent owned
+	set PO=100
+
+	// Accumulate the portion sold
+
+	type ResultSet rs=Db.select("PSEQ","LNLS6","CID=:CID")
+	if 'rs.isEmpty() while rs.next() do {
+		set S=rs.getCol(1)
+		type RecordLNLS6 lnls6=Db.getRecord("LNLS6","CID=:CID,PSEQ=:S")
+		set I=lnls6.incd
+		set P=lnls6.pl
+
+		if I=INCD,P=PL quit
+		
+		type RecordLNLS2 lnls2=Db.getRecord("LNLS2","INCD=:I,PL=:P")
+
+		// Do not change amounts if pool was swapped
+		if lnls2.swap quit		
+
+		type RecordLNLS6B lnls6b=Db.getRecord("LNLS6B","CID=:CID,PSEQ=:S")
+
+		set PO=PO-$S(lnls2.picm=6:lnls6b.ops,1:lnls2.pp)
+		}		
+
+	if PO<0 set PO=0
+
+	// Amortized to date
+	set AOTD=lncycpts.caltd
+
+	// Net Fee Original Amount
+	set AO=lncycpts.amt
+
+	// Amortizing a negative amount
+	set NEG=AO<0
+
+	// Non performing deferred
+
+	set NPDA=lncycpts.npda
+
+	// Amort balance (what is left)
+	set AOB=AO-AOTD-NPDA
+
+	// Recognize the balance if this
+	if PP+(100-PO)'<100 do {
+		set %AMT=AOB 
+		do FILE(.lncycpts,.ln) 
+		}
+
+	// Loan sold share
+	set %AMT=$$^SCARND(AOB*PP/PO,0,CID)
+
+	if '%AMT!('NEG&(%AMT<0)) do { quit		
+		set ER=1 
+		// Amount Processed Equal to Zero
+		set ET=ERRM(6) 
+		do LOGERR(.ln) 
+		do NX
+		}
+	
+	quit
+
+FILE(RecordLNCYCPTS lncycpts,RecordLN ln)	// File updates
+	/*
+	Check to see if the loan is still in non-accrual status.  If it is,
+	we will defer that amount until the loan has returned to repayment.
+	*/
+
+	if ln.nai do {
+		set NPDA=NPDA+%AMT 
+		set %AMT=0 
+		set ER=1 
+        	// Account in non-accrual, no amortization
+		set ET=ERRM(7)
+		}
+
+	//Update LNCYCPTS
+	set lncycpts.caltd=AOTD+%AMT
+	set lncycpts.ramt=%AMT
+	set lncycpts.npda=NPDA
+	do lncycpts.bypassSave()
+
+	if $G(%REPOST) do NX quit
+
+	if ln.nai!(ER) do LOGERR(.ln) do NX quit
+
+	// file into TTX
+
+        type RecordTTX ttx()
+ 
+        set ttx(NFTRC)=Class.new("RecordTTX")
+ 
+ 	set ttx(NFTRC).tjd=%SystemDate
+        set ttx(NFTRC).brcd=NFBRCD
+        set ttx(NFTRC).uid=NFUID
+        set ttx(NFTRC).tseq=NFTRC
+		
+        set ttx(NFTRC).cid=DGL
+	if %AMT<0 do {
+        	set ttx(NFTRC).itc=CITC
+        	set ttx(NFTRC).etc=CTC
+        	set ttx(NFTRC).tamt=-%AMT
+		}
+	else  do {
+       		set ttx(NFTRC).itc=DITC
+        	set ttx(NFTRC).etc=DTC
+        	set ttx(NFTRC).tamt=%AMT
+ 		}
+	
+        set ttx(NFTRC).efd=%EffectiveDate
+        set ttx(NFTRC).tlo=%UserStation
+	set TCMT="Net Fee "_CID
+        set ttx(NFTRC).tcmt=TCMT
+        set ttx(NFTRC).cdt=%CurrentDate
+        set ttx(NFTRC).tim=%CurrentTime
+        set ttx(NFTRC).brcde=BRCD
+	set ttx(NFTRC).trc=NFTRC
+        set ttx(NFTRC).uidt=%UserID
+	if $L(CRCD) set ttx(NFTRC).crcd=CRCD
+
+	set NFTRC=NFTRC+1
+
+	// File PLAN totals in ^TTX
+
+        set ttx(NFTRC)=Class.new("RecordTTX")
+ 
+ 	set ttx(NFTRC).tjd=%SystemDate
+        set ttx(NFTRC).brcd=NFBRCD
+        set ttx(NFTRC).uid=NFUID
+        set ttx(NFTRC).tseq=NFTRC
+		
+        set ttx(NFTRC).cid=CGL
+	if %AMT<0 do {
+        	set ttx(NFTRC).itc=DITC
+        	set ttx(NFTRC).etc=DTC
+        	set ttx(NFTRC).tamt=-%AMT
+		}
+	else  do {
+       		set ttx(NFTRC).itc=CITC
+        	set ttx(NFTRC).etc=CTC
+        	set ttx(NFTRC).tamt=%AMT
+ 		}
+	
+        set ttx(NFTRC).efd=%EffectiveDate
+        set ttx(NFTRC).tlo=%UserStation
+        set ttx(NFTRC).tcmt=DES
+        set ttx(NFTRC).cdt=%CurrentDate
+        set ttx(NFTRC).tim=%CurrentTime
+        set ttx(NFTRC).brcde=BRCD
+	set ttx(NFTRC).trc=NFTRC
+        set ttx(NFTRC).uidt=%UserID
+	if $L(CRCD) set ttx(NFTRC).crcd=CRCD
+
+	set NFTRC=NFTRC\1000*1000+1001
+
+	quit	
+
+NX	//
+	kill NPDA,AO,AOB,JD,NJD,N,%AMT,AOTD
+	quit
+
+EXIT	//
+	kill NFBRCD,CGL,CITC,CTC,DITC,DGL,DT,DTC,DES,PTS,ERRM,ET,I,lnls6,TSEQ,lnls2,UID
+	quit
+
+LOGERR(RecordLN ln)	// Log error in exception file
+
+        set ln.bal=BAL
+	// Loan Points Item Posting
+	do LOG^UTLEXC($T(+0),"*",$$^MSG(7074)_"|1",$G(CID),$G(%ZTSEQ),$G(ET),$G(BAL))      
+	kill ET,%ZTSEQ
+	do EXIT
+	quit
+
+PINI(RecordLN ln,String PLAN)	// Init plan data
+
+	// ~p1 Net Fee Plan ~p2
+	set DES=$$^MSG(4156,$$DAT^%ZM(%SystemDate,$G(%MSKD)),PLAN)
+
+        type RecordAOAMO aoamo=Db.getRecord("AOAMO","TYP='PTS',PAYEE=:PAYEE,PLAN=:PLAN")
+	
+	if $G(%REPOST) quit
+
+        // Posting Tran Code Not Defined - Posting Halted
+ 	set DTC=aoamo.dtran if '$L(DTC) set ER=1 set ET=ERRM(4) quit
+	set CTC=aoamo.ctran if '$L(CTC) set ER=1 set ET=ERRM(4) quit
+
+        // Posting Offset Account Not Defined - Posting Halted
+	set DGL=aoamo.dgl if '$L(DGL) set ER=1 set ET=ERRM(5) quit
+	set CGL=aoamo.cgl if '$L(CGL) set ER=1 set ET=ERRM(5) quit
+
+	type RecordTRN trn=Db.getRecord("TRN","ETC=:DTC")
+	set DITC=trn.itc
+
+	type RecordTRN trn=Db.getRecord("TRN","ETC=:CTC")
+	set CITC=trn.itc
+		
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "59886^43538^Sanchez SCM Administrator^5395"	// Signature - LTD^TIME^USER^SIZE

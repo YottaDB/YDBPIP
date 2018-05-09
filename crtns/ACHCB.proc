@@ -1,0 +1,1812 @@
+ACHCB	  /*
+ORIG: satyanas - 09/06/2005
+DESC: Create Batch(s) for ACH Originations
+
+---- Comments --------------------------------------------------------
+
+---- Revision History ------------------------------------------------
+
+	06/20/06 - MBUIM - CR 21461
+		   Report SCA220 did dot file account into rejected report
+		   because it did not file in TTX due to invalid record 
+		   length (95) error returned. This was because the length
+		   of achi.borig used in ACHDTL6 section is 9 where by it
+		   should be 8 as represented by local variable BORIG1 set 
+		   in ACHBCH5 section. Also modified to use Class.new
+		   Replaced ach1.borig with public variable BORIG1
+		   Modified BUMP section to swap dates as the incorrect last
+		   changed date defaulted.
+		   Modified OFFBLD,ACHDTL6 and TTXSET sections to use Class.new
+		   instead of Db.getRecord as these are new records.
+		   Modified TTXBLD and SRCF sections to get the correct columns from
+		   TMPRPT4 set in section ACHDTL6
+		   Modified IRADTL and TTXSET sections to remove the ETC(ETC)
+		   array and reference trn columns.
+		   Scoped several variables as they were not defined.
+	
+	04/18/06 - Satyanas - 20696
+		   Modified the section FILACH, changed the object name to instantiate the object
+		   properly for the table ACHFIL and used trim() for FDEST and FORIG column because 
+		   if it is taking the blank with the left justified then it is not inserting the 
+		   data for these columns to the table.
+		
+	03/30/06 - Satyanas - 20309
+		   Added the getMode() condition in OFFBLD and TTXSET section to avoid 
+		   the runtime error while it is inserting the same data to TTX table.
+		   Declared RT as local in the ACHDTL6 section.
+		   
+	03/03/06 - Satyanas - 19824
+		   Added the condition in the ACHDTL6 section to check if there is no 
+		   record in the TMPRPT3 table for the same processID,KEY1,KEY2 and KEY3 
+		   then it will generate the new record.	
+	
+	02/15/06 - Satyanas - 19534
+		   Argument CID passed for the section LOGEXC.
+	
+	09/02/05 - Satyanas - 16675
+		   Converted the M to PSL.
+----------------------------------------------------------------------		   
+ */
+ 	do INIT
+	quit
+
+INIT	//---------------------------------------------
+
+	type Boolean OFFSET
+
+	set OFFSET=0
+	
+	do SCREEN
+	quit
+	
+
+SCREEN	// Prompt for 'Continue or Quit'
+	
+	type public Number CONT
+	type public String %READ,%TAB(),VFMQ
+	type Number FILE,FPOS(,)
+	type String N,TCTBL(),TIME,TPD
+	
+	set %TAB("CONT")=".CONT2"
+	set %READ="@@%FN,,,CONT/REQ"
+	
+	do ^UTLREAD 
+	
+	if VFMQ="Q" quit
+	
+	if 'CONT quit
+	
+	// Table of pointers for each record type
+	
+	set FPOS(1,1)=5,FPOS(1,2)=17
+	set FPOS(5,1)=1,FPOS(5,2)=13
+	set FPOS(6,1)=1,FPOS(6,2)=11
+	set FPOS(7,1)=1,FPOS(7,2)=5
+	set FPOS(8,1)=1,FPOS(8,2)=11
+	set FPOS(9,1)=1,FPOS(9,2)=8
+	
+	set FILE=0
+		
+	type ResultSet rs=Db.select("ACHTC,DESC,DC","STBLACHTC")
+	while rs.next() do {
+		set N=rs.getCol("ACHTC")
+	    	set TCTBL(N)=(rs.getCol("DESC"))_"|"_(rs.getCol("DC"))
+	 	}
+	  
+	type ResultSet rs1=Db.select("FILE","ACHDTL","TJD=:%SystemDate","FILE DESC")
+	
+	if rs1.next() set FILE=rs1.getCol("FILE")
+	
+	set TIME=%CurrentTime,TPD=%SystemDate
+		
+	do COID 
+	quit	
+	
+
+COID    //-----------------------------------------------
+
+	type public Boolean ER,OFFSET
+	type public Number LEADDT
+	type public String TCTBL(),XACHTMP(,,)
+	type Boolean BUMP,PRENOTE,PREREQ	
+	type Number ACHSEQ,CID
+	type String CNAME,COID,DC,PTYPE
+	
+	type public ResultSet rs=Db.select("COID","ACH")
+	while rs.next() do {
+		set COID = rs.getCol("COID")
+	    
+		type ResultSet rs1=Db.select("PTYPE","ACH1","COID=:COID") 
+		while rs1.next() do {         
+			set PTYPE=rs1.getCol("PTYPE")
+                
+			type RecordACH1 ach1=Db.getRecord("ACH1","COID=:COID,PTYPE=:PTYPE",1)
+			set CNAME=ach1.cname
+		 	
+		 	// Calculate DATNPs that need to have records created
+			do LEADDT(ach1.lead) 
+		
+			// Skip, too early based on beginning date
+			if ach1.bdate,LEADDT<ach1.bdate quit	
+	 	
+			type ResultSet rs2=Db.select("SEQ","ACH2","COID=:COID AND PTYPE=:PTYPE")
+			while rs2.next() do {
+
+         			set ACHSEQ=rs2.getCol("SEQ")
+
+        	                type RecordACH2 ach2=Db.getRecord("ACH2","COID=:COID,PTYPE=:PTYPE,SEQ=:ACHSEQ",1)
+		
+                	        if ach1.edate ,ach1.edate < ach2.datnp quit
+			
+				// Expired
+	                        if ach2.edate , ach2.edate < ach2.datnp quit 
+
+				//Debit/credit flag
+				if ach2.ibstc do {	
+					type RecordTRN trn=Db.getRecord("TRN","ETC=:ach2.ibstc",1)
+					set DC= + (trn.itc).extract(1)
+	       				}
+	       		
+				else  set DC=+(TCTBL(ach2.achtc).get()).piece("|",2)
+		
+				// OK to bump DATNP & DATLP
+       				set BUMP=1 
+       		
+       				set CID=ach2.cid
+       				
+       				// Flag to indicate if sending prenote
+				set PRENOTE=0 
+		
+				/* Check prenote status and send for foreign debits only,
+				   if prenote option on and not already sent. */
+		
+				// Prenote required?
+				set PREREQ=0 
+
+				if 'ach2.ibstc,ach1.preopt,'ach2.pdate set PREREQ=1
+		
+				if PREREQ set BUMP=0 do PRENOTE(.ach1,.ach2)
+		
+				// Not time and no prenote, skip for now
+				if ach2.datnp>LEADDT,'PRENOTE quit 
+		
+				// Can't send detail if prenote required
+				if PREREQ,'PRENOTE quit 
+
+				do VERIFY(.ach1,.ach2)
+				// Exceeds maximum DR/CR amount
+				if ER do LOGEXC(CID) set OFFSET=0 quit
+			 
+				if OFFSET set OFFSET=0
+		
+				// Create detail records
+			
+				do ACHDTL6(.ach1,.ach2) 
+			
+				/*Do not proceed for single entry (no frequency) records and
+				  set the Expiration Date to be less than DATNP to prevent
+				  creation of same record if ACHCB is run more than once.*/
+
+				if ach2.fre="" do { quit
+					type public RecordACH2 ach2=Db.getRecord("ACH2","COID=:COID,PTYPE=:PTYPE,SEQ=:ACHSEQ",1)
+					set ach2.edate=ach2.datnp-1
+					do ach2.save()
+ 					}
+ 			
+				set ER=0 
+		  
+				if BUMP do BUMP(.ach2) if ER do LOGEXC(CID) set OFFSET=0,ER=0 quit
+		
+				// DATNP still within lead time window; force another pass on this ACHSEQ
+				if ach2.datnp'>LEADDT set ACHSEQ=ACHSEQ-.5
+				}   
+			    
+				do ACHBCH8
+			}
+		}
+
+	do ACHFIL9
+	
+	do TTXBLD
+
+	quit
+	
+	
+LEADDT( Number LEAD)	// Calculate DATNPs that need to have records created
+
+	type public Number LEADDT
+	type Date I
+	
+	set LEADDT=LEAD
+	
+	for I=(%SystemDate + 1):1 quit:'LEADDT  do {
+		if I.isBusDate("FED") set LEADDT=LEADDT-1
+		}
+	
+	// Include all DATNP's up to and including this date
+	set LEADDT=I 
+	
+	quit
+	
+
+PRENOTE( RecordACH1 ach1,
+	 RecordACH2 ach2)	// Check prenote status and set PRENOTE variable
+
+	type public Boolean ER
+	type Boolean PRENOTE
+	type Date I,JD,PRENOTDT
+	type Number CNT,PREDTMP
+		
+	if ach1.preopt=1 do {
+		set CNT=0,JD=ach2.datnp
+				
+		for  quit:CNT'<6  set PRENOTDT=JD.nextFreqDate(ach2.fre) quit:ER  do {
+			for I=JD + 1:1  quit:(I'<PRENOTDT)!(CNT'<6)  do {
+				if I.isBusDate("FED") set CNT=CNT + 1
+				}
+			set JD=PRENOTDT
+			}
+		}
+		
+	else  do {
+		set PREDTMP=0
+		for I=ach2.datnp-1:-1 quit:PREDTMP'<ach1.predays  if I.isBusDate("FED") set PREDTMP=PREDTMP + 1 
+		set PRENOTDT=I
+		}
+		
+	if PRENOTDT'>%SystemDate set PRENOTE=1
+	
+	quit
+
+	
+ACHFIL1( RecordACH1 ach1)	// Build the file header portion of ACHFIL file
+
+	type public Number FILE
+	type public String FDEST,FORIG,TIME
+	type Date FDATE
+	type Number HR,MIN,RT,X
+	type String DATA,FTIME,REC
+	
+	// Batch creation date
+	set DATA=$$DATE(%CurrentDate,6),FDATE=DATA 
+	
+	set HR=TIME\3600,X=TIME/3600,MIN=((X-(HR*.6))_"00").extract(2,3)
+	set DATA=$$FILL(HR_MIN,4,"R",0),FTIME=DATA
+	set REC=FDATE_"|"_FTIME_"|||1|01"
+	
+	set ach1.fdate=%CurrentDate
+	set ach1.ftime=TIME
+	do ach1.save()
+
+	set DATA=$$FILL(ach1.fdest,9,"R",0),REC=REC_"| "_DATA,FDEST=DATA 
+	set DATA=$$FILL(ach1.forig,9,"R",0),REC=REC_"| "_DATA,FORIG=DATA 
+	
+	// Tape date & time unknown
+	set REC=REC_"|000000|0000" 
+	
+	// File ID modifier
+	set DATA=$$FILL(FILE,1,"R",0),REC=REC_"|"_DATA 
+	
+	// Record length|Blocking factor|Format code
+	set REC=REC_"|094|10|1" 
+	type RecordUTBLACHRT utblfdest=Db.getRecord("UTBLACHRT","KEY=:FDEST",1)
+	set DATA=$$FILL(utblfdest.iname,23)
+	
+	// Description of the destination
+	set REC=REC_"|"_DATA 
+	type RecordUTBLACHRT utblforig=Db.getRecord("UTBLACHRT","KEY=:FORIG",1)
+	set DATA=$$FILL(utblforig.iname,23)
+	
+	// Description of the origin
+	set REC=REC_"|"_DATA 
+	
+	// Reference code
+	set REC=REC_"|        " 
+	
+	set RT=1 do FILEIT
+	
+	quit
+	
+
+ACHFIL9	// Build the file trailer portion of the ACHFIL file
+
+	type public Number BATCH,TCAMT(,),TDAMT(,)
+	type public String GETFILE(,),EHASH(,),TOT6(),TOT7()
+	type Number FILE,REC,RT,X
+	type String B,DATA,ZFDEST,ZFORIG
+	
+	set ZFDEST=""
+	
+	for  set ZFDEST = GETFILE(ZFDEST).order() quit:ZFDEST.isNull()  do {
+		set ZFORIG=""
+
+		for  set ZFORIG = GETFILE(ZFDEST,ZFORIG).order() quit:ZFORIG.isNull()  do {
+			set FILE = GETFILE(ZFDEST,ZFORIG)
+			set REC = 9
+			set BATCH = EHASH(FILE,"").order(-1)
+		
+			// Batch cnt
+			set DATA = $$FILL(BATCH,6,"R",0),REC = REC_"|"_DATA 
+			set DATA = TOT6(FILE) + TOT7(FILE) + (BATCH*2) + (FILE*2) + (9.9\10)
+		
+			// Block cnt
+			set DATA = $$FILL(DATA,6,"R",0),REC = REC_"|"_DATA 
+			set DATA = $$FILL(TOT6(FILE) + TOT7(FILE),8,"R",0),REC = REC_"|"_DATA
+	
+			set DATA = 0,B = ""
+
+			for  set B = EHASH(FILE,B).order() quit:B.isNull()  do {
+				set DATA = DATA + EHASH(FILE,B)
+				}
+			
+			set X = DATA.length() if X>10 set DATA = DATA.extract(X-9,X)
+			set DATA = $$FILL(DATA,10,"R",0),REC = REC_"|"_DATA
+			
+			set DATA = 0,B = ""
+
+			for  set B = TDAMT(FILE,B).order() quit:B.isNull()  do {
+				set DATA = DATA + TDAMT(FILE,B)
+				}
+		
+			// Total debits in file
+			set DATA = $$DOL(DATA,12),REC = REC_"|"_DATA 
+			
+			set DATA = 0,B = ""
+		
+			for  set B = TCAMT(FILE,B).order() quit:B.isNull()  do {
+				set DATA = DATA + TCAMT(FILE,B)
+				}
+			
+			// Total credits in file
+			set DATA = $$DOL(DATA,12),REC = REC_"|"_DATA 
+			set REC = REC_"|                                       "
+	
+			set RT = 9 do FILEIT
+			}
+		}
+	quit
+
+	
+ACHBCH5( RecordACH1 ach1,
+	 RecordACH2 ach2)	// Build the batch header portion of the ACHBCH file
+	
+	type public Number BATCH,FILE
+	type public String BORIG(,),BORIG1,DATA
+	type Number RT
+	type String REC
+		
+	set REC="5"
+	
+	// Patch in ACHBCH8 when the infor is available
+	set REC=REC_"|200" 
+	
+	// CNAME
+	set DATA=$$FILL(ach1.cname,16),REC=REC_"|"_DATA 
+	
+	// DISCR
+	set DATA=$$FILL(ach1.discr,20),REC=REC_"|"_DATA 
+	
+	// COID
+	set DATA=$$FILL(ach1.coid,10),REC=REC_"|"_DATA 
+	
+	// SEC
+	set DATA=$$FILL(ach1.sec,3),REC=REC_"|"_DATA 
+	
+	// CED
+	set DATA=$$FILL(ach1.ced,10),REC=REC_"|"_DATA 
+	set REC=REC_"|      "
+	
+	// Effective date
+	set DATA=$$DATE(ach2.datnp,6),REC=REC_"|"_DATA 
+	
+	// Blanks
+	set REC=REC_"|   " 
+	
+	// OSC
+	set REC=REC_"|1" 
+	set DATA=ach1.borig,DATA=DATA.extract(1,(DATA.length())-1)
+	
+	// BORIG
+	set DATA=$$FILL(DATA,8,"R",0),BORIG1=DATA,REC=REC_"|"_DATA 
+	
+	// Save for use in ACHBCH8
+	set BORIG(FILE,BATCH)=BORIG1 
+	set DATA=$$FILL(BATCH,7,"R",0),REC=REC_"|"_DATA
+	set RT=5 
+	
+	do FILEIT
+	quit
+	
+	
+ACHBCH8	// Build the batch trailer portion of the ACHBCH file
+
+	type public Date DATNP()
+	type public Number BATCH,FORGN(,)
+	type public String ACHTMP(,,,),BORIG(,),COID(,),CRIN(,),DRIN(,),EHASH(,)
+	type public String XACHTMP(,,),GETFILE(),PTYPE(,),SRC(,),TCAMT(,),TDAMT(,),TOT6(,),TOT7(,),TTCAMT(,),TTDAMT(,)
+	type Number DRCRIN,FILE,RT,X,Y
+	type String DATA,REC,XDATNP,XPTYPE,XSEQ,XSRC,ZCOID,ZDATNP,ZFDEST,ZFORIG,ZPTYPE
+	
+	set ZFDEST=""
+	
+	for  set ZFDEST=GETFILE(ZFDEST).order() quit:ZFDEST.isNull()  do {
+		set ZFORIG=""
+		
+		for  set ZFORIG=GETFILE(ZFDEST,ZFORIG).order() quit:ZFORIG.isNull()  do {
+			set FILE=GETFILE(ZFDEST,ZFORIG)	
+			set ZCOID=""
+			
+			for  set ZCOID=GETFILE(ZFDEST,ZFORIG,ZCOID).order() quit:ZCOID.isNull()  do {
+				set ZPTYPE=""
+			
+				for  set ZPTYPE=GETFILE(ZFDEST,ZFORIG,ZCOID,ZPTYPE).order() quit:ZPTYPE.isNull()  do {
+					set ZDATNP=""
+				
+					for  set ZDATNP=GETFILE(ZFDEST,ZFORIG,ZCOID,ZPTYPE,ZDATNP).order() quit:ZDATNP.isNull()  do {
+						set BATCH=GETFILE(ZFDEST,ZFORIG,ZCOID,ZPTYPE,ZDATNP)
+						set REC="8"
+
+						// Create a value to translate -  Service Class Code
+						set DRCRIN=DRIN(FILE,BATCH)+CRIN(FILE,BATCH)
+						set DATA=$S(DRCRIN=3:200,DRCRIN=1:225,1:220)
+
+						// Patch batch header with SCC
+				  		type RecordACHBCH achbch=Db.getRecord("ACHBCH","TJD=:%SystemDate,FILE=:FILE,BATCH=:BATCH",1)
+				  		if achbch.getMode() do {
+							set achbch.SCC5=DATA
+							do achbch.save()
+				  			}				
+						// Service Class Code
+						set REC=REC_"|"_DATA 
+						set DATA=TOT6(FILE,BATCH)+TOT7(FILE,BATCH)
+		
+						// Entry/Addenda count
+						set DATA=$$FILL(DATA,6,"R",0),REC=REC_"|"_DATA 
+						set DATA=EHASH(FILE,BATCH),X=DATA.length()
+		
+						if X>10 set DATA=DATA.extract(X-9,X)
+		
+						// Keep only the last 10 positions
+						set EHASH(FILE,BATCH)=DATA 
+		
+						// EHASH
+						set DATA=$$FILL(DATA,10,"R",0),REC=REC_"|"_DATA 
+
+						// TDAMT
+						set DATA=$$DOL(TDAMT(FILE,BATCH),12),REC=REC_"|"_DATA 
+		
+						// TCAMT
+						set DATA=$$DOL(TCAMT(FILE,BATCH),12),REC=REC_"|"_DATA
+		 
+						// COID
+						set DATA=$$FILL(COID(FILE,BATCH),10),REC=REC_"|"_DATA
+		 
+						// Reserved (blanks)
+						set REC=REC_"|                   |      " 
+		
+						// BORIG
+						set DATA=$$FILL(BORIG(FILE,BATCH),8,"R",0),REC=REC_"|"_DATA 
+						set DATA=$$FILL(BATCH,7,"R",0),REC=REC_"|"_DATA
+		
+						// PTYPE for reporting
+						set DATA=$$FILL(PTYPE(FILE,BATCH),10),REC=REC_"|"_DATA 
+		
+						// Foreign (y/n)
+						set DATA=$$FILL(FORGN(FILE,BATCH),1),REC=REC_"|"_DATA 
+		
+						// Build array of information to be applied to ^TTX
+		
+						// No new offsets to log
+						if TDAMT(FILE,BATCH)=TTDAMT(FILE,BATCH),TCAMT(FILE,BATCH)=TTCAMT(FILE,BATCH) set RT=8 do FILEIT quit
+		
+						set XSRC=SRC(FILE,BATCH),XDATNP=DATNP(FILE,BATCH)
+						set XPTYPE=PTYPE(FILE,BATCH)
+	
+						set XSEQ=ACHTMP(XSRC,XDATNP,XPTYPE,"").order(-1)+1
+		
+						if XSEQ.find(".") set XSEQ=XSEQ-.5
+	
+						// Save  to reference in GETUID subrtn
+						set XACHTMP(XSRC,XDATNP,XPTYPE)=ZCOID 
+
+						// Save total debit amount for ^TTX
+						set ACHTMP(XSRC,XDATNP,XPTYPE,XSEQ)=TDAMT(FILE,BATCH)-TTDAMT(FILE,BATCH) 
+		
+						// "  "    credit  "     "   "
+						set ACHTMP(XSRC,XDATNP,XPTYPE,XSEQ+.5)=TCAMT(FILE,BATCH)-TTCAMT(FILE,BATCH) 
+	
+						set X=COID(FILE,BATCH),Y=PTYPE(FILE,BATCH)
+		
+						// Save info for offset building
+						
+						type RecordACH1 ach=Db.getRecord("ACH1","COID=:X,PTYPE=:Y",1)
+						if ach.getMode() do {
+							set ACHTMP(XSRC,XDATNP,XPTYPE)=ach.forig_"|"_ach.fdest_"|"_ach.discr_"|"
+							set ACHTMP(XSRC,XDATNP,XPTYPE)=ACHTMP(XSRC,XDATNP,XPTYPE)_ach.sec_"|"_ach.ced_"|"_ach.osc_"|"_ach.borig
+							set ACHTMP(XSRC,XDATNP,XPTYPE)=ACHTMP(XSRC,XDATNP,XPTYPE)_"|"_ach.preopt_"|"_ach.predays_"|"_ach.offdrcid
+							set ACHTMP(XSRC,XDATNP,XPTYPE)=ACHTMP(XSRC,XDATNP,XPTYPE)_"|"_ach.offdretc_"|"_ach.offcrcid_"|"_ach.offcretc    
+					        	set ACHTMP(XSRC,XDATNP,XPTYPE)=ACHTMP(XSRC,XDATNP,XPTYPE)_"|"_ach.lead_"|"_ach.fdate_"|"_ach.ftime_"|"_ach.vfreq
+				       			set ACHTMP(XSRC,XDATNP,XPTYPE)=ACHTMP(XSRC,XDATNP,XPTYPE)_"|"_ach.bdate_"|"_ach.edate_"|"_ach.src_"|"_ach.maxamtc
+				       			set ACHTMP(XSRC,XDATNP,XPTYPE)=ACHTMP(XSRC,XDATNP,XPTYPE)_"|"_ach.maxamtd_"|"_ach.cname_"|"_ach.city_"|"_ach.state    
+					        	set ACHTMP(XSRC,XDATNP,XPTYPE)=ACHTMP(XSRC,XDATNP,XPTYPE)_"|"_ach.mzip_"|"_ach.cntry_"|"_ach.addr_"|"_ach.contact
+					       		set ACHTMP(XSRC,XDATNP,XPTYPE)=ACHTMP(XSRC,XDATNP,XPTYPE)_"|"_ach.phone_"|"_ach.ocaglflg_"|"_ach.odaglflg_"|"_ach.preauth  
+							}				
+               						// Tot DR sum
+						set TTDAMT(FILE,BATCH)=TDAMT(FILE,BATCH) 
+			
+						// Tot CR sum
+						set TTCAMT(FILE,BATCH)=TCAMT(FILE,BATCH)
+						set RT=8 
+			
+						do FILEIT
+						}							
+					}
+				}
+			}
+		}	
+	
+	do FILEOFF
+	quit
+
+
+FILEOFF	/* File offset transactions for all transactions into the end
+	   of each batch (total of on-us & foreign). */       
+	 
+	type public String ZCOID,ZPTYPE
+	type public Number TCAMTA(,),TDAMTA(),TTDAMTA(,),TTCAMTA(,)
+	type Number A1,A2,A3,A4,TAMT
+	type String FLAG,ZBATCH,ZFILE
+	
+	set ZFILE=""
+	
+	for  set ZFILE=TDAMTA(ZFILE).order() quit:ZFILE.isNull()  do {
+		set ZBATCH=""
+	
+		for  set ZBATCH=TDAMTA(ZFILE,ZBATCH).order() quit:ZBATCH.isNull()  do {
+			set A1 = TTDAMTA(ZFILE,ZBATCH),A2 = TDAMTA(ZFILE,ZBATCH)
+			set A3 = TTCAMTA(ZFILE,ZBATCH),A4 = TCAMTA(ZFILE,ZBATCH)
+			set TAMT = A2-(A1*100) if TAMT set FLAG = "DR" do OFFBLD(ZCOID,ZPTYPE,ZFILE,ZBATCH)
+			set TAMT = A4-(A3*100) if TAMT set FLAG = "CR" do OFFBLD(ZCOID,ZPTYPE,ZFILE,ZBATCH)
+		
+			// Tot DR sum
+			set TTDAMTA(ZFILE,ZBATCH) = A2	
+		
+			// Tot CR sum 
+			set TTCAMTA(ZFILE,ZBATCH) = A4 	
+			}
+		}	
+	quit	
+
+	
+OFFBLD( String ZCOID,
+	String ZPTYPE,
+	String ZFILE,
+	String ZBATCH)
+	 
+	type public Number BRCD,BORIG,BATCH,TAMT,TRC,TSEQ
+	type public Date DATNP(,)
+	type public String COID(,),BORIG(,),FLAG,PTYPE(,),SEQCNT(),TRC(,,),%UserID
+	type Number ETC,FILE,RT,SKIP
+	type String CID,DATA,REC,TRACE,X,Y
+		
+	set REC="6"
+	
+	// Get COID/PTYPE
+	set ZCOID=COID(ZFILE,ZBATCH),ZPTYPE=PTYPE(ZFILE,ZBATCH)
+	 
+	// Get the ACH1 info for this COID/PTYPE
+	type RecordACH1 ach1=Db.getRecord("ACH1","COID=:ZCOID,PTYPE=:ZPTYPE",1)
+	 
+	if FLAG="CR" set CID=ach1.offdrcid,ETC=ach1.offdretc
+	
+	if FLAG="DR" set CID=ach1.offcrcid,ETC=ach1.offcretc
+	
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR",,1)
+	set X=(cuvar.RT).extract(1,8)	
+	set REC=REC_"|  |"_"00000000".extract(1,8-X.length())_X
+
+	set REC=REC_"|1|"_CID_"|"_TAMT_"||"_ach1.cname_"||0"
+	set DATA=$$FILL(SEQCNT(ZFILE),7,"R",0),TRACE=DATA
+	set BORIG=BORIG(ZFILE,ZBATCH)
+	set REC=REC_"|"
+	set DATA=$$FILL(COID(ZFILE,ZBATCH),10)
+	
+	// COID for reporting
+	set REC=REC_"|"_DATA 
+	
+	// IBSTC - RPTS
+	set DATA=ETC set REC=REC_"|"_DATA 
+	set FILE=ZFILE,BATCH=ZBATCH
+	set RT=60,SKIP=1 do FILEIT
+
+	// Save offsets for ALL totals to post to ^TTX
+	set X=DATNP(FILE,BATCH),Y=PTYPE(FILE,BATCH)
+	
+	type String SRCTYP="ACHORIG"
+
+	type RecordUTBLSRC utblsrc=Db.getRecord("UTBLSRC","SRCTYP=:SRCTYP,KEY=:ach1.src",1)
+	set BRCD=utblsrc.brcd
+	set %UserID=utblsrc.uid
+		
+	type ResultSet rset4=Db.select("TSEQ","TTX","TJD=:X AND BRCD=:BRCD AND UID=:%UserID","TSEQ DESC")
+	
+	if rset4.next() set TRC=rset4.getCol("TSEQ")
+	
+	else  set TRC=1
+	
+	// Save TRC in the array
+	set TRC(X,BRCD,%UserID)=TRC 
+	
+	if TRC#1 set TRC=TRC + 1
+	
+	set TRC=TRC(X,BRCD,%UserID),TRC=(((TRC\1000)+1)*1000)+1,TRC(X,BRCD,%UserID)=TRC
+	
+	// Define the default TTX transaction information
+	type RecordTTX ttx = Class.new("RecordTTX")
+	set ttx.tjd=X
+	set ttx.brcd=BRCD
+	set ttx.uid=%UserID
+	set ttx.tseq=TRC
+	set ttx.cid = CID
+	set ttx.etc = ETC
+	set ttx.tamt = TAMT
+	do ttx.save()
+		
+	quit
+	
+
+ACHDTL6( RecordACH1 ach1,
+	 RecordACH2 ach2) 	// Build the detail transaction in the ACHDTL file
+	
+	type public Boolean ER
+	type public Number BATCH,FILE,NEWBCH,NEWFIL,PRENOTE
+	type public Number SKIP,TCAMTA(,),TDAMTA(,),X
+	type public Number CRIN(,),DRIN(,),FORGN(,),TCAMT(,),TDAMT(,)
+	type public String BORIG(,),BORIG1,DATA,DC,EHASH(,),SEQCNT(),TOT6(),XACHTMP(,,)
+
+	type Date JD
+	type Number ADDREC,AMT2,RT,TAMT
+	type String CID,INDID,REC,TMP4,TRACE
+		
+	// AMT2 required for IRADTL
+	set AMT2=ach2.tamt
+	
+	// if amount contains alphanumeric (PATOPT) must be converted to numeric
+	if AMT2.extract()?.A set AMT2=$$TAMT(AMT2,ach2.offcid)
+	 
+	/* TAMT needs to be set for TTXSRT if doesnt go through RPA processing
+	 and for ^IRA if it goes through RPA processing. */
+	 
+	set TAMT=AMT2
+	
+	// retirement account withholdings               
+	
+	set CID=$S(ach2.ibstc:ach2.cid,('ach2.ibstc&'ach2.offglflg):ach2.offcid,1:"")
+	
+	if CID do { quit:ER
+				
+		// To get the Class Name
+		type RecordDEP dep = Db.getRecord("DEP","CID=:CID",1)
+                    	
+		// Check if deposit account and retirement account
+		if (dep.cls="D"),(dep.ira) do {
+			// IRA processing is not done on G/L accounts
+			if '(ach2.cidglflg) set TAMT=$$IRADTL(.AMT2,.ach1,.ach2)
+			}
+		}
+	
+	// Define FILE for this entry
+	do GETFILE(.ach1) 
+	
+	if NEWFIL do ACHFIL1(.ach1)
+	               
+        // If prenote, change DATNP, TAMT & ACHTC; update [ACH2]PDATE
+        if PRENOTE do PREUPDT(.ach2)
+        
+        // Define BATCH for this entry
+        do GETBCH(.ach1,.ach2)
+        
+        if NEWBCH do ACHBCH5(.ach1,.ach2)
+        else  set BORIG(FILE,BATCH)=""
+        
+	set SEQCNT(FILE)=SEQCNT(FILE) + 1
+	
+	if '(ach2.ibstc) do {
+	
+		// Entry detail counter
+	        set TOT6(FILE)=TOT6(FILE) + 1 
+	        
+	        // Entry detail counter
+	        set TOT6(FILE,BATCH)=TOT6(FILE,BATCH) + 1 
+		}
+	
+	set REC="6"
+	
+	// ACHTC
+	set (DATA)=$$FILL(ach2.achtc,2),REC=REC_"|"_DATA
+	
+	set DATA=ach2.rtnum,DATA=DATA.extract(1,(DATA.length()-1))
+	
+	// RTNUM
+	set DATA=$$FILL(DATA,8,"R",0),REC=REC_"|"_DATA 
+	
+	// Check digit
+	set REC=REC_"|"_((ach2.rtnum).extract(9)) 
+	
+	// CID
+	set (DATA,CID)=$$FILL(ach2.cid,17),REC=REC_"|"_DATA 
+	
+	//TAMT 
+	set DATA=$$DOL(AMT2,10),REC=REC_"|"_DATA	
+	set DATA=ach2.indid,INDID=+DATA
+	
+	// INDID
+	set DATA=$$FILL(DATA,15),REC=REC_"|"_DATA 
+	
+	// INDNAM
+	set DATA=$$FILL(ach2.indnam,22),REC=REC_"|"_DATA 
+	
+	// DISD
+	set DATA=$$FILL(ach2.disd,2),REC=REC_"|"_DATA 
+	set ADDREC=0 if ach2.addrec'="" set ADDREC=1
+	set REC=REC_"|"_ADDREC
+	set DATA=$$FILL(SEQCNT(FILE),7,"R",0),TRACE=DATA
+	set REC=REC_"|"_BORIG1_TRACE
+	
+	// COID for reporting
+	set DATA=$$FILL(ach1.coid,10),REC=REC_"|"_DATA 
+	
+	// IBSTC - RPTS
+	set DATA=ach2.ibstc set REC=REC_"|"_DATA 
+	
+	// Append RPA code 
+ 	set DATA=ach2.cidrpa set REC=REC_"|"_DATA 
+	set RT=6,SKIP=0 do FILEIT
+	
+	if 'PRENOTE do {
+		set ach2.amtlp=AMT2.roundDec()
+		do ach2.save()
+		}
+		
+	if ach2.ibstc do TTXSRT(.ach1,.ach2)
+	
+	if ach2.offcid,'PRENOTE do {
+		set JD=ach2.datnp if JD<%SystemDate set JD=%SystemDate
+
+		type RecordTMPRPT3 tmprpt33=Db.getRecord("TMPRPT3","PID=:%ProcessID,KEY1=:ach1.src,KEY2=:JD,KEY3=:ach2.ptype",1)
+		if 'tmprpt33.getMode() do {
+		
+			type RecordTMPRPT3 tmprpt33
+			
+			set tmprpt33=ach1.copy()
+
+			set tmprpt33.PID=%ProcessID
+			set tmprpt33.KEY1=ach1.src
+			set tmprpt33.KEY2=JD
+			set tmprpt33.KEY3=ach2.ptype
+
+			do tmprpt33.setMode(0)
+			do tmprpt33.save()	
+		
+			}
+		
+		// X-ref for GETUID subrtn
+		if 'XACHTMP(ach1.src,JD,ach2.ptype).exists() set XACHTMP(ach1.src,JD,ach2.ptype)=ach2.coid 
+		
+		type ResultSet rs1=Db.select("KEY4","TMPRPT4","PID=:%ProcessID AND KEY1=:ach1.src AND KEY2=:JD AND KEY3=:ach2.ptype","KEY4 DESC")
+		
+		if rs1.next() set X=rs1.getCol("KEY4") + 1
+		
+		type RecordTMPRPT4 tmprpt4=Db.getRecord("TMPRPT4","PID=:%ProcessID,KEY1=:ach1.src,KEY2=:JD,KEY3=:ach2.ptype,KEY4=:X",1)
+		
+		set tmprpt4.pid = %ProcessID
+		set tmprpt4.key1 = ach1.src
+		set tmprpt4.key2 = JD
+		set tmprpt4.key3 = ach2.ptype
+		set tmprpt4.key4 = X
+		set TMP4 = ach2.offcid_"|"_ach2.offtc_"|"_TAMT_"|"_ach2.offrpa
+		set tmprpt4.data = TMP4
+	
+		do tmprpt4.save()
+		
+		if 'DC set TCAMTA(FILE,BATCH)=TCAMTA(FILE,BATCH) + AMT2
+		
+		if DC set TDAMTA(FILE,BATCH)=TDAMTA(FILE,BATCH) + AMT2
+		
+		set REC.piece("|",2)="  ",REC.piece("|",5)=$$FILL(ach2.offcid,17)
+		set REC.piece("|",13)=ach2.offtc
+		set REC.piece("|",14)=ach2.offrpa	
+		set RT=6 do FILEIT
+		}
+		
+	if ach2.ibstc do ACHDTL7(.ach2) quit
+	
+	// Process information
+	
+	// Flag whether or not the batch has foreign txns
+	set FORGN(FILE,BATCH)=1 
+	
+	// Flag not set / debit
+	if 'DRIN(FILE,BATCH),'DC set DRIN(FILE,BATCH)=1
+	 
+	// Flag not set / credit
+	if 'CRIN(FILE,BATCH),DC set CRIN(FILE,BATCH)=2 
+	
+	set EHASH(FILE,BATCH)=EHASH(FILE,BATCH) + (ach2.rtnum).extract(1,8)
+	
+	if 'DC do {
+	
+		// Tot foreign debits
+		set TDAMT(FILE,BATCH)=TDAMT(FILE,BATCH) + AMT2
+		 
+		// Tot ALL debits
+		set TDAMTA(FILE,BATCH)=TDAMTA(FILE,BATCH) + AMT2 
+		}
+		
+	if DC do {
+		
+		// Tot foreign credits
+		set TCAMT(FILE,BATCH)=TCAMT(FILE,BATCH) + AMT2 
+		// Tot ALL credits
+		set TCAMTA(FILE,BATCH)=TCAMTA(FILE,BATCH) + AMT2 
+		}
+		
+	do ACHDTL7(.ach2) quit
+	
+	
+ACHDTL7( RecordACH2 ach2)	// Build the addenda transaction in the ACHDTL file
+
+	type public Number ADDREC,BATCH,FILE,TOT7()
+	type public String TRACE
+	type Number REC,RT
+	type String DATA
+	
+	if 'ADDREC quit
+	
+	// Addenda count
+	set TOT7(FILE)=TOT7(FILE) + 1 
+	
+	// Addenda count
+	set TOT7(FILE,BATCH)=TOT7(FILE,BATCH) + 1 
+	set REC=7
+	set REC=REC_"|05"
+	set DATA=$$FILL(ach2.addrec,80),REC=REC_"|"_DATA
+	set REC=REC_"|0001|"_TRACE
+	set RT=7 do FILEIT
+	
+	quit
+	
+
+IRADTL( AMT2,
+	RecordACH1 ach1,
+	RecordACH2 ach2)   /* Private; Determines gross or net withholding and calculates
+	       		amount on retirement accounts
+	
+        --------------------------------------------------------------------------------
+         Arguments:
+               . AMT2    transaction amount
+        
+         Returns:
+		. $$	  complex TAMT  examples:
+			  net withholding     gross withholding
+			  112.50#125###12.50  125#137.25###12.25
+               . AMT2	  gross or net amount (piece 1 from complex TAMT)
+        
+         Inputs:
+               . CID     account number
+               . DC      debit or credit transaction debit=0 credit=1
+               . ONUS    On-Us Routing and Transit Number indicator
+		. TAMT	  transaction amount
+        
+         Desc:
+               . DWA     Withholding amount
+               . LOGEXC  Logs an exception if amount is negative
+               . RSPWIND Withholding indicator on the IRA account
+               . RPANET  Net withholding flag on CUVAR
+                         Both flags set to Yes net withholding applied
+                         RSPWIND set to Y, RPANET set N gross withholding
+                         RSPWIND set to N no withholding
+                . TSO     inserts ACH,company name debit/credit,RPA code
+                         example: ACH#Warm Breeze~IRADIS#101~IRAD#101
+        */
+
+	type public Boolean DC,ER
+	type public Number CID,DSWA,DWA
+	type Boolean OFFSET,RPANET
+	type Number ETC,ITC,TDDTOTAL,TAMT
+	type String ET,SAVDC,TSO,UTSO(),XTAMT
+	
+	set XTAMT=""
+	
+	if ach2.ibstc set ETC=ach2.ibstc
+	
+	set CID=ach2.cid				
+	// retrieve data from offset account
+	if '(ach2.ibstc) set ETC=ach2.offtc
+	
+	// ITC required for ^IRA
+	type RecordTRN trn = Db.getRecord("TRN", "ETC=:ETC")
+	
+	set ITC=trn.itc
+	set UTSO("ACH")=ach1.cname
+	 
+	// TSO required for ^IRA
+	set TSO="" do IN^UTSO(.UTSO,.TSO) kill UTSO
+	
+	// Insert RPA Code into TSO
+	if trn.itc.extract(1) set TSO=$$FIELDIN^UTSO(TSO,"IRAC",$S(ach2.ibstc:ach2.cidrpa,1:ach2.offrpa))
+	
+	else  set TSO=$$FIELDIN^UTSO(TSO,"IRAD",$S(ach2.ibstc:ach2.cidrpa,1:ach2.offrpa))	
+	
+	// Calculate Federal and State Withholding (DWA and DSWA) in ^IRA routine
+	
+	// Save the value of DC  ^IRA can change the value
+	set SAVDC=DC 
+	     
+	do ^IRA
+	
+	set DC=SAVDC
+	
+	if '(DWA.get()) quit TAMT
+	
+	type ResultSet rset=Db.select("RPANET","CUVAR")
+	
+	if rset.next() set RPANET=rset.getCol("RPANET")
+	
+	type RecordDEP dep=Db.getRecord("DEP","CID=:CID",1)
+		
+	type RecordACN acn=Db.getRecord("ACN","CID=:CID",1)
+	
+	type RecordIRATYPE iratype=Db.getRecord("IRATYPE","ACN=:acn.acn,RPASEQ=:dep.rpaseq",1)
+	
+	// apply withholding
+	if iratype.rspwind=1 do {      			
+		// apply net withholding
+		if RPANET=1 do {  			
+			set XTAMT.piece("#",2)=TAMT.roundDec()
+			set XTAMT.piece("#",5)=DWA
+			set XTAMT.piece("#",15)=DSWA              
+			set TAMT=TAMT-DWA-DSWA                    
+			set XTAMT.piece("#",1)=TAMT.roundDec()
+			if (TAMT<0) do {
+				set ER=1,ET="NEGAMT"
+				do LOGEXC(CID) 
+				set OFFSET=0
+				}
+			}
+			
+		if ER quit
+		
+		// apply gross withholding		
+		else  if RPANET=0 do {     		
+			set XTAMT.piece("#",1)=TAMT.roundDec()
+			set XTAMT.piece("#",5)=DWA
+			set XTAMT.piece("#",15)=DSWA 
+			set TDDTOTAL = TAMT + DWA + DSWA                    	
+			set XTAMT.piece("#",2) =  TDDTOTAL.roundDec() 	
+			}
+		}
+		
+	if ER quit 0 
+	
+	// update AMT2 to the gross or net amount
+	set AMT2=XTAMT.piece("#",1)
+	
+	quit XTAMT
+	
+
+PREUPDT( RecordACH2 ach2)	// Change AMT2 & ACHTC / update [ACH2]PDATE
+
+	type public Date PRENOTDT
+	type public Number AMT2,BUMP
+	type public String LEADDT
+	type String ACHTC,X
+		
+	set X=(ach2.achtc).extract(2),ACHTC=(ach2.achtc).extract()_$S(X>5:8,1:3)
+	
+	if ACHTC.length()=1 set ACHTC=2_ACHTC
+	set AMT2=0 if 'BUMP set ach2.datnp=LEADDT
+
+	if PRENOTDT>(%SystemDate) do {
+		set ach2.pdate=PRENOTDT
+		do ach2.save()
+		}
+	else  do {
+		set ach2.pdate=TJD
+		do ach2.save()
+		}
+	quit
+	
+
+TTXSRT( RecordACH1 ach1,
+	RecordACH2 ach2)	// Sort TTX records for On-Us transactions
+
+	type public Boolean DC,ER
+	type public Number AMT2,BATCH,FILE,TAMT,TCAMTA(,)
+	type public String CID,TDAMTA(,)
+	type Date JD
+	type Number TSEQ
+	
+	set JD=ach2.datnp if JD<%SystemDate set JD=%SystemDate
+	
+	type RecordTMPRPT3 tmprpt3=ach1.copy()
+	set tmprpt3.PID=%ProcessID
+	set tmprpt3.KEY1=ach1.src
+	set tmprpt3.KEY2=JD
+	set tmprpt3.KEY3=ach2.ptype
+
+	do tmprpt3.setMode(0)
+	do tmprpt3.save()
+	
+	type RecordTMPRPT3 tmprpt4=Db.getRecord("TMPRPT3","PID=:%ProcessID,KEY1=:ach1.src,KEY2=:JD,KEY3=:ach2.ptype",1)
+	set tmprpt4.data=ach2.coid
+	do tmprpt4.save()
+
+	type ResultSet rset1=Db.select("KEY4","TMPRPT4","PID=:%ProcessID AND KEY1=:ach1.src AND KEY2=:JD AND KEY3=:ach2.ptype","KEY4 DESC")
+	
+	if rset1.next() set TSEQ=rset1.getCol("KEY4") + 1
+
+	// No IBS tran code on file
+	if (ach2.ibstc).isNull() quit  
+		
+	type RecordTMPRPT4 tmprpt5=Class.new("RecordTMPRPT4")
+	set tmprpt5.PID=%ProcessID
+	set tmprpt5.KEY1=ach1.src
+	set tmprpt5.KEY2=JD
+	set tmprpt5.KEY3=ach2.ptype
+	set tmprpt5.KEY4=TSEQ
+	set tmprpt5.data=( + CID)_"|"_ach2.ibstc_"|"_TAMT_"|"_ach2.cidrpa
+	do tmprpt5.save()
+
+	// Do not add into the totals if it will later reject
+	do VERCID if ER quit
+	  
+	// Add into totals for ALL transactions.  
+	
+	// Tot ALL debits
+	if 'DC set TDAMTA(FILE,BATCH)=TDAMTA(FILE,BATCH) + AMT2 
+	
+	// Tot ALL credits
+	if DC set TCAMTA(FILE,BATCH)=TCAMTA(FILE,BATCH) + AMT2 
+	quit
+	
+
+TTXBLD	// Build TTX records out of the ACHTMP sort file
+
+	type public Boolean ER
+	type public Number BRCD
+	type public String CNAME,ITC,TSO,%UserID,XACHTMP(,,)
+	type Date EDATE
+	type Number ACN,OFFDRCID,OFFCRCID,TAMT,TCAMT,TDAMT,RPANET,RPASEQ,RSPWIND
+	type String BTSO,CID,DATA,ETC,SRC,OFFDRETC,OFFCRETC,TSEQ,%UCLS,UTSO(),ZPTYPE
+			
+	type ResultSet rs=Db.select("KEY1,KEY2,KEY3","TMPRPT3","PID=:%ProcessID")
+	while rs.next() do {
+		set SRC=rs.getCol("KEY1")
+		set EDATE=rs.getCol("KEY2")
+		set ZPTYPE=rs.getCol("KEY3")
+
+		type String SRCTYP="ACHORIG"
+
+		type RecordUTBLSRC utblsrc=Db.getRecord("UTBLSRC","SRCTYP=:SRCTYP,KEY=:SRC",1)
+	 	set BRCD=utblsrc.brcd
+		set %UserID=utblsrc.uid
+				
+		type RecordSCAU scau = Db.getRecord("SCAU","UID=:%UserID",1)
+		set %UserClass = scau.%ucls
+		set OFFDRCID = scau.rodr,OFFDRETC="RODR"
+		set OFFCRCID = scau.rocr,OFFCRETC="ROCR"
+											
+		// Get posting information
+		do GETUID
+	  
+		set UTSO("ACH")=CNAME
+		set TSO="" do IN^UTSO(.UTSO,.TSO) kill UTSO
+		set BTSO=TSO					
+		set TSEQ="",(TDAMT,TCAMT)=0
+				
+		type ResultSet rs=Db.select("KEY4","TMPRPT4","PID=:%ProcessID AND KEY1=:SRC AND KEY2=:EDATE AND KEY3=:ZPTYPE")
+	
+		while rs.next() do {
+			set TSEQ=rs.getCol("KEY4")
+						
+			type ResultSet rs1=Db.select("DATA","TMPRPT4","PID=:%ProcessID AND KEY1=:SRC AND KEY2=:EDATE AND KEY3=:ZPTYPE AND KEY4=:TSEQ")
+			while rs1.next() do {
+				set DATA=rs1.getCol("DATA")
+				set CID=DATA.piece("|",1)
+				set ETC=DATA.piece("|",2)
+				set TAMT=DATA.piece("|",3)
+			
+				/* Add IRA code to TSO - set to IRAD for distribution and 
+				   for contribution set code to IRAC. */
+	   
+			        if '(rs1.getCol("DATA")).isNull() do {  
+			        	type RecordTRN trn = Db.getRecord("TRN", "ETC=:ETC")                            
+        				if trn.itc.extract() set TSO=$$FIELDIN^UTSO(TSO,"IRAC",rs1.getCol("DATA"))
+	        			else  set TSO=$$FIELDIN^UTSO(TSO,"IRAD",rs1.getCol("DATA"))	
+				
+					//Insert RPA Federal (RPAWH) and State (RPASWH 46454 - AS) RPA withholding amount into TSO                  
+					
+					if TAMT.find("#")'=0 do {
+						type ResultSet rset4=Db.select("RPANET","CUVAR")
+						if rset4.next() set RPANET=rset4.getCol("RPANET")
+					
+						type RecordDEP dep=Db.getRecord("DEP","CID=:CID",1)
+						set RPASEQ=dep.rpaseq
+														
+						type RecordACN acn=Db.getRecord("ACN","CID=:CID",1)
+						set ACN=acn.acn
+								
+						type ResultSet rset6=Db.select("RSPWIND","IRATYPE","ACN=:ACN AND RPASEQ=:RPASEQ")
+						if rset6.next() set RPANET=rset6.getCol("RSPWIND")
+						
+						if (RSPWIND=1),(RPANET=1) do {
+							set TSO=$$FIELDIN^UTSO(TSO,"RPAWH",TAMT.piece("#",5))
+							set TSO=$$FIELDIN^UTSO(TSO,"RPASWH",TAMT.piece("#",15))
+							}
+						}
+					}	
+	
+				do VERCID if ER do LOGEXC(CID) quit
+	
+				do TTXSET
+		
+				// Put TSO back to ACH BATCH entry only for next sequence	
+
+				set TSO=BTSO
+		
+				//Update TDAMT and TCAMT and save value of TAMT // DMS 08/08/01		
+				if TAMT.find("#") do {
+					if ITC.extract() set TCAMT=TCAMT+TAMT.piece("#",1)
+					else  set TDAMT=TDAMT+TAMT.piece("#",1)
+					}
+			
+				else  if 'TAMT.find("#") do {
+					if ITC.extract() set TCAMT=TCAMT+TAMT
+					else  set TDAMT=TDAMT+TAMT
+					}
+				}
+			}	
+		}
+			
+	do TTXA
+	
+	quit
+	
+		
+VERIFY( RecordACH1 ach1,
+	RecordACH2 ach2)	// Verify that the amount does not exceed maximums
+	
+	type public Boolean ER
+	type public Number PRENOTE
+	type public String DC,ET,RM
+	type Number OFFSET,X
+			
+	set ER=0,OFFSET=0,ET=""
+	
+	type RecordUTBLACHRT achrt=Db.getRecord("UTBLACHRT","KEY=:ach2.rtnum",1)
+	
+	if 'achrt.getMode() set ER=1,ET="ACHRTN" do ^UTLERR quit
+		
+	type RecordACN acn=Db.getRecord("ACN","CID=:ach2.cid",1)
+		
+	if ach2.ibstc,'ach2.cidglflg,acn.stat=4 set ER=1,ET="ACNCLO" do ^UTLERR quit
+	
+	// Amount
+	set X=ach2.tamt 
+	
+	if X.extract(1)?.A set X=$$TAMT(X,ach2.offcid)	
+	
+	if X'>0,'PRENOTE set ER=1,ET="ZEROAMT",RM="Amount not greater than zero "_ach1.coid_"-"_ach1.ptype quit
+	
+	if 'DC,ach1.maxamtd,X>ach1.maxamtd set ER=1
+	
+	if DC,ach1.maxamtc,X>ach1.maxamtc set ER=1
+	
+	if ER set RM="Amount exceeds maximum "_ach2.coid_"-"_ach2.ptype quit
+	
+	if 'ach2.cidglflg,'(ach2.offglflg) do VEROFF(.ach1,.ach2)
+	
+	quit
+	
+	
+VEROFF( RecordACH1 ach1, RecordACH2 ach2)	// Verify offset account
+
+	type public Boolean ER
+	type public Number DC
+	type public String X
+	type Date JD
+	type Number ETC,OFFSET
+	type String ET
+			
+	set OFFSET=ach2.offcid
+	
+	if (ach2.offcid).isNull() quit
+	
+	
+	type RecordACN acn=Db.getRecord("ACN","CID=:ach2.offcid",1)
+				
+	if acn.stat=4 set ER=1,ET="ACNCLO" do ^UTLERR quit
+	
+	// Transaction amount exceeds source account available balance
+	
+	if (ach1.preauth),DC,(acn.cls="D"),(X>$$BALAVL^ACNCDI(ach2.offcid)) set ER=1,ET="DEPAVLBL" do ^UTLERR quit
+		
+	type RecordLN ln=Db.getRecord("LN","CID=:ach2.offcid",1)
+	 	
+	if acn.cls="L" do { if ER quit
+		set JD=ach2.datnp if JD<%SystemDate set JD=%SystemDate
+		
+		if JD'<ln.paylkfrm,ln.paylkto,JD'>ln.paylkto set ER=1,ET="PAYOFLOCK" do ^UTLERR quit
+		
+		// Transaction amount exceeds source account available credit
+		if (ach1.preauth),DC,(X>$$AVLBAL^LNCDI(ach2.offcid)) set ER=1,ET="LNAVLCR" do ^UTLERR quit
+		}
+		
+	quit
+	
+
+VERCID	// Validate the account
+
+	type public Boolean ER
+	type public String CID,COID,ZPTYPE
+	type String ET,RM
+	
+	set ER=0,RM="ACH 'on-us' reject "_COID_"-"_ZPTYPE.get()
+	
+	type RecordACN acn=Db.getRecord("ACN","CID=:CID",1)
+
+	if 'acn.getMode() set ER=1,ET="RECNOF" quit
+
+	// Account Closed
+	if acn.stat=4 set ER=1,ET="ACNCLO" quit
+	
+	type RecordGLAD glad=Db.getRecord("GLAD","ACN=:CID",1) 
+	
+	if 'glad.getMode() set ER=1,ET="RECNOF" quit
+			 
+	quit
+	
+
+LOGEXC( Number CID)	// TTX record rejected
+
+	type public Number OFFSET
+	type public String ET
+	
+	if OFFSET set CID=OFFSET
+	
+	do LOG^UTLEXC(%RoutineName,"*","ACH Batch Processing",CID,"",ET)
+	
+	quit
+	
+
+TAMT( String X, Number CID)	// Line tag called internaly and by report SCA381
+
+	type Number TAMT
+	type String NC
+	
+	set TAMT=0
+	
+	if X.find("_NC") set NC="",X=X.piece("_",1)		
+	set X=X.translate("_")
+	
+	do @(X_"^PATOPT")
+	
+	quit TAMT
+	
+
+TTXA	// Offset all ACHDTL transactions in TTX
+	
+	type public String ACHTMP,%UserID
+	type Date EDATE
+	type Number OFFCRCID,OFFDRCID,TCAMT,TDAMT
+	type String FLAG,SRC,OFFCRETC,OFFDRETC,ZPTYPE,ZSEQ
+	
+	set SRC=""
+
+	for  set SRC=ACHTMP(SRC).order() quit:SRC.isNull()  do {
+		set EDATE=""
+		
+		for  set EDATE=ACHTMP(SRC,EDATE).order() quit:EDATE.isNull()  do {
+			set ZPTYPE=""
+	
+			for  set ZPTYPE=ACHTMP(SRC,EDATE,ZPTYPE).order() quit:ZPTYPE.isNull()  do {
+				do GETUID 
+				
+ 				type RecordSCAU scau=Db.getRecord("SCAU","UID=:%UserID",1)
+				set OFFDRCID=scau.rodr,OFFDRETC="RODR"
+				set OFFCRCID=scau.rocr,OFFCRETC="ROCR"
+				
+				set ZSEQ=""
+				
+				for  set ZSEQ=ACHTMP(SRC,EDATE,ZPTYPE,ZSEQ).order() quit:ZSEQ.isNull()  do {
+					if ZSEQ.find(".") quit	
+				
+					set TDAMT=ACHTMP(SRC,EDATE,ZPTYPE,ZSEQ)
+					set TCAMT=ACHTMP(SRC,EDATE,ZPTYPE,ZSEQ + .5)
+	
+					// Batch offset for debits
+					if TDAMT set FLAG="DR" do BCHOFF
+											
+					// Batch offset for credits
+					if TCAMT set FLAG="CR"  do BCHOFF
+					}
+				}
+			}
+		}	
+	do SRCF
+	quit
+	
+
+BCHOFF	// Generate offset transactions to balance the TTX batch
+
+	type public Date EDATE
+	type public Number OFFCRCID,OFFDRCID,TCAMT,TDAMT
+	type public String ACHTMP,FLAG,OFFCRETC,OFFDRETC,SRC,ZPTYPE
+	type Number TAMT
+	type String CID,ETC,TSO,UTSO()
+	
+	set CID=$S(FLAG="DR":OFFDRCID,1:OFFCRCID)
+	set ETC=$S(FLAG="DR":OFFDRETC,1:OFFCRETC)
+	set TAMT=$S(FLAG="DR":TDAMT,1:TCAMT)
+	set UTSO("ACH")=(ACHTMP(SRC,EDATE,ZPTYPE)).piece("|",23)
+	set TSO="" do IN^UTSO(.UTSO,.TSO) kill UTSO
+	
+	do TTXSET
+	quit
+
+
+SRCF	// Offset foreign transactions in TTX
+	
+	type Date EDATE
+	type Number CID,TAMT
+	type String ETC,SRC,TMPREC,TSO,UTSO(),ZPTYPE
+		
+	type DbSet ds=Db.selectDbSet("TMPRPT4","PID=:%ProcessID")
+	while ds.next() do {
+		type RecordTMPRPT4 tmprpt4=ds.getRecord("TMPRPT4")
+		set SRC = tmprpt4.key1
+		set EDATE = tmprpt4.key2
+		set ZPTYPE = tmprpt4.key3
+				
+		do GETUID
+		
+		set TSEQ = tmprpt4.key4
+		set TMPREC = tmprpt4.data
+		set CID = TMPREC.piece("|",1)
+		set ETC = TMPREC.piece("|",2)
+		set TAMT = TMPREC.piece("|",3)			
+					
+		set UTSO("ACH") = TMPREC.piece("|",23)
+		
+		set TSO="" do IN^UTSO(.UTSO,.TSO) kill UTSO	
+	
+		do TTXSET	
+
+		}	
+		
+	do EOJ 
+	quit
+	
+	
+TTXSET	// File ^TTX entries
+	
+	type public Date EDATE
+	type public Number BRCD,CID,TAMT,TRC,TSEQ
+	type public String ETC,ITC,TSO
+	
+	set TRC=TRC(EDATE,BRCD,%UserID),TRC=(((TRC\1000)+1)*1000)+1,TRC(EDATE,BRCD,%UserID)=TRC
+	
+	type RecordTRN trn = Db.getRecord("TRN", "ETC=:ETC")
+	set ITC = trn.itc
+	
+	// Define the default TTX transaction information
+	type RecordTTX ttx = Class.new("RecordTTX")
+	
+	set ttx.tjd = EDATE
+	set ttx.brcd = BRCD
+	set ttx.uid = %UserID
+	set ttx.tseq = TRC
+	set ttx.tlo = %UserStation
+	set ttx.cid = CID
+	set ttx.itc = trn.itc
+	set ttx.etc = ETC
+	set ttx.tamt = TAMT
+	set ttx.tso = TSO
+	set ttx.cdt =  + %CurrentDate
+	set ttx.tim = %CurrentTime
+	set ttx.trc = TRC
+	do ttx.save()
+		
+	quit
+	
+			
+FILEIT	// File the records in the ^ACHDTL global
+	
+	type public Date TJD
+	type public Number BATCH,FILE,RT,SKIP
+	type public String FPOS,REC,REC1,REC5
+	type Number TSEQ
+	type String R
+		
+	if RT=60 set RT=6,REC=0_REC.extract(2,999)
+	
+	set R=REC.piece("|",FPOS(RT,1),FPOS(RT,2))
+	set R=R.translate("|","")
+	
+	// Skip length checking for offsets txns in ACHDTL
+	if RT=6,SKIP do FILACH quit
+	
+	if R.length()'=94 use 0 write !,"Invalid record length"," (",R.length(),") -  ",REC,!,R
+		
+	if RT=6 do FILACH
+	
+	if RT=1 set REC1=REC
+	
+	if RT=5 set REC5=REC
+
+	if RT=7 do {
+		type ResultSet rs=Db.select("SEQ","ACHDTL","TJD=:%SystemDate AND FILE=:FILE AND BATCH=:BATCH","SEQ DESC")
+		if rs.next() set TSEQ=rs.getCol("SEQ") 
+		else  set TSEQ=1
+		
+		type RecordACHDTL achdtl=Db.getRecord("ACHDTL","TJD=:%SystemDate,FILE=:FILE,BATCH=:BATCH,SEQ=:TSEQ",1)
+		set achdtl.rtc6=REC.piece("|",1)
+		set achdtl.achtc=REC.piece("|",2)
+		set achdtl.rtnum=REC.piece("|",3)
+		set achdtl.rtnumcd=REC.piece("|",4)
+		set achdtl.cid=REC.piece("|",5)
+		set achdtl.tamt=REC.piece("|",6)
+		set achdtl.indid=REC.piece("|",7)
+		set achdtl.indnam=REC.piece("|",8)
+		set achdtl.disd=REC.piece("|",9)
+		set achdtl.addrec=REC.piece("|",10)
+		set achdtl.trace=REC.piece("|",11)
+		set achdtl.coid=REC.piece("|",12)
+		set achdtl.ibstc=REC.piece("|",13)
+		set achdtl.rpa=REC.piece("|",14)
+	
+		do achdtl.save()
+		}
+	
+	if RT=8 do {
+		type RecordACHBCH achbch=Db.getRecord("ACHBCH","TJD=:%SystemDate,FILE=:FILE,BATCH=:BATCH",1)
+		set achbch.rtc8=REC.piece("|",1)
+		set achbch.scc8=REC.piece("|",2)
+		set achbch.eacnt=REC.piece("|",3)
+		set achbch.ehash=REC.piece("|",4)
+		set achbch.tdamt=REC.piece("|",5)
+		set achbch.tcamt=REC.piece("|",6)
+		set achbch.coid8=REC.piece("|",7)
+		set achbch.b5573=REC.piece("|",8)
+		set achbch.b7479=REC.piece("|",9)
+		set achbch.borig8=REC.piece("|",10)
+		set achbch.bnum8=REC.piece("|",11)
+		set achbch.ptype=REC.piece("|",12)
+		set achbch.for=REC.piece("|",13)
+		do achbch.save()
+		}
+	
+	if RT=9 do {
+		type RecordACHFIL achfil=Db.getRecord("ACHFIL","TJD=:TJD,FILE=:FILE",1)
+		set achfil.rtc9=REC.piece("|",1)
+		set achfil.bchcnt=REC.piece("|",2)
+		set achfil.blkcnt=REC.piece("|",3)
+		set achfil.eacnt=REC.piece("|",4)
+		set achfil.ehash=REC.piece("|",5)
+		set achfil.tdamt=REC.piece("|",6)
+		set achfil.tcamt=REC.piece("|",7)
+		set achfil.b5694=REC.piece("|",8)
+		do achfil.save()
+		}						
+	
+	quit
+		
+FILACH	
+	type public Date TJD
+	type public Number BATCH,FILE
+	type public String REC,REC1,REC5
+	type Number TSEQ
+	
+	type RecordACHBCH achbch=Db.getRecord("ACHBCH","TJD=:TJD,FILE=:FILE,BATCH=:BATCH",1)
+	if 'achbch.getMode() do {
+		type RecordACHFIL achfilrs=Db.getRecord("ACHFIL","TJD=:TJD,FILE=:FILE",1)
+		if 'achfilrs.getMode() do {
+			type RecordACHFIL achfil=Class.new("RecordACHFIL")
+			set achfil.tjd=TJD
+			set achfil.file=FILE
+			set achfil.fdate=%CurrentDate
+			set achfil.ftime=REC1.piece("|",2)
+			set achfil.rtc1=REC1.piece("|",5)     
+			set achfil.prio=REC1.piece("|",6)
+			set achfil.fdest=(REC1.piece("|",7)).trim(" ")
+			set achfil.forig=(REC1.piece("|",8)).trim(" ")
+			set achfil.tdate=REC1.piece("|",9)
+			set achfil.ttime=REC1.piece("|",10)
+			set achfil.fidm=REC1.piece("|",11)
+			set achfil.recsiz=REC1.piece("|",12)     
+			set achfil.blkf=REC1.piece("|",13) 
+			set achfil.fcode=REC1.piece("|",14) 
+			set achfil.dname=REC1.piece("|",15) 
+			set achfil.oname=REC1.piece("|",16) 
+			set achfil.rcode=REC1.piece("|",17) 
+			set achfil.rtc9=REC1.piece("|",18) 
+			set achfil.bchcnt=REC1.piece("|",19) 
+			set achfil.blkcnt=REC1.piece("|",20) 
+			set achfil.eacnt=REC1.piece("|",21) 
+			if REC1.piece("|",22)="" set REC1.piece("|",22)=0
+			set achfil.ehash=REC1.piece("|",22) 
+			set achfil.tdamt=REC1.piece("|",23) 
+			set achfil.tcamt=REC1.piece("|",24) 
+			set achfil.b5694=REC1.piece("|",25) 
+			do achfil.save()
+			}
+		type RecordACHBCH achbch=Class.new("RecordACHBCH")	
+		set achbch.tjd=TJD
+		set achbch.file=FILE
+		set achbch.batch=BATCH
+		set achbch.rtc5=REC5.piece("|",1)
+		set achbch.scc5=REC5.piece("|",2)
+		set achbch.cname=REC5.piece("|",3)
+		set achbch.discr=REC5.piece("|",4)
+		set achbch.coid=REC5.piece("|",5)
+		set achbch.sec=REC5.piece("|",6)
+		set achbch.ced=REC5.piece("|",7)
+		set achbch.ccd=REC5.piece("|",8)
+		set achbch.nd=REC5.piece("|",9)
+		set achbch.b7678=REC5.piece("|",10)
+		set achbch.osc=REC5.piece("|",11)
+		set achbch.borig5=REC5.piece("|",12)
+		set achbch.bnum5=REC5.piece("|",13)
+		set achbch.rtc8=REC5.piece("|",14)
+		set achbch.scc8=REC5.piece("|",15)
+		set achbch.eacnt=REC5.piece("|",16)
+		set achbch.ehash=REC5.piece("|",17)
+		set achbch.tdamt=REC5.piece("|",18)
+		set achbch.tcamt=REC5.piece("|",19)
+		set achbch.coid8=REC5.piece("|",20)
+		set achbch.b5573=REC5.piece("|",21)
+		set achbch.b7479=REC5.piece("|",22)
+		set achbch.borig8=REC5.piece("|",23)
+		set achbch.bnum8=REC5.piece("|",24)
+		set achbch.ptype=REC5.piece("|",25)
+		set achbch.for=REC5.piece("|",26)
+		do achbch.save()
+		}
+	type ResultSet rs=Db.select("SEQ","ACHDTL","TJD=:TJD AND FILE=:FILE AND BATCH=:BATCH","SEQ DESC")
+	if rs.next() set TSEQ=rs.getCol("SEQ") + 1
+	else  set TSEQ=1
+	
+	type RecordACHDTL achdtl=Class.new("RecordACHDTL")
+	set achdtl.tjd=TJD
+	set achdtl.file=FILE
+	set achdtl.batch=BATCH
+	set achdtl.seq=TSEQ
+	set achdtl.rtc6=REC.piece("|",1)
+	set achdtl.achtc=REC.piece("|",2)
+	set achdtl.rtnum=REC.piece("|",3)
+	set achdtl.rtnumcd=REC.piece("|",4)
+	set achdtl.cid=REC.piece("|",5)
+	set achdtl.tamt=REC.piece("|",6)
+	set achdtl.indid=REC.piece("|",7)
+	set achdtl.indnam=REC.piece("|",8)
+	set achdtl.disd=REC.piece("|",9)
+	set achdtl.addrec=REC.piece("|",10)
+	set achdtl.trace=REC.piece("|",11)
+	set achdtl.coid=REC.piece("|",12)
+	set achdtl.ibstc=REC.piece("|",13)
+	set achdtl.rpa=REC.piece("|",14)
+	do achdtl.save()
+			
+	quit		
+	
+	
+GETUID	/* Get posting information
+	   Each TTX file must be unique by PTYPE within COID within DATE. */
+	
+	type public Date EDATE
+	type public Number BRCD,TRC
+	type public String SRC,TRC(,,),TTXREF,%UserID,X,XACHTMP(,,),ZPTYPE
+	type Date TJD,TPD
+	type String COID,UID
+	
+	type String SRCTYP="ACHORIG"
+	
+	set COID=XACHTMP(SRC,EDATE,ZPTYPE)
+	
+	type ResultSet rset2=Db.select("BRCD,UID","UTBLSRC","SRCTYP=:SRCTYP AND KEY=:SRC")
+	if rset2.next() do {
+		set BRCD=rset2.getCol("BRCD")
+		set %UserID=rset2.getCol("UID")
+		}
+
+	if TTXREF(EDATE,COID,ZPTYPE).data() do {
+		set X=TTXREF(EDATE,COID,ZPTYPE)
+		set BRCD=rset2.getCol("BRCD")
+		set (UID,%UserID)=rset2.getCol("UID") 
+		quit
+		}
+		
+	set UID=%UserID
+	
+	set TJD=EDATE,TPD=EDATE 
+	
+	do ^TTXLOK
+			
+	type ResultSet rset4=Db.select("TSEQ","TTX","TJD=:EDATE AND BRCD=:BRCD AND UID=:%UserID","TSEQ DESC")
+	
+	if rset4.next() set TRC=rset4.getCol("TSEQ")
+	
+	// Save TRC in the array
+	set TRC(EDATE,BRCD,%UserID)=TRC 
+	set TTXREF(EDATE,COID,ZPTYPE)=BRCD_"|"_UID
+	
+	quit
+	
+	
+GETFILE( RecordACH1 ach1)	// Get the file number
+	
+	type public Number FILE,NEWFIL,SEQCNT(),TOT6,TOT7
+	type public String FDEST,FORIG,GETFILE
+		
+	set NEWFIL=0
+	
+	 // File pointer
+	if GETFILE(ach1.fdest,ach1.forig).data() set FILE=GETFILE(ach1.fdest,ach1.forig) quit 
+	
+	set FILE=FILE + 1,GETFILE(ach1.fdest,ach1.forig)=FILE,NEWFIL=1
+	set TOT6(FILE)=0
+	set TOT7(FILE)=0
+	set SEQCNT(FILE)=0
+	
+	quit
+
+		
+GETBCH( RecordACH1 ach1, 
+	RecordACH2 ach2)	// Get the batch number
+	
+	type public Date TJD
+	type public Number BATCH,CRIN(,),DRIN(,),EHASH(,),FILE,FORGN(,),NEWBCH,TCAMT(,),TDAMT(,),TCAMTA(,)
+	type public Number TDAMTA(,),TTCAMT(,),TTCAMTA(,),TTDAMT(,),TTDAMTA(,),TOT6(,),TOT7(,)
+	type public String COID(,),FDEST,FORIG,GETFILE,PTYPE(,),SRC(,)
+	type public Date DATNP(,),JD
+	
+	set (BATCH,NEWBCH)=0
+	
+	if GETFILE(FDEST,FORIG,ach1.coid,ach1.ptype,ach2.datnp).exists() set BATCH=GETFILE(FDEST,FORIG,ach1.coid,ach1.ptype,ach2.datnp) quit
+
+	type ResultSet rs=Db.select("BATCH","ACHDTL","TJD=:TJD AND FILE=:FILE","BATCH DESC")
+	if rs.next() set BATCH=rs.getCol("BATCH") + 1
+	else  set BATCH=1
+	
+	// Batch pointer
+	set GETFILE(FDEST,FORIG,ach1.coid,ach1.ptype,ach2.datnp)=BATCH 
+	set JD=ach2.datnp S:JD<TJD JD=TJD set DATNP(FILE,BATCH)=JD
+	
+	// Save for use in ACHBCH8
+	set COID(FILE,BATCH)=ach1.coid 
+	
+	// Save for use in ACHBCH8
+	set PTYPE(FILE,BATCH)=ach1.ptype 
+	set NEWBCH=1
+	
+	// Init variables - maintained by FILE & BATCH
+	// Foreign transactions
+	set FORGN(FILE,BATCH)=0
+	
+	 // Hash total for batch trailer record 
+	set EHASH(FILE,BATCH)=0
+	
+	// Debits-on-file
+	set DRIN(FILE,BATCH)=0 
+	
+	// Credits-on-file
+	set CRIN(FILE,BATCH)=0
+	 
+	// Total debits (Foreign transactions)
+	set TDAMT(FILE,BATCH)=0 
+	
+	// Total credits (Foreign transactions)
+	set TCAMT(FILE,BATCH)=0 
+	
+	// Total debits sum (Foreign transactions)
+	set TTDAMT(FILE,BATCH)=0 
+	
+	// Total credits sum (Foreign transactions)
+	set TTCAMT(FILE,BATCH)=0 
+	
+	// Total debits (ALL transactions)
+	set TDAMTA(FILE,BATCH)=0 
+	
+	// Total credits (ALL transactions)
+	set TCAMTA(FILE,BATCH)=0 
+	
+	// Total debits sum (ALL transactions)
+	set TTDAMTA(FILE,BATCH)=0 
+	
+	// Total credits sum (ALL transactions)
+	set TTCAMTA(FILE,BATCH)=0 
+	
+	// Source pointer for TTX totals
+	set SRC(FILE,BATCH)=ach1.src
+	set TOT6(FILE,BATCH)=0
+	set TOT7(FILE,BATCH)=0
+	
+	quit	
+	
+		
+BUMP( RecordACH2 ach2)	// Bump next/last dates.  
+
+	type public Boolean ER
+	type Date NJD
+		
+	set NJD=(ach2.datnp).nextFreqDate(ach2.fre) quit:ER
+	
+	set ach2.datlp=ach2.datnp	
+	set ach2.datnp=NJD
+	
+	do ach2.save()
+	
+	quit
+		
+	
+DATE( String V,
+      Number L)	// Format date - JULIAN to YYMMDD
+
+	type Date X 
+	
+	if V'?5N quit "      "	
+	
+	set X=%CurrentDate.toString("MM/DD/YY")			
+	set V=(X.extract(7,8))_(X.extract(1,2))_(X.extract(4,5))
+		
+	if V.length()'=L set V=$$FILL(V,L)
+
+	quit V
+	
+	 	
+DOL( Number V,
+     Number L)	// Format the dollar amount
+			
+	set V=(V.roundDec(2,"",1)).translate("."),V=$$FILL(V,L,"R",0)
+	quit V
+	
+	
+FILL( String V, 
+      Number L, 
+      String J, 
+      String F)	// Fill field
+
+	/*----------------------------------------------------------------------
+	
+	  Parameters:  V - Data value
+	                   (Value will be truncated if
+	                    it exceeds field length)
+	
+	               L - Field length
+	
+	               J - Justified (default = left)
+	                   L = left
+	                   R = right
+	
+	               F - Fill character (default = blank)
+	
+	*/
+	
+	type Date X
+	
+	set:J.get()="" J="L" set:F.get()="" F=" "
+	set X="",X.piece(F,L-V.length() + 1)=""
+	quit $S(J="L":V.extract(1,L)_X,1:X_V.extract(1,L))
+	
+		
+EOJ	//-----------------------------------------------------
+
+	type public String ER,RM
+	
+	set ER="W",RM="Completed at "_$$TIME^%ZD
+	quit
+	
+	
+
+vSIG()	quit "60445^39282^Marie Mbui^47207"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,643 @@
+MRPC147( String RETURN, Number VERSN, String INPUT)
+	/*
+	Procedure ID: MRPC147
+	DESC: Account Relationship Change
+	ORIG: Kevin Hailey
+	DATE: 11/1/2006
+	
+	KEYWORDS: RPC
+	
+	ARGUMENTS:
+	
+		RETURN		Return Value
+
+		VERSN		Version Number		/TYP=N/REQ/MECH=VAL
+		current version=1
+	
+		INPUT		Input String		/TYP=T/REQ/MECH=VAL
+		See details below
+
+
+	RETURNS:
+	
+		$$		Error Message		/TYP=T
+		Null		No Error
+	
+
+	RELATED:
+	
+		$$^PBSMRPC - MRPC Service Class Driver
+
+	
+	EXAMPLE:
+
+		S RM=$$^MRPC147(,1,INPUT)
+		   	
+
+	This RPC is a public RPC to perform the addition, deletion
+	or modification of account owners.
+	
+	This MRPC will accept a comma separated string in the form 
+	FID.DI=VAL, FID.DI=VAL,... which will be used to perform
+	modifications to the owners of the account.
+
+	This form of input is used vs. individual parameters to provide
+	the flexibility of changes on the input data without changes
+	to this routine.
+		      
+	In order to handle multiple records for a single table, an
+	exception to the FID.DI=VAL format must be used.  For these
+	records, add a sequential number to the FID field.  For example,
+	if there are 3 CIFs that should be attached to an account,
+	CIFs 544 (primary), 545 and 546, this should be set up as
+	RELCIF1.ACN=544,RELCIF1.ROLE=1,RELCIF2.ACN=545,RELCIF2.ROLE=2,
+	RELCIF3.ACN=546,RELCIF3.ROLE=3.
+
+	   ---- Revision History ------------------------------------------------
+	   
+	04/05/07 - MbuiM - CR 26444
+		   Modified VALIDATE section to combine the declaration and 
+		   instantiation of DBset abd Resultset as this was causing an 
+		   error #ZS=150373850,VALIDATE+60^MRPC147,%GTM-E-UNDEF, 
+		   Undefined local variable: vos3
+		   vos3 will only be set upon INSTANTIATION of the ResultSet, 
+		   and this will only occur if the condition is met.
+
+	03/16/07 - MbuiM - CR 25965
+	 	o Modified code to not delete RELCIF entries when the Role
+	 	  doesn't change.  
+		o Modified the code to allow for non-key values to be updated 
+		  for new primary owners.
+		o Modified the code to allow for non primary roles to be changed.
+
+	*/
+
+	// Begin processing
+
+	type public Boolean ER
+	type public String RM
+	type Boolean ERV
+	type String ERRMSG
+
+	set (ER,ERV)=0
+	set (ERRMSG,RM)=""
+	set RETURN=$$V2LV^MSG("")
+	
+	do MAIN(VERSN.get(),INPUT.get())
+	
+	if ERV set ER=1,RM=ERRMSG
+
+	if ER quit $$ERRMSG^PBSUTL(RM)
+
+	quit ""
+		
+
+MAIN( Number VERSN, String INPUT)
+	/*
+	
+	ARGUMENTS:
+	
+		VERSN	Version
+		INPUT	Input String
+	  
+	
+	This subroutine is responsible for parsing the INPUT string and
+	either adding or deleting RELCIF entries based on the option in
+	the input string.  
+	
+	There are 3 valid options.  They are ADD, DELETE and OVERLAY.
+	
+	The ADD option is used to add an additional owner to an account.
+
+	The DELETE option is used to remove an existing owner from an account.
+
+	The OVERLAY option is used to replace all existing owners on an 
+	account with the set of owners passed in.  This is done by a series
+	of inserts, updates, and deletes.  In the case where the primary
+	owner is changing the original primary owner's entry will be updated 
+	with the new owner's information, the new owner's original record 
+	will be deleted, and a new record will be inserted for the original 
+	owner.
+	
+	There is the potential that the input string can contain multiple
+	options.  For this reason the option must be passed in the form of
+	OPTION1=ADD,OPTION2=DELETE,OPTION3=ADD.  It is only valid to mix ADDs
+	and DELETEs.  If OVERLAY is to be used then each OPTION should be set
+	to OVERLAY.  If any OPTION of OVERLAY is contained in the input, the
+	RPC will assume all OPTIONs to be OVERLAY.
+	
+	The input string can also contain ACN columns.  If any ACN columns are
+	present the account object will be updated with these
+	values.
+
+	After all RELCIF entries in the input string have been processed 
+	validation will be peformed based on what the account will look like
+	if all updates are performed.  If the state of the account does not
+	pass validation an appropriate error message describing why will
+	be returned.
+	
+	If the account passes validation then all data will be saved to the 
+	database.  
+
+	*/
+	
+	catch vERROR {
+
+		// Log GTM system errors
+		set ET=vERROR.type
+		if vERROR.type["%GTM-" do {
+			do ZE^UTLERR
+			set ERRMSG=vERROR.type_","_vERROR.description
+		}
+
+		trollback:$tlevel
+
+		// Build error message for thrown errors
+		else  do {
+			set ERRMSG=$S(RM.get().isNull():vERROR.description,1:RM)
+			set ERRMSG=$S(ET.isNull():ERRMSG,ERRMSG.isNull():ET,1:ET_","_ERRMSG)
+		}
+
+		// Set error flag
+		set ERV=1
+	}
+
+	
+	type Number ACN,CID,COUNT,NPRIACN,RCID,RELCIF(,),XACN,XCID
+	type String DATA(),DELETE(),NPRIROLE,OPTION,OPRIROLE
+	type Boolean QUIT
+	type RecordACN acn
+	type RecordDEP dep
+	type RecordLN ln
+	type RecordRELCIF relcif()
+	type ResultSet rs
+
+	// Version number of client message is not compatible with server
+	if VERSN.get()'=1 set RM=$$^MSG(2951) throw Class.new("Error",","_RM)
+	
+	// Invalid Record
+	if INPUT.isNull() set RM=$$^MSG(8097) throw Class.new("Error",","_RM)
+
+	// Initialization
+	set QUIT=0
+	set (NPRIACN,XACN,XCID)=""
+
+	// Convert input string to DATA array
+	do STR2ARR^UTLMRPC(INPUT,.DATA)
+
+	set CID=DATA("ACN.CID").get()
+	
+	// No Account Number Specified
+	if CID.isNull() set RM=$$^MSG(6787) throw Class.new("Error",","_RM) quit
+	
+	// Invalid account ~p1
+	if 'Db.isDefined("ACN","CID=:CID") set RM=$$^MSG(1259,CID) throw Class.new("Error",","_RM) quit
+
+	set acn=Db.getRecord("ACN","CID=:CID")
+	do acn.setAuditFlag(1)
+	
+	// Get primary role from old relationship code
+	type ResultSet rs1 = Db.select("ROLE","RELCODE","REL=:acn.acnrelc AND PCIF=1")
+	if rs1.next() set OPRIROLE=rs1.getCol(1)
+
+	// Populate acn object with data passed in
+	do acn.overlay("DATA")
+
+	// Get primary role from new relationship code
+	type ResultSet rs1 = Db.select("ROLE","RELCODE","REL=:acn.acnrelc AND PCIF=1")
+	if rs1.next() set NPRIROLE=rs1.getCol(1)	
+	
+	// Process all RELCIF entries contained in INPUT string
+	for COUNT=1:1 do { quit:(ER.get()!(QUIT))
+
+		/*
+		If ACN is null then there are no more RELCIF entries to
+		process
+		*/
+		set ACN=DATA("RELCIF"_COUNT_".ACN").get()
+		if ACN.isNull() set QUIT=1,COUNT=COUNT-1 quit
+		
+		// Customer ~p1 does not exist
+		if 'Db.isDefined("CIF","ACN=:ACN") set RM=$$^MSG(6167,ACN) throw Class.new("Error",","_RM) quit
+				
+		set RCID=DATA("RELCIF"_COUNT_".CID").get()
+		
+		// ACN.CID not equal to RELCIF.CID
+		if CID'=RCID set RM=$$^MSG(6173) throw Class.new("Error",","_RM) quit
+				
+		set OPTION=DATA("OPTION"_COUNT).get()
+	
+		// Invalid OPTION ~p1
+		if (OPTION'="ADD"),(OPTION'="DELETE"),(OPTION'="OVERLAY") set RM=$$^MSG(1515,"OPTION",OPTION) throw Class.new("Error",","_RM) quit
+
+		/*
+		Populate DELETE array with each relationship that is being
+		removed
+		*/
+		if OPTION="DELETE" do { quit
+			// Account ~p1/Customer ~p2 relationship does not exist
+			if 'Db.isDefined("RELCIF","ACN=:ACN,CID=:CID") set RM=$$^MSG(6172,CID,ACN) throw Class.new("Error",","_RM) quit
+
+			set DELETE(CID,ACN)=""
+		}
+
+		/*
+		Add each new relationship.  To do this a RELCIF object will be
+		created in section ADD
+		*/
+		if (OPTION="ADD")!(OPTION="OVERLAY") do ADD(.relcif(),.DATA,COUNT,ACN,CID,OPRIROLE,.OWNERS,.NPRIACN,NPRIROLE,.RELCIF(,))
+	}
+	
+	if OPTION="OVERLAY" do OVERLAY(.relcif(),.DELETE,CID,OPRIROLE,.OWNERS,NPRIACN,NPRIROLE,.RELCIF(,),.DATA)
+	
+	// Missing RELCIF entries
+	if COUNT=0 set RM=$$^MSG(3113,"RELCIF entries") throw Class.new("Error",","_RM) quit
+
+	// Validate the customer/account relationships
+	do VALIDATE(.relcif(),.acn,.DELETE) quit:ER
+
+	// Save the account record
+	do acn.save()
+	if ER throw Class.new("Error",","_RM) quit
+	
+	// Delete relationship for each owner being deleted
+	for  set XCID=DELETE(XCID).order() quit:XCID.isNull()  do {
+		for  set XACN=DELETE(XCID,XACN).order() quit:XACN.isNull()  do {
+			do Db.delete("RELCIF","ACN=:XACN AND CID=:XCID")
+			if ER throw Class.new("Error",","_RM)
+		}
+	}
+	
+	new vfkey
+	
+	// Create relationship for each owner being added
+	set COUNT=""
+	for  set COUNT=relcif(COUNT).order() quit:COUNT.isNull()  do relcif(COUNT).save("/NOFKCHK=1/VALDD/VALRI/VALREQ/KEEPVFKEY") if ER throw Class.new("Error",","_RM) quit
+	
+	do vfkey^SQLBUF
+	if ER throw Class.new("Error",","_RM) quit
+
+	quit
+	
+
+ADD( RecordRELCIF relcif(), String DATA(), Number COUNT, Number ACN, Number CID, Number OPRIROLE, String OWNERS(), Number NPRIACN, Number NPRIROLE, Number RELCIF(,))
+	/* Create a single RELCIF object
+	
+	ARGUMENTS:
+		RecordRELCIF relcif()		An array of RELCIF objects. A
+		 				new entry will be added to the
+		 				array.
+						
+		DATA				A key/value string containing
+						RELCIF data.
+						
+		COUNT				The sequence number of the relcif
+						object being created.
+	
+		ACN				The customer number of the owner
+						that is being added to the account.
+
+		CID				The account the owner is being
+						added to.
+		
+		OPRIROLE			The primary role for the
+						relationship code.
+						
+		RELCIF				An array representing the new view of
+						RELCIF for the account.
+						
+	RETURNS:
+		RecordRELCIF relcif()		An array of RELCIF objects
+						with the new record added.
+
+		OWNERS				A arry of customer numbers
+						for the new account owners
+						
+		NPRIACN				The customer number corresponding
+						to the primary role.
+	*/
+
+	type public String RM
+	
+	type Number XACN,NEWROLE,OLDROLE
+	type String RCIFDATA()
+
+	// Populate RCIFDATA array with RELCIF_CNT specific data
+	do MOVEARR^UTLMRPC("RELCIF"_COUNT,"RELCIF",.DATA,.RCIFDATA)
+	
+	set XACN=RCIFDATA("RELCIF.ACN")
+	set relcif(COUNT+1)=Db.getRecord("RELCIF","ACN=:XACN,CID=:CID",1)
+	do relcif(COUNT+1).setAuditFlag(1)
+	
+	set OLDROLE=relcif(COUNT+1).role
+	set NEWROLE=RCIFDATA("RELCIF.ROLE")
+	
+	/*
+	 If primary role changed and the current record was the old primary owner,
+	 change to insert mode, as we will overlay the actual record in section
+	 OVERLAY.
+	*/
+	if NEWROLE'=OLDROLE,OLDROLE=OPRIROLE do relcif(COUNT+1).setMode(0)
+
+	// Populate relcif object with data passed in
+	do relcif(COUNT+1).overlay("RCIFDATA")
+	
+	// Missing required data item RELCIF.ROLE
+	if (relcif(COUNT+1).role).isNull() set RM=$$^MSG(1767,"RELCIF.ROLE") throw Class.new("Error",","_RM) quit
+	
+	// Save off COUNT to be used in section OVERLAY
+	set OWNERS(ACN)=COUNT
+	
+	// New view of RELCIF
+	set RELCIF(ACN,CID)=relcif(COUNT+1).role
+	
+	/*
+	If this is the primary role, capture the new primary customer number
+	and remove this user from the array.  The customer will be added to
+	the array in section OVERLAY once the exising primary record has
+	been retrieved from the database.
+	*/
+	if OLDROLE'=relcif(COUNT+1).role,relcif(COUNT+1).role=NPRIROLE do {
+		set NPRIACN=relcif(COUNT+1).acn
+		kill relcif(COUNT+1)
+	}
+	
+	quit
+
+
+OVERLAY( RecordRELCIF relcif(), String DELETE(), Number CID, Number OPRIROLE, String OWNERS(), Number NPRIACN, Number NPRIROLE, Number RELCIF(,), String DATA())
+	/*
+	ARGUMENTS:
+		RecordRELCIF relcif()		An array of RELCIF objects. A
+		 				new entry will be added to the
+		 				array.
+						
+		DELETE				An array of account owners to delete
+					
+		CID				The account the owner is being
+						added to.
+		
+		OPRIROLE			The primary role for the
+						relationship code.
+						
+		OWNERS				An array of customer numbers
+						for the new account owners
+						
+		NPRIACN				The customer number corresponding
+						to the primary role.
+						
+		RELCIF				An array representing the new view of
+						RELCIF for the account.
+
+	RETURNS:
+		RecordRELCIF relcif()		An array of RELCIF objects.
+						.
+
+	*/
+
+
+	type Number ACN,ROLE
+
+	// Select existing account owners
+	type ResultSet rs=Db.select("ACN,ROLE","RELCIF","CID=:CID")
+	while rs.next() do {
+		set ACN=rs.getCol(1)
+		set ROLE=rs.getCol(2)
+		
+		// Role didn't change so no overlay required
+		if ROLE=RELCIF(ACN,CID).get() quit
+
+		/* 
+		If owner was primary, select record and set customer number
+		equal to new primary owner so that an update will be processed.
+		*/
+		if ROLE=OPRIROLE do {
+			type Number COUNT
+			type String RCIFDATA()
+			
+			set COUNT=OWNERS(NPRIACN)
+			// Populate RCIFDATA array with RELCIF_CNT specific data
+			do MOVEARR^UTLMRPC("RELCIF"_COUNT,"RELCIF",.DATA,.RCIFDATA)
+			
+			set relcif(1)=Db.getRecord("RELCIF","CID=:CID,ACN=:ACN")
+			do relcif(1).setAuditFlag(1)
+			set relcif(1).acn=NPRIACN
+			set relcif(1).role=NPRIROLE
+			
+			// Populate relcif object with data passed in
+			do relcif(1).overlay("RCIFDATA")
+		} 
+		/*
+		If the owner is no longer on the account or the owner is now the 
+		primary owner add owner to the DELETE array.  If an owner is to 
+		remain on the account then they will already be in the relcif 
+		array and will be inserted again.
+		*/
+		if ('RELCIF(ACN,CID).exists())!(ACN=NPRIACN) set DELETE(CID,ACN)=""
+		
+		// The owner is no longer on the account
+	}
+
+	quit
+	
+
+VALIDATE( RecordRELCIF relcif(), RecordACN acn, String DELETE())
+	/* Validate the customer/account relationships
+
+	ARGUMENTS:
+		RecordRELCIF relcif()		An array of RELCIF objects that
+						are being added to the database
+						
+		RecordACN acn			ACN object for account being
+						modified
+	
+		DELETE				An array of relationships
+						that are being deleted
+	
+	This section of code will review what the customer/account relationship
+	will look like after the set of updates has been performed.  It will
+	check to make sure that all relationships are valid.
+	
+	It will check the account against table RELCODE and verify that all
+	of the criteria for the given relationship code - ACN.ACNRELC - are
+	satisfied. The following checks against table RELCODE are performed:
+		- Required minimum number of owners satisfied for each role
+		  code.
+		- Maximum number of owners for each role code not exceeded.
+		- All owners contain role codes that are associated with the
+		  relationship code.
+		  
+	An appropriate error message will be returned if a particular 
+	requirement is not satisfied.
+	*/
+	
+	type Number i,CNT,ROLE,ROLECNT
+	type String ACNS,LIST,OWNERS()
+		
+	/*
+	If OPTION equals ADD or DELETE cycle through table RELCIF and 
+	create relcif objects for each record in the database that is
+	not being deleted as part of the update.
+	*/
+	if OPTION'="OVERLAY" do {
+		set RECCNT=relcif("").order(-1)
+		type ResultSet rs1=Db.select("ACN","RELCIF","CID=:acn.cid")
+		if 'rs1.isEmpty() while rs1.next() do {
+			/*
+			If an entry is contained in array DELETE then the
+			account/customer relationship is being removed.  This
+			relationship should not be considered as part of the
+			validation.
+			*/
+			if DELETE(CID,rs1.getCol(1)).exists() quit
+	
+			set RECCNT=RECCNT+1
+	
+			set relcif(RECCNT)=Db.getRecord("RELCIF","ACN=:rs1.getCol(1),CID=:acn.cid")
+		}
+	}	
+
+	/*
+	Cycle through relcif array and create OWNER array.  The owner array
+	will be keyed by role code.  For each role, the number of owners will
+	be counted and a list of owners will be created.
+	*/
+	set i=""
+	for  set i=relcif(i).order() quit:i.isNull()  do {
+		set ROLE=relcif(i).role
+		set OWNERS(ROLE)=OWNERS(ROLE).get()
+		set CNT=OWNERS(ROLE).piece("|",1)+1
+		set ACNS=OWNERS(ROLE).piece("|",2)_","_relcif(i).acn
+		
+		set OWNERS(ROLE)=CNT_"|"_ACNS
+	}
+	
+	/*
+	Cycle through table RELCODE and and determine if OWNER array above
+	satisfies all rules
+	*/
+	type DbSet ds1=Db.selectDbSet("RELCODE","REL=:acn.acnrelc")
+
+	// Invalid relationship code ~p1
+	if ds1.isEmpty() set RM=$$^MSG(6171,acn.acnrelc) throw Class.new("Error",","_RM) quit
+	while ds1.next() do { quit:ER
+		type RecordRELCODE relcode=ds1.getRecord("RELCODE")
+		set ROLECNT=+OWNERS(relcode.role).get()
+
+		// Required minimum of ~p1 owners not satisfied for role code ~p2
+		if ROLECNT<relcode.req set RM=$$^MSG(6168,relcode.req,relcode.role) throw Class.new("Error",","_RM) quit
+	
+		// Maximum of ~p1 owners exceeded for role code ~p2
+		if ROLECNT>relcode.maxrol set RM=$$^MSG(6169,relcode.maxrol,relcode.role) throw Class.new("Error",","_RM) quit
+		
+		set OWNERS(relcode.role)=""
+	}
+
+	/* 
+	Determine if any invalid roles exist for the account.  If any invalid
+	roles exist an error will be returned along with a list of owners
+	containing invalid role codes
+	*/
+	set (LIST,ROLE)=""
+	for  set ROLE=OWNERS(ROLE).order() quit:ROLE.isNull()  do {
+		if OWNERS(ROLE).isNull() quit
+
+		set LIST=LIST_OWNERS(ROLE).piece("|",2)
+	}
+
+	if 'LIST.isNull() do {
+		set LIST=$E(LIST,2,9999)
+		
+		// Invalid role code for customers ~p1
+		set RM=$$^MSG(6170,LIST) throw Class.new("Error",","_RM)
+	}
+	
+	quit
+	
+	
+TEST(String %UserID)
+
+	/* Test Linetag
+	
+	This linetag can be used to test the RPC from the GTM prompt
+	*/
+	
+	new ACN,ACNRELC,AGEMAJ,CID,CLS,CNT,INPUT,IRN,NUM,NUMA,NUMD
+	new OPTION,OVERLAY,ROLE,RM
+
+	// User ID required
+	if %UserID.isNull() set ER=1 write !,$$^MSG(2849)
+
+	do SYSVAR^SCADRV0()
+	set %UserID=1
+	set %UserClass="SCA"
+	set %LOGID=$$LOGID^SCADRV
+	set %IPMODE="NOINT"
+	set %UserStation=$$TLO^UTLO()
+
+	set ER=0
+	set RM=""
+	set (NUMA,NUMD)=0
+
+	set INPUT=""
+
+	read !,"Account Number: ",CID
+	read !,"Relationship Code: ",ACNRELC
+	read !,"Interest Rate: ",IRN
+	read !,"Is this an OVERLAY(Y/N): ",OVERLAY
+	if OVERLAY="Y" do {
+		read !,"Number of OVERLAY records: ",NUMA
+		set OPTION="OVERLAY"
+	}
+	else  do {
+		read !,"Number of ADD records: ",NUMA
+		read !,"Number of DELETE records: ",NUMD
+		set OPTION="ADD"
+	}
+	
+	if 'IRN.isNull() set INPUT="ACN.IRN="_IRN_","
+	if 'ACNRELC.isNull() set INPUT=INPUT_"ACN.ACNRELC="_ACNRELC_","
+
+	for CNT=1:1:NUMA do {
+		write !!,"Add or overlay records:"
+		read !,"Customer Number: ",ACN
+		read !,"Role Code: ",ROLE
+		set INPUT=INPUT_"RELCIF"_CNT_"."_"ACN"_"="_ACN_","
+		set INPUT=INPUT_"RELCIF"_CNT_"."_"ROLE"_"="_ROLE_","
+		set INPUT=INPUT_"RELCIF"_CNT_"."_"CID"_"="_CID_","
+		set INPUT=INPUT_"OPTION"_CNT_"='"_OPTION_"',"
+	}
+
+	for CNT=NUMA+1:1:NUMA+NUMD do {
+		write !!,"Delete records"
+		read !,"Customer Number: ",ACN
+		read !,"Role Code: ",ROLE
+		set INPUT=INPUT_"RELCIF"_CNT_"."_"ACN"_"="_ACN_","
+		set INPUT=INPUT_"RELCIF"_CNT_"."_"ROLE"_"="_ROLE_","
+		set INPUT=INPUT_"RELCIF"_CNT_"."_"CID"_"="_CID_","
+		set INPUT=INPUT_"OPTION"_CNT_"='DELETE',"
+	}
+
+
+	if $E(INPUT,$L(INPUT))="," S INPUT=$E(INPUT,1,$L(INPUT)-1)
+	set INPUT=INPUT_",ACN.CID="_CID
+	
+	do Runtime.start("BA")
+	
+	set X=$$^MRPC147(.RETURN,1,INPUT)
+		
+	if 'X.isNull() do {
+		set PTR=$$LV2V^MSG(X,.FLD)
+		set ER=1
+		if RM.isNull() set RM=FLD(5)
+	}
+	if X.isNull() set RM="Success"
+	
+	write !!,"Error Flag: ",ER.get(),"   ",RM.get()
+
+	if $TLevel do Runtime.commit()
+
+	quit
+	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60725^47541^Marie Mbui^17615"	// Signature - LTD^TIME^USER^SIZE

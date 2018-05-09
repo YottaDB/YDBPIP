@@ -1,0 +1,2527 @@
+public	STFMON	//
+	/*
+
+	   STF monitor for auto transfer of STF files from FEP to HOST.  This
+	   monitor will run in background on the FEP, package a screen of
+	   off-line transactions and pass it to the server on the host, using
+	   the message transport and the SCA$IBS server type.
+
+	   EXAMPLE:
+
+	   D ^STFMON   - Called directly
+	   S X=$$^%ZJOB("^STFMON")  - Runs as a detached process
+	   D START^STFMON   - Interactive startup
+	   D JOB^STFMON("SCA$IBS")  - Job it from a startup file
+
+	   LIBRARY:
+
+	         $$STFPOLL - Return polling status.  If monitor is started
+	                     using option 3, continuous poll, this function
+	                     will return 1.
+	         $$STFHANG - Returns value in seconds that the monitor should
+	                     hang before attempting STF transfer again.
+	        $$SHUTDOWN - Returns 1 if monitor should stop.
+	             START - Subroutine called by PROFILE function STFSTART to
+	                     start the monitor.
+	              STOP - Subroutine called by PROFILE function STFSTOP to
+	                     stop the monitor.
+	            GETMSG - Main processing subroutine responsible for
+	                     transferring and posting STF records.
+	       NMSP1 - Build an off-line sign-on message when one does not
+	                     exist in the STF file.
+	     STFHOST - Post HOST based store and forward file.
+
+	  -----Revision History------------------------------------------------
+	  
+
+	   05/30/05 - CARROLLJ - CR 14189
+	   	      Cleaned up STFHOST section to get host storing forward working
+	   	      again. 
+
+	   02/01/05 - SMITHC - CR 13661
+	   	      Brought procedure into p04 version from V70DEV to correct
+	   	      error while zlinking that occurred during dayend. 
+	   	      Modified to conform to current standards (except for 
+	   	      unscoped variables). Corrected ZDDP table references 
+	   	      (does not exist) to DDPSTS. Added where clause to 
+	   	      stfhost1 Db references.
+	   	      
+	   	      Retrofitted the following change from p01:
+		      07/27/04 - RussellDS - CR11064
+			         Replace call to INIT^PBSSRV with INIT^PBSUTL
+
+	   01/08/03 - CHHABRIAS - 49451
+		      Converted to PSL
+
+	  ---------------------------------------------------------------------
+
+	*/
+
+public	PROCESS	//  Main processing section - determines HOW to process STF
+
+	catch vERROR { 
+		new ET,RM 
+		set ET=vERROR.type 
+
+		if ET.isLike("%GTM-") do { quit 
+
+			do ZE^UTLERR 
+
+			}       
+
+		set ET=ET_"-"_vERROR.thrownAt 
+		set RM=vERROR.description 
+	
+		do ^UTLERR
+
+		}
+
+	new BRCD,DATE,DIR,ET,LOGFILE,NOSVR,RGBLDIR,SPLDIR,STFHANG,STFMON,STFOPT
+	new STFPOLL,SVTYP,TIME,TJD,TPD,TR,X,Y,%CSID
+
+	set DATE=$$DAT^%ZM(CUVAR.tjd)
+
+	set TIME=$$TIM^%ZM(%CurrentTime,"24:60:SS")
+
+	set SPLDIR=CUVAR.spldir
+	set LOGFILE=$$FILE^%TRNLNM("STFMON.LOG",SPLDIR)
+
+	type IO logfile=Class.new("IO")
+	set logfile.fileName=LOGFILE
+	set logfile.openParams="WRITE/APPEND/SHARED"
+	do logfile.open()
+	
+	catch ERROR {
+		set ET=ERROR.type
+ 		set RM=ERROR.context
+		do EXC
+		}
+
+	// I18N=OFF
+	// STFMON started on ~p1 at ~p2
+
+	set REC1=$$^MSG(8296,DATE,TIME)
+
+	do logfile.write("")
+	do logfile.write("")
+	do logfile.write("")
+	do logfile.write(.REC1)
+
+	// No connection established
+	do INIT
+	if ER lock -TMP("STFMON") quit
+
+	// INIT successful
+	set REC1=$$^MSG(8294)
+
+	do logfile.write("")
+        do logfile.write(.REC1)
+
+	// I18N=ON
+
+	// Don't run on Host
+	if '%LOGID lock -TMP("STFMON") quit
+
+	if '%CSID.get().isNull() set ET=$$CLDSCNCT^%MTAPI(%CSID)
+
+	set ET=$$CLCNCT^%MTAPI(.%CSID)
+
+	if 'ET.isNull() do { quit
+		set ER=1
+		set RM=ET
+		do LOG(.logfile)
+		}
+
+	if $$STFPOLL do { quit
+
+		// Stay in MUMPS and poll ^STF
+		do NETPOLL(.logfile)
+
+		set TIME=$$TIM^%ZM(%CurrentTime,"24:60:SS")
+
+		// I18N=OFF
+		// STFMON processed STF file successfully on ~p1 at time ~p2
+		set REC1=$$^MSG(8334,DATE,TIME)
+
+		do logfile.write("")
+		do logfile.write(.REC1)
+		do logfile.close()
+	
+		// I18N=ON
+
+		lock -TMP("STFMON")
+		}
+
+	do GETMSG(.logfile)
+
+	// If in batch, either shutdown
+	if STFOPT=1 do { quit
+
+		// or exit and restart later
+		if '$$SHUTDOWN() quit
+
+		set TIME=$$TIM^%ZM(%CurrentTime,"24:60:SS")
+
+		// I18N=OFF
+		// STFMON aborting on ~p1 at ~p2
+		set REC1=$$^MSG(8295,DATE,TIME)
+
+                do logfile.write("")
+                do logfile.write(.REC1)
+                do logfile.close()
+
+		// I18N=ON
+
+		do ABORT
+		}
+
+	// initialize control file
+	type RecordDDPFEP ddpfep=Db.getRecord("DDPFEP","FEPDIR=:DIR",1)
+        set ddpfep.stfmon=""
+        set ddpfep.stfhang=""
+        set ddpfep.stfpoll=""
+        set ddpfep.stfopt=""
+        do ddpfep.save()
+
+	// I18N=OFF
+	set TIME=$$TIM^%ZM(%CurrentTime,"24:60:SS")
+
+	// STFMON processed STF file successfully on ~p1 at time ~p2
+	set REC1=$$^MSG(8334,DATE,TIME)
+
+	do logfile.write("")
+	do logfile.write(.REC1)
+	do logfile.close()
+
+	// I18N=ON
+
+	lock -TMP("STFMON")
+
+	// Process complete
+	set ER="W"
+	set RM=$$^MSG(2237)
+	
+	quit
+
+
+NETPOLL(IO logfile)	// Private ; Poll %NET for changes
+	/*
+	   This subroutine will be called if STFMON is to stay in MUMPS and
+	   start transferring STF when the network comes back up.
+	*/
+
+	catch vERROR {
+		new ET,RM
+		set ET=vERROR.type
+		set %NET=0
+
+		if ET.isLike("%GTM-") do { quit
+
+			do ZE^UTLERR
+			}
+
+		set ET=ET_"-"_vERROR.thrownAt
+		set RM=vERROR.description
+
+		do ^UTLERR
+
+		}
+
+	set ER=0
+	new %net
+
+	if 'DIR.exists() set DIR=$$DIR^DDPUTL
+
+	for  do { quit:ER!$$SHUTDOWN
+
+		// No off-line work
+		type ResultSet rs=Db.select("SSEQ","STF")
+		if rs.isEmpty() hang $$STFHANG quit
+
+		// Check network status
+		type RecordDDPSTS ddpsts=Db.getRecord("DDPSTS")
+		set %net=ddpsts.status
+
+		// Try again later
+		if '%net hang $$STFHANG quit
+		do GETMSG(.logfile)
+		}
+
+	type RecordDDPFEP ddpfep=Db.getRecord("DDPFEP","FEPDIR=:DIR",1)
+	set ddpfep.stfmon=""
+	set ddpfep.stfhang=""
+	set ddpfep.stfpoll=""
+	set ddpfep.stfopt=""
+	do ddpfep.save()
+
+	quit
+
+
+GETMSG(IO logfile)	// Private ; Gets the Message
+
+	/*
+	   This functions obtains each TLO and for it combines all message with
+	   same user ID (%UID) and sequence # into one message before calling
+	   REFINE to interpret the message header for appropriate action.
+	*/
+
+	catch vERROR {
+		new ET,RM
+		set ET=vERROR.type
+
+		if ET.isLike("%GTM-") do { quit
+
+			do ZE^UTLERR
+			}
+
+		set ET=ET_"-"_vERROR.thrownAt
+		set RM=vERROR.description
+
+		do ^UTLERR
+		}
+
+	new %UID
+	set %UID=""
+
+	type RecordDDPSTS ddpsts=Db.getRecord("DDPSTS")
+	set %net=ddpsts.status
+
+	// Branch is off-line
+	if '%NET quit	
+		
+	type ResultSet rs=Db.select("UID","STF")
+	while rs.next() do { quit:ER
+		set %UID=rs.getCol("UID")
+		do STFUID(%UID)
+
+		if 'ER quit
+		if ER=1 set ER=0 quit
+		if ER=2 do {
+
+			set ET=$$CLDSCNCT^%MTAPI(%CSID)
+
+			for  do { quit:'ER!$$SHUTDOWN
+
+				set ET=$$CLCNCT^%MTAPI(.%CSID)
+
+				if ET.isNull() set ER=0 quit
+				do LOG(.logfile)
+				hang 60
+				}
+			}
+		}
+	quit
+
+
+STFUID(%UID)	// Private; For each %UID, it collates thru the entire STF file
+
+	/*
+	   Collates through the entire STF file. For each user, it combines
+	   all subsequences together into one record, deletes all subseque-
+	   nces from the STF file, and sends the record to REFINE.
+
+	   ARGUMENTS:
+	   . %UID Current User ID  /TYP=N/REQ/MECH=VAL
+
+	*/
+
+	new SEQ,SSEQ,X,TLO,tlo
+
+	set (SEQ,SSEQ,X,tlo)=""
+	set ER=0
+
+	type ResultSet rs=Db.select("SEQ","STF1","UID=:%UID")
+	while rs.next() do {
+		set SEQ=rs.getCol("SEQ")
+
+		type RecordSTF1 stf1=Db.getRecord("STF1","UID=:%UID,SEQ=:SEQ")
+		set tlo=stf1.tlo
+		if tlo.isNull() do Db.delete("STF1","UID=:%UID AND SEQ=:SEQ") quit
+
+		set X=""
+		type ResultSet rs=Db.select("SSEQ,STFMSG","STF","UID=:%UID AND SEQ=:SEQ")
+		while rs.next() do {
+			set X=X_rs.getCol("STFMSG")
+			}
+
+		do REFINE(tlo,X)
+
+		if 'ER do {
+			do Db.delete("STF1","UID=:%UID AND SEQ=:SEQ")
+			do Db.delete("STF","UID=:%UID AND SEQ=:SEQ")
+			}
+		}
+	quit
+
+
+STFPROC(msg,reply,srvcls,tlo)	// Private ; Sending Client Message
+
+	/*
+	   DESC:
+	   This function exchanges the stored message with the host for proces-
+	   sing.
+
+	   KEYWORDS:
+
+	   ARGUMENTS:
+		. msg 	Message to be exchanged 	/TYP=T/REQ/MECH=REFNAM:RW
+
+		. reply Message Exchange Reply  	/TYP=T/REQ/MECH=REFNAM:W
+
+		. srvcls Service Class  		/TYP=N/REQ/MECH=VAL
+
+		. tlo 	Terminal Location 		/TYP=T/REQ/MECH=VAL
+
+	   INPUTS:
+
+	   RETURNS:
+		. ER 	Error Flag  			/TYP=N
+
+	*/
+
+	new ET,ptr,fld,fld1,stfflg,x
+
+	set stfflg=2
+
+	set ET=$$EXCHMSG^%MTAPI(.msg,.reply,"SCA$IBS",.%CSID,60)
+
+	if 'ET.isNull() do { hang $$STFHANG quit 2
+
+		do ERRLOG^PBSUTL(ET)
+
+		set reply=$$ERRMSG^PBSUTL(ET)
+
+		// STF message is definitely not processed; put it back in STF
+		if ET="CS_MTMCNCT"!(ET="CS_NOSVTYP") do SETSTF(%UID,SEQ,.msg,stfflg,tlo) quit
+
+		/* STF message could have been processed; set stfflg to 1
+		   Errors include CS_MTERROR, CS_SVFAIL, CS_TIMEOUT, CS_TIMEOUTNC
+		*/
+		do SETSTF(%UID,SEQ,.msg,1,tlo)
+		}
+
+	set ptr=$$LV2V^MSG(reply,.fld)
+
+	// Now fld(1) contains header, fld(2) contains body
+	set ptr=$$LV2V^MSG(fld(1),.fld1)
+
+	/*
+	 If transaction has already been processed on server, no message
+	 is returned.
+	 Empty reply from server - no error
+	*/
+	if srvcls,'fld(2).data() quit 0
+
+	// Quit with error if the reply message is empty
+	set ptr=$$LV2V^MSG(fld(2).get(),.fld2)
+
+	if 'srvcls,fld2(2).get().isNull() quit 1
+
+	// If error occurred due to invalid token
+	if fld1(3).get() do {
+
+		new et,fld3
+		
+		//reset ^STF w/ no token for next try
+		set ptr=$$LV2V^MSG(fld2(2),.fld3)
+		set et=fld3(3).get()
+		if et.isLike("SV_INVLDTKN") do SETSTF(%UID,SEQ,.msg,1,tlo,1)
+		}
+
+	// Return status stored in the header
+	quit fld1(3).get()
+
+
+SETSTF(%UID,SEQ,msg,stfflg,tlo,tknrst)	// Private; Reset value of STF flag
+
+	/*
+	   DESC:
+	   If it's not certain that the message has been exchanged, then reset
+	   the STF flag to a 1.
+
+	   KEYWORDS:
+
+	   ARGUMENTS:
+	   . %UID User ID   		/TYP=N/REQ/MECH=VAL
+
+	   . SEQ Sequence Number  	/TYP=N/REQ/MECH=VAL
+
+	   . msg Message   		/TYP=T/REQ/MECH=REFNAM:RW
+
+	   . stfflg STF flag  		/TYP=N/REQ/MECH=VAL
+
+	   . tlo Terminal Location 	/TYP=T/REQ/MECH=VAL
+
+	   . tknrst Reset Token  	/TYP=L/NOREQ/MECH=VAL
+
+	   INPUTS:
+
+	   RETURNS:
+
+	*/
+
+	new zptr,zhdr,zhdr2,rec,msg1,SSEQ1
+	set (zptr,zhdr,zhdr2,rec)=""
+
+	if stfflg=1 do {
+
+		// splitting message into header and body
+		set zptr=$$LV2V^MSG(msg,.rec)
+		
+		set msg1=rec(1)
+
+		// splitting header into its components
+		set zptr=$$LV2V^MSG(msg1,.zhdr)
+
+		// If stf_flg of message is set to
+		set zhdr(4)=1
+
+		// Reset value of token to null
+		if tknrst.get() set zhdr(2)=""
+
+		/* 1 already then don't change it.
+		   Puts header back with its length
+		*/
+		set rec(1)=$$V2LV^MSG(.zhdr)
+		set msg=$$V2LV^MSG(.rec)
+		}
+
+	type RecordSTF1 stf1=Db.getRecord("STF1","UID=:%UID,SEQ=:SEQ",1)
+	set stf1.tlo=tlo
+	do stf1.save()
+
+	set seq=1
+
+	if msg.length()>400 do {
+		for i=1:400:msg.length() do {
+			set SSEQ1=(i\400)+1
+			type RecordSTF stf=Db.getRecord("STF","UID=:%UID,SEQ=:SEQ,SSEQ=:SSEQ1",1)
+			set stf.stfmsg=msg.extract(i,i+399)
+			do stf.save()
+			}
+		}
+	else  do {
+		type RecordSTF stf=Db.getRecord("STF","UID=:%UID,SEQ=:SEQ,SSEQ=:seq",1)
+		set stf.stfmsg=msg
+		do stf.save()
+		}
+	quit
+
+
+TOKENINS(header,token)	//
+
+	/*
+	   Insert the given token in a single header. This token can then be
+	   added to headers of all transactions until we see the next NMSP sign-
+	   on message.
+
+	   ARGUMENTS:
+	   . header 	Message Header  		/TYP=T/REQ
+							/MECH=REFNAM:RW
+
+	   . token  	Token to be inserted 		/TYP=T/REQ
+							/MECH=VAL
+
+	*/
+
+	// ASSUMPTION: Header is in LV format
+	new vzhdr,vptr,zrec,zhdr
+
+	set vzhdr=$$LV2V^MSG(header,.zrec)
+
+	// If no token assigned already or token in invalid then assign token
+	if (zrec(2).isNull())!(zrec(2)'=token) do {
+		set zrec(2)=token
+		
+		set zhdr=$$V2LV^MSG(.zrec)
+		
+		set header=$$V2LV^MSG(.zhdr)
+		}
+		
+	quit
+
+
+INIT	// Private ; Initialize section
+
+	new PRCID,PRCNAM
+
+	// Get the process jobtype (0-Detach,1-Network,2-Batch,3-Interactive)
+	set JOBTYPE=$$JOBTYPE^%ZFUNC
+
+	set DIR=$$DIR^DDPUTL
+
+	set PRCNAM=$$PRCNAM^%ZFUNC
+
+	set PRCID=$$PID^%ZFUNC
+
+	type RecordDDPFEP ddpfep=Db.getRecord("DDPFEP","FEPDIR=:DIR",1)
+
+	set ddpfep.stfnam=PRCNAM
+	set ddpfep.stfid=PRCID
+
+	// Set STFOPT to 1 if the job type is batch
+	if JOBTYPE=2 do {
+		set STFOPT=1
+		set ddpfep.stfopt=STFOPT
+		}
+
+	do ddpfep.save()
+
+	set STFMON=ddpfep.stfmon
+	set STFHANG=ddpfep.stfhang
+	set STFPOLL=ddpfep.stfpoll
+	set STFOPT=ddpfep.stfopt
+
+	lock +TMP("STFMON"):2
+	else  do {
+
+		// Batch - do not resubmit
+		if JOBTYPE=2 do ABORT quit
+
+		// Store and forward (STF) monitor already running
+		do Runtime.setErrMSG("TMPSTFMON",2553) quit
+		}
+
+	if '%LOGID.exists() set %LOGID=$$LOGID^SCADRV
+	
+	set (TJD,TPD)=%SystemDate
+	set %TO=99
+	set ER=0
+	set SVTYP="SCA$IBS"
+	set %MCP=CUVAR.%MCP
+
+	type RecordDDPSTS ddpsts=Db.getRecord("DDPSTS")
+	set %NET=ddpsts.status
+
+	set NOSVR=0
+	set RGBLDIR=""
+	
+	quit
+
+
+SHUTDOWN()	// Private ; Check for a shutdown message sent from PROFILE
+
+	if 'DIR.exists() set DIR=$$DIR^DDPUTL
+
+	if 'Db.isDefined("DDPFEP","FEPDIR=:DIR") quit 1
+
+	type RecordDDPFEP ddpfep=Db.getRecord("DDPFEP","FEPDIR=:DIR")
+
+	// A stop has been issued
+	if 'ddpfep.stfmon do { quit 1
+
+		// initialize fields
+		set ddpfep.stfmon=""
+	        set ddpfep.stfhang=""
+        	set ddpfep.stfpoll=""
+	        set ddpfep.stfopt=""
+
+        	do ddpfep.save()
+		}
+	quit 0
+
+
+STFHANG()	// Private ; Return hang time
+
+	if '%LOGID quit 600
+	
+	if 'DIR.exists() set DIR=$$DIR^DDPUTL
+
+	if 'Db.isDefined("DDPFEP","FEPDIR=:DIR") quit 600
+
+	type RecordDDPFEP ddpfep=Db.getRecord("DDPFEP","FEPDIR=:DIR")
+
+	// default to 10 minutes
+	if ddpfep.stfhang.isNull() quit 600
+
+	quit ddpfep.stfhang*60
+
+
+STFPOLL()	// Private ; Check if process should remain polling in MUMPS
+
+	if 'DIR.exists() set DIR=$$DIR^DDPUTL
+
+	type RecordDDPFEP ddpfep=Db.getRecord("DDPFEP","FEPDIR=:DIR")
+
+	// Single pass, do not poll
+	if ddpfep.stfopt=2 quit 0
+
+	// Single pass, do not poll
+	if ddpfep.stfopt=4 quit 0
+	if ddpfep.stfpoll quit 1
+
+	quit 0
+
+
+public	START	// Start PROFILE/IBS Store and Forward Server
+
+	new DIR,STFOPT,STOPT,VFMQ,X,fSTF
+
+	catch vERROR {
+		new ET,RM
+		set ET=vERROR.type
+
+		if ET.isLike("%GTM-") do { quit
+
+			do ZE^UTLERR
+			}
+
+		set ET=ET_"-"_vERROR.thrownAt
+		set RM=vERROR.description
+
+		do ^UTLERR
+		}
+
+	if '%LOGID.exists() set %LOGID=$$LOGID^SCADRV
+
+	if '%LOGID do HOST quit
+
+	// Store and forward (STF) monitor not started
+	do PRMT(1)
+
+	if VFMQ="Q" set ER="W" set RM=$$^MSG(2555) quit
+
+	set ER="W"
+
+	set DIR=$$DIR^DDPUTL
+
+	if STFOPT=1 do SBMIT do FILE quit
+
+	if STFOPT=4 do PROCESS do FILE quit
+
+	if STFOPT=3 set STFPOLL=1
+	do JOB(SVTYP)
+	
+	do FILE
+	
+	quit
+
+
+FILE	//
+
+	type RecordDDPFEP ddpfep=Db.getRecord("DDPFEP","FEPDIR=:DIR",1)
+	set ddpfep.stfmon=STFMON
+	set ddpfep.stfhang=STFHANG
+	set ddpfep.stfpoll=STFPOLL
+	set ddpfep.stfopt=STFOPT
+
+	do ddpfep.save()
+	quit
+
+
+SBMIT	// Run the STF server out of a batch job
+
+	new CMD,DIR,HRS,LOG,MIN,PARAM,RESBMT,X
+
+	if STFHANG>60 do {
+		set HRS=STFHANG\60
+		set MIN=STFHANG#60
+		set RESBMT="+00:"_HRS_":"_MIN_":00"
+		}
+	else  set RESBMT="+00:"_STFHANG_":00"
+
+	set RESBMT=""""_RESBMT_""""
+
+	set DIR=$$DIR^DDPUTL
+
+	set LOG=$$SCAU^%TRNLNM("DDP","STFMON.LOG")
+
+	set PARAM="("_DIR_","_RESBMT_")"
+
+	set ER=$$STFMON^%OSSCRPT(PARAM,LOG)
+
+	if ER do { quit
+
+		// Store and forward (STF) monitor submittal failure
+		set ER="W"
+		set RM=$$^MSG(2556)
+		set STFMON=""
+		}
+
+	// Store and forward (STF) monitor submitted successfully
+	set ER="W"
+	set RM=$$^MSG(2557)
+	
+	set (STFMON,STFPOLL)=1
+	
+	quit
+
+
+public	JOB(vzsvtyp)	// (External) entry point to start server
+
+	new dirid,ER,param,prcnam,RM
+
+	#IF 'CUVAR.ptmdirid.isNull()
+		set dirid=CUVAR.ptmdirid
+	#ELSE
+		set dirid="PRD"
+	#ENDIF
+	
+	set prcnam="SCA$STF_"_dirid
+	if 'SVTYP.exists() set SVTYP=vzsvtyp
+
+	// Store and forward (STF) monitor already running
+	if $$VALIDNM^%ZPID(prcnam) set ER="W" set RM=$$^MSG(2553) quit
+
+	set param=$$JOBPARAM^%OSSCRPT(prcnam)
+
+	set x=$$^%ZJOB("PROCESS^STFMON",param)
+
+	// ~p1 job failure
+	if 'x do { quit
+		set STFMON=""
+		do Runtime.setErrMSG("TMPSTFMON",3053,prcnam) quit
+		}
+
+	// ~p1 submitted successfully
+	set ER="W"
+	
+	set RM=$$^MSG(3082,prcnam)
+
+	set STFMON=1
+	
+	quit
+
+
+public	EXTJOB	// Called from executing command to job a monitor
+
+	new DIR,ER,RM,STFHANG,STFMON,STFOPT,STFPOLL,SVTYP,X,fSTF
+
+	set ER=0
+
+	set (STFHANG,STFMON,STFOPT,STFPOLL)=1
+	set STFOPT=3
+
+	set DIR=$$DIR^DDPUTL
+
+	do FILE
+
+	do JOB("SCA$IBS")
+
+	// Job failed, exit MUMPS w/ error
+	if ER set X=$$EXIT^%ZFUNC(2)
+
+	quit
+
+
+public	STOP	// Issue a stop message to PROFILE/IBS server(s)
+
+	new DIR,STFMON,fSTF
+
+	if '%LOGID.exists() set %LOGID=$$LOGID^SCADRV
+	
+	if '%LOGID do HOSTSTOP quit
+
+	do PRMT(0)
+
+	if VFMQ="Q" quit
+	
+	do EXTSTOP
+	
+	quit
+
+
+public	EXTSTOP	// External entry point to stop the monitor
+
+	catch vERROR {
+		new ET,RM
+		set ET=vERROR.type
+
+		if ET.isLike("%GTM-") do { quit
+
+			do ZE^UTLERR
+ 			}
+
+		set ET=ET_"-"_vERROR.thrownAt
+		set RM=vERROR.description
+
+		do ^UTLERR
+		}
+
+	// Stop issued to store and forward (STF) monitor
+	set ER="W"
+	set RM=$$^MSG(2548)
+
+	set DIR=$$DIR^DDPUTL
+
+	set STFMON=""
+
+	type RecordDDPFEP ddpfep=Db.getRecord("DDPFEP","FEPDIR=:DIR",1)
+	
+	set STFMON=0
+	set ddpfep.stfmon=STFMON
+	set ddpfep.stfhang=""
+	set ddpfep.stfpoll=""
+	do ddpfep.save()
+
+	quit
+
+
+PRMT(OPT)	// Prompt for service type and number of servers
+
+	/*
+	   ARGUMENTS:
+	       . OPT Option (0=Stop, 1=Start)     /TYP=N/LEN=1/REQ
+	*/
+
+	new %PG,OLNTB
+
+	set %PG=1
+	kill VFMQ
+	do BLDOPT
+	do VPG00
+	
+	quit
+
+
+VPG00	// Set up
+
+	set STFMON=0
+	set STFHANG=""
+	set STFPOLL=0
+	set STFOPT=1
+	set %TAB("SVTYP")=".SVTYP/TBL=[CTBLSVTYP]SVTYP"
+	set %TAB("STFOPT")=".STFOPT/TBL=STFOPT(/XPP=D STCHK^STFMON"
+	set %TAB("STFHANG")=".STFHANG/XPP=D PPHANG^STFMON"
+
+	// Default service type
+	if 'SVTYP.exists() set SVTYP="SCA$IBS"
+	set %READ="@@%FN,,SVTYP/REQ"
+	if OPT>0 set %READ=%READ_",STFOPT/REQ,STFHANG",OLNTB=40
+
+	do ^UTLREAD
+
+	if VFMQ="Q" set ER=1
+
+	quit
+
+
+public	STCHK	// Post processor - determine if STF monitor is already running
+
+	// Invalid host function
+	if X=4,'%LOGID.get() do Runtime.setErrMSG("TMPSTFMON",1376) quit
+
+	// Store and forward (STF) monitor already running
+	lock +TMP("STFMON"):2 else  do Runtime.setErrMSG("TMPSTFMON",2553) quit
+	lock -TMP("STFMON")
+	
+	quit
+
+
+public	PPHANG	// Post processor for Hang prompt
+
+	if STFOPT=2 quit
+	if STFOPT=4 quit
+
+	// Minimum polling interval is 10 minutes
+	if X<1 do Runtime.setErrMSG("TMPSTFMON",1741) quit
+	
+	quit
+
+
+PPRUN	// Post processor - determine if already running
+
+	new DIR
+	
+	set DIR=$$DIR^DDPUTL
+
+	type RecordDDPFEP ddpfep=Db.getRecord("DDPFEP","FEPDIR=:DIR",1)
+
+	// Store and forward (STF) monitor already running
+	if ddpfep.stfmon do Runtime.setErrMSG("DDPFEP",2553) quit
+
+	// Store and forward (STF) monitor is shutting down.  Try again later.
+	if 'ddpfep.stfmon.isNull() do Runtime.setErrMSG("DDPFEP",2554) quit
+
+	if X=2 set STFHANG=0
+
+	quit
+
+
+BLDOPT	// Build startup options
+
+	// Batch Submittal
+	set STFOPT(1)=$$^MSG(6854)
+
+	// Jobbed Process (Single Pass)
+	set STFOPT(2)=$$^MSG(6856)
+
+	// Jobbed Process (Continuous Poll)
+	set STFOPT(3)=$$^MSG(6855)
+
+	// Run Direct (FEP only)
+	set STFOPT(4)=$$^MSG(171)
+	quit
+
+
+public STFOUT	// Output STF file into an RMS file.
+
+	/*
+	   Prompts for an RMS file name to output the STF file. All subsequences
+	   of a message are combined together into one message and are placed
+	   in the RMS file. The STF flag in each message is set to a 1 so that
+	   when the RMS file is posted on the host, it will check if this message
+	   had been already exchanged when the network connection was up.
+
+	   INPUTS:
+	   . STF 	STF file  	/TYP=T
+
+	*/
+
+	catch vERROR {
+		new ET,RM
+		set ET=vERROR.type
+
+		if ET.isLike("%GTM-") do { quit
+
+			do ZE^UTLERR
+			}
+
+		set ET=ET_"-"_vERROR.thrownAt
+		set RM=vERROR.description
+
+ 		do ^UTLERR
+		}
+
+	new %UID,DATE,IO,LSEQ,NODE,OLDSEQ,SEQ,SPLDIR,SSEQ,X,Y,msg,msg1,rec,tlo,tlo1,zhdr,zptr
+	set (%UID,SEQ,SSEQ,X,Y,msg,msg1,rec,tlo,zhdr,zptr)=""
+
+	if '%LOGID.exists() set %LOGID=$$LOGID^SCADRV
+
+	// FEP process, should not be on host
+	if '%LOGID set ET=1 quit
+
+	set DATE=$TR($$DAT^%ZM(+%CurrentDate,1),"/")
+
+	// returns node name
+	set NODE=$$NODENAM^%ZFUNC
+
+	set SPLDIR=CUVAR.spldir
+	set IO=SPLDIR_"STF"_NODE_DATE_".OUT"
+
+	// prompt from ^STBL("PROMPT"
+	set %TAB("IO")=".RMS3"
+
+	// Default file name
+	if 'IO.exists() set IO=SPLDIR_"STF"_NODE_DATE_".OUT"
+	set %READ="@@%FN,,,IO/REQ"
+
+	do ^UTLREAD
+
+	type IO io=Class.new("IO")
+	set io.fileName=IO
+	set io.recordSize=16384
+	set io.timeout=3
+	set io.openParams="WRITE/NEWV"
+	do io.open()
+
+	catch ERROR {
+		set ET=ERROR.type
+		set RM=ERROR.context
+		do EXC
+		}
+
+	set OLDSEQ=0
+	type ResultSet rs=Db.select("UID,SEQ,SSEQ","STF")
+	while rs.next() do {
+		set %UID=rs.getCol("UID")
+		set SEQ=rs.getCol("SEQ")
+		if SEQ'=OLDSEQ set (X,msg)="",LSEQ=0
+
+		set SSEQ=rs.getCol("SSEQ")
+		type ResultSet rs1=Db.select("TLO","STF1","UID=:%UID AND SEQ=:SEQ")
+		if rs1.next() set tlo=rs1.getCol("TLO")
+		if 'LSEQ do {
+
+			// Splitting message into header and body
+			set zptr=$$LV2V^MSG(X,.rec)
+	
+			set msg1=rec(1)
+
+			// Splitting header into its components
+			set zptr=$$LV2V^MSG(msg1,.zhdr)
+
+			// Setting stf_flg to a 1
+			set zhdr(4)=1
+
+			// Put header back with its length
+			set rec(1)=$$V2LV^MSG(.zhdr)
+	
+			set msg=$$V2LV^MSG(.rec)
+	
+			set LSEQ=1
+			}
+		else  set msg=msg_X
+
+		// I18N=OFF
+		set tlo1=tlo_$C(28)_msg
+		do io.write(.tlo1)
+		do io.write("")
+
+		// I18N=ON
+		kill rec,msg1,zptr,zhdr
+		set (rec,msg1,zptr,zhdr)=""
+
+		if SEQ'=OLDSEQ do {
+			do Db.delete("STF1","UID=:%UID AND SEQ=:SEQ")
+			do Db.fastDelete("STF","UID=:%UID,SEQ=:SEQ")
+			}
+
+		set OLDSEQ=SEQ
+		}
+
+	do io.close()
+
+	quit
+
+
+public	STFINP	// Host function to read RMS file and exchange STF messages
+
+	/*
+	   Called from Host, opens RMS file containing STF records and exchange
+	   messages at the Host.
+	*/
+	new X,Y,NODE,ET,ER,tlo,stfmsg,msg,IO,IO2,COUNT,TLO,DATE,SPLDIR
+	set (X,Y,tlo,stfmsg,msg,IO,IO2,vzsav)=""
+	set (ET,ER,COUNT)=0
+
+	set vzsav=$$INIT^PBSUTL()
+
+	if '%LOGID.exists() set %LOGID=$$LOGID^SCADRV
+
+	// Host process, should not be on FEP
+	if %LOGID set ET=1 quit
+
+	set DATE=$$DAT^%ZM(+%CurrentDate,1).translate("/")
+
+	set NODE=$$NODENAM^%ZFUNC
+
+	set SPLDIR=CUVAR.spldir
+	set IO1=SPLDIR_"STF"_NODE_DATE_".OUT"
+	set IO2=SPLDIR_"STF"_NODE_DATE_".ERR"
+
+	//  Prompt for input file name
+	set %TAB("IO1")=".RMS3"
+
+	// Default file name
+	if 'IO1.exists() set IO1=SPLDIR_"STF"_NODE_DATE_".OUT"
+
+	// Prompt for exception file
+	set %TAB("IO2")=".RMS4"
+
+	// Default file name
+	if 'IO2.exists() set IO2=SPLDIR_"STF"_NODE_DATE_".ERR"
+	set %READ="@@%FN,,,IO1/REQ,IO2/REQ"
+
+	do ^UTLREAD
+
+	type IO io1=Class.new("IO")
+        set io1.fileName=IO1
+        set io1.openParams="READ"
+        do io1.open()
+ 
+        catch ERROR {
+                set ET=ERROR.type
+                set RM=ERROR.context
+                do EXC
+                }
+
+	type IO io2=Class.new("IO")
+        set io2.fileName=IO2
+        set io2.openParams="WRITE/NEWV"
+        do io2.open()
+ 
+        catch ERROR {
+                set ET=ERROR.type
+                set RM=ERROR.context
+                do EXC
+                }
+
+	for  set msg=$$^%ZREAD(io1,.ET) quit:(+ET)!(msg.isNull())  do {
+		set tlo=msg.piece($C(28),1)
+		set stfmsg=msg.piece($C(28),2)
+		do REFINE(tlo,stfmsg,.io2)
+		}
+
+	do io1.close()
+	do io2.close()
+
+	// Mechanism for printing a message at
+	set ER="W"
+	
+	set RM=$$^MSG(5958,COUNT)
+
+	// the end of a process.
+	quit
+
+
+REFINE(tlo,msg,IO io2)	// Private ; Analyzes messages header and exchanges a message.
+
+	/*
+	   DESC:
+	   Message header is interpreted here. If it's a sign-on then exchange
+	   message and obtain token if there is no token already existing
+	   for this TLO. After sign-on is successful insert this token into
+	   all subsequent STF/RMS TSSP message headers and exchange the next
+	   message in the STF/RMS file.
+
+	   KEYWORDS:
+
+	   ARGUMENTS:
+	   . tlo Terminal Location 		/TYP=T/REQ/MECH=VAL
+
+	   . msg Message to be exchanged 	/TYP=T/REQ/MECH=VAL
+
+	   INPUTS:
+
+	   RETURNS:
+
+	*/
+
+	new x,xx,xxx,tran,tran2,vzreply,zptr,zhdr,zhdr2,zmsg,zmsg2,y,vzclid,token,reply
+	new INSERT
+
+	set (x,xx,xxx,tran,tran2,vzreply,zptr,zhdr,zhdr2,zmsg,zmsg2,y)=""
+	set (vzclid,token,reply)=""
+	set INSERT=0
+	set ER=0
+	set (ET,RM)=""
+
+	set zptr=$$LV2V^MSG(msg,.y)
+	set msg1=y(1)
+	set msg2=y(2)
+	set zptr=$$LV2V^MSG(msg1,.zhdr)
+
+	/* 
+	   If service Class is NMSP then find out if it is sign-on.
+	   If sign-on and does not have a token in the TLO array
+	   then get token and insert in the TLO array.
+	*/
+	set token=zhdr(2)
+	if 'token.isNull() set TLO(tlo)=token
+
+	if zhdr(1)=0 do { quit:ER
+		set tran=$$LV2V^MSG(msg2,.tran2)
+
+		// NMSP Sign-on
+		if tran2(1)=1 do {
+			if 'token.isNull() do {
+				set zhdr(2)=""
+	
+				set y(1)=$$V2LV^MSG(.zhdr)
+	
+				set msg=$$V2LV^MSG(.y)
+				}
+
+			if %LOGID do {
+				set ER=$$STFPROC(.msg,.reply,0,tlo)
+	
+				if ER quit
+
+				// Sign-on successful. Get the token.
+				set ptr=$$LV2V^MSG(reply,.x)
+	
+				set ptr=$$LV2V^MSG(x(2),.xx)
+	
+				set ptr=$$LV2V^MSG(xx(2),.xxx)
+				set token=xxx(1)
+				set TLO(tlo)=token
+				}
+			else  do {
+				kill vzrecord,vzrec,TPD
+
+				// Exchanging Message
+				set vzreply=$$PROC^PBSSRV(msg,"",1,.vzsav,"")
+
+				// Break reply into header and body
+				set zptr=$$LV2V^MSG(vzreply,.zmsg)
+
+				// Further analyze reply header..
+				set zptr=$$LV2V^MSG(zmsg(1),.zhdr2)
+
+				// Message exchange is not a failure
+				if zhdr2(3)'=1 do {
+					set zptr=$$LV2V^MSG(zmsg(2),.tran)
+					set zptr=$$LV2V^MSG(tran(2),.zmsg2)
+					set token=zmsg2(1)
+					set TLO(tlo)=token
+					}
+				}
+			}
+		}
+
+	// No token
+	if 'TLO(tlo).data() do { quit:(ER!('TLO(tlo).data()))
+		if %LOGID do {
+
+			// Re-issue a sign-on message if there is no token
+			set TLO=tlo
+
+			// Non-NMSP, get a token
+			set ER=$$NMSP1(.RM,.token)
+			if ER do { quit
+				if ET.get().isNull() set ET="SV_ERRUNDEF"
+
+				// Log the error
+				do ^UTLERR
+	
+				}
+			// Store token
+			set TLO(tlo)=token
+			}
+		else  do {
+
+			// I18N=OFF
+			set tlo1=tlo_msg
+			do io2.write(.tlo1)
+			do io2.write("")
+			set COUNT=COUNT+1
+
+			// I18N=ON
+			}
+		}
+
+	/*
+	  If service class is TSSP, i.e. an STF transaction record
+	   then insert the token (obtained either in the first
+	   pass through STF file or obtained above) into all subse-
+	   quent transactions and simultaneously exchange the
+	   message with the host.
+	*/
+
+	// Service class is other than NMSP
+	if zhdr(1)'=0,TLO(tlo).data() do { quit:ER
+
+		// Check if the token in the header is valid.
+		if 'zhdr(2).isNull(),zhdr(2)'=TLO(tlo) set INSERT=1
+
+		/* Insert token if there is no token in the header or if the
+		   the token in the header is invalid.
+		*/
+		if (zhdr(2).isNull())!(INSERT) do {
+			set token=(TLO(tlo))
+			do TOKENINS(.msg1,token)
+
+			set msg2=$$V2LV^MSG(msg2)
+			set msg=msg1_msg2
+			}
+
+		if %LOGID do {
+			set ER=$$STFPROC(.msg,.reply,1,tlo)
+			}
+		else  do {
+			new LOGFILE,zhdr2,zmsg
+			kill vzrecord,vzrec,TPD
+
+			set vzreply=$$PROC^PBSSRV(msg,"",0,.vzsav,"")
+
+			/* Break reply into hdr and body then disect hdr
+			   If the STF flag is on then get hdr from ^MSGEXC
+			*/
+			set zptr=$$LV2V^MSG(vzreply,.zmsg)
+	
+			set zptr=$$LV2V^MSG(zmsg(1),.zhdr2)
+
+			// If no err in reply check ^MSGEXC
+			if 'zhdr2(3).get() do {
+				new zmsg2,zhdr3
+				do LOADREP(.zmsg2,.zhdr)
+
+				set zptr=$$LV2V^MSG(zmsg2(1),.zhdr2)
+	
+				if zhdr3(3).get() set zhdr2(3)=1
+				}
+
+			/* Message exchange failed.
+			   Write exception to the exception file
+			*/
+			if zhdr2(3).get()=1 do {
+				set ER=1
+
+				// I18N=OFF
+				set tlo1=tlo_msg
+				do io2.write(.tlo1)
+				do io2.write("")
+				set COUNT=COUNT+1
+
+				// I18N=ON
+				}
+			}
+		}
+	quit
+
+
+LOADREP(vzreply,hdr)	// Load STF reply from ^MSGEXC
+
+	// Not an STF message
+	if 'hdr(4).get() quit
+
+	new X2,vzcltokn,vzmssgid,fld,PTR,vzrm,vzhdr
+
+	set vzcltokn=hdr(2).get()
+	set vzmssgid=hdr(3).get()
+	if vzcltokn.isNull()!(vzmssgid.isNull()) quit
+
+	set vzrm=""
+	type RecordMSGEXC msgexc=Db.getRecord("MSGEXC","TOKEN=:vzcltokn,MSGID=:vzmssgid,KEY=3",1)
+	set vzrm=msgexc.message
+
+	set PTR=$$LV2V^MSG(vzrm,.fld)
+
+	set ER=0
+	if fld(1).get()="ER"!(fld(1).get()="AU") set ER=1
+	if 'ER set vzreply(1)="" quit
+
+	set X2(1)=hdr(2)
+	set X2(2)=hdr(3)
+	set X2(3)=ER
+	set vzreply(1)=$$V2LV^MSG(.X2)
+	quit
+
+
+public	STFINQ	// Prints a list of users with STF records.
+
+	/*
+	   Inquires on STF status, i.e., users with STF records & number of enteries.
+	   To invoke this routine, type D STFINQ^STFMON from the MUMPS prompt.
+
+	   INPUTS:
+	   . STF STF file   /TYP=T
+	*/
+
+	new I,LIST,%UID,SEQ,SID,SSEQ,X,TLO,tlo,ER,zptr,msg,zhdr,USER
+	set (%UID,SEQ,SSEQ,X,tlo,zptr,msg,zhdr)=""
+	set ER=0
+
+	if '%LOGID.exists() set %LOGID=$$LOGID^SCADRV
+
+	// FEP process, should not be on host
+	if '%LOGID set ET=1 quit
+	kill %LOGID
+
+	type DbSet rs=Db.selectDbSet("STF1",,"UID,SEQ")
+	while rs.next() do {
+
+		type RecordSTF1 stf1=rs.getRecord("STF1")
+		set %UID=stf1.uid
+		set SEQ=stf1.seq
+		set tlo=stf1.tlo
+
+		type ResultSet rs=Db.select("STFMSG","STF","UID=:%UID AND SEQ=:SEQ")
+		while rs.next() set X=X_rs.getCol("STFMSG")
+
+		set zptr=$$LV2V^MSG(X,.msg)
+		set zptr=$$LV2V^MSG(msg(1),.zhdr)
+
+		// Not an NMSP message
+		if zhdr(1)'=0 do {
+			if 'USER(%UID).data() set USER(%UID)=1
+			else  set USER(%UID)=USER(%UID)+1
+			}
+		kill msg,X,zhdr
+		set (msg,zhdr,zptr,X)=""
+		}
+
+	// Build a local array to be used by the screen to display the list
+
+	set I=1
+	for  set %UID=USER(%UID).order() quit:%UID.isNull()  do {
+		set LIST(I)=%UID_"|"_USER(%UID)
+		set I=I+1
+		}
+
+	set %ProcessMode=2
+
+	do DRV^USID(%ProcessMode,"STFUSR")
+	
+	quit
+
+
+ABORT	// Abort image and send status to command procedure to NOT resubmit
+
+	if 'DIR.exists() set DIR=$$DIR^DDPUTL
+
+	type RecordDDPFEP ddpfep=Db.getRecord("DDPFEP","FEPDIR=:DIR",1)
+	set ddpfep.stfmon=""
+	set ddpfep.stfhang=""
+	set ddpfep.stfpoll=""
+	set ddpfep.stfopt=""
+	do ddpfep.save()
+
+	ZMESSAGE 44
+	lock -TMP("STFMON")
+	quit
+
+
+HOST	//  Build startup file on all associated FEPs
+
+	catch vERROR {
+		new ET,RM
+		set ET=vERROR.type
+
+		if ET.isLike("%GTM-") do { quit
+
+			do ZE^UTLERR
+			}
+
+		set ET=ET_"-"_vERROR.thrownAt
+		set RM=vERROR.description
+
+		do ^UTLERR
+		}
+
+	new COPYCOM,DDPLOG,FEP,MIN,RESBMT,SEC,SBMIT,X
+
+	if '%LOGID.exists() set %LOGID=$$LOGID^SCADRV
+	if '%LIBS.exists() set %LIBS=CUVAR.%libs
+
+	set DDPLOG=$$SCAU^%TRNLNM("DDPLOG")
+
+	// DDP logical not defined
+	if DDPLOG.isNull() do Runtime.setErrMSG("DDPFEP",764) quit
+
+	// No associated front-end processors exist
+	if 'Db.isDefined("DDPFEP","FEPDIR=:DDPLOG") do Runtime.setErrMSG("DDPFEP",1895) quit
+
+	set HOSTDIR=DDPLOG
+
+	// Prompt for the FEP(s) to run monitor
+	do QUE
+
+	if VFMQ="Q" do QUIT quit
+
+	// Front-end processors not selected
+	if FEP.data()'>1 set ER="W" set RM=$$^MSG(7845) quit
+
+	set STFHANG=$$STFHANG
+
+	set FEP=""
+	for  set FEP=FEP(FEP).order() quit:FEP.isNull()  do {
+		if STFHANG>60 do {
+			set MIN=(STFHANG#3600)\60
+			set SEC=(STFHANG#3600)#60
+			if MIN<10 set MIN="0"_MIN
+			if SEC<10 set SEC="0"_SEC
+			set RESBMT="+00:"_MIN_":"_SEC
+			}
+		else  set RESBMT="+00:00:"_STFHANG
+		set RESBMT=""""_RESBMT_""""
+
+		set ER=$$STFSTART^%OSSCRPT(FEP)
+
+		if ER quit
+		kill FEP(FEP)
+		lock +%ZDDP("DDP",DDPLOG,FEP)
+
+		type RecordDDPHOST ddphost=Db.getRecord("DDPHOST","HOSTDIR=:DDPLOG,FEPDIR=:FEP",1)
+		set ddphost.dlru=+%CurrentDate
+		set ddphost.tlru=%CurrentTime
+		do ddphost.save()
+
+		lock -%ZDDP("DDP",DDPLOG,FEP)
+		}
+	quit
+
+
+HOSTSTOP	//  Build command file to stop monitor on all associated FEPs
+
+	catch vERROR {
+                new ET,RM
+                set ET=vERROR.type
+ 
+                if ET.isLike("%GTM-") do { quit
+ 
+                        do ZE^UTLERR
+                        }
+ 
+                set ET=ET_"-"_vERROR.thrownAt
+                set RM=vERROR.description
+ 
+                do ^UTLERR
+                }
+
+	new COPYCOM,DDPLOG,FEP,SBMIT,X
+
+	if '%LOGID.exists() set %LOGID=$$LOGID^SCADRV
+	if '%LIBS.exists() set %LIBS=CUVAR.%libs
+
+	set DDPLOG=$$SCAU^%TRNLNM("DDPLOG")
+
+	// DDP logical not defined
+	if DDPLOG.isNull() do Runtime.setErrMSG("DDPFEP",764) quit
+
+	// No associated front-end processors exist
+	if 'Db.isDefined("DDPFEP","FEPDIR=:DDPLOG") do Runtime.setErrMSG("DDPFEP",1895) quit
+	set HOSTDIR=DDPLOG
+
+	// Prompt for the FEP(s) to stop monitor
+	do QUE
+
+	if VFMQ="Q" do QUIT quit
+
+	// Front-end processors not selected
+	if FEP.data()'>1 set ER="W" set RM=$$^MSG(7845) quit
+
+	set FEP=""
+	for  set FEP=FEP(FEP).order() quit:FEP.isNull()  do {
+		
+		set ER=$$STFSTOP^%OSSCRPT(FEP)
+
+		if ER quit
+		kill FEP(FEP)
+		lock +%ZDDP("DDP",DDPLOG,FEP)
+		type RecordDDPHOST ddphost=Db.getRecord("DDPHOST","HOSTDIR=:DDPLOG,FEPDIR=:FEP",1)
+                set ddphost.dlru=+%CurrentDate
+                set ddphost.tlru=%CurrentTime
+                do ddphost.save()
+
+		lock -%ZDDP("DDP",DDPLOG,FEP)
+		}
+	quit
+
+
+QUE	//  Get the front-end processors on which to build the command file
+
+	new HDG1,HDG2
+
+	// Enter ""*"" = ALL  or Individual FEP Directories
+	set HDG1=$$^MSG(3460)
+
+	// FEP Directory  FEP Directory    FEP Directory    FEP Directory    FEP Directory         
+	set HDG2=$$^MSG(7853)
+	
+	set %TAB("FEP")=".FEP1/TBL=[DDPHOST]FEPDIR:QU ""[DDPHOST]=<<HOSTDIR>>""/XPP=D FEPPP^STFMON"
+
+	set OLNTB=1
+
+	set %READ="@@%FN,,,@HDG1/CEN,,@HDG2/REV,,FEP/REP=20"
+	set %NOPRMT="C"
+	set %CTPRMT=5
+
+	do ^UTLREAD
+
+	if VFMQ="Q" quit
+
+	set Z=0
+	
+	do TEST
+	
+	quit
+
+
+TEST	//
+
+	set X=""
+	for  set X=FEP(X).order() quit:X.isNull()  if 'FEP(X).isNull() set Z=Z+1
+	if Z'>0 do FEPALL
+
+	set X=""
+	for  set X=FEP(X).order() quit:X.isNull()  if 'FEP(X).isNull() set FEPS(FEP(X))=""
+	kill FEP,FEPS("*")
+	
+	set X=""
+	for  set X=FEPS(X).order() quit:X.isNull()  set FEP(X)=""
+	
+	quit
+
+
+FEPPP	// Post processor for FEP
+
+	if X.isNull() quit
+	if X="*" set I(3)="" do FEPALL quit
+
+	// Invalid FEP directory
+	if 'Db.isDefined("DDPHOST","HOSTDIR=:HOSTDIR,FEPDIR=:X") do Runtime.setErrMSG("DDPHOST",1330) quit
+
+	// ~p1 is a PFW directory. This function is invalid for this directory.
+	type RecordDDPHOST ddphost=Db.getRecord("DDPHOST","HOSTDIR=:HOSTDIR,FEPDIR=:X")
+	if ddphost.sqlbase do Runtime.setErrMSG("DDPHOST",3201,X) quit
+
+	quit
+
+
+FEPALL	// Build array of all feps
+
+	type DbSet rs=Db.selectDbSet("DDPHOST","HOSTDIR=:HOSTDIR")
+	while rs.next() do {
+		type RecordDDPHOST ddphost=rs.getRecord("DDPHOST")
+		if ddphost.sqlbase quit
+		set FEP(ddphost.fepdir)=ddphost.fepdir
+		}
+
+	// All front-end processors
+	set ER="W"
+	set RM=$$^MSG(243)
+
+	quit
+
+
+QUIT	// Quit when FEP(s) are not selected
+
+	// Front-end processors not selected
+	set ER="W"
+	set RM=$$^MSG(7845)
+	
+	quit
+
+
+LOG(IO logfile)	// Log errors
+
+	new MSG1
+	set TIME=$$TIM^%ZM(%CurrentTime,"24:60:SS")
+
+	// I18N=OFF
+	//  Occurred on ~p1 at ~p2
+	do logfile.write("")
+	do logfile.write(.ET)
+
+	set MSG1=$$^MSG(8291,DATE,TIME)
+
+	do logfile.write(.MSG1)
+
+	// I18N=ON
+
+	lock -TMP("STFMON")
+	quit
+
+
+NMSP1(RM,token,fap,context)	//Private; Build an off-line sign-on message
+
+	/*
+	   Build a sign-on message in order to have a valid token returned that
+	   will be used for subsequent messages.
+
+	   ARGUMENTS:
+	   . RM - Reply message  /TYP=T/REQ/MECH=REFNAM
+
+	   . token - Client token  /TYP=T/REQ/MECH=REFNAM
+
+	   . fap - User Level Fap /TYP=T/NOREQ/MECH=VAL
+
+	   . context - Specific Values /TYP=T/NOREQ/MECH=VAL
+	      for individual service
+	      classes.
+
+	   RETURNS:
+	   . $$ - Error status
+
+	   Sign-on
+	*/
+
+	new hdr,pkt,ptr,x,xx,xxx
+	new srvcls,stfflg,log,msg
+	if TJD.get().isNull() set TJD=CUVAR.tjd
+	type RecordSCAU scau=Db.getRecord("SCAU","UID=:%UID",1)
+	set ER=0
+	set RM=""
+	set ET=""
+	set x(1)=1
+	set x(2)=%UID
+	set x(3)=TLO
+	set x(4)=$C(1)_scau.pswd
+	set x(5)=""
+	set x(6)=$select(fap.get()="":$C(0),1:fap)
+	set x(7)=context.get()
+	set msg=$$V2LV^MSG(.x)
+
+	set srvcls=0
+	set log=0
+	set stfflg=2
+
+	if %LOGID do {
+		new %LOGID 
+		set %LOGID=1
+		
+		set ER=$$SNDMSG^PBSCLI(.msg,.reply,srvcls,log,stfflg)
+		}
+	else  set ER=$$^PBSNMSP(.reply,srvcls,msg,0)
+
+	if 'ER do {
+		kill x
+
+		/* STF will not return error message, but reply will be null.
+		   The reason can be exired password, revoked user
+		*/
+		if reply.isNull() set ER=1 quit
+
+		set ptr=$$LV2V^MSG(reply,.x)
+
+		// Client token
+		set token=x(1)
+		}
+	else  set erptr=$$ER^PBSCLI(.reply,.RM)
+
+	quit ER
+
+
+Public PIDPP	// Private; Pre-processor to determine if a monitor process is running
+
+	/*
+	   This pre-processor is called by the function that runs the front-end
+	   status report.  If the table indicates that a STF monitor is already
+	   running, this processor will determine if the process id is in fact
+	   on the system.  If not, the STF information will be initialized in
+	   the table.
+
+	*/
+
+	new FDIR
+
+	set FDIR=$$DIR^DDPUTL
+
+	type RecordDDPFEP ddpfep=Db.getRecord("DDPFEP","FEPDIR=:FDIR")
+
+	if ddpfep.stfid.isNull() quit
+
+	if $$VALID^%ZPID(ddpfep.stfid,1) quit
+
+	set ddpfep.stfmon=""
+        set ddpfep.stfhang=""
+        set ddpfep.stfpoll=""
+        set ddpfep.stfopt=""
+	set ddpfep.stfnam=""
+	set ddpfep.stfid=""
+	do ddpfep.save()
+
+	quit
+
+
+public	STFHOST	// Process host based STFHOST records.
+
+	/*
+	   This section will collate through the host based global
+	   STFHOST and process these messages by calling PROC^PBSSRV.
+
+	   ^STFHOST1("CTL") options:
+	   0 Disabled,   file is supposed to be empty.
+	   1 Enabled,    Incomming messages are being stored.
+	   2 Processing, Messages in file are being posted
+	                and incomming messages are being stored.
+	   3 Closing,    STFHOST file is being closed. PBSTSSP
+	         will freeze while this is set to 3 and
+	         resume when this is set to 0, or NULL.
+
+	*/
+
+	catch vERROR {
+		new ET,RM
+		set ET=vERROR.type
+
+		if ET.isLike("%GTM-") do { quit
+
+			do ZE^UTLERR
+
+			type RecordSTFHOST1 stfhost1=Db.getRecord("STFHOST1","STARKEY='*'",1)
+	                if stfhost1.ctl>1 set stfhost1.ctl=1
+        	        do stfhost1.save()
+			}
+
+		set ET=ET_"-"_vERROR.thrownAt
+		set RM=vERROR.description
+
+		do ^UTLERR
+
+		type RecordSTFHOST1 stfhost1a=Db.getRecord("STFHOST1","STARKEY='*'",1)
+	        if stfhost1a.ctl>1 set stfhost1a.ctl=1
+        	do stfhost1a.save()
+		}
+
+	type RecordTRN trn
+
+	if '%LOGID.exists() set %LOGID=$$LOGID^SCADRV
+
+	// HOST FUNC ONLY
+	if %LOGID do Runtime.setErrMSG("STFHOST1",1192) quit
+
+	new BRCD,DATE,DIR,ET,ERCNT,LOGFILE,MSG1,MSG2,NOSVR,RGBLDIR,SPLDIR,TLO
+	new %CSID,REPOST,SURE,SVTYP,TIME,TJD,TPD,TR,X,Y
+
+	do SYSVAR^SCADRV0()
+
+	set JOBTYPE=$$JOBTYPE^%ZFUNC
+	set PRCID=$$PID^%ZFUNC
+	set DATE=$$DAT^%ZM(%SystemDate)
+	set TIME=$$TIM^%ZM(%CurrentTime,"24:60:SS")
+	set SPLDIR=CUVAR.spldir
+
+	set IO2=$$BLDPATH^%TRNLNM(SPLDIR,"STFMON.ERR")
+
+	set REPOST=0
+	set SURE=0
+
+	// Prompt for Exception File
+	set %TAB("REPOST")=".REPOST1/XPP=D AREUSURE^STFMON"
+	set %TAB("IO2")=".RMS4/XPP=S %EXT=1 D ^SCAIO"
+	set %READ="@@%FN,,,REPOST/REQ,IO2/REQ"
+
+	do ^UTLREAD
+
+	if VFMQ.isLike("Q") quit
+
+	// Store and forward (STF) monitor already running
+	lock +TMP("STFMON"):2 else  do Runtime.setErrMSG("TMPSTFMON",2553) quit
+
+	do Db.delete("TMPSTFMON")
+
+	// OPEN Exception file.
+
+	if ER!(IO.isNull()) lock -TMP("STFMON") quit
+
+	set LOGFILE=$$FILE^%TRNLNM("STFMON.LOG",SPLDIR)
+	type IO logfile=Class.new("IO")
+        set logfile.fileName=LOGFILE
+        set logfile.openParams="WRITE/APPEND/SHARED"
+        do logfile.open()
+ 
+        catch ERROR {
+                set ET=ERROR.type
+                set RM=ERROR.context
+                do EXC	
+                }
+
+
+	// STFMON started on ~p1 at ~p2
+	type RecordSTFHOST1 stfhost1b=Db.getRecord("STFHOST1","STARKEY='*'",1)
+
+	// Host file being posted
+	set stfhost1b.ctl=2
+	do stfhost1b.save()
+
+	// INIT successful
+	// I18N=OFF
+	// STFMON started on ~p1 at ~p2
+	do logfile.write("")
+	do logfile.write("")
+	do logfile.write("")
+	set MSG1=$$^MSG(8296,DATE,TIME)
+	do logfile.write(.MSG1)
+	do logfile.write("")
+	set MSG2=$$^MSG(8294)
+	do logfile.write(.MSG2)
+	do logfile.write("")
+
+	// I18N=ON
+
+	set %STFPID=PRCID
+
+	// IF RE-POST Then KILL off the STFHOST2 global
+	if REPOST do {
+
+		// I18N=ON
+		do Db.delete("STFHOST2")
+		}
+
+	/* When SEQ="" the first time set ^STFHOST1("CTL")=3 to force all
+	   incomming TSSP messages to wait until ^STFHOST1("CTL")'=3. Then
+	   loop thru STFHOST until SEQ="" a 2nd time, now we can clear
+	   STFHOST1("CTL").
+	*/
+	set (DONE,ER,BADTOK,ERCNT)=0
+
+	set SEQ=""
+	type ResultSet rs=Db.select("STFSEQ","STFHSEQ",,"STFSEQ")
+	while rs.next() do { set:ER!BADTOK ERCNT=ERCNT+1 quit:DONE
+		set SEQ=rs.getCol("STFSEQ")
+
+		/* Assign new error trap to avoid error from undefines
+		   that would attempt an escape of the TP fence.
+		*/
+		catch vERROR {
+			new ET,RM
+			set ET=vERROR.type
+
+			if ET.isLike("%GTM-") do { quit
+
+				do ZE^UTLERR
+
+				type RecordSTFHOST1 stfhost1c=Db.getRecord("STFHOST1","STARKEY='*'",1)
+	                        if stfhost1c.ctl>1 set stfhost1c.ctl=1
+        	                do stfhost1c.save()
+				}
+
+			set ET=ET_"-"_vERROR.thrownAt
+			set RM=vERROR.description
+
+			do ^UTLERR
+
+			type RecordSTFHOST1 stfhost1d=Db.getRecord("STFHOST1","STARKEY='*'",1)
+                        if stfhost1d.ctl>1 set stfhost1d.ctl=1
+                        do stfhost1d.save()
+			}
+
+		new ERCNT,EXC,HDR,PKT,SEG,VZRM,WRK,X
+		new %MSGID,%TOKEN,%UCLS,%UID,CONTEXT,FAP,MYTLO,REC,TLO
+
+		set (ER,BADTOK)=0
+		set RM=""
+
+		if Db.isDefined("STFHOST2","STFSEQ=:SEQ") quit
+
+		// Load Message
+		set REC=""
+		set (ER,BADTOK)=0
+	
+		type RecordSTFMSG stfmsg=Db.getRecord("STFMSG","STFSEQ=:SEQ",1)
+		set REC=stfmsg.msg
+
+		// Load %TOKEN,MSSGID,%UID,%UCLS,CONTEXT,TLO,FAP,REC
+		type RecordSTFHSEQ stfhseq=Db.getRecord("STFHSEQ","STFSEQ=:SEQ",1)
+		set %UID=stfhseq.uid
+		set %UCLS=stfhseq.ucls
+		set BRCD=stfhseq.brcd
+		set MSSGID=stfhseq.mssgid
+		set TLO=stfhseq.tlo
+		set FAP=stfhseq.fap
+		set CONTEXT=stfhseq.context
+		set SRVCLS=stfhseq.srvcls
+		set MYTLO=TLO
+		if SRVCLS.isNull() set SRVCLS=1
+		if SRVCLS=1 do TSSPCHK(.trn,.REC,TJD,%UID,BRCD)
+
+		/* Since all msgs are now logged when entering PBSSRV
+		   They are logged in ^MSGLOG() so assign a new token to
+		   prevent the DUPLICATE_MESSAGE error.
+		*/
+		do {
+			type RecordTMPSTFMON tstfmon=Db.getRecord("TMPSTFMON","MONLIT='TOKEN',IDENT1=:%UID,IDENT2=:MYTLO",1)
+			set %TOKEN=tstfmon.tmpdata
+
+			// Turn OFF current token so NMSP1 can verify info
+			if '%TOKEN.isNull() do {
+				type RecordTOKEN token=Db.getRecord("TOKEN","TOKEN=:%TOKEN",1)
+				set token.stat=0
+				do token.save()
+				}
+	
+			set ER=$$NMSP1(.RM,.%TOKEN,FAP,CONTEXT)
+
+			if 'ER do { quit
+				type RecordTMPSTFMON tstfmon=Db.getRecord("TMPSTFMON","MONLIT='TOKEN',IDENT1=:%UID,IDENT2=:MYTLO",1)
+				set tstfmon.tmpdata=%TOKEN
+				}
+			// If ER then force new TOKEN to record error.
+			set BADTOK=ER
+			set ER=0
+			set %TOKEN=$$TOKEN^PBSNMSP()
+
+			do Db.delete("MSGLOG","TOKEN=:%TOKEN")
+			do Db.delete("MSGLOGSEQ","TOKEN=:%TOKEN")
+			do Db.delete("SQLCUR","TOKEN=:%TOKEN")
+	
+			type RecordTOKEN token=Db.getRecord("TOKEN","TOKEN=:%TOKEN",1)
+			set token.stat=1
+			set token.uid=%UID
+			}
+
+		// If MSSGID=NULL or MSSGID used Generate a new MSSGID
+		if MSSGID.isNull()!(Db.isDefined("MSGLOG","TOKEN=:%TOKEN AND MSGID=:MSSGID")) do {
+			new X
+			type ResultSet rs1=Db.select("MSGID","MSGLOG","TOKEN=:%TOKEN","MSGID DESC")
+			if rs1.next() set MSSGID=rs1.getCol("MSGID")+1
+			else  set MSSGID=1
+
+			type ResultSet rs2=Db.select("IDENT2","TMPSTFMON","MONLIT='MSGID' AND IDENT1=:%TOKEN","IDENT2 DESC")
+			if rs2.next() set X=rs2.getCol("IDENT2")+1
+                        else  set X=1
+			if X>MSSGID set MSSGID=X
+
+			type ResultSet rs3=Db.select("MSGID","MSGEXC","TOKEN=:%TOKEN","MSGID DESC")
+			if rs3.next() set X=rs3.getCol("MSGID")+1
+			else  set X=1
+			if X>MSSGID set MSSGID=X
+
+			type RecordTMPSTFMON tstfmon1=Db.getRecord("TMPSTFMON","MONLIT='MSGID',IDENT1=:%TOKEN,IDENT2=:MSSGID",1)
+			do tstfmon1.save()
+			}
+
+		// build complete message, if no errors have happened
+		set X(1)=SRVCLS
+		set X(2)=%TOKEN
+		set X(3)=MSSGID
+		set X(4)=2
+		set X(5)=""
+		set HDR=$$V2LV^MSG(.X)
+
+		kill X
+		set X(1)=HDR
+		set X(2)=REC
+		set PKT=$$V2LV^MSG(.X)
+		kill X
+
+		// FILE SECTION
+
+		do Runtime.start("CS")
+
+		/* If message fails, do a TROLLBACK to remove any updates done
+		   uptil now.  Then issue a TSTART to allow normal
+		   processing to continue. TSTART must be done on same
+		   stack level as 1st TSTART.
+		*/
+		type IO io2=Class.new("IO")
+	        set io2.fileName=IO2
+        	set io2.openParams="WRITE/APPEND"
+	        do io2.open()
+
+		if BADTOK do {
+			do Db.delete("MSGLOG","TOKEN=:%TOKEN")
+			do Db.delete("MSGLOG","TOKEN=:%TOKEN")
+			do Db.delete("MSGLOGSEQ","TOKEN=:%TOKEN")
+
+			set VZRM=$$ERRMSG^PBSUTL(RM.get(),"")
+
+			do MSGEXC(.logfile,.io2,SEQ,%TOKEN,MSSGID,LOGFILE,IO2,VZRM) if 1
+			}
+		else  do {
+			new BADTOK,BRCD,DATE,DONE,ERRNO,ETC,HDR,LOGFILE
+			new MSG1,MSG2,MSSGID,REC,PRCID,SEQ
+			set COUNT=0
+			set %IPMODE="NOINT"
+			set %STFPLAY=1
+			do REFINE(MYTLO,PKT,.io2)
+			if COUNT set ER=1
+			}
+		do SAVEXC(.EXC,%TOKEN,MSSGID)
+		if '$TLEVEL do Runtime.start("CS")
+		if ER do {
+			set VZRM=EXC(3).get()
+			set PTR=$$LV2V^MSG(VZRM,.X)
+			set RM=X(5).get()
+			do MSGEXC(.logfile,.io2,SEQ,%TOKEN,MSSGID,LOGFILE,VZRM)
+			}
+
+		// Update ACN.STFNET file. Always !
+		new TRSEQ
+		set X=0
+		type DbSet rs=Db.selectDbSet("STFHOST","STFSEQ=:SEQ")
+		while rs.next() do {
+			new CID,NET
+			type RecordSTFHOST stfhost=rs.getRecord("STFHOST")
+			set CID=+stfhost.cid
+			set ETC=stfhost.etc
+			set SEQ10=stfhost.trseq
+			if 'ETC.isNull() do { quit:ETC.isNull()
+				set trn=Db.getRecord("TRN","ETC=:ETC",1)
+				if trn.cls="M" set ETC=""
+				}	
+			set NET=stfhost.trnet
+			if CID.isNull()!'Db.isDefined("ACN","CID") quit
+
+			type RecordACN acn=Db.getRecord("ACN","CID=:CID")
+			set acn.stfnet=acn.stfnet-NET
+			if acn.stfnet=0 set acn.stfnet="" quit
+			do acn.save()
+			}
+
+		// The failed message is stored in ^MSGEXC()
+		type RecordSTFHOST2 stfhost2=Db.getRecord("STFHOST2","STFSEQ=:SEQ",1)
+		set stfhost2.dateproc=%CurrentDate
+		set stfhost2.error=ER+BADTOK
+		set stfhost2.msg=RM.get()
+		set stfhost2.token=%TOKEN
+		do stfhost2.save()
+
+		if $TLEVEL do Runtime.commit()
+		}
+	type RecordSTFHOST1 stfhost1e=Db.getRecord("STFHOST1","STARKEY='*'",1)
+	set stfhost1e.last=SEQ
+	set stfhost1e.ctl=3
+	hang 3	// Wait for rest of records to process
+
+        set stfhost1e.ctl=0
+        do stfhost1e.save()
+
+	set ER=0
+
+	set TIME=$$TIM^%ZM(%CurrentTime,"24:60:SS")
+
+	// 8334=STFMON processed STF file sucessfully on ~p1 at time ~p2
+	// I18N=OFF
+	do logfile.write("")
+	set MSG1=$$^MSG(8334,DATE,TIME)
+
+        do logfile.write(.MSG1)
+
+	// ~p1  errors logged in exception file
+	if ERCNT do {
+		set MSG1=$$^MSG(2997,ERCNT)
+		do logfile.write("")
+	        do logfile.write(.MSG1)
+		}
+	// I18N=ON
+	do logfile.close()
+
+	set IO=IO2
+
+	lock -TMP("STFMON")
+
+	set ER="W"
+
+	// Process complete
+	if 'ERCNT.get() set RM=$$^MSG(2237)
+
+	// Process complete, P1 Exceptions
+	else  set RM=$$^MSG(5958,ERCNT)
+	quit
+
+
+SAVEXC(exc,token,mssgid)	// Save contents of ^MSGEXC
+
+	new I,J
+	set J=""
+	for I=1,2,3 do {
+		set exc(I)=""
+		type RecordMSGEXC msgexc=Db.getRecord("MSGEXC","TOKEN=:token,MSGID=:mssgid,KEY=:I",1)
+		set exc(I)=msgexc.message
+		}
+	quit
+
+
+TSSPCHK(RecordTRN trn,REC,TPD,%UID,BRCD)	// Check/Set TRC is TSSP message.
+
+	new i,a,trc,qlf
+
+	type ResultSet rs=Db.select("TSEQ","TTX","TJD=:TPD AND BRCD=:BRCD AND UID=:%UID","TSEQ DESC")
+	if rs.next() set trc=((rs.getCol("TSEQ")\1000)+1)*1000
+	else  set trc=((1\1000)+1)*1000
+
+	set ptr=$$LV2V^MSG(REC,.a)
+
+	set i=""
+	for  set i=a(i).order() quit:i.isNull()  do {
+		new a1,odt,cid,tpd,efd,etc,tamt,qseq
+		set trc=trc+1
+		set ptr=$$LV2V^MSG(a(i),.a1)
+		set cid=a1(3).get()
+		set tpd=a1(2).get()
+		set efd=a1(8).get()
+		set ETC=a1(4).get()
+
+		/* If EFD'="" and EFD+1=TPD this was probably
+		   a PM transaction. So the EFD was for normal PM
+		   mode, for 24x7 mode this isn't true so clear EFD
+		   if it is prior to ODT.
+		*/
+
+		// EFD check
+		if 'efd.isNull(),('cid.isNull()),('ETC.isNull()) do {
+			if (efd+1)'=tpd quit
+
+			if 'trn.exists() do { quit:ER
+				if 'Db.isDefined("TRN","ETC=:ETC") do Runtime.setErrMSG("TRN",1498) quit
+				set trn=Db.getRecord("TRN","ETC=:ETC")
+				}
+
+			// ignore misc trantrn(ETC).?0
+			if trn.cls="M" quit
+
+			type RecordACN acn=Db.getRecord("ACN","CID=:cid")
+			set odt=acn.odt
+
+			if odt.isNull() quit
+			if efd<odt set (efd,a1(8))=""
+			}
+
+		// If TPD is less than or equal TJD clear TPD.
+		if tpd'>TJD set (tpd,a1(2))=""
+
+		// assign TRC
+		if a1(6).get().isNull() set a1(6)=trc
+
+		// Handle EC/REV
+		set ptr=$$LV2V^MSG(a1(11).get(),.qlf)
+
+		set qseq=""
+		set spr=""
+		for  set qseq=qlf(qseq).order() quit:qseq.isNull()  do {
+			new i,seq,trseq,uid,brcd,key,fld,f,msc
+
+			set f="#"
+			set key=qlf(qseq).piece(f,1)
+			if key'="EC",key'="REV" quit
+
+			set fld=qlf(qseq).piece(f,2)
+			if fld.extract(1,3)'="STF" quit
+
+			set ptr=$$LV2V^MSG(a1(13).get(),.msc)
+
+			set i=""
+			for  set i=msc(i).order() quit:i.isNull()  do { quit:'spr.isNull()
+				if msc(i).piece(f,1)'="SPR" quit
+				set spr=msc(i).piece(f,2)
+				}
+
+			set etc=a1(4)
+			if etc.isNull() quit
+			set tamt=a1(5)
+			if tamt.isNull() quit
+			set brcd=a1(1)
+			if brcd.isNull() quit
+			set uid=%UID
+			if key="EC" do ecscan(.qlf,qseq,tpd,brcd,uid,cid,etc,tamt,spr)
+			if key="REV" do rvscan(.qlf,qseq,uid,cid,etc,tamt,spr)
+
+			set a1(11)=$$V2LV^MSG(.qlf)
+			}
+		set a(i)=$$V2LV^MSG(.a1)
+		}
+	set REC=$$V2LV^MSG(.a)
+
+	quit
+
+
+ecscan(qlf,qseq,tpd,brcd,uid,cid,etc,tamt,spr)	// Private; find orig tran for ec
+
+	new trc,xtrc
+
+	if tpd.isNull() set tpd=TJD
+	set (trc,xtrc)=""
+
+	type DbSet rs=Db.selectDbSet("TTX","TJD=:tpd AND BRCD=:brcd AND UID=:uid","TSEQ DESC")
+	while rs.next() do { quit:'xtrc.isNull()
+
+		new itc
+		type RecordTTX ttx=rs.getRecord("TTX")
+		set trc=ttx.tseq
+		if cid=ttx.cid quit
+		set itc=ttx.itc
+		if itc.extract(6)!(itc.extract(12)) quit
+		if etc'=ttx.etc quit
+		if +tamt'=+ttx.tamt quit
+		if uid'=ttx.uidt,'ttx.uidt.isNull() quit
+		if 'spr.isNull(),'ttx.tso.isLike("SPR#"_spr) quit
+		set xtrc=trc
+		}
+
+	if 'xtrc.isNull() set qlf(qseq)="EC#"_xtrc
+
+	quit
+
+
+rvscan(qlf,qseq,uid,cid,etc,tamt,spr)	// Private; find orig tran for ec
+
+	new seq,xseq,cnt
+
+	set (seq,xseq)=""
+	set cnt=0
+
+	type DbSet rs=Db.selectDbSet("HIST","CID=:cid","TSEQ DESC")
+	while rs.next() do { quit:'xseq.isNull()
+
+		new itc
+		type RecordHIST hist=rs.getRecord("HIST")
+		set seq=tseq
+		set itc=hist.itc
+		if itc.extract(6)!(itc.extract(12)) quit
+		if etc'=hist.etc quit
+		if +tamt'=+hist.tamt quit
+		if uid'=hist.uid quit
+		if 'spr.isNull(),'hist.tso.isLike("SPR#"_spr) quit
+		set xseq=seq
+		}
+
+	if 'xseq.isNull() set qlf(qseq)="REC#"_xseq
+	
+	quit
+
+
+public AREUSURE	// Double check with operator about re-posting entries
+
+	// Verify REPOST flag if specified !
+	new VFMQ
+	set REPOST=X
+	set SURE=0
+	if 'REPOST set RM="" set ER=0 quit
+	
+	do {
+		new D,P,X
+	
+		set X=OLNTB.get()
+		new OLNTB
+		if X set OLNTB=((X\1000)+2)*1000
+		if %BLK.exists() do { new %BLK,%IPMODE set %BLK=X
+			set X=%BLK
+			set D=+%IPMODE.get().piece("DELIM=",2)
+			if D=0 quit
+			set D=$C(D)
+			set P=+%IPMODE.get().piece("POINTER=",2)
+			if P=0 quit
+			set X=D_D_%BLK.piece(D,P+1,999)
+			}
+
+		// ** WARNING ** This will re-post all previously posted messages from the [STFHOST] file!
+		set M1=$$^MSG(3351)
+
+		set M2=""
+		set X=M1.length()
+		if X>80 do {
+			for X=80:-1:1 quit:M1.extract(X)=" "
+			set M2=M1.extract(X+1,M1.length())
+			set M1=M1.extract(1,X)
+			}
+		set M1=M1.justify("",(80-M1.length())\2)_M1
+		set M2=M2.justify("",(80-M2.length())\2)_M2
+		set %TAB("SURE")=".YN1"
+		set %READ=",M1/PROT,M2/PROT,,SURE/REQ"
+		set %NOPRMT="F"
+
+		do ^UTLREAD
+		}
+
+	if ER!(VFMQ.isLike("Q"))!('SURE.get()) do {
+		set (SURE,X,RESTART)=0
+
+		// RE-POST Not Allowed !
+		do Runtime.setErrMSG("STFHOST",3458) quit
+		}
+
+	//3454=YOU are RE-Posting from the Beginning of the STFHOST file.
+	else  set ER=0 set RM=$$^MSG("STFHOST",3454)
+
+	do DISPLAY^DBSMACRO("ALL")
+
+	quit
+
+
+MSGEXC(IO logfile,IO io2,SEQ,vzcltokn,vzmssgid,LOGFILE,IO2,vzrm)
+
+	/*
+	   Log message
+	   
+	   Log failed message into file MSGEXC, IO2 and LOGFILE.
+
+	   ARGUMENTS:
+	      . SEQ STFHOST Sequence 		/TYP=N/REQ/MECH=VAL
+	      . vzcltokn Client Token  		/TYP=T/REQ/MECH=VAL
+	      . vzmssgid Client Message ID 	/TYP=T/REQ/MECH=VAL
+	      . LOGFILE Log file  		/TYP=T/NOREQ/MECH=VAL
+	      . IO2 Exception File  		/TYP=T/NOREQ/MECH=VAL
+	      . vzrm Response Message 		/TYP=T/NOREQ/MECH=VAL
+
+	   INPUTS:
+	      . MYTLO Location  		/TYP=T/NOREQ
+	      . PKT Message   			/TYP=T/NOREQ
+
+	*/
+	new RM
+
+	set ERCNT=ERCNT.get()+1
+	set vzcltokn=vzcltokn.get()
+	set vzmssgid=vzmssgid.get()
+	if 'vzcltokn.isNull(),'vzmssgid.isNull() do {
+		new vzrec,vzpkt,vzerr
+		set vzrec=REC
+		set vzpkt=PKT
+		set vzerr=$$MSGEXC^PBSSRV("")
+		}
+
+	// I18N=OFF
+	if 'IO2.get().isNull() do {
+		set TDATA=MYTLO.get()_PKT.get()
+		do io2.write(.TDATA)
+		do io2.write("")
+		}
+	// 2173=Message XX Failed and is in MSGEXC under TOKEN=.. and MSSGID=..
+	set RM=$$^MSG(2173,SEQ,vzcltokn,vzmssgid)
+
+	if 'LOGFILE.get().isNull() do {
+		do logfile.write(.RM)
+		do logfile.write("")
+		}
+
+	write !,RM
+
+	// I18N=ON
+	quit
+
+
+public	STFHSTON	// Turn on Host STF capability
+
+	/*
+	   RETURNS:
+	   . ER Error Status   /TYP=N
+	   . RM Error Message   /TYP=T
+
+	*/
+
+	type RecordSTFHOST1 stfhost1=Db.getRecord("STFHOST1","STARKEY='*'",1)
+	set STFHOST=stfhost1.ctl
+
+	// HOST STORE AND FORWARD already enabled
+	if STFHOST=1 do Runtime.setErrMSG("STFHOST1",2175) quit
+
+	// HOST STORE AND FORWARD is being posted
+	if STFHOST=2 do Runtime.setErrMSG("STFHOST1",2176) quit
+
+	// HOST STORE AND FORWARD is shutting down
+	if STFHOST=3 do Runtime.setErrMSG("STFHOST",2168) quit
+
+	// HOST STORE AND FORWARD is being posted
+	lock +TMP("STFMON"):5 else  do Runtime.setErrMSG("TMPSTFMON",2176) quit
+	set ANS=0
+	set %TAB("ANS")=".YN1"
+	set %READ="@@%FN,,ANS"
+
+	do ^UTLREAD
+
+	if ER!(VFMQ="Q")!'ANS do { quit
+
+		// Host store and forward is not enabled
+		set ER="W"
+		set RM=$$^MSG(2212)
+		lock -TMP("STFMON")
+		}
+
+	do {
+		set STFHOST=stfhost1.ctl
+
+		// Somehow enabled so quit
+		if STFHOST>0,STFHOST<4 quit
+
+		/* verify nothing is in STFHOST file
+		   if ending sequence is different then don't kill old files.
+		*/
+		
+		type ResultSet rs=Db.select("STFSEQ","STFHSEQ",,"STFSEQ DESC")
+		if rs.next() set SEQ1=rs.getCol("STFSEQ")
+		else  set SEQ1=""
+		
+		type ResultSet rs1=Db.select("STFSEQ","STFHSEQ",,"STFSEQ DESC")
+                if rs1.next() set SEQ2=rs1.getCol("STFSEQ")
+                else  set SEQ2=""
+
+		if SEQ1'=SEQ2 quit
+
+		do Db.delete("STFHOST")
+		do Db.delete("STFHSEQ")
+		do Db.delete("STFMSG")
+		do Db.delete("STFHOST1")
+		do Db.delete("STFHOST2")
+		}
+
+	type RecordSTFHOST1 stfhost1=Db.getRecord("STFHOST1","STARKEY='*'",1)
+	set stfhost1.ctl=1
+	do stfhost1.save()
+
+	lock -TMP("STFMON")
+
+	// HOST STORE AND FORWARD is enabled
+	set ER="W"
+	set RM=$$^MSG(2174)
+
+	quit
+
+
+EXC	// Log error in exception file
+
+	new ET
+	set ET=RM.get()
+
+	// Error loading SWIFT message
+	do LOG^UTLEXC($T(+0),"*",$$^MSG(1431),CID.get(),%ZTSEQ.get(),ET)
+
+	if 'ET.get().isNull() set ET=": *"_ET_"*"
+	kill %ZTSEQ
+	
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60051^39350^John Carroll^52025"	// Signature - LTD^TIME^USER^SIZE

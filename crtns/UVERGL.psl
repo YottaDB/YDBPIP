@@ -1,0 +1,344 @@
+public UVERGL
+	/* 
+	ORIG:  ROTELLA - 16 DEC 1991
+	DESC:
+		Verify G/L set codes, accounts, etc.
+	
+		Can be called for Prompts by calling sub routine "prompt" or
+		from top for no prompts ...
+	
+	---- Revision History ------------------------------------------------
+
+	06/29/06 - KELLYP - CR 22044
+		   Modified ttl section to eliminate PSL-E-SQLFAIL error that
+		   would occur when TTL records existed for TJD.
+
+	06/14/06 - KELLYP - CR 21769
+		   Modified prompt section to delete temporary UVERGL records
+		   at beginning of processing.  Modified err section so that 
+		   it won't try to create the same UVERGL record more than
+		   once.  This prevents a RECONFL error when the same invalid
+		   G/L account is listed more than once in UTBLGLSC.  Also
+		   modified prod section to use GLSC instead of TYPE when
+		   checking for UTBLGLSC record validity. This prevents errors
+		   from being reported when they shouldn't be.
+
+	07/27/04 - RussellDS - CR11335
+		   Modified code to eliminate use of getOneRow.  This will
+		   fix a problem with checking for valid GL accounts not
+		   working (this CR).
+		   
+		   General clean-up, rework to bring in line with PSL
+		   standards.
+		   
+		   Removed old change history.
+
+	----------------------------------------------------------------------
+	*/
+	
+	do all		// Allow call from top
+	
+	quit
+	
+
+all	// Run everything ... entered or from function
+	
+	type public Number run()
+	
+	type Number i
+	
+	do Db.delete("UVERGL","JOB=:%ProcessID")
+	for i=1:1:4 if 'run(i).exists() set run(i)=1
+	
+	do init
+	
+	quit
+	
+
+init 	// init variables ...  Later allow for prompts of which to check
+
+	type public Number cid,ER,run(),type
+	type public String cls,grp,RM
+	
+	type Number cnt
+	type String crcd,glsc,txt
+	
+	catch vERROR {
+		do ZE^UTLERR
+		set ER=1 set RM=$G(RM)
+		}
+
+	set (glsc,crcd)=""
+	set cnt=0
+	
+	if 'cls.exists() set cls=""
+	if 'grp.exists() set grp=""
+	if 'type.exists() set type=""
+	if 'cid.exists() set cid=""
+
+	// Control Section ...
+
+	//I18N=OFF
+	write $$CLEAR^%TRMVT	// Clear Screen ...
+		      
+	// G/L Set Code and Account Verification Utility
+	set txt=$$^MSG(5391)                 
+	
+	write !,$$msg(txt,1)
+	// Selected Options:
+	write !!,$$msg($$^MSG(5395),1),!
+	
+	// Account Verification
+	if run(1) write !,$$msg($$^MSG(5388),0)      
+	// TTL Verification
+	if run(2) write !,$$msg($$^MSG(5396),0)      
+	// G/L set code Verification
+	if run(3) write !,$$msg($$^MSG(5392),0)       
+	// Product Verification
+	if run(4) write !,$$msg($$^MSG(5394),0)   
+	
+	// Beginning at ~p1
+	write !!,$$msg($$^MSG(5389,$$EXT^%T),0)       
+	if run(1) do {
+		// Now Checking Accounts ...
+		write !!,$$msg($$^MSG(5393)_" ...",0)
+		do cls
+		}
+	//I18N=ON
+	
+	if run(2) do {
+		type Date XTJD
+		
+		for XTJD=%SystemDate-30:1:%SystemDate do {
+	
+			type ResultSet rs=Db.select("TJD","TTL","TJD=:XTJD")
+			if rs.isEmpty() quit 
+	
+			//I18N=OFF
+			write !!,$$msg("Now Checking TTL for "_XTJD.toString()_" ... ",0)
+			//I18N=ON
+			do ttl
+			}
+		}
+	
+	//I18N=OFF
+	if run(3) do {
+		write !!,$$msg("Now Checking UTBLGLSC ... ",0)
+		do utbl
+		}
+	
+	if run(4) do {
+		write !!,$$msg("Now Checking Products ... ",0)
+		do prod
+		}
+	//I18N=ON
+	
+	do end
+
+	quit 
+
+	
+cls	// Check all accounts first ...
+
+	type public Number cnt
+
+	type Number cid
+	type String XGLSC
+
+	type ResultSet rs=Db.select("GLSC,CID","ACN")
+	while rs.next()  do { 
+		set cid=rs.getCol("CID")
+		set XGLSC=rs.getCol("GLSC")
+
+		// Checking for accounts with missing G/L setcode
+		if XGLSC="" do err(2,cid,1,%SystemDate) quit 
+
+		// Checking for accounts with undefined G/L setcode
+		type RecordUTBLGLSC utblglsc=Db.getRecord("UTBLGLSC","GLSC=:XGLSC",1)
+		if 'utblglsc.getMode() do err(3,cid,1,%SystemDate)
+
+		// ~p1 Accounts verified
+		set cnt=cnt+1
+		if '(cnt#200) write !,$$msg($$^MSG(5397,cnt),0)
+		}
+
+	quit 
+	
+
+utbl	//  Verify UTBL to GLAD for each glsc ...
+
+	type Number cid,I
+	type String data,dilist,glsc
+	
+	set cid=""
+	set dilist=""
+	set glsc=""
+	
+	// Build list of columns linked to GLAD
+	type ResultSet rs=Db.select("DI","DBTBL1D","%LIBS='SYSDEV' AND FID='UTBLGLSC' AND TBL='[GLAD]'")
+	while rs.next() set dilist=dilist_","_rs.getCol("DI")
+	set dilist="GLSC"_dilist
+	
+	// Allow dynamic select
+	#ACCEPT DATE=07/28/04; PGM=Dan Russell; CR=11335
+	type ResultSet rs2=Db.select(dilist,"UTBLGLSC")
+	while rs2.next() do {
+		set data=rs2.getRow().toString()
+		set glsc=$P(data,$C(9),1)
+		for I=2:1:$L(data,$C(9)) do {
+			set cid=$P(data,$C(9),I)
+			quit:cid.isNull()
+			// Verify UTBL to GLAD ...
+			if 'Db.isDefined("GLAD","ACN=:cid") do err(6,cid,3,%SystemDate)
+			}
+		}
+	
+	quit 
+	
+
+prod	// Verify product type tables ...
+
+	type Number type
+	type String glsc
+	
+	type ResultSet rs=Db.select("TYPE,GLSC","PRODDFTD")
+	while rs.next() do { 
+		set type=rs.getCol("TYPE")
+		set glsc=rs.getCol("GLSC")
+		if glsc="" do err(4,type,4,%SystemDate) quit 
+		do 4(glsc)
+		}
+
+	type ResultSet rs2=Db.select("TYPE,GLSC","PRODDFTL")
+	while rs.next() do { 
+		set type=rs2.getCol("TYPE")
+		set glsc=rs2.getCol("GLSC")
+		if glsc="" do err(4,type,4,%SystemDate) quit 
+		do 4(glsc)
+		}
+	
+	quit 
+
+	
+4(type)	//   Verify product ...
+	if 'Db.isDefined("UTBLGLSC","GLSC=:type") do err(4,type,4,%SystemDate)
+	quit 
+		
+
+ttl	//   TTL check ...
+
+	type String glsc
+
+	type ResultSet rs=Db.select("DISTINCT GLSC","TTL","TJD=:%SystemDate")
+	while rs.next() do {
+		set glsc=rs.getCol("GLSC")
+		if 'Db.isDefined("UTBLGLSC","GLSC=:glsc") do err(5,glsc,2,%SystemDate)
+		}
+
+	quit
+	
+	
+err(Number er,Number cid,Number lvl,Date tjd)
+
+	type String ERRDATA
+	
+	type RecordUVERGL uvergl=Db.getRecord("UVERGL","JOB=:%ProcessID,LVL=:lvl,TJD=:tjd,CID=:cid",1)
+
+	/*
+	 The same invalid G/L may be listed multiple times in UTBLGLSC 
+	 for a particular set code so the mode is checked here to ensure 
+	 that the system doesn't attempt to save the same record more
+	 than once.
+	*/
+	if uvergl.getMode() quit
+	
+	set ERRDATA=$$loader(er)
+	set uvergl.msg=ERRDATA.piece("|",1)
+	set uvergl.crcd=ERRDATA.piece("|",2)
+	set uvergl.cls=ERRDATA.piece("|",3)
+	set uvergl.grp=ERRDATA.piece("|",4)
+	set uvergl.type=ERRDATA.piece("|",5)
+	set uvergl.glsc=ERRDATA.piece("|",6)
+
+	do uvergl.bypassSave()
+
+	quit 
+
+	
+loader(er)
+
+	type Public String cls,crcd,glsc,grp,type
+
+	if er=0 quit "Account not defined|"_$G(crcd)_"|"_$G(cls)_"|"_$G(grp)_"|"_$G(type)_"|"_$G(glsc)
+	if er=1 quit "Bad account|"_$G(crcd)_"|"_$G(cls)_"|"_$G(grp)_"|"_$G(type)_"|"_$G(glsc)
+	if er=2 quit "Missing G/L set code in account|"_$G(crcd)_"|"_$G(cls)_"|"_$G(grp)_"|"_$G(type)_"|"_$G(glsc)
+	if er=3 quit "G/L set code not defined|"_$G(crcd)_"|"_$G(cls)_"|"_$G(grp)_"|"_$G(type)_"|"_$G(glsc)
+	if er=4 quit "Invalid G/L set code in Product Table|"_$G(crcd)_"|"_$G(cls)_"|"_$G(grp)_"|"_$G(type)_"|"_$G(glsc)
+	if er=5 quit "Invalid G/L set code in TTL |"_$G(crcd)_"|"_$G(cls)_"|"_$G(grp)_"|"_$G(type)_"|"_$G(glsc)
+	if er=6 quit "Invalid G/L account number in set code|"_$G(crcd)_"|"_$G(cls)_"|"_$G(grp)_"|"_$G(type)_"|"_$G(glsc)
+
+	quit ""
+	
+
+msg(String rm,
+    String vid)
+	set rm=$G(rm) 
+	set vid=+$G(vid)
+	set rm=$$CJ^%ZTEXT(rm,79)
+	if vid quit $$VIDINC^%TRMVT_rm_$$VIDOFF^%TRMVT
+
+	quit rm
+
+	
+end	// Done verifying now lets run the report ...
+
+	type public String ER,RM
+
+	type String %LIBS,PGM,RID
+	
+	// Completed at ~p1
+	write !!,$$msg($$^MSG(591,$$EXT^%T),0)
+	
+	set %LIBS="SYSDEV",RID="UVERGL"
+	do ^URID
+	
+	// Recompile report UVERGL
+	if PGM="" do Runtime.setErrMSG(2324,RID) quit:ER
+	do ^@PGM
+	
+	type ResultSet rs=Db.select("JOB","UVERGL","JOB=:%ProcessID")
+
+	// Verification complete ... No errors found.
+	if rs.isEmpty() set RM=$$^MSG(2944)
+	// Verification complete
+	else  set RM=$$^MSG(2943)
+	
+	set ER="W"
+	
+	do Db.delete("UVERGL","JOB=:%ProcessID")
+
+	quit 
+	
+
+prompt	// Prompt for what to run ... store in run(#) array
+
+	type String OLNTB,%READ,run(),%TAB(),VFMQ
+
+	do Db.delete("UVERGL","JOB=:%ProcessID")
+
+	set %TAB("run(1)")=".RUN5" set run(1)=1
+	set %TAB("run(2)")=".RUN2" set run(2)=1
+	set %TAB("run(3)")=".RUN3" set run(3)=1
+	set %TAB("run(4)")=".RUN4" set run(4)=1
+	
+	set OLNTB="0035"
+	
+	set %READ="@@%FN,,,run(1),run(2),run(3),run(4)"
+	
+	do ^UTLREAD
+	
+	if VFMQ'="Q" do init
+
+	quit 
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60445^41727^Pat Kelly^7717"	// Signature - LTD^TIME^USER^SIZE

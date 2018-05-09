@@ -1,0 +1,115 @@
+LNPTS17(RecordDEP dep, RecordTTX ttx, RecordTRN trn)
+
+	/*
+	       Escrow paid in and out
+
+	       ORIG:  David Caliendo (5527) - 07/07/86
+	       DESC:  Post deposit / withdrawal to escrow account as a 
+	              secondary transaction generated from LNPTS16.
+	              Depending on the transaction code, escrow remittance 
+	              data may or may not be updated.
+	
+	 ---- Revision History ------------------------------------------------
+	
+	01/26/06 - SmithCD - CR 19343 (16890)
+		   . Fixed undefined error on SEQ and issues w/ use of ttx / 
+		     ttxpri
+		   . Removed POST section, which was attempting to posted a 
+		     loan tranasaction in the case of a primary escrow 
+		     transaction (p04 cannot easily handle this situation, and 
+		     escrow transactions should always be secondary anyway)
+		   . Removed setting TB() in EXEC section (this is done in 
+		     LNPTS16 for this transaction)
+		   . Added required ttx parameter to FO^LNERB call
+		   . Cleaned up code, including call to FO^LNERB to 
+		     EXTERN^LNERB, in conjunction with changes in LNERB
+		   . Removed old revision history
+
+	*/
+
+	type public Boolean ER, ERS
+	
+	type String LNERC, ESCTYPE
+	
+	// Affect Escrow Remittance
+	if trn.pcfd11 do { quit:ER
+		set ESCTYPE = $$FIELD^UTSO(ttx.tso, "ESC").piece(":", 2)
+	
+		// Payee required
+		if ESCTYPE.isNull() do Runtime.setErrMSG("TTX", 6159) quit
+		
+		// Escrow Transfer Type table
+		type RecordTRTYPE trtype = Db.getRecord("TRTYPE", "CID=:dep.cid,TYP=:ESCTYPE", 1)
+
+		// Escrow type ~p1 not defined for this escrow account
+		if 'trtype.getMode() do Runtime.setErrMSG("TRTYPE", 4189, ESCTYPE) quit
+	
+		if trtype.spf do { quit
+			// Escrow ~p1 is self-pay
+			do Runtime.setErrMSG("TRTYPE", 7614, ESCTYPE)
+			// Escrow account is self-pay
+			do Runtime.setErrSTBLER("TRTYPE", "ESCSP")
+			}
+			
+		set LNERC = ttx.lnerc
+	
+		if ERS do {
+			// Record updated Transfer Remittance File in error 
+			// correct data of transaction
+			type RecordRAMT ramt = Db.getRecord("RAMT", "CID=:dep.cid,TYP=:ESCTYPE,REMDT=:trtype.remnd", 1)
+			if 'ramt.getMode() quit
+			
+			type String REMDATA = trtype.remnd
+			set REMDATA.piece(",", 2) = ramt.remamt
+			set REMDATA.piece(",", 3) = ramt.estflg
+			set REMDATA.piece(",", 4) = trtype.remptp
+			
+			// Save Transfer Remittance data in error correct data 
+			// of transaction
+			set LNERC.piece("#", 7) = REMDATA
+			}
+
+		// Save original last date remitted and escrow remittance 
+		// shortcut indicator in error correct data of transaction
+		set LNERC.piece("#", 9) = trtype.ldrem
+		set LNERC.piece("#", 10) = +ERS
+				
+		set ttx.lnerc = LNERC
+	
+		do EXTERN^LNERB(.trtype, .ttx, .dep) quit:ER
+		}
+
+	do EXEC(.dep, .ttx, .trn)
+	
+	quit	
+
+
+EXEC(RecordDEP dep,		// Deposit account			/REF:RW
+     RecordTTX ttx,		// Primary transaction			/REF:R
+     RecordTRN trn)		// Transaction code			/REF:R
+     
+	type public Number ZAMT
+	type public String OVR(,,), TB(), ESCTYPE
+	type public RecordLN ln
+	
+	type Number AMT, PC
+	
+	if 'ln.exists() set ln = Db.getRecord("LN", "CID=:dep.aref")
+	
+	set AMT = $select(ttx.itc1:ZAMT, 1:ZAMT * (-1))
+
+	set dep.bal = dep.bal + AMT
+	set dep.balcol = dep.balcol + AMT
+
+	if trn.itc.extract(1) set dep.cntcr = dep.cntcr + $select(ZAMT < 0:-1, 1:1)
+	else  set dep.cntdr = dep.cntdr + $select(ZAMT < 0:-1, 1:1)
+
+	// Principal and Escrow payment suspense	
+	do GL^LNPTSU(.ttx, ZAMT, 2, 7)
+
+	// Escrow account below minimum balance of $<TMINBAL>
+	if 'ttx.itc1 if dep.bal < ln.sbwamt set OVR(dep.aref, "OVR", "TMINBAL") = $$^SCARND(ln.sbwamt, 0, dep.aref)
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60297^70601^Chad Smith^3386"	// Signature - LTD^TIME^USER^SIZE

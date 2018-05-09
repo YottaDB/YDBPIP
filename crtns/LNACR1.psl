@@ -1,0 +1,980 @@
+public	LNACR1
+
+	/*
+	Procedure ID: LNACR1
+	DESC: Accrual Calc - Pre Calculated (Amortized)		
+
+	  ---- Revision History -----------------------------------------------
+
+	04/11/06 - KELLYP - CR 20232
+		   Modified TCC and RESTART sections to remove references to
+		   CUVAR.GLCC.  This data item has been obsoleted and the
+		   system will always operate as if CUVAR.GLCC="Y" (cost center
+		   reporting enabled).
+
+	08/24/05 - Radhika - CR 16725
+	           .Changed the class.new() for TTXTOP in LNACR1 to a Db.getRecord, 
+	            passing the third parameter.
+	           .Passed "1" as the last parameter to Db.getRecord which is
+		    assigned to the "type RecordTTL ttl=". 
+		     	
+	06/03/05 - SmithCD - CR 15902
+		   . Modified FUT section to select only future bills (was 	
+		     selecting all bills, which was causing accrual amount to 
+		     get reduced below 0)
+		   . Corrected 'tjd' undefined variable reference in TTXTOP 
+		     section
+		   . Brought NGRP section in-line
+		   . Cleaned up code, includFing removal of incorrect / 
+		     misleading documentation
+		   . Removed old revision history
+
+	05/06/05 - KinI - 15524
+		   Modified to replace lnbil1.bp1 piece references with direct
+		   sub-fields references per DBI standards. 
+	  
+	04/26/05 - SmithCD - CR 15305
+		   Removed all occurrences of "ORDER BY" in order by clauses 
+		   of select and selectDbset statements b/c they can cause 
+		   problems in an Oracle environment.
+
+	11/16/04 - TITOVE - CR 13197
+		   Added back the %LNACR logic, to be used by ACRCLS^LNACRS.
+		   Created FILE and UPD sections. Removed CLEAN section. Added
+		   conditions to create new LNBIL* objects, if not defined.
+		   In USED section added code to reset %ICTD to 1, if zero.
+		   Modified logic in RESTART and PROC sections, cleaned up
+		   some errors made during initial conversion.
+	   
+	-----------------------------------------------------------------------------
+
+	*/
+	
+	// Top called by LACRFE
+	
+	type public Boolean %ACM, %ANT, %PLDF, RESTART
+	type public Number STATUS
+	type public String ACM(,,)
+
+	type Number BRCD, RCID, RTYPE, TCC(,,), TYPE
+	type String CC, GRP, RGRP, %UserID
+	type Boolean ER
+
+	set (TYPE, GRP) = ""
+	
+	set ER = 0
+	set %ANT = %ANT.get()
+
+	if '%ANT do { quit:ER
+		
+		do SOURCE^BCHSOURC("LNACR", "LNACR", .%UserID, .BRCD) quit:ER
+
+		// Loan accrual adjustment source not defined
+		if BRCD.isNull() ! (%UserID.isNull()) do Runtime.setErrSTBLER("UTBLSRC", 8434) do LOGERR quit
+		else  set STATUS = 0 do ^TTXLOK
+		}
+
+	set CC = "*"
+
+	if RESTART do RESTART
+
+	// If restart occurred, processing starts with last filed GRP and TYPE
+	for  set GRP = ACM(%ACM, GRP).order() quit:GRP.isNull()  do {  
+		for  set TYPE = ACM(%ACM, GRP, TYPE).order() quit:TYPE.isNull()  do PROC(GRP, TYPE)
+		}
+		
+	quit
+
+
+PROC(String GRP, Number TYPE)	// Process accounts within group / type
+
+	type public Number RCID, RTYPE, TCC(,,)
+	type public Boolean %ANT, RESTART
+	type public String RGRP
+
+	type DbSet ds = Db.selectDbSet("LN", "GRP=:GRP AND TYPE=:TYPE")
+
+	while ds.next() do {
+		
+		type RecordLN ln = ds.getRecord("LN")
+				
+		/* If before restart occurred we processed records of this 
+		   group and type only partially, make sure we start with 
+		   next CID
+		*/
+		if RESTART, GRP = RGRP, TYPE = RTYPE, ln.cid '> RCID quit
+
+		do NCID(.ln)
+	}
+	
+	if '%ANT do SAVTCC(.TCC(,,), TYPE, GRP)
+
+	quit
+
+
+NCID(RecordLN ln)	// Next loan account
+
+	type public Number %ACM, ACM(,,), TCC(,,), TYPE
+	type public String CC, GRP
+	type public Boolean %ANT, %PLDF
+
+	type String %LNACR, CRCD, ET, FROM, RM
+	type Number %ACR, %ZTSEQ, CID
+	
+	// Set up error trapping
+	catch error {
+		// Log MUMPS error
+		type Boolean %ZTHALT = 0
+
+		set ET = error.type
+		set RM = error.description
+		set FROM = error.thrownAt
+		
+		do ZE^UTLERR
+ 
+		// Error in account, not processed
+		set ET = $$^MSG("3511")
+		do LOGERR
+		}
+		
+	set CID = ln.cid
+	set CRCD = ln.crcd
+	
+	// Make sure the currency-specific product type for this account's
+	// currency matches %ACM
+	if 'ACM(%ACM, GRP, TYPE).exists() quit
+	
+	do ACR(.ln, %ACM, .%ACR, .%LNACR)
+
+	if '%ANT do TCC(.ln, .TCC(,,), CRCD, GRP, .CC, CID, ln.acr, %ACR)
+
+	if ln.stat = 4 quit
+
+	if (%ACM = 1), ('%LNACR.isNull()) do FILE(.ln, %EffectiveDate, %LNACR)
+
+	quit
+	
+	
+FILE(RecordLN ln, 	// Loan object			/REF:R
+     Date EFD,		// Effective Date of Accrual
+     String %LNACR)	// Values for LNACR1 columns	/REF:W
+
+	// This section creates new LNACR1 records
+
+	type RecordLNACR1 lnacr1 = Db.getRecord("LNACR1", "EFD=:EFD,GRP=:ln.grp,TYPE=:ln.type,CID=:ln.cid", 1)
+
+	set lnacr1.%ica = %LNACR.piece("|", 1)
+	set lnacr1.%icdd = %LNACR.piece("|", 2)
+	set lnacr1.%icd = %LNACR.piece("|", 3)
+	set lnacr1.%ictd = %LNACR.piece("|", 4)
+	set lnacr1.%acrs = %LNACR.piece("|", 5)
+	set lnacr1.%bup = %LNACR.piece("|", 6)
+	set lnacr1.%pnb = %LNACR.piece("|", 7)
+	set lnacr1.%acr = %LNACR.piece("|", 8)
+	set lnacr1.%schld = %LNACR.piece("|", 9)
+	set lnacr1.%schnd = %LNACR.piece("|", 10)
+	set lnacr1.%icpd = %LNACR.piece("|", 11)
+	set lnacr1.acr = %LNACR.piece("|", 12)
+	set lnacr1.adj = %LNACR.piece("|", 13)
+		
+	do lnacr1.bypassSave()
+	
+	quit
+	
+
+private	TCC(RecordLN ln,	// Loan account record		/REF:RW
+	    Number TCC(,,),	// Cost center totals		/REF:W
+	    String CRCD,	// Currency code
+	    String GLSC,	// General ledger set code
+	    String CC,		// Cost center			/REF:RW
+	    Number CID,		// Account number
+	    Number ACR,		// Accrual amount
+	    Number %ACR)	// Adjusted accrual amount
+
+	// Update loan record and set TCC(,,)
+	
+	type public Number %MCP
+	
+	set CC = ln.cc
+
+	// Currency Code
+	if %MCP set CRCD = ln.crcd
+
+	// General Ledger Set Code
+	set GLSC = ln.glsc
+	if GLSC.isNull() do LOGERR quit
+
+	set TCC(CRCD, GLSC, CC) = TCC(CRCD, GLSC, CC).get() + $$^SCARND((%ACR - ACR), 0, CID)
+
+	set ln.acr = %ACR
+	
+	do ln.bypassSave()
+
+	quit
+
+
+public OL(RecordLN ln)	// On-line access (transaction processing, inquiry)
+	
+	/*
+	ARGUMENTS:
+		. RecordLN - Loan record		     /TYP=Object/REQ
+		
+	*/
+	
+	type public String %LNACR, PCM
+	type public Number %ACM, %ACR
+	type public Boolean %PLDF
+
+	type String PCMSAVE = PCM
+	
+	do ACR(.ln, %ACM, .%ACR, .%LNACR)
+	
+	set PCM = PCMSAVE
+	
+	quit
+	
+	
+private	UPD(RecordLN ln,	// Loan object			/REF:RW 
+	    Date ACREFD)	// Effective Date of Accrual
+
+	// Call from BCHLNACR batch
+	
+	type public Number %ACR
+	type public Boolean %PLDF
+	
+	type String %LNACR
+
+	do OL(.ln)
+	
+	if '%LNACR.isNull() do FILE(.ln, ACREFD, %LNACR)
+	
+	quit
+
+
+ACR(RecordLN ln,	// Loan account record			/REF:RW
+    Number %ACM,	// Accrual method			
+    Number %ACR,	// Accrual amount			/REF:W
+    String %LNACR)	// Loan Int Accrual-Meth 1 record	/REF:W
+
+	// Determine accrual amount (%ACM) and %LNACR
+	
+	type public Boolean %PLDF
+	
+	type String INTBIL, IACM, PCM
+	type Date %SCHLD, %SCHND, AMODT
+	type Number %ACRS, %BUP, %BSEQ, %ICA, %ICD, %ICDD, %ICTD, %ICPD
+	type Number %PNB, %SEQ1, %SCHSEQ, %SEQ, %SQ, INT, INTA
+	type Number ACR, BALINT, DIU, LUMPI, ICM, IRN
+		
+	// Initialization blocks against divide error
+	set (%ICPD, %SEQ, %ICA, %ICD, %ICTD, %ACRS, %PNB, %ACR) = 0 
+	set (%ICDD, %LNACR) = ""
+
+	// Account Status = Closed
+	if ln.stat = 4 quit
+
+	// Number of Debits
+	if ln.bal + ln.cntdr = 0 quit
+
+	// Payment Calculation Method
+	set PCM = ln.pcm 
+	
+	type RecordSTBLPCM stblpcm = Db.getRecord("STBLPCM", "KEY=:PCM")
+	
+	set PCM = stblpcm.pcmp
+
+	if 'PCM.extract(2) do { quit
+		set %LNACR = "|||1||||"_+ln.acr_"||||"_+ln.acr
+		set %ACR = +ln.acr
+		}
+	
+	// Interest Collection Method
+	set IACM = ln.iacm
+	set ICM = ln.icm
+	
+	// Adjusted Balance for Accrual Calculation
+	set BALINT = ln.balint
+	set IRN = +ln.irn
+	
+	// Deferred Interest - Uncapitalized
+	if %ACM '= 4 set DIU = ln.diu set %BUP = DIU
+	else  if %BUP.get().isNull() set %BUP = 0
+
+		
+	/*
+	Modified following section, Instead of automatically building
+	the BL array from beginning to end, build it from beginning up
+	to and including the Bill Number from the column BSEQ.
+	*/
+	type RecordLNBIL0 lnbil0 = Db.getRecord("LNBIL0", "CID=:ln.cid", 1)
+	
+	set INTBIL = $$BIL0^BILFUNCS(.lnbil0, "I")
+	if INTBIL.isNull() quit
+	
+	set LUMPI = INTBIL.piece("#",5)
+	
+	/*
+	%SCHSEQ, %SCHND, %SCHLD, INTA, %BSEQ start off as the current account 
+	values, but may be redefined as the values pertaining to the
+	effective date being passed in (%EffectiveDate).
+	*/
+	set %SCHSEQ = ln.schseq
+	set %SCHND = ln.schnd
+	set %SCHLD = ln.schld
+	set INTA = ln.inta
+	set %BSEQ = ln.bseq
+
+	// Interest Prepaid Date
+	set AMODT = ln.amodt
+	if %EffectiveDate '< AMODT, (%EffectiveDate - %SystemDate) do EFD(.ln)
+	
+	// Original Disbursement Date
+	if %SCHLD < ln.odd set %SCHLD = ln.odd
+
+	if %ACM = 4 do ACM4(.ln)
+
+	if %ACM '= 4 do {
+		if %EffectiveDate '< AMODT do USED(.ln) quit
+		else  do NEW(.ln)
+		}
+
+	set %ACR = %ACRS + %BUP - %PNB
+	set %ACR = $$^SCARND(%ACR, 0)
+	
+	set ACR = $$^SCARND(ln.acr, 0)
+	
+	set %ICPD = $$^SCARND(%ICPD, 0)
+	
+	set %LNACR = %ICA_"|"_%ICDD_"|"_%ICD_"|"_%ICTD_"|"_%ACRS_"|"_+%BUP_"|"_+%PNB
+	set %LNACR = %LNACR_"|"_%ACR_"|"_%SCHLD_"|"_(%SCHND - 1)_"|"_%ICPD
+	set %LNACR = %LNACR_"|"_ACR_"|"_(%ACR - ACR)
+
+	quit
+
+
+NEW(RecordLN ln)	// Accrual for new account
+
+	type public Date %SCHLD, %SCHND, AMODT, ODD
+	type public String %ICDD
+	type public Number %ACRS, %ICA, %ICD, %ICPD, %ICTD, CID, ICD
+	type public Boolean %PLDF
+
+	set %SCHND = AMODT
+
+	// Original Disbursement Date
+	set ODD = ln.odd
+	set %ICDD = "PREPAID"
+
+	set %ICA = ln.disppi
+	set %ICPD = ln.ipl
+	set %SCHLD = ODD
+	set %ICD = %EffectiveDate - ODD + %PLDF 
+	set %ICTD = AMODT - ODD 
+	if '%ICTD set %ICTD = 1
+
+	// Disclosure - Prepaid Interest Days
+	if %EffectiveDate < ODD do {
+		set %ICD = 0 
+		set %ICTD = ln.disppid 
+		set:%ICTD = 0 %ICTD = 1
+		}
+
+	if %ICA set %ACRS = $$^SCARND((((%ICA * %ICD) / %ICTD) - %ICPD), 0, CID)
+
+	quit
+
+
+USED(RecordLN ln)	// Accrual for other than new account
+
+	type public Number %ACM, %ACRS, %BUP, %BSEQ, %ICD, %ICDD, %ICTD
+	type public Number INT, %ICA, %ICPD, INTA, %SCHLD, %SCHND
+	type public Number %SCHSEQ, %SEQ, %SQ, ICM
+	type public String IACM
+	type public Boolean %PLDF
+	
+	type String INTBIL
+
+	/*
+	Address odd days interest if first payment and [LN]ODIO=1
+	Odd Days Interest Option
+	*/
+
+	if ln.schnd = ln.dfp, ln.odio do ODIO(.ln)
+	
+	/*
+	Allocate interest associated with current due period
+
+	Interest paid in ARREARS - allocate NEXT scheduled bill (%SCHSEQ + 1)
+	Interest paid in ADVANCE - allocate LAST scheduled bill (%SCHSEQ)
+	*/
+	
+	set %SEQ = %SCHSEQ
+	if 'ICM set %SEQ = (%SEQ \ 1) + 1
+	
+	set %ICTD = $select(%ACM=2:$$DY^UIC(IACM, %SCHLD) / ln.dist1af, 1:%SCHND - %SCHLD)
+	if '%ICTD set %ICTD=1
+	
+	type RecordLNBIL1 lnbil1 = Db.getRecord("LNBIL1", "CID=:ln.cid,SCHSEQ=:%SEQ", 1)
+
+	set %BUP = %BUP - lnbil1.cdib
+	set %ICA = %ICA + lnbil1.cdib
+
+	if %SEQ > %BSEQ do {
+		// Current interest
+		do CUR(.ln)
+	
+		set lnbil1.casd = ""
+		set lnbil1.cbcd = ""
+		set lnbil1.cdpd = "##"_%SCHND
+
+		do SETELMT^BILFUNCS(.lnbil1, "I", "I##"_INT_"#"_INT)
+		
+		if %SEQ > %BSEQ set %BSEQ = %SEQ
+		}	
+
+	// Total interest
+	set %ICA = %ICA + $$SUB^BILFUNCS("I", .lnbil1).piece("#",3)		
+	
+	// Original subsidy
+	set %ICA = %ICA + lnbil1.csubamt
+
+	// Total interest still due
+	set INTBIL = $$SUB^BILFUNCS("I", .lnbil1).piece("#",4)
+
+	// Remaining subsidy
+	set INTBIL = INTBIL + lnbil1.csubdue
+
+	set %ICD = %EffectiveDate - %SCHLD + %PLDF 
+	set %ICPD = %ICA - INTBIL
+	set %ACRS = $$^SCARND((((%ICD / %ICTD) * %ICA) - %ICPD), 0, ln.cid)
+	set %BUP = %BUP + INTA 
+	set INTA = 0
+	set %SQ = %SEQ 
+	set %ICDD = lnbil1.cdpd.toString()
+	
+	do FUT
+	do PAS(ln.oseq)
+	
+	quit
+
+
+FUT	// Dated after "current" sequence - int paid subtracted from accrual
+
+	type public Number %PNB, %SCHSEQ, %SEQ, %SQ, CID
+	
+	type String BILINT
+
+	type DbSet ds = Db.selectDbSet("LNBIL1","CID=:CID AND SCHSEQ>:%SQ")
+	if ds.isEmpty() set %SQ = %SEQ quit
+ 
+	while ds.next() do { 
+		type RecordLNBIL1 lnbil1 = ds.getRecord("LNBIL1")
+
+		set %SQ = lnbil1.schseq
+		
+		set BILINT = $$SUB^BILFUNCS("I", .lnbil1)
+		set %PNB = %PNB + BILINT.piece("#", 3) - BILINT.piece("#", 4)
+		
+		// Original subsidy
+		set %PNB = %PNB + lnbil1.csubamt
+
+		// Remaining subsidy
+		set %PNB = %PNB - lnbil1.csubdue
+		}
+
+	quit
+
+
+CUR(RecordLN ln)	// Current interest calculation
+
+	type public Number %BUP, BALINT, CID, INT, INTA, IRN, LUMPI
+	type public Date %SCHLD, %SCHND
+	type public String IACM
+	
+	type Date LD, ND
+
+	// Promotional Rate - Expiration Date
+	if ln.trate, %SCHND '> ln.trexd set IRN = ln.trate
+
+	set LD = %SCHLD
+	set ND = %SCHND - 1
+
+	set INT = $$^UIC(BALINT, LD, ND, IACM, IRN, 1, ln.dist1af, ln.dist1fre, ln.icpf)
+	set INT = $$^SCARND(INT, 0, CID)
+	set INT = INT + LUMPI 
+
+	set LUMPI = 0 
+	set %BUP = %BUP + INTA 
+	set INTA = 0
+	
+	quit
+
+
+PAS(Number OSEQ)
+
+	// Dated before "current" sequence - int unpaid added to accrual
+
+	type public Number %BUP, %SQ
+
+	type String INTBIL
+		
+	type DbSet ds = Db.selectDbSet("LNBIL1", "CID=:CID AND SCHSEQ>=:OSEQ", "SCHSEQ DESC")
+
+	while ds.next() do {
+		type RecordLNBIL1 lnbil1 set lnbil1 = ds.getRecord("LNBIL1")
+		set %SQ = lnbil1.schseq
+		
+		set INTBIL = $$SUB^BILFUNCS("I", .lnbil1)
+		set %BUP = %BUP + INTBIL.piece("#", 4)
+		}
+	
+	quit
+
+
+EFD(RecordLN ln)	// Effective dated entry - determine scheduled information
+
+	type public Date %SCHLD, %SCHND
+	type public Boolean ER
+	type public Number %SCHSEQ, %SEQ, %SEQ1
+
+	type Date JD, NJD
+
+	if %EffectiveDate < %SCHLD do { quit:ER
+		
+		for  do { quit:%EffectiveDate '< %SCHLD ! (ER)
+			set JD = %SCHLD
+			set NJD = JD.nextFreqDate("-"_ln.dist1fre) quit:ER
+
+			if %EffectiveDate '< %SCHLD quit
+			
+			set %SCHLD = NJD
+			}
+		}
+
+	set JD = %SCHLD 
+	for  do { quit:(%EffectiveDate < NJD) ! (ER)
+		set NJD = JD.nextFreqDate(ln.dist1fre) quit:ER
+		
+		if %EffectiveDate < NJD set %SCHND = NJD quit
+		
+		set JD = NJD
+		}
+	
+	if ER quit
+
+	if %EffectiveDate < %SystemDate do EFD1A(ln.schseq) quit
+	
+	set %SEQ = ln.schseq - 1 
+	set NJD = $select('ln.lbdd.isNull():ln.lbdd, 1:ln.dist1ld) 
+	
+	do EFD1B(.ln)
+	
+	quit
+
+
+EFD1A(Number SCHSEQ)	// Effective date is less than system date
+
+	type public Number %SCHSEQ, %SEQ, %SEQ1
+	type public Date %SCHLD
+
+	type Boolean EXIT = 0
+	
+	set (%SEQ, %SEQ1) = SCHSEQ + 1
+
+	type DbSet ds = Db.selectDbSet("LNBIL1", "CID=:CID AND SCHSEQ=:%SEQ", "SCHSEQ DESC")
+
+	while ds.next() do { quit:EXIT
+		type RecordLNBIL1 lnbil1 = ds.getRecord("LNBIL1")
+		if lnbil1.cdpd '> %SCHLD set %SCHSEQ = lnbil1.schseq set EXIT = 1
+		}
+
+	quit
+
+
+EFD1B(RecordLN ln)	// Effective date is greater than system date
+
+	type public Date %SCHLD, %SCHND
+	type public Number %BSEQ, %SCHSEQ, %SEQ, %SEQ1
+
+	type Boolean EXIT = 0
+	type Number PDUE
+	
+	if %SEQ < 0 set %SEQ = 0
+
+	set %SEQ1 = %SEQ
+
+	type DbSet ds = Db.selectDbSet("LNBIL1", "CID=:CID AND SCHSEQ=:%SEQ")
+
+	while ds.next() do { quit:EXIT
+		type RecordLNBIL1 lnbil1 = ds.getRecord("LNBIL1")	
+
+		if (%SEQ.isNull()) ! (%SEQ > ln.bseq) do BLDBL(.lnbil1, .ln) 
+		set PDUE = lnbil1.bp1.piece("#", 3)
+
+		if PDUE = %SCHND set EXIT = 1 quit
+		if PDUE '< %SCHLD set %SCHSEQ = %SEQ, EXIT = 1 quit
+		}
+	
+	quit
+
+	
+BLDBL(RecordLNBIL1 lnbil1, RecordLN ln)
+
+	// Build bill record
+
+	type public Date LD, ND, NJD
+	type public Number %BSEQ, %BUP, %SEQ, BALINT, CID, INT, INTA
+	type public Number IRN
+	type public String IACM
+	
+	set %SEQ = %SEQ + 1
+	
+	// Promotional Rate - Expiration Date
+	if ln.trate, NJD '> ln.trexd set IRN = ln.trate
+
+	set ND = NJD - 1 
+	set INT = $$^UIC(BALINT, LD, ND, IACM, IRN, 1, ln.dist1af, ln.dist1fre, ln.icpf)
+	set INT = $$^SCARND(INT, 0, CID)
+
+	set %BUP = %BUP + INTA 
+	set INTA = 0
+	
+	set lnbil1.cdpd = NJD
+	
+	do SETELMT^BILFUNCS(.lnbil1, "I", "I##"_INT_"#"_INT)
+
+	if %SEQ > %BSEQ set %BSEQ = %SEQ
+	
+	quit
+
+
+ODIO(RecordLN ln)	// Odd days lump interest
+
+	type public Number %BUP, LUMPI
+
+	// Disclosure - Prepaid Interest Amount
+	set LUMPI = LUMPI - ln.disppi
+
+	// Disclosure - Prepaid Interest Amount
+	if LUMPI < 0 do {
+		set %BUP = %BUP + ln.disppi + LUMPI 
+		set LUMPI = 0
+		}
+
+	// Disclosure - Prepaid Interest Amount
+	else  set %BUP = %BUP + ln.disppi
+
+	quit
+
+
+ACM4(RecordLN ln)	// Accrual method 4
+
+	type public Date %SCHLD, %SCHND
+	type public Number %ACRS, %BUP, %ICA, %ICD, %ICPD, %ICTD, %INF, INT
+	type public Number %SCHSEQ, %SEQ, %SQ, CID, ICM, IRN
+	type public Boolean %PLDF
+
+	type Number BALINT, DSEQ, IR, N, RT
+	type Date DATE, DIST1ND, LD, ND
+	type String FRE, IACM
+	type Boolean QUIT = 0
+
+	// 365 day year regardless of true number
+	set IACM = "13"
+
+	// Use current balance
+	set BALINT = +ln.bal
+
+	// Unadvanced Balance
+	set BALINT = $select('ln.aruf:BALINT, 1:BALINT - ln.udbal)
+
+	// Needed for FUT section
+	set (%SQ, %SEQ) = %SCHSEQ + 1
+
+	// Distribution 1 Next Due
+	set DIST1ND = ln.dist1nd
+
+	// Internal Bill Seq Nbr Next Due Date
+	set DSEQ = ln.dseq
+
+	// Previous interest due
+	
+	type DbSet ds = Db.selectDbSet("LNBIL1", "CID=:CID AND SCHSEQ<:(%SCHSEQ+1)", "SCHSEQ DESC")
+	
+	while ds.next() do { quit:QUIT
+		type RecordLNBIL1 lnbil1 = ds.getRecord("LNBIL1")
+
+		/*
+		If interest is Collected in Arrears, and Pmt Due Date on 
+		bill record is less than or equal to the actual last
+		payment due date, ignore this bill record
+		*/
+		if 'ICM, lnbil1.cdpd '> ln.dist1ld set QUIT = 1 quit
+		
+		/*
+		If interest is Collected in Advance, and Pmt Due Date on 
+		bill record is less than or equal to the actual next
+		payment due date, ignore this bill record
+		*/
+		if ICM, lnbil1.cdpd '> ln.dist1nd set QUIT = 1 quit
+		
+		set IR = lnbil1.cirn
+		
+		// Check for Promotional Rate
+		if IR.isNull(), ln.trate do {
+			if lnbil1.cdpd < ln.trexd set IR = ln.trate
+			else  set IR = IRN
+			}
+		if IR.isNull(), 'ln.trate set IR = IRN
+
+		set %BUP = %BUP + (BALINT * IR / 100 / ln.dist1af)
+		}
+
+	// Current interest period
+	set %ICTD = %SCHND - %SCHLD
+	do CUR(.ln)
+	set %ICA = INT
+
+	// Find amount paid - current period
+	
+	type RecordLNBIL1 lnbil1 = Db.getRecord("LNBIL1", "CID=:CID,SCHSEQ=:(%SCHSEQ+1)", 1)
+	
+	// Tot Int
+	set %ICPD = +$$SUB^BILFUNCS("I",.lnbil1).piece("#", 3)
+	
+	// Tot Due
+	set %ICPD = +$$SUB^BILFUNCS("I", .lnbil1).piece("#", 4)
+
+	// Calculate accrual
+	set %ICD = %EffectiveDate - %SCHLD + %PLDF
+	set %ACRS = $$^SCARND((((%ICD / %ICTD) * %ICA) - %ICPD), 0, CID)
+
+	// Calculate the daily interest factor
+
+	if ln.trate, %EffectiveDate < ln.trexd set RT = ln.trate
+	else  set RT = IRN
+	
+	set (LD, ND) = %EffectiveDate
+	set %INF = $$^UIC(BALINT, LD, ND, IACM, RT, "", ln.dist1af, ln.dist1fre, ln.icpf, ln.schnd, ln.schld)
+
+	do FUT
+
+	quit
+
+
+private SAVTCC(Number TCC(,,),		// Cost center totals	/REF:R
+	       Number TYPE,		// Product type
+	       String GRP)		// Product group
+
+	// Move total adjustments into TTL
+
+	type String CC, CRCD, GLSC 
+	
+	set ( CC, CRCD, GLSC) = ""
+
+	for  set CRCD = TCC(CRCD).order() quit:CRCD.isNull()  do {
+		for  set GLSC = TCC(CRCD, GLSC).order() quit:GLSC.isNull()  do { 
+			for  set CC = TCC(CRCD, GLSC, CC).order() quit:CC.isNull()  do {
+				type RecordTTL ttl = Db.getRecord("TTL", "TJD=:%SystemDate,CRCD=:CRCD,CLS='L',GRP=:GRP,TYPE=:TYPE,GLSC=:GLSC,CC=:CC",1)
+				set ttl.meacradj = TCC(CRCD, GLSC, CC)
+				do ttl.bypassSave()
+				
+				do SETUPGL(.TCC(,,), CRCD, GLSC, CC)
+				}
+			}
+		}
+
+	quit
+
+
+SETUPGL(Number TCC(,,), String CRCD, String GLSC, String CC)
+
+	// Post the LN accrual adjustment
+	
+	type public String GRP
+
+	type Number CID, CID1
+	type Boolean BIT, BIT1
+
+	if 'TCC(CRCD, GLSC, CC) quit
+	
+	if TCC(CRCD, GLSC, CC) > 0 set BIT = $select(GRP = "CBL":1, 1:0)
+	if TCC(CRCD, GLSC, CC) < 0 set BIT = $select(GRP = "CBL":0, 1:1)
+
+	set BIT1 = 'BIT
+	
+	type RecordUTBLGLSC utblglsc = Db.getRecord("UTBLGLSC", "GLSC=:GLSC")
+
+	if TCC(CRCD, GLSC, CC) > 0 do { do TTXTOP quit
+
+		if BIT do { quit
+			set CID = +utblglsc.lgli
+			set CID1 = +utblglsc.lgl2
+			
+			do ADJINI
+			do POSTGL
+			}
+
+		if 'BIT do { quit
+			set CID = +utblglsc.lgl2
+			set CID1 = +utblglsc.lgli
+			
+			do ADJINI
+			do POSTGL
+			}
+		}
+		
+	if TCC(CRCD, GLSC, CC)<0 do { do TTXTOP quit
+
+		if BIT do { quit
+			set TCC(CRCD, GLSC, CC) = TCC(CRCD, GLSC, CC) * (-1)
+			set CID = +utblglsc.lgli
+			set CID1 = +utblglsc.lgl2
+			
+			do ADJINI
+			do POSTGL
+			}
+
+		if 'BIT do { quit
+			set TCC(CRCD, GLSC, CC) = TCC(CRCD, GLSC, CC) * (-1)
+			set CID = +utblglsc.lgl2
+			set CID1 = +utblglsc.lgli
+			
+			do ADJINI
+			do POSTGL
+			}
+		}
+		
+	quit
+
+
+ADJINI	// Initialize interest expense data
+
+	type public String ADJT(,,,), CC, CRCD, GLSC, GRP
+	type public Number CID, CID1, TYPE
+
+	type String TCMT
+		
+	// I18N=OFF
+	set TCMT = "TYPE "_TYPE_" CC "_CC_" ACR ADJ"
+	// I18N=ON
+	
+	set ADJT(CRCD, TYPE, GLSC, CC) = CID_"|MDR|"_CID1_"|MCR||"_TCMT
+
+	quit
+
+
+POSTGL	// Post G/L offset
+
+	type public Boolean BIT, BIT1
+	type public Number ADJT(,,,,), BRCD, CRCD, TCC(,,), TYPE
+	type public String CC, GLSC
+
+	type String AN
+
+	set ADJT(CRCD, TYPE, GLSC, CC, BIT) = TCC(CRCD, GLSC, CC)
+
+	set AN = "ADJT"
+	do {
+		type String SVCRCD 
+		set SVCRCD = CRCD 
+
+		type String CRCD
+		set CRCD = SVCRCD
+		
+		do OFFSET^UMSC(%SystemDate, BRCD, %UserID, .AN, 1)
+		}
+
+	kill ADJT(CRCD, TYPE, GLSC, CC, BIT)
+	set ADJT(CRCD, TYPE, GLSC, CC, BIT1) = TCC(CRCD, GLSC, CC)
+
+	set AN = "ADJT"
+	do {
+		type String SVCRCD
+		set SVCRCD = CRCD 
+		
+		type String CRCD
+		set CRCD = SVCRCD
+
+		do OFFSET^UMSC(%SystemDate, BRCD, %UserID, .AN, 1)
+		}
+		
+	quit
+
+
+TTXTOP	//Set the pointer
+
+	type public Number BRCD
+	
+	type RecordTTXUID ttxuid = Db.getRecord("TTXUID","TJD=:%SystemDate,BRCD=:BRCD,UID=:%UserID",1)
+		
+	set ttxuid.lpseq = Db.currVal("TTX", "%SystemDate,BRCD,%UserID") \ 1000
+		
+	do ttxuid.bypassSave()
+	
+	quit
+
+
+LOGERR	// Log error in exception file
+
+	type public Number %ZTSEQ, CID
+	type public String ET
+
+	type Number BAL
+	
+	if CID.get() do {
+		type RecordLN ln = Db.getRecord("LN", "CID=:CID", 1)
+		set BAL = +ln.bal
+		}
+		
+	// Loan Accrual Calculation
+	do LOG^UTLEXC($T(+0), "*", $$^MSG(3809)_"|1", CID.get(), %ZTSEQ.get(), ET.get(), BAL)
+
+	quit
+
+
+RESTART	// Reset key values in case processing was restarted
+
+	type public Number %MCP, ADJ, CID, RCID, RTYPE, TCC(,,), TYPE
+	type public String CC, CRCD, GLSC, GRP, RGRP
+
+	type DbSet ds = Db.selectDbSet("LNACR1", "EFD=:%EffectiveDate")
+
+	// Reset TCC(,,)
+	while ds.next() do {
+		type RecordLNACR1 lnacr1 = ds.getRecord("LNACR1")
+		
+		set CID = lnacr1.cid
+		set GRP = lnacr1.grp
+		set TYPE = lnacr1.type		
+		set ADJ = lnacr1.adj
+		
+		type RecordLN ln = Db.getRecord("LN", "CID=:CID")
+		
+		if %MCP set CRCD = ln.crcd
+		set GLSC = ln.glsc 
+		if GLSC.isNull() do LOGERR quit
+		
+		set CC = ln.cc
+				
+		set TCC(CRCD, GLSC, CC) = TCC(CRCD, GLSC, CC).get() + ADJ
+		}
+	
+	// If any records were found in LNACR1 table, then after while() loop
+	// we have last GRP, TYPE and CID values to start with. Save them.
+	set RGRP = GRP
+	set RTYPE = TYPE
+	set RCID = CID
+	
+	// Reset the key values for NGRP loop through ACM array	
+	set CRCD = ""
+        set TYPE = TYPE-.01
+        
+        type ResultSet rs = Db.select("GRP", "LNACR1", "EFD=:%EffectiveDate AND GRP<:GRP", "GRP DESC")
+
+        if rs.next() set GRP = rs.getCol("GRP")
+        else  set GRP = ""
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60366^60140^Pat Kelly^21777"	// Signature - LTD^TIME^USER^SIZE

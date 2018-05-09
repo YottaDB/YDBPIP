@@ -1,0 +1,342 @@
+BCHLNDIC //Batch BCHLNDIC - Deferred Interest capitalization
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 01/31/2007 12:46 - shetyes
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHLNDIC Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ set vBCHSTS=$$STATUS^BCHUTL("BCHLNDIC")
+ if vBCHSTS=1 set ER=1,RM=$$^MSG(3410) quit
+ if vBCHSTS=2 set ER=1,RM=$$^MSG(3414) quit
+ if vBCHSTS=0 set %BatchRestart=1
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit do EXIT^BCHUTL("BCHLNDIC") quit
+ do JOBMGR^BCHUTL(%FN,"BCHLNDIC",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ do EXIT^BCHUTL("BCHLNDIC")
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(TJD,CID) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHLNDIC","*","",TJD.get()_","_CID.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ if %BatchRestart,$$CHKLOG^BCHUTL(%SystemDate,%FN,"BCHLNDIC",TJD.get()_","_CID.get()) do { quit
+ do LOG^BCHUTL(%SystemDate,%FN,"BCHLNDIC",TJD.get()_","_CID.get(),"Record already processed")
+ }
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,TJD,CID)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHLNDIC","*","",TJD.get()_","_CID.get(),"",et)
+ }
+ do UPDLOG^BCHUTL(%SystemDate,%FN,"BCHLNDIC",TJD.get()_","_CID.get(),vCONTEXT)
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,TJD,CID) //
+	new BAL
+        type RecordLN ln
+        set ln=Db.getRecord("LN","CID")
+
+	// If the loan is setup to capitalize interest then we do not
+	// want to defer interest.
+	if ln.icap=1 quit
+
+	do EXEC(%SystemDate,.ln)
+
+	if $G(ER) do EXC quit
+	quit
+
+
+public EXEC(EFD,RecordLN ln)	// Determine the Transaction Amount
+
+	
+	new TRNC,TRND,ACN,TYPE,CRCD,DIU,NAMXB,BAL,UDBAL,DITGACN,STAT,LNERC	//KCA 3/14/01
+	
+			
+	// Define variables
+
+
+	set STAT=ln.stat quit:STAT=4            //mee 42222
+	set TYPE=ln.type
+	set CRCD=ln.crcd
+	set ACR=ln.acr
+	set DIU=ln.diu 
+	set DIL=ln.diaa
+	set NAMXB=ln.namxb
+	set BAL=ln.bal
+	set DITGACN=ln.ditgacn
+	set LNERC=""		//KCA 3/14/01	
+
+	do TRANAMT(.ln)
+	
+	if ln.iropt=2 do SDIRND(.ln) do:ER EXC
+	
+	quit
+	
+TRANAMT(RecordLN ln)	//Calculate Transaction Amount (TAMT)
+	
+	new ts
+	type TranSet ts
+	set ts=Class.new("TranSet")
+	set BALCMP=$S('ln.aruf:BAL,1:BAL-ln.udbal)
+	if ACR>DIU do {
+		new DIFF
+		set DIFF=$$^SCARND(ACR-DIU,0,CID)
+		set $P(LNERC,"#",2)=ACR		//KCA 3/14/01
+		set DIU=DIU+DIFF	
+		set DIL=DIL+DIFF
+		set ln.diu=DIU
+		set ln.diaa=DIL
+		do ln.bypassSave()
+		}
+	
+	set TAMT=$S(NAMXB="":DIU,BALCMP+DIU<NAMXB:DIU,1:NAMXB-BALCMP)
+	set TAMT=$$^SCARND(TAMT,0,CID)
+	
+	quit:TAMT'>0
+	
+	if '$D(TRND(TYPE)) do TRANSET(ln.type,ln.crcd)
+	set ETC=$P(TRND(TYPE),"|",1)
+	do FILETTX($S(DITGACN:DITGACN,1:CID),.ETC,$P(TRND(TYPE),"|",2),TAMT,EFD,CRCD,LNERC,%UserStation,.ts)	//KCA 3/14/01
+	set ETC=$P(TRNC(TYPE),"|",1)
+	do FILETTX(CID,.ETC,$P(TRNC(TYPE),"|",2),TAMT,EFD,CRCD,LNERC,%UserStation,.ts)	 //KCA 3/14/01
+	
+	//post the transactions
+	do ts.postTSet(TPD,BRCD,.par,.tr)
+	do BCAPINT(.ln)
+	
+	quit
+
+BCAPINT(RecordLN ln)       //
+ 
+	if 'ln.bcapint quit
+  
+	new pmt
+
+	type RecordLNBIL0 lnbil0
+	set lnbil0=Db.getRecord("LNBIL0","CID") 	
+
+	if lnbil0.pe01="P" set pmt=lnbil0.pe01,$P(pmt,"#",5)=$P(pmt,"#",5)+TAMT,lnbil0.pe01=pmt
+        if lnbil0.pe02="P" set pmt=lnbil0.pe02,$P(pmt,"#",5)=$P(pmt,"#",5)+TAMT,lnbil0.pe02=pmt
+        if lnbil0.pe03="P" set pmt=lnbil0.pe03,$P(pmt,"#",5)=$P(pmt,"#",5)+TAMT,lnbil0.pe03=pmt        
+	if lnbil0.pe04="P" set pmt=lnbil0.pe04,$P(pmt,"#",5)=$P(pmt,"#",5)+TAMT,lnbil0.pe04=pmt
+        if lnbil0.pe05="P" set pmt=lnbil0.pe05,$P(pmt,"#",5)=$P(pmt,"#",5)+TAMT,lnbil0.pe05=pmt
+        if lnbil0.pe06="P" set pmt=lnbil0.pe06,$P(pmt,"#",5)=$P(pmt,"#",5)+TAMT,lnbil0.pe06=pmt
+        if lnbil0.pe07="P" set pmt=lnbil0.pe07,$P(pmt,"#",5)=$P(pmt,"#",5)+TAMT,lnbil0.pe07=pmt
+        if lnbil0.pe08="P" set pmt=lnbil0.pe08,$P(pmt,"#",5)=$P(pmt,"#",5)+TAMT,lnbil0.pe08=pmt
+        if lnbil0.pe09="P" set pmt=lnbil0.pe09,$P(pmt,"#",5)=$P(pmt,"#",5)+TAMT,lnbil0.pe09=pmt
+        if lnbil0.pe10="P" set pmt=lnbil0.pe10,$P(pmt,"#",5)=$P(pmt,"#",5)+TAMT,lnbil0.pe10=pmt
+	if lnbil0.pe11="P" set pmt=lnbil0.pe11,$P(pmt,"#",5)=$P(pmt,"#",5)+TAMT,lnbil0.pe11=pmt
+        if lnbil0.pe12="P" set pmt=lnbil0.pe12,$P(pmt,"#",5)=$P(pmt,"#",5)+TAMT,lnbil0.pe12=pmt
+	if lnbil0.pe13="P" set pmt=lnbil0.pe13,$P(pmt,"#",5)=$P(pmt,"#",5)+TAMT,lnbil0.pe13=pmt
+	if lnbil0.pe14="P" set pmt=lnbil0.pe14,$P(pmt,"#",5)=$P(pmt,"#",5)+TAMT,lnbil0.pe14=pmt
+	if lnbil0.pe15="P" set pmt=lnbil0.pe15,$P(pmt,"#",5)=$P(pmt,"#",5)+TAMT,lnbil0.pe15=pmt
+	if lnbil0.pe16="P" set pmt=lnbil0.pe16,$P(pmt,"#",5)=$P(pmt,"#",5)+TAMT,lnbil0.pe16=pmt
+	if lnbil0.pe17="P" set pmt=lnbil0.pe17,$P(pmt,"#",5)=$P(pmt,"#",5)+TAMT,lnbil0.pe17=pmt
+	if lnbil0.pe18="P" set pmt=lnbil0.pe18,$P(pmt,"#",5)=$P(pmt,"#",5)+TAMT,lnbil0.pe18=pmt
+	if lnbil0.pe19="P" set pmt=lnbil0.pe19,$P(pmt,"#",5)=$P(pmt,"#",5)+TAMT,lnbil0.pe19=pmt
+	if lnbil0.pe20="P" set pmt=lnbil0.pe20,$P(pmt,"#",5)=$P(pmt,"#",5)+TAMT,lnbil0.pe20=pmt
+	
+	do lnbil0.bypassSave()
+	
+	quit
+
+	
+SDIRND(RecordLN ln)	// Calculate next resolution date - set new Dayend and account file
+
+	set NJD=$$NJD^UFRE(EFD,ln.dirfre) quit:ER
+	
+	set ln.dirnd=NJD
+	set ln.dirld=EFD
+	type RecordDAYENDNEGAM negam
+	set negam=Class.new("RecordDAYENDNEGAM")
+	set negam.tjd=NJD
+	set negam.cid=CID	
+	do negam.bypassSave()
+	do ln.bypassSave()
+	quit
+
+	
+public TRANSET(TYPE,CRCD)	// Find capitalization tran codes
+
+	new ETC
+
+	type RecordPRODCTL prodctl
+	type RecordTRN trn,trn2
+
+	set prodctl=Db.getRecord("PRODCTL","TYPE")
+	set ETC=prodctl.drtrna
+
+	set trn=Db.getRecord("TRN","ETC")
+	set TRND(TYPE)=ETC_"|"_trn.itc
+	
+	set ETC=prodctl.crtrna
+	set trn2=Db.getRecord("TRN","ETC")
+	set TRNC(TYPE)=ETC_"|"_trn2.itc
+	quit
+	
+	
+FILETTX(CID,ETC,ITC,TAMT,EFD,CRCD,LNERC,%UserStation,TranSet ts)	// Create ^TTX entry  KCA 3/14/01
+	
+	
+ 	new TTXBLD
+	set TTXBLD("CID")=CID
+	set TTXBLD("ITC")=ITC
+	set TTXBLD("ETC")=ETC
+	set TTXBLD("TAMT")=TAMT
+	set TTXBLD("EFD")=EFD
+	set TTXBLD("TSO")=""
+	set TTXBLD("TCMT")=$$^MSG(4955)	//PAR 05/22/01
+	set TTXBLD("CRCD")=CRCD
+	set TTXBLD("TLO")=%UserStation
+	set TTXBLD("LNERC")=LNERC	//KCA 3/14/01
+	type RecordTTX ttx
+	set ttx=Class.new("RecordTTX")
+	set x=ts.copyTran(ttx,.TTXBLD)
+	
+	quit
+
+
+public	EXTERN(RecordLN ln,EFD)
+
+	// External entrypoint (called by UANTICLN)
+ 
+	do EXEC(EFD,.ln)
+
+        //      set next capitalization date in %A
+        if ln.iropt=2 do {
+		set ln.dirld=EFD
+		set NJD=$$NJD^UFRE(EFD,ln.dirfre) quit:ER
+		set ln.dirnd=NJD
+		type RecordDAYENDNEGAM negam
+		set negam=Class.new("RecordDAYENDNEGAM")
+		set negam.tjd=NJD
+		set negam.cid=CID
+		do negam.bypassSave()
+                }
+ 
+        quit
+ 
+ 	
+EXC	// Log error in exception file
+	// Deferred Interest Capitalization
+	new DESC
+	set DESC=$$^MSG(7115)_"|1"
+	do LOG^UTLEXC($T(+0),"*",DESC,$G(CID),$G(%ZTSEQ),$G(RM),$S($G(CID):+$G(BAL),1:""))
+	kill ET,%ZTSEQ
+	quit
+
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,TJD,CID
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set TJD=vRECORD.piece($C(9),1)
+ set CID=vRECORD.piece($C(9),2)
+ do vPROC(TJD,CID)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,TJD,CID
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>32767 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+24>32767 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+	do SOURCE^BCHSOURC("BOFF","NEGAM",.%UserID,.BRCD,.%UserClass)
+
+	// Interest capitalization teller not defined
+	if BRCD.get().isNull()!(%UserID.get().isNull()) do Runtime.setErrMSG("1249") quit:ER
+	
+	do ^TTXLOK if ER set:'RM.get() RM="TTXLOK" do EXC quit
+
+	set XTJD=%SystemDate
+
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("TJD,CID","DAYENDNEGAM","DAYENDNEGAM.TJD=:XTJD")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	do SOURCE^BCHSOURC("BOFF","NEGAM",.%UserID,.BRCD,.%UserClass)
+	set TPD=%SystemDate
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

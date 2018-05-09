@@ -1,0 +1,249 @@
+LNPTS10(RecordLN ln,RecordTTX ttx)	// Extension Payment Processing
+	/*
+	   ORIG: LESSIG - 02/20/96
+	   DESC: Extension Payment Processing
+
+	---- Revision History-------------------------------------------------
+	06/14/06 - ratht - CR 21488
+		   Modified EXTBL section to save the lnbil1 record
+		   
+	02/09/06 - KinI - CR19503
+		   Modified to send lnbil1 record to EXEC^LNBLDE.
+	
+	01/05/06 - KUMARB - 17263
+		   Modified section EXTBL, to pass third param "1" in 
+		   RecordLNBIL1.
+		   In section EXTDCC, removed line that set interest accrual.
+
+	05/06/05 - KinI - 15524
+		   Modified EXTBL scrtion to replace lnbil1.bp1 pieces update
+		   with direct lnbil1 sub-fields update per DBI standards.
+		   
+	11/13/02 - CARROLLJ - 51630
+		   Modified external calls to pass correct parameters.
+
+	08/04/02 - CARROLLJ - 51629
+		   Modifed call to INIT^UAVB in section EXTINT.
+
+	06/12/03 - CARROLLJ - 51349
+		   Modifed INIT section to new variables before calls to the
+		   following linetags:EXTUX,EXTTR,EXTDCC, and EXTBL
+
+	11/14/02 - CARROLLJ - 43583
+		   Modified calls to LNPTSU to pass ttx.
+
+	03/07/02 - MBUIM - 43583
+		   Converted to PSL.	   
+
+	*/
+
+	do INIT(.ln,.ttx)
+
+	quit
+
+INIT(RecordLN ln,RecordTTX ttx)	// Initialize variables necessary for processing
+
+	new FIN1,NJD,NODE12,NODE13,NODE50,NODE65,PCS,TAX1,TAXYEOFF,UAVB,YEOFF
+
+	set PCS=""
+ 
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+
+	set YEOFF=cuvar.yeoff
+	set TAXYEOFF=cuvar.taxyeoff
+
+	if '$D(CUVAR2) set CUVAR2=cuvar.tjd
+
+	set FIN1=$$BOFY^SCADAT(CUVAR2,1)
+	set TAX1=$$BOTY^SCADAT(CUVAR2,1)
+
+	// Horizontal processing not supported by extentions
+	set NODE65=ln.ppdcat1_"|"_ln.ppdcat2_"|"_ln.ppdcat3_"|"_ln.ppdcat4
+	set NODE65=NODE65_"|"_ln.ppdcat5_"|"_ln.ppdcat6_"|"_ln.ppdcat7
+	set NODE65=NODE65_"|"_ln.ppdcat8_"|"_ln.ppdcat9_"|"_ln.ppdcat10
+
+	if NODE65[">"!(NODE65["#") do Runtime.setErrMSG("LN",376) quit:ER
+
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","ln.type")
+	
+	set NODE12=prodctl.dradin
+	set NODE13=prodctl.cradin
+
+	type RecordPRODDFTL proddftl=Db.getRecord("PRODDFTL","ln.type")
+		 
+	set NODE50=proddftl.glsc
+
+        new BLTMP,DSEQ,OCC,TAMT2,TCMT,TSO,X
+ 	do EXTUX(.ln)
+	do EXTTR(.ln,.ttx)
+	do EXTDCC(.ln)
+	do EXTBL(.ln,.ttx)
+
+	quit
+
+EXTUX(RecordLN ln)	// Update the account record
+
+   	if ln.mdt'="" do { quit:ER
+		// Increase maturity date another period by using ^UFRE
+		set NJD=$$NJD^UFRE(ln.mdt,ln.dist1fre) quit:ER
+
+		// Account Maturity Date
+		set ln.mdt=NJD
+
+		}
+
+	// Update interest fields
+	if (YEOFF)&(%EffectiveDate<FIN1)&(CUVAR2'>(FIN1+YEOFF-1)) set ln.ipy=ln.ipy+TAMT
+	else  set ln.iytd=ln.iytd+TAMT
+	set ln.ipl=ln.ipl+TAMT
+
+	// Update Tax Year interest fields ARQ 35437
+	if (TAXYEOFF)&(%EffectiveDate<TAX1)&(CUVAR2'>(TAX1+TAXYEOFF-1)) set ln.ipty=ln.ipty+TAMT
+   	else  set ln.itytd=ln.itytd+TAMT
+
+	// Update extension fields
+	set OLDEXT=ln.extldt
+	set ln.exttot=ln.exttot+1
+       	set ln.extldt=%EffectiveDate
+      	set ln.extamt=ln.extamt+TAMT	
+
+	quit
+
+EXTTR(RecordLN ln,RecordTTX ttx)	// Build the secondary transactions via POST^LNTRB
+
+
+	// Store EXTLDT into TSO of TRs
+	set TSO="" 
+	set X("EXTLDT")=OLDEXT
+
+	do IN^UTSO(.X,.TSO)
+
+	set ttx.tso=TSO
+	
+	set TSO=""
+	set TCMT="" 
+	set OCC=""
+
+	// Update TAMT to post to accrual on the primary transaction
+	do GL^LNPTSU(.ttx,TAMT,3)
+
+	// Build increase (DR) to interest accrued for the extension
+   	do POST^LNTRB(.ttx,CID,NODE12,TAMT,%EffectiveDate,%UserStation,TSO,TCMT,CRCD,OCC,PCS)
+
+	// Build increase (CR) to interest income for the extension
+   
+	type RecordUTBLGLSC utblglsc=Db.getRecord("UTBLGLSC","GLSC=:NODE50")
+
+	// interest income account
+	set GLCID=utblglsc.lgli
+ 
+     	do POST^LNTRB(.ttx,GLCID,"MCR",TAMT,%EffectiveDate,%UserStation,"",TCMT,CRCD,OCC,PCS)
+
+	// Now determine how much interest would have accrued for this period 
+	set TAMT2=$$EXTINT(.ln,.ttx,CID,%EffectiveDate)
+
+	// Build decrease (CR) to interest accrued for the period's accrual
+	do POST^LNTRB(.ttx,CID,NODE13,TAMT2,%EffectiveDate,%UserStation,TSO,TCMT,CRCD,OCC,PCS)
+
+	// Build decrease (DR) to interest income for the period's accrual
+  	do POST^LNTRB(.ttx,GLCID,"MDR",TAMT2,%EffectiveDate,%UserStation,"",TCMT,CRCD,OCC,PCS)
+
+	quit
+
+EXTDCC(RecordLN ln)	// Update delinquency counters
+
+	do DCC^LNPTS3(.ln)
+
+	quit
+
+EXTBL(RecordLN ln,RecordTTX ttx)	// Finally, update bill records by zeroing out due amounts
+
+
+	set DSEQ=ln.dseq
+
+	type RecordLNBIL1 lnbil1=Db.getRecord("LNBIL1","CID=:CID,SCHSEQ=:DSEQ",1)
+		   
+	if ln.dseq>ln.bseq do EXEC^LNBLDE(.ln,.ttx,CID,%SystemDate,"00",.lnbil1)
+    
+	set lnbil1.casd=0
+	set lnbil1.cpid=0
+  
+	do EXTHIS(.lnbil1,.ttx)
+	do EXTFEE(.lnbil1)
+	do EXTEND(.ln)
+	do lnbil1.bypassSave()
+
+	quit
+
+EXTHIS(RecordLNBIL1 lnbil1,RecordTTX ttx)	// Zero out piece 4 in fields 2 to "n"
+
+	/* Added call to %HSEQ^LNPTSU while looping through bill records
+	   as this level of ^HIST is useful for error-corrects/reversals
+	*/
+	new BLPC,BLTMP,LNBIL1
+
+	set BLPC=2
+	
+	set LNBIL1=$TR($$BIL1ELE^BILFUNCS(.lnbil1),$C(9),"|")
+
+	for  do { quit:BLTMP=""
+		set BLTMP=$P(LNBIL1,"|",BLPC) 
+		quit:BLTMP=""
+		set $P(BLTMP,"#",4)=0
+		set ELMNT=$P(BLTMP,"#",1)
+		set BLAMT=$P(BLTMP,"#",3)
+		do %HSEQ^LNPTSU(.ttx,DSEQ_"#"_ELMNT_"#"_BLAMT)
+		do SETELMT^BILFUNCS(.lnbil1,BLPC,BLTMP)
+		set BLPC=BLPC+1
+		}
+
+	quit
+
+EXTFEE(RecordLNBIL1 lnbil1)	// At 4th key level, set 2nd piece to zero
+
+	new DUEAMT,FEE 
+	
+	set CID=lnbil1.cid
+	set DSEQ=lnbil1.schseq
+	set DUEAMT=1
+
+	type RecordLNBIL5 lnbil5
+
+	type ResultSet rs=Db.select("FEETYP","LNBIL5","CID=:CID AND SCHSEQ=:DSEQ AND DUEAMT=1")
+
+	if rs.isEmpty() quit
+
+	while rs.next() do {
+		set FEE=rs.getCol(1)
+
+		set lnbil5=Db.getRecord("LNBIL5","CID,DSEQ,1,FEE")
+		set lnbil5.brfamt=0
+
+		do lnbil5.save()
+		}
+	
+	quit
+
+EXTEND(RecordLN ln)	// File
+
+	do LNPTS^LNPTS(.ln)
+
+	set ZAMT=0
+
+	quit
+
+EXTINT(RecordLN ln,RecordTTX ttx,CID,%EffectiveDate)	// Extrinsic to calculate interest for an account for the current period
+
+	new INT
+
+	// Uses ^UAVB so that rate changes are considered.
+	if 'ln.iam do {
+		do INIT^UAVB(.ln,CID,ln.dist1ld,ln.dist1nd-1,"110111110001111111")
+		set INT=$P(UAVB(2),"|",15)-$P(UAVB(2),"|",10)
+		}
+
+	else  set INT=$$EXTIAM^LNTCP(.ln,.ttx,CID)
+       
+	quit $$^SCARND(INT,0,CID)
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60430^23928^Tarini Charan Rath^5842"	// Signature - LTD^TIME^USER^SIZE

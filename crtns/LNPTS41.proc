@@ -1,0 +1,398 @@
+public	LNPTS41(RecordLN ln,
+		RecordTTX ttx,
+		RecordTRN trn,
+		String CTL)
+	/*
+	       ORIG:  GORMAN - 25 MAY 1993
+	       DESC:  Deferred fee processing transactions
+
+	  ARGUMENTS:
+		 . RecordLN Record LN			/TYP=Object/REQ
+		 . RecordTTX Record TTX			/TYP=Object/REQ
+		 . CTL Control Variable 		/TYP=N/NOREQ/MECH=VAL
+
+	    Position 1:  New Deferred Fee Record Indicator
+
+			 0 - Modify existing fee sequence. Used
+			     when adjusting current record
+
+			 1 - Add new sequence to fee detail file.
+			     Used when offsetting fee assessment.
+
+	    Position 2:  Direction Flag
+
+			 0 - Transaction will INCREASE deferred
+			     income balance.
+
+			 1 - Transaction will DECREASE deferred
+			     income balance.
+
+	    Position 3:  Amortization Flag
+
+			 0 - Amortization fields not updated.
+			     Adjustment only.
+
+			 1 - Amortization fields (counter etc.)
+			     will be updated.
+
+	    Position 4:  Reversal Flag
+
+			 0 - This is not a reversal transaction.
+
+			 1 - This is a reversal transaction.
+
+	--- Revision History ------------------------------------------------
+
+	06/09/06 - DHANALAKSHMI R - CR 21181
+		   Modified by moving the condition to check BILSEQ before 
+		   LNBIL1 fetch to prevent a problem with instantiation 
+		   of LNBIL1 record when one of the keys is null. 		   
+
+	02/26/06 - TITOVE - CR 19733
+		   Corrected instantiation of LNFEE record with null FEETYP
+		   value. Removed ADD1 section. Added setting of a value into
+		   required column LNFEED.AMOFA during record create (contains
+		   adjustments to-date value). Added arguments to local calls,
+		   RecordTRN to the LNPTS41 call and also several to call to 
+		   LNPTSR. Brought up to standards and deleted old revision 
+		   history.
+
+	*/
+	type public Number ER, ZAMT
+	
+	type Date SAVEFD
+	type Number ADJAMT, BILSEQ, FEESEQ
+	type String FEETYP, TSO, UTSO
+
+	set CTL = CTL.get()
+
+	// Define EFD as TJD if current value is null
+	set SAVEFD = %EffectiveDate
+
+	type Date %EffectiveDate = $select(SAVEFD:SAVEFD,1:%SystemDate)
+
+	// Transaction Source of Funds
+	set TSO = ttx.tso
+	do OUT^UTSO(.UTSO,TSO)
+
+	// Determine if transaction is a reversal or not for setting of FEETYP
+	if 'CTL.extract(4) do {
+	
+		// Fee type
+		set FEETYP = UTSO("LNFEEIN").get().piece(":",1)
+		
+		set UTSO("LNFEE") = UTSO("LNFEEIN").get()
+		}
+		
+	// Reversal fee type
+	if CTL.extract(4) set FEETYP = UTSO("LNFEE").get().piece(":",1)
+
+	do IN^UTSO(.UTSO,.TSO)
+       
+	// Transaction Source of Funds
+	set ttx.tso = TSO
+
+	set BILSEQ = +UTSO("LNFEE").get().piece(":",3)
+
+	if BILSEQ do {
+		type RecordLNBIL1 lnbil1 = Db.getRecord("LNBIL1", "CID = :ln.cid, SCHSEQ = :BILSEQ", 1)
+
+		// Set EFD equal to cutoff date from bill record if bill record is
+		// defined. Will only be defined if source is bill maintenance function.
+		if 'lnbil1.bp1.isNull() set %EffectiveDate = lnbil1.cbcd
+	}
+
+	// Fee sequence number
+	set FEESEQ = UTSO("LNFSQ").get()
+
+	// Rejected.  Fee type required to process transaction.
+	if FEETYP.isNull() do Runtime.setErrMSG("LNFEE",2346) quit
+
+	type RecordLNFEE lnfee = Db.getRecord("LNFEE", "CID = :ln.cid, FEETYP = :FEETYP")
+	
+	type RecordLNFEEP lnfeep = Db.getRecord("LNFEEP", "FEETYP = :FEETYP", 1)
+
+	if FEESEQ.isNull() do { quit:ER
+		
+		// Rejected.  Deferred fee sequence required to process transaction.
+		if +CTL.extract() = 0 do Runtime.setErrMSG("LNFEED",2345) quit
+		
+		set FEESEQ = Db.nextVal("LNFEED","ln.cid,FEETYP,FEESEQ")
+		}
+
+	type RecordLNFEED lnfeed = Db.getRecord("LNFEED", "CID = :ln.cid, FEETYP = :FEETYP, FEESEQ = :FEESEQ", 1)
+
+	// New deferral record
+	if +CTL.extract() = 1 do ADD( .ln, .lnfee, .lnfeep, .lnfeed, .ttx, FEETYP) quit:ER
+
+	// Adjust existing record
+	if +CTL.extract() = 0 do ADJ( .lnfeed, .lnfeep, .ttx, CTL) quit:ER
+
+	/*
+	   Update total fee deferred in [LNFEE] record.  Unlike our adjustments
+	   to the [LNFEED]AMOFA field, we INCREASE the [LNFEE] total deferred
+	   fee field with INCREASE transactions, and DECREASE it with DECREASE
+	   transactions.
+	*/
+
+	set ADJAMT = $select(CTL.extract(2)=1:ttx.tamt*-1,1:ttx.tamt)
+	
+	set lnfee.deftot = lnfee.deftot + ADJAMT
+	
+	do lnfee.save()
+	
+	do lnfeed.save()
+	
+	// Must build TSO and ttx.tamt if not reversal
+	if 'CTL.extract(4) do {
+
+		set ttx.tso = "LNFEE#"_FEETYP_":"_ttx.tamt_"~LNFSQ#"_FEESEQ
+
+		// Set piece 13 of ttx.tamt equal to the deferral amount
+		do GL^LNPTSU(.ttx, ttx.tamt, 13)
+		}
+
+	// If reversal, call generic reversal routine to update various fields
+	if CTL.extract(4) do ^LNPTSR( .ln, .ttx, .trn)
+
+	set ZAMT = 0
+
+	quit
+
+ADD(RecordLN ln,
+    RecordLNFEE lnfee,
+    RecordLNFEEP lnfeep,
+    RecordLNFEED lnfeed,
+    RecordTTX ttx,
+    String FEETYP)	// Create new deferred fee sequence at assessment
+
+	type public Number ER
+	
+	type Boolean Q = 0
+	type Date NJD
+	type Number AF, AMOTOT, DIFF, DSTFRE, N, TMP
+	type String LNBIL0, PMTELMNT
+
+	/*
+	   Determine AMOTOT, the total number of cycles. It is calculated as
+	   the lesser of [LNFEEP]AMONUM and number of cycles between
+	   the effective date and the account's maturity date.
+	*/
+	set AMOTOT = lnfeep.amonum 
+
+	do { quit:ER
+		// Determine the number of days between the system date
+		// and the account maturity date
+		set DIFF = ln.mdt - %SystemDate
+	
+		// The CBMF flag determines whether or not we should ignore
+		// the fact that we will cycle beyond the maturity date
+		if (DIFF '> 0) set DIFF = 0 if 'lnfeep.cbmf set AMOTOT = 1 quit
+	
+		// Determine the annual factor of AMOFRE (to find # of scheduled
+		// occurences per year, and determine whether this is a daily frequency)
+		if lnfeep.amofre.isNull() quit
+		
+		set TMP = %SystemDate.nextFreqDate(lnfeep.amofre,.AF) quit:ER
+	
+		// Special processing if daily processing
+		if (AF '< 360) do { quit:Q ! ER
+	
+			// AF cannot be greater than 360. If greater, the
+			// calculation TMP=360\AF will return invalid results.
+			set AF = 360
+	
+			// Actual Number of Days flag
+			if 'lnfeep.andf quit
+	
+			// Actual days daily processing available if assessment
+			// method is either 1 (frequency) or 3 (billing)
+			if (lnfeep.amth <> 1) , (lnfeep.amth <> 3) quit
+	
+			// Processing if assessed on regular frequency
+			if (lnfeep.amth = 1) do { quit:ER
+				
+				// Find next assessment date in account record
+				set NJD = lnfee.asnd
+				
+				// Bump EFD by frequency if no next date
+				if NJD.isNull() set NJD = %EffectiveDate.nextFreqDate(lnfeep.cfre) quit:ER
+				}
+	
+			// Processing if assessed at billing
+			if (lnfeep.amth = 3) do {
+				
+				// Find which distribution contains FEETYP
+				type RecordLNBIL0 lnbil0 = Db.getRecord("LNBIL0", "CID = :ln.cid", 1)
+				
+				set LNBIL0 = $$ELEMENT^BILFUNCS(.lnbil0).translate($C(9),"|")		
+	
+				for N = 1:1:LNBIL0.length("|") do { quit:Q
+					
+					set PMTELMNT = LNBIL0.piece("|",N)
+					
+					if (PMTELMNT.piece("#",1) '= FEETYP) quit
+					
+					set DSTFRE = PMTELMNT.piece("#",4)
+					
+					set Q = 1
+					}
+	
+				// If payment schedule loan, find next time that this 
+				// distribution is due
+				if (ln.dist1fre = "*") do { quit:ER
+					
+					set NJD = %EffectiveDate.nextFreqDate("*"_DSTFRE) quit:ER ! NJD.isNull()
+	
+					/*
+					   Ensure that system did not compute the date 
+					   returned by checking to be sure that date 
+					   appears in schedule.(System computes date if 
+					   beyond all dates in schedule.)
+					*/
+					if 'Db.isDefined("LNPS1", "CID=:ln.cid,PDD=:NJD") set NJD = ""
+					}
+	
+				// If not payment schedule loan, use appropriate
+				// next date field from account record.
+				if (ln.dist1fre '= "*") do {
+				
+					// Scheduled Payment - Next Date
+					if DSTFRE<2 set NJD = ln.schnd quit
+	
+					// Distribution 2 Next Due
+					if DSTFRE = 2 set NJD = ln.dist2nd quit
+	
+					// Distribution 3 - Next Due
+					if DSTFRE = 3 set NJD = ln.dist3nd quit
+	
+					// Distribution 4 - Next Due
+					if DSTFRE = 4 set NJD = ln.dist4nd quit
+					}
+	
+				/*
+				   If defined, NJD is due date and not a billing date.
+				   That would only be appropriate if the [LNFEEP]RIDD flag
+				   is turned on. Otherwise, we will need to subtract the
+				   billing offset days from the value of NJD.
+				*/
+				if 'NJD.isNull() , 'lnfeep.ridd set NJD = NJD - ln.bloff
+				}
+	
+			/* If no next date (NJD=""), AMOTOT will remain
+			   [LNFEEP]AMONUM.  Otherwise we should use the
+			   calculated difference between the next and tran date.\
+			*/
+			if NJD set AMOTOT = NJD - %EffectiveDate
+	
+			// Use lesser of days to assessment or days to maturity
+			if 'lnfeep.cbmf , (AMOTOT > DIFF) set AMOTOT = DIFF
+	
+			// If effective date is far in past, s/b fully amortized
+			if (AMOTOT '> 0) set AMOTOT = 1
+	
+			set Q = 1
+			}
+	
+		// If the lnfeep.cbmf flag is turned on, we will use the value of
+		// AMONUM regardless of whether or not we will cycle past maturity.
+		if lnfeep.cbmf quit
+	
+		// Divide 360 by the annual factor.  This returns the standard
+		// number of days in each amortization period.
+		set TMP = 360 \ AF
+	
+		/* Divide the total days to maturity by the standard number of days per
+		   period.  The result (truncated) is the number of cycles to maturity.
+		   Use lesser of [LNFEEP]AMONUM or calculated figure.
+		*/
+		if ((DIFF \ TMP) < AMOTOT) set AMOTOT = (DIFF \ TMP)
+		}
+
+	set lnfeed.amotot = AMOTOT
+	set lnfeed.deforg = lnfeed.deforg + ttx.tamt
+	set lnfeed.amofa = 0
+	set lnfeed.trnefd = %EffectiveDate
+	set lnfeed.cycld = %EffectiveDate
+	set lnfeed.amtass = lnfeed.amtass + ttx.tamt
+
+	quit
+	
+
+ADJ(RecordLNFEED lnfeed,
+    RecordLNFEEP lnfeep,
+    RecordTTX ttx,
+    String CTL)		// Adjust deferred income
+	/*
+	  NOTE: The two exception conditions below generate warning messages,
+	   not errors.
+
+	   This is because there are valid conditions which may increase
+	   the amortized-to-date figure to an amount greater than the
+	   original fee assessed.
+
+	   Example:  A $100 fee is assessed on January 1.  On February
+		     20th when $10 of the deferred fee had been amortized,
+		     bill record maintenance is used to reduce the fee
+		     amount to zero.  This generates a deferred fee
+		     reduction transaction of $100 which brings the
+		     net fee deferred amount below zero.  The first
+		     scheduled amortization after this transaction will
+		     see this negative amount and post an increase
+		     transaction to bring it to zero.
+
+	   If customer demand forces us to return an error rather than
+	   a warning, our approach should be to introduce a new system
+	   override with the above messages.  This way the teller an
+	   determine whether or not to accept the condition.
+
+	*/
+	type public Number ADJAMT, ER
+	type public String RM
+	
+	// Amortization process
+	if CTL.extract(3) do { quit:ER
+
+		// This tran code is designed to effect the regular amortization
+		// of loan fee deferral
+
+		// Regular amortization
+		if 'CTL.extract(4) do {
+		
+			set lnfeed.amocnt = lnfeed.amocnt + 1
+			
+			set lnfeed.cycld = %EffectiveDate
+			}
+
+		// Reversal transaction
+		if CTL.extract(4) do { quit:ER
+			
+			set lnfeed.amocnt = lnfeed.amocnt - 1
+			
+			if lnfeed.cycld.isNull() ! lnfeep.amofre.isNull() quit
+			
+			set lnfeed.cycld = lnfeed.cycld.nextFreqDate(lnfeep.amofre,"",1) quit:ER
+			}
+		}
+
+	/* [LNFEED]AMOFA is the total fee amortized to-date.
+	   We must DECREASE [LNFEED]AMOFA to INCREASE (pos 2 = 0) deferred fee balance.
+	   We must INCREASE [LNFEED]AMOFA to DECREASE (pos 2 = 1) deferred fee balance.
+	*/
+	set ADJAMT = $select(CTL.extract(2)=0:ttx.tamt*-1,1:ttx.tamt)
+	
+	set lnfeed.amofa = lnfeed.amofa + ADJAMT
+
+	// Check if amortized-to-date does not exceed original deferred. If so, return 
+	// message "Income for linked fees may not be deferred", not error.
+       	if (lnfeed.amofa > lnfeed.deforg) set RM = $$^MSG(1206)
+
+	// Check if amortized-to-date is not reduced below zero (which means that the 
+	// amount deferred exceeds the amount assessed). If so, return message, not error.
+
+	// Deferral amortized-to-date will be reduced below zero
+	if (lnfeed.amofa < 0) set RM = $$^MSG(7154)
+	 
+	quit
+
+vSIG()	quit "60600^8344^Sunitha Santhumayor^11476"	// Signature - LTD^TIME^USER^SIZE

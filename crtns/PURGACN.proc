@@ -1,0 +1,437 @@
+PURGACN	//Private; Purge accounts
+	/*
+	  ---- Revision History ------------------------------------------------
+	   04/28/06 - chhabris - CR20928
+		      Modified GROUP section to include NULL validation for IYTD
+		      and ITYTD. Also removed deletion for TMPDEPP0 and TMPDEPP0
+		      from END section as the report was not fetching data and the
+		      report DEPPURA no records to display. Removed the 'if 'SORT'
+		      condition for updating the TMP tables as if we purge (sort
+		      based on type) the details are not to be seen in DEPPURA.
+
+           12/05/05 - SATYANAS - 18155
+		      Clean up PSL warnings and used ACN instead of XCLSGRP table.		              
+           
+           07/26/05 - SkariahV- CR16679
+	              Removed #WARN and #OPTIMIZE directives.
+	              
+	   02/17/04 - GIRIDHARANB - 8421
+	   	      Replaced parameter in fastDelete call from "NOTESACN" to
+	   	      "NOTES". NOTESACN has been obsoleted in v7.0
+	  
+	   02/02/04 - Pete Chenard - 8096
+		      Commented out calls to UARCHIST until history archiving
+		      design is completed for this view.
+
+	   06/23/03 - BHANGALEV - 51351
+		      Converted to PSL
+
+	   10/16/02 - MBUIM - 50611
+	              Modified KILL line tag to use call to EXT DBSFILER instead
+	              of direct kills to ACN(
+
+	   03/19/02 - KELLYP - 49129
+		      Modified KILL section to delete ACNDSD records used for
+		      interest accrual recalculations.
+
+	   08/06/01 - SCHWARTZA - 46587
+		      Modified the KILL section to correct a null subscript
+		      error introduced in ARQ 45460 by setting ACN=+A(99).
+
+	   06/25/01 - SCHWARTZA - 45460
+		      Added XACN("D",CID,ACN) and XREF("XBRCD",BRANCH,ACN)
+		      to be deleted in KILL. Removed pre-96 comments.
+	   
+	   --------------------------------------------------------------------
+
+	*/
+
+	do TYP
+	quit
+	
+
+TYP	//
+
+	type public Number ANT,SORT
+	type public String GRP,%READ,SORTTBL(),%TAB,TYP,VFMQ,X
+	type Number IRAPRGD
+
+	set IRAPRGD=CUVAR.iraprgd
+
+	// Sort by Product Type
+	set SORTTBL(0)=$$^MSG(8274)
+
+	// Sort by Account Number
+	set SORTTBL(1)=$$^MSG(8276)
+
+	set %TAB("GRP")=".GRP2/TBL=[ACN]GRP:DISTINCT:QU ""[ACN]CLS=""D"""":NOVAL/XPP=D GRPPP^PURGACN(.X)"
+	set GRP="ALL"
+	set %TAB("TYP")=".TYPE3/TBL=[PRODCTL]TYPE:DISTINCT:QU ""[PRODCTL]CLS='D' AND [PRODCTL]GRP=<<GRP>>"":NOVAL"
+	set TYP="ALL"
+	set %TAB("ANT")=".ANT1"
+	set ANT=1
+	set %TAB("XJD")=".CODATE/XPP=D DATPP^PURGACN(.X)"
+	set %TAB("SORT")=".SORT3/TBL=SORTTBL("
+	set SORT=0
+
+	set %READ="@@%FN/REV/CEN,,,GRP/REQ,TYP/REQ,,ANT/REQ,XJD/REQ,,SORT/REQ"
+
+	do ^UTLREAD
+
+	if VFMQ="Q" quit
+
+	// Verified
+	set X=$$YN^DBSMBAR("",$$^MSG(5347),1)
+
+	if 'X quit
+
+	do ARCHIVE
+
+	quit
+
+
+ARCHIVE		// find global directory for history archive
+
+	type public Boolean ER
+	type public Number HISTARCH
+	type public String GRP,MAX(),MIN(),RM,TYP
+	type String PGM
+	type Number CNT,X,Y
+
+	// History archive global directory
+	// do GBLDIR^UARCHIST(.GD,.ER,.RM)  comment out intil hist archiving is resolved in this view
+
+	if ER.get() do {
+		set HISTARCH=0
+		set ER=0
+		}
+
+	else  set HISTARCH=1
+
+	type RecordEXTRACTDESC extract=Db.getRecord("EXTRACTDESC","MAP='ZDEPCL'",1)
+
+	// Data extraction routine
+	set PGM=extract.rtn
+
+	// Data extraction routine does not exist
+	if PGM.isNull()!('$$VALID^%ZRTNS(PGM)) set RM=$$^MSG(3845)
+
+	if GRP="ALL" do {
+		set MIN(1)=""
+		set MAX(1)=$CHAR(255)
+		}
+	else  do {
+		set X=GRP.extract(GRP.length())
+		set Y=$A(X)-1
+		set MAX(1)=GRP
+		set MIN(1)=GRP.extract(1,GRP.length()-1)_$C(Y)
+		}
+
+	if TYP="ALL" do {
+		set MIN(2)=0
+		set MAX(2)=1E18
+		}
+	else  do {
+		set MAX(2)=TYP
+		set MIN(2)=TYP-1
+		}
+	set CNT=0
+
+	set GRP=MIN(1)
+
+	do GROUP
+
+	quit
+
+
+GROUP	//
+
+	type public String GRP,MAX(),MIN()
+	type Boolean FINISH
+	type String MAX2,MIN2
+
+
+	set FINISH=0
+	set MAX2=MAX(2)+1
+	set MIN2=MIN(2)-1
+
+	type DbSet rs=Db.selectDbSet("DEP","CLS='D' AND GRP>:GRP AND GRP<>'ESC' AND GRP<>'WASH' AND TYPE>:MIN2 AND TYPE<:MAX2 AND BAL=0 AND TLD<=:XJD AND STAT=4 AND ADF=0 AND ODT<=:XJD AND (IYTD=0 OR IYTD IS NULL) AND (ITYTD=0 OR ITYTD IS NULL)")
+	while rs.next() do { quit:FINISH=1
+
+		type RecordDEP dep=rs.getRecord("DEP")
+
+		if dep.grp]]MAX(1) set FINISH=1 quit
+
+		do QUERY(.dep)
+		}
+
+	do END
+
+	quit
+
+
+QUERY( RecordDEP dep)	//
+
+	/*
+	ARGUMENTS:
+	. dep		DEP Object	/REQ/MECH=REF
+	*/
+
+	type public Number ANT,CNT,SORT,IRAPRGD
+	type Number ACN,CC,CID,TYPE
+	type String CRCD,NAM
+
+	set CID=dep.cid
+	set TYPE=dep.type
+
+	// IRA account
+	if dep.ira,IRAPRGD.isNull() quit
+
+	if dep.ira,dep.tld'<(%SystemDate-IRAPRGD) quit
+
+	set ACN=dep.acn
+
+	type RecordCIF cif=Db.getRecord("CIF","ACN=:ACN",1)
+	set NAM=cif.nam
+
+	set CC=dep.cc
+	set CRCD=dep.crcd
+
+	set CNT=CNT+1
+
+	type RecordTMPDEPP0 tmpdepp=Db.getRecord("TMPDEPP0","PID=:%ProcessID,CID=:CID,TYPE=:TYPE",1)
+	if 'tmpdepp.getMode() do {
+		type RecordTMPDEPP0 tmpdepp=Class.new("RecordTMPDEPP0")
+
+		set tmpdepp.pid=%ProcessID
+		set tmpdepp.type=TYPE
+		set tmpdepp.cid=CID
+		set tmpdepp.acn=ACN
+		set tmpdepp.name=NAM
+		set tmpdepp.ldt=dep.tld
+		do tmpdepp.bypassSave()
+		}
+	else  do {
+		set tmpdepp.acn=ACN
+		set tmpdepp.name=NAM
+		set tmpdepp.ldt=dep.tld
+		do tmpdepp.bypassSave()
+		}	
+
+	type RecordTMPDEPP1 tmpdepp1=Db.getRecord("TMPDEPP1","PID=:%ProcessID,CID=:CID",1)
+	if 'tmpdepp1.getMode() do {
+               	type RecordTMPDEPP1 tmpdepp1=Class.new("RecordTMPDEPP1")	
+             
+               	set tmpdepp1.pid=%ProcessID
+		set tmpdepp1.cid=CID
+		set tmpdepp1.acn=ACN
+		set tmpdepp1.type=TYPE
+                set tmpdepp1.name=NAM
+		set tmpdepp1.ldt=dep.tld
+		do tmpdepp1.bypassSave()
+		}
+        else  do {
+        	set tmpdepp1.acn=ACN
+		set tmpdepp1.type=TYPE
+                set tmpdepp1.name=NAM
+		set tmpdepp1.ldt=dep.tld
+		do tmpdepp1.bypassSave()       
+		}
+
+	if ANT quit
+
+	do SAVE(.dep)
+
+	quit
+
+
+SAVE( RecordDEP dep)	// Save Record
+
+	/*
+	  ARGUMENTS:
+		. dep		DEP Object	/REQ/MECH=REF
+	*/
+
+
+	type public String PGM
+
+	// Write account info to archive file
+	If 'PGM.isNull()!($$VALID^%ZRTNS(PGM)) do ^@PGM
+
+	do KILL(.dep)
+
+	quit
+
+	
+KILL( RecordDEP dep)	// Purge Account
+
+	/*
+	  ARGUMENTS:
+		. dep		DEP Object	/REQ/MECH=REF
+	*/
+	type Number CID
+	
+	set CID=dep.cid
+	
+	// Purged account file
+	type RecordPURGDACN fPURGDAC=Class.new("RecordPURGDACN")
+	set fPURGDAC.cid=CID
+	do fPURGDAC.bypassSave()
+      
+	// delete ACN and all references.
+	do Db.delete("ACN","CID=:CID")
+
+	/* Kill RFLGCCID (Customer Restrictions) for this account only
+	   Kill RFLGRPACID (Retirement Restrictions) for this account only
+	*/
+	do Db.fastDelete("RFLGCCID","CID=:CID")
+	do Db.fastDelete("RFLGRPACID","CID=:CID")
+
+	// delete any european check related stuff
+	if $$EUROCHK^CHKPROC(CID) do CHKDEL(CID)
+
+	do Db.fastDelete("HIST","CID=:CID")
+
+	// Account stops
+	do Db.fastDelete("STOP2","CID=:CID")
+
+	// Check stops
+	do Db.fastDelete("STOP3","CID=:CID")
+
+	// Amount stops
+	do Db.fastDelete("STOP4","CID=:CID")
+
+	// ACH stops
+	do Db.fastDelete("STOP5","CID=:CID")
+
+	do Db.fastDelete("TIKLACN","CID=:CID")
+
+	do Db.fastDelete("NOTES","FILE='ACN',CID=:CID")
+
+	//Budget Processing Account Record
+	do Db.fastDelete("BUDGET","CID=:CID")
+
+	do Db.fastDelete("RFLG","CID=:CID")
+
+	do Db.fastDelete("PHLD","CID=:CID")
+
+	do Db.fastDelete("HLD7","CID=:CID")
+
+	do Db.fastDelete("HLD8","CID=:CID")
+
+	// Delete user-defined cross-reference files
+	set %ProcessMode=3
+		
+	// 49129 - Delete ACNDSD Records
+	do Db.fastDelete("ACNDSD","CID=:CID")
+
+	quit
+
+
+END	//
+
+	type public String RM
+	type public Number ANT,CNT,SORT
+	type String RID
+
+	set RID=$S('SORT:"DEPPURT",1:"DEPPURA")
+
+	do DRV^URID
+
+	// Total accounts purged: ~p1
+	if 'ANT set RM=$$^MSG(5730,CNT)
+
+	// Total accounts to be purged: ~p1
+	else  set RM=$$^MSG(5731,CNT)
+
+	// I18N=ON
+	quit
+
+
+GRPPP( String X)	// Group post-processor
+	
+	/*
+	  ARGUMENTS:
+	  	. X	Product Group		/REQ/MECH=REF
+	*/
+	
+	type public Boolean ER
+	type public String RM
+
+	// Invalid group
+	if X="ESC"!(X="WASH") set ER=1 set RM=$$^MSG(1368)
+	quit
+
+
+DATPP( Date X)	// Date post-processor
+
+	/*
+	  ARGUMENTS:
+	  	. X	Date, Must be prior to current date	/REQ/MECH=REF
+	*/
+	
+	type public Boolean ER
+	type public String RM
+	
+	// Must be prior to today
+	if X'<%SystemDate set ER=1 set RM=$$^MSG(5762)
+	quit
+
+
+CHKDEL( Number CID)	// delete any european check information
+
+	/*
+	  ARGUMENTS:
+	  	. CID	Account Number	/REQ/MECH=VAL
+	*/
+
+	type String END,START,TYPE
+	
+	// clean up CHECK
+	type DbSet rs=Db.selectDbSet("XCHECK","CID=:CID")
+        while rs.next() do {
+		type RecordXCHECK fXCHECK=rs.getRecord("XCHECK")
+		set TYPE=fXCHECK.chks
+		set START=fXCHECK.low
+		set END=fXCHECK.high
+
+		do EXPAND(START,END)
+
+		}
+
+	do Db.fastDelete("XCHECK","CID=:CID")
+
+	// now clean up CHKPRD
+	do Db.fastDelete("CHKPRD","CID=:CID")
+
+	quit
+
+
+EXPAND( String START, String END)	// expand range, remove all checks from CHECK
+
+	/*
+
+	Arguments:
+		. START		Low Check Number	/REQ/MECH=VAL
+		. END		High Check Number	/REQ/MECH=VAL
+
+	*/
+	
+	type public String CHKARR(),TYPE
+	type String CHKNUM
+	type Number CHKCNT,I
+	
+
+	set CHKCNT=$$CHKCNT^CHKNUTL(START,END)-1
+
+	do CHKRNG^CHKNUTL(START,CHKCNT)
+
+	set CHKARR(0)=START
+
+	for I=0:1:CHKCNT do {
+		set CHKNUM=CHKARR(I)
+		do Db.delete("CHECK","CHKS=:TYPE AND CHKNUM=:CHKNUM")
+		}
+	quit
+
+vSIG()	quit "60390^10938^Sanjay Chhrabria^8660"	// Signature - LTD^TIME^USER^SIZE

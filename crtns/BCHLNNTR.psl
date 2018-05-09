@@ -1,0 +1,355 @@
+BCHLNNTR //Batch BCHLNNBTR - Loan Negative Balance Transfer
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 08/30/2007 15:08 - joynerd
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHLNNBTR Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ set vBCHSTS=$$STATUS^BCHUTL("BCHLNNBTR")
+ if vBCHSTS=1 set ER=1,RM=$$^MSG(3410) quit
+ if vBCHSTS=2 set ER=1,RM=$$^MSG(3414) quit
+ if vBCHSTS=0 set %BatchRestart=1
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit do EXIT^BCHUTL("BCHLNNBTR") quit
+ do JOBMGR^BCHUTL(%FN,"BCHLNNBTR",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ do EXIT^BCHUTL("BCHLNNBTR")
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(TFRDT,CID) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHLNNBTR","*","",TFRDT.get()_","_CID.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ if %BatchRestart,$$CHKLOG^BCHUTL(%SystemDate,%FN,"BCHLNNBTR",TFRDT.get()_","_CID.get()) do { quit
+ do LOG^BCHUTL(%SystemDate,%FN,"BCHLNNBTR",TFRDT.get()_","_CID.get(),"Record already processed")
+ }
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,TFRDT,CID)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHLNNBTR","*","",TFRDT.get()_","_CID.get(),"",et)
+ }
+ do UPDLOG^BCHUTL(%SystemDate,%FN,"BCHLNNBTR",TFRDT.get()_","_CID.get(),vCONTEXT)
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,TFRDT,CID) //
+	type Boolean ER = 0
+		
+	do PROC(CID, 1)
+ 	
+	if ER do LOGERR quit
+	
+	quit
+	
+ 
+PROC(Number CID,	// Account Number	  	/REQ/MECH=VAL
+     Boolean CTL)   	// Control Variable		/REQ/MECH=VAL
+     
+	/*
+	  Additional notes on ARGUMENTS:
+ 
+		. CTL   0 - do not file to disk (update account	object, if applicable)
+			1 - file to disk (ACN, TTX and other supporting tables)
+ 
+	*/
+	type public Cache %CACHE()
+	type public Number BRCD
+	
+	type Number BAL, GLCID, TRCID
+	type String CHKS, CRCI, CRTRCI, DRCI, DRTRCI, TSO
+
+	type RecordLN ln = Db.getRecord("LN", "CID = :CID")
+
+	if 'ln.nbtr ! ln.pmt.isNull() quit
+	
+	set BAL = ln.balcol     // Collected Balance
+	set CHKS = ln.nbtck	// Check Type for Negative Balance Transfer
+	set TRCID = ln.trcid	// Destination Account for Negative Balance Transfer
+
+	// Check if account should be skipped because original payment amount
+	// is larger than negative balance amount 
+	if (ln.ntropt = 1), (-ln.balcmp < ln.pmt) quit
+
+	// Balance no longer negative, no need to continue
+	if (BAL '< 0) do Db.delete("DAYENDLNNBTR", "TFRDT=:%EffectiveDate AND CID=:CID") quit
+ 
+	type TranSet ts = Class.new("TranSet")
+	
+	// Account is already closed
+	if (ln.stat = 4) quit 
+	 
+	if 'TRCID.isNull() do {
+	
+		type RecordDEP dep = Db.getRecord("DEP", "CID = :TRCID")
+		
+		type RecordPRODCTL depprdtyp = %CACHE("PRODCTL").getRecord("PRODCTL", "TYPE = :dep.type")
+	 	
+	 	set CRCI = depprdtyp.crtrgp       // CR General Purpose DEPCID TR Code
+		set DRCI = depprdtyp.drtrgp       // DR General Purpose DEPCID TR Code
+		}
+	
+	type RecordPRODCTL prodtype = %CACHE("PRODCTL").getRecord("PRODCTL", "TYPE = :ln.type")
+
+	set CRTRCI = prodtype.crnbtr      		 // CR Neg. Bal. Trans Tran Code
+	set DRTRCI = prodtype.drnbtr      		 // DR Neg Bal Trans Tran Code
+ 	if DRTRCI.isNull() set DRTRCI = prodtype.drtrgp  // DR General Purpose Tran Code
+
+	if TRCID.isNull(), 'ln.lnsa.isNull() set TRCID = ln.lnsa,CRCI = CRTRCI
+
+	set TSO = $$FIELDIN^UTSO("", "NEGTR", CID)
+	
+	type RecordPRODDFTL proddftl = Db.getRecord("PRODDFTL", "TYPE = :ln.type")
+	
+	if CHKS.isNull() set CHKS = proddftl.nbtck
+	
+	if 'CHKS.isNull() do {
+	
+		type RecordUTBLCHKS chks = Db.getRecord("UTBLCHKS", "CHKS = :CHKS", 1)
+		
+		set GLCID = chks.cid
+		}
+
+	// Transfer negative balance to deposit account
+	if 'TRCID.isNull(), (ln.nbtr = 1), CTL do {
+	
+		do SETTR(.ln, DRTRCI, "0", CID, -BAL, TSO, $$^MSG(3796), .ts)
+		
+		do SETTR(.ln, CRCI, "1", TRCID, -BAL, TSO, $$^MSG(3796), .ts)
+ 		}	
+
+	if TRCID.isNull(), ((ln.nbtr = 2)!(ln.nbtr = 1)) do {
+		
+		do SETTR(.ln, DRTRCI, "0", CID, -BAL, TSO, $$^MSG(3796), .ts)
+		
+		// Pay by Check
+		
+		if CHKS.isNull(), CTL do SETTR(.ln, "MCR", "1", CUVAR.GLTS, -BAL, "", $$^MSG(3796), .ts) quit
+
+		do XPDO(.ln, BAL, BRCD, CID, GLCID, CHKS, CTL)
+		}
+		
+	// Issue check to customer for negative balance	
+	if CTL do POST(.ts, BRCD)
+	
+	quit
+	
+ 
+SETTR(RecordLN ln,		// Loan
+      String ETC,		// External transaction code  	/TYP=T/REQ/MECH=VAL
+      String ITC,		// Internal transaction code    /TYP=T/REQ/MECH=VAL
+      Number CID,		// Account number	     	/TYP=N/REQ/MECH=VAL
+      Number TAMT,		// Transaction amount	 	/TYP=$/REQ/MECH=VAL
+      String TSO,		// Transaction source		/TYP=T/REQ/MECH=VAL
+      String TCMT,		// Transaction comment		/TYP=T/NOREQ/MECH=VAL
+      TranSet ts)		// Transaction set		/TYP=TranSet/REQ/MECH=REF:W
+ 
+	type Number x
+
+	type RecordTRN trn = Db.getRecord("TRN", "ETC = :ETC")
+
+	type RecordTTX ttx = Class.new("RecordTTX")
+	
+	set ttx.cid = CID
+	set ttx.itc = ITC
+	set ttx.etc = ETC
+	set ttx.tamt = TAMT
+	set ttx.efd = %SystemDate
+	set ttx.tlo = %UserStation
+	set ttx.tso = TSO
+	set ttx.tcmt = TCMT
+	set ttx.cc = ln.cc
+	
+	#if CUVAR.%MCP set ttx.crcd = ln.crcd
+	
+	set x = ts.copyTran(ttx)
+	
+	quit
+	
+	
+POST(TranSet ts,
+     Number BRCD)
+
+	type Number par()
+	
+	set par("IPMODE") = 3
+	set par("OPTION") = 2
+	
+	do ts.postTSet(%SystemDate, BRCD, .par())
+	
+	quit
+	
+
+XPDO(RecordLN ln,		// Loan
+     Number BAL,		// Collected balance	     	/TYP=N/REQ/MECH=VAL
+     Number BRCD,		// Branch code		     	/TYP=N/REQ/MECH=VAL
+     Number CID,		// Account number	     	/TYP=N/REQ/MECH=VAL
+     Number GLCID,		// GL Account number	     	/TYP=N/REQ/MECH=VAL
+     String CKTYP,		// Check type		     	/TYP=T/REQ/MECH=VAL
+     Boolean CTL)		// Control variable	     	/TYP=B/REQ/MECH=VAL
+
+	// Create XPDO table entry to print checks 
+	type Number CKSEQ
+
+	set CKSEQ = Db.nextVal("XPDO","%SystemDate,CKTYP")
+ 
+	type RecordXPDO xpdo = Class.new("RecordXPDO")
+ 
+	set xpdo.tjd = %SystemDate
+	set xpdo.cktyp = CKTYP
+	set xpdo.ckseq = CKSEQ
+	set xpdo.brcd = BRCD
+	set xpdo.uid = %UserID
+	set xpdo.cid = CID
+	set xpdo.tamt = -BAL
+	set xpdo.efd = %SystemDate
+ 
+	do xpdo.save()
+ 
+	if CTL do {
+ 
+		if 'Db.isDefined("TMPBCHOFF","%SystemDate,'BCHLNNBTR',%ProcessID,'exp',ln.crcd,ln.type,ln.glsc,ln.cc") do {
+			
+			do BDOFFSET^BCHSOURC("BCHLNNBTR", "exp", ln.crcd, ln.type, ln.glsc, ln.cc, GLCID, GLCID, "MDR", "MCR", $$^MSG(3796))
+			}
+		
+		do UPOFFSET^BCHSOURC("BCHLNNBTR", "exp", ln.crcd, ln.type, ln.glsc, ln.cc, 1, -BAL)
+		}
+ 
+	quit
+	
+
+LOGERR   // Log error in DAYEND exceptions table
+
+	type public Number BAL, CID
+	type public String %ZTSEQ, ET, RM
+
+	if ET.get().isNull() set ET = RM.get()
+	
+	// STBLMSG message 3796: "Negative Balance Transfer processing"
+	do LOG^UTLEXC($T(+0), "*", $$^MSG(3796), CID.get(), %ZTSEQ.get(), ET, $select(CID.get():+BAL.get(),1:""))
+	
+	kill ET,%ZTSEQ
+	
+	quit
+	
+	
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,TFRDT,CID
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set TFRDT=vRECORD.piece($C(9),1)
+ set CID=vRECORD.piece($C(9),2)
+ do vPROC(TFRDT,CID)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,TFRDT,CID
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>32767 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+24>32767 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("DISTINCT TFRDT,CID","DAYENDLNNBTR","DAYENDLNNBTR.TFRDT=:TJD")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	type public Number BRCD
+
+	set %EffectiveDate = %SystemDate
+
+	do SOURCE^BCHSOURC("BOFF", "NEG", .%UserID, .BRCD, .%UserClass)
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+	type public Boolean ER = 0	
+	type public Number BRCD
+
+	do SOURCE^BCHSOURC("BOFF", "NEG", .%UserID, .BRCD, .%UserClass)
+ 
+	if ER set %BatchExit = 1 do LOGERR quit
+      
+	quit
+	
+	
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+	type public Number BRCD
+
+	do OFFSET^TTXBLD(%SystemDate, BRCD, %UserID, "BCHLNNBTR")
+	
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

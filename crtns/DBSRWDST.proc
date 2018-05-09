@@ -1,0 +1,188 @@
+DBSRWDST	/* Private - DATA-QWIK Report Writer Distribution
+	ORIG: CHIANG - 05/2L8/93
+	PROCEDURE ID: DBSRWDST
+	DESC: DATA-QWIK Report Writer Distribution
+	
+	---- Comments --------------------------------------------------------
+	LIBRARY:
+		. EXEC	Prompt for and run report in distribution mode
+			Called by function DBSEXERDIST
+
+		. EXT	Run report (input provided) in distribution mode
+
+
+	------ Revision History ------------------------------------------------
+
+        07/26/05 - SkariahV- CR16679
+	           Removed #WARN directive.
+	              
+	01/10/03 - Dan Russell - 53149
+		   Moved into PSL.  Removed old change history.
+
+		   This code was originally in routine DBSRWRUN
+
+	------------------------------------------------------------------------
+
+	I18N=QUIT Excluded from I18N standards
+	*/
+	
+	quit				// Can't call from top
+
+
+EXEC	// Public - Run report in distribution mode (called by function DBSEXERDIST)
+
+
+	type Number %FRAME,OLNTB,VMODE
+	type String %NOPRMT,QRY,%READ,RID,%TAB,VFMQ
+
+	set QRY="[DBTBL5H]DISTKEY'="""""
+
+	set %TAB("RID")=".RID2/TBL=[DBTBL5H]RID,DESC:QU QRY"
+	set %TAB("VMODE")=".TABFMT"
+
+	set OLNTB=40,%FRAME=2
+	set %READ="@@%FN,,RID/REQ,VMODE/REQ",%NOPRMT="F"
+
+	do ^UTLREAD
+	quit:VFMQ="Q"
+	
+	do EXT(RID,VMODE)
+
+	quit
+
+
+EXT(String RID,	// Public - Run report in distribution mode 
+	Number VMODE)
+	
+	/*
+	ARGUMENTS:
+		. RID		Report name		/REQ/NONULL/MECH=VAL
+		. VMODE		Raw data format		/NOREQ/DEF=0/MECH=VAL
+				0 = Regular format
+				1 = Raw data format
+				    column name<tab>column name<tab>...
+				    column data<tab>column data<tab>
+				    ...
+
+	EXAMPLE:
+
+		set %BLK="/,0,<100" do EXT^DBSRWRUN("SCA123")
+	*/
+
+	type Public Number ER
+	type Public String RM
+
+	type String DISTKEY,PGM,POP,VRWOPT(),VTBLNAM
+
+	type RecordDBTBL5H dbtbl5h=Db.getRecord("DBTBL5H","LIBS=""SYSDEV"",RID=:RID",1)
+
+	set PGM=dbtbl5h.pgm				// Run-time name
+	if PGM="" do { quit
+		set ER=1
+		// ~p1 Missing run-time routine name ~p2
+		set RM=$$^MSG(3056,RID)
+		}
+
+	set DISTKEY=dbtbl5h.distkey
+	if DISTKEY="" do { quit
+		set ER=1
+		// Invalid function ~p1
+		set RM=$$^MSG(1361,"DBSEXERDIST")
+		}
+
+	// Delete any old data
+	do Db.fastDelete("TMPRPTDS","JOBNO=:%ProcessID")
+
+
+	use 0
+	set POP=0 do ^SCAIO				// Set device to 0
+	set VRWOPT("NOOPEN")=1				// Don't open it
+	set VTBLNAM=RID					// Distribution mode
+
+	do ^@PGM					// Create result set
+	kill VTBLNAM					// Clear signal
+
+	// Produce individual reports by the distribution key values
+	set DISTKEY=DISTKEY.piece(".",2)		// Just use column name
+
+	type ResultSet rs=Db.select("DISTINCT DISTKEY","TMPRPTDS","JOBNO=:%ProcessID")
+	while rs.next() do {
+		type String IO,VDISTKEY,VRWOPT()
+
+		set VDISTKEY=rs.getCol("DISTKEY")	// Value of column
+
+		// Set up output device
+		do {
+			type String IODEL,POP
+			set IODEL=$$IODEL^%ZFUNC()	// Platform specific device delimiter
+			set POP=RID_".RPT"_IODEL_"DATE/RDIST="_DISTKEY_"_"_$TR(VDISTKEY,",","Z")
+			do ^SCAIO
+			}
+
+		if VMODE.get() do {			// Raw data
+			type String HEADER,MAP
+
+			set MAP=$$VMAP^@PGM		// SELECT list
+
+			set HEADER=$TR(MAP,",",$C(9))	// Column names
+			use IO
+			write HEADER
+
+			type DbSet ds=Db.selectDbSet("TMPRPTDS","JOBNO=:%ProcessID AND DISTKEY=:VDISTKEY","SEQ ASC")
+
+			while ds.next() do {
+				write !,ds.getRecord().data
+				}
+			close IO
+			}
+
+		else  do {				// Report format
+			type String VRWOPT()
+
+			set VRWOPT("NOBANNER")=1	// Skip banner page
+			do V0^@PGM
+			}
+		}
+
+	// Delete temporary table
+	do Db.fastDelete("TMPRPTDS","JOBNO=:%ProcessID")
+
+	quit
+
+
+BBMBIO(String RID,  // Private - Custom report distribution IO for BBMB
+	String DISTKEY,
+	String VALUE)
+
+	/*
+	ARGUMENTS:
+		. RID		Report name
+		. DISTKEY	Distribution Column name
+		. VALUE		Distribution Column value
+
+	RETURNS:
+		. $$	IO
+
+	This function will be called by BBMB's cutomized routine.  If the
+	column name is specific to branch code the IO returned will be for
+	a directory specific for that column's value.  If the logical/
+	enviromental variable is not defined the IO returned will be the
+	the standard report distribution IO directed to the spool directory.
+	*/
+
+	type String IO,IODEL,PATH,POP
+
+	set IODEL=$$IODEL^%ZFUNC()		// Platform specific device delimiter
+
+	if (DISTKEY="BOO")!(DISTKEY="BRCD")!(DISTKEY="CC") do {
+		set PATH=$$TRNLNM^%ZFUNC("/sp"_VALUE_"ibs")
+		if PATH'="" S PATH=$$BLDPATH^%TRNLNM(PATH,RID_".RPT"_IODEL_"DATE")
+		}
+
+	if PATH.get()'="" set POP=PATH
+	else  set POP=RID_".RPT"_IODEL_"DATE/RDIST="_DISTKEY_"_"_$TR(VALUE,".","Z")
+
+	do ^SCAIO
+	quit IO
+
+vSIG()	quit "60107^27446^Viji Skariah^4238"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,310 @@
+LNNFNEW1(RecordLN ln,NDFAMT,NDFPLAN)
+
+	/*
+	   ORIG:  Unknown
+	
+	    INPUT: CF array from ^LNAPR.
+	   OUTPUT: Complete "PTS" level of LN(70).
+	
+	  ---- Revision History ------------------------------------------------
+
+	   04/16/07 - KumarSS - CR 26582
+	   	Modified the LNNFNEW1 section in LNNFNEW1 procedure to update 
+	   	the Last Date to Calcuate (LSADT) with correct value.
+
+	  03/14/2007 - SENTHIL.J KUMAR - CR 25724
+		 Modified the NEW section to redefine JD when resetting NJD.  
+		 This prevents an issue from occurring where the last cycle date
+		 was being set to a value greater than the next cycle date for
+		 non-backdated account openings with FASB fees attached.
+	   		   
+	   02/21/2006 - ratht - CR19302
+	         Modified NEW section to set the variable MDTO for proper 
+	         calculation.
+	         
+	   02/10/2006 - Radhika -CR16885
+	  	.Added a new line code "if 'ln.dist1af set ln.dist1af=AF" in P0
+	  	 section to avoid %GTM error "Attempt to divide by zero".
+	   	
+	   09/30/05 - Satyanas - CR16994
+	   	Modified the Code to PSL Standards and removed 
+	   	the unscoped warnings.
+	   
+	   09/26/05 - MbuiM - CR17243
+	   	Modified PI section to round off IRR. The IRR variable 
+	   	which is stored in piece 8 of the PLN array winds up being
+	   	saved to LNCYCPTS.RATE by LNAI.PROC. This can cause problems 
+	   	because, depending upon account/system variables, the unrounded
+	   	rate can exceed 10 digits which winds up causing an error to be
+	   	returned by the LNCYCPTS filer
+
+	   01/20/04 - Erik Scheetz - CR7798
+	  	Modified code to remove the update of DAYENDNFRYLD(obsoleted).  
+	  	This is redundant code as the the information is updated by 
+	  	an index definition. 
+	  
+	   02/21/03 - CARROLLJ - 51349
+		Undefined error being returned because aoamo object was not 
+		being used.
+
+	   11/21/02 - CARROLLJ - 51349
+		Removed getRecord of aoamo in NEW section and passed the object
+		from the ADD section.  Also made the ADD section a public
+		linetag.		
+
+	   01/29/02 - CARROLLJ - 43583
+		Convert to PSL.
+
+	   10/29/01 - APPLEYARDM - 47556
+	        Modified section P0 to prevent undefined error when adding
+	        net deferred fees when node 431 is not defined.
+	
+	  -----------------------------------------------------------------------
+	   Are there net fees to amortize?
+	*/
+
+	type public Date NJD
+	type public Boolean ER
+	type public Number AF
+	type Date JD
+	type Number AMAF,BASE
+	type String FRE,PAYEE,TYP
+	
+	if NDFPLAN.isNull()!'NDFAMT quit 
+	set BASE=ln.crlmt+ln.aoamtorg
+	
+	if (ln.iam).extract()=1 set BASE=BASE-(ln.iun-ln.ipl)
+	set TYP="PTS"
+	set PAYEE=1
+	
+	type RecordAOAMO aoamo=Db.getRecord("AOAMO","TYP,PAYEE,NDFPLAN")
+	set FRE=aoamo.fre
+	set (JD,NJD)=ln.odd
+	
+	for  set NJD=NJD.nextFreqDate(FRE,.AF) quit:ER  quit:NJD'<%SystemDate  
+	set AMAF=AF
+	do ADD(.ln,.aoamo,NDFAMT,NDFPLAN)
+	quit 
+	
+public ADD(RecordLN ln,RecordAOAMO aoamo,NDFAMT,NDFPLAN)
+	
+	type Number NSIP
+	type String IACM,IRR
+	
+	set NSIP=1 
+	set IRR=""
+	set IACM=ln.iacm
+	do NEW(.ln,.aoamo,NDFAMT,NDFPLAN)
+	quit 
+	
+NEW(RecordLN ln,RecordAOAMO aoamo,NDFAMT,NDFPLAN)
+
+	type public Date JD,NJD
+	type public Number AMAF,CID
+	type public String PLN,TYP
+	type Date MDT,ODT
+	type String BUSOPT,NBDC,TRM
+	type Number MDTO,NSIP,X
+	
+	/*
+	   If the plan specifies amortization in advance, set up the first
+	   amort to be the ODD (or today if ODD is in the past).
+	*/
+	if aoamo.bes set NJD=$S(ln.odd<%SystemDate:%SystemDate,1:ln.odd),JD=NJD
+	type RecordLNCYCPTS lncycpts=Db.getRecord("LNCYCPTS","CID,TYP",1)
+
+	type RecordLNAMOAO lnamoao=Class.new("RecordLNAMOAO")
+	set lnamoao.cid=CID
+	set lnamoao.typ="PTS"
+	set lnamoao.caltd=0
+	set lnamoao.nxadt=NJD
+	set lnamoao.lsadt=JD
+	set lnamoao.cntr=+lncycpts.cntr
+	
+
+	set PLN="0|"_NJD_"|"_JD_"|"_lncycpts.cntr
+	if 'aoamo.fmet do P0(.ln,.aoamo,.lncycpts,.lnamoao) quit
+	
+	/*
+	If the plan uses straight line, calculate on number of payments
+	If the loan has no term, and the plan estimates a term, build # pmts
+	*/
+	set NSIP=3
+	if lncycpts.term set X=lncycpts.term do P1(.ln,.aoamo,.lnamoao) quit
+	set ODT=ln.odd
+	set TRM=ln.ptrm
+	
+	if TRM.isNull() set TRM=ln.trm
+	set BUSOPT=ln.busopt
+	set NBDC=ln.nbdc
+	
+	if TRM.isNull() set TRM=aoamo.tes
+	
+	if TRM.isNull() quit 
+	
+	set MDT=$$EXT^UMDT(TRM,ODT,0,BUSOPT,NBDC) 
+	set MDTO=((MDT-ODT)/365)*AMAF
+	set X=MDTO.roundDec(0,"","") 
+	set:X<0 X=0
+	do P1(.ln,.aoamo,.lnamoao)
+	quit
+		
+P0(RecordLN ln,RecordAOAMO aoamo,RecordLNCYCPTS lncycpts,RecordLNAMOAO lnamoao) // Build cash flow array
+	
+	type public Boolean ER
+	type public Date AMODT,NJD	
+	type public Number AMAF,BASE,%EXT,NDFAMT
+	type public String CF(),IACM,OINT
+	type Boolean CMP
+	type Date BD,ND,ODYS
+	type Number AF,APR,NEW,NPFV,NPCNT,NSIP,PCH,SVBASE,X,XTYPE
+	type String IN,IRR,PCM
+
+	set NSIP=1
+	set (NPFV,NPCNT)=0
+	set SVBASE=BASE.get()
+	set PCM=ln.pcm
+	
+	if 'PCM(PCM).exists() do {
+		type RecordSTBLPCM stblpcm=Db.getRecord("STBLPCM","PCM")
+		set PCM(PCM)=stblpcm.pcmp
+		}	
+		
+	// Payment Schedule Loans
+	if ln.dist1fre="*" do { 
+		set AF=365
+		do NEW^LNCFBLDP(.ln)
+		}
+		
+	// P&I loans
+	else  if PCM(PCM).extract() do { set AF=ln.dist1af 
+		if aoamo.fmet quit
+		set (APR,%EXT,PCH)=0
+		set NEW=1
+		do N1^LNCFBLD(.ln)
+		}
+		
+	// Revolving Loans
+	else  if PCM(PCM).extract(3)=4 do NEW^LNCFBLDR(.ln) set AF=ln.dist1af if 1
+	
+	// Everything else (I+P loans)
+	else  do NEW^LNCFBLDI(.ln) set AF=ln.dist1af
+	
+	set OINT=OINT.get()
+	set IN=OINT
+	if 'aoamo.oprf set IN=0
+	set BASE=SVBASE.get()
+	if 'BASE set BASE=ln.crlmt
+	if (ln.iam).extract()=1 set BASE=BASE-(ln.iun-ln.ipl)
+	
+	/*
+	Determine internal rate of return CF(0) equals the loan amount, minus 
+	remaining fees (original - paid	to date) minus odd interest.	*/
+
+	if 'ln.ballamt.isNull() set BASE=BASE-ln.ballamt
+	set CF(0)="-"_(BASE-(NDFAMT-lncycpts.caltd)-IN)_"|0"
+	
+	// If plan includes odd days in calculation set = DIST1LD - ODD
+	set ODYS=$S(aoamo.oprf:ln.dist1ld-ln.odd,1:0)
+	
+	// Compute IRR for CF series
+	set IRR=""
+	if 'CF(0).order().isNull() do {
+		
+		if IACM.get().isNull() set IACM=ln.iacm
+	
+		/* Use DIST1LD if existing, AMODT if new.  We can determine this
+		by looking at DFP and comparing it to DIST1ND.	*/
+		
+		set BD=ln.dist1ld
+		if ln.dfp.isNull()!(ln.dfp=ln.dist1nd) set BD=ln.amodt
+	
+		set XTYPE=ln.type
+		type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","XTYPE")
+		set CMP=prodctl.ppif
+		set CMP='CMP
+	
+		if ln.amodt'=ln.dist1ld do {
+			set ND=AMODT.nextFreqDate(ln.dist1fre) quit:ER 
+			if ND=ln.dist1nd set CMP=CMP_1
+			}
+	
+		set IRR=$$^UIRR(.CF,ln.dist1fre,ln.piacm,IACM,BD,IACM,CMP)
+		if ER quit 
+		if ln.dist1fre="*" set IRR=$$^DEPCALC("F7",365,(IRR/36500),100,0,"",5)-100
+		}
+	
+	set AMAF=AMAF.get()
+	if 'AMAF set NJD=%SystemDate.nextFreqDate(aoamo.fre,.AF) quit:ER
+	if 'ln.dist1af set ln.dist1af=AF
+	set X=ln.onp/ln.dist1af*AMAF
+
+	if 'X do CFN(.ln)
+	if X-(X\1) set X=X.roundDec(0,"","")
+	do P1(.ln,.aoamo,.lnamoao)
+	quit
+
+
+P1(RecordLN ln,RecordAOAMO aoamo,RecordLNAMOAO lnamoao) 
+
+	type public Number CID,IRR,NDFAMT,NSIP
+	type public String FRE,NDFPLAN,PLN,X
+	type public Date NJD
+	
+	set PLN=PLN_"|"_X_"|"_aoamo.fre_"|"_NDFAMT_"|"_IRR.roundDec(5,"+")_"|1|0|0"
+	set PLN.piece("|",20)=NDFPLAN
+	set PLN.piece("|",36)=0
+	set PLN.piece("|",39)=NSIP
+
+	set lnamoao.term=X
+	set lnamoao.freq=aoamo.fre
+	set lnamoao.amt=NDFAMT
+	set lnamoao.rate=IRR.roundDec(5,"+")
+	set lnamoao.payee=1
+	set lnamoao.pdby=0
+	set lnamoao.apr=0
+	set lnamoao.plan=NDFPLAN
+	set lnamoao.npda=0
+	set lnamoao.nsip=NSIP
+	
+	// Establish next yield recalculation date.
+	if 'aoamo.ryfre.isNull() do {
+		set NJD=%SystemDate.nextFreqDate(aoamo.ryfre)
+		set PLN.piece("|",31)=NJD
+		set PLN.piece("|",32)=FRE
+		set PLN.piece("|",33)=%SystemDate
+		set lnamoao.rynd=NJD
+		set lnamoao.ryfre=aoamo.ryfre
+		set lnamoao.ryld=%SystemDate	
+
+		do CFN(.ln)
+		set PLN.piece("|",5)=X
+		}
+
+	set lnamoao.cid=CID
+	set lnamoao.typ="PTS"
+	do lnamoao.bypassSave()
+	set ln.ptsp=1
+	quit 
+
+	
+CFN(RecordLN ln)	// Determine the number of payments based on CF array
+
+	type public Number AMAF
+	type public String CF(),PLN
+	type Number C,N,LNDIS,X
+	
+	set (C,N)=0
+
+	for  set C=CF(C).order() quit:C.isNull()  set N=N+CF(C).piece("|",2)
+	set C=PLN.piece("|",4)
+
+	if N'>C set N=C+1
+
+	set LNDIS=(N/(ln.dist1af*AMAF))-C
+	set X=LNDIS.roundDec(0,"","")
+
+	quit 
+	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60736^52112^Sudanthiran S. Kumar^7876"	// Signature - LTD^TIME^USER^SIZE

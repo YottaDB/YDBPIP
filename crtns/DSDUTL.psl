@@ -1,0 +1,733 @@
+DSDUTL
+  	/*
+	 ORIG: KELLYP - 03/15/2002
+	 DESC: Deposit Scheduled Date Conversion
+
+	 This procedure, run by the @DSDUTL function, will generate a list of
+	 scheduled interest/dividend and/or negative interest posting dates for
+	 a selected deposit account, for all deposit accounts of a specified 
+	 group or type, or for all deposit accounts in the system.
+
+	 This procedure is also called into from the BCHDSD batch definition
+	 which is used to do the same conversion, but is multi-threaded for
+	 performance purposes.
+
+	 These dates are used by RECALC functionality to calculate interest 
+	 accrual adjustments more accurately than previously possible and also
+	 can be utilized to reconstruct posting dates for accounts with
+	 problematic frequencies.  This new processing lifts limitations that 
+	 existed for backdated transactions on deposit accounts that were 
+	 previously restricted due to file maintenance issues w/ DEP.IPF, 
+	 DEP.INP, DEP.NEGIPF, and DEP.NEGINP.
+
+	 ---- Comments --------------------------------------------------------
+	 Called from the top, this function can be run in Anticipated Mode which
+	 allows the user to review the scheduled posting dates calculated by 
+	 this procedure prior to the ACNDSD table being updated.  
+
+	 The public NEWDEP linetag allows the creation of ACNDSD records during
+	 backdated and regular deposit account openings.
+
+	 The public CNVACCT linetag allows the conversion of a single account
+	 w/ no reporting functionality.
+	 ---- Revision History ------------------------------------------------
+	 
+	 04/17/07 - RussellDS - CR6387
+	 	Eliminated use of UHFETCH
+
+	 08/05/05 - SAHOOU - CR13697
+                Modified CNVACCT and NEWDEP section to set the top level 
+                of ^ACNDSD(CID,"IPF") and ^ACNDSD(CID,"NEGIPF"),even if 
+                no values exist on the account for IPF  and NEGIPF.This 
+                corrects a problem in which transaction processing in
+                (RECALC.m). CR 13697 is a retrofit of CR 1217 from Profile01
+                view to Profile04 view.
+
+         06/11/02 - KELLYP - 49129:002
+		Modified HISTFM section to prevent null subscript error in
+		ACCT array when file maintenance changed INP to null.  Also
+		modified ROLLDT to set FRE correctly (was not setting FRE 
+		correctly when posting frequency was changed from a value to
+		null).
+
+	 05/14/02 - KELLYP - 49129
+		Modified ROLLDT section to handle INP file maintenance changes
+		during a posting period other than the first one.  Processing
+		was previously not using a corresponding IPF change until
+		one period after it should have due to INP file maintenance.
+
+	 05/13/02 - KELLYP - 49129
+		Modified CNVACCT section to prevent ACNDSD records from being
+		built for segmented accounts.
+
+	 05/06/02 - KELLYP - 49129
+		Modified PROC section to use a Db.select, rs.isEmpty(), and 
+		rs.next() for each type of selection.  Using one rs.next()
+		for all 3 types of selects (GRP, TYPE, and ALL) was causing
+		problems where the records returned did not match the query
+		passed (PSL Problem).  Also modified this procedure to use
+		SAVPID when filing changes to TMPACNDSD so that reporting
+		works properly for BCHDSD.
+	*/
+
+	new ALLDEP,CID,GRP,INTPOS,MODE,SAVPID,SPDT,TYP
+	set (ALLDEP,CID,GRP,TYP)=""
+
+	set SAVPID=%ProcessID
+
+	// Stop Date: INTPOS=1 means SPDT=TJD, INTPOS=2 means SPDT=TJD+1
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR","*")
+	set INTPOS=cuvar.intpos
+	set SPDT=%SystemDate+INTPOS-1
+
+	// Process full utility (not multi-threaded)
+	do PROC
+
+	quit
+ 
+ 
+PROC    // Get Accounts Matching User-Defined Query, Convert, and Report
+	/*
+	 This section retrieves all accounts within the system that the user
+	 selects and converts them one at a time by calling the CNVACCT section.
+	 The REP section is then called to display the dates calculated for each
+	 account.
+
+	 INPUTS:
+		. CID           Account Number          /TYP=N
+		. TYP           Account Type            /TYP=T
+		. GRP           Account Group           /TYP=T
+		. ALLDEP        All Dep Accounts Flag   /TYP=L
+		. MODE          Anticipated Mode Flag   /TYP=L
+		. SPDT          Stop Date               /TYP=D
+		. INTPOS        EOD/BOD Int Posting     /TYP=N
+		. SAVPID        Process iD              /TYP=N
+
+	 EXAMPLE:
+		do PROC
+	*/
+
+	new rs
+
+	// Query user for accounts to convert
+	do QUERY(.CID,.GRP,.TYP,.ALLDEP,.MODE)
+
+	// User Quit: Account(s) not converted
+	if VFMQ="Q" do Runtime.setErrMSG("DEP",184) quit:ER
+
+	// If only one account, convert it and report
+	if CID'="" do CNVACCT(CID,SPDT,INTPOS,MODE,SAVPID) do REP quit
+
+	type ResultSet rs
+
+	if TYP'="" do {  if 1
+		set rs=Db.select("CID","DEP","TYPE=:TYP")
+
+		// No accounts satisfy query
+		if rs.isEmpty() do Runtime.setErrMSG("DEP",1890) quit:ER
+
+		// Fetch and convert accounts one at a time
+		while rs.next() do CNVACCT(rs.getCol(1),SPDT,INTPOS,MODE,SAVPID)
+		}
+
+	else  if GRP'="" do {  if 1
+		set rs=Db.select("CID","DEP","GRP=:GRP")
+
+		// No accounts satisfy query
+		if rs.isEmpty() do Runtime.setErrMSG("DEP",1890) quit:ER
+
+		// Fetch and convert accounts one at a time
+		while rs.next() do CNVACCT(rs.getCol(1),SPDT,INTPOS,MODE,SAVPID)
+		}
+
+	else  if ALLDEP do {
+		set rs=Db.select("CID","DEP")
+
+		// No accounts satisfy query
+		if rs.isEmpty() do Runtime.setErrMSG("DEP",1890) quit:ER
+
+		// Fetch and convert accounts one at a time
+		while rs.next() do CNVACCT(rs.getCol(1),SPDT,INTPOS,MODE,SAVPID)
+		}
+
+	// Run CNV62DSD Report
+	do REP
+
+	quit
+
+
+Public CNVACCT(CID,SPDT,INTPOS,MODE,SAVPID) // Create Interest Posting Dates
+	/*
+	 This section controls the calculation of a deposit account's scheduled
+	 interest/dividend and/or negative interest posting dates.  The dates
+	 calculated are stored in the ACCT array which takes the following form:
+
+		ACCT(COL,IPD)
+
+	 Note that COL can be "IPF" or "NEGIPF" and IPD is a scheduled posting
+	 date.  Also note that error trapping is used so that accounts which
+	 fail to be converted are logged appropriately.
+
+	 ARGUMENTS:
+		. CID         Account Number            /TYP=N/MECH=VAL/REQ
+		. SPDT	      Stop Date			/TYP=D/MECH=VAL/REQ
+		. INTPOS      EOD/BOD Int Posting Flag  /TYP=N/MECH=VAL/REQ
+		. MODE        Anticipated Mode Flag   	/TYP=L/MECH=VAL/REQ
+		. SAVPID      Process ID		/TYP=N/MECH=VAL/REQ
+
+	 EXAMPLE:
+		do CNVACCT^DSDUTL(CID,SPDT,INTPOS,MODE,SAVPID) 
+	*/
+
+	new ACCT,dep,NEGFM,POSFM,rs,STDT
+
+	catch error {
+		new ET,RM
+
+		kill ACCT		// Remove from conversion list
+
+		set ET=error.type
+ 
+		if ET["%GTM-" do ZE^UTLERR quit
+		set ET=ET_"-"_error.thrownAt
+		set RM=error.description
+		do ^UTLERR
+		}
+
+	type RecordDEP dep=Db.getRecord("DEP","CID")
+
+	// Omit segmented accounts
+	if dep.segflg quit
+
+	// Set Starting Date to greater of ODT and CONVDT
+	if dep.odt>dep.convdt set STDT=dep.odt
+	else  set STDT=dep.convdt
+
+	// Set up top-levels
+	set ACCT("IPF")=""
+	set ACCT("NEGIPF")=""
+
+	// Get all FM transactions for IPF,INP,NEGIPF, and NEGINP
+	do HISTFM(CID,.ACCT,.POSFM,.NEGFM)
+
+	// Calculate scheduled int/div and neg int posting dates
+	do ROLLDT(CID,.ACCT,.POSFM,dep.ipf,"IPF",STDT,SPDT,INTPOS)
+	do ROLLDT(CID,.ACCT,.NEGFM,dep.negipf,"NEGIPF",STDT,SPDT,INTPOS)
+
+	// Save scheduled dates to ACNDSD and/or TMPACNDSD
+	do FILE(CID,.ACCT,MODE,1,SAVPID)
+
+	quit
+
+
+ROLLDT(CID,ACCT,FMARR,FRE,COL,STDT,SPDT,INTPOS)	// Calculate Sch Int Dates
+	/*
+	 This section calculates the scheduled interest/dividend or negative
+	 interest posting dates for a single deposit account.  It is called
+	 once for DEP.IPF and once for DEP.NEGIPF.
+
+	 ARGUMENTS:
+		. CID       Account Number             /TYP=N/MECH=VAL/REQ
+		. ACCT	    Account Conversion Array   /TYP=T/MECH=REFARR:RW/REQ
+		. FMARR	    Posting Date FM Array      /TYP=T/MECH=REFARR:RW/REQ
+		. FRE	    Int. Posting Frequency     /TYP=F/MECH=VAL/REQ
+		. COL	    Int. Posting Freq. Type    /TYP=T/MECH=VAL/REQ
+		. STDT	    Start Date		       /TYP=D/MECH=VAL/REQ
+		. SPDT	    Stop Date		       /TYP=D/MECH=VAL/REQ
+		. INTPOS    EOD/BOD Int Posting Flag   /TYP=N/MECH=VAL/REQ
+
+	 INPUTS:
+		, ER	    Error Flag		       /TYP=T
+
+	 EXAMPLE:
+		do ROLLDT(CID,.ACCT,.POSFM,dep.ipf,"IPF",STDT,SPDT,INTPOS)
+        */
+
+	new DT,SAVDT,STOP
+
+	// Determine what IPF was at STDT
+	if $D(FMARR) do {
+		new FRE1,FRE2
+		set ACCT(COL)=""
+		set DT=$O(FMARR("")) 
+		if DT="" quit
+		set FRE1=$P(FMARR(DT),"|",1)
+		set FRE2=$P(FMARR(DT),"|",2)
+
+		/*
+		 Frequency was changed from null to value so we use the value
+		 that the frequency changed to and manually insert the first
+		 interest posting date (if not defined by FM).
+		*/
+		if FRE1="",FRE2'="" do {
+			set FRE=FRE2
+			set STDT=$O(ACCT(COL,""))
+			if STDT="" do {
+				set STDT=$$FRSTDATE^ACNFUNCS(DT,FRE,INTPOS_"1") quit:ER
+				if STDT<SPDT set ACCT(COL,STDT)=""
+				}
+			kill FMARR(DT)
+			}
+
+		/*
+		 Frequency was changed from one value to another (or to null)
+		 so we leave FMARR and STDT alone because they will change on
+		 the first iteration of the UFRE loop.
+		*/
+		else  if FRE1'="" set FRE=FRE1     // 49129:002 - Removed FRE2
+		}
+
+	if ER do LOGERR(CID,.ACCT,COL) quit
+
+	if FRE="" quit
+
+	set DT=STDT,STOP=0 
+
+	// Cycle forward from STDT to find each frequency
+	for  set SAVDT=DT,DT=$$NJD^UFRE(DT,FRE) quit:ER!(DT'<SPDT)!STOP  do { quit:ER!STOP
+		new ADJINT,INPCHG,XDT,XIPF
+
+		set ACCT(COL,DT)=""
+
+		/*
+		 INPCHG>SAVDT means that INP was FM'd which makes the current
+		 ACCT array entry invalid.  Kill it and reset DT equal to
+		 INPCHG and allow the calculation of the next DT from there.
+		*/
+		set INPCHG=$O(ACCT(COL,DT),-1)
+		if INPCHG>SAVDT kill ACCT(COL,DT) set DT=INPCHG
+
+		if '$D(FMARR) quit
+
+		set ADJINT=INTPOS#2
+		set XDT=$O(FMARR(DT+ADJINT),-1)
+		if XDT="" quit
+
+		set FRE=$P(FMARR(XDT),"|",2) do KILLFM(.FMARR,XDT)
+
+		if FRE="" do {	// Last FM changed FRE to null, look for new FRE
+			set XDT=$O(FMARR(DT))
+
+			// No more FM, no more interest posting
+			if XDT="" kill FMARR set STOP=1 quit
+
+			/*
+			 If INP (or NEGINP) was file maintained along with
+			 IPF (or NEGIPF) then that date is already in the 
+			 ACCT array and we can calculate the next interest
+			 posting date from there.  If not, then we have to
+			 calculate it as the DEP triggers would and add it
+			 to ACCT.
+			*/
+
+			set DT=$O(ACCT(COL,XDT-1))
+			if DT="" do {  quit:ER
+				set DT=$$FRSTDATE^ACNFUNCS(DT,FRE,INTPOS_"1") quit:ER
+				set ACCT(COL,DT)=""
+				}
+
+			set FRE=$P(FMARR(XDT),"|",2)
+			do KILLFM(.FMARR,XDT)
+			}
+		}
+
+	if ER do LOGERR(CID,.ACCT,COL) quit
+
+	quit
+
+
+HISTFM(CID,ACCT,POSFM,NEGFM)	// Get FM transactions on IPF,NEGIPF,INP,NEGINP
+	/*
+	 This section retrieves all file maintenance (FM) transactions from
+	 HIST for an account.  Of the FM transactions retrieved, only non-
+	 system-generated transactions on DEP.IPF, DEP.INP, DEP.NEGIPF, and
+	 DEP.NEGINP are considered.  INP and NEGINP changes are stored
+	 in the ACCT array directly and IPF and NEGIPF changes are stored
+	 in the POSFM and NEGFM arrays respectively.
+ 
+	 ARGUMENTS:
+		. CID      Account Number           /TYP=N/MECH=VAL/REQ
+		. ACCT	   Account Conversion Array /TYP=T/MECH=REFARR:RW/REQ
+		. POSFM	   IPF FM Array  	    /TYP=T/MECH=REFARR/REQ
+		. NEGFM	   NEGIPF FM Array	    /TYP=T/MECH=REFARR/REQ
+
+	 EXAMPLE:
+		do HISTFM(CID,.ACCT,.POSFM,.NEGFM)
+	*/
+	
+	type public Date SPDT
+	
+	type ResultSet rs = Db.select("TJD,TCMT", "HIST", "CID=:CID AND ETC IS NULL AND TAMT IS NULL AND ITC7<>1")
+	
+	while rs.next() do {
+		
+		type Boolean PDT
+		type Date DT
+		type String COL, FMCOL, FMREC, TCMT
+		
+		set DT = rs.getCol("TJD")
+		set TCMT = rs.getCol("TCMT")
+
+		set FMCOL = TCMT.piece(":", 1)
+		set FMCOL = FMCOL.piece("[DEP]", 2)
+
+		set PDT = false
+
+		if FMCOL = "IPF" set COL = "IPF"
+		else  if FMCOL = "INP" set COL = "IPF", PDT = true
+		else  if FMCOL = "NEGIPF" set COL = "NEGIPF"
+		else  if FMCOL = "NEGINP" set COL = "NEGIPF", PDT = true
+		else  quit
+
+		quit:COL.isNull()
+
+		set FMREC = TCMT.piece(":", 2)_"|"_TCMT.piece(":", 3)
+
+		// INP and NEGINP changes can go right into ACCT
+		if PDT do {
+			
+			type Date NEWDT
+			
+			set NEWDT = FMREC.piece("|", 2)
+			// 49129:002 - Added NEWDT="" condition
+			if (NEWDT '< SPDT) ! NEWDT.isNull() quit	// Only prior dates
+			set ACCT(COL, NEWDT) = ""
+		}
+
+		// IPF and NEGIPF changes need to be considered later
+		else  do {
+			
+			if COL = "IPF" set POSFM(DT) = FMREC
+			else  if COL = "NEGIPF" set NEGFM(DT) = FMREC
+		}
+	}
+
+	quit
+
+
+FILE(CID,ACCT,ANTFL,TMPFL,SAVPID) // File Dates to ACNDSD and/or TMPACNDSD
+	/*
+	 This section files the scheduled interest posting dates calculated by 
+	 this procedure to the ACNDSD table (when ANTFL=N) and/or to the
+	 TMPACNDSD table (when TMPFL=1).
+ 
+	 ARGUMENTS:
+		. CID	      Account Number		/TYP=N/MECH=VAL/REQ
+		. ACCT	      Account Conversion Array	/TYP=T/MECH=REFARR:R/REQ
+		. ANTFL       Anticipated Mode Flag	/TYP=L/MECH=VAL/REQ
+		. TMPFL       TMPACNDSD File Flag	/TYP=L/MECH=VAL/REQ
+		. SAVPID      Process ID		/TYP=N/MECH=VAL/REQ
+
+	 EXAMPLE:
+		do FILE(CID,.ACCT,1,0,SAVPID)
+	*/
+
+	new COL,DT
+
+	set (COL,DT)=""
+	for  set COL=$O(ACCT(COL)) quit:(COL="")  do {
+		new OLDDTS,rs,SEQ
+		set (OLDDTS,SEQ)=0
+
+		// Retrieve all scheduled dates (for comparison)
+		if TMPFL do {
+			type ResultSet rs=Db.select("SCHDT","ACNDSD","CID=:CID AND FRECOL=:COL AND SCHDT>0")
+			if rs.isEmpty() quit
+			set OLDDTS=1
+			while rs.next() set OLDDTS(rs.getCol(1))=""
+			}
+
+		if 'ANTFL do {		// Perm. ACNDSD Data
+
+			// Delete existing dates greater than zero
+			if Db.isDefined("ACNDSD","CID,COL,0") do Db.delete("ACNDSD","CID=:CID AND FRECOL=:COL AND SCHDT>0") quit
+
+			new acndsd
+
+			/*
+			 A dummy ACNDSD record with SCHDT=0 is used in
+			 case there are no future posting dates as of
+			 now but we want BCHINTPOST to build them in
+			 the future.
+			*/
+
+			type RecordACNDSD acndsd=Class.new("RecordACNDSD")
+			set acndsd.cid=CID
+			set acndsd.frecol=COL
+			set acndsd.schdt=0
+
+			// Create dummy ^ACNDSD record
+			do acndsd.bypassSave()
+			}
+
+		for  set DT=$O(ACCT(COL,DT)) quit:(DT="")  do {
+
+			// Anticipated Mode - Don't save data to ACNDSD
+			if 'ANTFL do {
+
+				new acndsd
+
+				type RecordACNDSD acndsd=Class.new("RecordACNDSD")
+				set acndsd.cid=CID
+				set acndsd.frecol=COL
+				set acndsd.schdt=DT
+
+				// Create ^ACNDSD sch int posting date
+				do acndsd.bypassSave()
+				}
+
+			// File dates to TMP for CNV62DSD report
+			if TMPFL do {
+
+				new tmptbl
+
+				set SEQ=SEQ+1
+
+				type RecordTMPACNDSD tmptbl=Class.new("RecordTMPACNDSD")
+				set tmptbl.pid=SAVPID
+				set tmptbl.cid=CID
+				set tmptbl.frecol=COL
+				set tmptbl.seq=SEQ
+				set tmptbl.newdt=DT
+
+				if OLDDTS do {
+					set tmptbl.olddt=$O(OLDDTS(""))
+					kill OLDDTS(tmptbl.olddt)
+					}
+
+				// Temp. Report Data
+				do tmptbl.bypassSave()	
+				}
+			}
+
+		// More old dates than new dates, save them to TMPACNDSD
+		if TMPFL,OLDDTS do {
+			new TMPDT
+			set TMPDT=""
+			for  set TMPDT=$O(OLDDTS(TMPDT)) quit:TMPDT=""  do {
+				type RecordTMPACNDSD tmptbl=Class.new("RecordTMPACNDSD")
+
+				set SEQ=SEQ+1
+
+				set tmptbl.pid=SAVPID
+				set tmptbl.cid=CID
+				set tmptbl.frecol=COL
+				set tmptbl.seq=SEQ
+				set tmptbl.olddt=TMPDT
+
+				do tmptbl.bypassSave()
+
+				kill OLDDTS(TMPDT)
+				}
+			}
+		}
+
+	quit
+
+
+Public QUERY(CID,GRP,TYP,ALLDEP,MODE)	// Get account(s) to convert
+	/*
+	 This section prompts the user to select which deposit accounts should
+	 be converted.  A single deposit account, all deposit accounts, or all 
+	 deposit accounts of a specified type or group can be converted.
+ 
+	 ARGUMENTS:
+		. CID	      Account Number		/TYP=N/MECH=REF/REQ
+		. GRP	      Account Group		/TYP=T/MECH=REF/REQ
+		. TYP	      Account Type		/TYP=T/MECH=REF/REQ
+		. ALLDEP      All Dep Accounts Flag	/TYP=L/MECH=REF/REQ
+		. MODE        Anticipated Mode Flag	/TYP=L/MECH=REF/REQ
+
+	 EXAMPLE:
+		do QUERY^DSDUTL(.CID,.GRP,.TYP,.ALLDEP,.MODE)
+	*/
+
+	new %NOPRMT,%PAGE,%PG,%READ,%TAB
+
+	set %PG=1
+	set %PAGE=1
+	set %NOPRMT="N"
+	set MODE=1	// Default Anticipated Mode to "Y"
+	kill OLNTB
+
+	set %TAB("IO")=$$IO^SCATAB($I)
+	set %TAB("CID")=".CID1/HLP=[DEP]CID/DES=Deposit Account/TBL=[DEP]/XPP=D XPP^DSDUTL"
+	set %TAB("GRP")=".GRP1/HLP=[DEP]GRP/DES=Deposit Group/TBL=[STBLGRP]:QU ""[STBLGRP]CLS=""D""""/XPP=D XPP^DSDUTL"
+	set %TAB("TYP")=".TYP1/HLP=[DEP]TYPE/DES=Deposit Type/TBL=[PRODCTL]:QU ""[PRODCTL]CLS=""D""""/XPP=D XPP^DSDUTL"
+	set %TAB("ALLDEP")=".ALLDEP1/TYP=L/DES=Convert all Deposit Accts/XPP=D XPP^DSDUTL"
+	set %TAB("MODE")=".MODE1/TYP=L/DES=Anticipated Mode"
+
+	set %READ="@@%FN,,IO/REQ,,ALLDEP,,CID,TYP,GRP,,MODE"
+
+	do ^UTLREAD
+
+	quit
+
+
+Public XPP    // UTLREAD post processor for protecting/unprotecting query fields
+	/*
+	 This section handles screen navigation for the QUERY section so
+	 that the user cannot enter an invalid combination of parameters
+	 for the account query.
+ 
+	 INPUTS:
+		. X	      Value Modified		/TYP=T
+		. DATA	      Field Modified		/TYP=T
+
+	 EXAMPLE:
+		do XPP^DSDUTL
+	*/
+
+	new UNPR
+
+	// Unprotect all fields so the user can re-enter
+	if (X="")!(('X)&(DATA="ALLDEP")) do UNPROT^DBSMACRO("ALL") quit
+
+	// Protect CID, GRP, and TYP fields (user should only define 1 of them)
+	do PROTECT^DBSMACRO("@ALLDEP")
+	do PROTECT^DBSMACRO("@CID")
+	do PROTECT^DBSMACRO("@GRP")
+	do PROTECT^DBSMACRO("@TYP")
+
+	// Unprotect the field that was changed (in case they want to modify it)
+	set UNPR=$S(DATA="ALLDEP":"@ALLDEP",DATA="CID":"@CID",DATA="GRP":"@GRP",DATA="TYP":"@TYP",1:"ALL")
+	do UNPROT^DBSMACRO(UNPR)
+
+	quit
+
+
+Public REP	// Run CNV62DSD Report to Compare Calculated/Stored Values
+	/*
+	 This section runs the CNV62DSD report to display the differences
+	 between records that already exist in the ACNDSD table for an
+	 account and the newly calculated values.
+
+	 INPUTS:
+		. ER		Error Flag	/TYP=T
+
+	 EXAMPLE:
+		do REP^DSDUTL
+	*/
+
+	new PGM,RID
+
+	set RID="CNV62DSD"
+	do ^URID if PGM="" do Runtime.setErrMSG("DBTBL5D",1448,RID) quit:ER
+
+	// Generate CNV62DSD Report
+	do ^@PGM
+	
+	// Delete TMP records for CNV62DSD report for this user's process
+	set SAVPID=%ProcessID
+	do Db.fastDelete("TMPACNDSD0","SAVPID")
+
+	quit
+
+
+LOGERR(CID,ACCT,COL)	// Log errors via UTLERR
+	/*
+	 This section logs errors encountered when calling NJD^UFRE or
+	 FRSTDATE^ACNFUNCS from the ROLLDT section of this procedure so that
+	 processing may continue for other interest posting types for the
+	 account (CID).
+
+	 ARGUMENTS:
+		. CID	     Account Number	       /TYP=N/MECH=VAL/REQ
+		. ACCT	     Account Conversion Array  /TYP=T/MECH=REFARR:RW/REQ
+		. COL	     Frequency Column Name     /TYP=T/MECH=VAL/REQ
+		
+	 INPUTS:
+		. ER	     Error Flag		  	/TYP=T
+		. ET	     Error Text		  	/TYP=T
+		. RM	     Error Message		/TYP=T
+
+	 EXAMPLE:
+		do LOGERR(CID,.ACCT,COL)
+	*/ 
+
+	kill ACCT(COL)		// Possibly invalid dates (don't save them)
+
+	set RM=$G(RM)
+
+	do ^UTLERR		// Log the error
+
+	set (ER,ET,RM)=""	// Error has been logged, continue processing
+
+	quit
+
+
+KILLFM(FMARR,XDT)	// Kill Freq. File Maintenance less than & equal to XDT
+	/*
+	 This section removes the frequency file maintenance records stored in
+	 the local FMARR array prior to and including the XDT passed in.  Once
+	 FMARR(XDT) is used, any dates in FMARR prior to and including XDT need
+	 to be removed so that the "for" loop in ROLLDT doesn't consider changes
+	 to IPF or NEGIPF in a prior interest posting period when calculating
+	 the next interest posting date.
+
+	 ARGUMENTS:
+		. FMARR		Posting Date FM Array  /TYP=T/MECH=REFARR:RW/REQ
+	 	. XDT		File Maintenance Date  /TYP=D/MECH=VAL/REQ
+
+	 EXAMPLE:
+		do KILLFM(.FMARR,XDT)
+	*/
+
+	new TMPDT
+	set TMPDT=""
+	for  set TMPDT=$O(FMARR(XDT+1),-1) quit:TMPDT=""  kill FMARR(TMPDT)
+
+	quit
+
+
+Public NEWDEP(CID,IPF,INP,NEGIPF,NEGINP,CONVDT,ODT,INTPOS)  // Create IPF and/or NEGIPF ACNDSD records for new DEP account
+	/*
+	 This section handles the creation of ACNDSD records for the IPF and
+	 NEGIPF posting frequencies for deposit account creation.  If the
+	 account opening is not backdated, only a ACNDSD record where SCHDT=0
+	 will be generated.
+
+	 ARGUMENTS:
+		. CID		Account Number		/TYP=N/MECH=VAL/REQ
+		. IPF		Int/Div Posting Freq.	/TYP=F/MECH=VAL/REQ
+		. INP		Int/Div Next Post Date	/TYP=D/MECH=VAL/REQ
+		. NEGIPF	Neg Int Posting Freq.	/TYP=F/MECH=VAL/REQ
+		. NEGINP	Neg Int Next Post Date	/TYP=D/MECH=VAL/REQ
+		. CONVDT	Acct Conversion Date	/TYP=D/MECH=VAL/REQ
+		. ODT		Acct Opening Date	/TYP=D/MECH=VAL/REQ
+		. INTPOS	EOD/BOD Int Post Flag	/TYP=N/MECH=VAL/REQ
+
+	 INPUTS:
+		. %SystemDate	System Date		/TYP=D
+
+	 EXAMPLE:
+		do NEWDEP^DSDUTL(CID,IPF,INP,NEGIPF,NEGINP,CONVDT,ODT,INTPOS)
+	*/
+
+	new ACCT,FRECOL,SPDT,STDT
+
+	set STDT=$S((CONVDT)>(ODT):CONVDT,1:ODT)
+	set SPDT=%SystemDate+INTPOS-1
+
+	for FRECOL="IPF","NEGIPF" do {
+		new FRE,SCHDT
+		set ACCT(FRECOL)=""		// Define frequency column 
+
+		// Define frequency
+		set FRE=$S(FRECOL="IPF":IPF,1:NEGIPF)
+		if FRE="" quit
+
+		// Define next posting date
+		set SCHDT=$S(FRE="IPF":INP,1:NEGINP)
+		if (SCHDT'=""),(SCHDT<%SystemDate) S ACCT(FRECOL,SCHDT)=""
+
+		// Calculate Deposit Scheduled Dates for backdated openings
+		if ODT'=%SystemDate do ROLLDT(CID,.ACCT,"",FRE,FRECOL,STDT,SPDT,INTPOS)
+		}
+
+	// Save Deposit Scheduled Dates to ACNDSD
+	do FILE(CID,.ACCT,0,0,%ProcessID)
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60739^53842^Dan Russell^20218"	// Signature - LTD^TIME^USER^SIZE

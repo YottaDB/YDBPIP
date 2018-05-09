@@ -1,0 +1,238 @@
+LNPTS28
+	/*
+	       ORIG:  David Caliendo (5527) - 12/12/86
+	       
+	       DESC:  Post escrow closeout through the associated loan, 
+	              generating a secondary closeout transaction to the 
+	              escrow.
+
+	---- Revision History ------------------------------------------------
+	
+	05/23/06 - SmithCD - CR 19732
+		   . Re-tooled RND section to work properly, removing second 
+		     parameter in call to BIL0ELE^BILFUNCS in RND section 
+		     since it accepts only 1 parameter, and adding ln.save() 
+		     so the change to ln.rnd appears in account history
+		   . Modified last change to check for credit primary 
+		     transaction before reversing the closeout amount
+		   . Removed INCLINT condition before call to INTRDX^ESCFUNCS 
+		     since we always want to reduce accrual to 0, regardless 
+		     of whether it is to be waived or posted
+		
+	04/12/06 - Srinivar CR 19732
+		   Modified the EXEC section to include the 'ttx.itc1 
+		   condition before reversing the closeout amount. Also 
+		   modifiedthe call to ECLOSE by passing .dep instead of .ln.
+		   Added a additional parameter .ttx while calling
+		   %HSEQ^LNPTSU in order to avoid an undefined error.
+				
+	01/28/06 - Srinivar / SmithCD - CR 16890
+		   Cleaned up code and retrofitted the following from p01:
+			01/26/04 - APPLEYARDM - CR 7906
+		   Replaced code waiving or posting interest with call to new
+		   INTRDX^ESCFUNCS.
+			07/24/03 - STATTOND - CR 5174
+		   Modified code to handle negative interest when closing
+		   escrow accounts including:
+		   ·  Modified title.
+		   ·  Replaced variable F with variable INCLINT.
+		   ·  Removed calls to ^UIC. Effective dated closeouts
+		      handled by ESCADJ^UANTIC.
+		   ·  Calls to ^LNTRB replaced with calls to SET^LNTRB.
+		   ·  Renamed section F1 to ECLOSE
+		   .  Removed old revision histories
+
+	*/
+
+	quit
+
+	
+public CL0(RecordLN ln,		// Loan account			/REF:RW
+	   RecordTTX ttx)	// Primary Transaction		/REF:RW
+	   
+	// Closeout w/o interest
+
+	do EXEC(.ln, .ttx, 0)
+
+	quit
+
+
+public CL1(RecordLN ln,		// Loan account			/REF:RW
+	   RecordTTX ttx)	// Primary Transaction		/REF:RW
+	   
+   	// Closeout w/interest
+
+	do EXEC(.ln, .ttx, 1)
+
+	quit
+
+
+EXEC(RecordLN ln,		// Loan account			/REF:RW
+     RecordTTX ttx,		// Primary Transaction		/REF:RW
+     Boolean INCLINT)		// Include interest indicator
+
+	// Execute escrow closeout through loan
+
+	type public Boolean ER
+	type public RecordDEP dep, dep()
+	type public Number ZAMT
+	type public String TB()
+	
+	type literal String TAB = $char(9)
+	
+	type String ESCTYP, ESCPMTEL, PMTELEM
+	type Number BILLNUM, CLOSEAMT, ELENUM = 0, ESCCID, PRIN
+
+	// Pull escrow type from transaction
+	set ESCTYP = $$FIELD^UTSO(ttx.tso, "ESC")
+
+	type RecordLNBIL0 lnbil0 = Db.getRecord("LNBIL0", "CID=:ln.cid")
+	set ESCPMTEL = $$ESCACT^BILFUNCS(.lnbil0, .ELENUM)
+			
+	// If escrow transfer type not defined in transaction, get from 
+	// bill header
+	if ESCTYP.isNull() set ESCTYP = ESCPMTEL.piece(TAB, 2)
+
+	// Escrow type ~p1 not defined for this account
+	if ESCTYP.isNull() ! (ESCTYP '= ESCPMTEL.piece(TAB, 2)) do Runtime.setErrMSG("LNBIL0", 1016, ESCTYP) quit
+
+	set ESCCID = ESCPMTEL.piece(TAB, 1)
+	
+	for BILLNUM = ln.bseq:-1 quit:'BILLNUM  do { quit:ER ! 'BILLNUM ! (BILLNUM < ln.oseq)
+
+		type RecordLNBIL1 lnbil1 = Db.getRecord("LNBIL1", "CID=:ln.cid,SCHSEQ=:BILLNUM", 1)
+		if lnbil1.getMode() = 0 quit
+
+		set PMTELEM = $$SUB^BILFUNCS(ESCTYP, .lnbil1)
+		if PMTELEM.isNull() quit
+			
+		// Bill amounts are outstanding on bill # ~p1
+		if PMTELEM.piece("#", 4) do Runtime.setErrMSG("LNBIL1", 350, BILLNUM) quit
+		}
+
+	if ER quit
+	
+	// Update transfer balance array (used in LNPTS1)
+	set TB(ESCTYP) = TB(ESCTYP).get()
+	// Transaction amount
+	set TB(ESCTYP).piece(",", 1) = TB(ESCTYP).piece(",", 1) + ZAMT
+	// Transfer account number
+	set TB(ESCTYP).piece(",", 2) = ESCCID
+	// Transaction amount remaining
+	set TB(ESCTYP).piece(",", 3) = TB(ESCTYP).piece(",", 3) + ZAMT
+	
+	// Escrow Element to Round
+	if ln.rnd = ESCTYP do RND(.lnbil0, .ttx, .ln)
+	
+	// Ensure we're using the correct dep object
+	if 'dep.exists() ! (dep.exists() & (ESCCID '= dep.cid)) do {
+		if dep(ESCCID).exists() set dep = dep(ESCCID)
+		else  set dep = Db.getRecord("DEP", "CID=:ESCCID")
+		}
+        
+        if INCLINT set CLOSEAMT = dep.bal + dep.posacr.roundCur() - dep.negacr.roundCur() - dep.negacrun.roundCur() - dep.uncacr.roundCur()
+        else  set CLOSEAMT = +dep.bal
+
+	// If primary transaction is a credit, reverse closeout amount
+	if ttx.itc1 set CLOSEAMT = -CLOSEAMT
+
+	// Calculated closeout amount is $~p1
+	if (ZAMT - CLOSEAMT) do Runtime.setErrMSG("DEP", 399, CLOSEAMT) quit
+
+	// Include / waive interest
+	do INTRDX^ESCFUNCS(.ln, .dep, .ttx, 'INCLINT, ESCTYP, 1) quit:ER
+	
+	do ECLOSE(.dep, .ttx) quit:ER
+
+	/*
+	Find the direction of the tran amount. Example:
+	If primary tran is MECWI, then tran amount is positive.
+	If primary tran is MPO, then tran amount is negative.
+	*/
+	set PRIN = $select((ln.trb - ttx.itc1):ttx.tamt, 1:-ttx.tamt)
+	
+	// Escrow payment suspense
+	do GL^LNPTSU(.ttx, PRIN, 7)
+
+	// Update the History Support record (lower level of HIST)
+	do %HSEQ^LNPTSU(.ttx,"*#"_ESCTYP_"#"_PRIN)
+	
+	set ln.teb = ln.teb - dep.bal		// Total Escrow Balance
+	set ttx.tsb = dep.bal			// Total Secondary Balance
+	set ZAMT = 0
+		
+	quit
+
+
+RND(RecordLNBIL0 lnbil0,	// Internal bill control	/REF:R
+    RecordTTX ttx,		// Primary Transaction		/REF:RW
+    RecordLN ln)		// Loan account
+
+	// Find next available escrow-to-round
+	
+	type public String ESCTYP
+
+	type Number ELENUM
+	type String ELEMENT, PEA, PMTELEM, RND = ""
+	
+	// Payment Rounding Option 2 - Do not round; 3 - Round principal amount
+	if ln.ropt > 1 quit
+	
+	set PMTELEM = $$BIL0ELE^BILFUNCS(.lnbil0)
+	for ELENUM = 2:1:20  do { quit:'RND.isNull()
+		set ELEMENT = PMTELEM.piece($char(9), ELENUM)
+		
+		set PEA = ELEMENT.piece("#", 1)
+		if PEA.isNull() quit
+		
+		// Deposit account number defined, and this payment element 
+		// acronym is not this escrow type
+		if ELEMENT.piece("#", 2), ESCTYP '= PEA do {
+			type String HPR = $translate(PEA, "0123456789", "")
+			type ResultSet rs = Db.select("RND", "LNTRS", "TRTYPE=:HPR")
+			if rs.next() set RND = PEA
+			}
+
+		if RND.isNull() quit
+
+		// Record Escrow Element to Round in history
+		do ln.setAuditFlag(1)
+		set ln.rnd = RND
+		do ln.save()
+		}
+	
+	quit
+	
+	
+ECLOSE(RecordDEP dep,		// Deposit account		/REF:RW
+       RecordTTX ttx)		// Primary Transaction		/REF:RW
+     
+	// Create secondary escrow closeout transaction
+	
+	type public Cache %CACHE()
+	type public Boolean ER
+
+	type String ETC
+	type Number TAMT
+
+	set TAMT = dep.bal
+	
+	type RecordPRODCTL prodctl = %CACHE("PRODCTL").getRecord("PRODCTL", "TYPE=:dep.type")
+        
+	if 'ttx.itc1 do { quit:ER
+		// DR Closeout Tran Code - PRODCTL.DRTRCI
+		set ETC = prodctl.drtrci
+		if ETC.isNull() do ETCERR^TTXEXT(dep.type, "DRTRCI")
+		}
+	else  do { quit:ER
+		// CR Closeout Tran Code - PRODCTL.CRTRCI
+		set ETC = prodctl.crtrci
+		if ETC.isNull() do ETCERR^TTXEXT(dep.type, "CRTRCI")
+		set TAMT = -TAMT
+		}
+
+	do POST^LNTRB(.ttx, dep.cid, ETC, TAMT, %EffectiveDate, %UserStation, ttx.tso, ttx.tcmt, dep.crcd) quit:ER
+
+	quit
+
+vSIG()	quit "60408^55668^Chad Smith^6881"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,257 @@
+XALPHA
+
+	/*
+	ProcedureID: XALPHA
+	DESC: Utilities related to names and TAXIDs
+
+	LIBRARY:
+		. ACNSET	(called by REL)
+		. DELETE	(called by CIFDEL and CIFPURGE)
+		. FBL		(called by CIFDBS and screens CIFADD,CIFCNAM)
+		. $$ACNFRTID -	returns ACN based on TAXID
+
+
+	   Define directory (Should be on a separate drive)
+	   Average 60 bytes/account
+
+	----- Revision History -------------------------------------------------
+
+        09/14/05 - HAILEYM - CR17143
+        	   Fixed null subscript error in section FBL: Allowed for section
+        	   FBL to work even if ACN is not defined, per original comments.
+        
+        07/26/05 - SkariahV- CR16679
+	           Removed #WARN and #OPTIMIZE directives.
+	              
+
+	09/08/04 - KELLYP - CR 11982
+		   Replaced references to RELACN with RELCIF.  RELACN is an index
+		   and should not be directly referenced.  The RELACN table was 
+		   also obsoleted from the M database.
+	
+	04/14/04 - RussellDS - CR9565
+		   Fixed undefined error in XNAM section.
+		   Cleaned up scope warnings.
+
+	11/04/02 - SIVCHUKA/YENDAPALLIS - 43583
+		   PSL conversion cleanup 	
+	
+	06/27/00 - YENDAPALLIS - 43583
+		   Converted the routine to PSL
+	
+	------------------------------------------------------------------------
+	*/
+	  
+	quit
+
+	//I18N=OFF
+	
+ACNSET	// External entry point from REL
+
+	/*
+	File ^XALPHA for accounts
+	Missing account linkage
+	*/
+	
+	type Public Number ACN,CID
+	type Public String RECRE
+
+	if 'Db.isDefined("ACN","CID") do {
+		do Db.fastDelete("RELCIF","ACN,CID")
+		}	
+	if $D(RECRE) use 0 write !,ACN,?15,$$^MSG(5429),CID 
+
+	quit
+
+
+LNM	//
+
+	type Public Number ACN
+	
+	type String LNM,NAM,SS
+
+	type RecordCIF cif=Db.getRecord("CIF","ACN")
+	set NAM=cif.nam
+	set SS=cif.taxid 
+	set LNM=cif.lnm
+	
+	//I18N=ON
+
+	do XNAM
+	quit
+
+XNAM	// Reverse name for filing (personal) - LNM,FNM MI Suffix
+
+	type Public String LNM,NAM,XNAM
+
+	type Number J
+	type String XLNM
+
+	// NO LAST NAME
+	if LNM="" set LNM=$$^MSG(3957)
+	if LNM?.E1L.E set LNM=$$UPPER^%ZFUNC(LNM)
+	if NAM?.E1L.E set NAM=$$UPPER^%ZFUNC(NAM)
+	if LNM=NAM set XNAM=$E(NAM,1,35) quit
+
+	for J=1:1 set XLNM=$P(NAM," ",J) quit:LNM=XLNM!(XLNM="")
+	if XLNM'="" set XNAM=LNM_","_$P(NAM," "_XLNM,1)_$P(NAM," "_XLNM,2)
+	else  set XNAM=LNM_","_$P(NAM,LNM,1)_$P(NAM,LNM,2)
+	set XNAM=$E(XNAM,1,35)
+	if $E(XNAM,$L(XNAM))=" " set XNAM=$E(XNAM,1,$L(XNAM)-1)
+	
+	quit
+
+
+Public FBL	//External entry point from CIFDBS, screens CIFADD,CIFCNAM
+
+	/*
+
+	   Format last name
+
+	   Requires as input V = name; returns LN as best guess of last name.
+	   Use [CIF] data item PERS to determine personal/non-personal nature
+	   of account (0=personal, 1=non-personal).  If not defined in record,
+	   assumes personal.
+	*/
+
+	type Public Number ACN
+	type Public String LN,SUF,V
+
+	type Number I,PERS
+	type String X,Y
+	
+	type RecordCIF cif
+	
+	if ACN.get().isNull() set PERS=0
+	else  do {
+		set cif=Db.getRecord("CIF","ACN=:ACN",1)
+		if 'cif.getMode() set PERS=0 quit
+		set PERS=cif.pers
+		}
+      
+	if V?.E1L.E set V=$$UPPER^%ZFUNC(V)
+
+	if PERS do { quit
+		set LN=V 
+		if $P(LN," ",1)="THE" set LN=$P(LN," ",2,99)
+		}
+
+	// Handle personal
+	set X=$P(V,",",1) 
+	set LN="" 
+
+	for I=1:1 quit:$P(X," ",I)=""
+	if $P(X," ",I-1)="FOR" set I=I-1
+	set LN=$P(X," ",I-1) 
+	set SUF=$P(V,",",2) 
+	if $E(SUF)=" " set SUF=$E(SUF,2,99)
+	
+	// I18N=OFF:	Excluded from I18N Standards
+	
+	set Y="/TR./TR. FOR/JR./SR./3RD./TRS/SR/AND/FOR/TR/CUST/TR FOR/CUSTODIAN FOR/CUSTODIAN/TRUSTEE/TRUSTEE FOR/ITF/111/3RD/TRUST/TRUST FOR/SENIOR/JUNIOR/OR/JR/PHD/ESQ/ESQ./II/III/IV/MD/DDM/DMD/KT/MP/M.P./"
+	
+	// I18N=ON: Included to I18N Standards
+	
+	if Y[("/"_LN_"/") set SUF=LN set LN=$P(X," ",I-2) set I=I-2
+	
+	//check if we still have this
+	if Y[("/"_LN_"/") set LN=$P(X," ",I-1)
+	if LN="" set LN=X set SUF=""
+	
+	quit
+
+
+Public CK	// 
+	
+	/*
+	Check to see if any other CIF's linked to same account have same SSN,
+	if they do, don't delete old entry
+	*/
+
+	type Public Number ID
+
+	type Number CIF
+	type Boolean KILL
+
+	set KILL=0
+
+	type RecordACN acn=Db.getRecord("ACN","ID",1)
+	set CIF=acn.acn
+	 
+	if CIF do CK1 quit:'KILL
+
+	// 11982 - Replaced RELACN with RELCIF
+	type ResultSet rs=Db.select("ACN","RELCIF","CID=:ID")
+	if rs.isEmpty() quit
+	while rs.next() do { quit:'KILL 
+		set CIF=rs.getCol(1)
+		do CK1
+		quit:'KILL
+		}
+	quit
+
+
+CK1	//
+
+	type Public Boolean KILL
+	type Public Number ACN,CIF
+	type Public String OV
+
+	if CIF=ACN quit
+
+	type RecordCIF cif=Db.getRecord("CIF","CIF",1)
+	if cif.getMode(),cif.taxid=OV set KILL=0
+
+	quit
+
+
+Public XNAME(NAM,LNM)	//Private;Calculates reversed name for CIF.XNAME
+
+	/*
+	   CIF.XNAME stores the proper reversed name for use in the index XALPHA .
+	   This function calculates it.  It is called from the CIF filer
+	    triggers.
+
+	*/
+	type String XNAM
+	
+	do XNAM
+	
+	quit XNAM
+
+
+Public ACNFRTID(TAXID,CO)	//Public;Return ACN based on tax-id input
+
+	/*
+	If there are multiple CIFs associated with a single taxid, only the
+	first ACN will be returned.
+
+	INPUT:
+		. TAXID		TaxID number	/REQ/TYP=T/USE=CIF.TAXID
+		. CO		Company Code	/NOREQ/TYP=T/USE=CIF.CO
+	I18N=OFF
+	*/
+
+	type Number ACN
+	type String XCO
+
+	if $G(TAXID)="" quit ""
+	set XCO=$G(CO)
+
+	if XCO'="" do {
+		type ResultSet rs=Db.select("ACN","CIF","TAXID=:TAXID AND CO=:XCO")
+		if rs.isEmpty() set ACN="" quit 
+		if rs.next() set ACN=rs.getCol(1)
+		}
+	else  do {
+		type ResultSet rs=Db.select("ACN","CIF","TAXID=:TAXID")
+		if rs.isEmpty() set ACN="" quit 
+		if rs.next() set ACN=rs.getCol(1)
+		}
+
+	quit ACN
+
+
+	// I18N=ON
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60197^36862^Marie Hailey^5174"	// Signature - LTD^TIME^USER^SIZE

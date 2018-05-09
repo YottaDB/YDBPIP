@@ -1,0 +1,1829 @@
+DEPAI		/* ---------- Revision History -----------------------------------------
+	
+	07/05/07 - VanithaK - CR28007
+	        Modified the changes made for CR 27879 to include a test
+		case when Region code starts with zero.
+		
+	06/28/07 - VanithaK - CR27879
+	 	Added validation for Branch of Ownership when bankid is 
+	   	defined.
+	
+	06/13/07 - Anitha Chandran - CR 27044              
+	        Modified PROC and SEGINUYN sections to insert a record 
+	        into DAYENDINP, since interest was not getting posted on 
+	        the next interest posting date whenever segmented deposit 
+	        accounts were created.
+	         
+	06/11/07 - VARGAJ - CR 27402
+		Added value for CHKPRD.SCN. It was being set to null
+		which caused display issues with WebCSR.
+
+	05/03/07 - VANITHAK - CR 26845
+		Replicated the CR 22462 for MMDA Automatic Conversion.
+		
+		08/17/06 - PUTTASWH - 22462
+		Modified to validate the data in MMDAPTC and MMDACNVTYP
+		Columns if the flag MMDACNV is set to 'Y'.
+
+	04/17/07 - VARGAJ - CR24940
+		   The key structure for CHECK was changed to support the move from
+		   globally unique check numbers to being unique at the account level.
+
+	03/13/07 - NATRAJAH - CR 24946
+		Modified PROC section to generate the error message, when pay 
+		interest on partial withdrawal flag is enabled and withholding
+		tax calc base is greater than "0"
+		   
+	02/17/07 - KinI - CR 24944
+		Modified PROC section to generate the error if DEP.ANLINFLCALIN
+		is defined and DEP.IRCB is not 1 or 3.
+
+	07/20/06 - Giridhal - CR 21207
+		Modified to default the county information for the seasonal 
+		address to the newly created accounts
+		   	
+	04/19/06 - RussellDS - CR20209
+		Remove code related to obsoleted Mutual Funds/Securities.
+
+	03/24/06 - SkariahV - CR 20246
+		Added error message in the section SEGINUYN for the case where
+		'Interest maturity Transfer Customer' is not defined when  
+		interest maturity option is set to option4 - Transfer to 
+		External Account.Also added error message for the case where
+		'Interest maturity Transfer customer Sequence' is not defined 
+		when 'Interest maturity Transfer Customer' exists.
+		
+	12/29/05 - Alagarss - CR 18006
+		Modified the message id from 4969 to 4959.
+		
+	12/08/05 - SmithCD - CR 18519
+		Removed code that created an EMPLNOT record b/c EMPLNOT has been 
+		obsoleted with CR 16891.
+
+	11/18/05 - Srinivar - CR 18519
+		Modified the CUVAR references with #IF in PROC section.
+		
+	11/11/05 - KELLYP - CR 18175
+		Modified to only create the account's ACNADDR record when 
+		%O=0 (create).  This prevents a "record already exists" error
+		from occuring when running the @DEPVER001 function.
+
+	10/26/05 - KELLYP - CR 17964
+		Modified to prevent undefined error on GTIME1.  Also modified
+		to prevent a compilation error from occuring due to function
+		optimization (prodctl.dtbeg needed to be stored in a local 
+		variable prior to using the toString method).
+
+	10/24/05 - Radhika - 16891
+	        Modified section AIINUSE: removed "1" which is passed as the 
+		fourth parameter to INSERT^DEPSEGIN.	        
+	
+	09/15/05 - NATRAJAH - 16674
+		Modified PROC section: in "relrs" while loop assigned the ROLE
+		variable value from ResultSet relrs instead of ResultSet rs.		
+		
+	08/04/05 - SatyanaS - 16676
+		Modified PROC section: added an additional check to skip the 
+		code section in the DEP filer (which does an insert
+		on a record that already exists) if %ProcessMode'=2 (which is 
+		verification).
+	
+	06/01/05 - KinI - 16153
+		Modified PROC section: added new GL set code verification via 
+		GLCHK^ACNFUNCS to ensure that the class and group of GLSC match 
+		the class and group of the deposit. Removed 'Db.isDefined check 
+		on UTBLGLSC table as GLCHK^ACNFUNCS returns the same error now 
+		if the set code isn't defined.
+
+	05/18/05 - KELLYP - CR 15268
+		Modified to populate the XSGNCRD table.  This table was 
+		formerly populated via the XSGNCRD index but needs to be
+		populated via the triggers since XSGNCRD needs to be treated
+		as a regular table because records need to be directly fetched
+		from it.
+
+	02/22/05 - KELLYP - CR 13662
+		Made several changes to variable typing and setting of dates.
+
+	02/17/05 - Kini - 13991	
+		Modified to replace UTBLGLSCX index table with UTBLGLSC
+		since UTBLGLSCX has been obsoleted.
+
+	02/01/05 - KELLYP - CR 13662
+		Cleaned up procedure and  modified to conform to current
+		PSL standards.  Also moved some XBAD checks and SWIFT 
+		942 logic (corrected) to this procedure from the DEPBI 
+		procedure.
+
+	12/10/04 - Georges - CR 13023
+		Modified PROC section to add ACNADDR record for escrow
+		accounts.This will eliminate receiving a Referential
+		Integrity error ACNADDR(CID)->ACN.
+	
+	06/05/03 - CARROLLJ - 51349
+		Modified AIINUSE section to pass dep object to DEPSEGIN.
+
+	03/12/03 - Dan Russell - 51351
+		Remove reference to membership.  It is no longer supported
+		in V7.0.   
+	*/
+
+	quit	// Dummy quit for compiler
+
+public PROC(RecordDEP dep)	// Entry point for DEP AFTER_INSERT trigger
+
+	type Public Boolean ER
+	type Public String ET,RM
+	
+	set %EffectiveDate=%EffectiveDate.get()
+
+	// Initialize objects used throughout procedure
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:dep.type")
+	type RecordPRODDFTD proddftd=Db.getRecord("PRODDFTD","TYPE=:dep.type")
+	type RecordCIF cif=Db.getRecord("CIF","ACN=:dep.acn")
+	type RecordUTBLBRCD utblbrcd=Db.getRecord("UTBLBRCD","BRCD=:dep.boo")
+
+	// Product type ~p1 not available prior to ~p2
+	if dep.odt<prodctl.dtbeg do { quit
+		type Date DTBEG
+		set DTBEG=prodctl.dtbeg
+		do Runtime.setErrMSG("DEP",2036,dep.type_"~"_DTBEG.toString()) quit:ER
+		}
+
+	// Conversion Account Required for Non-PROFILE Institution Account.
+	if prodctl.nonpa=1,dep.convacn.isNull() do Runtime.setErrMSG("DEP",4896) quit:ER
+
+	// Scheduled deposit processing must be used with cumulative deposits. ;ahmeds
+	if 'dep.schproc,dep.cumdep do Runtime.setErrMSG("DEP",4690) quit:ER
+
+	// Cumulative Deposits Require an Interest Compounding Frequency
+	if dep.cumdep,dep.icf.isNull() do Runtime.setErrMSG("DEP",4694) quit:ER
+
+	// Scheduled deposit frequency required
+	if dep.schproc,dep.schdepf.isNull() do Runtime.setErrMSG("DEP",4660) quit:ER
+
+	// Scheduled deposit amount required
+	if dep.schproc,'dep.schdepa do Runtime.setErrMSG("DEP",4662) quit:ER
+
+	// Call FUNDTRANSFER procedure if funding account field is not null
+	if 'dep.fundact.isNull(),'%ProcessMode do EXEC^FUNDTFR(.dep)
+ 
+	/*
+	 Select Backup Withholding Option to use Accrued Withholding
+	 Tax Processing
+	*/
+	if 'dep.bwf,dep.awtp do Runtime.setErrMSG("DEP",5071) quit:ER
+
+	/*
+	 Accrued Withholding Tax Processing not valid with interest
+	 Withholding Calculation Method
+	*/
+	if dep.awtp,'dep.intwcalc.isNull() do Runtime.setErrMSG("DEP",5072) quit:ER
+
+	/*
+	 Pay interest on partial withdrawal is not valid, when 
+	 whenholding tax calc base is other than "0"
+	*/
+	if 'dep.intwcalc.isNull(),dep.pipw do { quit:ER
+		type RecordUTBLWCALC utblwcalc=Db.getRecord("UTBLWCALC","KEY=:dep.intwcalc")
+
+		//Cannot pay interest on partial withdrawal if withholding tax calc base is ~p1
+		if utblwcalc.whcalcb>0 do Runtime.setErrMSG("DEP",6184,utblwcalc.whcalcb) quit:ER
+		}
+		
+	// Overdraft Term (ODTERM) verification.
+	if 'dep.odterm.isNull() do { quit:ER
+
+		// First character of term may not be '0'
+		if dep.odterm.extract()=0 do Runtime.setErrMSG("DEP",1113) quit:ER 
+
+		// First character of term must be numeric
+		if +dep.odterm=0 do Runtime.setErrMSG("DEP",1114) quit:ER 
+
+		// Term must contain character D, W, M, or Y
+		if dep.odterm=+dep.odterm do Runtime.setErrMSG("DEP",2629) quit:ER 
+
+		// Lowercase characters not allowed
+		if dep.odterm?.E1L.E do Runtime.setErrMSG("DEP",1662) quit:ER 
+
+		type Number I
+		for I=1:1:dep.odterm.length() do { quit:ER
+			// Term may only contain characters D, W, M, Y, or Q
+			if '(("DWMY"[dep.odterm.extract(I)!(dep.odterm.extract(I)?1N))) do Runtime.setErrMSG("DEP",2628) quit:ER 
+			}
+
+		// Last character of term must be D, W, M, or Y
+		if dep.odterm.extract(dep.odterm.length())?1N do Runtime.setErrMSG("DEP",2714) quit:ER 
+
+		// Overdraft term requires overdraft limit
+		if dep.odlim.isNull() do Runtime.setErrMSG("DEP",4002) quit:ER
+		}
+		
+ 	// Overdraft limit requires overdraft term
+	if ('dep.odlim.isNull()),(dep.odterm.isNull()) do Runtime.setErrMSG("DEP",4001) quit:ER
+		
+ 	// Invalid Negative Interest Processing Option with O/D Limit processing (ROR Account)
+ 	if ('dep.odlim.isNull())&(dep.negipo'=2) do Runtime.setErrMSG("DEP",4178) quit:ER
+
+	// Low Level Defaults
+	if %ProcessMode=0 do { quit:ER 
+	
+		type ResultSet rs=Db.select("DFTDEF","UTBLLLD")
+		if rs.isEmpty() quit
+
+		type String END(),FILE
+
+		do START^LLDDEF(dep.cid)
+		set FILE=""
+		for  set FILE=END(FILE).order() quit:(FILE.isNull())  do { quit:ER
+			// Expired element in low level default table ~p1
+			do Runtime.setErrXBAD("DEP","LLD",FILE) quit:ER 
+			}
+		}
+	
+	if dep.ira do { quit:ER
+		
+		do TRIGGER^PROCIRA(dep.cid,.dep)
+		
+		// ~p1
+		if ER do Runtime.setErrMSG("DEP",3333,RM) quit:ER 
+		
+		if 'Db.isDefined("IRATYPE","dep.acn,dep.rpaseq") quit
+		
+		type Number CYR,PYR
+		set CYR=$$YEAR^SCADAT(%SystemDate,1)
+		set PYR=CYR-1
+
+		if 'Db.isDefined("IRA","dep.acn,dep.rpaseq,CYR") do {
+		
+			type RecordIRA irac=Class.new("RecordIRA")
+			
+			set irac.acn=dep.acn
+			set irac.rpaseq=dep.rpaseq
+			set irac.taxyr=CYR
+			set irac.d1=0
+			
+			do irac.save()
+			}
+	
+		if 'Db.isDefined("IRA","dep.acn,dep.rpaseq,PYR") do {
+		
+			type RecordIRA irap=Class.new("RecordIRA")
+			
+			set irap.acn=dep.acn
+			set irap.rpaseq=dep.rpaseq
+			set irap.taxyr=PYR
+			set irap.d1=0
+			
+			do irap.save()
+			}
+		}
+		
+	// STAT - Account Status Closed Verification
+	if dep.stat=4 do { quit
+		// Closed Account with Balance
+		if dep.bal do Runtime.setErrXBAD("DEP","CLSDBAL") quit:ER 
+		
+		// Closed Account with Accrued Int/Div
+		if dep.posacr!dep.negacr do Runtime.setErrXBAD("DEP","CLSDACR") quit:ER 
+		}
+		
+	// Check for account level bill pay option
+	if dep.actibpay=1,dep.eligbpay'=1 do Runtime.setErrMSG("DEP",5093) quit:ER 
+
+	// Accrual Processed Indicator Error
+        if %SystemDate-dep.acs>1,prodctl.nonpa'=1 do Runtime.setErrXBAD("DEP","ACS") quit:ER
+       	
+	// Renewal code 6 is for pledged accounts only
+	if 'dep.pldg,dep.rencd=6 do Runtime.setErrMSG("DEP",3847) quit:ER
+	
+	// BALCOL - Collected Balance Verification
+	do { quit:ER 
+
+		type Number SUM
+		set SUM=0
+
+		type ResultSet rs=Db.select("AMT","HLD7","CID=:dep.cid AND EXPDT>:%SystemDate")
+		if 'rs.isEmpty() while rs.next() set SUM=SUM+rs.getCol(1)
+
+		// Collected Balance not Supported by Float File
+		if dep.bal-dep.balcol-SUM do Runtime.setErrXBAD("DEP","BALCOL") quit:ER
+		}
+
+	// CHKHLD - Check Hold Amount Verification
+	do { quit:ER 
+		
+		type Number SUM
+		set SUM=0
+		
+		type ResultSet rs=Db.select("AMT","HLD8","CID=:dep.cid AND EXPDT>:%SystemDate")
+		if 'rs.isEmpty() while rs.next() set SUM=SUM+rs.getCol(1)
+		
+		// Check Hold Amount Not Supported by Hold File
+		if dep.chkhld-SUM do Runtime.setErrXBAD("DEP","CHKHLD") quit:ER 
+		}
+	
+	// CHKSTS - Check Type validation
+	if dep.chkeuro do { quit:ER
+		quit:dep.chks=""
+		
+		type RecordUTBLCHKS utblchks = Db.getRecord("UTBLCHKS","CHKS=:dep.chks",1)
+			
+		if dep.nscn'="",utblchks.accntnum=0 do { quit:ER
+			// Check type prohibits a starting check number.
+			do Runtime.setErrXBAD("DEP","CHECKNUMPROH","NSCN")
+		}
+			
+		if dep.nscn="",utblchks.accntnum = 1 do { quit:ER
+			// Check type requires a starting check number.		
+			do Runtime.setErrXBAD("DEP","CHECKNUMREQ","NSCN")
+		}
+	}
+		
+	// CHKPRD - Check Book Production File on Create
+	if '(%ProcessMode=2),dep.chkeuro=1,dep.chkiss=1,dep.chkcnt>0 do { quit:ER
+		type RecordUTBLCHKS utblchks = Db.getRecord("UTBLCHKS", "CHKS=:dep.chks",1)
+		
+		// Missing required field ~p1
+		if utblchks.accntnum '= 1 do Runtime.setErrMSG("DEP",6174,"UTBLCHKS.ACCNTNUM") quit:ER
+			
+		type RecordCHKPRD chkprd=Class.new("RecordCHKPRD")
+		
+		set chkprd.brcd=dep.boo
+		set chkprd.tjd=%SystemDate
+		set chkprd.cid=dep.cid
+		set chkprd.chks=dep.chks
+		set chkprd.seq=1
+		set chkprd.chkcnt=dep.chkcnt
+		set chkprd.scn = dep.nscn
+		set chkprd.uid=%UserID
+		set chkprd.stat=0
+		set chkprd.acn=dep.acn
+		
+		do chkprd.save()
+		}
+	
+	// ESC - Escrow Account Addition
+	if dep.grp="ESC",'dep.aref.isNull(),%ProcessMode=0 do {
+	
+		type RecordACNADDR acnaddr=Db.getRecord("ACNADDR","CID=:dep.aref")
+		type RecordACNADDR acnaddr1=acnaddr.copy()
+		
+		do acnaddr1.setMode(0)
+		set acnaddr1.cid=dep.cid
+		
+		do acnaddr1.save()
+		}
+         
+	// ESC - Escrow Account Verification
+	if dep.grp="ESC" do AFTERINS^PROCESC(.dep) quit:ER
+	
+	/*
+	 GCRS - Good Customer Status - If GCR status contains a
+	 value, GCR processing is invoked.  Scoring tables, etc are required even
+	 when the status is fixed or revoked.  When the status if fixed or revoked,
+	 the account will not be automatically be scored in the monthly or
+	 daily scoring processes.
+	*/
+	if dep.gcrs do { quit:ER 
+	
+		// GCR status is Revoked, GCR code not applicable
+		if dep.gcrs=3,('dep.gcrcd.isNull()) do Runtime.setErrMSG("DEP",3283) quit:ER 
+
+		// Monthly scoring table, GCR code, and Scoring Frequency
+		// are required if GCR status is Dynamic or Fixed
+		if dep.gcrs'=3 do { quit:ER 
+		
+			// Data required in Data Item ~p1
+			if dep.mscrtbl.isNull() do Runtime.setErrMSG("DEP",7531,"DEP.MSCRTBL") quit:ER
+
+			// Data required in Data Item ~p1
+			if dep.gcrcd.isNull() do Runtime.setErrMSG("DEP",7531,"DEP.GCRCD") quit:ER
+		
+			// Good customer recognition code ~p1 does not exist in monthly scoring table ~p2
+			if 'Db.isDefined("UTBLGCRBAL","dep.mscrtbl,dep.gcrcd") do Runtime.setErrMSG("DEP",3284,dep.gcrcd_"~"_dep.mscrtbl) quit:ER
+
+			// Data required in Data Item ~p1
+			if dep.scrfreq.isNull() do Runtime.setErrMSG("DEP",7531,"DEP.SCRFREQ") quit:ER
+			}
+
+		if dep.gcrs=1 do { quit:ER 
+		
+			// Daily scoring table and daily scoring option are required if GCR status is Dynamic
+			
+			// Data required in Data Item ~p1
+			if dep.dscrtbl.isNull() do Runtime.setErrMSG("DEP",7531,"DEP.DSCRTBL") quit:ER
+			
+			// Data required in Data Item ~p1
+			if 'dep.dsopt do Runtime.setErrMSG("DEP",7531,"DEP.DSOPT") quit:ER
+			
+			// Next scoring date is in the past
+			if dep.nsdate<%SystemDate do Runtime.setErrMSG("DEP",3285) quit:ER 
+			}
+		}
+	
+	// FLTP*/FLTD* & HLDP*/HLDD* - Float and Check Hold verification
+	if dep.grp'="DBD" do { quit:ER 
+
+		type String D(),DESC,P()
+		
+		// Float Hold
+		set DESC=$$^MSG(6053)
+		set P(1)=dep.fltp1
+		set P(2)=dep.fltp2
+		set P(3)=dep.fltp3
+		set P(4)=dep.fltp4
+		set P(5)=dep.fltp5
+		set D(1)=dep.fltd1
+		set D(2)=dep.fltd2
+		set D(3)=dep.fltd3
+		set D(4)=dep.fltd4
+		set D(5)=dep.fltd5
+	
+		do VERHLD if ER quit 
+		
+		// Check hold ~p1
+		set DESC=$$^MSG(6704)
+		set P(1)=dep.hldp1
+		set P(2)=dep.hldp2
+		set P(3)=dep.hldp3
+		set P(4)=dep.hldp4
+		set P(5)=dep.hldp5
+		set D(1)=dep.hldd1
+		set D(2)=dep.hldd2
+		set D(3)=dep.hldd3
+		set D(4)=dep.hldd4
+		set D(5)=dep.hldd5
+	
+		do VERHLD
+		}
+	
+	if 'dep.scrfreq.isNull() do { quit:ER 
+
+		type Date TMPDT
+		type Number AF
+
+		set TMPDT=$$NJD^UFRE(%SystemDate,dep.scrfreq,.AF) quit:ER 
+		
+		// Scoring frequency must be monthly
+		if AF'=12 do Runtime.setErrMSG("DEP",3286) quit:ER 
+		}
+	
+	// Data required in data item ~p1
+	if dep.iacm.isNull(),dep.ircb>0 do Runtime.setErrMSG("DEP",7531,"LN.IACM") quit:ER 
+	
+	// INC - Interest Next Compounded
+	if 'dep.inc.isNull() do { quit:ER
+
+		// Int/Div Next Compounded Prior to System Date
+		if dep.inc<%SystemDate do Runtime.setErrXBAD("DEP","INC") quit:ER 
+		
+		// Missing Int/Div Compounding Frequency
+		if dep.icf.isNull() do Runtime.setErrXBAD("DEP","ICF") quit:ER 
+		}
+	// Int/Div Next Compounded Prior to System Date
+	else  if 'dep.icf.isNull() do Runtime.setErrXBAD("DEP","INC") quit:ER 
+	
+	// Incremental DR Amt Inconsistent with OD Tfr Amt
+	if dep.incdr,prodctl.odsitr,prodctl.odsitr#dep.incdr do Runtime.setErrXBAD("DEP","ODSITR") quit:ER
+	
+	// ICHND - Interest Change - Next Date
+	if 'dep.ichnd.isNull() do { quit:ER 
+	
+		// Next Int/Div Change Date Prior to System Date
+		if dep.ichnd<%SystemDate do Runtime.setErrXBAD("DEP","ICHND") quit:ER 
+		
+		// Missing Int/Div Change Frequency
+		if dep.intfre.isNull() do Runtime.setErrXBAD("DEP","INTFRE") quit:ER 
+		}
+	// Next Int/Div Change Date Prior to System Date
+	else  if 'dep.intfre.isNull(),('dep.segflg!(dep.segacr)) do Runtime.setErrXBAD("DEP","ICHND") quit:ER 
+
+	// Matrix must reference non segment data items when accruing at account level
+	if 'dep.intmat.isNull() do { quit:ER 
+	
+		// Do not perform check if segmented account accruing at segment level
+		if dep.segflg,'dep.segacr quit 
+
+		type Boolean ERFLAG
+		type String ITEM
+		type RecordUTBLMATATT umatatt=Db.getRecord("UTBLMATATT","NAME=:dep.intmat")
+
+		type ResultSet rs=Db.select("ITEM","STBLMATATT","DEP NOT LIKE 'DEPSEG%'")
+		if rs.isEmpty() quit 
+	
+		set ERFLAG=1
+	
+		while rs.next() do { quit:'ERFLAG  
+			set ITEM=rs.getCol(1)
+
+			// Checks if ROW or MATCOL have non segment data items
+			if (umatatt.row=ITEM)!(umatatt.matcol=ITEM) set ERFLAG=0 quit 
+			}
+	
+		// Matrix must reference non segment data items
+		if ERFLAG do Runtime.setErrMSG("DEP",3999) quit:ER 
+		}
+	
+	// INDEX - Index Verification
+	if 'dep.index.isNull() do { quit:ER 
+
+		// Int/Div Index reqs value in int/div change freq
+		if dep.intfre.isNull() do Runtime.setErrXBAD("DEP","INDEX13") quit:ER 
+
+		type String PAR(),X,IX()		  // Used in EDT^UINDX
+
+		set PAR("IPMODE")=0
+
+		/*
+		   EDT^UINDX validates the following:
+		   INDEX1 - Invalid index name
+		   INDEX2 - Invalid index offset syntax
+		   INDEX3 - Invalid rounding instruction
+		   INDEX4 - Invalid index rounding percentage
+		   INDEX5 - Extraneous index plan information entered
+		*/
+
+		set X=dep.index
+		do EDT^UINDX if ER do Runtime.setErrSTBLER("DEP",ET) quit:ER 
+
+		set X=dep.intspr
+		do SPRPP^UINDX if ER do Runtime.setErrSTBLER("DEP",ET) quit:ER 
+
+		set X=dep.rndmtd
+		do RNDPP^UINDX if ER do Runtime.setErrSTBLER("DEP",ET) quit:ER 
+
+		type Date DT
+		type Number IRN
+		type String BASE,DIAUTH,EXP,IND,TIER,TIERDI
+
+		set BASE=""
+		set TIER=""		
+		set TIERDI=$$TIERDI^PROCDEP(.dep)
+		
+		// O/D Limit cannot be used with Index Tier data items
+		if 'dep.odlim.isNull(),TIERDI do Runtime.setErrXBAD("DEP","ODLIM") quit:ER 
+
+		set IND=dep.index
+
+		// Load indes and tiers data to IX array
+		if 'IX(IND).exists() do { quit:ER
+			set X=$$LOADIX^UINDX(.dep,dep.index,%EffectiveDate)
+			if ER do Runtime.setErrSTBLER("DEP",ET) quit
+			}
+
+		// Data Item Authorization Flag
+		set DIAUTH=IX(IND).piece("|",14)
+
+		set DT=0
+		for  set DT=IX(IND,DT).order() quit:(DT.isNull())  do { quit:ER
+			for  set TIER=IX(IND,DT,TIER).order() quit:(TIER.isNull())  do { quit:ER
+				
+				// Check tier
+				do DICHECK(TIER,.dep,BASE,DIAUTH) quit:ER
+				
+				// Check interest rate
+				set IRN=IX(IND,DT,TIER).piece("|",1)
+				do DICHECK(IRN,.dep,BASE,DIAUTH) quit:ER
+				}
+			}
+								
+		// Auth/Uauth Negative / Positive Int Spreads integrity check
+		if ('dep.intspra.isNull())!('dep.intspru.isNull()) do { quit:ER
+
+			type Boolean VALID
+			type String TIER
+
+			set DT=0
+			set VALID=0
+			set TIER=""
+
+			// Negative interest spread requires incremental interest index using DEP.ODLIM and DEP.ODTERM
+			if IX(IND).piece("|",2)'="I" do Runtime.setErrMSG("DEP",4522) quit:ER
+
+			// Negative interest spread requires incremental interest index using DEP.ODLIM and DEP.ODTERM
+			if dep.odlim.isNull() do Runtime.setErrMSG("DEP",4522) quit:ER
+
+			// If DEP.ODLIM and DEP.ODEXP are not defined as an Ind tier.
+			set DT=IX(IND,DT).order()
+			for  set TIER=IX(IND,DT,TIER).order() quit:(TIER.isNull()!VALID)  do { quit:ER
+				if TIER["DEP.ODLIM",IX(IND,DT,TIER).piece("|",4)="DEP.ODEXP" set VALID=1 quit
+				}
+				
+			// Negative interest spread requires incremental interest index using DEP.ODLIM and DEP.ODTERM
+			if 'VALID do Runtime.setErrMSG("DEP",4522) quit:ER
+			}
+
+		// Positive interest spread requires a cumulative or incremental interest index
+		if ('dep.intsprp.isNull()),IX(IND).piece("|",2)'="I",IX(IND).piece("|",2)'="C" do Runtime.setErrMSG("DEP",4521) quit:ER
+		
+		// Check spread syntax. ( +-*/ can only be used )
+		if 'dep.intspra.isNull()  do { quit:ER
+		
+			// Division by zero is not allowed in Interest Spread column
+			if dep.intspra["/0" do Runtime.setErrMSG("DEP",4538) quit:ER
+			
+			set X=dep.intspra
+			do SPRPP^UINDX
+			
+			// Invalid interest spread syntax in column ~p1
+			if ER do Runtime.setErrMSG("DEP",4523,"DEP.INTSPRA") quit:ER
+			}
+			
+		if 'dep.intspru.isNull()  do { quit:ER
+		
+			// Division by zero is not allowed in Interest Spread column
+			if dep.intspru["/0" do Runtime.setErrMSG("DEP",4538) quit:ER
+			
+			set X=dep.intspru
+			do SPRPP^UINDX
+			
+			// Invalid interest spread syntax in column ~p1
+			if ER do Runtime.setErrMSG("DEP",4523,"DEP.INTSPRU") quit:ER
+			}
+
+		if 'dep.intsprp.isNull()  do { quit:ER
+		
+			// Division by zero is not allowed in Interest Spread column
+			if dep.intsprp["/0" do Runtime.setErrMSG("DEP",4538) quit:ER
+
+			set X=dep.intsprp
+			do SPRPP^UINDX
+			
+			// Invalid interest spread syntax in column ~p1
+			if ER do Runtime.setErrMSG("DEP",4523,"DEP.INTSPRP") quit:ER
+			}
+
+		// Does not apply if accruing at the segment level
+		if dep.segflg,'dep.segacr quit
+
+		// Int/Div Index reqs value in Last Change Date
+		if dep.ichld.isNull() do Runtime.setErrXBAD("DEP","INDEX11") quit:ER 
+		
+		// Int/Div Index reqs value in Next Change Date
+		if dep.ichnd.isNull() do Runtime.setErrXBAD("DEP","INDEX12") quit:ER
+		}
+	
+	// Positive interest spread requires a cumulative or incremental interest index
+	if (('dep.intspra.isNull())!('dep.intspru.isNull())),dep.index.isNull() do Runtime.setErrMSG("DEP",4521) quit:ER
+
+	// Negative interest spread requires incremental interest index using DEP.ODLIM and DEP.ODTERM
+	if ('dep.intsprp.isNull()),(dep.index.isNull()) do Runtime.setErrMSG("DEP",4522) quit:ER
+
+	// O/D Limit requires Index with Data Item Authorization
+	if dep.index.isNull(),('dep.odlim.isNull()!($$TIERDI^PROCDEP(.dep))) do Runtime.setErrXBAD("DEP","ODLIM2") quit:ER 
+	
+	// Interest Change Frequency requires an Index
+	if dep.index.isNull(),'dep.intfre.isNull() do Runtime.setErrXBAD("DEP","INDEX16") quit:ER
+	
+	// Validate IRN against the Min and Max Rates
+	
+	// Invalid Int/Div Rate - Lower than Minimum
+	if 'dep.intmn.isNull(),dep.irn<dep.intmn do Runtime.setErrXBAD("DEP","INVINTRTL") quit:ER 
+	
+	// Invalid Int/Div Rate - Higher than Maximum
+	if 'dep.intmx.isNull(),dep.irn>dep.intmx do Runtime.setErrXBAD("DEP","INVINTRTH") quit:ER  
+
+	// IRCB set to accrue but IRN is null
+	if dep.ircb>0,dep.irn.isNull() do { quit:ER 
+	
+		// XBAD does not apply if accruing at the segment level
+		if dep.segflg,'dep.segacr quit 
+	
+		// Account accruing int/div must have int/div rate
+		do Runtime.setErrXBAD("DEP","IRN") quit:ER 
+		}
+	
+	// INP - Interest Next Posting Date Verification
+	if 'dep.inp.isNull() do { quit:ER 
+	
+		// Next int/div post date prior to system date
+		if dep.inp<%SystemDate do Runtime.setErrXBAD("DEP","INP") quit:ER 
+
+		// Int/Div posting frequency is required
+		if 'dep.segflg,dep.inp'=dep.mdt,dep.inp>%SystemDate,dep.ipf.isNull() do Runtime.setErrXBAD("DEP","INPF") quit:ER 
+
+		if (%ProcessMode=2) quit 
+	
+		/*
+		 If INP is modified from the default value, update history with
+		 the change.  RECALC must thread back through history.
+		*/
+
+		type Date NJD
+		type Number INTPOS
+		set INTPOS=CUVAR.INTPOS#2
+
+		set NJD=$$FRSTDATE^ACNFUNCS(dep.odt,dep.ipf,INTPOS)
+	
+		if NJD'=dep.inp do {
+			type String TCMT
+			set TCMT=dep.cid_"[DEP]INP:"_NJD_":"_dep.inp
+			do HISTBLD^ACNFUNCS(TCMT,dep.boo)
+			}
+		}
+
+	// Next int/div post date prior to system date
+	else  if 'dep.ipf.isNull(),('dep.segflg!(dep.segacr)) do Runtime.setErrXBAD("DEP","INP") quit:ER 
+	
+	// Next int/div check date prior to system date
+	if 'dep.intchknd.isNull(),dep.intchknd<%SystemDate do Runtime.setErrXBAD("DEP","INTCHKND") quit:ER 
+	else  if 'dep.intchkfre.isNull(),dep.intchknd.isNull() do Runtime.setErrXBAD("DEP","INTCHKND") quit:ER 
+	
+	// Verify Interest Posting and Check Data are Compatible
+	if 'dep.inp.isNull(),'dep.ipf.isNull(),'dep.intchkfre.isNull(),'dep.intchknd.isNull() do { quit:ER 
+		
+		// Interest Posting
+		do VER^LNUSFV(dep.inp,dep.ipf,$$^MSG(3787),dep.intchknd,dep.intchkfre,$$^MSG(6796))
+		
+		// Int/Div posting and check data incompatible
+		if ER do Runtime.setErrXBAD("DEP","INTCHKINV") quit:ER 
+		}
+	
+	/*
+	 Set up DAYEND entry for next interest posting date manually
+	 This coding replaces the traditional filer index definitions for
+	 next interest posting dates.
+	*/
+	if '(%ProcessMode=2),'dep.inp.isNull() do { quit:ER 
+	
+		// Segmented interest on principal, accruing/posting at account level
+		if dep.segflg,dep.segacr do {
+		
+			type RecordDAYENDSEGIP dsegip=Class.new("RecordDAYENDSEGIP")
+		
+			set dsegip.tjd=dep.inp
+			set dsegip.cid=dep.cid
+			set dsegip.posting=2
+			set dsegip.seg=-1
+			
+			do dsegip.save()
+			
+			type RecordDAYENDINP dinp=Class.new("RecordDAYENDINP")
+			
+			set dinp.tjd=dep.inp
+			set dinp.cid=dep.cid
+			set dinp.posting=2
+			
+			do dinp.save()
+			}
+
+		// Regular interest
+		if 'dep.segflg do {
+			
+			type RecordDAYENDINP dinp=Class.new("RecordDAYENDINP")
+			
+			set dinp.tjd=dep.inp
+			set dinp.cid=dep.cid
+			set dinp.posting=0
+			
+			do dinp.save()
+			}
+		}
+	
+	// Low Balance Integrity
+	if (dep.ircb=5!(dep.ircb=6)) do { quit:ER 
+
+		// Low bal proc n/a w/o inst including int/div posting day
+		#IF 'CUVAR.IPD do Runtime.setErrXBAD("DEP","LBBIPD") quit:ER 
+		
+		// Call procedure DEPLBB for low balance verification
+		if 'dep.lbcp.isNull() do ALL^PROCLBB(dep.ircb,dep.ipf,dep.lbcp,dep.lbcm)
+		}
+	
+	// Neg Acct Bal Opt cannot be 1, 2, or 3 with Neg Int Transfer
+	if (dep.iopt=6!(dep.iopt=7)),dep.negbalop do Runtime.setErrXBAD("DEP","NABO") quit:ER 
+
+	// Invalid field values Available Int/Div Option and Int/Div Disbursement Option
+ 	if dep.iopt>0,dep.iaf=2 do Runtime.setErrMSG("DEP",8619) quit:ER
+
+	// Int/Div Disbursement/Transfer Account Error
+	if (dep.iopt=2!(dep.iopt=5)!(dep.iopt=7)),dep.itrf.isNull() do Runtime.setErrXBAD("DEP","IOPT") quit:ER 
+
+	// Interest Disbursement/Transfer Account Error
+	if dep.iopt=6,dep.negitrf.isNull() do Runtime.setErrXBAD("DEP","IOPT") quit:ER 
+
+	do TFRCID^PROCDEP(dep.itrf,.dep) quit:ER
+	do TFRCID^PROCDEP(dep.negitrf,.dep) quit:ER
+	
+	// IRCB - Interest Rate Calculation Base Verification
+	if dep.ircb=4 do { quit:ER 
+	
+		// Renewal code should be 5 for discount CD
+		if dep.rencd'=5 do Runtime.setErrXBAD("DEP","RENCD11") quit:ER 
+		
+		// No int/div posting frequency for discount CD
+		if 'dep.ipf.isNull() do Runtime.setErrXBAD("DEP","IPF") quit:ER 
+		
+		// Int/Div Disbursement/Transfer Account Error
+		if 'dep.iopt.isNull() do Runtime.setErrXBAD("DEP","IOPT") quit:ER 
+		
+		// No int/div index for discount CD
+		if 'dep.index.isNull() do Runtime.setErrXBAD("DEP","INDEX14") quit:ER 
+		}
+	
+	// If SGNCRD>0 AND PSGNCRDR'=1 track this account in XSGNCRD
+	if '%ProcessMode,dep.sgncrd>0,dep.psgncrdr'=1 do {
+		type RecordXSGNCRD xsgncrd=Class.new("RecordXSGNCRD")
+		set xsgncrd.sjd=%SystemDate
+		set xsgncrd.sgncrd=dep.sgncrd
+		set xsgncrd.osgncrdc=+dep.osgncrdc
+		set xsgncrd.psgncrdr=+dep.psgncrdr
+		set xsgncrd.cid=dep.cid
+		do xsgncrd.bypassSave()
+		}
+	
+	// Maturity Date/Term Error
+	if dep.trm.isNull(),dep.mdt do Runtime.setErrXBAD("DEP","MDT1") quit:ER 
+	else  if 'dep.trm.isNull() do { quit:ER 
+	
+		// Maturity Date/Term Error
+		if 'dep.segflg,'dep.mdt do Runtime.setErrXBAD("DEP","MDT1") quit:ER 
+		
+		// Maturity Date Prior to System Date
+		if 'dep.segflg,dep.mdt<%SystemDate do Runtime.setErrXBAD("DEP","MDT") quit:ER 
+	
+		// First character of term may not be zero
+		if dep.trm.extract()=0 do Runtime.setErrMSG("DEP",1113) quit:ER 
+
+		// First character of term must be numeric
+		if +dep.trm=0 do Runtime.setErrMSG("DEP",1114) quit:ER 
+
+		// Term must contain characters D, W, M, Y, or Q
+		if dep.trm=+dep.trm do Runtime.setErrMSG("DEP",2629) quit:ER 
+
+		// Lowercase characters not allowed
+		if dep.trm?.E1L.E do Runtime.setErrMSG("DEP",1662) quit:ER 
+
+		type Number I
+
+		// Term may only contain characters D, W, M, Y, or Q
+		for I=1:1:dep.trm.length() if '(("DWMYQ"[dep.trm.extract(I))!(dep.trm.extract(I)?1N))) do Runtime.setErrMSG("DEP",2628) quit:ER
+
+		// First character of quarter term must be 1, 2, 3, or 4
+		if dep.trm.extract(2)="Q",dep.trm.extract()>4 do Runtime.setErrMSG("DEP",3869) quit:ER 
+		}
+	
+	// Overdraft Tfr Minimum Less Than Min Debit Amount
+	if dep.mindr,prodctl.odsmtr,prodctl.odsmtr<dep.mindr do Runtime.setErrXBAD("DEP","ODSMTR") quit:ER
+
+  	// MT900 Debit Threshold must be defined if Generate MT900="Y"
+	if dep.mt900=1,dep.mt900thr.isNull(),cif.mt900thr.isNull() do Runtime.setErrMSG("DEP",4077) quit:ER
+
+	// MT910 Credit Threshold must be defined if Generate MT910="Y"
+	if dep.mt910=1,dep.mt910thr.isNull(),cif.mt910thr.isNull() do Runtime.setErrMSG("DEP",4078) quit:ER
+
+	if dep.mt320=1 do { quit:ER
+		// SWIFT Address must be defined
+		if (dep.mt320a.isNull()),(cif.mt320a.isNull()),(cif.swiftadd.isNull()) do Runtime.setErrMSG("DEP","4029") quit:ER
+		}
+	
+	if dep.mt900=1 do { quit:ER
+		// SWIFT Address must be defined
+		if (dep.mt900a.isNull()),(cif.mt900a.isNull()),(cif.swiftadd.isNull()) do Runtime.setErrMSG("DEP","4029") quit:ER
+		}
+	
+	if dep.mt910=1 do { quit:ER
+		// SWIFT Address must be defined
+		if (dep.mt910a.isNull()),(cif.mt910a.isNull()),(cif.swiftadd.isNull()) do Runtime.setErrMSG("DEP","4029") quit:ER
+		}
+	
+	if dep.mt940=1 do { quit:ER
+		// SWIFT Address must be defined
+		if (dep.mt940a.isNull()),(cif.mt940a.isNull()),(cif.swiftadd.isNull()) do Runtime.setErrMSG("DEP","4029") quit:ER
+		}
+
+	if dep.mt942=1 do { quit:ER
+		// SWIFT Address must be defined
+		if (dep.mt942a.isNull()),(cif.mt942a.isNull()),(cif.swiftadd.isNull()) do Runtime.setErrMSG("DEP","4029") quit:ER
+		}
+
+	type Boolean G1NULL,G2NULL
+	set G1NULL=dep.mt942g1.isNull()
+	set G2NULL=dep.mt942g2.isNull()
+	
+	// Generate MT942 must be set to "Yes"
+	if 'dep.mt942,('G1NULL!'G2NULL) do Runtime.setErrMSG("DEP",4113) quit:ER
+
+	// A value must be entered in MT942 Generate Time 1
+	if 'G2NULL,G1NULL do Runtime.setErrMSG("DEP",4114) quit:ER
+
+	// Value must be greater than MT942 Generate Time 1
+	if 'G2NULL,dep.mt942g1>dep.mt942g2 do Runtime.setErrMSG("DEP",4121) quit:ER
+
+	// Generate SW942 table entry on account create
+	if dep.mt942,%ProcessMode=0 do {
+	
+		type Time GTIME1,GTIME2
+
+		set GTIME1=""
+		set GTIME2=""
+
+		// Use DEP-level values, if defined
+		if 'G1NULL do {
+			set GTIME1=dep.mt942g1
+			set GTIME2=dep.mt942g2			
+			}
+
+		// Otherwise, use CIF-level values
+		else  if 'cif.mt942g1.isNull() do {
+			set GTIME1=cif.mt942g1
+			set GTIME2=cif.mt942g2
+			}
+			
+		if GTIME1.isNull() quit
+		
+		type Date TMPDT,TMPTM
+		
+		// Determine the next date and time to generate an MT942
+		
+		// GTIME1 has not passed
+		if GTIME1>%CurrentTime do {
+			set TMPDT=%SystemDate
+			set TMPTM=GTIME1
+			}
+		// GTIME1 has passed but GTIME2 hasn't
+		else  if GTIME1<%CurrentTime,GTIME2>%CurrentTime do {
+			set TMPDT=%SystemDate
+			set TMPTM=GTIME2
+			}
+		// GTIME1 and GTIME2 have both passed
+		else  if GTIME1<%CurrentTime,GTIME2<%CurrentTime do {
+			set TMPDT=%SystemDate+1
+			set TMPTM=GTIME1
+			}
+
+		if 'TMPDT.isBusDate() do {
+			set TMPDT=TMPDT.nextBusDate()
+			set TMPTM=GTIME1
+			}
+			
+		// Create the SW942 record
+		type RecordSW942 sw942=Class.new("RecordSW942")
+
+		set sw942.swdate=TMPDT
+		set sw942.swtime=TMPTM
+		set sw942.cid=dep.cid
+		set sw942.status=0
+		
+		do sw942.save()
+		}
+
+	// Negative accrued value with net accrued processing
+	if dep.negacrpo=0,dep.negacr>0 do Runtime.setErrXBAD("DEP","NEGACRPO") quit:ER 
+
+	// Neg Int Posting Option cannot be 2 if Neg Accrual Option is 0
+	if dep.negipo=2,'dep.negacrpo do Runtime.setErrMSG("DEP",249) quit:ER
+
+	// Negative interest posting frequency not allowed
+	if 'dep.negipf.isNull(),dep.negipo'=2 do Runtime.setErrXBAD("DEP","NEGIPFNAL") quit:ER 
+
+	// Neg interest posting frequency missing
+	if dep.negipf.isNull(),dep.negipo=2 do Runtime.setErrXBAD("DEP","NEGIPFREQ") quit:ER 
+	
+	// NEGINP - Negative Interest Next Posting Date Verification
+	if 'dep.neginp.isNull() do { quit:ER 
+	
+		// Next Neg Int post date missing or prior to sys date
+		if dep.neginp<%SystemDate do Runtime.setErrXBAD("DEP","NEGINP") quit:ER 
+
+		if %ProcessMode=2 quit
+	
+		/*
+		 If NEGINP is modified from the default value, update history
+		 with the change.  RECALC must thread back through history.
+		*/
+
+		type Date NJD
+		type Number INTPOS
+		set INTPOS=CUVAR.INTPOS#2
+
+		set NJD=$$FRSTDATE^ACNFUNCS(dep.odt,dep.negipf,INTPOS)
+	
+		if NJD'=dep.neginp do {
+			type String TCMT
+			set TCMT=dep.cid_"[DEP]NEGINP:"_NJD_":"_dep.neginp
+			do HISTBLD^ACNFUNCS(TCMT,dep.boo)
+			}
+		}
+
+	// Next Neg Int post date missing or prior to sys date
+	else  if 'dep.negipf.isNull(),('dep.segflg!(dep.segacr)) do Runtime.setErrXBAD("DEP","NEGINP") quit:ER 
+	
+	/*
+	 Set up DAYEND entry for next negative interest posting date manually
+	 This coding replaces the traditional filer index definitions for
+	 next interest posting dates.
+	*/
+	if '(%ProcessMode=2),'dep.neginp.isNull() do { quit:ER 
+		
+		type RecordDAYENDINP dinp=Class.new("RecordDAYENDINP")
+		
+		set dinp.tjd=dep.neginp
+		set dinp.cid=dep.cid
+		set dinp.posting=1
+		
+		do dinp.save()
+		}
+
+	/*	
+	 Create ACNDSD record(s) for all scheduled interest and/or negative
+	 interest posting dates.
+	*/
+	if '(%ProcessMode=2),'dep.segflg do NEWDEP^DSDUTL(dep.cid,dep.ipf,dep.inp,dep.negipf,dep.neginp,dep.convdt,dep.odt,CUVAR.INTPOS)
+
+	// Maximum days notice effective required for notice products
+	if dep.notice,'dep.notmax do Runtime.setErrMSG("DEP",1685) quit:ER 
+	
+	// Minimum notice period required for notice products
+	if dep.notice,'dep.notmin do Runtime.setErrMSG("DEP",1738) quit:ER 
+
+	// Purchase threshold amount required
+	if proddftd.swpf=1,((dep.swpt<0)!(dep.swpt.isNull())) do Runtime.setErrXBAD("DEP","SWPAMT") quit:ER 
+
+	/*
+	 PHLD - Permanent Hold Indicator Verification
+	 If a current permanent hold exist in the PHLD file, the permanent hold
+	 flag PHLD should be on in the deposit file.
+	*/
+	if 'dep.phld do { quit:ER 
+
+		type ResultSet rs=Db.select("SEQ","PHLD","CID=:dep.cid AND EXPDT>:%SystemDate AND STDT<:%SystemDate") 
+
+		// Permanent Hold Indicator Error
+		if 'rs.isEmpty() do Runtime.setErrXBAD("DEP","PHLD") quit:ER 
+		}
+	
+	// Renewal Code/Transfer Account Error
+	if dep.rencd=2,dep.racn.isNull() do Runtime.setErrXBAD("DEP","RENCD") quit:ER 
+	if 'dep.racn.isNull() do { quit:ER 
+
+		// Renewal Code/Transfer Account Error
+		if dep.rencd'=2 do Runtime.setErrXBAD("DEP","RENCD") quit:ER 
+		
+		// Prin Mat opt 2 requires valid Renewal Tfr Account
+		if 'Db.isDefined("DEP","dep.racn") do Runtime.setErrXBAD("DEP",530) quit:ER 
+		
+		// Rollover transfer to same account restricted
+		if dep.racn=dep.cid do Runtime.setErrMSG("DEP",813) quit:ER 
+
+		type RecordDEP depracn=Db.getRecord("DEP","CID=:dep.racn",1)
+		
+		// Error if rollover account is closed or not a deposit account.
+		if depracn.stat=4 do Runtime.setErrMSG("DEP",834,dep.racn) quit:ER
+		
+		// Rollover transfer account must be a deposit account
+		if depracn.cls'="D" do Runtime.setErrMSG("DEP",833) quit:ER 
+		}
+	
+	// Renewal Code/Transfer Account Error
+	if dep.imo=2,dep.intmatita.isNull() do Runtime.setErrXBAD("DEP","RENCD") quit:ER 
+	
+	if 'dep.intmatita.isNull() do { quit:ER 
+		
+		// Renewal Code/Transfer Account Error
+		if dep.imo'=2 do Runtime.setErrXBAD("DEP","RENCD") quit:ER 
+		
+		// Int Mat opt 2 requires valid Int Tfr Account
+		if 'Db.isDefined("DEP","dep.intmatita") do Runtime.setErrXBAD("DEP",531) quit:ER 
+		
+		// Rollover transfer to same account restricted
+		if dep.intmatita=dep.cid do Runtime.setErrMSG("DEP",813) quit:ER 
+		}
+
+	/*
+	 RFLG - Restriction Flag Verification
+	 If a restriction exist in the RFLG file, the restriction flag RFLG should
+	 be on in the deposit file.
+	*/
+	if 'dep.rflg do { quit:ER 
+
+		type ResultSet rs=Db.select("RFLG","RFLG","CID=:dep.cid AND EXDT>:%SystemDate AND STDT<:%SystemDate") 	
+
+		// Restrict Flag Indicator Error
+		if 'rs.isEmpty() do Runtime.setErrXBAD("DEP","RFLG") quit:ER 
+		}
+	
+	// SCH - Ensure rate schedule on account is correct. New accounts only.
+	if '(%ProcessMode=2),'dep.sch.isNull(),'dep.segflg,dep.mdt do { quit:ER 
+
+		type ResultSet rs=Db.select("EFD","RATE1","SCH=:dep.sch AND EFD<:dep.mdt") 
+
+		// No rate table entry prior to maturity date
+		if rs.isEmpty() do Runtime.setErrMSG("DEP",1978) quit:ER 
+		}
+
+	// Rate Schedule Verification
+	if 'dep.sch.isNull() do { quit:ER
+			
+			type String PAR(),X
+
+			set PAR("IPMODE")=0
+			
+			set X=dep.rsintspr
+      		do SPRPP^UINDX if ER do Runtime.setErrSTBLER("DEP",ET) quit:ER
+        	
+        	set X=dep.rsrndmtd
+        	do RNDPP^UINDX if ER do Runtime.setErrSTBLER("DEP",ET) quit:ER
+        	}	
+
+	// No service charge frequency
+	if 'dep.feepln.isNull(),dep.scfre.isNull() do Runtime.setErrXBAD("DEP","SCFRE") quit:ER 
+	
+	// No service charge next date
+	if dep.scnd.isNull(),'dep.feepln.isNull() do Runtime.setErrXBAD("DEP","SCND2") quit:ER 
+
+	// Next Service Charge Date Prior to System Date
+	else  if dep.scnd<%SystemDate,'dep.scfre.isNull() do Runtime.setErrXBAD("DEP","SCND") quit:ER 
+	
+	// SVCFEECID - Verify service fee charge account
+	if 'dep.svcfeecid.isNull() do { quit:ER 
+
+		// Data required in Data Item ~p1
+		if dep.cid=dep.svcfeecid do Runtime.setErrMSG("DEP",7531,"DEP.SVCFEECID") quit:ER 
+
+		type RecordDEP depfee=Db.getRecord("DEP","CID=:dep.svcfeecid",1)
+		
+		// Invalid service charge fee account
+		if 'depfee.getMode() do Runtime.setErrMSG("DEP",836) quit:ER 
+
+		// Service charge fee account ~p1 is closed
+		if depfee.stat=4 do Runtime.setErrMSG("DEP",457,dep.svcfeecid) quit:ER 
+		
+		// Service charge fee account must be a deposit account
+		if depfee.cls'="D" do Runtime.setErrMSG("DEP",803) quit:ER 
+		}
+	
+	// Usage Credit Plans not valid for DBD accounts
+	if dep.grp="DBD",'dep.uspl.isNull() do Runtime.setErrXBAD("DEP","XDBDUSPL") quit:ER 
+	
+	// No usage credit plan charge frequency
+	if 'dep.uspl.isNull(),dep.upfre.isNull() do Runtime.setErrXBAD("DEP","UPFRE") quit:ER 
+	
+	// No usage credit plan next date
+	if dep.upndt.isNull(),'dep.uspl.isNull() do Runtime.setErrXBAD("DEP","UPNDT2") quit:ER 
+
+	// Usage credit plan next date prior to system date
+	else  if dep.upndt<%SystemDate,'dep.upfre.isNull() do Runtime.setErrXBAD("DEP","UPNDT") quit:ER 
+
+	// Relationship code Integrity check
+	if %ProcessMode=2 do { quit:ER 
+	
+		type Number ROLE
+		type String ROLES()
+
+		type ResultSet rs=Db.select("REQ,MAXROL,ROLE","RELCODE","REL=:dep.acnrelc") quit:ER
+		if rs.isEmpty() quit
+		while rs.next() set ROLES(rs.getCol(3))=rs.getCol(1)_"|"_rs.getCol(2)
+
+		type ResultSet relrs=Db.select("ROLE","RELCIF","CID=:dep.cid")
+		
+		// Invalid CIF/Account Linkage
+		if relrs.isEmpty() do Runtime.setErrXBAD("LN","INVLDLNK") quit:ER
+		while relrs.next() do {
+			set ROLE=relrs.getCol(1)
+			set ROLES(ROLE).piece("|",1)=ROLES(ROLE).piece("|",1)-1		// Min
+			set ROLES(ROLE).piece("|",2)=ROLES(ROLE).piece("|",2)-1		// Max
+			}
+ 
+		set ROLE=""
+		for  set ROLE=ROLES(ROLE).order() quit:ROLE.isNull()  do { quit:ER
+		
+			// Below Minimum Number of customers for role code ~p1
+			if ROLES(ROLE).piece("|",1)>0 do Runtime.setErrXBAD("DEP","RCMIN",ROLE) quit:ER
+ 
+			// Maximum Number of customers for role code ~p1 exceeded
+			if ROLES(ROLE).piece("|",2)<0 do Runtime.setErrXBAD("DEP","RCMAX",ROLE) quit:ER
+			}
+		}
+	
+	/*
+	 If a customer stop occurs on the cif being linked to this account,
+	 it will be propagated to the account by code within the RELCIF filer.
+	 However to get a overridable message to display, we must determine
+	 if the acn contains a STOP here and build the message.
+	*/
+	if '%ProcessMode do { quit:ER 
+
+		type ResultSet rs=Db.select("EXP,ACT","STOP1","ACN=:dep.acn")
+		if rs.isEmpty() quit
+		while rs.next() if rs.getCol(1)>%SystemDate!(rs.getCol(1).isNull()) quit  
+
+		// Customer stop exists
+		if rs.getCol(1).length() do Runtime.setErrXBAD("DEP","CUSSTP") quit:ER 
+		}
+
+	// STPVER - Stop Payment Bit Map Verification. STP compared to STOP table.
+	if %ProcessMode=2 do { quit:ER 
+
+		type Boolean ERR
+		type Number POS
+		type String MAP,TMP
+
+		set ERR=0
+		set MAP=dep.stp
+		
+		set TMP=$$BLDSTP^CHKSTP(dep.cid) quit:ER
+		
+		for POS=1:1:5 quit:ERR  if (TMP.piece("#",POS))-(MAP.piece("#",POS)) set ERR=1
+		
+		// Stop bitmap error
+		if ERR do Runtime.setErrXBAD("DEP","STPBIT") quit:ER
+		}
+	
+	// Employer/Institution relationship - first account open notification
+	if %ProcessMode=0,'dep.emplno.isNull() do { quit:ER
+
+		type RecordUTBLEMPLOYER uempl=Db.getRecord("UTBLEMPLOYER","EMPLNO=:dep.emplno",1)
+
+		if 'uempl.fcidd.isNull() quit
+		
+		set uempl.fcidd=%SystemDate
+		do uempl.save()
+		}
+
+	/*
+	 If SFRE defined in product and not defined upon create (native), 
+	 create new statement group.
+	*/
+	if %ProcessMode=0,proddftd.sfre do { quit:ER 
+
+		type RecordCMBGRP cmbgrp=Class.new("RecordCMBGRP")
+		
+		set cmbgrp.acn=dep.acn 
+		set cmbgrp.stmgrp=Db.nextVal("CMBGRP","dep.acn")
+		set cmbgrp.addr=dep.cid
+		set cmbgrp.sfre=dep.sfre
+		
+		do cmbgrp.save()
+		
+		type RecordCMBSTM cmbstm=Class.new("RecordCMBSTM")
+		
+		set cmbstm.acn=dep.acn
+		set cmbstm.stmgrp=cmbgrp.stmgrp
+		set cmbstm.cid=dep.cid
+		
+		do cmbstm.save()
+		}
+	
+	// Purchase Threshold Amount is less than Redemption Threshold Amount
+	if dep.swpt<dep.swptr do Runtime.setErrMSG("DEP",4280) quit:ER
+
+	// Cannot define sweep thresholds if account does not allow sweep processing
+	if dep.swpf'=1,'dep.swpt.isNull() do Runtime.setErrMSG("DEP",4328) quit:ER 
+       
+	// Purchase threshold amount required
+	if dep.swpf=1,((dep.swpt<0)!(dep.swpt.isNull())) do Runtime.setErrXBAD("DEP","SWPAMT") quit:ER
+	
+	// Purchase Threshold Amount required for Purchase Increment
+	if dep.swpi>0,((dep.swpt<0)!(dep.swpt.isNull())) do Runtime.setErrMSG("DEP",4965) quit:ER
+
+	// Redemption Threshold Amount required for Redemption Increment
+	if dep.swri>0,((dep.swptr<0)!(dep.swptr.isNull())) do Runtime.setErrMSG("DEP",4966) quit:ER
+	
+	// Checking if DEP.SWPI or DEP.SWRI is a whole number
+	type Number POS1,POS2
+	set POS1=dep.swpi#1
+	set POS2=dep.swri#1
+
+	// Purchase Increment and Redemption Increment must be define in whole increment
+	if (POS1'=0)!(POS2'=0) do Runtime.setErrMSG("DEP",4959) quit:ER
+
+	// Cannot define a redemption sweep option if account does not allow sweep processing
+	if dep.swpf'=1,'dep.swpropt.isNull() do Runtime.setErrMSG("DEP",5091) quit:ER
+
+	// Next Statement Date Prior to System Date
+	if %ProcessMode=2,dep.sndt,dep.sndt<%SystemDate do Runtime.setErrXBAD("DEP","SNDT") quit:ER 
+	
+	// Check for Institution Type Restriction.
+	if 'cif.intype.isNull() do { quit:ER 
+
+		type RecordPRODCTL prodc=Db.getRecord("PRODCTL","TYPE=:cif.type")
+
+		// If INTYPRST is set to Yes, check the user table UTBLTTBL for a valid combination.
+		if '(%ProcessMode=2),prodc.intyprst do { quit:ER 
+			if Db.isDefined("UTBLINTTBL","cif.type,cif.intype,dep.type") quit 
+
+			// Product not valid for Institution Type
+			do Runtime.setErrXBAD("DEP","INTYPRST") quit:ER 
+			}
+		}
+
+	// Date of Death Check
+	if 'cif.dod.isNull() do { quit:ER
+		// Remove the CIFDOD XBAD if it already exists and then re-add
+		// it.  This is done to prevent the XBAD from showing up twice.
+		do Runtime.delErrXBAD("LN","CIFDOD") quit:ER
+		do Runtime.setErrXBAD("LN","CIFDOD") quit:ER
+		}
+		
+	// Date of Disability Check
+	if 'cif.dodsabl.isNull() do { quit:ER
+		// Remove the CIFDODSABL XBAD if it already exists and then re-add
+		// it.  This is done to prevent the XBAD from showing up twice.
+		do Runtime.delErrXBAD("LN","CIFDODSABL") quit:ER
+		do Runtime.setErrXBAD("LN","CIFDODSABL") quit:ER
+		}
+
+	// Verify Budget Offset Days
+	if dep.bgtpro do { quit:ER
+		
+		// Budget offset days must be less than days in budget year
+		if (dep.bgtyrnd-dep.bgtyrsd)<dep.bgtoffst do Runtime.setErrXBAD("DEP","BGT") quit:ER
+		
+		// Next Scheduled Contribution prior to System Date
+		if dep.bgtncdt,(dep.bgtncdt<%SystemDate) do Runtime.setErrXBAD("DEP","BGTNCDT") quit:ER
+		}
+
+	// If Budget Account create first Budget Record
+ 	if dep.bgtpro,'(%ProcessMode=2) do { quit:ER
+ 	
+ 		type RecordBUDGET budget=Class.new("RecordBUDGET")
+ 
+ 		set budget.cid=dep.cid
+ 		set budget.bgtyrsd=dep.bgtyrsd
+ 		set budget.bgtseq=1
+ 		
+ 		do budget.save()
+ 		}
+
+	// Combined Commercial Analysis checks
+	if (dep.anltyp=2)!(dep.anltyp=3) do { quit:ER
+
+		// Valid lead account must be defined for earnings analysis
+		if 'dep.anlcid do Runtime.setErrXBAD("DEP","ANLVAL") quit:ER
+
+		type RecordDEP depanl=Db.getRecord("DEP","CID=:dep.anlcid",1)
+		
+		// Valid lead account must be defined for earnings analysis
+		if 'depanl.getMode() do Runtime.setErrXBAD("DEP","ANLVAL") quit:ER
+
+   		// Account is not a valid lead account
+		if depanl.anltyp'=1 do Runtime.setErrXBAD("DEP","ANLVAL") quit:ER
+
+		// Acct service fee frequency must equal lead acct frequency
+	  	if depanl.scfre'=dep.scfre do Runtime.setErrXBAD("DEP","ANLFEE") quit:ER
+
+		// Accts next svc fee date must equal lead acct svc fee date
+		if depanl.scnd'=dep.scnd do Runtime.setErrXBAD("DEP","ANLSVF") quit:ER
+		}
+
+	if dep.anltyp=1,dep.anloffdy,dep.scfre do { quit:ER
+
+		/*
+		 Ensure analysis offset days are less than the interval defined by the 	
+		 service charge frequency.  Define a service fee last date to test
+		 interval, use today's date. 
+		*/
+
+		type Date TMPDT1,TMPDT2
+		
+		set TMPDT1=$$NJD^UFRE(%SystemDate,dep.scfre) quit:ER
+
+		// Find the end date for analysis adjustment period
+		set TMPDT2=$$NBD^UNBD(%SystemDate+1,dep.anloffdy,0,"IBS") quit:ER
+
+		// Offset day period must be less than svc fee frequency		
+		if (TMPDT1<TMPDT2)!(TMPDT1=TMPDT2) do Runtime.setErrXBAD("DEP","ANLOFF") quit:ER
+		}
+
+	// Negative Interest Application Option requires Uncollected Funds Interest Index
+	if 'dep.niao.isNull(),dep.ufindex.isNull() do Runtime.setErrMSG("DEP",4257)
+	
+	// Uncollected Funds Interest Index requires Negative Interest Application Option
+	if dep.niao.isNull(),'dep.ufindex.isNull() do Runtime.setErrMSG("DEP",4258)
+	
+	// Handles segmented account processing
+	if dep.segflg=1 do AIINUSE(.dep) quit:ER     // Is this Segmented Account in use?
+	if 'dep.segflg do AININUSE(.dep) quit:ER     // Is this Segmented Account not in use?
+
+	/*
+	 Loop through all of the agent's commission plans and check to
+	 see if they are assessed at the account level.  If they are, then
+	 insert them into the file COMPLNCID
+	*/
+	type ResultSet rs=Db.select("CPLAN","AGENTCOM","AGENT=:dep.boo") quit:ER
+	if 'rs.isEmpty(),%ProcessMode=0 while rs.next() do {
+		
+		type Date NCNGDT
+		type String CPLAN,query
+		
+		set CPLAN=rs.getCol(1)
+
+		// Get the commission plan data
+ 		type RecordUTBLCOMPLN ucompln=Db.getRecord("UTBLCOMPLN","CPLAN=:CPLAN")
+ 		
+		// Check to see if the plan is valid within the query
+		set query=ucompln.intquery
+		if '$$CHECKCID^COMCALC() quit
+
+		// If account level calculations, insert into the COMPLNCID file
+		if 'ucompln.alc quit
+                
+		set NCNGDT=""
+		if 'ucompln.rrfre.isNull() set NCNGDT=$$NJD^UFRE(%SystemDate,ucompln.rrfre)
+		
+		type RecordCOMPLNCID compln=Class.new("RecordCOMPLNCID")
+		
+		set compln.cid=dep.cid
+		set compln.cplan=CPLAN
+		set compln.rate=ucompln.rate
+		set compln.ncngdt=NCNGDT
+		
+		do compln.save()
+		}
+
+	/*
+	 Check DEP.CTFGRP. Default Plan name(s) assigned to the Group onto the
+	 account level (CTFPLNCID).
+	*/
+	if '(%ProcessMode=2),'dep.ctfgrp.isNull() do {
+	
+		type String CTFPLN,query
+
+		type ResultSet rs=Db.select("CTFPLN","UTBLCTFGRP1","GRPNAME=:dep.ctfgrp") quit:ER
+ 
+		if 'rs.isEmpty() while rs.next() do {
+			
+			set CTFPLN=rs.getCol(1)
+			
+			type RecordUTBLCTFPLN uctfpln=Db.getRecord("UTBLCTFPLN","CTFPLN=:CTFPLN")
+			
+			// Check to see if the plan is valid within the query
+			set query=uctfpln.intquery
+			if '$$CHECKCID^COMCALC() quit
+			
+			// Check to see if end date on plan has passed	
+			if 'uctfpln.enddate.isNull(),%SystemDate>uctfpln.enddate quit
+
+			type RecordCTFPLNCID ctfplnc=Class.new("RecordCTFPLNCID")
+			
+			set ctfplnc.cid=dep.cid
+			set ctfplnc.ctfpln=CTFPLN
+			set ctfplnc.active=1
+			
+			do ctfplnc.save()
+			}
+		}
+ 
+
+	// Withdrawal Priority Option 2 must be used with Segment Penalty Calculation Method 3	
+	if dep.segpopt=3,dep.wdprio'=2 do Runtime.setErrMSG("DEP",4953) quit:ER
+	if dep.wdprio=2,dep.segpopt'=3 do Runtime.setErrMSG("DEP",4953) quit:ER
+
+	/*
+	 If a seasonal address is defined within the customer record of the 
+	 primary account owner, then the values within the seasonal address 
+	 window will default to the account record.
+	*/
+
+	if Db.isDefined("SADDRCIF","dep.acn"),(%ProcessMode'=2) do { quit:ER
+
+		type RecordSADDRCIF saddrcif=Db.getRecord("SADDRCIF","dep.acn")
+		type RecordSADDRACN saddracn=Class.new("RecordSADDRACN")
+
+		set saddracn.cid=dep.cid
+		set saddracn.sadsd=saddrcif.sadsd
+		set saddracn.saded=saddrcif.saded 
+		set saddracn.sad1=saddrcif.sad1
+		set saddracn.sad2=saddrcif.sad2
+		set saddracn.sad3=saddrcif.sad3
+		set saddracn.sad4=saddrcif.sad4
+		set saddracn.scity=saddrcif.scity
+		set saddracn.scntry=saddrcif.scntry
+		set saddracn.sstate=saddrcif.sstate
+		set saddracn.szip=saddrcif.szip
+		set saddracn.scounty=saddrcif.scounty	//BASEL II
+
+		set saddracn.nsad1=saddrcif.nsad1
+		set saddracn.nsad2=saddrcif.nsad2
+		set saddracn.nsad3=saddrcif.nsad3
+		set saddracn.nsad4=saddrcif.nsad4
+		set saddracn.nscity=saddrcif.nscity
+		set saddracn.nscntry=saddrcif.nscntry
+		set saddracn.nsstate=saddrcif.nsstate
+		set saddracn.nszip=saddrcif.nszip
+		set saddracn.nscounty=saddrcif.nscounty	//BASEL II
+
+		do saddracn.save("NOTRIGBRF/NOTRIGAFT/NOJOURNAL")
+		}
+
+	// A customer can only have one account per employer per product type open at a time
+	if dep.emplben=1 do {
+		
+		type ResultSet rs=Db.select("CID","DEP","TYPE=:dep.type AND EMPLNO=:dep.emplno AND ACN=:dep.acn")
+		
+		// Employer Benefit Plan already opened for this cust and prod
+		if 'rs.isEmpty() do Runtime.setErrXBAD("DEP",197) quit:ER
+		} 
+		
+	// Validate G/L Set Code
+	do GLCHK^ACNFUNCS(dep.cls,dep.grp,dep.glsc) quit:ER	
+
+	// Invalid Int/Div Rate Calc Base if Annual Inflation Rate Calc Index defined
+	if ('dep.anlinflcalin.isNull()) , (dep.ircb'=1) , (dep.ircb'=3) do Runtime.setErrMSG("DEP",6233) quit:ER
+	
+	// A Value is required for MMDA automatic conversion 
+	if (dep.mmdacnv)&(dep.mmdaptc.isNull()!dep.mmdacnvtyp.isNull()) do Runtime.setErrMSG("DEP",5725) quit:ER 
+	
+	// Region Code must be three numbers	
+	if prodctl.iftanpro = "IFTAN" do { quit:ER
+		
+		type RecordUTBLBRCD utblbrcd = Db.getRecord("UTBLBRCD","BRCD=:dep.boo",1)
+		type Number I
+		type String CH, REGION
+		
+		if utblbrcd.region.length()'=3 do Runtime.setErrMSG("UTBLBRCD",6198) quit
+		
+		set REGION=""
+		
+		for I=1:1:utblbrcd.region.length() do { quit:ER
+			set CH = utblbrcd.region.extract(I)
+			if CH'="0" set REGION=REGION_CH
+		}
+		
+		if 'REGION.isNumber() do Runtime.setErrMSG("UTBLBRCD",6198) quit
+	}
+		
+	quit
+	
+AIINUSE(RecordDEP dep)	// This section handles Segmented Accounts that are presently in use
+
+	type Public Boolean ER
+
+	// Segments in Use Flag must be Yes
+	if dep.segflg'=1 do Runtime.setErrXBAD("DEP",231) quit:ER 
+	
+	// Deferred interest processing not supported for segmented accounts
+	if dep.definadj do Runtime.setErrMSG("DEP",3988) quit:ER 
+	
+	// Interest disbursement option ~p1 not supported for segmented accounts
+	if dep.iopt>4 do Runtime.setErrMSG("DEP",3990,dep.iopt) quit:ER 
+	
+	// Create the zero segment
+	type Number SEGMENT
+	set SEGMENT=0
+
+	// Only create zero segment if in create mode, not in verify mode
+	if '(%ProcessMode=2) do INSERT^DEPSEGIN(.dep,dep.cid,dep.odt,,.SEGMENT) quit:ER 
+
+	// Int Accr Flag must be 0 or 1 when accruing at segment level
+	if (dep.segacr=0)&((dep.ircb'=0)&(dep.ircb'=1)) do Runtime.setErrXBAD("DEP",206) quit:ER 
+
+	// Int Accr Flag must be 0, 1, or 3 when accruing at the acct level
+	if dep.segacr=1,dep.ircb'=0,dep.ircb'=1,dep.ircb'=3 do Runtime.setErrXBAD("DEP",207) quit:ER 
+
+	// Residual Int Processing is not supported for segmented accts
+	if dep.negbalop=2 do Runtime.setErrXBAD("DEP",222) quit:ER 
+
+	// Positive and negative int must accrue net for segmented acct
+	if dep.negacrpo'=0 do Runtime.setErrXBAD("DEP",219) quit:ER 
+
+	// Rate Renewal Option cannot be 3 for segmented accounts
+	if dep.rro=3 do Runtime.setErrXBAD("DEP",221) quit:ER 
+
+	// Overdraft processing for segmented accounts is not supported
+	if dep.odo'=0 do Runtime.setErrXBAD("DEP",215) quit:ER 
+
+	// Loan Pmt Sweep Processing not supported for segmented accts
+	if dep.lpswp=1 do Runtime.setErrXBAD("DEP",212) quit:ER 
+	if dep.aiacrf=1 do { quit:ER 
+
+		// Avail Int Opt must be 2 when Avail Int Accr Flag is Yes
+		if dep.iaf'=2 do Runtime.setErrXBAD("DEP",196) quit:ER 
+
+		// Avail Int Posting Freq required if Avail Int Accr Flag is Y
+		if dep.aiipf="" do Runtime.setErrXBAD("DEP",193) quit:ER 
+		}
+	
+	do SEGINUYN(.dep) quit:ER 
+	
+	quit 
+
+AININUSE(RecordDEP dep)	//If segments not in use flag is set then check for the following:
+	
+	type Public Boolean ER
+	
+	// Avail Int Accr Proc may only be used for segmented accts
+	if dep.aiacrf=1 do Runtime.setErrXBAD("DEP",195) quit:ER 
+
+	do SEGINUYN(.dep) quit:ER
+	
+	quit
+
+	
+SEGINUYN(RecordDEP dep)	// Segment processing whether segment in use flag is set to Yes or No
+	
+	type Public Boolean ER
+	
+	//If Avail Int Accrual Flag=0 perform edit checks
+	if dep.aiacrf=0 do {
+	
+		// ~p1 must be null when Avail Int Accrual Flag is No
+
+		// Avail Int - Int Chg Freq
+		if 'dep.aiintfre.isNull() do Runtime.setErrXBAD("DEP",184,"DEP.AIINTFRE") quit:ER
+
+		// Avail Int - Int Rate
+		if 'dep.aiirn.isNull() do Runtime.setErrXBAD("DEP",184,"DEP.AIIRN") quit:ER
+
+		// Avail Int Ext Acct Seq
+		if 'dep.aiextseq.isNull() do Runtime.setErrXBAD("DEP",184,"DEP.AIEXTSEQ") quit:ER
+
+		// Avail Int Ext Transf Cust ID
+		if 'dep.aiextacn.isNull() do Runtime.setErrXBAD("DEP",184,"DEP.AIEXTACN") quit:ER
+
+		// Avail Int Index
+		if 'dep.aiindex.isNull() do Runtime.setErrXBAD("DEP",184,"DEP.AIINDEX") quit:ER
+
+		// Avail Int Intrnl Transfer Acct
+		if 'dep.aiinttrf.isNull() do Runtime.setErrXBAD("DEP",184,"DEP.AIINTTRF") quit:ER
+
+		// Avail Int Last Chg Date 
+		if 'dep.aiichld.isNull() do Runtime.setErrXBAD("DEP",184,"DEP.AIICHLD") quit:ER
+
+		// Avail Int Last Posting Date
+		if 'dep.aiipld.isNull() do Runtime.setErrXBAD("DEP",184,"DEP.AIIPLD") quit:ER
+
+		// Avail Int Next Chg Date
+		if 'dep.aiichnd.isNull() do Runtime.setErrXBAD("DEP",184,"DEP.AIICHND") quit:ER
+
+		// Avail Int Next Posting Date
+		if 'dep.aiinp.isNull() do Runtime.setErrXBAD("DEP",184,"DEP.AIINP") quit:ER
+
+		// Avail Int Posting Freq
+		if 'dep.aiipf.isNull() do Runtime.setErrXBAD("DEP",184,"DEP.AIIPF") quit:ER
+
+		// Avail Int Disburesment Opt
+		if 'dep.aiiopt.isNull() do Runtime.setErrXBAD("DEP",184,"DEP.AIIOPT") quit:ER
+		}
+	
+	// Avail Int - Int Change Freq is required with Avail Int Index
+	if 'dep.aiindex.isNull(),dep.aiintfre.isNull() do Runtime.setErrXBAD("DEP",186) quit:ER 
+
+	// Employer Code is required when Employer Benefit Plan is Yes
+	if dep.emplben=1,dep.emplno.isNull() do Runtime.setErrXBAD("DEP",198) quit:ER 
+
+	// Avail Int - Int Rate required if Avail Int Rate Deter is 1
+	if dep.airdet=1,dep.aiirn.isNull(),dep.aiindex.isNull() do { quit:ER 
+
+		if dep.segflg,'dep.segacr quit 
+
+		// Avail Int-Int Rate required if Avail Int Rate Determ is 1
+		do Runtime.setErrXBAD("DEP",187) quit:ER 
+		}
+	
+	// Avail Int Next Change Date cannot be earlier than sys date
+	if dep.aiichnd,(dep.aiichnd<%SystemDate) do Runtime.setErrXBAD("DEP",191) quit:ER 
+
+	// Avail Int Next Posting Date cannot be earlier than sys date
+	if dep.aiinp,(dep.aiinp<%SystemDate) do Runtime.setErrXBAD("DEP",192) quit:ER 
+
+	/* 
+	 If dep.airdet is zero, (use principal interest rate), then we
+	 shouldn't have values for information relating to available
+	 interest changes, because the interest on available interest
+	 should never change. 
+	*/
+	
+	// Do not use Values Relating to Change in Available Interest if DEP.AIRDET=0
+	if ('dep.airdet)&(('dep.aiichld.isNull())!('dep.aiichnd.isNull())!('dep.aiintfre.isNull())) do Runtime.setErrMSG("DEP",3987) quit:ER
+
+	/*
+	 Set up DAYEND entry for next segment available interest posting
+	 date manually.  This coding replaces the traditional filer index
+	 definitions for next interest posting dates.
+	*/
+	if '(%ProcessMode=2),'dep.aiinp.isNull(),dep.segflg,dep.segacr do { quit:ER 
+
+		type RecordDAYENDSEGIP dsegip=Class.new("RecordDAYENDSEGIP")
+
+		set dsegip.tjd=dep.aiinp
+		set dsegip.cid=dep.cid
+		set dsegip.posting=3
+		set dsegip.seg=-1
+		
+		do dsegip.save()
+		
+		type RecordDAYENDINP dayendinp=Class.new("RecordDAYENDINP")
+		
+		set dayendinp.tjd=dep.aiinp 
+		set dayendinp.cid=dep.cid 
+		set dayendinp.posting=3  
+ 		
+ 		do dayendinp.save()
+		}
+	
+	// Avail Int Disbmt Opt 2 requires valid Avail Int Internal Tfr
+	if dep.aiiopt=2,'Db.isDefined("DEP","dep.aiinttrf") do Runtime.setErrXBAD("DEP",190) quit:ER
+
+	// Avail Int Ext Tfr Cust ID required if Avail Int Disbmt Opt is 4
+	if dep.aiiopt=4,dep.aiextacn.isNull() do Runtime.setErrXBAD("DEP",189) quit:ER 
+
+	// Partial Renewal Amt must be null if Prin Mat Opt equals 0, 3, or 5
+	if ((dep.rencd=0)!(dep.rencd=3)!(dep.rencd=5))&('dep.prena.isNull()) do Runtime.setErrXBAD("DEP",216) quit:ER 
+
+	// For Int Maturity Option 5, Renewal Code must be 1, 2, or 4
+	if ((dep.rencd=0)!(dep.rencd=3)!(dep.rencd=5)),dep.imo=5 do Runtime.setErrMSG("DEP",3910) quit:ER 
+	
+	// External Tfr Cust ID is required if Prin Mat Opt is 4
+	if dep.rencd=4,dep.primatetc.isNull() do Runtime.setErrXBAD("DEP",201) quit:ER 
+
+	// External Acct Sequence is required
+	if 'dep.extacn.isNull(),dep.extseq.isNull() do Runtime.setErrXBAD("DEP",199) quit:ER 
+	
+	// External Acct Sequence is required
+	if 'dep.intdisetc.isNull(),dep.intdisets.isNull() do Runtime.setErrXBAD("DEP",199) quit:ER
+	
+	// External Acct Sequence is required
+	if 'dep.intmatetc.isNull(),dep.intmatets.isNull() do Runtime.setErrXBAD("DEP",199) quit:ER
+
+	// External Tfr Cust ID required for external tfr
+	if dep.intmatetc.isNull(),dep.imo=4 do Runtime.setErrXBAD("DEP",202) quit:ER 	
+	
+	// External Tfr Cust ID required for external tfr
+	if dep.intdisetc.isNull(),dep.iopt=4 do Runtime.setErrXBAD("DEP",202) quit:ER 	
+	
+	// Segment Period must contain a valid term
+	if 'dep.segper.isNull() do { quit:ER 
+
+		// First character of period may not be '0'
+		if dep.segper.extract()=0 do Runtime.setErrXBAD("DEP",229) quit:ER 
+
+		// First character of period must be numeric
+		if +dep.segper=0 do Runtime.setErrXBAD("DEP",229) quit:ER 
+
+		// Period must contain character D, W, M, Y, or Q
+		if dep.segper=+dep.segper do Runtime.setErrXBAD("DEP",229) quit:ER 
+
+		// Lowercase characters not allowed
+		if dep.segper?.E1L.E do Runtime.setErrXBAD("DEP",229) quit:ER 
+		
+		type Number I
+		for I=1:1:dep.segper.length() if '("DWMYQ"[dep.segper.extract(I)!(dep.segper.extract(I)?1N)) set ER=1 quit 
+
+		// Period may only contain characters D, W, M, Y, or Q
+		if ER do Runtime.setErrXBAD("DEP",229) quit:ER 
+
+		// First character of quarter term must be 1, 2, 3, or 4
+		if dep.segper.extract(2)="Q",dep.segper.extract()>4 do Runtime.setErrMSG("DEP",3869) quit:ER 
+		}
+	
+	quit
+	
+VERHLD	// Verify %HELD input
+
+	type Public String D(),DESC,ER,P()
+		
+	/*
+	 This is not extrinsic, but it is a separate function call
+	 used for hold verification
+	*/
+
+	type Number J,K
+	
+	set P=0 for J=1:1:5 set P=P+P(J)
+	
+	// Total %HELD ~p1 exceeds 100%
+	if P>100 do Runtime.setErrMSG("DEP",2668,DESC) quit:ER 
+	
+	// Sum of percentage allocations must be 0% or 100%
+	if P'=0,P'=100 do Runtime.setErrMSG("DEP",2852) quit:ER
+	
+	// Percent held ~p1 # ~p2 cannot be greater than # ~p3
+	for J=5,4,3,2 if P(J),P(J)'<P(J-1) set K=J-1 do Runtime.setErrMSG("DEP",24,"DESC~J~K") quit:ER 
+	
+	// Days held ~p1 for factor #~p2 must be greater than #~p3
+	for J=1,2,3,4 if P(J),P(J+1),D(J+1)'>D(J) set K=J+1 do Runtime.setErrMSG("DEP",762,"DESC~K~J") quit:ER 
+	
+	quit
+
+public DICHECK(String DISTR,RecordDEP dep,Number BASE,Boolean DIAUTH)
+	/* 
+	 Validate data item within index definition against actual account values
+
+	 Arguments:
+		. DISTR		Data item				/TYP=T/REQ/MECH=VAL
+		. dep		Deposit account			/TYP=RecordDEP/REQ
+		. BASE		Calculation base		/TYP=N/REQ/MECH=VAL
+		. DIAUTH	Data item authorization	/TYP=L/REQ/MECH=VAL
+	*/
+	
+	type Public Boolean ER
+	
+	// Not a data item string
+	if DISTR'["DEP.",DISTR'["[DEP]" quit
+	
+	type String VAL
+	set VAL=$$IXVALUE^UINDX(.dep,DISTR)
+
+	// Index Tier data items require Index w/Data Item Auth
+	if 'VAL.isNull(),'DIAUTH do Runtime.setErrXBAD("DEP","ODLIM3") quit:ER
+	
+	// Indx w/data item auth requires acct tier data items or ODLIM
+	if DIAUTH,VAL.isNull() do Runtime.setErrXBAD("DEP","ODLIM4") quit:ER
+	
+	quit
+	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60816^58178^Vanitha Krishnasamy^58593"	// Signature - LTD^TIME^USER^SIZE

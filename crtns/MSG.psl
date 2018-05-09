@@ -1,0 +1,414 @@
+public MSG(Number MSGID,
+           String p1,
+           String p2,
+           String p3,
+           String p4,
+           String p5)
+
+	/*
+	ORIG: Vitaliy Antonov - 12/19/01
+	DESC: Generic Message Handler
+	PROCEDURE ID: MSG
+
+	This routine returns a message based upon a message ID
+	contained in STBLMSG table.
+
+	KEYWORDS: Error handling
+
+	ARGUMENTS:
+		. MSGID Message ID   		/TBL=[STBLMSG]
+
+		. p1 Variable insertion value 1 /NOREQ
+		. p2 Variable insertion value 2 /NOREQ
+		. p3 Variable insertion value 3 /NOREQ
+		. p4 Variable insertion value 4 /NOREQ
+		. p5 Variable insertion value 5 /NOREQ
+
+	RETURNS:
+		. $$ Return message		/TYP=T
+		. %MSGID Message ID		/TYP=T
+
+	EXAMPLE:
+		S RM=$$^MSG(1,1234)
+
+	---- Revision History --------------------------------------------------
+	07/25/06 - Pete Chenard - CR 20048
+		   Corrected unbalance { }.
+		   
+	04/26/06 - Allan Mattson - CR 20048
+	           Modified subroutines LV and LV2V to support UTF-8 encoded
+	           messages.  The length fields of length value messages are
+	           now reflected in number of bytes instead of number of
+	           characters.
+
+	           Replaced $A[scii], $C[har], $D[ata], $E[xtract], $F[ind],
+	           $G[et], $L[ength], $O[rder] and $P[iece] functions with
+	           applicable PSL methods.
+
+	           Replaced 'new' command with PSL 'type' command and typed
+	           parameters.
+
+	           Made miscellaneous changes to improve readability and
+	           conformance to standards.
+
+	04/04/06 - KELLYP - CR 20566
+		   Modified V2LV to revert the val.exists()=1 check back to
+		   val.data()=1.  This was not evaluating the same way and was
+		   causing issues with MRPC056 when the val variable was used as 
+		   both an array and a simple variable.   
+	
+	03/26/06 - RussellDS - CR20360
+		   Added code so that if message number 1721 does not exist we
+		   just return an English message and not null.
+		   
+		   Cleaned up PSL warning issue.
+		   
+		   Removed old revision history.
+	
+	10/22/05 - Alagarss - CR 16677		
+		   Added a new function NEXTVAL which generates next sequence 
+		   MSGID.
+		   
+	06/03/05 - Pete Chenard - CR16195
+		   Modified to not use ResultSet objects for message retrieval.  This
+		   is inefficient.  getRecord is used instead.
+	
+	------------------------------------------------------------------------
+	*/
+	
+	type public String %MSGID
+	
+	type String v,vmsg
+	type Number vi,vofst
+	
+	type RecordUTBLMSG utblmsg = Db.getRecord("UTBLMSG","MSGID=:MSGID",1)
+	set vmsg=utblmsg.message
+
+	if vmsg.isNull() do {
+		type RecordSTBLMSG stblmsg = Db.getRecord("STBLMSG","MSGID=:MSGID",1)
+		set vmsg=stblmsg.message
+
+		if vmsg.isNull() do {
+		type String ermsg,ET,RM,%ZTSEQ,%ZTX
+
+		set ET="INVLDMSG" do ^UTLERR
+		set p1=MSGID 
+
+		// Message ~p1 not found
+		type RecordSTBLMSG msg = Db.getRecord("STBLMSG","MSGID=1721",1)
+			set vmsg=msg.message
+		// I18N=OFF
+			if vmsg.isNull() set vmsg = "Message "_MSGID_" not found"
+		// I18N=ON
+		}
+	}
+
+	set (vi,vofst)=0
+	for  set vi=vmsg.find("~p",vi-vofst) quit:vi=0  do {
+
+		set vofst=0
+		set v=vmsg.extract(vi-1,vi)
+
+		// Accept use of indirection
+		#ACCEPT Date=11/22/04; PGM=Dan Russell; CR=13365
+		set v=@v.get() 
+
+		set v(vmsg.extract(vi)+1)=v
+
+		if v.isNull() do {
+			set vofst=2
+
+			/*
+			If there is a null parameter value, and pn~ is at
+			the beginning with one trailing space, strip out
+			the extra space.
+			*/
+
+			if vi=3,vmsg.extract(4)=" " set vmsg=vmsg.extract(1,vi)_vmsg.extract(vi+2,999) quit 
+	
+			/*
+			If no parameter value, see if the message contains a
+			space before and after the ~pn (e.g., "Account ~p1 not
+			modified"). If so, strip out one of the extra spaces.
+			*/
+
+			if vmsg.extract(vi-3)=" ",vmsg.extract(vi+1)=" " set vmsg=vmsg.extract(1,vi)_vmsg.extract(vi+2,999)
+		}
+
+		set vmsg=vmsg.extract(1,vi-3)_v_vmsg.extract(vi+1,999)
+	}
+
+	set %MSGID=MSGID_"|"_$$V2LV(.v)
+	quit vmsg
+	
+
+
+public V2LV(ByteString val(),
+            String fs,
+            Number opt)
+	/* 
+	This function returns the L[ength]/V[alue] format of 'val'.  The
+	following rules apply:
+
+	'opt' determines if an overall length of the field/record should
+	prefix the resulting LV format of 'val'.  This option is used
+	to format sub-fields.
+
+	If $d(val)=1 (i.e., a named variable) and a field separator is
+	specified, 'val' is treated as one or more sub-fields delimited
+	by 'fs'.
+
+		Ex:  $$V2LV^MSG("ABC|DEF","|",0)=$C(4)_"ABC"_$C(4)_"DEF"
+		Ex:  $$V2LV^MSG("ABC|DEF","|",1)=$C(9,4)_"ABC"_$C(4)_"DEF"
+
+	If $d(val)=1 and a field separator is not specified, 'val' is
+	treated as a single field/record.
+
+		Ex:  $$V2LV^MSG("ABC|DEF")=$C(8)_"ABC|DEF"
+
+	If $d(val)'=1 (i.e., a local array), the field separator has no
+	meaning and is ignored, each subscript represents a sub-field.
+
+		Ex:  $$V2LV^MSG(.array)=$C(4)_"ABC"_$C(4)_"DEF"
+		Ex:  $$V2LV^MSG(.array,"",1)=$C(9,4)_"ABC"_$C(4)_"DEF"
+			where array(1)="ABC"
+			array(2)="DEF"
+
+	Arguments:
+ 		. val Value of field or sub-fields	/NOREQ/MECH=REFARR
+
+		. fs Field separator			/NOREQ
+
+		. opt Sub-field option			/NOREQ/DFT=0
+
+			0 = Exclude overall field/record length
+			1 = Include overall field/record length
+
+ 	Returns:
+		. $$ LV format of 'val  /TYP=T
+ 
+	Keywords: Formatting
+
+	Example:
+		S X=$$V2LV^MSG(string,=rs.getCol(0)
+		S X=$$V2LV^MSG(.array)
+	*/
+
+	type ByteString x,y
+	type Number i
+	
+	set x=""
+	if val.data()=1 do {
+		if fs.get().isNull() set x=$$LV(val) quit 
+		for i=1:1:val.length(fs) set y=val.piece(fs,i),x=x_$$LV(y)
+	}
+
+	else  set y="" for  set y=val(y).order() quit:y.isNull()  set x=x_$$LV(val(y))
+	if opt.get() set x=$$LV(x)
+	quit x
+	
+
+LV(ByteString val)
+	/*
+	This private function returns value 'val' in L[ength]/V[alue] format.
+
+	ARGUMENTS:
+		. val Value of field/record
+
+	RETURNS:
+		. $$ LV format of 'val'		/TYP=T
+	*/
+
+	type ByteString len
+	type Number x,x()
+
+	// Determine the length of 'val' in bytes + 1 for the length field
+	set x=val.length()+1
+
+	if x>255 do {
+		type Number i,n
+
+		for i=1:1 set x(i)=x#256 set x=x\256 quit:x=0  set x(1)=x(1)+1
+		for i=1:1 quit:x(i)<256  set x(i)=x(i)#256,x(i+1)=x(i+1).get()+1
+
+		set n=x("").order(-1)
+		set len=0.byte()_n.byte()
+		for i=n:-1:1 set len=len_x(i).byte()
+	}
+
+	else  set len=x.byte()
+	quit len_val
+	
+
+public	LV2V(ByteString msg,
+             ByteString arr,
+             Number ptr,
+             Number num)
+	/*
+	This function parses L[ength]/V[alue] formatted message and returns 
+	array of values.
+
+	Complement of function $$V2LV^MSG
+
+	KEYWORDS: Formatting
+
+	ARGUMENTS:
+		. msg Message (LV format)
+		. arr Output array name  		/NOREQ/MECH=REFARR:W
+		. ptr Starting pointer position		/NOREQ/DFT=1
+		. num Number of fields requested	/NOREQ/DFT=ALL
+
+	RETURNS:
+		. $$ Pointer position of next field /TYP=N
+					Null = End of string
+		. arr Output array (V format)  /TYP=T
+
+	EXAMPLE:
+		 x=$C(4)_"ABC"_$C(3)_"XY"_$C(2)_"Z"_$C(1)
+
+		$$LV2V^MSG(x,.fld)=""  fld(1)="ABC"
+		fld(2)="XY"
+		fld(3)="Z"
+		fld(4)=""
+	*/
+
+	type Number fld,i,len,ln,n,sub,x
+	type Boolean exit
+	
+	// Determine the length of 'msg' in bytes
+	set len=msg.get().length() 
+	if len=0 quit 0
+
+	if 'ptr.get() set ptr=1
+	set num=+num.get()
+	
+	set sub=arr("").order(-1)
+
+	set fld=0
+	set exit=0
+	
+	for  do { quit:exit 
+		if ptr>len set exit=1,ptr="" quit 
+		if num,fld=num set exit=1 quit 
+
+		set ln=msg.extract(ptr).ascii() 
+		set n=1
+	
+		if ln=0 do { quit:exit 
+			set n=msg.extract(ptr+1).ascii()
+			set ptr=ptr+2
+
+			// Msg terminator
+			if n=0 set exit=1,ptr="" quit
+			set x=1 
+			for i=n-1:-1:0 set ln=(msg.ascii(ptr+i)*x)+ln,x=x*256
+		}
+
+		set fld=fld+1 
+		set sub=sub+1
+		set arr(sub)=msg.extract(ptr+n,ptr+ln-1) 
+		set ptr=ptr+ln
+	}
+
+	quit ptr
+	
+
+public COLUMN(String row,
+              Number del,
+              String arr)
+	/*
+	Parse row of data into columns and populate an output array with parsed 
+	data.
+
+	KEYWORDS: Formatting
+
+	ARGUMENTS:
+		. row Row of data	/MECH=REFNAM:R
+
+		. del Delimeter (ASCII)	/NOREQ/DFT=44
+
+		. arr Output array name	/NOREQ/MECH=REFARR:W
+
+	RETURNS:
+		$$ Number of elements in array
+
+	EXAMPLE:
+		S X=$$COLUMN(data,44,.array)
+	*/
+
+	type String str
+	type Number n,x
+	
+	if del.get().isNull() set del=44 
+	set del=del.char()
+
+	set n=+arr("").order(-1)
+	set str=row
+	set x=0
+	
+	for  set x=str.find(del,x) quit:x=0  if str.extract(1,x-2).length("""")#2 do {
+		set n=n+1 
+
+		set arr(n)=$$unq(str.extract(1,x-2))
+		set str=str.extract(x,str.length())
+		set x=0
+	}
+
+	set n=n+1 
+	set arr(n)=str
+	
+	quit n
+	
+
+public	NXTCOL(String row,
+               Number del,
+               Number ptr)
+	/*
+	Return value of next column in row.
+
+	KEYWORDS: Formatting
+
+	ARGUMENTS:
+		. row Row of data		/MECH=REFNAM:R
+		. del Delimeter (ASCII)		/NOREQ/DFT=44
+		. ptr Starting pointer position	/NOREQ/DFT=1/MECH=REFNAM:RW
+
+	RETURNS:
+		. $$ Value of next column	/TYP=T
+
+	EXAMPLE:
+		S X=$$NXTCOL^MSG(row,44,.ptr)
+	*/
+
+	type String v
+	type Number x
+	
+	if del.get().isNull() set del=44 
+	set del=del.char()
+
+	set ptr=+ptr.get() 
+	set x=ptr
+	
+	for  set x=row.find(del,x) if row.extract(1,x-2).length("""")#2 do { quit 
+		if x set v=$$unq(row.extract(ptr,x-2))
+		else  set v=row.extract(ptr,row.length())
+	}
+	set ptr=x
+	quit v
+	
+
+unq(String v)	//  This private function "Unquotes" text.
+	
+	if v.extract()="""",v.extract(v.length())="""" set v=v.extract(2,v.length()-1)
+	quit v
+
+	
+public NEXTVAL	// Returns the highest key value +1
+        
+	type public Number VNMSGID
+
+	set VNMSGID=Db.nextVal("STBLMSG")
+                
+	quit 
+
+vSIG()	quit "60472^43703^Pete Chenard^8946"	// Signature - LTD^TIME^USER^SIZE

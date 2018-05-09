@@ -1,0 +1,924 @@
+UCCOLSF		/*
+	 ORIG: Frans S.C. Witte, 2005-03-11
+	 DESC: This unit contains subroutines and functions that deal with
+	 	masterfields and subfields.
+
+	---- Comments ----------------------------------------------------------
+
+	---- Revision History --------------------------------------------------
+	10/17/06 - Frans S.C. Witte - CRs: 22719 / 20613
+		* Changed call to PSLColumn.getUpdateCode
+		* Corrected setMfXDB to properly pass recInst as a number or as
+		  a variable.
+
+	06/12/06 - Frans S.C. Witte - CRr: 22060 / 22061
+		Modified getMf2A() to deal with bytelength
+
+	03/30/06 - Frans S.C. Witte - CRs: 20280 / 18164
+		Modified setMfXDB to generate more efficient MDB code.
+		Modified setM* / getM* to use $$findSubr^UCGM.
+
+	02/02/06 - Frans S.C. Witte - CRs: 18163 / 18164
+		Replaced PSLColumn colun casts by method calls of new methods
+		(multiple occurrences)
+		Corrected problem in getMf2A.
+		As discussed with Dan: 'public' access changed to 'private'.
+		Corrected problem in getXfXdb() (leading delimiter)
+
+	11/29/05 - Frans S.C. Witte - CRs: 18767 / 18768
+		Added implementation of $$setMfXDB().
+		Replaced this. by PSL.
+		Modified getXfXDB to ensure the returned values qualifies as
+		M expratom (parenthesis added if needed), and to strip trailing
+		subfield delimiters from type 2 masterfields.
+
+	08/31/05 - Frans S.C. Witte - CRs: 17056 / 17057
+		Replaced type literal MAX by PSL.maxLineLength
+
+	03/11/05 Frans S.C. Witte - CRs 15028 / 16039
+		Initial unit
+	*/
+	// I18N=QUIT
+	// *******************************************************************
+	// * IMPORTANT NOTE:                                                 *
+	// * According to the rules that apply to PSL compiler upgrades,     *
+	// * the generated M routine associated with this procedure must be  *
+	// * checked into StarTeam and released with the procedure whenever  *
+	// * changes are made to this procedure.                             *
+	// *                                                                 *
+	// * The M routine will be loaded to the mrtns directory during      *
+	// * upgrades and will then be removed from that directory as part   *
+	// * of the upgrade process.  Therefore, other than during an        *
+	// * upgrade an mrtns version of this routine should not exist.      *
+	// *                                                                 *
+	// * Keep these comments as single line to ensure they exist in the  *
+	// * generated M code.                                               *
+	// *******************************************************************
+	quit
+
+	// ---------------------------------------------------------------------
+private getMaster( PSLIdentifier recInst,	// RecordTBL instance variable
+		String TBL,			// table name
+		String CLN)			// column name of masterfield
+	/* ---------------------------------------------------------------------
+	This subroutine generates the code for the RecordTAB.getCln() method.
+	It generates the following function:
+		$$vCoMfGnn( RecordTBL vObj)
+	This function composes the masterfield by starting with an empty field,
+	and uses String.putSub() to insert the individual subfields.
+	This function only generates the (PSL) code to compose the masterfield.
+	Any side effect, such as turning off object optimization because the
+	RecordTBL instance is passed as a parameter, is the responsibility of the
+	caller.
+	*/
+	type Row sf
+	type String fields()		// exchange String(), and cast as Row
+	type String Des = $$getSfd^UCXDD(TBL, CLN, .fields())
+	do sf.setDelimiter( Des.extract())
+	do sf.setColumns( Des.extract(2, Des.length()))
+	do setOpti^UCGM(recInst, recInst.scopeLevel , 1)	// optimize off
+
+	type String comment = "Record"_TBL_".get"_CLN_"()"
+	type String label = $$findSubr^UCGM( "vCoMfG", comment)
+
+	if 'PSL.subrouExists(label) do {
+
+		type PSLBuffer buf = PSL.openBuffer("(Record"_TBL_" vRec)",comment)
+		do buf.add(" type String vMas = """"")
+		type Number cnt
+		for cnt=1:1:fields("").order(-1) do {
+			set sf = {Row}fields(cnt)
+			type String col = sf.di
+			Type String tag = """"_ sf.sft_ """"
+			Type String line = " set vMas = vMas.putSub( vRec."_col.lowerCase()_","_tag
+
+			/* sfd1 and sfd2 may be empty */
+			Type Number asc = sf.sfd1
+			if asc.isNull() set line = line_","""""
+			else  set line = line _ ",$C("_asc_")" 
+			set asc = sf.sfd2
+			if asc.isNull() set line = line_","""""
+			else  set line = line _ ",$C("_asc_")"
+
+			/* sfp is always present */ 
+			do buf.add( line _","_sf.sfp_")")
+		}
+		do buf.add(" quit vMas") 
+		do buf.insert( label)
+	}
+	quit "$$"_label_"("_recInst_")"
+
+	// ---------------------------------------------------------------------
+private getMf2A( String getval,		// masterfield retrieval code (*1)
+		PSLIdentifier vMas,	// variable to use (*2)
+		String code())		// code array (*3)	/REFARR:W
+	/* ---------------------------------------------------------------------
+	This subroutine breaks the supplied masterfield exppression into lines
+	that do not exceed the GT.M line limit. It uses the same limit as used
+	elsewhere. A global constant seems appropriate, but this is not yet
+	supported by PSL.
+
+	ARGUMENTS:
+	(*1) getval
+		Shall be as returned by $$getMfRDB^UCCOLSF(), because this
+		function breaks the construction at $CHAR(9)
+	(*2) vMas
+		This leftexpr will receive the intermediate and final result.
+		It is the callers responsibility to provide proper scoping of
+		the supplied leftexpr.
+	(*3) code()
+		The code() array will contain the M/PSL code to construct vMas.
+		Each line will start with a SPACE, and contain the complete
+		command word. No extra SPACEs will be added around delimiters.
+		This makes the code both M and PSL compliant.
+		Lines will be numbered sequentially, starting at 1.
+	NOTES:
+	* If the length of the supplied getval does not exceed the maximum,
+		then code() will contain a single line.
+	* This function can be used to break down the code for any retrieval
+		operation: Record.masterfield, and Record.masterfield.oldVal
+		will both be translated correctly.
+	*/
+	type Number i		// iterator
+	type Number ln = 0	// line counter for code()
+	type PSLExpression sub	// TAB delimited sub-expression
+
+	/* first handle the special cases: $$getXfXDB will may have added a
+	   function call or parenthesis */
+	type String head = ""
+	type String tail = ""
+	if getval.extract( 1, 2) = "$$" do {
+		set head = getval.piece( "(")_"(", tail = ")"
+		set getval = getval.extract( head.length() + 1, getval.length() - 1)
+	}
+	else  if getval.extract() = "(" do {
+		set head = "(", tail = ")"
+		set getval = getval.extract( 2, getval.length() - 1)
+	}
+
+	type String line = " set "_ vMas_ "="_ getval.piece($CHAR(9))
+
+	for i=2:1:getval.length($CHAR(9)) do {
+		set sub = getval.piece($CHAR(9),i)
+		if 'sub.fitsLineLength( line.toByteString().length()) do {
+			set ln = ln + 1
+			set code(ln) = line
+			set line = " set "_ vMas_ "="_ vMas
+		}
+		set line = line_ "_"_ sub
+	}
+	set ln = ln + 1
+
+	/* last line: prepend head and append tail if they are not empty
+	   */
+	if 'head.isNull() set line = " set "_ vMas_ "="_ head_ line.extract( line.find( "="), line.length())_ tail
+	set code(ln) = line
+	quit
+
+	// ---------------------------------------------------------------------
+getMfdTp( String sft,	// subfield tag
+	Number sfd1,	// major delimiter
+	Number sfd2,	// minor delimiter
+	Number sfp)	// position			/NONUL
+	/* ---------------------------------------------------------------------
+	Helper funtion that returns the masterfield type as follows:
+	- 1	If the masterfield can be composed by simple concatenation of the
+		individual (single character) subfields ($EXTRACT()-type).
+	- 2	If the masterfield can be composed by simple concatenation of the
+		subfields, delimited by a fixed single character ($PIECE()-type).
+	- 3	If the subfield is composed by grouping the subfields by tag, and
+		concateating the tags and subfields using the specified
+		delimiters.
+
+	NOTES:
+	* Although all 4 subfield defining properties are supplied to the
+		function, sfd2 is not needed to determin the result.
+	*/
+	if sft.isNull(),sfd1.isNull() quit 1
+	if sft.isNull() quit 2
+	quit 3
+
+	// ---------------------------------------------------------------------
+public getMfORC( PSLColumn cd)		// masterfield column desctiptor
+	/* ---------------------------------------------------------------------
+	This subroutine generates the ORACLE SQL code for the retrieval of a
+	masterfield from an RDB table. It uses the same mechnism as $$getMfRDB(),
+	but returns the complete ORACLE SQL expression, without control
+	characters. If this value needs to be stored in a global, than it is the
+	callers responsibility to break the code into pieces.
+	Also note that the returned value contains the vertical bar (as it is the
+	concatenation operator of SQL.
+	Columnnames of subfield columns are by DATA-QWIK name.
+
+	NOTES:
+	* The NULL check for type 3 subfields with subfieldPosition>1 will fail,
+		because this ends up as SUB1 || '#' || SUB2, which will never be
+		NULL in ORACLE.
+	*/
+	if cd.masterfieldType=0 quit ""
+
+	type Row sf
+	type String tn = cd.table
+	type String fields()		// exchange String(), and cast as Row
+	type String Des = $$getSfd^UCXDD(tn, cd.column, .fields())
+	do sf.setDelimiter( Des.extract())
+	do sf.setColumns( Des.extract(2, Des.length()))
+
+	/* Use first subfield to find out what kind expression must be
+	   constructed */
+	set sf = {Row}fields(1)
+	type Number tp = $$getMfdTp( sf.sft, sf.sfd1, sf.sfd2, sf.sfp)
+	type String sep1
+
+	if tp=1 set sep1 = ""			// $E()
+	else  set sep1 = "'"_$CHAR(sf.sfd1)_ "' || " 	// $P()
+
+	type Number cnt		// position iterator
+	type String getval = ""	// function return value
+	type String sfexp	// subfield retrieval expression
+	type PSLTable tdc()	// PSLTable cache
+	type String byTnP(,)	// byTnP(sft,sfp)=column
+	
+	do sortSfd(.sf, .fields(), .byTnP(,))
+
+	if tp = 3 do {
+		/* The algorithm uses the fact that the result is ordered by
+		   tag as well as by position. Thus a complete tag expression
+		   is available as soon as the the value of sf.sft changes.
+		   Within each tag construction, sf.sfd2 is used to concatenate
+		   the subfields bound to the tag. */
+		type String cn		// column name
+		type String sep2	// subfieldMinor
+		type String tag = ""	// tag under construction
+		type String tagval	// delimited subfields for current tag
+		
+		for  set tag = byTnP(tag).order() quit:tag=""  do {
+			set cnt = byTnP(tag,"").order()
+			set sep2 = "'"_ $CHAR(byTnP(tag,cnt).piece("|",2))_ "' || "
+			set tagval = ""
+			for cnt=1:1:byTnP(tag,"").order(-1) do {
+				if 'byTnP(tag,cnt).exists() set sfexp = "''"
+				else  do {
+					set cn = byTnP(tag,cnt).piece("|")
+					set cd = PSL.getPSLColumn(tn, cn, .tdc())
+					set sfexp = tn_ "."_ cn
+				}
+				if 'tagval.isNull() set tagval = tagval_ " || "_ sep2
+				set tagval = tagval_ sfexp
+			}
+			if cnt>1 set tagval = "("_tagval_")"
+			/* At this point tagval contains the M expression
+			   that combines all subfields tied to this tag.
+			   Add the code that checks for all-subfields-empty, and
+			   append the code for this tag to getval (using DLM) */
+			if 'getval.isNull() set getval = getval_ " || "
+			set getval = getval_ "CASE WHEN "_ tagval
+			set getval = getval_ " IS NULL THEN '' ELSE "
+			set getval = getval_ sep1.extract(1,2)_ tag
+			set getval = getval_ sep2.extract(2,sep2.length())
+			set getval = getval_ tagval_ " END"
+		}
+		set getval = "SUBSTR( "_getval_", 2)"
+	}
+	else  do {
+		/* type 1 and type 2 use simple concatenation of all subfields,
+		   with sep1 to separate them. */
+		
+		for cnt=1:1:byTnP(" ","").order(-1) do {
+			if 'byTnP(" ",cnt).exists() set sfexp = "''"
+			else  do {
+				set cd = PSL.getPSLColumn(tn, byTnP(" ",cnt), .tdc())
+				set sfexp = tn_ "."_ byTnP(" ",cnt)
+			}
+			if 'getval.isNull() set getval = getval_ " || "_ sep1
+			set getval = getval_ sfexp
+		}
+		set getval="("_ getval_ ")"
+	}
+
+	quit getval
+
+	// ---------------------------------------------------------------------
+private getMfRDB( PSLColumn cd,		// masterfield column desctiptor
+		PSLIdentifier recInst)	// record instance variable
+	/* ---------------------------------------------------------------------
+	This subroutine generates the GTM code for the retrieval of a masterfield
+	from an RDB table. It does this by combining the subfield retrieval
+	expressions into a single M-like expression. However, because the
+	resulting expression can be too large to be used in-line, the function
+	will use the TAB-character as the concatenation operator.
+	If the caller chooses to use the code in-line, it is sufficient to apply
+	String.translate($CHAR(9),"_") to the value returned by the function.
+	If the caller needs to break down the return value, it can use the TAB
+	character to construct individual M expressions.
+	*/
+	quit $$getXfXDB(cd, recInst, 2)
+
+	// ---------------------------------------------------------------------
+private getObjMet	// RecordTBL.getClm
+	/* ---------------------------------------------------------------------
+	This subroutine can be designated as the subroutine that implements the
+	method RecordTBL.getCln() where TBL is the name of the table and Cln is
+	the standardized spelling for materfield CLN.
+	This subroutine assumes:
+
+	INPUTS:
+	. PSL.class = "RecordTBL"
+		The name of the table will be derived from this
+	. PSL.method = "get"_Columnname
+		The uppercase translation of the characters following "get" shall
+		be the columnname.
+	. actuals()
+		If the row in OBJECTMET is set up correctly, there will be no
+		actual parameters. This subroutine does not verify this,
+		it simply ignores them.
+	OUTPUTS:
+	. whatever is produced by getMaster(objectName,TBL,Cln)
+	. Record optimization on this record instance is turned off, because the
+		objectinstance is passed as a parameter. By turning it off
+		explicitly, the result is independent of default settings in UCGM.
+	*/
+	type String table  = $$getReTable^UCGM( PSL.class)
+	type String column = PSL.method.extract( 4, PSL.method.length()).upperCase()
+
+	set PSL.return = $$getMaster( PSL.objectName, table, column)
+	quit
+
+	// ---------------------------------------------------------------------
+private getOfXDB( PSLColumn cd,		// masterfield column desctiptor
+		PSLIdentifier recInst)	// record instance variable
+	/* ---------------------------------------------------------------------
+	This subroutine generates the GTM code for the retrieval of a
+	masterfield.oldVal from an MDB or RDB. It calls $$getXfXDB(,,1) to
+	construct the expression.
+	*/
+	quit $$getXfXDB(cd, recInst, 1)
+
+	// ---------------------------------------------------------------------
+private getOldVal( PSLIdentifier recInst,	// RecordTBL instance variable
+		String TBL,			// table name
+		String CLN)			// column name of masterfield
+	/* ---------------------------------------------------------------------
+	This subroutine generates the code for the RecordTAB.oldCln() method.
+	It generates the following function:
+		$$vCoMfOnn( RecordTBL vObj)
+	This function composes the masterfield by starting with an empty field,
+	and uses String.putSub() to insert the oldvals of individual subfields.
+	This function only generates the (PSL) code to compose the masterfield.
+	Any side effect, such as turning off object optimization because the
+	RecordTBL instance is passed as a parameter, is the responsibility of the
+	caller.
+	*/
+	type literal String oLvn = "vobj"
+	type Row sf
+	type String fields()		// exchange String(), and cast as Row
+	type String Des = $$getSfd^UCXDD(TBL, CLN, .fields())
+	do sf.setDelimiter( Des.extract())
+	do sf.setColumns( Des.extract(2, Des.length()))
+
+	do setOpti^UCGM(recInst, recInst.scopeLevel , 1)	// turn off object optimization
+
+	type String comment = "Record"_TBL_".old"_CLN_"()"
+	type String label = $$findSubr^UCGM( "vCoMfO", comment)
+	
+	if 'PSL.subrouExists(label) do {
+
+		type PSLBuffer buf = PSL.openBuffer("(Record"_TBL_" vRec)",comment)
+		type PSLColumn sc = PSL.getPSLColumn( TBL, CLN)
+		type String node = sc.node
+		if node'=+node set node = node.addQuotes()
+		set node = oLvn_ "(vRec,-100,"_ node_ "," _ CLN.addQuotes()_ ")"
+		// tbd: if already calculated return without recalculting again
+		do buf.add(" if "_ node_ ".exists() quit "_node)
+		do buf.add(" type String vMas = """"")
+		type Number cnt
+		for cnt=1:1:fields("").order(-1) do {
+			set sf = {Row}fields(cnt)
+			type String col = sf.di
+			Type String tag = """"_ sf.sft_ """"
+			Type String line = " set vMas = vMas.putSub( vRec."_col.lowerCase()_".oldVal,"_tag
+
+			/* sfd1 and sfd2 may be empty */
+			Type Number asc = sf.sfd1
+			if asc.isNull() set line = line_","""""
+			else  set line = line _ ",$C("_asc_")" 
+			set asc = sf.sfd2
+			if asc.isNull() set line = line_","""""
+			else  set line = line _ ",$C("_asc_")"
+
+			/* sfp is always present */ 
+			do buf.add( line _","_sf.sfp_")")
+		}
+		do buf.add(" set "_node_" = vMas	// store calculated value for multiple retrievals")
+		do buf.add(" quit vMas") 
+		do buf.insert( label)
+	}
+	quit "$$"_label_"("_recInst_")"
+
+	// ---------------------------------------------------------------------
+public getSf(	String master,	// value of masterfield
+		String sft,	// subfield tag
+		Number sfd1,	// major delimiter
+		Number sfd2,	// minor delimiter
+		Number sfp)	// position			/NONUL
+	/* ---------------------------------------------------------------------
+	Runtime implementation of String.getSub() for subfields.
+	This function expects all parameters to be valid, in particular sfp.
+	This will be the case if the actual parameters are derived from a
+	PSLColumn instance.
+	*/
+	type Number tp = $$getMfdTp(sft, sfd1, sfd2, sfp)
+	if tp=1 quit master.extract(sfp)		// type 1: $EXTRACT()
+	if tp=2 quit master.piece( sfd1.char(), sfp)	// type 2: $PIECE()
+
+	// TYPE 3: TAG-delimited
+	quit ($CHAR(sfd1)_master).piece($CHAR(sfd1)_sft_$CHAR(sfd2),2).piece($CHAR(sfd1)).piece($CHAR(sfd2),sfp)
+
+	// ---------------------------------------------------------------------
+public getSfMDB( PSLExpression master,	// masterfield value
+		String sft,		// PSLColumn.subfieldTag
+		Number sfd1,		// PSLColumn.subfieldMajor
+		Number sfd2,		// PSLColumn.subfieldMinor
+		Number sfp)		// PSLCoumn.subfieldPosition
+	/* ---------------------------------------------------------------------
+	This subroutine generates the M code for the retrieval of a subfield
+	from a MDB table.
+	This function is a simplification of String.getSub(), because it only
+	supports subfield extraction, and expects all values to be consistent.
+	*/
+	type Number tp = $$getMfdTp(sft,sfd1,sfd2,sfp)
+
+	if tp=1 quit "$E("_ master_ ","_ sfp_ ")"			// $E()
+	if tp=2 quit "$P("_ master_ ",$C("_ sfd1 _"),"_ sfp_ ")"	// $P()
+
+	// TYPE 3: TAG-delimited
+	quit "$P($P($P($C("_sfd1_")_"_master_",$C("_sfd1_")_"""_sft_"""_$C("_sfd2_"),2),$C("_sfd1_")),$C("_sfd2_"),"_sfp_")"
+
+	// ---------------------------------------------------------------------
+public getXfXDB( PSLColumn mcd,		// masterfield descriptor
+		PSLIdentifier recInst,	// record instance variable
+		Number oldOrCur)	// 1 = getOldExpr, 2 = getCurrentExpr
+	/* ---------------------------------------------------------------------
+	Common code for $$getMfXDB() and $$getOfMdb(). This code differs only in
+	the value that must be inserted for each column:
+	- subfield.getCurrentExpr() for $$getMfXDB()
+	- subfield.getOldExpr() for $$getOfXDB()
+	*/
+	type literal String DLM = 9.char()
+
+	if mcd.masterfieldType=0 quit ""
+
+	type Row sf
+	type String tn = mcd.table
+	type String fields()		// exchange String(), and cast as Row
+	type String Des = $$getSfd^UCXDD(tn, mcd.column, .fields())
+	do sf.setDelimiter( Des.extract())
+	do sf.setColumns( Des.extract(2, Des.length()))
+
+	/* Use first subfield to find out what kind expression must be
+	   constructed */
+	set sf = {Row}fields(1)
+	type Number tp = $$getMfdTp( sf.sft, sf.sfd1, sf.sfd2, sf.sfp)
+	type String sep1
+
+	if tp=1 set sep1 = ""			// $E()
+	else  set sep1 = """"_ ({Number}(sf.sfd1)).char()_ """_" 	// $P()
+
+	type Number cnt		// position iterator
+	type String getval = ""	// function return value
+	type PSLColumn scd	// subfield PSLColumn instance
+	type String sfexp	// subfield retrieval expression
+	type PSLTable tdc()	// PSLTable cache
+	type String byTnP(,)	// byTnP(sft,sfp)=column
+	
+	do sortSfd(.sf, .fields(), .byTnP(,))
+
+	if tp = 3 do {
+		/* The algorithm uses the fact that the result is ordered by
+		   tag as well as by position. Thus a complete tag expression
+		   is available as soon as the the value of sf.sft changes.
+		   Within each tag construction, sf.sfd2 is used to concatenate
+		   the subfields bound to the tag. */
+		type String cn		// column name
+		type String sep2	// subfieldMinor
+		type String tag = ""	// tag under construction
+		type String tagval	// delimited subfields for current tag
+		
+		for  set tag = byTnP(tag).order() quit:tag=""  do {
+			set cnt = byTnP(tag,"").order()
+			set sep2 = """"_ ({Number}(byTnP(tag,cnt).piece("|",2))).char()_ """_"
+			set tagval = ""
+			for cnt=1:1:byTnP(tag,"").order(-1) do {
+				if 'byTnP(tag,cnt).exists() set sfexp = """"""
+				else  do {
+					set cn = byTnP(tag,cnt).piece("|")
+					set scd = PSL.getPSLColumn(tn, cn, .tdc())
+					if oldOrCur = 1 set sfexp = scd.getOldExpr(recInst,0)
+					if oldOrCur = 2 set sfexp = scd.getCurrentExpr(recInst,0)
+				}
+				if 'tagval.isNull() set tagval = tagval_ "_"_ sep2
+				set tagval = tagval_ sfexp
+			}
+			/* At this point tagval contains the M expression
+			   that combines all subfields tied to this tag.
+			   Add the code that checks for all-subfields-empty, and
+			   append the code for this tag to getval (using DLM) */
+			if 'getval.isNull() set getval = getval_ DLM
+			set getval = getval_ "$S("_ tagval_ "'?."_ sep2.extract(1,3)_ ":"
+			set getval = getval_ sep1.extract(1,2)_ tag
+			set getval = getval_ sep2.extract(2,4)_ tagval
+			set getval = getval_ ",1:"""")"
+		}
+	}
+	else  do {
+		/* type 1 and type 2 use simple concatenation of all subfields,
+		   with sep1 to separate them. */
+		
+		for cnt=1:1:byTnP(" ","").order(-1) do {
+			if 'byTnP(" ",cnt).exists() set sfexp = """"""
+			else  do {
+				set scd = PSL.getPSLColumn(tn, byTnP(" ",cnt), .tdc())
+				if oldOrCur = 1 set sfexp = scd.getOldExpr(recInst,0)
+				if oldOrCur = 2 set sfexp = scd.getCurrentExpr(recInst,0)
+			}
+			if 'getval.isNull() set getval = getval_ DLM
+			if cnt>1 set getval = getval_ sep1
+			set getval = getval_ sfexp
+		}
+
+		if tp = 2 set getval = "$$RTCHR^%ZFUNC("_getval_","_ sep1.extract( 1, sep1.length() - 1) _ ")"
+		else  set getval = "("_getval_")"
+	}
+
+	quit getval
+
+	// ---------------------------------------------------------------------
+public rtGetMf( String TBL,			// table name
+		String CLN,			// column name of masterfield
+		PSLIdentifier recInst)		// RecordTBL instance variable
+	/* ---------------------------------------------------------------------
+	This subroutine constructs the masterfield at runtime.
+	This function composes the masterfield by starting with an empty field,
+	and uses String.putSub() to insert the individual subfields.
+	Instead of generating code for the assignments, the String.putSub()
+	method will be called directly to "insert" the subfield value.
+
+	NOTES:
+	. It is assumed that this function will only be called for masterfield
+		retrieval from an RDB table.
+	. The function uses PSLColumn.gerCurrentNode(), PSLColumn.position, and
+		PSLColumn.delimiter as supplied. It is assumed that these
+		values can be used without additional checking. In particular
+		no check for "key node" or "memo node" is applied.
+	*/
+	type Row sf
+	type String fields()		// exchange String(), and cast as Row
+	type String Des = $$getSfd^UCXDD(TBL, CLN, .fields())
+	do sf.setDelimiter( Des.extract())
+	do sf.setColumns( Des.extract(2, Des.length()))
+
+	type String masVal = ""
+	type Number cnt
+	for cnt=1:1:fields("").order(-1) do {
+		set sf = {Row}fields(cnt)
+		type String col = sf.di
+
+		type PSLColumn cd = PSL.getPSLColumn(TBL,col)
+		type String nod = cd.getCurrentNode()
+		type Number pos = cd.position
+		type Number dlm = cd.delimiter
+
+		type String subVal
+		if nod.isNull() set subVal = vobj( recInst).piece($CHAR(dlm), pos)
+		else  set subVal=vobj( recInst, nod).piece($CHAR(dlm), pos)
+		
+		type String sfd1 = sf.sfd1 if 'sfd1.isNull() set sfd1 = $CHAR(sfd1)
+		type String sfd2 = sf.sfd2 if 'sfd2.isNull() set sfd2 = $CHAR(sfd2)
+
+		set masVal = masVal.putSub( subVal, sf.sft, sfd1, sfd2, sf.sfp)
+	}
+	quit masVal
+
+	// ---------------------------------------------------------------------
+public rtGetSf( String TBL,			// table name
+		String CLN,			// column name of masterfield
+		PSLIdentifier recInst)		// RecordTBL instance variable
+	/* ---------------------------------------------------------------------
+	This subroutine retrieves the subfield at runtime.
+	The supplied combination shall be a subfield in the underlying storage
+	model.
+	*/
+	type PSLColumn cd = PSL.getPSLColumn( TBL, CLN)
+	type String nod = cd.getCurrentNode()
+	type String master
+
+	if nod.isNull() set master = vobj(recInst).piece( cd.delimiter.char(), cd.position)
+	else  set master = vobj(recInst,nod).piece( cd.delimiter.char(), cd.position)
+
+	quit $$getSf(master, cd.subfieldTag, cd.subfieldMajor, cd.subfieldMinor, cd.subfieldPosition)
+
+	// ---------------------------------------------------------------------
+public rtMfORC( String TBL,		// table name
+		String CLN)		// masterfield column name
+	/* ---------------------------------------------------------------------
+	Wrapper function for call to $$getMfORC(), that takes a tablename and
+	column name instead of a PSLColumn instance
+	*/
+	type PSLColumn cd = PSL.getPSLColumn( TBL, CLN)
+	quit $$getMfORC( cd)
+	
+	// ---------------------------------------------------------------------
+public rtMfRDB( String TBL,		// table name
+		String CLN,		// masterfield column name
+		PSLIdentifier recInst)	// 
+	/* ---------------------------------------------------------------------
+	Wrapper function for call to $$getMfRDB(), that takes a tablename and
+	column name instead of a PSLColumn instance
+	*/
+	type PSLColumn cd = PSL.getPSLColumn( TBL, CLN)
+	quit $$getMfRDB( cd, recInst)
+	
+	// ---------------------------------------------------------------------
+private setMaster( String TBL,		// table name
+		String CLN,		// column name of masterfield
+		Boolean bAudit)		// Audit flag
+	/* ---------------------------------------------------------------------
+	This subroutine generates the code for the RecordTBL.setCln() method.
+	This subroutine generates the following function, regardless of the
+	underlying database
+		$$vCoMfSnn( RecordTBL vObj, String vVal)
+	that decomposes the supplied vVal, using String.getsub() to obtain the
+	individual subfields.
+	
+	OUTPUTS:
+	. this.return = vCoMfSnn
+		Only the label is returned. The caller must append the recInst
+	. vobj(buf) will contain the code array
+		If the caller wants to insert the code, it is sufficient to call
+			buf.insert( label)
+		where label is the value returned by the function.
+		If the caller cannot generate M code, because the call does not
+		come from inside the compiler, the caller may interpret the
+		buffer directly:
+		* The buffer contains one assignment per line for each subfield
+		* The first assignment is preceeded by a line
+			" // begin assignments"
+		* The last assignment is followed by a line
+			" // end assignments"
+	*/
+	type Row sf
+	type String fields()		// exchange String(), and cast as Row
+	type String Des = $$getSfd^UCXDD(TBL, CLN, .fields())
+	do sf.setDelimiter( Des.extract())
+	do sf.setColumns( Des.extract(2, Des.length()))
+
+	type String comment = "Record"_TBL_".set"_CLN_"("_bAudit_")"
+	type String label = $$findSubr^UCGM( "vCoMfS", comment)
+
+	if 'PSL.subrouExists(label) do {
+
+		type PSLBuffer buf = PSL.openBuffer("(Record"_TBL_" vRec, String vVal)",comment)
+
+		#IF 0
+		/* Old code, works but is sub-optimal
+		   */
+		if bAudit do buf.add("do vRec.setAuditFlag(1)")
+		do buf.add("// begin assignments")
+		type Number cnt
+		for cnt=1:1:fields("").order(-1) do {
+			set sf = {Row}fields(cnt)
+			type String col = sf.di
+			Type String tag = """"_ sf.sft_ """"
+			Type String line = "set vRec."_col.lowerCase()_" = vVal.getSub("_tag
+
+			/* sfd1 and sfd2 may be empty */
+			Type Number asc = sf.sfd1
+			if asc.isNull() set line = line_","""""
+			else  set line = line _ ",$C("_asc_")" 
+			set asc = sf.sfd2
+			if asc.isNull() set line = line_","""""
+			else  set line = line _ ",$C("_asc_")"
+
+			/* sfp is always present */ 
+			do buf.add( line _","_sf.sfp_")")
+		}
+		do buf.add("// end assignments")
+
+		#ELSE
+		/* New code, calls $$setMfXDB to obtain the entire assignment
+		   as a single string, and spits it on each TAB.
+		   This code befefits from the optimizations in $$setMfXdb().
+		   */
+		type PSLColumn cd = PSL.getPSLColumn( TBL, CLN)
+		type String code = $$setMfXDB( cd, "vRec", "vVal", bAudit)
+		type Number cnt
+		for cnt = 1:1:code.length( 9.char()) do buf.add( code.piece( 9.char(), cnt))
+		#END
+
+		do buf.add("quit") 
+		do buf.insert( label)
+	}
+	quit label
+
+	// ---------------------------------------------------------------------
+public setMfXDB( PSLColumn cd,		// masterfield descriptor
+		PSLIdentifier recInst,	// record instance variable
+		PSLExpression newval,	// new subfield value
+		Number mode)		// Audit and RDB tracking mode
+	/* ---------------------------------------------------------------------
+	This function returns the code for assignment to a masterfield.
+	For RDB, the return value consists of the assignment statements to each
+	of the individual subfields, separated by TABs.
+	For MDB the return value consists of the -100 tree maintenance of the
+	individual subfields plus a single assignment to the masterfield.
+
+	If 'newval' is not a variable or array, the code will include a "line"
+	NEW vSetMf SET vSetMf=newval
+	Note that using this variable name is safe as long as no other part of
+	the PSL compiler will use this variable
+	
+	OUTPUTS:
+	*/
+	type literal String TAB = 9.char()
+	type literal Number RDBSUPPRESS = 3
+
+	type Boolean bAudit = (mode # RDBSUPPRESS)>0
+	type PSLColumn cdsf		// subfield column descriptor
+	type Number cnt			// subfield iterator
+	type String col			// column name
+	type String fields()		// exchange String(), and cast as Row
+	type String recVar		// variable name (if recInst.isNumber())
+	type String rightval		// rightexpr to extract sf from new mf
+	type String setMf = ""		// return value
+	type Number sfp			// subfield position
+	type String Des  = $$getSfd^UCXDD(cd.table, cd.column, .fields())
+	type Row    sf   = Class.new( "Row", Des.extract(2, Des.length()))
+	type PSLTable td = PSL.getPSLTable( cd.table, 0)
+
+	do sf.setDelimiter( Des.extract())
+
+	/* If bAudit we are stuck with the vobj() structure, and we can safely
+	   pass recVar to all calls that expect a record instance. On the other
+	   hand, if RDB and not bAudit, then voxn optimization may apply, and
+	   the original numeric recInst must be passed to cdsf.getUpdateCode().
+	   */
+	if recInst.isNumber() set recVar = $$dec2ovs^UCREC4OP(recInst)
+	else  set recVar = recInst
+
+	/* If the new value (RDB) or the current value (MDB with audit) is
+	   referenced more than once, use intermediate variables. */
+	if 'newval.isVariable(),td.isRdb set setMf = " N vSetMf S vSetMf="_ newval, newval = "vSetMf"
+	if 'td.isRdb,bAudit set setMf = setMf_ " N vSetMf S vSetMf="_ cd.getCurrentExpr( recVar, 0)
+
+	for cnt=1:1:fields("").order(-1) do {
+		set sf = {Row}fields(cnt)
+		set col = sf.di
+		set cdsf = PSL.getPSLColumn( cd.table, col)
+		set sfp = sf.sfp if sfp.isNull() set sfp = 1
+
+		if td.isRdb do {
+			if 'setMf.isNull() set setMf = setMf_ TAB
+			set rightval = $$getSfMDB( newval, sf.sft, sf.sfd1, sf.sfd2, sfp)
+			set setMf = setMf_ cdsf.getUpdateCode( recInst, rightval, mode)
+		}
+		else  if bAudit do {
+			set rightval = $$getSfMDB( "vSetMf", sf.sft, sf.sfd1, sf.sfd2, sfp)
+			set rightval = $$getUpdAudit^UCXDD( cdsf, recVar, rightval, mode # RDBSUPPRESS = 2)
+			if 'setMf.isNull() set setMf = setMf_ TAB
+			set setMf = setMf_ rightval
+		}
+	}
+	if 'td.isRdb do {
+		/* If we get here we are definitely using vobj(), so we can pass
+		   recVar in the (generated) calls to UCXDD */
+		if 'setMf.isNull() set setMf = setMf_ TAB
+		set setMf = setMf_ " S "_ cd.getCurrentExpr( recVar, 1)_ "="_newval_","_ $$cdNodChg^UCXDD(recVar, cd.getOldNode(1)) _ "="""""
+	}
+
+	quit setMf
+
+	// ---------------------------------------------------------------------
+private setObjMet	// RecordTBL.setCln
+	/* ---------------------------------------------------------------------
+	This subroutine can be designated as the subroutine that implements the
+	method RecordTBL.setCln() where TBL is the name of the table and Cln is
+	the standardized spelling for materfield CLN.
+	This subroutine assumes:
+
+	INPUTS:
+	. PSL.class = "RecordTBL"
+		The name of the table will be derived from this
+	. PSL.method = "set"_Columnname
+		The uppercase translation of the characters following "set" shall
+		be the columnname.
+	. actuals()
+		If the row in OBJECTMET is set up correctly, there will be a single
+		actual parameter. This subroutine does not verify this,
+		it simply passes actual(1) to setMaster.
+	. type(,objectName)
+		The node that describes the RecordTBL instance is used to obtain
+		the setting of the autitFlag. This setting is then passed to
+		$$setMaster()
+	OUTPUTS:
+	. whatever is produced by setMaster(objectName,TBL,Cln,actual(1),audit)
+	. Record optimization on this record instance is turned off, because the
+		objectinstance is passed as a parameter. By turning it off
+		explicitly, the result is independent of default settings in UCGM.
+	*/
+	type String table  = $$getReTable^UCGM( PSL.class)
+	type String column = PSL.method.extract( 4, PSL.method.length()).upperCase()
+	type Boolean isAudit = $$getAtt^UCGM( PSL.objectName, , 12)
+
+	do setOpti^UCGM(PSL.objectName, , -1)	// turn off object optimization
+
+	set PSL.return = $$setMaster( table, column, isAudit)_ "("_ PSL.objectName_ ","_ PSL.actual(1)_ ")"
+	quit
+
+	// ---------------------------------------------------------------------
+public setSf(	String master,	// value of masterfield
+		String subval,	// value of subfield to be assigned
+		String sft,	// subfield tag
+		Number sfd1,	// subfield major delimiter
+		Number sfd2,	// subfield minor delimiter
+		Number sfp)	// subfield position
+	/* ---------------------------------------------------------------------
+	Runtime implementation of String.putSub() for subfields.
+	This function expects all parameters to be valid, in particular sfp.
+	This will be the case if the actual paramters are derived from a
+	PSLColumn instance.
+	*/
+	if sft.isNull(),sfd1.isNull() set master.extract( sfp) = subval quit master
+	
+	type String d1 = $CHAR(sfd1)
+	if sft.isNull() set master.piece( d1, sfp) = subval quit master
+
+	type String d2 = $CHAR(sfd2)
+	if master.isNull() set master.piece( d2, sfp) = subval quit sft_ d2_ master
+
+	type String field = (d1_ master).piece(d1_ sft_ d2,2).piece(d1)
+	if 'field.isNull() do {		// code to remove "old" value
+		type String z = d1_ sft_ d2_ field
+		set master = (d1_ master).piece(z)_(d1_ master).piece(z,2)
+		if master.extract() = d1 set master = master.extract(2,master.length())
+	}
+	set field.piece( d2, sfp) = subval
+	if master.isNull() quit sft_ d2_ field
+	quit master_ d1_ sft_ d2_ field
+
+	// ---------------------------------------------------------------------
+public setSfMDB( PSLExpression master,	// masterfield value
+		PSLExpression newval,	// new subfield value
+		String sft,		// PSLColumn.subfieldTag
+		Number sfd1,		// PSLColumn.subfieldMajor
+		Number sfd2,		// PSLColumn.subfieldMinor
+		Number sfp)		// PSLCoumn.subfieldPosition
+	/* ---------------------------------------------------------------------
+	This subroutine generates the M code for the assignment of a subfield.
+	When the subfield type is 1 or 2, in-line code can be generated. However,
+	if the subfield type is 3, then the code returns a call to
+	$$setSf^UCCOLSF().
+	This function is a simplification of String.putSub(), because it only
+	supports subfield extraction, and expects all values to be consistent.
+	*/
+	type String code = ""
+
+	/* If masterfield expression neither a variable nor an array, there are
+	   no shortcuts available. */
+	if $$isVar^UCGM(master)!$$isArr^UCGM(master) do {
+		// type 1: $EXTRACT()
+		if sft.isNull(),sfd1.isNull() set code = "$E("_ master_ ","_ sfp_ ")="_ newval
+
+		// type 2: $PIECE()
+		if sft.isNull() set code = "$P("_ master_ ",$C("_ sfd1 _"),"_ sfp_ ")="_ newval
+	}
+	if 'code.isNull() quit code
+
+	// TYPE 3: TAG-delimited, or master not directly assignable
+	type String d1 = sfd1
+	type String d2 = sfd2
+	if d1.isNull() set d1=""""""
+	if d2.isNull() set d2=""""""
+	quit master_ "=$$setSf^UCCOLSF("_ master_ ","_ newval_ ","""_ sft_ ""","_ d1_ ","_ d2_ ","_ sfp_ ")"
+
+	// ---------------------------------------------------------------------
+sortSfd( Row sf,
+	String sfd(),		// Array of rows as returned by $$getSfd%UCXDD()
+	String byTnP(,))	// byTnP(sft,sfp)=columnname [| sft2]
+	/* ---------------------------------------------------------------------
+	*/
+
+	type Number cnt
+	type Number sfp
+	type String sft
+	type String sfd2
+	for cnt=1:1:sfd("").order(-1) do {
+		set sf = {Row}sfd(cnt)
+		set sfp = sf.sfp if sfp.isNull() set sfp = 1
+		set sft = sf.sft
+		if sft.isNull() set sft = " ",sfd2=""
+		else  set sfd2 = "|"_sf.sfd2
+		set byTnP(sft,sfp) = sf.di_ sfd2
+	}
+	quit
+
+vSIG()	quit "60570^64645^Frans S.C. Witte^36319"	// Signature - LTD^TIME^USER^SIZE

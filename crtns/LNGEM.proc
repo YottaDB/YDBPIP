@@ -1,0 +1,269 @@
+public LNGEM(RecordLN ln)	
+
+	//Calculate GEM Mortgage Payments
+
+	/*
+	   ORIG:  Chuck Hardy (6721) - 04/12/86
+	
+	   INPUT:
+	   . ln	Loan Object		/TYP=RecordLN/REQ/REF:R
+
+	   . BAL,IR (Decimal divided by AF)
+
+
+	   RETURNS:
+	   . PMTPI (For the first period)
+	    Where: PV=LOAN AMOUNT
+	     NP=TOTAL #PMTS
+	     CF=CHANGE FREQ
+	     NC=# CHANGES
+	     INC=PMT INCREMENT (%)
+	     IRN=NOMINAL RATE
+
+	---- Revision History -------------------------------------------------
+
+	07/31/06 - KELLYP - CR 22048
+		   Modified the FNL2 and XPTS sections to eliminate PRECEDENCE
+		   warnings.
+
+	02/27/06 - KELLYP - CR 19765
+		   Modified FN, FSTP, & FNL2 sections to use a new "QUIT" var
+		   that is used to determine when to stop processing.  The old
+		   M routine version of this procedure used GOTO statements to
+		   exit the INT section.  These statements were replaced with
+		   "do...quit" calls appropriately, however, the handling of 
+		   exiting the FSTP section prior to I=ln.numch was not handled
+		   and the "QUIT" variable was introduced to correct this.  Also
+		   made top of procedure public and removed pre-2003 revision
+		   history.
+
+	12/10/03 - CARROLLJ - CR7239
+		   Removed dead code from INT section.
+
+	-----------------------------------------------------------------------
+	
+	*/
+	do BOFF(.ln)
+	quit
+
+public BOFF(RecordLN ln)
+	
+	new CAF,PMTPI
+	
+	do CALC(ln.dist1af,.ZPMT,.DISTINT,.CAF,.PMTPI,$G(FEE),$G(PVF))
+	
+	// Number of Payments Per Change
+	if $G(CAF) set ln.caf=CAF
+
+	// Principal and Interest Payment
+	if $G(PMTPI) set ln.pmtpi=PMTPI
+	quit 
+	
+public CALC(dist1af,ZPMT,DISTINT,CAF,PMTPI,FEE,PVF,RecordLN ln)	// Do calculations
+
+	/*
+	   Called from this routine and from LNNEW10 only
+	
+	   ARGUMENTS:
+	   . dist1af LN.DIST1AF  /TYP=N/MECH=VAL
+	
+	   . ZPMT  Calculated here  /TYP=$/MECH=REFNAM:W
+	
+	   . DISTINT Calculated here  /TYP=$/MECH=REFNAM:W
+	
+	   . CAF  LN.CAF   /TYP=N/MECH=REFNAM:W
+	
+	   . PMTPI  LN.PMTPI  /TYP=$/MECH=REFNAM:W
+	
+	   . FEE  LNAMOAO.AMT total /TYP=$/MECH=VAL
+	
+	   . PVF  From ^LNGEM  /TYP=N/MECH=REFNAM:RW
+	
+	*/
+
+	new BAL,PCTIRN,PCTPPINC,PPINC
+
+	kill CF
+	
+	set FEE=$G(FEE)
+	set PVF=$G(PVF)
+	set BOFF=1 
+	set BAL=1000
+
+	if ln.dist1af'="" set LAF=ln.dist1af
+	else  set NJD=$$NJD^UFRE(%SystemDate,ln.dist1fre,.LAF) quit:ER
+
+	if '$G(CAF) set CAF=ln.caf
+	
+	if ln.numch*CAF>ln.ambas quit 
+	if ln.irn>1 set PCTIRN=ln.irn/100
+	else  set PCTIRN=ln.irn
+	if ln.ppinc>.99999 set PCTPPINC=ln.ppinc/100
+	else  set PCTPPINC=ln.ppinc
+	set IR=PCTIRN/LAF
+	if '$D(BOFF) set BOFF=0
+	
+	set MARGIN=.0009 
+	set PV=1000 
+	set CNTR=0
+
+	do FN(.ln)
+	quit
+
+FN(RecordLN ln)
+
+	type Boolean QUIT = 0
+
+	// If not, calculate a starting payment for the final term
+	set IR=PCTIRN/LAF
+	set EXP=$$LNX^%ZFUNC(1+IR)*(ln.ambas-1) 
+	set EXP=1/$$EXP^%ZFUNC(EXP)
+	set (PMTFH,PMTF)=PV/((1-EXP)/IR)
+	set PMTFL=0
+	do FSTP(.ln)
+	quit
+
+public FSTP(RecordLN ln)
+
+	type public Boolean QUIT
+	
+	if QUIT.get()=1 quit
+
+	// calculate the first payment, using present value method
+	set PMT=PMTF 
+	set PV=1000 
+	set CNTR=CNTR+1
+
+	// for each of the change periods, find the FV after making pmts
+	set I=1
+	for I=1:1  quit:(I>ln.numch)!(QUIT)  do INT(.ln,I)
+
+	quit
+	
+INT(RecordLN ln,I)
+
+	// find the future value after each change period
+	set EXP=$$LNX^%ZFUNC(1+IR)*CAF 
+	set EXP=$$EXP^%ZFUNC(EXP)
+	set FV=(((1-EXP)/IR)*PMT)+(PV*EXP)
+	set BLN(I)=FV set P(I)=PMT
+	if I=1 set BPV=PV
+	set PMT=PMT*(1+PCTPPINC) set PV=FV
+	set P(I+1)=PMT 
+	
+	do FNL1(.ln)
+	
+	quit
+	
+FNL1(RecordLN ln)	
+
+	/*
+	Calculate future value which results from the final payment
+	being applied for the remaining period.
+	*/
+	set N=ln.ambas-(CAF*ln.numch)
+	if 'N do FNL2(.ln) quit
+	set EXP=$$LNX^%ZFUNC(1+IR)*N 
+	set EXP=$$EXP^%ZFUNC(EXP)
+	set FV=(((1-EXP)/IR)*PMT)+(PV*EXP)
+	
+	quit
+	
+FNL2(RecordLN ln)
+	
+	type public Boolean QUIT
+	
+	if FV>-MARGIN,FV<MARGIN set QUIT=1 do END(.ln) quit
+	
+	set E(CNTR)=FV 
+	set PT(CNTR)=PMTF
+	
+	if CNTR>1 set A=(E(CNTR)-E(CNTR-1))/(PT(CNTR)-PT(CNTR-1))
+	if  set PMTF=PT(CNTR)-(E(CNTR)/A) do FSTP(.ln) quit
+	
+	if FV<0 do {
+		set X=PMTF 
+		set PMTF=PMTF+((PMTFH-PMTFL)/2) 
+		set PMTFH=X
+		}
+	else  do {
+		set X=PMTF 
+		set PMTF=PMTF-((PMTFH-PMTFL)/2) 
+		set PMTFL=X
+		}
+	do FSTP(.ln)
+	quit
+	
+END(RecordLN ln)
+
+	set BF=(PRIN+FEE)/1000 
+	set PVF=P(1) 
+	set TP=0
+	do XPTS 
+	if XPTS<0 set XPTS=0
+	do TP(.ln)
+	set ZPMT=ZPMT*(PRIN+FEE)/1000
+	set DISTINT=DISTINT*(PRIN+FEE)/1000
+	set N=""
+	for I=1:1 set N=$O(P(N)) quit:N=""  set LNGEM(I)=N_"|"_$$^SCARND(P(N)*BF,0,$G(CID))
+	set NC=ln.numch set C=ln.ambas
+	for I=1:1 set N=$O(P(N)) quit:N=""  set CF(I)=+$$^SCARND(P(N)*BF,0,$G(CID))_"|"_$S(NC:CAF,1:C) set C=C-CAF set NC=NC-1
+	set PMTPI=$P(LNGEM(1),"|",2)
+	set %REPEAT=I-1
+	
+	kill P,PT,BLN,E
+	do EXIT
+	quit	
+
+END1(RecordLN ln)
+
+	new C,F,I,P,X,%REPEAT
+
+	do TP(.ln)
+	set ZPMT=ZPMT*(PRIN+FEE)/1000 
+	set DISTINT=DISTINT*(PRIN+FEE)/1000
+	set PMTPI=$$^SCARND(PMTPI,0,$G(CID))
+	set X=ln.numch+1 
+	set F=1+PCTPPINC		//MCA 11/19/02
+	if X*CAF>ln.ambas set X=X-1
+	for I=1:1:X set LNGEM(I)=I_"|"_$$^SCARND(PMTPI,0,$G(CID)) set PMTPI=$$^SCARND(PMTPI*F,0,$G(CID))
+	set %REPEAT=I
+	set NC=ln.numch 
+	set C=ln.ambas 
+	set P=PMTPI
+	for I=1:1:X set CF(I)=+$$^SCARND(P,0,$G(CID))_"|"_$S(NC:CAF,1:C) set C=C-CAF set NC=NC-1 set P=$$^SCARND(P*F,0,$G(CID))
+	do EXIT
+	quit
+
+
+EXIT	kill BLN,X,XX,CNTR,I,PT,FAC,XPTS,E,EXP,FV,PMTFL,PMTFH,MARGIN
+	quit 
+	
+
+XPTS	set N="" set XPTS=0
+	for  set N=$O(BLN(N)) quit:N=""  if BLN(N)'<1000 do {
+		set EXP=$$LNX^%ZFUNC(1+IR)*N 
+		set EXP=1/$$EXP^%ZFUNC(EXP)
+		set X=(1-EXP)/IR
+		set XPTS=XPTS+((BLN(N)-1000)*X)
+		}
+	set XPTS=XPTS/10
+	quit 
+
+	
+TP(RecordLN ln)
+	set ZPMT=0 
+	set XPV=PVF 
+	set PVF=$$^SCARND(PVF,0,"","",8) 
+	set XB=BAL 
+	set BAL=1000
+	//MCA 11/19/02 - corrected usage of ln.ppinc
+	for I=1:1:ln.numch set ZPMT=ZPMT+(CAF*PVF) set PVF=$$^SCARND(PVF*(1+PCTPPINC),0,"","",8)
+	set X=ln.ambas-(ln.numch*CAF)
+	set ZPMT=+$$^SCARND(ZPMT+(X*PVF),0,"","",9)
+	set DISTINT=+$$^SCARND(ZPMT-BAL,0,"","",9) 
+	set PVF=XPV 
+	set BAL=XB
+	quit 
+
+vSIG()	quit "60477^65453^Pat Kelly^5634"	// Signature - LTD^TIME^USER^SIZE

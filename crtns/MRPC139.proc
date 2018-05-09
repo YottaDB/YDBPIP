@@ -1,0 +1,261 @@
+MRPC139( String RETURN, Number VERSN, Date DATE, Number UID, Number BRCD, String CRCD, String WHERE)
+
+	/*
+	 Procedure Id: MRPC139
+	 DESC: Teller Totals RPC
+	 ORIG: Kin Cho
+	 DATE: 03/23/2006
+
+	 ARGUMENTS:
+		. RETURN	Return value		/TYP=T/REQ/MECH=REFNAM:W
+		. VERSN		Version number		/TYP=N/REQ/MECH=VAL
+		. DATE		System Processing Date	/TYP=D/REQ/MECH=VAL
+		. UID		User ID			/TYP=T/REQ/MECH=VAL
+		. BRCD		Branch Code		/TYP=N/NOREQ/MECH=VAL
+		. CRCD		Currency Code		/TYP=T/NOREQ/MECH=VAL
+		. WHERE		WHERE Clause		/TYP=T/NOREQ/MECH=VAL
+
+	 RETURNS:
+           	. $$     Error Message               	/TYP=T
+             	  Null= No Error
+ 
+		. RETURN 				/TYP=T
+
+		  RETURN contains the following values seperated by $C(9) and end with $C(13,10)
+
+		  - CRCD	Currency Code
+		  - BRCD	Branch Code
+		  - UID		User ID
+		  - CLS		Transaction Code Class
+		  - GRP 	Transaction Code Group
+		  - ETC		Transaction Code
+		  - DRCR	Debit/Credit Indicator (0-debit, 1-credit)
+		  - DESC	Transaction Code Description
+		  - COUNT	Total Count of Transactions
+		  - TOTAMT	Total Amount of Transactions 
+
+	 EXAMPLE:
+
+		set UID=1
+		set BRCD=0
+		set CRCD="USD"
+		set WHERE="TSEQ BETWEEN 1001 AND 5001"
+		set X=$$^MRPC139(.R,1,DATE,UID,BRCD,CRCD,WHERE)
+
+	---- Comments ---------------------------------------------------------
+
+	---- Revision History -------------------------------------------------
+	10/11/06 - ChhabriS - CR23553
+		   Retrofited (created new procedure) from ICGWeb01_Dev_Profile
+		   view.
+		   This MRPC will return the total number and total amount for
+		   the transactions based on the Currency Code, Branch Code,
+		   User ID and System processing date.
+	-----------------------------------------------------------------------
+	
+		*/
+
+	type public Boolean ER
+	type public String RM
+
+	type Boolean ERV
+	type String ERRMSG
+
+	set (ER,ERV)=0
+	set (ERRMSG,RM)=""
+	set RETURN=""
+
+	// Check for Custom Routine and call it if it exists.
+	#if $$VALID^%ZRTNS("ZMRPC139")
+	do PROC^ZMRPC139(VERSN.get(),DATE.get(),UID.get(),BRCD.get(),CRCD.get(),WHERE.get(),.RETURN)
+	#else
+	do PROC(VERSN.get(),DATE.get(),UID.get(),BRCD.get(),CRCD.get(),WHERE.get(),.RETURN)
+	#endif
+
+	if ERV set ER=1,RM=ERRMSG
+
+	if ER quit $$ERRMSG^PBSUTL(RM)
+
+	// Build return value
+	set RETURN=$$V2LV^MSG(.RETURN) 
+
+	quit ""
+
+
+public PROC( Number VERSN, Date DATE, Number UID, Number BRCD, String CRCD, String WHERE, String RETURN)
+
+	/*
+
+	 ARGUMENTS:
+		. VERSN		Version number		/TYP=N/REQ/MECH=VAL
+		. DATE		System Processing Date	/TYP=D/REQ/MECH=VAL
+		. UID		User ID			/TYP=T/REQ/MECH=VAL
+		. BRCD		Branch Code		/TYP=N/NOREQ/MECH=VAL
+		. CRCD		Currency Code		/TYP=T/NOREQ/MECH=VAL
+		. WHERE		WHERE Clause		/TYP=T/NOREQ/MECH=VAL
+
+	 RETURNS
+		. RETURN	Return value		/TYP=T/REQ/MECH=REFNAM:W
+	*/
+
+	type public Boolean ER
+	type public String FROM,ERRMSG,ET,RM
+	type public Number ERV
+
+	catch error {
+		set ET=error.type
+		set RM=error.description
+		set FROM=error.thrownAt
+		if error.type["%GTM-" do ZE^UTLERR
+
+		// Set error flag
+		set ERV=1
+		set ERRMSG=RM
+	}
+
+	type String CLS,COLS,ETC,GRP,RET,TAMT,TY,X,%
+
+	set (RET,RETURN)=""
+	set %=$C(9)
+
+	// Version number of client message is not compatible with server
+	if VERSN'=1 set RM=$$^MSG(2951) throw Class.new("Error",","_RM)
+	
+	// 1308 - Invalid date ~p1
+	if $$^SCAJD(DATE)=-1 set RM=$$^MSG(1308,DATE) throw Class.new("Error",","_RM)
+
+	//1504- Invalid user ID
+	if UID.isNull() set RM=$$^MSG(1504) throw Class.new("Error",","_RM)
+
+	type ResultSet rs=Db.select("UID","SCAU","UID=:UID")
+	if rs.isEmpty() set RM=$$^MSG(1504) throw Class.new("Error",","_RM)
+
+	if WHERE.isLike("%WHERE%") set WHERE=WHERE.piece("WHERE",2)
+	set WHERE=$$LTRIM^%ZS(WHERE)
+	if WHERE.isNull() do FAST(DATE,UID,BRCD,CRCD,.RETURN) quit
+
+	set COLS="CRCD,BRCD,UID,CLS,GRP,ETC,TAMT"
+	
+	// Consider case where we don't store CRCD if equal to System Currency
+	if 'CRCD.get().isNull() do {
+		if CRCD=%SystemCurrency set WHERE="(CRCD=:CRCD OR CRCD IS NULL) AND "_WHERE
+		else  set WHERE="CRCD=:CRCD AND "_WHERE
+	}
+	
+	set WHERE="UID=:UID AND "_WHERE
+	if 'BRCD.get().isNull() set WHERE="BRCD=:BRCD AND "_WHERE
+	set WHERE="TJD=:DATE AND "_WHERE
+
+	#ACCEPT CR=23553;DATE=10/10/06;PGM=Sanjay
+	type ResultSet rs1=Db.select(COLS,"TTX",WHERE)
+	while rs1.next() do {
+		set CRCD=rs1.getCol("CRCD")
+		if CRCD.isNull() set CRCD=%SystemCurrency
+		set BRCD=rs1.getCol("BRCD")
+		set UID=rs1.getCol("UID")
+		set CLS=rs1.getCol("CLS")
+		set GRP=rs1.getCol("GRP")
+		set ETC=rs1.getCol("ETC")
+		set TAMT=+rs1.getCol("TAMT")
+		set TY(CRCD,BRCD,UID,CLS,GRP,ETC).piece("|",1)=(TY(CRCD,BRCD,UID,CLS,GRP,ETC).get().piece("|",1))+1
+		set TY(CRCD,BRCD,UID,CLS,GRP,ETC).piece("|",2)=(TY(CRCD,BRCD,UID,CLS,GRP,ETC).get().piece("|",2))+TAMT
+		}
+
+	type String XBRCD,XCLS,XCOUNT,XCRCD,XDESC,XDRCR,XETC,XGRP,XTOT,XUID
+	set (XBRCD,XCLS,XCOUNT,XCRCD,XDESC,XDRCR,XETC,XGRP,XTOT,XUID)=""
+	for  set XCRCD=TY(XCRCD).order() quit:XCRCD.isNull()  do {
+		for  set XBRCD=TY(XCRCD,XBRCD).order() quit:XBRCD.isNull()  do {
+			for  set XUID=TY(XCRCD,XBRCD,XUID).order() quit:XUID.isNull()  do {
+				for  set XCLS=TY(XCRCD,XBRCD,XUID,XCLS).order() quit:XCLS.isNull()  do {
+					for  set XGRP=TY(XCRCD,XBRCD,XUID,XCLS,XGRP).order() quit:XGRP.isNull()  do {
+						for  set XETC=TY(XCRCD,XBRCD,XUID,XCLS,XGRP,XETC).order() quit:XETC.isNull()  do {
+							set XCOUNT=TY(XCRCD,XBRCD,XUID,XCLS,XGRP,XETC).piece("|",1)
+							set XTOT=TY(XCRCD,XBRCD,XUID,XCLS,XGRP,XETC).piece("|",2)
+							if 'XETC(XETC).data() do {
+								type RecordTRN trn=Db.getRecord("TRN","ETC=:XETC")
+								set XETC(XETC).piece("|",1)=trn.itc
+								set XETC(XETC).piece("|",6)=trn.des
+								}
+							set XDRCR=XETC(XETC).piece("|",1).extract(1)
+							set XDESC=XETC(XETC).piece("|",6)
+							set RET=RET_XCRCD_%_XBRCD_%_XUID_%_XCLS_%_XGRP_%_XETC_%_XDRCR_%_XDESC_%_XCOUNT_%_XTOT_$C(13,10)
+							}
+						}
+					}
+				}
+			}
+		}
+
+	set RETURN=RET
+	quit
+
+
+FAST(Date DATE, Number UID, Number BRCD, String CRCD, String RETURN)
+
+	/*
+
+	 ARGUMENTS:
+		. DATE		System Processing Date	/TYP=D/REQ/MECH=VAL
+		. UID		User ID			/TYP=T/REQ/MECH=VAL
+		. BRCD		Branch Code		/TYP=N/NOREQ/MECH=VAL
+		. CRCD		Currency Code		/TYP=T/NOREQ/MECH=VAL
+
+	 RETURNS
+		. RETURN	Return value		/TYP=T/REQ/MECH=REFNAM:W
+	*/
+
+	type String CLS,COLS,DESC,ETC,GRP,RET,WHERE,X,%
+	type Date A(),XTJD
+	type Number DRCR
+
+	set (A(1),XTJD)=$$^SCAJD(DATE)
+	if 'BRCD.get().isNull() do ACCUM^TTXSUM
+	if BRCD.get().isNull() do {
+		type Number BRCD
+		type ResultSet rs=Db.select("DISTINCT BRCD","TTX","TJD=:XTJD AND UID=:UID")
+		while rs.next() do {
+			set BRCD=rs.getCol("BRCD")
+			do ACCUM^TTXSUM
+			}
+		}
+
+	set %=$C(9)
+	set (RET,RETURN)=""
+
+	set COLS="CRCD,BRCD,UID,ETC,COUNT,TOTAL"
+
+	set WHERE="UID=:UID"
+	if 'CRCD.get().isNull() set WHERE="CRCD=:CRCD AND "_WHERE
+	if 'BRCD.get().isNull() set WHERE="BRCD=:BRCD AND "_WHERE
+	set WHERE="TPD=:DATE AND "_WHERE
+
+	#ACCEPT CR=23553;DATE=10/10/06;PGM=Sanjay
+	type ResultSet rs2=Db.select(COLS,"TPETC",WHERE)
+	while rs2.next() do {
+		set CRCD=rs2.getCol("CRCD")
+		if CRCD.isNull() set CRCD=%SystemCurrency
+		set BRCD=rs2.getCol("BRCD")
+		set UID=rs2.getCol("UID")
+		set ETC=rs2.getCol("ETC")
+		
+		 if 'ETC(ETC).data() do {
+			type RecordTRN trn=Db.getRecord("TRN","ETC=:ETC")
+			set CLS=trn.cls
+			set GRP=trn.grp
+			set DRCR=trn.itc.extract(1)
+			set DESC=trn.des
+			}
+		else  do {
+			set CLS=ETC(ETC).piece("|",3)
+			set GRP=ETC(ETC).piece("|",4)
+			set DRCR=ETC(ETC).piece("|",1).extract(1)
+			set DESC=ETC(ETC).piece("|",6)
+			}		
+
+		set RET=RET_CRCD_%_BRCD_%_UID_%_CLS_%_GRP_%_ETC_%_DRCR_%_DESC_%_rs2.getCol("COUNT")_%_rs2.getCol("TOTAL")_$C(13,10)
+		}
+
+	set RETURN=RET
+	quit
+
+vSIG()	quit "60556^11180^Sanjay Chhabria^7215"	// Signature - LTD^TIME^USER^SIZE

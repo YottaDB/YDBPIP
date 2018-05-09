@@ -1,0 +1,4355 @@
+RECALC
+
+	/*
+ 	 PROCEDURE ID:	RECALC
+ 	         Desc:	Deposit account-based interest calculation and 
+ 	         	adjustment utility
+ 	          
+ 	---- Comments --------------------------------------------------------
+
+	Returns:
+		. ADJACR DEP.POSACR (Positive Accrued Int/Div)	TYP=N
+		. ADJAWT DEP.AWT (Accrued Withholding Tax)	TYP=N
+		. ADJBWA Backup withholding paid		TYP=N
+		. ADJINT Positive interest paid			TYP=N
+		. ADJRES Residual interest (no principal)	TYP=N
+		. ADJUNC DEP.UNCACR (Uncollected Accrued)	TYP=N
+		. NEGADJ DEP.NEGACR (Negative Accrued)		TYP=N
+		. NEGPST Negative interest paid			TYP=N
+		. NEGUNA DEP.NEGACRUN (Negative Accrued Interest 
+			Unauthorized)			TYP=N
+		. RESPST Residual interest (hit principal)	TYP=N
+		. UNCPST Uncollected interest paid		TYP=N
+
+	Internal Data:
+
+	. BJD Beginning date for calculations
+       		Initialized as EFD. Depending upon circumstances it may 
+       		be reset to [DEP]ODT, [DEP]DLR or [DEP]ILP.
+
+	. DEPCHG()	Account changes array
+		Holds effective dated file maintenance values when interest rate
+		is calulated. This array replaced acn() array.
+		DEPCHG(DEP_column_name)=value 
+
+	. DTL Print supporting detail
+		0 = On-line processing
+		1 = On-line test mode, program ^DEPACR
+		2 = Earnings allowance processing
+		3 = Effective dated interest index change
+		4 - Effective dated interest rate change
+		7 - On-line test mode, low balance (single account)
+		8 = Actual/Anticipated Interest Accrual Report
+		9 = Effective dated interest matrix change
+		10 = Effective dated tax index change
+
+	. FM(,)	File maintenance array by date
+		Contains old and new values of all data items file-maintained 
+		within the effective-date period.
+		Example: FM(EffectiveDate,ColumnName)=OldValue_"|"_NewValue
+  
+	. UPD Update flag
+		0 = Calculate adjustment only
+		1 = Calculate adjustments, generate transactions, if applicable
+
+	. X(dt) The X array is keyed by effective date and represents
+		the significant events in the account or its history
+		of which ^RECALC* must be aware
+
+		Pieces:
+		1 - The principal portion of the transaction which took place
+			on the effective date
+		2 - A new interest rate which was to take effect on the
+			effective date
+		3 - A flag which represents whether interest was paid
+		4 - Whether the effective date was a compounding date
+		5 - Whether the effective date was an interest change date
+		6 - Amount of adjustment to POSACR (Positive Accrued)
+		7 - Interest amount that was paid originally (prior to this
+			transaction)
+		8 - Next interest posting date
+		9 - Amount of interest withheld
+		10 - Old interest rate
+		11 - Old withholding tax rate
+		12 - A new withholding tax rate which was to take effect on
+			the effective date
+		13 - Not used (available)
+		14 - Accrual date flag.  Represents month within Low Balance
+			Calc Period (IRCB=5)
+		15 - Flag representing End of Low Balance Calc Period (IRCB=5)
+		18 - Amount of adjustment to NEGACR (Negative Accrued)
+		19 - Negative interest collected originally.
+		20 - Backup withholding given back on interest collected
+		21 - A flag which represents whether negative interest was paid
+		22 - Next negative interest posting date
+		23 - New backup withholding amount
+		24 - A new interest index which was to take effect on the
+			effective date. Contains the name of the new index, or:
+				* value of 1 indicates old index value is null
+				* value of 2 indicates new index value is null
+		25 - Residual Interest
+		26 - Original net interest transferred
+		27 - Original positive deferred interest posted
+		28 - Original negative deferred interest posted
+		29 - Amount of adjustment to NEGACRUN (Unauthorized Neg Accr)
+		30 - Amount of adjustment to UNCACR (Uncollected Accrual)
+		31 - Uncollected interest posted originally
+		32 - Whether the effective date was a tax index change date
+		33 - Amount of adjustment to AWT (Accrued Withholding Tax)
+
+	. NNT(dt) Contains the interest amounts from before and now
+
+		pieces:
+		1. new interest amount
+		2. old interest paid
+		3. new negative interest
+		4. old negative interest
+		5. new negative interest unauthorized
+		6. old negative interest unauthorized
+		7. new residual interest (no principal)
+		8. old residual interest (no principal)
+		9. new residual interest (hit principal)
+		10. old residual interest (hit principal)
+		11. new positive interest transfer amount
+		12. old positive interest transfer amount
+		13. new negative interest transfer amount
+		14. old negative interest transfer amount
+		15. positive interest transfer account
+		16. negative interest transfer account
+		17. new uncollected interest amount
+		18. old uncollected interest amount
+		19. new tax withholding amount
+		20. old tax withholding amount
+
+	. INDX(dt) If index has been file maintained then this array will
+		contain the start date of each index used during the
+		period.
+
+		pieces:
+		1. Index value
+		2. INTEFD (the oldest change date) for this index
+
+	. LBB(dt) Contains the low balance amount for the monthly period
+		ending on EFD.
+
+		pieces:
+		1. Low balance for that month
+		2. Accrual calculated for the current low balance period
+
+	. RATECHG(,,)  Array that contains interest rate changes on effective 
+		dates. This array is used by RECALC and filed in RECALCO
+
+		pieces:
+		1. Old rate value
+		2. New rate value
+		3. hist.tso (Transaction Source of Funds) field value. It also 
+		   contains primary transaction history number for reference.
+		4. Rate change date (Effective Date).
+		
+		example:
+		RATECHG(CID,DINAME,SEQ)=OLDRATE_"|"_NEWRATE_"|HSEQ#"_HSEQ_"|"_EFD
+
+	EXTERNAL ENTRY POINTS (called by):
+
+		ACR		DEPPEN,BCHIRADIS1
+		CLOSE		DEPCL
+		COMADJ		RECALSEG
+		ENT		DEPCL,DEPDBS,DEPEC0,DEPEC1,DEPIAV,DEPINT,DEPPI,
+				DEPPO,DEPPW,LNPTS1,LNPTSR
+		EFDAVBAL	BCHINTPOST		
+		ERNALL		SRVFEE,BCHFEEUTL
+		EXEC		MRPC023
+		INIT		DEPPEN,RECALCFS,BCHIRADIS1
+		LDINDEX 	RECALCFS
+		NOREV		DEPIRN
+		RANGE		CIFDOD
+		VER		INDXMC,DEPACR,DEPADJ,AWTIMC
+
+
+	NOTE: It is important that any variables used by RECALC routines be
+	scoped properly. Specifically, those variables initialized in the 
+	INIT section should be scoped locally in the START section. If this
+	programming standard is not followed, it will cause variables
+	pertaining to one account to get overlaid by variables pertaining
+	to another account when one account spawns back-dated transactions 
+	to another account (as is the case with interest transfer adjustments).
+
+	---- Revision History -------------------------------------------------
+	
+	08/28/06 - KUMARB - CR 22464
+		   Modify section INIT to replace the check CUVAR.AVLBAL="DEPBA2" 
+		   with new Available Balance Calculation method to set the 
+		   variable AUTOD.
+
+	06/20/06 - Dhanalakshmi R - 21816
+		   Modified the section ACR and all calls to the same to  
+		   include BJD as third argument to avoid the undefined BJD
+		   error during Dayend.
+
+	06/14/06 - SANTHUMS - CR 21573
+		   Modified INITRNG section to add NEGACRUN to the 
+		   initialization list to prevent undefined error when called 
+		   from CIFDOD.
+		   
+	05/12/06 - Dhanalakshmi R - 21138
+		   Modified the section EFDAVBAL by removing the logic for 
+		   Split Day processing.
+
+	05/03/06 - SmithCD - CR 21007
+		   . Modified INTFRE section to indicate Effective date was an 
+		     interest change date for mass matrix change (DTL=9) 
+		     (previously was only doing so for mass index change 
+		     (DTL=3)). Also replaced references to %EffectiveDate in 
+		     INTFRE with SEFD when checking for future-dated 
+		     transactions (prevents undefined error).
+		   . Removed calls to INDEX section from CALC* sections. This 
+		     change is needed b/c BASE is now always backed off to 
+		     BOD on BJD. Prevents erroneous interest rate changes from 
+		     being filed to history.
+		   . Modified EXEC and FILE section to properly handle calls 
+		     to ^RECALCFS for mass interest changes (both mass index 
+		     and mass matrix change should be eligible for fast recalc)
+		   . Added required parameters to DUPIX^UINDX call
+		   . In INDX section, removed call to SETPAR^UINDX, which is 
+		     not needed (the code immediately following the call takes 
+		     care of this).
+		   . Made FMRATE section private (now called from ^RECALCFS).
+	
+	03/25/06 - SmithCD - CR 20345
+		   . Retrofitted the following change from p01 to enable 
+		     interest changes resulting from mass index change:
+	
+	05/13/04 - PREMKUMARM - CR9094
+		     Modified CALC and CALC1 sections so that LDINDEX would be
+		     called if a mass matrix change (DTL=9) occurs or a mass
+		     index change (DTL=3) occurs and the index is involved
+		   . Removed conditions in which we would quit from FILE 
+		     section so ^RECALC0 could file interest rate changes 
+		     to history even if there are no other changes to the 
+		     account
+		   . Performed some cleanup, including removal of TST tag, 
+		     which is not called, and code / documentation involving 
+		     DTL=8, which is no longer needed
+	
+	03/06/06 - Sreeram P - CR 19872
+		   VER^RECALC is modified to accept new parameter 
+		   MCEFD (Mass change effective date) and all
+		   references to IXEFD and AXEFD in RECALC are replaced
+		   with MCEFD.
+		   	
+	03/01/06 - Srinivar -CR 19792
+		   Modified the FMLOAD section to change DEPCHG(BWF) to
+		   DEPCHG("BWF") while assigning array DEPCHG("BWF") to
+		   BWF variable to prevent the undefined error. 
+		
+	02/27/06 - DHANALAKSHMI R - CR 19437
+		   Modified the sections EXEC,IRCB,FEJD and IPD1 by removing the 
+		   Null check for IACM and the check for IRCB is zero or null.
+		   Since these checks were added for the sake of efficiency 
+		   but give up some of functionality, including the updates 
+		   to DELDT (This mirrors the logic in BTTDRV).
+		   Modified the section CONVERT by replacing all the calls to 
+		   CONVDI^UINDX by IXVALUE^UINDX and also removed "quit:ER" 
+		   from the check EXPDT is not null.
+		   Modified the section IPD by adding one missing "}".
+
+	12/21/05 - TITOVE - CR 18591
+		   Modified FEJD section, restored missing block terminator.
+
+	11/21/05 - S.Krishnan - CR17959
+		   In the section DTLPRINT, modified the deprecated feature
+		   Db.prevVal using Db.Select() method.
+		   		
+	11/10/05 - Srinivar - CR 16890
+		   Replaced the CUVAR references with #IF/#ENDIF.	
+		   Modifications were made to accomodate escrow account 
+	 	   interest accrual processing.
+
+	09/19/05 - S.Krishnan - CR16724
+		   In the section ERNALL, the variable %SystemDate is redefined
+		   as Date.
+	           Modified the EXEC section to set the index from DEP instead of
+	           calling INDFILE^LNU.
+	           
+	09/16/05 - Srinivasan Rajesh
+		   Modified the LKUP section to quit if TIER is null.     
+	           
+	08/17/05 - S.Krishnan - CR16724
+		   Corrected the scope of the label. DDB^RECALC as private
+		   INIT^RECALC and COMADJ^RECALC as public		
+
+	08/17/05 - S.Krishnan - CR16724
+		   . Removed all the 'ORDER BY' clause used in the
+		     Db.Select statements.
+
+	02/01/05 - SmithCD - CR13661
+		 . Modified scope handling of MLB variable in CALC0 (MLB made 
+		   public) and IRCB (MLB made non-public) sections to correct 
+		   undefined error
+		 . Corrected various other issues with variables declared as 
+		   both public and non-public in the same sections
+		 . Replaced SCA489 and SCA489D table references with TMPRPT0 
+		   and TMPRPT1, respectively (due to DEPACR function being 
+		   made obsolete)
+		 . Replaced references to IPD global scope variable with a 
+		   local scope (to ADJ section) variable ORIGINTP (original 
+		   interest posted) to avoid confusion with CUVAR.IPD (Include 
+		   Interest Posting Date)
+		 . Corrected interest amounts reported in section DTLFOOT
+		 . Labeled LDINDEX section as private (to the system area)
+
+	*/
+
+	quit
+
+
+public ENT(RecordDEP dep,		// Deposit account		/REF:R
+	   RecordTTX ttx)		// Transaction			/REF:R
+
+ 	/*
+ 	Entry point on-line
+ 	
+	Called from: DEPCL, DEPDBS, DEPEC0, DEPEC1, DEPIAV, DEPINT, DEPPI, 
+		     DEPPO, DEPPW
+		
+	RECALC does not adjust interest on escrow accounts for backdated  
+	transactions - the loan unwind/reapply process does. RECALC 
+	will only adjust escrow interest for Mass Index Changes 
+	(entry point is line tag VER).
+	*/
+	
+	type public Number ER
+
+	type Number DTL,ITC,UPD
+	type String IX,IX(),IX(,,)
+
+	set UPD=1 
+	set DTL=0
+	
+	if dep.grp="ESC" quit
+
+	do START(.dep,.ttx)
+
+	quit
+
+
+public	NOREV(RecordDEP dep)		// Deposit account		/REF:R
+
+	/*
+	Entry point on-line (interest can not be calculated in reverse)
+	Called from ^DEPIRN (effective dated interest rate change) 
+
+	Inputs:
+		. %EffectiveDate Effective Date
+		. %IND		Interest index with effective dated change
+				(mass index change)
+	*/
+	
+	type public String INDEX,%IND
+	type public Number ER
+
+	type Number DTL,ITC,UPD
+
+	set UPD=1 
+	set DTL=4
+	set %IND=%IND.get()
+
+	// Create an empty transaction object to be passesd over to START
+	type RecordTTX ttx=Class.new("RecordTTX")
+	set ttx.tjd=""
+	set ttx.brcd=""
+	set ttx.tseq=""
+	set ttx.uid=""
+
+	do START(.dep,.ttx)
+	
+	quit
+
+
+public VER(RecordDEP dep,	// Deposit account			/REF:R
+	   Number DTL,		// Print support detail
+	   Date MCEFD)		// Mass change effective date		/NOREQ
+	   
+	/*
+	Entry point for INDXMC, DEPACR, DEPADJ, AWTIMC, DEPACR
+
+	Additional notes on Arguments:
+		. DTL
+			0 = On-line processing
+			1 = On-line test mode, program ^DEPACR
+			2 = Earnings allowance processing
+			3 = Effective dated interest index change
+			4 - Effective dated interest rate change
+			7 - On-line test mode, low balance (single account)
+			9 = Effective dated interest matrix change
+			10 = Effective dated tax index change
+
+	OUTPUTS:
+		The following output variables are the amounts that the value of
+		the specified amount or column must change due to the trn:
+
+		. ADJINT Positive interest paid
+		. NEGPST Negative interest paid
+		. ADJRES Residual interest (no principal)
+		. RESPST Residual interest (hit principal)
+		. UNCPST Uncollected interest paid
+		. ADJBWA Backup withholding paid
+		. ADJACR DEP.POSACR (Positive Accrued Int/Div)
+		. ADJAWT DEP.AWT (Accrued Withholding Tax)
+		. NEGADJ DEP.NEGACR (Negative Accrued)
+		. NEGUNA DEP.NEGACRUN (Negative Accrued Interest Unauthorized)
+		. ADJUNC DEP.UNCACR (Uncollected Accrued)
+	*/
+
+	type public Number ER
+	type public String %IND, %MAT
+
+	type Number UPD=0
+		
+	// Create an empty transaction object to be passesd over to START
+	type RecordTTX ttx=Class.new("RecordTTX")
+	set ttx.tjd=""
+	set ttx.brcd=""
+	set ttx.tseq=""
+	set ttx.uid=""
+
+	do START(.dep,.ttx)
+
+	quit
+
+
+START(RecordDEP dep,		// Deposit account			/REF:R
+      RecordTTX ttx)		// Transaction				/REF:R
+	
+	type public String RM
+	type public Number DTL,ER,UPD
+
+	// Is effective dating enabled
+	#IF 'CUVAR.EFD quit
+	
+	type Number I
+	type Date BJD,JD,SEFD
+	type String X(),XDI()
+	
+	set (BJD,SEFD)=%EffectiveDate
+	set DTL=DTL.get()
+
+	/* Delete temporary report data (in case if anything has left 
+	   from previouse execution)
+	*/
+	if DTL=1 do {
+		do Db.fastDelete("TMPRPT0","PID=:%ProcessID")
+		do Db.fastDelete("TMPRPT1","PID=:%ProcessID")
+		}
+
+	/* Set up an array of DEP columns that may affect interest rate if 
+	   modified
+	*/
+	for I="ODLIM","ODEXP" set XDI(I)=""
+	for I="INTRAMT1","INTRAMT2","INTRAMT3" set XDI(I)=""
+	for I="INTRRAT1","INTRRAT2","INTRRAT3" set XDI(I)=""
+	for I="INTREXP1","INTREXP2","INTREXP3" set XDI(I)=""
+
+	do EXEC(.dep,.ttx) quit:ER
+
+	quit
+
+
+EXEC(RecordDEP dep,		// Deposit account			/REF:R
+     RecordTTX ttx)		// Transaction				/REF:R
+
+	// Process one account
+
+	type public Date BJD,SEFD
+
+	type public String %IND,RM,XDI(),X()
+
+	type public Number ADJACR,ADJAWT,ADJRES,ADJUNC,DTL,ER
+	type public Number NEGADJ,NEGPST,NEGUNA
+	type public Number RESPST,UNCPST
+
+
+	type Number AUTOD,AWTP,AWTR,AWT,AWTROLD,BWF,CMP,DCF,DRC,INT,IOPT,IRN
+	type Number IRCB,IRNOLD,ITRF,ESC
+	type Number LPNTACR,MINACR,MINOPT,NEGACR,NEGACRUN,NEGITRF,NEGMININ
+	type Number ODLIM,POSACR,PREVBASE,RESIDUAL,UNCACR,ZAMT
+
+	type Date DELDT,%EffectiveDate,ICHND,INTEFD,LJD,ODEXP,ODSTART,SND
+
+	type String AWTI,FRE,IACM,ICF,INDEX,INTFRE,IPF,ODTERM
+
+	type String HOLD(,),HOLD(,,),HLD(,,),PHOLD()
+	type String INDX(),FM(,),NNT(),RATECHG(,,)
+	type Boolean MASSCHG
+
+	if DTL=3!(DTL=9)!(DTL=10) set MASSCHG=1
+	else  set MASSCHG=0
+
+	set ER=0
+
+	// Catch MUMPS errors
+	catch vError {
+		do ZE^UTLERR
+		set ER=1 
+		set RM=$$ETLOC^%ZT
+		}
+
+	do INIT(.dep) quit:ER
+
+	// Cannot effective-date prior to opening date
+	if BJD<dep.odt do Runtime.setErrMSG("DEP",450) quit
+
+	// Cannot effective-date prior to date last renewed
+	if dep.dlr>BJD do Runtime.setErrMSG("DEP",449) quit
+
+	/*
+	Cannot effective-date prior to conversion date
+	History cannot support transaction
+	*/
+	if dep.convdt,BJD<dep.convdt do Runtime.setErrMSG("DEP",1177) quit
+
+	// Process commission adjustments if commission plans are linked
+	do COMADJ(.dep,.ttx) quit:ER
+
+	if DTL'=2,$$^RECALCFS(.dep,.ttx,SEFD,.ADJACR,.NEGADJ,%IND.get(),.ADJAWT) do { quit
+		if MASSCHG do { quit:ER
+			type Number ADJINT=0,ADJBWA=0,INT=0
+
+			set (ADJRES,NEGUNA)=0
+			set (ADJACR,POSACR)=ADJACR.get()
+			set (ADJAWT,AWT)=ADJAWT.get()
+			set (NEGADJ,NEGACR)=NEGADJ.get()
+			set (ADJUNC,UNCACR)=ADJUNC.get()
+			set NEGPST=NEGPST.get()
+			set UNCPST=UNCPST.get()
+			set RESPST=RESPST.get()
+			
+			do FILE(.dep,.ttx,0) quit:ER
+			}
+		// Generate transactions
+		else  do FILE(.dep,.ttx,1) quit:ER
+		
+		do EOMBAL(.dep,.ttx,1)
+		}
+	// Fast recalc may return error
+	quit:ER
+
+	// Nominal Interest Rate
+	set IRN=dep.irn
+	// Accrued Withholding Tax Rate
+	set AWTR=dep.awtr
+
+	set INDEX=dep.index
+
+	set (AWT,CMP,INT,NEGACR,NEGACRUN,POSACR,UNCACR)=0
+
+	if DTL=1 do DTLHEAD(.dep)
+
+	// Compute adjustments. If IRCB=0 - no adjustments necessary
+	set ESC=$$ESC(dep.grp,IPF,ICF)
+	if 'ESC do IRCB(.dep,.ttx) quit:ER
+	if IRCB=0 quit
+
+	if ESC do QWIK(.dep,.ttx) quit:ER
+
+	if DTL'=2 do ADJ(.dep,.ttx)
+
+	quit
+
+
+ADJ(RecordDEP dep,		// Deposit account			/REF:R
+    RecordTTX ttx)		// Transaction				/REF:R
+
+	/*
+	Accrual/interest adjustments. Compute adjustments, call ^RECALC0 to
+	post.
+	
+	Inputs:
+		. AWT		Accrued Withholding Tax
+		. DTL		Print supporting detail
+		. NEGACR	Negative Accrued
+		. NEGACRUN	Unauthorized Neg Accrued
+		. POSACR	Positive Accrued Int/Div
+		. UNCACR	Uncollected Accrued
+		. %IND		Interest index with effective dated change
+				(mass index/matrix change)
+		. NNT()		Array of interest amounts on effective date
+
+	Returns:
+		. ADJACR	DEP.POSACR (Positive Accrued Int/Div)
+		. ADJAWT	DEP.AWT (Accrued Withholding Tax)
+		. ADJBWA	Backup withholding paid
+		. ADJINT	Positive interest paid
+		. ADJRES	Residual interest (no principal)
+		. ADJUNC	DEP.UNCACR (Uncollected Accrued)
+		. NEGPST	Negative interest paid
+		. NEGADJ	DEP.NEGACR (Negative Accrued)
+		. NEGUNA	DEP.NEGACRUN (Negative Accrued Interest Unauth)
+		. RESPST	Residual interest (hit principal)
+		. UNCPST	Uncollected interest paid
+
+	ADJACR represents the amount that the value of [DEP]POSACR must
+	change due to the transaction. NEGADJ is the adjustment to
+	[DEP]NEGACR. NEGUNA is the adjustment to [DEP]NEGACRUN.
+
+	ADJINT/NEGPST represents the amount of interest that should/shouldn't
+	have been paid through interest postings.  This amount will be
+	reflected in the principal balance by interest posting adjustment
+	transactions.
+	*/
+
+	type public Number ADJACR,ADJAWT,ADJBWA,ADJINT,ADJRES,ADJUNC,AWT
+	type public Number DTL,ER,NEGACR,NEGACRUN,NEGADJ,NEGPST,NEGUNA
+	type public Number POSACR,RESPST,UNCACR,UNCPST
+	type public Date SEFD
+	type public String %IND,NNT()
+
+	type Number NDT,ORIGINTP
+
+	set ADJACR=(POSACR-dep.posacr).roundDec(5)
+	// Accrued Withholding Tax
+	set ADJAWT=(AWT-dep.awt).roundDec(5)
+
+	if dep.negacrpo do {
+		// Negative Accrued
+		set NEGADJ=(NEGACR-dep.negacr).roundDec(5)
+		// Negative Accrued Interest Unauthorized
+		set NEGUNA=(NEGACRUN-dep.negacrun).roundDec(5)
+		}
+	else  set (NEGADJ,NEGUNA)=0
+
+	// Uncollected Accrued
+	set ADJUNC=(UNCACR-dep.uncacr).roundDec(5)
+
+	set (ADJBWA,ADJINT,ADJRES,NEGPST,ORIGINTP,RESPST,UNCPST)=0
+
+	/* Calculate total "paid" adjustments.  ADJINT will be used as an 
+	"expense" offset.  NEGPST will be used as an "income" offset. */
+	if NNT.data() set NDT="" for  set NDT=NNT(NDT).order() quit:NDT.isNull()  do {
+		set ADJINT=ADJINT+NNT(NDT).piece("|",1)-NNT(NDT).piece("|",2)
+		set NEGPST=NEGPST+NNT(NDT).piece("|",3)-NNT(NDT).piece("|",4)
+		set NEGPST=NEGPST+NNT(NDT).piece("|",5)-NNT(NDT).piece("|",6)
+		set ADJRES=ADJRES+NNT(NDT).piece("|",7)-NNT(NDT).piece("|",8)
+		set RESPST=RESPST+NNT(NDT).piece("|",9)-NNT(NDT).piece("|",10)
+		set UNCPST=UNCPST+NNT(NDT).piece("|",17)-NNT(NDT).piece("|",18)
+		set ADJBWA=ADJBWA+NNT(NDT).piece("|",19)-NNT(NDT).piece("|",20)
+		set ORIGINTP=ORIGINTP+NNT(NDT).piece("|",1)-NNT(NDT).piece("|",3)
+		}
+
+	// Mass index or matrix change
+	if DTL=3!(DTL=9) do { quit
+		
+		set ADJINT=ADJINT.get()
+		set NEGPST=NEGPST.get()
+		set ADJRES=ADJRES.get()
+		set RESPST=RESPST.get()
+		set UNCPST=UNCPST.get()
+		set ADJBWA=ADJBWA.get()
+		set ADJACR=ADJACR.get()
+		set ADJAWT=ADJAWT.get()
+		set NEGADJ=NEGADJ.get()
+		set NEGUNA=NEGUNA.get()
+		set ADJUNC=ADJUNC.get()
+		
+		do ADJ^RECALCFS(.dep,.ttx,SEFD,ADJACR,NEGADJ,ADJINT-ADJBWA,NEGPST,%IND,ADJAWT)
+		
+		do FILE(.dep,.ttx,0)
+		}
+
+	do DTLFOOT(.dep)
+	do FILE(.dep,.ttx,0) quit:ER
+
+	quit
+
+
+FILE(RecordDEP dep,		// Deposit account			/REF:R
+     RecordTTX ttx,		// Transaction				/REF:R
+     Boolean FAST)		// Fast recalculation
+
+	/*
+	File recalc'd data
+
+	Additional notes on Arguments:
+
+		. FAST
+				0 = old method was used
+				1 = fast (^RECALCFS) used
+	Inputs:
+		. DTL		Print supporting detail
+		. UPD		Update account flag
+		. ADJACR	DEP.POSACR (Positive Accrued Int/Div)
+		. ADJAWT	DEP.AWT (Accrued Withholding Tax)
+		. ADJBWA	Backup withholding paid
+		. ADJINT	Positive interest paid
+		. ADJRES	Residual interest (no principal)
+		. RESPST	Residual interest (hit principal)
+		. NEGPST	Negative interest paid
+		. NEGADJ	DEP.NEGACR (Negative Accrued)
+		. NEGUNA	DEP.NEGACRUN (Negative Accrued Interest Unauth)
+		. UNCPST	Uncollected interest paid
+		. SEFD		Saved(original) effective date
+
+	Treat mass interest index (3), mass matrix (9), mass tax index (10)
+	the same (do not process transactions, accumulate G/L offsets)
+	*/
+	
+	type public Number ADJACR,ADJAWT,ADJBWA,ADJINT,ADJRES,DTL,ER
+	type public Number RESPST,SEFD,NEGPST,NEGADJ,NEGUNA,UNCPST,UPD
+	type public Boolean MASSCHG
+
+	// Continue only if updating account or mass change
+	if 'MASSCHG,'UPD quit
+
+	// Fast doesn't do interest updates
+	if FAST set (NEGUNA,ADJINT,ADJBWA,NEGPST,ADJRES,RESPST,UNCPST)=0
+
+	/*
+	Fast recalc not used, but to preserve info for later fast recalcs
+	need to update DBI, DAA, and CMP data items, if possible
+	*/
+	if DTL'=2,'FAST do ADJ^RECALCFS(.dep,.ttx,SEFD,ADJACR,NEGADJ,ADJINT-ADJBWA,NEGPST,"",ADJAWT)
+
+	// File transactions
+	do ^RECALC0(.dep,.ttx) quit:ER
+
+	// Update dollar days balances
+	do DDB(.dep,.ttx) quit:ER
+
+	quit
+
+
+IRCB(RecordDEP dep,		// Deposit account			/REF:R
+     RecordTTX ttx)		// Transaction				/REF:R
+
+	/*
+	Interest rate calc base
+
+	Recalc cannot handle accounts with INTMXDL,DC,IL,IC (rate change
+	decrease and increase life and change maximums) if passing rate
+	change period
+	*/
+	
+	type public Date BJD
+	type public Number DTL,ER,IRCB
+
+	type String LBB()
+	type Number BASE,MLB
+
+	// Cannot effective date earlier than last change date with rate change limits
+	if BJD'>dep.ichld,'(dep.intmxic_dep.intmxil_dep.intmxdc_dep.intmxdl).isNull() do Runtime.setErrMSG("DEP",8489) quit
+
+	// Check for index maintenance
+	if DTL<2 do OVR(.dep)
+
+	// Always set base to ledger
+	set BASE=dep.bal
+	// Sales Price
+	if IRCB=4 set BASE=dep.salesprc
+
+	// Build X array and compute adjustments
+	do CALC(.dep,.ttx) quit:ER
+
+	// Re-state low balance buckets for low balance accounts
+	if IRCB=5!(IRCB=6) do {
+		type String LBBKT=""
+		type Number LBPER
+
+		set LBB(%SystemDate)=MLB
+		for LBPER=1:1:24 set LBBKT=LBB(LBBKT).order(-1) quit:LBBKT.isNull()  do SETLBBMP(.dep,LBPER,LBB(LBBKT).piece("|",1))
+		}
+
+	do UPDACT(.dep)
+
+	quit
+
+
+CALC(RecordDEP dep,		// Deposit account			/REF:R
+     RecordTTX ttx)		// Transaction				/REF:R
+
+	/*
+	Calculate accrual/earnings adjustments
+
+	Internal variables: 
+		BASEOLD is defined in RECALC1 with the beginning balance in BJD.
+
+	Reset BJD for interest posting.  Set entries in X array for each
+	posting date.
+	*/
+
+	type public Date BJD,ICHND,INTEFD,ODEXP,ODSTART
+	type public Number AWTR,AWTROLD,DTL,ER,IRN,IRNOLD
+	type public String AWTI,ICF,%IND,IND,INDEX,IX
+	type public String DEPCHG(),INDX(),IX(,,),X()
+
+	type Number BASEOLD
+	type Date NEGBJD,POSBJD
+
+	// Determine calculation start dates
+	do IPF(.dep,.BJD,.POSBJD,.NEGBJD) if ER quit
+
+	// Set entries in X array for interest compounding.
+	if 'ICF.isNull() do ICF(dep.inc,ICF) if ER quit
+
+	do LPYR(BJD) quit:ER
+
+	// Re-construct event array based on transaction and file maintenance
+	do ^RECALC1(.dep,.ttx) if ER quit
+
+	do EOMBAL(.dep,.ttx,0)
+
+	/*
+	Following added to set IRN to oldest value with forwards calculations.
+	A change to ^RECALC1 was newing IRN, and old value was lost.  ^RECALC1
+	is now setting IRNOLD in the File Maintenance (FM) section, so it is
+	available when needed.
+	*/
+	if 'IRNOLD.get().isNull() set IRN=IRNOLD
+	if 'AWTROLD.get().isNull() set AWTR=AWTROLD
+
+	/*
+	Build X array for interest change dates.  If the account will use
+	reverse calcs, do not redefine the interest rate, as that's the rate
+	that we want to start with.
+	In fact if doing reverse calcs don't even call into INDEX until
+	later. 
+
+	Array INDX holds the effective date for an index, when an account
+	has had the INDEX maintained during the period being evaluated
+	(BJD-TJD).  RECALC1 will create an X array entry for the date that
+	an index was changed and place this index into piece 24.  If array
+	INDX is defined the system will redefine variable INDEX to equal the
+	index that was being used on BJD.  It will then loop through the
+	INDX array and assure that the necessary X array entries are created
+	for any interest rate change dates.
+	*/
+
+	if INDX.data() do { quit:ER  if 1
+		type Date IDATE=""
+
+		set INDEX=X(BJD.get()).piece("|",24)
+		if INDEX=1!(INDEX=2) set INDEX=""
+		
+		for  set IDATE=INDX(IDATE).order() quit:IDATE.isNull()  do { quit:ER
+			type Date IICHND
+			type String IINDEX
+
+			set IINDEX=INDX(IDATE)
+			
+			// No index
+			if IINDEX=1!(IINDEX=2) quit
+			
+			// Get end date for this index
+			set IICHND=INDX(IDATE).order()
+			
+			if IICHND.isNull() set IICHND=ICHND
+			do INTFRE(.dep,IINDEX,IICHND,IDATE)
+			set INDX(IDATE).piece("|",2)=INTEFD.get()
+
+			/*
+			Call LDINDEX if mass matrix change OR mass index
+			change AND index is involved in mass index change.
+			*/
+			if DTL=9!((DTL=3)&((IINDEX.piece(" ",1)=%IND)!(IINDEX.piece(" ",1)=IND))) do LDINDEX(.dep,%IND)
+			}
+
+		set %EffectiveDate=BJD
+		}
+	else  if 'INDEX.isNull() do { quit:ER
+		do INTFRE(.dep,INDEX,ICHND,BJD) quit:ER  
+		set %EffectiveDate=BJD 
+
+		if 'IX.isNull(),IX(IX).piece("|",14),'ODSTART.isNull() do {
+			type Date %EffectiveDate=ODSTART
+			do BLDIX(.dep,.DEPCHG())
+
+			// Reset old ODEXP into IX array
+			if ODEXP<BJD do SETEXP(ODEXP,%EffectiveDate)
+			}
+		}
+
+	// Indicate the effective dates that are a tax index change date
+	if 'AWTI.isNull() do {
+		type Date TODATE
+		set TODATE=%SystemDate-1
+		type ResultSet rs=Db.select("EFDATE","UTBLAWTIEFD","AWTI=:AWTI AND EFDATE NOT <:BJD AND EFDATE NOT >:TODATE","EFDATE DESC")
+		while rs.next() set X(rs.getCol("EFDATE")).piece("|",32)=1
+		}
+		
+	do CALC0(.dep,.ttx)
+
+	quit
+
+
+CALC0(RecordDEP dep,		// Deposit account			/REF:R
+      RecordTTX ttx)		// Transaction				/REF:R
+
+	type public Number BASE,ER,IRCB,MLB
+	type public Date BJD
+	type public String IPF
+
+	// Low balance processing variables
+	type Date GRCJD,NAGRCJD
+	type String MFRE
+
+	// Consider low balance buckets
+	if IRCB=5!(IRCB=6) do { quit:ER
+		set MFRE=$$MFRE^DEPLBB(IPF,dep.inp)
+
+		set MLB=BASE
+		if MLB<0 set MLB=0
+	
+		// Interest Grace Period + Next low balance accrual date
+		set GRCJD=dep.intgrc+$$LBACNJD^DEPLBB(BJD,MFRE,1,dep.lbcm)
+
+		if dep.lbbdo="N",dep.intgrc set GRCJD=GRCJD.nextBusDate(1,dep.nbdc)
+
+		set NAGRCJD=dep.odt+dep.lbgpna-1
+		if dep.lbbdo="N",dep.lbgpna set NAGRCJD=NAGRCJD.nextBusDate(1,dep.nbdc)
+		if GRCJD<NAGRCJD set GRCJD=NAGRCJD
+
+		// Set all monthly frequency dates in X() for Low Bal accounts
+		do MLBFRE(.dep) quit:ER
+		}
+
+	do CALC1(.dep,.ttx)
+
+	quit
+
+
+CALC1(RecordDEP dep,		// Deposit account			/REF:R
+      RecordTTX ttx)		// Transaction				/REF:R
+
+	type public Date BJD,LJD,NEGBJD,POSBJD
+	type public Number AWT,BASE,CMP,DRC,DTL,ER,IRCB,IRN,NEGACR,NEGACRUN
+	type public Number POSACR,PREVBASE,UNCACR
+	type public String %IND,IND,INDEX,INTFRE
+	type public String INDX(),X() 
+
+	set LJD=BJD
+	set %EffectiveDate=BJD
+
+	if IRCB'=5,IRCB'=6 do {
+		set X(%SystemDate)=X(%SystemDate).get()
+		
+		// If a daily rate change, need to call to UINDX to get correct
+		// rate on the account
+		if DRC set X(%SystemDate).piece("|",5)=1
+		}
+
+	/*
+	Call LDINDEX if mass matrix change OR mass index
+	change AND index is involved in mass index change.
+	*/
+	if DTL=9!((DTL=3)&((INDEX.piece(" ",1)=%IND)!(INDEX.piece(" ",1)=IND))) do {
+
+		// If INDEX file maintained (i.e. INDX exists), already 
+		// processed LDINDX in CALC section
+		if INDX.data() quit
+
+		do LDINDEX(.dep,%IND)
+		}
+
+	if 'INDEX.isNull(),INTFRE.isNull() set IRN=$$INDX(.dep,%EffectiveDate) if ER quit
+
+	// Consider converted account's accrual and low balance buckets
+	if BJD=dep.convdt,dep.convdt=(dep.hisctf+1) do {
+		set POSACR=dep.convpa
+		set UNCACR=dep.convua
+		set AWT=dep.convawt
+		set CMP=+dep.convcmp
+		if dep.negacrpo do {
+			set NEGACR=dep.convna
+			set NEGACRUN=dep.convnau
+			}
+		if IRCB=5!(IRCB=6) do MLBCONV(.dep)
+		}
+
+	set %EffectiveDate=""
+	set X(BJD)=X(BJD).get()
+
+	// Remove any interest posted amounts on beginning date to avoid
+	// inclusion in calculations
+	if POSBJD.get() set X(POSBJD).piece("|",7)=""
+	if NEGBJD.get() set X(NEGBJD).piece("|",19)=""
+
+	// Set up initial PREVBASE value
+	set PREVBASE=BASE
+
+	// Order through the event array
+	for  set %EffectiveDate=X(%EffectiveDate).order() quit:%EffectiveDate.isNull()!(ER)  do FEJD(.dep,.ttx)
+	if ER quit
+
+	// Process FM entries for final date in X array
+	set LJD=X("").order(-1)
+	set %EffectiveDate=LJD+1
+	do FMLOAD(.dep) quit:ER
+
+	quit
+
+
+public COMADJ(RecordDEP dep,	// Deposit account			/REF:R
+	      RecordTTX ttx)	// Transaction				/REF:R
+
+	// Calculate commission adjustment
+
+	if 'ttx.exists() quit
+
+	type public Number ER
+	type public Cache %CACHE()
+
+	type DbSet ds=Db.selectDbSet("COMPLNCID","CID=:dep.cid")
+	if ds.isEmpty() quit
+	while ds.next() do { quit:ER
+		type Date DATE
+		
+		type RecordCOMPLNCID complncid=ds.getRecord("COMPLNCID")
+	
+		// Load in all data and do preliminary checks
+		type RecordUTBLCOMPLN ucompln=%CACHE("UTBLCOMPLN").getRecord("UTBLCOMPLN","CPLAN=:complncid.cplan")
+
+		// Quit if this is a transaction based plan
+		if ucompln.amth=2 quit
+
+		// Check to see if this transaction passes over a plan
+		// calculation date
+		if ttx.efd.nextFreqDate(ucompln.calcfre)'<%SystemDate quit
+
+		// Quit if the plan utilizes a calc formula
+		if 'ucompln.comcalc.isNull() quit
+
+		set DATE=ucompln.ncald+ucompln.postoff
+
+		// If a prior adjustment was made - quit
+		type RecordDAYENDCOMADJ dcomadj=Db.getRecord("DAYENDCOMADJ","PSTDT=:DATE,AGENT=:dep.boo,CPLAN=:complncid.cplan,CID=:dep.cid",1)
+
+		if dcomadj.getMode(),(dcomadj.efd<ttx.efd) quit
+
+		// Set up new dayend file entry
+		set dcomadj.efd=ttx.efd
+
+		do dcomadj.bypassSave()
+		}
+
+	quit
+
+
+FEJD(RecordDEP dep,		// Deposit account			/REF:R
+     RecordTTX ttx)		// Transaction				/REF:R
+
+	/*
+	Collate forwards through the event array to compute interest 
+	earnings.
+	*/
+
+	type public Number BASE,BASEOLD,ER,IRCB,IRN,IRNOLD,MLB,OLDIRN
+	type public Date BJD,GRCJD,INTEFD,LJD
+	type public String INDEX,IX
+	type public String INDX(),IX(),IX(,,),X()
+
+	type Number PIPDBASE
+
+	// If deferred for this date, add into X
+	if Db.isDefined("DEFINP","CID=:dep.cid,INP=:%EffectiveDate") do DEF(dep.cid)
+
+	do FMLOAD(.dep) quit:ER
+
+	// Calc accrued, print if DTL
+	if %EffectiveDate'<BJD do { quit:ER
+		set:LJD<BJD LJD=BJD
+		if %EffectiveDate>LJD do { quit:ER
+			do ACR(.dep,.ttx,BJD) quit:ER
+			do DTLPRINT(.dep)
+			}
+		}
+	
+	// Update base before interest posting for end-of-day
+	#IF CUVAR.INTPOS=1 do PRN2BASE(dep.iaf)
+	
+	/*
+	Transactions that manually increased accruals have to be included
+	in cases when EFD=TJD, otherwise do not perform Dayend simulation
+	for today's date since dayend has not yet been run.
+	*/
+	if %EffectiveDate=%SystemDate do { quit
+		/*
+		For current system date skip accruals-related simulation and:
+		EOD - do not "post" interest, include manual accr adj
+		*/
+		#IF CUVAR.INTPOS=1 do EJD
+		
+		// BOD - "post" interest, update base, include manual accr adj
+		#IF CUVAR.INTPOS=2 do IPD(.dep,.ttx) do PRN2BASE(dep.iaf)
+		}
+		
+	// Update low balance bucket for low balance accounts
+	if (IRCB=5!(IRCB=6))&(%EffectiveDate<%SystemDate) do { quit:ER
+		if %EffectiveDate'>GRCJD set MLB=BASE
+		if BASE<MLB set MLB=BASE
+		if MLB<0 set MLB=0
+
+		if X(%EffectiveDate).piece("|",14) do MFD(.dep) quit:ER
+		}
+
+	// Use new index if changed
+	if 'X(%EffectiveDate).piece("|",24).isNull() do {
+		set INDEX=X(%EffectiveDate).piece("|",24)
+		if INDEX=1!(INDEX=2) set:INDEX=1 IRN=IRNOLD.get() set INDEX=""
+		if 'INDEX.isNull(),'INDX(%EffectiveDate).piece("|",2).isNull() set INTEFD=INDX(%EffectiveDate).piece("|",2)
+		}
+
+	if 'INDEX.isNull() do {
+		set IX=INDEX.piece(" ",1)
+
+		// Load index data from INDEX table into an IX() array
+		if 'IX(IX).data() do {
+			type RecordINDEX index=Db.getRecord("INDEX","INDEX=:IX",1)
+
+			set IX(IX)=$$IND2STR^UINDX(.index)
+			}
+
+		if 'X(%EffectiveDate).piece("|",2).isNull(),IX(IX).piece("|",3)=1 do INDEX(.dep) quit
+		if X(%EffectiveDate).piece("|",5)!(+X(%EffectiveDate)) do INDEX(.dep) quit
+		if 'X(%EffectiveDate).piece("|",24).isNull() do INDEX(.dep) quit
+		if 'X(%EffectiveDate).piece("|",2).isNull() set IRN=X(%EffectiveDate).piece("|",2)
+		}
+	// Use new interest rate if changed
+	else  if 'X(%EffectiveDate).piece("|",2).isNull() set IRN=X(%EffectiveDate).piece("|",2)
+
+	// Pre-IPD base
+	set PIPDBASE=BASE
+	// "Post" interest
+	do IPD(.dep,.ttx) quit:ER
+
+	// Update base after interest posting for begininning-of-day
+	
+	#IF CUVAR.INTPOS=2 do PRN2BASE(dep.iaf) do ODPROC(.dep)
+	
+	/*
+	If the base has changed due to capitalization of interest, another
+	call to INDEX is necessary
+	*/
+	if 'INDEX.isNull(),BASE'=PIPDBASE do INDEX(.dep)
+
+	// Set Month End Balance to a new value
+	if %EffectiveDate=($$EOMJD^SCADAT(%EffectiveDate,1)) do SETMEBAL^RECALSEG(.dep,$$MON^SCADAT(%EffectiveDate,1),BASE)
+
+	// Save the old base for possible use in the next pass through X array
+	set BASEOLD=BASE
+
+	quit
+
+
+DEF(Number CID)			// Account number
+
+	/*
+	Deferred Current Interest, add to X array
+
+	Argumenets:
+		. CID		Primary account number	TYP=N/MECH=VAL/REQ
+
+	Inputs:
+		. NEGBJD 	Negative interest calculation start date
+		. NNT()		Array of interest amounts on effective date
+		. POSBJD 	Negative interest calculation start date
+		. X() 		Account activity array.
+
+	All of the deferred interest paid and current, is added to interest
+	paid for that date, so as not to overpay adjustments being calculated
+	now. These amounts do not affect the base; the principal changes are
+	already in the X array for the paid amounts as of the actual posting
+	dates.  The deferreds have not yet affected the base.
+	*/
+
+	type public Date NEGBJD,POSBJD
+	type public String NNT(),X()
+
+	type RecordDEFINP definp=Db.getRecord("DEFINP","CID=:CID,INP=:%EffectiveDate",1)
+	if 'definp.getMode() quit
+
+	if definp.dcur!definp.dpaid do {
+		// Interest paid flag
+		set X(%EffectiveDate).piece("|",3)=1
+		if POSBJD.get()=%EffectiveDate quit
+
+		// Current Deferred Interest + Deferred Paid Interest
+		set NNT(%EffectiveDate).piece("|",2)=definp.dcur+definp.dpaid
+		}
+
+	if definp.dcurneg!definp.dpaidneg do {
+		// Negative interest flag
+		set X(%EffectiveDate).piece("|",21)=1
+		if NEGBJD.get()=%EffectiveDate quit
+
+		/*
+		Negative Current Deferred Interest + 
+		paid negative paid deffered
+		*/
+		set NNT(%EffectiveDate).piece("|",4)=definp.dcurneg+definp.dpaidneg
+		}
+
+	// Deferred Accrued Withholding
+	if definp.awcd!definp.awpd do {
+		// Interest paid flag
+		set X(%EffectiveDate).piece("|",3)=1
+		if POSBJD.get()=%EffectiveDate quit
+
+		/*
+		Current Deferred Accrued Withholding +
+		Paid Deferred Accrued Withholding
+		*/
+		set NNT(%EffectiveDate).piece("|",20)=definp.awcd+definp.awpd
+		}
+
+	quit
+
+
+IPD(RecordDEP dep,		// Deposit account			/REF:R
+    RecordTTX ttx)		// Transaction				/REF:R
+
+	/*
+	Interest Posting Date
+
+	IPD = Interest Posting Day option. 1=accrue through posting day.
+	Processing if accrual for interest posting date is not to be included.
+	*/
+	
+	type public Number ER
+	type public Date LJD
+	type public String X()
+
+	// If do not include int/div posting day
+	
+	#IF 'CUVAR.IPD
+	 	do { quit:ER
+		
+		#IF CUVAR.INTPOS=1 do EJD
+
+		// Positive interest posting
+		if X(%EffectiveDate).piece("|",3) do INT(.dep,.ttx,0) quit:ER
+
+		// Negative interest posting
+		if X(%EffectiveDate).piece("|",21) do INT(.dep,.ttx,1) quit:ER
+		#IF CUVAR.INTPOS=2 do EJD
+
+		/*
+		Update common fields - after posting for non-IPD, before for 
+		IPD acts. Because IPD accounts include efd in posting period.
+		*/
+	 	}
+	#ELSE  
+		do EJD
+	#ENDIF
+		
+	#IF CUVAR.INTPOS=1 do ODPROC(.dep)
+	set LJD=%EffectiveDate
+
+	// Processing if accrual for interest posting date is to be included
+	#IF CUVAR.IPD=1 do IPD1(.dep,.ttx) quit:ER
+
+	quit
+
+
+IPD1(RecordDEP dep,		// Deposit account			/REF:R
+     RecordTTX ttx)		// Transaction				/REF:R
+
+	/*
+	Processing if accrual for interest posting date is to be included
+
+	Note that the ACR subroutine requires the prior value of EFD.  
+	This will only be a problem if IACM.extract()=0.  
+	Then the value of SND will be misstated.
+	*/
+
+	type public Number ER,IRCB
+	type public Date BJD,LJD,SEFD
+	type public String X()
+
+	// Low balance should calc int
+	quit:%EffectiveDate<SEFD&(IRCB'=5)&(IRCB'=6)
+	quit:%EffectiveDate<BJD
+
+	// Int can never post on or before opening date
+	quit:%EffectiveDate'>dep.odt
+
+	// Continue only if positive or negative interest was paid on this date
+	quit:'(X(%EffectiveDate).piece("|",3)!X(%EffectiveDate).piece("|",21))
+
+	// Calculate accrual for single date EFD+1 and re-set EFD
+	set %EffectiveDate=%EffectiveDate+1
+
+	// To allow FM entry if its an interest posting day and CUVAR.IPD is on
+	do FMLOAD(.dep) quit:ER
+
+	do ACR(.dep,.ttx,BJD) quit:ER
+
+	set %EffectiveDate=%EffectiveDate-1
+
+	do DTLPRINT(.dep)
+
+	// Positive interest posting
+	if X(%EffectiveDate).piece("|",3) do INT(.dep,.ttx,0) quit:ER
+
+	// Negative interest posting
+	if X(%EffectiveDate).piece("|",21) do INT(.dep,.ttx,1) quit:ER
+
+	set LJD=%EffectiveDate+1
+
+	quit
+
+
+EJD	// Account updates for FEJD - add/subtract any accrual adjustments
+
+	type public Number AWT,CMP,NEGACR,NEGACRUN,POSACR,UNCACR
+	type public String X()
+
+	if X(%EffectiveDate).piece("|",6) set POSACR=POSACR+X(%EffectiveDate).piece("|",6)
+	if X(%EffectiveDate).piece("|",18) set NEGACR=NEGACR-X(%EffectiveDate).piece("|",18)
+	if X(%EffectiveDate).piece("|",29) set NEGACRUN=NEGACRUN-X(%EffectiveDate).piece("|",29)
+	if X(%EffectiveDate).piece("|",30) set UNCACR=UNCACR-X(%EffectiveDate).piece("|",30)
+
+	// Accrued withholding tax amount
+	if X(%EffectiveDate).piece("|",33) set AWT=AWT+X(%EffectiveDate).piece("|",33)
+
+	// Compound if it's time.
+	if X(%EffectiveDate).piece("|",4) set CMP=POSACR
+
+	quit
+
+
+public ACR(RecordDEP dep,	// Deposit account			/REF:R
+	   RecordTTX ttx, 	// Transaction				/REF:R
+	   Date BJD)		// Beginning date for calculations
+
+	/*
+	Accrual calculation. Also the external entry point from
+	^DEPPEN (Penalties) and BCHIRADIS1.
+
+	Inputs:
+		. BASE		Calculation base
+		. CMP		Compounded Int/Div
+		. IACM		Accrual calc method
+		. IPF		Interest Posting Frequency
+		. IRN		Interest rate
+		. IRCB		Int/Div rate calculation base
+		. LJD		Last date for calculations
+		. MINACR	Minimum balance to accrue
+		. MINOPT	Minimum balance option
+		. POSACR	Positive accrual
+		. PREVBASE	Base amount before modification
+		. SND		Int/Div Next Posted
+		. UNCACR	Uncollected Accrued Amount
+		. X() 		Account activity array.
+	*/
+
+	type public Number AWTP,BASE,BWF,CMP,DCF,ER,IRN,IRCB,MINACR,MINOPT
+	type public Number POSACR,PREVBASE,RATE,UNCACR		
+	type public String IACM,IPF
+	type public String HOLD(,,),X()
+	type public Date LJD,SND
+
+	type Number ADAYS,BALINT,BWA,INT,MINAMT,UNCOLL
+	type String CT
+
+	// If low balance, do not accrue for non-negative balance
+	if (IRCB=5!(IRCB=6)),BASE+CMP'<0 quit
+	
+	if 'MINACR.isNull(),BASE<MINACR set POSACR=POSACR+$select(MINOPT:0,1:-POSACR) quit
+
+	// Accrued int/div and withholding tax for this accrual period
+	set (BWA,INT)=""
+
+	/* CT is used by ^UIC to determine how to make the interest calculation.
+	CT.extract(1) determines whether a full period (1) or a partial period (0)
+	is to be calculated. CT.extract(2) says whether daily compounding is to
+	considered.
+	The ^UIC formulas assume daily compounding unless told otherwise.
+	If ICF'="1DA", then it could be a user-defined frequency which maps
+	to a 1DA.  Check DCF flag before continuing. */
+
+	// Daily compounding
+	if DCF do {
+		/* If negative amount, don't compound unless accrual is set
+		up to be handled as lump sum */
+		if BASE<0,'(dep.negipo=1&(dep.negacrpo=0)) set CT=""
+		else  set CT="01" set CMP=POSACR
+		}
+	else  set CT=""
+
+	// Continuous compounding
+	if IACM.extract()=2 set CMP=POSACR
+	if 'X(%EffectiveDate).get().piece("|",8).isNull() set SND=X(%EffectiveDate).piece("|",8)
+
+	set BALINT=BASE+CMP
+	if 'dep.maxacr.isNull(),BALINT>dep.maxacr set BALINT=dep.maxacr
+
+	set INT=$$^UIC(BALINT,LJD,%EffectiveDate-1,IACM,IRN,CT,"",IPF,dep.icpf,SND)
+
+	/* Determine if we need to use minimums
+	Use PREVBASE to determine if it's orig or subsequent */
+	set MINAMT=0
+	set ADAYS=%EffectiveDate-LJD
+	if BALINT<0 do {
+		type Number FDAY=0,DLYAVG
+
+		set DLYAVG=INT/ADAYS
+
+		// Charge first day at initial daily minimum
+		if 'dep.idomi.isNull(),BASE<PREVBASE set FDAY=1 set MINAMT=dep.idomi
+
+		// Only one day accrual
+		quit:(FDAY&(ADAYS=1))
+
+		if 'dep.sdomi.isNull() do {
+			if FDAY set MINAMT=MINAMT+(dep.sdomi*(ADAYS-1))
+			else  set MINAMT=dep.sdomi*ADAYS
+			}
+
+		if dep.sdomi.isNull(),FDAY set MINAMT=MINAMT+(DLYAVG*(ADAYS-1))
+		}
+
+	// Reverse sign to match INT
+	set MINAMT=-MINAMT
+
+	if BALINT<0,MINAMT<INT set INT=MINAMT
+
+	set UNCOLL=0
+	
+	// Calculate uncollected accrual amount (will be positive value)
+	if 'dep.ufindex.isNull() do {
+		type Number BALAVL,LGBAL,XBASE,RATE
+		type String PAR()
+
+		// Calculate effective-dated available balance
+		set BALAVL=$$EFDAVBAL(dep.cid,BASE,%EffectiveDate-1)
+		quit:BALAVL'<0
+		set LGBAL=BASE
+		if IRCB=3 do {
+			type Number H7AMT
+			if 'HOLD(7,dep.cid).data() do GETHOLD^UHLDSCA(7,dep.cid,BJD,%SystemDate,.HOLD)
+			set H7AMT=HOLD(7,dep.cid,%EffectiveDate).order(-1) if H7AMT set H7AMT=HOLD(7,dep.cid,H7AMT)
+			set LGBAL=BASE+H7AMT
+			}
+
+		if LGBAL'<0 set XBASE=-BALAVL
+		else  set XBASE=LGBAL-BALAVL
+		quit:'XBASE
+
+		// Calculate rate
+		type RecordDEP deptmp=dep.copy()
+
+		set PAR("INDEX")=dep.ufindex
+		set PAR("IXLOAD")=1
+		set PAR("NOTSER")=1
+		set PAR("IPMODE")=0
+		set PAR("ROUND")=0
+
+		do CTL^UINDX(.deptmp,%EffectiveDate-1,XBASE,.PAR()) quit:ER ""
+
+		set UNCOLL=$$^UIC(XBASE,LJD,%EffectiveDate-1,IACM,RATE,CT,"",IPF,dep.icpf,SND)
+
+		if dep.dumi,(dep.dumi*ADAYS)>UNCOLL set UNCOLL=(dep.dumi*ADAYS)
+		}
+
+	// if both neg and uncoll, check flag and process accordingly
+	if (INT<0),UNCOLL do {
+		// Charge both
+		quit:dep.niao<2
+		// Assess uncollected only
+		if dep.niao=2 set INT=0 quit
+		// Assess O/D only
+		if dep.niao=3 set UNCOLL=0 quit
+		// Charge the greater
+		if (UNCOLL)>(-INT) set INT=0 quit
+		set UNCOLL=0
+		}
+
+	set INT=INT.roundDec(5)
+	set UNCOLL=UNCOLL.roundDec(5)
+
+	// Update uncollected accrual amount
+	if UNCOLL set UNCACR=UNCACR+UNCOLL
+
+	/*
+	If backup withholding flag (DEP.BWF) and accrued withholding tax
+	processing (DEP.AWTP) are set calculate the tax withholding based
+	on positive accrued amount.
+	*/
+	if BWF,AWTP,INT>0 do { quit:ER
+		type Date %EffectiveDate
+
+		set %EffectiveDate=LJD
+		do BWACALC(.dep,.ttx,INT) quit:ER
+		// Round off BWA
+		set BWA=BWA.roundDec(5)
+		}
+
+	do SORTACR(.dep,INT)
+
+	quit
+
+
+SORTACR(RecordDEP dep,		// Deposit account			/REF:R
+	Number INT)		// Interest amount
+
+	// Sort interest accrual into POSACR,NEGACR,NEGACRUN classes
+
+	type public Date BJD,DELDT,LJD,NEGBJD,ODEXP,POSBJD,SND
+	type public Number AWT,BASE,BWA,NEGACR,NEGACRUN,ODLIM
+	type public Number POSACR,RATE,RESIDUAL
+	type public String CT,IACM,IPF,IX()
+
+	// May be undefined if called from DEPPEN
+	
+	if POSBJD.get().isNull() set POSBJD=BJD
+	if NEGBJD.get().isNull() set NEGBJD=BJD
+
+	// New Accrual
+	if 'dep.negacrpo do { quit
+		// Positive Accrual
+		set POSACR=POSACR+INT
+		// Accrued Withholding Tax
+		set AWT=AWT+BWA
+
+		/*
+		We are accruing net, the delinquency date is not set, there
+		is a negative balance or there is residual interest...  set
+		delinquency date
+		*/
+		if DELDT.isNull(),(BASE<0!RESIDUAL) set DELDT=LJD
+
+		/*
+		We are accruing net, the delinquency date is set, there is
+		a positive/zero balance and there is no residual interest
+		outstanding... reset delinquency date
+		*/
+		if 'DELDT.isNull(),(BASE'<0),('RESIDUAL) set DELDT=""
+		}
+
+	/*
+	Even if the amount calculated was negative, if the base was positive
+	we don't have negative accrual, regardless of dep.negacrpo.
+	*/
+	if BASE'<0,%EffectiveDate>POSBJD do { quit
+		// Positive Accrual
+		set POSACR=POSACR+INT
+		// Accrued Withholding Tax
+		set AWT=AWT+BWA
+
+		/*
+		There is a positive/zero balance, the delinquency date is
+		not set and residual interest is outstanding... set
+		delinquency date
+		*/
+		if DELDT.isNull(),RESIDUAL set DELDT=LJD
+
+		/*
+		There is a positive/zero balance, the delinquency date is
+		set and there is no residual interest outstanding... reset
+		delinquency date
+		*/
+		if 'DELDT.isNull(),'RESIDUAL set DELDT=""
+		}
+
+	if INT>0,%EffectiveDate>POSBJD do {
+		// Positive Accrual
+		set POSACR=POSACR+INT
+		// Accrued Withholding Tax
+		set AWT=AWT+BWA
+		}
+
+	if INT<0,%EffectiveDate>NEGBJD do {
+		if 'ODEXP.isNull() do { quit
+			// Beyond expiration date - all unauthorized
+			if ODEXP<(%EffectiveDate-1) do { quit
+				set NEGACRUN=NEGACRUN.get()-INT
+				if DELDT.isNull() set DELDT=ODEXP+1
+				}
+
+			/*
+			Determine if exceeds overdraft limit within 
+			overdraft term.
+			*/
+			if BASE<(-ODLIM) do { quit
+				type String INDTYPE
+				type Number NACR
+
+				if DELDT.isNull() set DELDT=LJD
+				set INDTYPE=IX(IX).piece("|",2)
+
+				/*
+				Interest rate will not change for a
+				cumulative index when a split of authorized
+				unauthorized negative accrual is necessary,
+				but may change for an incremental index.
+				*/
+				if INDTYPE="I" do SPLIT(.dep) quit
+
+				// Split authorized/unauthorized using one rate
+				set NACR=$$^UIC(-ODLIM,LJD,%EffectiveDate-1,IACM,RATE,CT,"",IPF,dep.icpf,SND)
+				set NEGACRUN=NEGACRUN.get()+(NACR-INT)
+				set NEGACR=NEGACR-NACR
+				}
+
+			set NEGACR=NEGACR-INT
+
+			/*
+			If O/D Expiration Date has not expired and Overdraft
+			limit is exceeded by balance and there is no Residual
+			Interest, reset Delinquency Date (if not already)
+			*/
+
+			/*
+			If O/D Expiration Date has not expired and Overdraft
+			limit less Residual Interest is not exceeded by
+			balance, set Delinquency Date (if not already)
+			*/
+
+			if 'DELDT.isNull(),BASE'<(-ODLIM),'RESIDUAL set DELDT=""
+			else  if DELDT.isNull(),BASE-RESIDUAL<(-ODLIM) set DELDT=LJD
+			}
+
+		set NEGACR=NEGACR-INT
+		if DELDT.isNull() set DELDT=LJD
+		}
+	quit
+
+
+SPLIT(RecordDEP dep)		// Deposit account			/REF:R
+
+	// Split out authorized and unauth neg accrual using different rates
+
+	type public Number INT,NEGACR,NEGACRUN,ODLIM
+	type public String CT,IACM,IPF
+	type public Date LJD,SND
+
+	type Number BASE,NACR,RATE
+
+	set BASE=-ODLIM
+	
+	// Need to get the rate for amount of ODLIM.
+	set RATE=$$INDX(.dep,LJD)
+
+	set NACR=$$^UIC(-ODLIM,LJD,%EffectiveDate-1,IACM,RATE,CT,"",IPF,dep.icpf,SND)
+	set NACR=NACR.roundDec(5)
+
+	set NEGACR=NEGACR-NACR
+	set NACR=INT-NACR
+	set NEGACRUN=NEGACRUN-NACR
+
+	quit
+
+
+INT(RecordDEP dep,		// Deposit account			/REF:R
+    RecordTTX ttx,		// Transaction				/REF:R
+    Number NEGPOST)		// Negative interest posting option
+
+	/*
+	Interest posting
+
+	Additional notes on Arguments:
+		. NEGPOST
+				0 = post positive and negative
+				1 = post negative only
+	*/	
+
+	if dep.grp="ESC" quit
+	
+	type public Number AWT,BWA,CMP,ER,INT,NEGACR,NEGACRUN,NEGMININ
+	type public Number POSACR,UNCACR
+	type public Date ODEXP
+
+	type Number POSTOPT
+
+	// Determine type of posting (pos/neg or neg only)
+	// Post Net
+	if dep.negipo'=2 set POSTOPT=0
+	// Post positive only
+	else  if 'NEGPOST set POSTOPT=1
+	// Post negative only
+	else  set POSTOPT=2
+
+	// Withholding amount to post
+	set BWA=0
+
+	// Posting net
+	if POSTOPT=0 do { quit:ER
+		/* Note: if dep.negacrpo=0, NEGACR and NEGACRUN should 
+		always be 0
+		Don't post negative values if posting only positive net */
+		if 'dep.negipo,POSACR<0 set (POSACR,AWT)=0
+		// Accruing separately but posting actual net accrued interest
+		if dep.negipo=1 set POSACR=POSACR-NEGACR-NEGACRUN-UNCACR
+		do INTSET(.dep,.ttx,POSACR,"","","") quit:ER
+		set INT=INT+POSACR
+		set (CMP,POSACR,AWT,NEGACR,NEGACRUN,UNCACR)=0
+		}
+
+	// Posting positive
+	if POSTOPT=1 do { quit:ER
+		do INTSET(.dep,.ttx,POSACR,"","","") quit:ER
+		set INT=INT+POSACR
+		set (CMP,POSACR,AWT)=0
+		}
+
+	// Posting negative
+	if POSTOPT=2 do { quit:ER
+		// Total negative accrual
+		type Number TNACR
+		set TNACR=NEGACR+NEGACRUN
+		if dep.negminop=1,TNACR<NEGMININ set (NEGACRUN,NEGACR)=0
+		if dep.negminop=2,TNACR,NEGMININ>TNACR do {
+			// Authorized
+			if ODEXP>%EffectiveDate set NEGACR=NEGMININ set NEGACRUN=0
+			// Unauthorized
+			else  set NEGACRUN=NEGMININ set NEGACR=0
+			}
+
+		do INTSET(.dep,.ttx,"",NEGACR,NEGACRUN,UNCACR) quit:ER
+		set (NEGACR,NEGACRUN,UNCACR)=0
+		}
+
+	quit
+
+
+INTSET(RecordDEP dep,		// Deposit account			/REF:R
+       RecordTTX ttx,		// Transaction				/REF:R
+       Number POSACR,		// Positive accrual
+       Number NEGACR,		// Negative accrual (authorized)
+       Number NEGACRUN,		// Negtive accrual (unauthorized)
+       Number UNCACR)		// Uncollected negative accrual
+
+	//Set new base and NNT array
+
+	type public Number AWT,AWTP,BASE,BWA,BWF,ER,INT,IOPT,IRCB,MLB,POSTOPT
+
+	type public String NNT(),X()
+
+	type Number RESADJ=0
+
+	if 'POSACR.isNull() do {
+		// Account for LBB neg bal
+		if 'POSACR,+X(%EffectiveDate).piece("|",7)=0 quit
+		set POSACR=POSACR.roundCur(dep.crcd)
+		// New positive accrual amount
+		set NNT(%EffectiveDate).piece("|",1)=NNT(%EffectiveDate).get()+POSACR
+		// Add original positive interest paid (any deferred is already
+		// included - see DEF section)
+		set NNT(%EffectiveDate).piece("|",2)=NNT(%EffectiveDate).piece("|",2)+X(%EffectiveDate).piece("|",7)
+
+		if BWF do { quit:ER
+			if AWTP set BWA=AWT
+			else  if POSACR>0 do BWACALC(.dep,.ttx,POSACR) quit:ER
+			set BWA=BWA.roundCur(dep.crcd)
+			}
+
+		// New withholding amount
+		set X(%EffectiveDate).piece("|",23)=BWA
+		set NNT(%EffectiveDate).piece("|",19)=NNT(%EffectiveDate).piece("|",19)+BWA
+		// Add amount of interest withheld to old withholding amount
+		set NNT(%EffectiveDate).piece("|",20)=NNT(%EffectiveDate).piece("|",20)+X(%EffectiveDate).piece("|",9)
+		}
+
+	if 'NEGACR.isNull() do {
+		set NEGACR=NEGACR.roundCur(dep.crcd)
+		// New negative accrual amount
+		set NNT(%EffectiveDate).piece("|",3)=NNT(%EffectiveDate).get().piece("|",3)+NEGACR
+		// Add original negative interest paid (any deferred is already
+		// included - see DEF section)
+		set NNT(%EffectiveDate).piece("|",4)=NNT(%EffectiveDate).piece("|",4)+X(%EffectiveDate).piece("|",19)
+		}
+
+	if 'NEGACRUN.isNull() do {
+		set NEGACRUN=NEGACRUN.roundCur(dep.crcd)
+		// New negative unauthorized accrual amount
+		set NNT(%EffectiveDate).piece("|",5)=NNT(%EffectiveDate).get().piece("|",5)+NEGACRUN
+		// orig neg acr un/rev sign on neg
+		set NNT(%EffectiveDate).piece("|",6)=X(%EffectiveDate).piece("|",25)
+		}
+
+	if 'UNCACR.isNull() do {
+		// New uncollected accrual amount
+		set UNCACR=UNCACR.roundCur(dep.crcd)
+		set NNT(%EffectiveDate).piece("|",17)=NNT(%EffectiveDate).get().piece("|",17)+UNCACR
+		set NNT(%EffectiveDate).piece("|",18)=NNT(%EffectiveDate).get().piece("|",18)+X(%EffectiveDate).piece("|",31)
+		}
+
+	// If Available Int Option = Update Interest/Dividend Available Only
+	if dep.iaf=2 quit
+
+	if dep.negbalop,POSTOPT'=1,'dep.definadj do RESINT(.dep) quit:ER
+
+	set BASE=BASE+RESADJ+$$INT2BASE(IOPT,dep.definadj) quit:ER
+
+	// Update low balance accounts after posting interest
+	if IRCB=5!(IRCB=6) do {
+		set MLB=BASE
+		if MLB<0 set MLB=0
+		}
+	quit
+
+
+IPF(RecordDEP dep,		// Deposit account			/REF:R
+    Date BJD,			// Beginning date for accruals
+    Date POSBJD,		// Positive beginning date for accruals
+    Date NEGBJD)		// Negative beginning date for accruals
+
+	/*
+	Interest next posted
+
+	Inputs:
+		. IPF	Interest Posting Frequency
+	*/
+
+	type public Number ER
+	type public String IPF
+
+	/* Determine initial value for positive and negative beginning dates
+	and set interest posting dates into X array */
+	set POSBJD=$$IPFSETX(.dep,IPF,dep.inp,3,8) quit:ER
+	set NEGBJD=$$IPFSETX(.dep,dep.negipf,dep.neginp,21,22) quit:ER
+
+	// Re-evaluate positive and negative beginning dates
+	set POSBJD=$$IPFADJB(.dep,POSBJD)
+	set NEGBJD=$$IPFADJB(.dep,NEGBJD)
+
+	/* Posting positive or net, return positive beginning date. If NEGIPO is
+	not equal to 2 then we could not have negative interest postings, so
+	no reason to go through history starting at BJD/NEGBJD set by IPFSETX */
+	if dep.negipo'=2 set (BJD,NEGBJD)=POSBJD
+	/* Posting separate, return BJD as earliest of the two dates. In this
+	case it is possible to have positive and negative interest postings
+	starting and ending at different times due to account miantenance.
+	We need to make sure that we will not miss either one. */
+	else  set BJD=$select(POSBJD<NEGBJD:POSBJD,1:NEGBJD)
+
+	quit
+
+
+IPFSETX(RecordDEP dep,		// Deposit account			/REF:R
+	String IPF,		// Interest posting frequency
+	Date INP,		// Next interest posting frequency
+	Number PFLG,		// Piece of X() to set for flag
+	Date PDATE)		// Piece of X() to set for date
+
+	/*
+	For positive or negative int
+
+	Additional notes on Arguments:
+		. PFLG
+			(3 if pos, 21 if neg)
+		. PDATE
+			(8 if pos, 22 if neg)
+
+	Inputs:
+		. BJD	Beginning date for calculations
+		. DRC	Daily rate change flag
+		. IRCB	Int/Div Rate Calculation Base
+
+	Returns:
+		. $$	FIRST Pos or Negative Int/Div Next Posting Date in given 
+			calculation period.
+
+	Use Interest Next Posted date to go backwards to start setting up
+	X array, because of frequencies that can fall in different cycles
+	3MA05 for example.  Stop when NJD is not greater than BJD, as interest
+	posting is always effective for the period up to (but not including)
+	the interest posting date. 
+	(CUVAR.INTPOS=1 is end of day, 2 is beginning of day.)
+	*/
+
+	type public Date BJD
+	type public Number DRC,ER,IRCB
+
+	type String FRECOL
+	type Date MODBJD,NJD,PREVDT
+
+	// Initialize INP, could be set to null by maintenance
+	if INP.isNull() set INP=%SystemDate+1
+
+	set FRECOL=$select(PDATE=8:"IPF",1:"NEGIPF")
+	// Include or not include int post date
+	set MODBJD=BJD-CUVAR.IPD
+
+	set NJD=INP
+	type ResultSet rs=Db.select("SCHDT","ACNDSD","SCHDT<:INP AND CID=:dep.cid AND FRECOL=:FRECOL","SCHDT DESC")
+	if 'rs.isEmpty() do { quit NJD
+		set PREVDT=NJD
+		while rs.next() do { quit:ER!(NJD'>MODBJD)
+			set NJD=rs.getCol("SCHDT")
+			do IPFSETX1(dep.dlr,dep.odt)
+			}
+
+		// Use Account Conversion Date under these conditions
+		if dep.convdt,NJD<dep.convdt,IRCB'=5,IRCB'=6 set NJD=dep.convdt
+
+		/* If NJD=0 then we're backdating prior to the first interest
+		posting period. NJD needs to be reset under these conditions. */
+		if 'NJD set NJD=$select(NJD<dep.dlr:dep.dlr,NJD<dep.odt:dep.odt,1:BJD)
+		}
+
+	if IPF.isNull() quit $$IPFNOFRE(.dep)
+
+	for  set PREVDT=NJD,NJD=PREVDT.nextFreqDate(IPF,,1) quit:ER  do IPFSETX1(dep.dlr,dep.odt) quit:NJD'>MODBJD
+ 
+        if dep.convdt,NJD<dep.convdt,IRCB'=5,IRCB'=6 S NJD=dep.convdt
+
+	quit NJD
+
+
+IPFSETX1(Date DLR,		// Date last renewed
+	 Date ODT) 		// Opening date
+
+	// Add interest posting indicator in X array according to NJD
+
+	type public Date BJD,NJD,PREVDT
+	type public Number DRC,PFLG,PDATE
+	type public String X()
+
+	if (NJD<$select(DLR:DLR,1:ODT))!(NJD<BJD) quit
+	if DRC set X(NJD).piece("|",5)=1
+	if NJD'>%SystemDate set X(NJD).piece("|",PFLG)=1 set X(NJD).piece("|",PDATE)=PREVDT
+
+	quit
+
+
+IPFNOFRE(RecordDEP dep)		// Deposit account		/REF:R
+
+	// No frequency, return beginning date
+
+	type public Number IRCB
+
+	type Date BJD
+	
+	/* There is no IPF, set BJD to either the opening date, or the 
+	Date Last Renewed if it exists. */
+	if 'dep.dlr set BJD=$select(dep.hisctf>dep.odt:dep.hisctf,1:dep.odt)
+	else  set BJD=$select(dep.hisctf>dep.dlr:dep.hisctf,1:dep.dlr)
+	
+	// Cannot be less than conversion date
+	if dep.convdt,BJD<dep.convdt,IRCB'=5,IRCB'=6 set BJD=dep.convdt
+	
+	quit BJD
+
+
+IPFADJB(RecordDEP dep,		// Deposit account			/REF:R
+	Date NJD)		// Positive/negative last date returned
+
+	/*
+	Adjust beginning date (pos or neg)
+
+	Inputs:
+		. SEFD	Saved(original) effective date
+
+	Returns:
+		. $$ 	Adjusted beginning date
+	*/
+	type public Number IRCB
+	type public Date SEFD
+
+	type Date BDATE,MINBJD
+		
+	set BDATE=NJD
+
+	// If IPD and using compounding, must start at beg of accrual period
+	#IF CUVAR.IPD if BDATE'=dep.convdt,BDATE'=SEFD set BDATE=BDATE+1
+		
+	/* If BJD has been set to a date prior to either dep.dlr or ODT, reset it
+	to dep.dlr if there is one, or ODT */
+	set MINBJD=$select(dep.dlr:dep.dlr,1:dep.odt)
+	if BDATE<MINBJD set BDATE=MINBJD
+
+	#IF CUVAR.IPD if BDATE=(dep.odt+1) set BDATE=dep.odt
+
+	if dep.convdt,BDATE<dep.convdt,IRCB'=5,IRCB'=6 set BDATE=dep.convdt
+	
+	quit BDATE
+
+
+ICF(Date INC,		// Int/div next compounded
+    String ICF)		// Int/div compounding frequency
+
+	/*
+	Interest next compounded
+
+	Inputs:
+		. DCF	Daily compounding frequency flag
+		. BJD	Beginning date for calculations
+		. X()	Account activity array
+
+	Use interest next compounded date, or interest last compounded date, 
+	for same reasons as explained above.
+
+	The ^UIC formulas assume daily compounding unless told otherwise.
+	*/
+	
+	type public Number DCF,ER
+	type public Date BJD
+	type public String X()
+
+	type Date NJD
+
+	if DCF=1 quit
+
+	set NJD=INC
+	for  set NJD=NJD.nextFreqDate(ICF,,1) quit:ER!(NJD<BJD)  set X(NJD).piece("|",4)=1
+
+	quit
+
+
+INTFRE(RecordDEP dep,		// Deposit account			/REF:R
+       String INDEX,		// Interest index
+       Date ICHND,		// Next int/div change
+       Date BDATE)		// Strart date
+
+	/*
+	Load index changes
+
+	Inputs:
+		. BJD		Beginning date for calculations
+		. DTL		Print supporting detail
+		. INTFRE	Int Rate Change Freq
+		. IX		Interest index name
+		. IX()		Array of index data (mirror of INDEX tbl)
+		. ODTERM	Authorized O/D Limit Term
+		. SEFD		Saved(original) effective date
+		. X()		Account activity array
+
+	Returns:
+		. INTEFD	The oldest change date for the index
+	*/
+
+	type public Number DTL,ER
+	type public Date BJD,INTEFD,SEFD
+	type public String INTFRE,IX,ODTERM
+	type public String IX(),X()
+
+	type Date DATE,NEXTDT
+
+	if INTFRE.isNull() quit
+
+	set IX=INDEX.piece(" ",1)
+	
+	// Load index data from INDEX table into an IX() array
+	if 'IX(IX).exists() do {
+		type RecordINDEX index=Db.getRecord("INDEX","INDEX=:IX",1)		
+
+		set IX(IX)=$$IND2STR^UINDX(.index)
+		}
+
+	/*
+	If this isn't a daily frequency set up the X array with elements to
+	correspond with the interest rate change dates.  Starting with
+	ICHND, go back until NJD is less than or equal to BJD.  INTEFD is
+	the interest change date associated with BJD.  Turn on piece 5 of the
+	X array for each interest change date.
+	*/
+
+	// Determine if index change is daily
+	if '$$DLYF(INTFRE,ICHND) do { quit
+		type Date NJD
+		
+		// Invalid ICHND
+		if ICHND.isNull() do Runtime.setErrMSG("DEP",1377) quit
+		
+		set NJD=ICHND
+		for  set NJD=NJD.nextFreqDate(INTFRE,,1) quit:ER!(NJD'>BJD)  set X(NJD).piece("|",5)=1
+
+		if NJD<BDATE set INTEFD=BDATE
+		else  set X(NJD).piece("|",5)=1,INTEFD=NJD
+
+		// Call LKUP to load all entries if ODLIM processing
+		if 'ODTERM.isNull() do LKUP(.dep,BDATE,$select(SEFD>%SystemDate:SEFD,1:%SystemDate),IX)
+		}
+
+	/*
+	If there is a daily rate change with a basis index, let the index
+	determine the entries in the X array, as the rate will only change as
+	often as the index does.  For instance, there is no need to place an
+	entry in X for every day if the index only changes once a week (e.g.,
+	there will be 6 unncessary entries in X to collate on and 6 unneeded
+	^UFREs to do.  Note that the INTFRE paragraph puts entries in X.
+	*/
+
+	/*
+	In order to get all rate change dates, regardless of index type, you
+	must look for an index name in piece 1 of the index tier. If piece 1
+	is a valid index, you must also get its change dates, for the ranges
+	it is needed for. Then if the primary index and all secondary indexes
+	are BASIS (type=0).
+	*/
+
+	// For future dated trans.
+	do LKUP(.dep,BDATE,$select(SEFD>%SystemDate:SEFD,1:%SystemDate),IX)
+
+	/*
+	If this is a tiered index and we have a daily rate change, 
+	then put an entry in the X array for each element which has a 
+	principal change so that we can recalculate the rate.  Also, 
+	set up INTEFD. If the index and all chained indexs are BASIS 
+	(determined by OPT=0) then we only need to get the rate on rate 
+	change dates and not balance change dates.
+
+	With the ability to change an index, the above paragraph does 
+	not apply. An index may be changed from tiered to basis.  Now, 
+	for each X array entry with principal or a rate entry, flag the 
+	date to recalculate the rate.
+	*/
+
+	set NEXTDT=BDATE.nextFreqDate(INTFRE) quit:ER
+	set INTEFD=NEXTDT.nextFreqDate(INTFRE,,1) quit:ER
+	if INTEFD<BDATE set INTEFD=BDATE
+
+	set DATE=""
+	for  set DATE=X(DATE).order() quit:DATE.isNull()  do {
+		if X(DATE)!('X(DATE).piece("|",2).isNull()) set X(DATE).piece("|",5)=1
+		}
+
+	// Effective date was an interest change date
+	if DTL=3 ! (DTL=9) set X(SEFD).piece("|",5)=1
+
+	quit
+
+
+LKUP(RecordDEP dep,		// Deposit account			/REF:R
+     Date FRDT,			// From date
+     Date TODT,			// To date
+     String INDEX)		// Interest index name
+
+	/*
+	Lookup Change dates for index
+
+	Input:
+		. RATE
+		. IX()		Array containing index data. Mirror of INDEX,
+				INDEX0 and INDEX1 tables.
+		. X()		Account activity array.
+
+	This procedure will lookup interest change dates in a timeframe 
+	specified. This procedure may go in recursion if another index is 
+	defined on a tier. It will call itself then to figure out if any 
+	interest changes should be done due to the new index.	
+	*/
+	type public Number ER
+	type public String IX(),X()
+
+	type Date EFDBEG,EFDEND,INDEFD
+
+	set EFDEND=TODT
+
+	type ResultSet rs=Db.select("EFD","INDEX1","INDEX=:INDEX AND EFD<:TODT","EFD DESC")
+	if rs.isEmpty() quit
+	while rs.next() do { quit:ER!(INDEFD'>FRDT)  set EFDEND=INDEFD
+		
+		type String TIER=""
+	
+		set INDEFD=rs.getCol("EFD")
+
+		/*
+		If index effective date falls before 'from date' put an 
+		interest change entry in X() array on 'from date'
+		*/
+		if INDEFD'>FRDT set X(FRDT).piece("|",5)=1 set EFDBEG=FRDT
+		
+		/*
+		If index effective date changed in the given period - int
+		change entry will be added to X() on index effective date
+		*/
+		else  set X(INDEFD).piece("|",5)=1 set EFDBEG=INDEFD
+
+		// Load index tiers data to IX array and create a lowest tier 
+		set ER='$$LOADIX^UINDX(.dep,INDEX,INDEFD,,1) quit:ER
+
+		/*
+		If index is used on a index tier - go in recursion to figure 
+		out if there should be any interest changes in the current 
+		index's effective date interval.
+		*/
+		for  set TIER=IX(INDEX,INDEFD,TIER).order() quit:TIER.isNull()  do {
+			type String RECIND
+		
+			set RECIND=IX(INDEX,INDEFD,TIER).piece("|",1).piece(" ",1)
+			quit:RECIND.isNull()
+			if Db.isDefined("INDEX","RECIND") do LKUP(.dep,EFDBEG,EFDEND,RECIND)
+			}
+		}
+
+	quit
+
+
+INDEX(RecordDEP dep)		// Deposit account			/REF:R
+
+	/*
+	Get rate from UINDX. If this EFD is a rate change date, or if INTFRE
+	isn't used, then EFD can be used to get RATE.
+	
+	If this account has INTFRE, and it is not an interest change date, 
+	then INTEFD must be used as the date to get the rate.
+	*/
+	
+	type public String IX,IX(),X()
+	type public String INDEX,INTFRE
+	type public Number ER,IRN,RATE
+	type public Date INTEFD
+
+	type Date EFDATE
+
+	// If the effective date is not an interest change date and no frequency
+	if 'X(%EffectiveDate).get().piece("|",5),INTFRE.isNull() quit
+
+	set IX=INDEX.piece(" ",1)
+
+	// Load index data from INDEX table into an IX() array
+	if 'IX(IX).exists() do { quit:ER
+		type RecordINDEX index=Db.getRecord("INDEX","INDEX=:IX",1)
+
+		set IX(IX)=$$IND2STR^UINDX(.index)
+		}
+
+	kill RATE
+
+	/*
+	Find the correct interest change date to use to calculate the rate.
+	Start with INTEFD (the oldest change date) and then collate backward
+	through the X array for any more recent entries.
+	*/
+	set EFDATE=%EffectiveDate
+	if 'INTFRE.isNull(),'X(EFDATE).get().piece("|",5) set EFDATE=INTEFD do {
+		type Date N=%EffectiveDate
+		for  set N=X(N).order(-1) quit:N.isNull()!(N'>dep.odt)  if X(N).piece("|",5) set EFDATE=N quit
+		}
+
+	set RATE=$$INDX(.dep,EFDATE)
+
+	do FMRATE(dep.cid,%EffectiveDate,IRN,RATE,"IRN")
+
+	set IRN=RATE 
+
+	quit
+
+
+INDX(RecordDEP dep,		// Deposit account			/REF:R
+     Date EFDATE)		// Effective date
+
+	/*
+	Calculate interest rate
+
+	Inputs:
+		. DEPCHG()	Array of changes to deposit account on effective
+				date
+		. IRCB		Interest Rate Calculation Base
+		. INDEX		Index name. May also contain spread and rounding
+				factor
+		. BASE		Base amount
+		. DRC		Daily rate change flag
+		. DTL		Print supporting detail
+		. X()		Account activity array
+	*/
+
+	type public Number BASE,DRC,DTL,ER,IRCB
+	type public String DEPCHG(),X()
+	type public String INDEX,%MSKD,ODTERM
+
+	type Number BALINT,RATE
+	type Date ERDT
+	type String PAR(),RNDFC,SPREAD
+
+	type RecordDEP deptmp=dep.copy()
+
+	// Extract spread and rounding factor from INDEX
+	do INDEXTR^UINDX(INDEX,.SPREAD,.RNDFC)
+	
+	set PAR("INDEX")=INDEX
+	set PAR("SPREAD")=SPREAD
+	set PAR("RNDFC")=RNDFC
+	set PAR("MATRIX")=dep.intmat
+	set PAR("IXLOAD")=0
+	set PAR("NOTSER")=0
+	set PAR("IPMODE")=0
+	set PAR("ROUND")=1
+	set PAR("LIMIT")=1
+
+	/*
+	If daily rate change or ODLIM processing or if mass index changes 
+	(DTL=3), then IX array is fully loaded.
+	*/
+	if DRC!('ODTERM.isNull())!(DTL=3) set PAR("IXLOAD")=1
+
+	// Populate account object with effective dated values
+	do EFDDEP(.deptmp,.DEPCHG()) quit:ER
+
+	// Ledger Balance
+	if IRCB=1 set deptmp.bal=BASE
+	// Collected Balance
+	if IRCB=3 set deptmp.balcol=BASE
+
+	if 'dep.maxacr.isNull(),BASE>dep.maxacr set BALINT=dep.maxacr
+	else  set BALINT=BASE
+
+	// Calculate rate
+	do CTL^UINDX(.deptmp,EFDATE,BALINT,.PAR(),.X()) quit:ER ""
+
+	// Index ~p1 not set up for ~p2
+	if RATE.get().isNull() set ERDT=EFDATE.toString() do Runtime.setErrMSG("DEP",1228,"INDEX~ERDT") quit ""
+
+	quit RATE
+
+
+LPYR(Date BJD)		// Beginning date
+
+	// Check for leap year, add an entry to X() on Jan 1st of the next year
+
+	type public String X()
+
+	type Date EOYJ
+
+	// BJD is not in leap year, %SystemDate is not in leap year
+	if 'BJD.isLeapYear(),'%SystemDate.isLeapYear() quit
+
+	// BJD and %SystemDate are in the same year
+	if BJD.year()=%SystemDate.year() quit
+
+	// End-Of-Year - Julian
+	set EOYJ=$$EOYJD^SCADAT(BJD,1)
+	set X(EOYJ+1)=X(EOYJ+1).get()
+
+	quit
+
+
+private	LDINDEX(RecordDEP dep,		// Desosit account		/REF:R
+		String IND)		// Index
+
+	/*
+	Load the Index, then modify for current changes
+
+	Note: This paragraph is only called via ^INDEXMC (DTL=3 within RECALC).
+	*/
+
+	type public String AX(,,,),IX(,,),NEW()
+	type public Date MCEFD
+
+	type public Number DTL
+
+	type String TIER
+	
+	// Mass matrix change
+	if DTL=9 do { quit
+		type Number N
+
+		// Int/Div Matrix
+		set AX=dep.intmat
+		do LOADAX^MATRIXMC(.AX)
+		kill AX(AX,MCEFD)
+		
+		if %ProcessMode>2 quit
+		
+		type Number ROW,COL,SPREAD
+		
+		set N="" for  set N=NEW(N).order() quit:N.isNull()  do {
+			set ROW=NEW(N).piece("|",1)
+			set COL=NEW(N).piece("|",2)
+			set SPREAD=NEW(N).piece("|",3)
+			if 'ROW.isNull(),COL.isNull() set AX(AX,MCEFD,ROW)=SPREAD
+			else  if 'COL.isNull() set AX(AX,MCEFD,ROW,COL)=SPREAD
+			}
+		}
+
+	// Load IX array for master index
+	do LOADIX^INDEXMC(IND)
+	kill IX(IND,MCEFD)
+
+	// Delete mode
+	if %ProcessMode>2 quit
+
+	set TIER=""
+	// Collate NEW tier array (set up in INDEXMC) to load complete IX array
+	for  set TIER=NEW(TIER).order() quit:TIER.isNull()  do {
+		type String TIERVAL
+
+		set IX(IND,MCEFD,TIER)=NEW(TIER)
+		set TIERVAL=IX(IND,MCEFD,TIER).piece("|",1).piece(" ",1)
+		if TIERVAL.isNull() quit
+
+		// Is TIERVAL an index name (nested index)
+		if Db.isDefined("INDEX","INDEX=:TIERVAL") do LKUP(.dep,MCEFD,%SystemDate,TIERVAL)
+		}
+	quit
+
+
+DLYF(String FRE,		// Int/div change frequency
+     Date JD)			// Julian date
+
+	/*
+	Determine whether frequency is daily
+
+	Returns:
+		. $$	Frequency Indicator	TYP=L 
+			1 - Daily
+			0 - Non daily
+	*/
+	
+	type public Number ER
+
+	type Number AF
+
+	if FRE.extract(1,3)="1DA" quit 1
+
+	/* If FRE'="1DA", then it could be a user-defined frequency which maps
+	to a 1DA.  Check if annual factor equal to the number of days in the 
+	year before continuing. */
+
+	set JD=JD.nextFreqDate(FRE,.AF,1) quit:ER 0
+	if AF>360,AF=$$DY^UIC(11,JD) quit 1
+
+	quit 0
+
+
+public INIT(RecordDEP dep)	// Deposit account			/REF:R
+
+	/*
+	This section should be called by all routines calling into external
+	entry points, to ensure that all variables needed for processing are
+	defined.
+	*/
+
+	type public Number ADJUNC,AUTOD,AWTP,BWF,DCF,DRC,IOPT,IRCB,ITRF
+	type public Number MINOPT,MINACR,NEGITRF,NEGMININ,ODLIM,RESIDUAL,UNCPST
+	type public Date DELDT,ICHND,SND
+	type public String AWTI,IACM,ICF,INTFRE,IPF,ODTERM
+	
+	type String BALAVLCALCFO
+
+	// Initialize Accrued Withholding Tax variables
+	// Backup Withholding Flag. Can be file maintained.
+	set BWF=dep.bwf
+	// Accr. Withh. Tax Processing. Can be file maintained.
+	set AWTP=dep.awtp
+	// Accr. Withh. Tax Index. Can be file maintained.
+	set AWTI=dep.awti
+
+	// Int/Div Accrual Calc Method
+	set IACM=dep.iacm
+	// Minimum Balance Accrual Option
+	set MINOPT=dep.minopt
+	// Int/Div Compounding Frequency
+	set ICF=dep.icf
+	// Int/Div Rate Calculation Base
+	set IRCB=+dep.ircb
+	// Minimum Balance to Accrue Int/Div
+	set MINACR=dep.minacr
+
+	// Minimum Negative Interest to Charge
+	set NEGMININ=dep.negminint 
+	if NEGMININ.isNull() set NEGMININ=-1E15
+
+	// Interest Disbursement Option. Can be file maintained
+	set IOPT=dep.iopt
+	// Interest Transfer Account. Can be file maintained
+	set ITRF=dep.itrf
+	// Residual Interest
+	set RESIDUAL=dep.resint
+	// Interest Posting Frequency
+	set IPF=dep.ipf
+	// Authorized Overdraft Limit. Can be file maintained 
+	set ODLIM=dep.odlim
+	// Authorized O/D Limit Term
+	set ODTERM=dep.odterm
+	// Delinquency Date
+	set DELDT=dep.deldt
+	// Neg Interest Transfer Account
+	set NEGITRF=dep.negitrf
+
+	set (ADJUNC,UNCPST)=0
+
+	// Authorized Overdraft Flag
+	set AUTOD=0
+	set BALAVLCALCFO = $$BALAVLFO^DEPCDI(dep.cid)
+	if BALAVLCALCFO.extract(2)=1 set AUTOD=1
+	
+	/*
+	To save us checking frequencies every calculation, determine now if
+	the account uses daily compounding or not.
+	DCF - Daily Compounding Flag.  
+	(Note that continuous compounding [IACM.extract()=2] has a DCF of 0.)
+	*/
+	set DCF=0
+	if 'ICF.isNull() set DCF=$$DLYF(ICF,dep.inc)
+
+	// Determine if interest index changes daily
+	// Int/Div Check Frequency
+	set INTFRE=dep.intfre
+	// Int/Div Change - Next Date
+	set ICHND=dep.ichnd
+	if 'INTFRE.isNull() set DRC=$$DLYF(INTFRE,ICHND)
+	else  set DRC=0
+
+	// Int/Div Next Posted
+	set SND=dep.inp
+
+	// Next int/div post date prior to system date
+	if dep.inp,dep.inp<%SystemDate do Runtime.setErrXBAD("DEP","INP") quit
+
+	// Next Neg Int post date missing or prior to system date
+	if dep.neginp,dep.neginp<%SystemDate do Runtime.setErrXBAD("DEP","NEGINP") quit
+
+	quit
+
+
+public CLOSE(Number CID,		// Account number
+	     Date EFDATE)		// Effective date
+
+	/*
+	External entry point from ^DEPCL (Closeouts)
+
+	Arguments: 
+		. CID		Account Number		TYP=N/MECH=VAL/REQ
+		. EFDATE	Effective Date		TYP=D/MECH=VAL/REQ
+
+	Collate thru history to determine if close-out transaction is prior 
+	to any debit or credit transaction which has not been reversed or E/C 
+	and was not effective-dated prior to the EFD of the close-out. 
+	*/
+
+	type public Number ER
+	type public String DATE
+	
+	type Date HISTEFD
+
+	// Transaction Effective Date
+	if EFDATE.isNull() set EFDATE=%SystemDate
+
+	/*
+	Select transactions effective dated after closeout effective date, 
+	no error correct (itc6), no reversals (itc12), no file maintenance
+	(itc1), no interest related transactions (TSO IS LIKE "INT") and 
+	External Transaction Code must also be present
+	*/
+	type DbSet ds=Db.selectDbSet("HIST","CID=:CID AND EFD>:EFDATE AND TJD>:EFDATE AND ITC1 IS NOT NULL AND REVTRN=0 AND ITC6=0 AND ITC12=0 AND (TSO NOT LIKE '%INT%') AND ETC IS NOT NULL")
+	while ds.next() do { quit:ER
+		type RecordHIST hist=ds.getRecord("HIST")
+
+		// Transaction Amount (TAMT)
+		if hist.tamt.isLike("%#%") if 'hist.tamt.piece("#",2) quit
+		else  if 'hist.tamt.piece("#",1) quit
+
+		set HISTEFD=$select(hist.efd:hist.efd,1:hist.tjd)
+		set DATE=HISTEFD.toString()
+		
+		// Cannot effective-date closeouts prior to ~p1
+		do Runtime.setErrMSG(448,DATE)
+		}
+
+	quit
+
+
+public ERNALL(RecordDEP dep,	// Deposit account			/REF:R
+	      Date SCND,	// Service charge next date (to date)
+	      Date SCLD,	// Service charge last date (to date)
+	      Number BASE)	// Base amount for earnings
+
+	/*
+	External entry point from SRVFEE to determine net accruals for 
+	specified period.
+
+	Returns:
+		. ACR	Net accrual amount		     TYP=N
+
+	*/
+
+	type public Number ACR=0,DTL,ER
+
+	type Number ADJUNC,AUTOD,AWTP,AWTR,AWT,BASEOLD,BWF,CMP,DCF,DRC,INT,IOPT
+	type Number IRCB,IRN,ITRF,LPNTACR,MINACR,MINOPT,NEGACR,NEGACRUN
+	type Number NEGITRF,NEGMININ,ODLIM,POSACR,RESIDUAL,UPD
+
+	type Date BJD,DELDT,%EffectiveDate,ICHND,ODEXP,ODSTART
+	type Date SEFD,SND
+
+	type String AWTI,IACM,ICF,INDEX,INTFRE,IPF,ODTERM
+	type String RATECHG(,,),XDI()
+
+	do INIT(.dep) quit:ER
+
+	/* Compiler instruction not to throw "Assigning system variable" warning
+	This variable is declared in this section, so old value is hidden */
+	
+	type Date %SystemDate // Cannot type earlier as INIT requires input value
+	#ACCEPT DATE={2/13/2003};PGM={Vitaliy Antonov}
+	set %SystemDate=SCND+1 
+
+	set SEFD=%SystemDate
+
+	set (NEGACR,POSACR,AWT,NEGACRUN)=0
+
+	set ICHND=%SystemDate
+
+	// Service Charge Frequency
+	set IPF=dep.scfre
+
+	/* The IRCB should be 1 for service fees. BCHFEEUTL already
+	has the collected and investible balances and passes the
+	correct period's balance to RECALC, RECALC does not need
+	to calculate low balances in period or collected or investible
+	balances, these are done in SRVSUM. */
+	set IRCB=1
+
+	// Accrual Method (Analysis)
+	set IACM=dep.anlacm
+	// Earnings Rate (Analysis)
+	set IRN=dep.anlirn
+	// Earnings Index (Analysis)
+	set INDEX=dep.anlidx
+	// Int/Div Review Frequency (Analysis)
+	set INTFRE=dep.anlirf
+	// Minimum Balance Option (Analysis)
+	set MINOPT=dep.anlmbo
+	// Minimum Balance to Accrue (Analysis)
+	set MINACR=dep.anlmba
+
+	set (CMP,%EffectiveDate,INT,ODEXP,RESIDUAL)=""
+	set BJD=SCLD+1
+	set BASEOLD=BASE
+
+	set DTL=DTL.get()
+	
+	if DTL=2 set UPD=0
+	else  set UPD=1
+
+	// Int/Div Compounding Frequency (Analysis)
+	if 'dep.anlicf.isNull() do ICF(dep.inc,dep.anlicf)
+	// Earnings Index (Analysis)
+	if 'INDEX.isNull() do INTFRE(.dep,INDEX,ICHND,BJD) if ER quit
+	do LPYR(BJD)
+
+	// Create an empty transaction object to be passesd over to START
+	type RecordTTX ttx=Class.new("RecordTTX")
+
+	do CALC0(.dep,.ttx) quit:ER
+
+	set ACR=POSACR-NEGACR-NEGACRUN
+
+	quit
+
+
+OVR(RecordDEP dep)	// Deposit account			/REF:R
+
+	/*
+	OVR line tag verifies that for DTL=0 or 1 that the index is not
+	currently being edited
+
+	Arguments:
+		. dep	Deposit account object		TYP=RecordDEP/REQ
+	Inputs:
+		. OVR()	Array of index names for which mass change currently 
+		in process.
+	*/
+
+	type public String OVR(,,)
+
+	if dep.index.isNull() quit
+
+	// Determine if Mass Change in Process
+	type RecordINDEX index=Db.getRecord("INDEX","INDEX=:dep.index")
+	if (index.getMode()),(index.mcf) set OVR(dep.cid,"OVR","INDXEFD")=dep.index
+
+	quit
+
+
+FMLOAD(RecordDEP dep)		// Deposit account			/REF:R
+
+	// Load File Maintenance changes into local variables and arrays
+
+	type public Number AWT,AWTI,AWTP,BWF,ER,IACM,IOPT,ITRF,MINOPT,MINACR
+	type public Number NEGITRF,ODLIM
+
+	type public Date LJD,ODEXP,ODSTART
+
+	type public String DEPCHG(),FM(,),ODTERM,XDI()
+
+	type String DI="",FMREC
+	type Date JD
+	type Number DIFLG=0,RIFLG=0
+
+	set JD=LJD-1
+
+	for  set JD=FM(JD).order() quit:JD.isNull()!(ER)  quit:JD>(%EffectiveDate-1)  do {
+		for  set DI=FM(JD,DI).order() quit:DI.isNull()  do { quit:ER
+			set FMREC=FM(JD,DI)
+			// Load new value on the date of change
+			set DEPCHG(DI)=FMREC.piece("|",2)
+
+			/* Check if modified column may affect interest rate
+			then RATE must be recalculated. Set RIFLG flag. */
+			if XDI(DI).exists() set (DIFLG,RIFLG)=1
+
+			/* Any data items that may effect an interest index
+			evaluation must go here. */
+			if DI="ODTERM" do { quit:ER
+				set ODTERM=FMREC.piece("|",2)
+				if ODSTART.isNull()!(ODTERM.isNull()) quit
+
+				set ODEXP=$$EXT^UMDT(ODTERM,ODSTART)-1
+
+				/* File maintenance to DEP.ODTERM prohibits
+				processing of this transaction */
+				if ODEXP<%SystemDate do Runtime.setErrMSG("DEP",3839) quit
+				}
+
+			if DI="ODLIM" set ODLIM=FMREC.piece("|",2)
+
+			/*
+			When DEP.AWTP changes from selected to not selected,
+			the accrued withholding tax and accrued withholding
+			tax rate must equal to null in order to exclude any
+			previous daily accrued interest withholding and
+			to calculate the withholding amount for the entire
+			interest/dividend posting period at the next
+			interest posting day.
+			*/
+			if DI="AWTP" do {
+				// Accred Withholding Tax Processing
+				set AWTP=FMREC.piece("|",2)
+				if 'AWTP set AWT=""
+				}
+
+			// Accr. Withh. Tax Index
+			if DI="AWTI" set AWTI=FMREC.piece("|",2)
+			}
+		quit:ER
+
+		if DIFLG do {
+			type Date %EffectiveDate
+
+			set %EffectiveDate=JD
+	
+			// Rebuild IX for EFD date using new data item values.
+			do BLDIX(.dep,.DEPCHG())
+			set DIFLG=0
+			}
+		}
+
+
+	/*
+	Set current (as of EFD) value into file maintainable variables.
+	If the new value is not inserted in acn above, the old value is
+	defaulted from acn set in RECALC1.
+	*/
+	if DEPCHG("IACM").data() set IACM=DEPCHG("IACM")
+	if DEPCHG("MINOPT").data() set MINOPT=DEPCHG("MINOPT")
+	if DEPCHG("MINACR").data() set MINACR=DEPCHG("MINACR")
+
+	if DEPCHG("IOPT").data() set IOPT=DEPCHG("IOPT")
+	if DEPCHG("ITRF").data() set ITRF=DEPCHG("ITRF")
+	
+	// Backup Withholding Flag
+	if DEPCHG("BWF").data() set BWF=DEPCHG("BWF")
+
+	if DEPCHG("NEGIPF").get() set NEGITRF=DEPCHG("NEGIPF")
+
+	// Accr. Withholding Tax Index
+	if DEPCHG("AWTI").get() set AWTI=DEPCHG("AWTI")
+
+	/*
+	If RIFLG is set, must call out to index to recalculate the rate based
+	on the new changes from the file maintenance.
+	*/
+	if RIFLG do INDEX(.dep)
+
+	quit
+
+
+private	FMRATE(Number CID,		// Account number
+	       Date %EffectiveDate,	// Effective date
+	       Number OLDRATE,		// Old rate value
+	       Number NEWRATE,		// New rate value
+	       String DINAME)		// Column name
+
+	/*
+	Rate change file maintenance entry
+
+	If current effective-dated transaction changed the interest / tax 
+	rate on the account, then store in RATECHG() for later creation of 
+	HIST entry for this effective date (done in RECALC0). Also called 
+	from RECALCFS.
+
+	Inputs:
+		. RATECHG(,,)	Contains interest rate changes on
+				effective dates
+		. %TRNHSEQ	Primary transaction history sequence number.
+				Determined in TRNDRV
+		. X()		Account activity array
+	*/
+
+	type public String RATECHG(,,),X()
+	type public Number %TRNHSEQ
+
+	type Number PC,SEQ,XRATE
+
+	// New AWTR piece in X
+	if DINAME="AWTR" set PC=12
+	// New IRN piece in X
+	else  set PC=2
+
+	/*
+	Check X array piece 2 for EFD to see if another transaction changed
+	the rate on the same EFD.
+	*/
+	set XRATE=X(%EffectiveDate).get().piece("|",PC)
+	if 'XRATE.isNull(),(XRATE-NEWRATE=0) quit
+	if OLDRATE-NEWRATE=0,XRATE.isNull() quit
+
+	/*
+	Always use XRATE value, if defined, as the old value when setting
+	new rate change in history so subsequent transactions pick up the
+	correct rate.
+	*/
+	if 'XRATE.isNull() do {
+		set OLDRATE=XRATE
+		set X(%EffectiveDate).piece("|",PC)=NEWRATE
+		}
+
+	// Add rate change to RATECHG array
+	if 'RATECHG(CID,DINAME).data() set SEQ=1
+	else  set SEQ=RATECHG(CID,DINAME,"").order(-1)+1
+
+	set RATECHG(CID,DINAME,SEQ)=OLDRATE_"|"_NEWRATE_"|HSEQ#"_%TRNHSEQ.get()_"|"_%EffectiveDate
+
+	quit
+
+
+public CHKHIST(RecordDEP dep)	// Deposit account			/REF:R
+
+	/*
+
+	Returns:
+		. 1 - must collate through history to create rate base or
+	        . 0 - no need to go through overhead of history.  It's a killer
+			over the network.
+
+	*/
+
+	// Transaction - Last Date
+	if dep.tld>%EffectiveDate quit 1
+
+	// File Maintenance - Last Date
+	if dep.fmld>%EffectiveDate quit 1
+
+	// All conditions verified.  No need to collate through ^HIST
+	quit 0
+
+
+DTLFOOT(RecordDEP dep)		// Deposit account			/REF:R
+
+	// Populate TMPRPT1 with report footer information
+
+	type public Number ADJINT,DTL,INT,ORIGINTP,POSACR
+
+	type String RPTDATA
+
+	// Continue only if in reporting mode
+	if DTL'=1,DTL'=2 quit
+
+	type RecordTMPRPT0 tmprpt0=Db.getRecord("TMPRPT0","PID=:%ProcessID",1)
+
+	set RPTDATA=tmprpt0.data
+	set RPTDATA.piece("|",7)=ORIGINTP		// Original Interest
+	set RPTDATA.piece("|",8)=ADJINT			// Interest Adjustment
+	set RPTDATA.piece("|",9)=ADJINT-ORIGINTP	// New Interest
+	set RPTDATA.piece("|",10)=dep.posacr		// Original Accrued
+	set RPTDATA.piece("|",11)=POSACR-dep.posacr	// Accrual Adjustment
+	set RPTDATA.piece("|",12)=POSACR		// New Accrued
+	set tmprpt0.data=RPTDATA
+
+	do tmprpt0.bypassSave()
+
+	quit
+
+
+DTLPRINT(RecordDEP dep)		// Deposit account			/REF:R
+
+	/*
+	Print report
+	
+	Inputs:
+		. INP		Interest next paid date
+		. DTL     	Print supporting detail
+				0 = On-line processing
+				1 = On-line test mode, program ^DEPACR
+				2 = Earnings allowance processing
+				3 = Effective dated interest index change
+				4 - Effective dated interest rate change
+				7 - On-line test mode, low balance (single acct)
+		. NEGINP	Negative interest next paid date
+	
+	Returns:
+
+	*/
+	
+	type public Number BASE,CMP,DTL,IRN,LPNTACR,POSACR,NEGACR,NEGACRUN
+	type public Date INP,LJD,NEGINP
+	type public String ICF
+
+	type Number RPTACR
+	
+	set RPTACR=POSACR-NEGACR-NEGACRUN
+	if 'RPTACR quit
+
+	// Save reporting data
+
+	// Reporting mode - Earnings allowance processing
+	if DTL=2 do {
+		type Number NUM,RPTSQ
+
+		set RPTSQ=DTL("").order(-1)+1 
+		set NUM=$select(ICF.extract(1,3)="1DA":RPTACR,1:CMP)
+		
+		set DTL(RPTSQ)=LJD_"|"_(%EffectiveDate-1)_"|"_BASE
+		set DTL(RPTSQ)=DTL(RPTSQ)_"|"_NUM.roundDec(5)
+		set DTL(RPTSQ)=DTL(RPTSQ)_"|"_IRN_"|"_(RPTACR-LPNTACR.get())_"|"_RPTACR
+
+		set LPNTACR=RPTACR
+		}
+	// Reporting mode - Effective Dated Transaction Detail
+	else  if DTL=1 do {
+		type Number RPTCMP,RPTSQ
+		type String RPTDATA
+
+		set RPTCMP=$select(ICF.extract(1,3)="1DA":RPTACR,1:CMP)
+		set RPTCMP=RPTCMP.roundDec(5)
+		
+		/*
+		Add detail line for Effective-Dated Transaction Detail (PFW)
+		report
+		*/
+		
+		type ResultSet rs1=Db.select("KEY1","TMPRPT1","PID=:%ProcessID","KEY1 DESC")
+	 	if rs1.next() set RPTSQ=rs1.getCol("KEY1")+1
+	 	else  set RPTSQ=1
+	 	
+		type RecordTMPRPT1 tmprpt1=Class.new("RecordTMPRPT1")
+
+		set RPTDATA=""
+		set RPTDATA.piece("|",1)=LJD			// From Date
+		set RPTDATA.piece("|",2)=%EffectiveDate-1	// To Date
+		set RPTDATA.piece("|",3)=BASE			// Basis
+		set RPTDATA.piece("|",4)=RPTCMP			// Compound Int
+		set RPTDATA.piece("|",5)=IRN			// Int Rate
+		set RPTDATA.piece("|",6)=RPTACR-LPNTACR.get()	// Accrued
+		set RPTDATA.piece("|",7)=RPTACR			// Total Accr
+
+		set tmprpt1.pid=%ProcessID			// Job Number
+		set tmprpt1.key1=RPTSQ				// Dtl Rec Seq
+		set tmprpt1.data=RPTDATA
+
+		do tmprpt1.bypassSave()
+
+		set LPNTACR=RPTACR
+		}
+
+	quit
+
+
+DTLHEAD(RecordDEP dep)		// Deposit account			/REF:R
+
+	/*
+	Populate TMPRPT0 with report header information, which is used by 
+	Effective-Dated Transaction Detail (PFW) report.
+	*/
+
+	type public String IACM,INDEX
+	type public Number IRCB
+	
+	type String RPTDATA
+	type RecordTMPRPT0 tmprpt0=Class.new("RecordTMPRPT0")
+	
+	set RPTDATA=""
+	set RPTDATA.piece("|",1)=dep.cid	// Account Number
+	set RPTDATA.piece("|",2)=dep.grp	// Product Group
+	set RPTDATA.piece("|",3)=dep.type	// Product Type
+	set RPTDATA.piece("|",4)=IACM		// Int Accr Calc Method
+	set RPTDATA.piece("|",5)=IRCB		// Int Rate Calc Base
+	set RPTDATA.piece("|",6)=INDEX		// Int/Div Index
+
+	set tmprpt0.pid=%ProcessID
+	set tmprpt0.data=RPTDATA
+
+	do tmprpt0.bypassSave()
+
+	quit
+
+
+public RANGE(RecordDEP dep,	// Deposit account			/REF:R
+	     Date FD,		// From date
+	     Date TD,		// To date
+	     Number BASE)	// Calculation base
+
+	/*
+	Recalculate positive and negative accruals for a range of dates not 
+	considering posting periods.
+	
+	Input:	
+		. BJD	Beginning date for calculations	TYP=D/REQ
+		. IACM	Accrual calc method		TYP=S/NOREQ
+		. IRCB	Interest Rate Calculation Base	TYP=N/NOREQ
+	*/
+
+	type public String IACM,RM
+	type public Number ER,IRCB
+	type public Date BJD
+
+	type String X(),XDI()
+	type String AWTI,INDEX,INTFRE,ODTERM
+
+	type Date DELDT,%EffectiveDate,ICHND,ODSTART,ODEXP
+
+	type Number AWT,AWTP,AWTR,BWF,BASEOLD,DCF,DRC,IOPT,ITRF,LPNTACR
+	type Number NEGACR,NEGACRUN,NEGITRF,ODLIM,POSACR,RESIDUAL,UPD
+
+	// Create an empty transaction object to be passesd over to START
+	type RecordTTX ttx
+
+	do INITRNG(.dep,.ttx) if ER quit 0
+
+	if IACM.get().isNull()!('IRCB.get()) quit 0_"|"_BASE.get()
+
+	// Reconstruct hist... save existing base
+	do CNSTHIST(.dep,.ttx,BASE) quit:ER 0
+
+	// Reset X array for only our dates
+	do STRIPX(.X,%EffectiveDate,%SystemDate)
+
+	// Int/Div Change - Next Date
+	set ICHND=dep.ichnd
+	// Init INDEX and INTFRE and call
+	set INDEX=dep.index
+
+	if 'INDEX.isNull() do { if ER quit 0
+		do INTFRE(.dep,INDEX,ICHND,BJD) if ER quit
+		set %EffectiveDate=BJD
+		do INDEX(.dep)
+		}
+
+	do CALC0(.dep,.ttx) quit:ER
+
+	quit POSACR_"|"_BASE_"|"_NEGACR
+
+
+INITRNG(RecordDEP dep,		// Deposit account			/REF:R
+	RecordTTX ttx)		// Transaction				/REF:R
+
+	//  Init for a range needs DTL to be 2 to call LOAD
+
+	type public Date BJD,FD,LJD,SEFD,TD
+
+	type public Number ADJACR,ADJAWT,AWT,CMP,DTL,ER,INT,IACM,INDEX
+	type public Number IRCB,IRN,NEGACR,NEGACRUN,NEGUNA,POSACR,RESIDUAL,UNCACR
+
+	type Date %SystemDate
+
+	set DTL=DTL.get()
+
+	set ER=0
+
+	set ttx=Class.new("RecordTTX")
+	set ttx.tjd=""
+	set ttx.brcd=""
+	set ttx.tseq=""
+	set ttx.uid=""
+
+	/*
+	Compiler instruction not to throw "Assigning system variable" warning
+	%SystemDate is declared in this section, so old value is hidden
+	*/
+	#ACCEPT DATE={2/13/2003};PGM={Vitaliy Antonov}
+	set (%SystemDate,LJD,SEFD)=TD 
+	set (BJD,%EffectiveDate)=FD
+
+	do INIT(.dep) quit:ER
+
+	if IACM.isNull()!(IRCB=0) quit
+
+	// Cannot effective-date prior to opening date
+	if BJD<dep.odt do Runtime.setErrMSG("DEP",450) quit
+
+	// Int/Div Index
+	set INDEX=dep.index
+	// Int/Div Rate
+	set IRN=dep.irn
+
+	set (ADJACR,ADJAWT,AWT,CMP,INT,NEGACR,NEGACRUN,NEGUNA,POSACR,UNCACR)=0
+
+	quit
+
+
+CNSTHIST(RecordDEP dep,		// Deposit account			/REF:R
+	 RecordTTX ttx,		// Transaction				/REF:R
+	 Number BASE)		// Base account balance
+
+	//  Reconstruct History ... save existing base amount
+
+	type Date SEFD=%EffectiveDate
+
+	do ^RECALC1(.dep,.ttx)
+
+	quit
+
+
+STRIPX(String X(),		// Account history data
+       Date FD,			// From date
+       Date TD)			// To date
+
+	/*
+	Limit X array to contain only account activity records dated between 
+	from date ( FD ) and to date ( TD ).
+	*/
+
+	type Date DATE
+
+	set DATE=FD-1
+	for  set DATE=X(DATE).order() quit:(DATE.isNull())!(DATE>TD)  kill X(DATE)
+
+	quit
+
+
+QWIK(RecordDEP dep,		// Deposit account			/REF:R
+     RecordTTX ttx)		// Transaction				/REF:R
+
+	/*
+	Adjusments for Escrow accounts
+	
+	Used ONLY for escrow accounts specifically with IPF="" and ICF=""
+
+	Currently CANNOT handle ESC accounts with IPF or ICF as well
+	as accounts with Tiered INDEX as UAVB needs to handle this
+	condition.
+	*/
+
+	type public Date BJD,LJD
+	type public Number DTL,ER,MINACR,POSACR,IRCB,NEGACRPO
+	type public String ICF,INDEX,RM
+
+	type String IX()
+
+	set (MINACR,ICF)="" 
+	set %EffectiveDate=%SystemDate
+	
+	if (IRCB'=1)!('NEGACRPO) quit	
+
+	// Quit if tran amt is null (i.e., @DEPIRN)
+	if ttx.tamt.isNull() quit
+
+	// Can't handle tiered index
+	if $$TIERED(.dep,INDEX) quit
+
+	// User UAVB to calc if using an INDEX
+	if 'INDEX.isNull(),$$QWIK1(.dep,.ttx) do:DTL DTLPRINT(.dep) quit
+	else  do {
+		type String BASE
+
+		set BASE=ttx.tamt
+		set:BASE.isLike("%#%") BASE=BASE.piece("#",2)
+		set LJD=BJD
+		do ACR(.dep,.ttx,BJD)
+		if DTL do DTLPRINT(.dep)
+		set POSACR=dep.posacr+$select(ttx.itc1:POSACR,1:-POSACR)
+		}
+	quit
+
+
+QWIK1(RecordDEP dep,		// Deposit account			/REF:R
+     RecordTTX ttx)		// Transaction				/REF:R
+
+	//  For Escrow accounts without IPF's
+	
+	type public Date BJD
+	type public Number POSACR
+
+	type RecordDEP deptmp=dep.copy()
+
+	set POSACR=$$CALCADJ(.deptmp,.ttx,BJD,0)
+
+	set POSACR=dep.posacr+$select(ttx.itc1:POSACR,1:-POSACR)
+
+	quit 1
+
+
+CALCADJ(RecordDEP dep,			// Deposit account		/REF:R
+	RecordTTX ttx,			// Transaction			/REF:R
+	Date %EffectiveDate,		// Effective date
+	Number TIERED)			// Tiered index indicator
+
+	// Calculate the accrual adjustment for escrow
+
+	type public Number ER
+	type public String IACM,IPF
+
+	type String NWIRN(),OWIRN(),WIRN()
+	type Number BASE,INT,IRN,NBASE,NINT,OBASE,OINT,TAMT,XINT
+	type Date BJD,EJD
+				  
+	set (NINT,OINT,INT)=0 
+	set (BJD,EJD)=""
+
+	if ttx.tamt.isLike("%#%") set TAMT=ttx.tamt.piece("#",2)
+	else  set TAMT=ttx.tamt
+
+	if 'TIERED do { quit INT
+		do INIT^UAVB(.dep,dep.cid,%EffectiveDate,%SystemDate,10000000001) quit:ER
+		if 'WIRN.data() quit
+		set BASE=TAMT
+		for  set BJD=WIRN(BJD).order() quit:BJD.isNull()!(BJD=%SystemDate)  do {
+			set EJD=WIRN(BJD).order() set:EJD.isNull() EJD=%SystemDate
+			set IRN=+WIRN(BJD)
+			set XINT=$$^UIC(BASE,BJD,EJD-1,IACM,IRN,"","",IPF,dep.icpf)
+			set INT=INT+$J(XINT,0,5)
+			}
+		}
+
+	if '$$WIRN(.dep,.ttx,%EffectiveDate,TAMT,.OWIRN(),.NWIRN(),.OBASE,.NBASE) quit 0
+
+	if OBASE for  set BJD=OWIRN(BJD).order() quit:BJD.isNull()!(BJD=%SystemDate)  do {
+		set EJD=OWIRN(BJD).order() set:EJD.isNull() EJD=%SystemDate
+		set IRN=+OWIRN(BJD)
+		set XINT=$$^UIC(OBASE,BJD,EJD-1,IACM,IRN,"","",IPF,dep.icpf)
+		set OINT=OINT+XINT.roundDec(5)
+		}
+
+	if NBASE for  set BJD=NWIRN(BJD).order() quit:BJD.isNull()!(BJD=%SystemDate)  do {
+		set EJD=NWIRN(BJD).order() set:EJD.isNull() EJD=%SystemDate
+		set IRN=+NWIRN(BJD)
+		set XINT=$$^UIC(NBASE,BJD,EJD-1,IACM,IRN,"","",IPF,dep.icpf)
+		set NINT=NINT+$J(XINT,0,5)
+		}
+
+	quit (NINT-OINT)
+
+
+WIRN(RecordDEP dep,		// Deposit account			/REF:RW
+     RecordTTX ttx,		// Transaction				/REF:R
+     Date %EffectiveDate,	// Effective date
+     Number TAMT,		// Transaction amount
+     String OWIRN(),		// Old WIRN()				/REF:R
+     String NWIRN(),		// New WIRN()				/REF:R
+     Number OBASE,		// Original base			/REF:W
+     Number NBASE)		// New base				/REF:W
+
+	type public Number ER
+
+	set NBASE=dep.bal
+
+	do { quit:ER 0
+		type Date DATE=""
+		type String WIRN()
+	
+		do INIT^UAVB(.dep,dep.cid,%EffectiveDate,%SystemDate,10000000001)
+		quit:ER
+		for  set DATE=WIRN(DATE).order() quit:DATE.isNull()  set NWIRN(DATE)=WIRN(DATE)
+		}
+
+	set dep.bal=dep.bal-TAMT 
+	set OBASE=dep.bal
+
+	do { quit:ER 0
+		type Date DATE=""
+		type String WIRN()
+
+		do INIT^UAVB(.dep,dep.cid,%EffectiveDate,%SystemDate,10000000001)
+		quit:ER
+		for  set DATE=WIRN(DATE).order() quit:DATE.isNull()  set OWIRN(DATE)=WIRN(DATE)
+		}
+
+	if 'OWIRN.data(),NWIRN.data() quit 0
+
+	quit 1
+
+
+ESC(String GRP,String IPF,String ICF)
+
+	// Determine if QWIK applies or not
+
+	// Must ESC account
+	if GRP'="ESC" quit 0
+	// Can't have IPF
+	if 'IPF.isNull()="" quit 0
+	// Can't have ICF
+	if 'ICF.isNull() quit 0
+
+	quit 1
+
+
+TIERED(RecordDEP dep,String INDEX)
+
+	// Determine if tiered or not
+
+	type public Number ER
+	type public String RM
+
+	type String IX(),PAR()
+
+	//  Doesn't apply
+	if INDEX.isNull() quit 0
+
+	//  Load IX array
+	set PAR("IXLOAD")=1
+	set ER='$$LOADIX^UINDX(.dep,INDEX,%SystemDate,.PAR()) if ER quit 1
+	if 'IX(INDEX).piece("|",3) quit 0
+
+	// Cannot effective date account with tiered index
+	do Runtime.setErrMSG("DEP",7811)
+
+	quit 1
+
+
+BLDIX(RecordDEP dep,		// Deposit account			/REF:R
+      String DEPCHG())		// Effective date changes		/REF:R
+
+	/*
+	Build the IX array and convert fields that have data items in them
+
+	Inputs:
+		. IX		Index name
+		. IX()		Index data array
+
+	*/
+
+	type public String IX,IX(,)
+
+	type RecordDEP efddep=dep.copy()
+
+	// Load account values on effective date
+	do EFDDEP(.efddep,.DEPCHG())
+
+	// Rebuild IX array for EFD
+	if IX(IX,%EffectiveDate).exists() do BLDIX0(.efddep) quit
+
+	// Build an IX array for EFD
+	if 'IX(IX,%EffectiveDate).exists(),IX(IX,%EffectiveDate).order(-1) do BLDIX1(.efddep)
+
+	// Make sure that an IX array exist for all table entries
+	if 'IX(IX,%EffectiveDate).order(-1) do BLDIX2(.efddep)
+
+	quit
+
+
+EFDDEP(RecordDEP dep,		// Deposit account			/REF:W
+       String DEPCHG())		// Effective date changes		/REF:R
+
+	/*
+	Update deposit account object with effective dated values taken from 
+	DEPCHG(). DEPCHG() was populated with data based on file Maintenance 
+	array FM(,).
+	*/
+	if 'DEPCHG.data() quit
+
+	type public Number ER
+
+	type String COL=""
+
+	for  set COL=DEPCHG(COL).order() quit:COL.isNull()!(ER)  set dep.@COL=DEPCHG(COL)
+
+	quit
+
+
+BLDIX0(RecordDEP dep)		// Deposit account			/REF:R
+
+	// Rebuild IX(,,) array for effective date
+
+	type public String IX,IX(,,)
+
+	type String XTIER=""
+
+	// Check for data item authorization option
+	if 'IX(IX).piece("|",14) quit
+
+	for  set XTIER=IX(IX,%EffectiveDate,XTIER).order() quit:XTIER.isNull()  do CONVERT(.dep,IX,%EffectiveDate,XTIER)
+
+	quit
+
+
+BLDIX1(RecordDEP dep)		// Deposit account			/REF:R
+
+	// Build an IX(,,) for effective date
+
+	type public String IX,IX(,,)
+
+	type String XTIER
+	type Date XEFD
+
+	set XEFD=IX(IX,%EffectiveDate).order(-1)
+	if XEFD.isNull() quit
+
+	set XTIER=""
+	for  set XTIER=IX(IX,XEFD,XTIER).order() quit:XTIER.isNull()  do {
+		set IX(IX,%EffectiveDate,XTIER)=IX(IX,XEFD,XTIER)
+		if IX(IX).piece("|",14) do CONVERT(.dep,IX,%EffectiveDate,XTIER)
+		}
+	quit
+
+
+BLDIX2(RecordDEP dep)
+
+	// Make sure that an IX array exist for all table entries
+
+	type public Date BJD
+	type public Number ER
+	type public String IX,IX(,,)
+
+	type Date EDT
+
+	for EDT=BJD:1:%SystemDate do {
+		// IX entry already exist
+		if IX(IX,EDT).data() quit
+
+		type DbSet ds=Db.selectDbSet("INDEX1","INDEX=:IX AND EFD=:EDT")
+		if 'ds.isEmpty() while ds.next() do { quit:ER
+
+			type RecordINDEX1 index1=ds.getRecord("INDEX1")
+
+			set IX(IX,EDT,index1.rmin)=$$INDT2STR^UINDX(.index1)
+
+			if IX(IX).piece("|",14) do CONVERT(.dep,IX,EDT,index1.rmin)
+			}
+		}
+
+	quit
+
+
+CONVERT(RecordDEP dep,String INAME,Date EFDATE,String TIER)
+
+	/*
+	Convert Data Items in the IX array
+	
+	Arguments:
+		. dep		Deposit account	TYP=RecordDEP/REQ
+		. INAME		Index name	TYP=T/MECH=VAL/REQ
+		. EFDATE	Index EFD	TYP=D/MECH=VAL/REQ
+		. TIER		Index tier	TYP=T/MECH=VAL/REQ
+	*/
+
+	type public Date ODEXP
+	type public String IX(,,),X()
+	type public Number DRC,ER
+
+	type String DATA,DITIER,EXPDT,RATE,TIERVAL
+
+	// Tier - Data Item
+	set DITIER=IX(INAME,EFDATE,TIER).piece("|",5)
+	if 'DITIER.isNull() do {
+		type String REC
+		set REC=IX(INAME,EFDATE,TIER)
+		kill IX(INAME,EFDATE,TIER)
+		set IX(INAME,EFDATE,DITIER)=REC
+		set TIER=DITIER
+		}
+
+	if 'TIER.isLike("%DEP%") quit
+
+	// Convert data item
+	set TIERVAL = $$IXVALUE^UINDX(.dep, TIER)
+	if TIERVAL.isNull() quit
+
+	set DATA=IX(INAME,EFDATE,TIER)
+
+	// Rate data section. DI or Rate value
+	set RATE=DATA.piece("|",1)
+	if 'RATE.isLike("%DEP%") set RATE=DATA.piece("|",7)
+	if 'RATE.isNull() do {
+		set DATA.piece("|",7)=RATE
+		set RATE = $$IXVALUE^UINDX(.dep, RATE)
+
+		// Rate value
+		set DATA.piece("|",1)=RATE
+		}
+
+	// Expiration date section. DI or Expiration date
+	set EXPDT=DATA.piece("|",4)
+	if 'EXPDT.isLike("%DEP%") set EXPDT=DATA.piece("|",6)
+	if 'EXPDT.isNull() do {
+		set DATA.piece("|",6)=EXPDT
+		if EXPDT.isLike("%ODEXP%") set EXPDT=ODEXP
+		else  set EXPDT = $$IXVALUE^UINDX(.dep, EXPDT)
+
+		// Expiration date
+		set DATA.piece("|",4)=EXPDT
+		if DRC,EXPDT,EXPDT<%SystemDate set X(EXPDT+1).piece("|",5)=1
+		}
+
+	set DATA.piece("|",5)=TIER
+
+	if IX(INAME,EFDATE,TIERVAL).exists() do DUPIX^UINDX(INAME,EFDATE,TIERVAL)
+	set IX(INAME,EFDATE,TIERVAL)=DATA
+	kill IX(INAME,EFDATE,TIER)
+
+	quit
+
+
+SETEXP(Date ODEXP,Date %EffectiveDate)
+
+	type public String IX(,,)
+
+	type Date JD
+	type String TIER,DATA
+
+	set JD=%EffectiveDate-1 
+	set TIER=""
+	for  set JD=IX(IX,JD).order() quit:JD.isNull()  do {
+		for  set TIER=IX(IX,JD,TIER).order() quit:TIER.isNull()  do {
+			set DATA=IX(IX,JD,TIER)
+			if DATA.piece("|",4)["ODEXP" set DATA.piece("|",6)=DATA.piece("|",4)
+			if DATA.piece("|",6)["ODEXP" set DATA.piece("|",4)=ODEXP
+			set IX(IX,JD,TIER)=DATA
+			}
+		}
+
+	quit
+
+
+ODPROC(RecordDEP dep)		// Deposit account			/REF:R
+
+	// Set ODSTART, ODEXP
+ 
+	type public String ODTERM
+	type public String DEPCHG(),X()
+	type public Date ODSTART,ODEXP
+	type public Number BASE,BASEOLD
+
+	// No overdraft term defined
+	if 'ODTERM quit
+
+	type String ODEXPTMP=ODEXP
+
+	// Balance went negative
+	if BASE<0,BASEOLD'<0 do {
+		set X(%EffectiveDate).piece("|",5)=1
+
+		set ODSTART=%EffectiveDate
+		set ODEXP=$$EXT^UMDT(ODTERM,ODSTART)-1
+		}
+
+	// Balance went positive (or 0)
+	if BASE'<0,BASEOLD<0 set (ODSTART,ODEXP)=""
+
+	// ODEXP was changed
+	if ODEXPTMP'=ODEXP do {
+		// Build the IX entry for EFD date
+		do BLDIX(.dep,.DEPCHG())
+
+		// Rebuild IX entries starting on EFD using new value of ODEXP
+		do SETEXP(ODEXP,%EffectiveDate)
+
+		// Flag X array to change the interest rate after ODEXP
+		if ODEXP<(%SystemDate-1) set X(ODEXP+1).piece("|",5)=1
+		}
+
+	quit
+
+
+RESINT(RecordDEP dep)		// Deposit account			/REF:R
+
+	/*
+	Calculate residual interest amount for this posting date
+
+	Arguments:
+		. dep	Deposit Account	Object		TYP=RecordDEP/REQ
+
+	Inputs:
+		. NNT()		Array of interest amounts on effective date
+		. BASE		Calculation base
+
+	*/
+
+	type public Number BASE,NEGACR,NEGACRUN,POSACR,RESADJ,RESIDUAL
+	type public Number ER
+	type public String NNT()
+
+	type Number BALRINT,DIFF,INT,REMAIN
+
+	set INT=POSACR-NEGACR-NEGACRUN
+	if INT'<0 quit
+
+	/* Determine balance for residual interest calculation purposes
+	dep.negbalo=3 - Post negative interest up to available balance;
+	then track residual interest */
+	if dep.negbalop<3 set BALRINT=BASE
+	else  set BALRINT=$$EFDAVBAL(dep.cid,BASE,%EffectiveDate-1) quit:ER
+
+	if BALRINT+INT'<0 quit
+
+	// Part of neg int is residual
+	if BALRINT>0 set RESADJ=-(BALRINT+INT)
+	// All neg int is residual
+	else  set RESADJ=-INT
+
+	// Track residual
+	if dep.negbalop>1 do {
+		set RESIDUAL=RESIDUAL+RESADJ
+		// Set new RESINT adjustment into NNT
+		set NNT(%EffectiveDate).piece("|",7)=NNT(%EffectiveDate).get().piece("|",7)+RESADJ
+		}
+
+	// Increase POSACR by residual interest amount if accruing net
+	if 'dep.negacrpo set NNT(%EffectiveDate).piece("|",1)=NNT(%EffectiveDate).piece("|",1)+RESADJ quit
+
+	// Decrease NEGACRUN by residual interest amount 
+	set NEGACRUN=NNT(%EffectiveDate).piece("|",5)
+	set DIFF=$select(RESADJ>NEGACRUN:NEGACRUN,1:RESADJ)
+	set NEGACRUN=NEGACRUN-DIFF
+	set NNT(%EffectiveDate).piece("|",5)=NEGACRUN
+	// REMAIN - remainder of res int
+	set REMAIN=RESADJ-DIFF
+
+	// Decrease NEGACR by residual interest amount
+	set NEGACR=NNT(%EffectiveDate).piece("|",3)
+	set DIFF=$select(REMAIN>NEGACR:NEGACR,1:REMAIN)
+	set NEGACR=NEGACR-DIFF
+	set NNT(%EffectiveDate).piece("|",3)=NEGACR
+
+	quit
+
+
+PRNCHG(String DATA)
+
+	// Calculate actual principal change considering int adj
+
+	type Number CHGAMT
+
+	set CHGAMT=DATA-(DATA.piece("|",7)-DATA.piece("|",9))
+	set CHGAMT=CHGAMT+(DATA.piece("|",19)-DATA.piece("|",20))
+
+	quit CHGAMT
+
+
+MLBFRE(RecordDEP dep)		// Deposit account			/REF:R
+
+	/*
+	Set all monthly frequency dates in X() for Low Bal accounts
+
+	Arguments:
+		. dep	Account object	TYP=RecordDEP/REQ
+
+	Inputs:
+		. IPF	Interest posting frequency
+		. BJD	Beginning date for calculations
+
+	Piece 14 of the X() will contain a value that signifies
+		- Accrual Date (end of monthly period)
+		- The month within the low balance calculation period
+	Piece 15 of the X() is a flag which signifies the end of a low balance 
+	calculation period.
+	*/
+	
+	type public Number ER
+	type public String X()
+	type public String IPF,MFRE
+	type public Date BJD
+
+	type Date JD,NJD
+	type Number LBCF,MFREDT=0
+
+	// Low balance calculation period month / semi-month factor
+	// Monthly
+	set LBCF=$select(dep.lbcp=0:1,dep.lbcp=1:12,dep.lbcp=2:6,dep.lbcp=3:.5,1:3)
+
+	// Semi-monthly
+	if dep.lbcm=3 set LBCF=LBCF*2
+
+	set JD=dep.inp
+	for  set NJD=JD.nextFreqDate(IPF,,1) set JD=NJD quit:ER!(JD<BJD)
+	quit:ER
+
+	for  set MFREDT=MFREDT+1 do { quit:ER!(JD'<%SystemDate)
+		set NJD=$$LBACNJD^DEPLBB(NJD,MFRE,0,dep.lbcm) quit:ER
+		if NJD<%SystemDate,NJD'<BJD do {
+			set X(NJD).piece("|",14)=MFREDT
+			if MFREDT=LBCF set X(NJD).piece("|",15)=1
+			}
+		if MFREDT=LBCF set MFREDT=0
+		set JD=NJD
+		}
+
+	quit
+
+
+MLBCONV(RecordDEP dep)		// Deposit account			/REF:R
+
+	/*
+	Set LBB() when starting at the conversion date
+
+	In the case where the recalculation of interest/accrual
+	begins at the conversion date, an LBB() entry will need to
+	be established for the beginning low balance calculation
+	period.  The low balance for the beginning month and the
+	accrual amount calculated for the beginning low balance
+	calculation period will be stored in the LBB()
+	(Low balance|Accrual Amount)
+	*/
+
+	type public Date BJD
+	type public String FRE,LBB(),MFRE
+	type public Number DTL,ER,MLB
+
+	type Date FD,TD,JD
+	type Number LBCPMF,LBMON,LOWBAL,MLOWBAL,INT
+	type String CPFRE
+
+	// Low balance calculation period month factor
+	set LBCPMF=$select(dep.lbcp=0:1,dep.lbcp=1:12,dep.lbcp=2:6,dep.lbcp=3:1,1:3)
+	set CPFRE=LBCPMF_$$MFRE^DEPLBB(FRE,dep.inp).extract(2,999)
+
+	set JD=dep.inp
+	for  set FD=$$LBACNJD^DEPLBB(JD,CPFRE,1,dep.lbcp) set JD=FD quit:ER!(FD<BJD)
+	quit:ER
+
+	set LBMON=0
+	set JD=%SystemDate
+
+	for  set TD=$$LBACNJD^DEPLBB(JD,MFRE,1,dep.lbcm) set JD=TD set LBMON=LBMON+1 quit:ER!(TD=FD)
+	quit:ER
+
+	set JD=FD
+	set LOWBAL=""
+	for  set TD=$$LBACNJD^DEPLBB(TD,MFRE,0,dep.lbcm) quit:ER!(TD'<BJD)  do {
+		if TD'<dep.odt do {
+			set MLOWBAL=$$GETLBBMP(.dep,LBMON)
+			if LOWBAL.isNull() set LOWBAL=MLOWBAL
+			if MLOWBAL<LOWBAL set LOWBAL=MLOWBAL
+			set LBB(TD)=MLOWBAL
+			}
+		set LBMON=LBMON-1
+		set JD=TD
+		}
+	quit:ER
+
+	if $$GETLBBMP(.dep,LBMON)<MLB set MLB=$$GETLBBMP(.dep,LBMON)
+	set TD=JD
+	quit:TD=FD
+	quit:LBB(TD).data()=0
+
+	set FD=FD+1
+	set FRE=MFRE
+	// Compute low balance accrual
+	set INT=$$ACRCAL^DEPLBB(.dep,LOWBAL,FD,TD,DTL)
+	set LBB(TD)=LBB(TD)_"|"_INT
+
+	quit
+
+
+GETLBBMP(RecordDEP dep,Number PP)
+
+	/*
+	Get value of Low Balance Bucket xx Periods Prior (DEP.LBBxxMP)
+	
+	Arguments:
+		. dep	Deposit account object		TYP=RecordDEP/REQ
+		. PP	Periods Prior			TYP=N/MECH=VAL/REQ
+
+	Returns:
+		. $$	Value of Low Balance Bucket xx Periods Prior
+
+	Note: 	if PP=1 - value of Low Balance Bucket Current Period 
+		(dep.lbbcm) will be returned.
+	*/
+
+	if PP=1 quit dep.lbbcm
+	if PP=2 quit dep.lbb1mp
+	if PP=3 quit dep.lbb2mp
+	if PP=4 quit dep.lbb3mp
+	if PP=5 quit dep.lbb4mp
+	if PP=6 quit dep.lbb5mp
+	if PP=7 quit dep.lbb6mp
+	if PP=8 quit dep.lbb7mp
+	if PP=9 quit dep.lbb8mp
+	if PP=10 quit dep.lbb9mp
+	if PP=11 quit dep.lbb10mp
+	if PP=12 quit dep.lbb11mp
+	if PP=13 quit dep.lbb12mp
+	if PP=14 quit dep.lbb13mp
+	if PP=15 quit dep.lbb14mp
+	if PP=16 quit dep.lbb15mp
+	if PP=17 quit dep.lbb16mp
+	if PP=18 quit dep.lbb17mp
+	if PP=19 quit dep.lbb18mp
+	if PP=20 quit dep.lbb19mp
+	if PP=21 quit dep.lbb20mp
+	if PP=22 quit dep.lbb21mp
+	if PP=23 quit dep.lbb22mp
+	if PP=24 quit dep.lbb23mp
+	
+	quit ""
+
+
+SETLBBMP(RecordDEP dep,			// Deposit account		/REF:RW
+	 Number PP,			// Periods prior
+	 Number LBBVAL)			// Low balance bucket value
+
+	/*
+	Set new value to Low Balance Bucket xx Periods Prior (DEP.LBBxxMP)
+
+	Note: 	if PP=1 - new value will be set to Low Balance Bucket Current 
+		Period (dep.lbbcm).
+	*/
+
+	if PP=1 set dep.lbbcm=LBBVAL quit
+	if PP=2 set dep.lbb1mp=LBBVAL quit
+	if PP=3 set dep.lbb2mp=LBBVAL quit
+	if PP=4 set dep.lbb3mp=LBBVAL quit
+	if PP=5 set dep.lbb4mp=LBBVAL quit
+	if PP=6 set dep.lbb5mp=LBBVAL quit
+	if PP=7 set dep.lbb6mp=LBBVAL quit
+	if PP=8 set dep.lbb7mp=LBBVAL quit
+	if PP=9 set dep.lbb8mp=LBBVAL quit
+	if PP=10 set dep.lbb9mp=LBBVAL quit
+	if PP=11 set dep.lbb10mp=LBBVAL quit
+	if PP=12 set dep.lbb11mp=LBBVAL quit
+	if PP=13 set dep.lbb12mp=LBBVAL quit
+	if PP=14 set dep.lbb13mp=LBBVAL quit
+	if PP=15 set dep.lbb14mp=LBBVAL quit
+	if PP=16 set dep.lbb15mp=LBBVAL quit
+	if PP=17 set dep.lbb16mp=LBBVAL quit
+	if PP=18 set dep.lbb17mp=LBBVAL quit
+	if PP=19 set dep.lbb18mp=LBBVAL quit
+	if PP=20 set dep.lbb19mp=LBBVAL quit
+	if PP=21 set dep.lbb20mp=LBBVAL quit
+	if PP=22 set dep.lbb21mp=LBBVAL quit
+	if PP=23 set dep.lbb22mp=LBBVAL quit
+	if PP=24 set dep.lbb23mp=LBBVAL quit
+
+	quit
+
+
+MFD(RecordDEP dep)
+
+	/*
+	Monthly accrual date for Low Balance accounts
+
+	When this section is called, %EffectiveDate is the end of a monthly
+	period (accrual date).  The following (4) is processed at
+	the end of every monthly period.
+
+	(1) 	LOWBAL will be set for the entire low balance
+		calculation period be cycling backwards through the LBB().
+		As LOWBAL is set, the accrual amount is backed off for all
+		the previous months in the low balance calculation period.
+	(2) 	The new accrual amount is calculated for the low
+		balance calculation period using LOWBAL up to EFD and is
+		added back into the accrual bucket.  After every end of
+		month, the accrual bucket is up to date.
+	(3) 	The low balance and the Accrual amount is placed
+		in the most recent LBB() entry.
+	(4) 	The Monthly Low Balance (MLB) for the upcomming
+		month is set to the balance at the end current month.
+
+	*/
+
+	type public Date GRCJD,NAGRCJD,POSBJD
+	type public String MFRE
+	type public Number BASE,DTL,ER,INT,MLB,POSACR
+	type public String LBB(),LBINFO(),X()
+
+	type String FRE
+	type Date FD,TD,JD
+	type Number MON,LOWBAL
+
+	set LBB(%EffectiveDate)=MLB
+
+	set JD=""
+	set LOWBAL=MLB
+	set MON=X(%EffectiveDate).piece("|",14)
+
+	for  set MON=MON-1 do { quit:MON=0
+		type Number INT
+
+		set JD=LBB(JD).order(-1)
+		if JD.isNull() set MON=0 quit
+		if +LBB(JD)<LOWBAL set LOWBAL=+LBB(JD)
+
+		set INT=LBB(JD).piece("|",2) quit:INT=0
+		set POSACR=POSACR-INT
+
+		set LBB(JD).piece("|",2)=0
+		}
+
+	if JD.isNull() set JD=LBB(JD).order()
+	set FD=$$LBACNJD^DEPLBB(JD,MFRE,1,dep.lbcm)+1 quit:ER
+	set TD=%EffectiveDate
+	
+	set FRE=MFRE
+	set INT=$$ACRCAL^DEPLBB(.dep,LOWBAL,FD,TD,DTL)
+
+	if 'dep.negacrpo set POSACR=POSACR+INT
+	else  if %EffectiveDate'<POSBJD set POSACR=POSACR+INT
+
+	set GRCJD=%EffectiveDate+dep.intgrc
+	if dep.lbbdo="N",dep.intgrc set GRCJD=GRCJD.nextBusDate(1,dep.nbdc)
+	if NAGRCJD>GRCJD set GRCJD=NAGRCJD
+
+	set LBB(%EffectiveDate)=MLB_"|"_INT
+
+	// LBINFO() can be used by calling routine to get low balance info
+	if DTL=7 set LBINFO(%EffectiveDate)=LBB(%EffectiveDate)
+
+	set MLB=BASE
+	if MLB<0 set MLB=0
+
+	quit
+
+
+private DDB(RecordDEP dep,		// Deposit account		/REF:RW
+	    RecordTTX ttx)		// Transaction			/REF:R
+
+	// Calculate / update dollar day balance for each transaction
+
+	type Number DIFFDAY,ER,INCRS
+	type Date EOMDD,PREVCOM
+	type String AMT
+
+	// Account Number
+	quit:ttx.cid'=dep.cid
+
+	// Transaction Amount
+	set AMT=ttx.tamt
+	if AMT.isLike("%#%") set AMT=AMT.piece("#",2)
+	quit:'AMT
+
+	// Check Transaction Effective Date
+	quit:(ttx.efd.isNull())!(ttx.efd=%SystemDate)
+
+	set INCRS=dep.trb-ttx.itc1
+	if INCRS=0 set AMT=-AMT
+
+	// Get end of month date (julian format)
+	set EOMDD=$$EOMJD^SCADAT(ttx.efd,1)
+
+	/*
+	Get the number of days left in the month the transaction was
+	back-dated to (including the day it was back dated to).
+	*/
+	set DIFFDAY=EOMDD-ttx.efd+1
+
+	/*
+	If the transaction is backdated, but still in the current
+	month, only update the Dollar Days Balance For current Period bucket
+	*/
+	if EOMDD.month()=%SystemDate.month() set dep.ddbalcur=(DIFFDAY*AMT)+dep.ddbalcur
+
+	/*
+	If the transaction is backdated beyond the current month,
+	update all of the dollar days balance buckets from the
+	backdated month to current.
+	*/
+	else  do {
+		// Update current Dollar Day balance bucket
+		do DDBUPD(.dep,EOMDD,DIFFDAY,AMT) 
+
+		// Update Dollar Day balance buckets for previouse month
+		while EOMDD<%SystemDate do { quit:ER
+			set EOMDD=$$EOMJD^SCADAT(EOMDD+1,1)
+			do DDBUPD(.dep,EOMDD,$$NODM^SCADAT(EOMDD,1),AMT)
+			}
+
+		if (EOMDD-1)>%SystemDate do {
+			// Dollar Days Balance For current Period
+			set dep.ddbalcur=($$NODM^SCADAT(%SystemDate,1)*AMT)+dep.ddbalcur
+			}
+		}
+
+	quit
+
+
+DDBUPD(RecordDEP dep,		// Deposit account		/REF:RW
+       Date JD,			// Calculation base date
+       Number NDAYS,		// Number of days
+       Number AMT)		// Transaction amount
+
+	// Update current Dollar Day balance bucket
+
+	type Number MM
+
+	// Month portion of given date
+	set MM=JD.monthOfYear()
+	
+	/*
+	Update Dollar Days Balance bucket for certain month 
+	( MM - from January to December )
+	*/
+	if MM=1 set dep.ddbal1=dep.ddbal1+(NDAYS*AMT) quit
+	if MM=2 set dep.ddbal2=dep.ddbal2+(NDAYS*AMT) quit
+	if MM=3 set dep.ddbal3=dep.ddbal3+(NDAYS*AMT) quit
+	if MM=4 set dep.ddbal4=dep.ddbal4+(NDAYS*AMT) quit
+	if MM=5 set dep.ddbal5=dep.ddbal5+(NDAYS*AMT) quit
+	if MM=6 set dep.ddbal6=dep.ddbal6+(NDAYS*AMT) quit
+	if MM=7 set dep.ddbal7=dep.ddbal7+(NDAYS*AMT) quit
+	if MM=8 set dep.ddbal8=dep.ddbal8+(NDAYS*AMT) quit
+	if MM=9 set dep.ddbal9=dep.ddbal9+(NDAYS*AMT) quit
+	if MM=10 set dep.ddbal10=dep.ddbal10+(NDAYS*AMT) quit
+	if MM=11 set dep.ddbal11=dep.ddbal11+(NDAYS*AMT) quit
+	if MM=12 set dep.ddbal12=dep.ddbal12+(NDAYS*AMT) quit
+
+	quit
+
+
+public EOMBAL(RecordDEP dep,RecordTTX ttx,Number FAST)
+
+	/*
+	Set X array date for the end of month
+	
+	Arguments:
+		. dep	Account object		TYP=RecordDEP/REQ
+		. ttx	Transaction object	TYP=RecordTTX/REQ
+		. FAST  Fast recalc flag	TYP=L/MECH=VAL/REQ
+			1 - called from RECALCFS; 0 - called from inside
+	*/
+
+	type public String X()
+	type public Number ER
+
+	type Date EOMDATE
+
+	if 'ttx.efd quit
+
+	set EOMDATE=$$EOMJD^SCADAT(ttx.efd,1) quit:ER
+
+	// Process Commission Corrections for portfolio plans
+	do COMCOR^TTXCOM(.dep,ttx.efd)
+
+	if FAST do {
+		type Number EOMBAL
+		type String PRIN
+
+		if $$MON^SCADAT(ttx.efd),1'<$$MON^SCADAT(%SystemDate,1) quit
+
+		// Transaction Amount
+		set PRIN=ttx.tamt if PRIN.isLike("%#%") set PRIN=PRIN.piece("#",2)
+		
+		// Get Month End Balance
+		set EOMBAL=$$GETMEBAL^RECALSEG(.dep,$$MON^SCADAT(ttx.efd,1))
+
+		// Reverse prin amount if credit
+		set EOMBAL=EOMBAL+$select(ttx.itc1:PRIN,1:-PRIN)
+
+		// Update the Month End Balance bucket
+		do SETMEBAL^RECALSEG(.dep,$$MON^SCADAT(ttx.efd,1),EOMBAL)
+		}
+	else  do {
+		for  quit:EOMDATE>%SystemDate  do {
+			set X(EOMDATE)=X(EOMDATE).get()
+			set EOMDATE=EOMDATE+1
+			set EOMDATE=$$EOMJD^SCADAT(EOMDATE,1)
+			}
+		}
+	quit
+
+
+PRN2BASE(Number IAF)		// Available interest option
+
+	// Adjust BASE by principal amount for the current
+
+	type public String NNT(),X()
+	type public Number BASE
+	type public Number PREVBASE,RESIDUAL
+
+	type Number PRNCHG
+
+	set PREVBASE=BASE
+
+	// Adjust base by transaction amt net of interest and withholding
+	set BASE=BASE+X(%EffectiveDate)
+	//  Factor in original net int transferred if including int posting date
+	#if CUVAR.IPD set BASE=BASE+X(%EffectiveDate).piece("|",26)
+
+	// Actual principal change considering int adj
+	set PRNCHG=$$PRNCHG(X(%EffectiveDate))
+	if PRNCHG>0,RESIDUAL do {
+		if PRNCHG>RESIDUAL set PRNCHG=RESIDUAL
+		set RESIDUAL=RESIDUAL-PRNCHG
+		set BASE=BASE-PRNCHG
+		// Update new residual interest (hit principal)
+		set NNT(%EffectiveDate).piece("|",9)=NNT(%EffectiveDate).get().piece("|",9)-PRNCHG
+		}
+
+	// Keep track of Residual interest on Debit transactions
+	set RESIDUAL=X(%EffectiveDate).piece("|",25)+RESIDUAL
+
+	// Remove original posting interest effects.
+	if IAF'=2 do {
+		// Original positive interest posted
+		set BASE=BASE-(X(%EffectiveDate).piece("|",7)-X(%EffectiveDate).piece("|",9))
+		// Original positive deferred interest posted
+		set BASE=BASE-X(%EffectiveDate).piece("|",27)
+
+		// Original negative interest posted
+		set BASE=BASE+(X(%EffectiveDate).piece("|",19)-X(%EffectiveDate).piece("|",20))
+		// Original negative deferred interest posted
+		set BASE=BASE+X(%EffectiveDate).piece("|",28)
+		}
+
+	quit
+
+
+INT2BASE(Number IOPT,Number DEFINADJ)
+
+	/*
+	Add/subtract interest amount for period to BASE
+
+	If interest adjustments are not to be transferred, apply to BASE as
+	usual.  Otherwise, do not apply to base and record current transfer
+	account number.
+	
+	Arguments:
+		. IOPT 					/TYP=N/MECH=VAL/REQ
+				Interest Disbursement Option:
+				5 - Transfer Int Paid and Int Paid Adjmts
+				6 - Transfer Int Charged and Charged Adjmts
+				7 - Transfer All Int and All Int Adjmts
+
+		. DEFINADJ				/TYP=N/MECH=VAL/REQ
+				Defer Posting Interest Adjust.
+
+	*/
+
+	type public String NNT(),X()
+	type public Number BASE,BWA,ER,ITRF,NEGACR,NEGACRUN,NEGITRF
+	type public Number POSACR,POSTOPT
+
+	type Number ADDBASE,ITFRCID,NETINT,RESULT
+
+	set ADDBASE=0
+	if DEFINADJ do { quit ADDBASE
+		// Reapply original posted amounts when deferring adjustments
+		if POSTOPT=2 do {
+			// Original negative interest amounts
+			set ADDBASE=-(X(%EffectiveDate).piece("|",19)-X(%EffectiveDate).piece("|",20))
+			set ADDBASE=ADDBASE-X(%EffectiveDate).piece("|",28)
+			}
+		else  do {
+			// Original positive interest amounts
+			set ADDBASE=+(X(%EffectiveDate).piece("|",7)-X(%EffectiveDate).piece("|",9))
+			set ADDBASE=ADDBASE+X(%EffectiveDate).piece("|",27)
+			}
+		}
+
+	/* Apply all interest to base and do not update NNT interest transfer
+	fields if not transferring interest adjustments.
+	Do not quit here if net interest is zero because interest transfer
+	account numbers must still be set into the NNT array. */
+	set NETINT=POSACR-BWA-NEGACR-NEGACRUN
+	if IOPT<5 quit NETINT
+
+	// Transferring paid interest adjustments only. Apply to base
+	if IOPT=5 do { quit ADDBASE
+		// Store current positive interest transfer account
+		set NNT(%EffectiveDate).piece("|",15)=ITRF
+
+		// Interest amount is positive
+		if NETINT'<0 do {
+			if ITRF.isNull() do TFRREQ(%EffectiveDate) quit
+
+			set RESULT=BASE+NETINT
+			if NETINT>RESULT,RESULT>0 do {
+				/* Store new positive interest transfer amount
+				(do not bring account negative) */
+				set NNT(%EffectiveDate).piece("|",11)=NNT(%EffectiveDate).get().piece("|",11)+RESULT
+				set ADDBASE=NETINT-RESULT
+				}
+			else  do {
+				// Store new positive interest transfer amount
+				set NNT(%EffectiveDate).piece("|",11)=NNT(%EffectiveDate).get().piece("|",11)+NETINT
+				set ADDBASE=0
+				}
+			}
+		// Int amount is neg (nothing to tfr)
+		else  set ADDBASE=NETINT
+		}
+
+	// Transferring charged interest adjustments only. Apply to base
+	if IOPT=6 do { quit ADDBASE
+
+		type Number ITFRCID
+
+		// Store current negative (net) interest transfer account
+		set ITFRCID=$select(NEGITRF:NEGITRF,1:ITRF)
+		set NNT(%EffectiveDate).piece("|",16)=ITFRCID
+
+		if NETINT'>0 do { quit:ER
+			if ITFRCID.isNull() do TFRREQ(%EffectiveDate) quit
+
+			// Interest amount is positive
+			set RESULT=BASE+NETINT
+			if NETINT<RESULT,RESULT<0 do {
+				/* Store new negative interest transfer amount
+				(do not bring account positive) */
+				set NNT(%EffectiveDate).piece("|",13)=NNT(%EffectiveDate).get().piece("|",13)+RESULT
+				set ADDBASE=NETINT-RESULT
+				}
+			else  do {
+				// Store new negative interest transfer amount
+				set NNT(%EffectiveDate).piece("|",13)=NNT(%EffectiveDate).get().piece("|",13)+NETINT
+				set ADDBASE=0
+				}
+			}
+		// Int amount is pos (nothing to tfr)
+		else  set ADDBASE=NETINT
+		}
+
+	// Transferring all interest adjustments
+	if IOPT=7 do {
+		if NETINT'<0 do { quit:ER
+			if ITRF.isNull() do TFRREQ(%EffectiveDate) quit
+
+			// Store current positive interest transfer account
+			set NNT(%EffectiveDate).piece("|",15)=ITRF
+
+			// Store new positive interest transfer amount
+			set NNT(%EffectiveDate).piece("|",11)=NNT(%EffectiveDate).get().piece("|",11)+NETINT
+			}
+		else  do { quit:ER
+			type Number ITFRCID
+
+			set ITFRCID=$select(NEGITRF:NEGITRF,1:ITRF)
+			if ITFRCID.isNull() do TFRREQ(%EffectiveDate) quit
+
+			// Store current negative (net) interest transfer account
+			set NNT(%EffectiveDate).piece("|",16)=ITFRCID
+
+			// Store new negative interest transfer amount
+			set NNT(%EffectiveDate).piece("|",13)=NNT(%EffectiveDate).get().piece("|",13)+NETINT
+			}
+		}
+
+	// Do not apply to base
+	quit 0
+
+
+TFRREQ(Date %EffectiveDate)
+
+	// Set "Interest transfer account required" error
+	
+	type public String %MSKD,RM
+	type public Number ER
+
+	type Date ERDT
+
+	set ERDT=%EffectiveDate.toString()
+
+	// Int/Div transfer account required; Effective Date: ~p1
+	do Runtime.setErrMSG("DEP", 1257)
+	set RM=RM_"; "_$$^MSG(5951,ERDT)
+
+	quit
+
+
+public EFDAVBAL(Number CID,Number BASE,Date %EffectiveDate)
+
+	/*
+	Returns effective-dated available balance calculation
+
+	Arguments:
+		. CID		Account number 		/TYP=N/REQ/MECH=VAL
+		. BASE  	Ledger balance		/TYP=$/REQ/MECH=VAL
+		. %EffectiveDate   Effective date	/TYP=D/REQ/MECH=VAL
+
+	Inputs:	
+		. BJD		Beginning date for calculations
+		. ODLIM		Authorized Overdraft Limit
+		. ODSTART	Authorized Overdraft Limit Start Date
+		. ODEXP  	Authorized Overdraft Limit Expiration Date
+		. AUTOD		Authorized Overdraft Flag
+
+	Returns: An effective-dated available balance using the
+		following calculation:
+		. $$ = Ledger Balance (BASE)
+			- Check Holds (HLD8)
+			- Permanent Holds (HLD3)
+			+ if AUTOD, Authorized Overdraft (DEP.ODLIM)
+
+	NOTE: HOLD and PHOLD should be "newed" by the calling routine before
+	calling this section.
+	*/
+
+	type public String HOLD(,,),PHOLD(,,)
+	type public Number ODLIM,AUTOD
+	type public Date BJD,ODSTART,ODEXP
+
+	type Number CHKHLD=0,PHLD1=0,PHLD2=0,XODLIM=0
+
+	// Set BJD for calls from outside RECALC
+	if BJD.get().isNull() set BJD=%EffectiveDate
+
+	// Check Holds
+	if 'HOLD(8,CID).data() do GETHOLD^UHLDSCA(8,CID,BJD,%SystemDate,.HOLD)
+	set CHKHLD=HOLD(8,CID,%EffectiveDate+1).order(-1) if CHKHLD set CHKHLD=HOLD(8,CID,CHKHLD)
+
+	// Permanent Holds-1
+	if 'PHOLD(3,CID).data() do GETPHOLD^UHLDSCA(3,CID,BJD,%SystemDate,.PHOLD)
+	set PHLD1=PHOLD(3,CID,%EffectiveDate+1).order(-1) if PHLD1 set PHLD1=PHOLD(3,CID,PHLD1)
+
+	// Permanent Holds-2
+	if 'PHOLD(9,CID).data() do GETPHOLD^UHLDSCA(9,CID,BJD,%SystemDate,.PHOLD)
+	set PHLD2=PHOLD(9,CID,%EffectiveDate+1).order(-1) if PHLD2 set PHLD2=PHOLD(9,CID,PHLD2)
+
+	// Authorized Overdraft Limit
+	if AUTOD,ODLIM,(ODSTART'>%EffectiveDate),(ODEXP>%EffectiveDate) set XODLIM=ODLIM
+
+	quit BASE-CHKHLD-PHLD1-PHLD2+XODLIM
+
+
+BWACALC(RecordDEP dep,RecordTTX ttx,Number INT)	
+
+	// Calculate withholding amount (ACCRUED OR NOT)
+
+	type public String AWTI
+	type public Number AWTR,BWA,ER,IRN
+
+	type Number TAXRATE=""
+	
+	do ^DEPBW(.dep,.ttx,INT,.BWA,,CUVAR.BWAPGM,AWTI,IRN,.TAXRATE) quit:ER
+
+	do FMRATE(dep.cid,%EffectiveDate,AWTR,TAXRATE,"AWTR")
+
+	set AWTR=TAXRATE
+
+	quit
+
+
+UPDACT(RecordDEP dep)		// Deposit account			/REF:RW
+
+	// Update acoount object with recalculated data
+	
+	type public String RATECHG(,,)
+	type public String ODTERM
+	type public Number ER,ODLIM
+	type public Date DELDT,ODEXP,ODSTART
+
+	type String COLUMN
+
+	// Save final Overdraft Limit data
+	// Authorized Overdraft Limit
+	set dep.odlim=ODLIM
+	// Authorized O/D Start Date
+	set dep.odstart=ODSTART
+	// Authorized O/D Expiration Date
+	set dep.odexp=ODEXP
+	// Authorized O/D Limit Term
+	set dep.odterm=ODTERM
+	// Delinquency Date
+	set dep.deldt=DELDT
+
+	// Update Nominal Interest rate and Accrued Withholding Tax Rate
+	for COLUMN="IRN","AWTR" do { quit:ER
+		type Number CHGSEQ
+
+		// Determine if rate change occurred
+		if 'RATECHG(dep.cid,COLUMN).data() quit
+
+		// Get the last rate change
+		set CHGSEQ=RATECHG(dep.cid,COLUMN,"").order(-1)
+
+		// Nominal Int/Div Rate
+		if COLUMN="IRN" set dep.irn=RATECHG(dep.cid,COLUMN,CHGSEQ).piece("|",2) quit
+
+		// Accrued Withholding Tax Rate
+		if COLUMN="AWTR" set dep.awtr=RATECHG(dep.cid,COLUMN,CHGSEQ).piece("|",2)
+		}
+
+	quit
+
+vSIG()	quit "60509^5314^Balasubramonian Sankar^115256"	// Signature - LTD^TIME^USER^SIZE

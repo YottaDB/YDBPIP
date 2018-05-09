@@ -1,0 +1,2656 @@
+DEPCL(RecordDEP dep,		// Deposit account			/REF:RW
+      RecordTTX ttx,		// Primary transaction			/REF:RW
+      RecordTRN trn,		// Transaction code			/REF:R
+      String CTL)		// Control indicator
+
+	/*
+	ORIG:  HARDY - 24 OCT 1992
+
+	Note: - DEPCL depends on variables that are used in other
+	        supporting routines. If one of the other called routines
+	        changes the use of a variable, it is important that DEPCL
+	        UMAT, RECALC*, DEPPEN, DEPDBS, DEPAES, DEPBW, etc.. all
+	        are considered in the change.
+	
+	   Additional notes on ARGUMENTS:
+		. CTL position 1 - Calculate Interest
+				   0 - Waive all interest accrual
+				   1 - Include all interest accrual
+		. CTL position 2 - Calculate Penalty
+				   0 - Waive penalty
+				   1 - Include penalty
+		. CTL position 3 - Negative net closeout transaction
+				   0 - Credit balnce closeout
+				   1 - Debit balance closeout
+
+	     OUTPUT from ^RECALC: (Effective dated closeout)
+	             ADJACR  Positive accrual adjustment
+		     ADJAWT  Withholding tax accrual adjustment
+	             NEGADJ  Negative accrual adjustment
+
+	     OUTPUT from ^UMAT:
+	             ADJ  Accrual adjustment (grace period - GOPT)
+		     ADJW Withholding accrual adjustment (grace period - GOPT)
+	             BWA  Backup withholding
+	             INT  Interest amount (interest including RECALC adjustment)
+	             PEN  Penalty amount
+
+	     USED in ^DEPCL:
+	             RNDINT   Rounded INT figure of (INT+ADJ)
+	             POSACR   Positive accrual as it existed on account
+		     AWT      Accrued withholding tax as it exsited on account
+	             NEGACR   Negative accrual as it existed on account
+	             NEGACRUN Negative accrual unauth as it existed on account
+	             UNCACR   Uncollected accrual as it existed on the account
+
+	------ Revision History ----------------------------------------------
+
+	04/27/07 - DHANALAKSHMI R - 26442
+		   Modified the section VAL by removing code included for the
+		   CR 25699.
+
+	04/16/07 - KinI - CR 26556
+		   Modified TRN section to set ttx.custcd to dep.ccode. Prior
+		   wrongful setting to dep.cc caused OOB condition.
+		   	
+	03/15/07 - KumarSS - CR 25177
+		   Removed Invalid Unicode Characters.
+
+	03/09/07 - DHANALAKSHMI R - 25699
+		   Modified the section VAL to consider withholding amount to 
+		   validate the closeout amount for Retirement/Savings account.
+
+	01/05/07 - GIRIDHAL - CR 24721
+		   Modified section AUT to add check for Single Signature
+		   Withdrawal Limit.
+	
+	12/04/06 - KinI - CR 22979
+		   Modified EC section to remove dep.pctnod reference as part 
+		   of Premature Withdrawal Tax processing obsoleting.
+	
+	11/29/06 - MbuiM - CR 21675
+		   Changed reference of INTAVLNC to INTAVLNCR to comply with 
+		   GTM version 5.0.
+
+	11/21/06 -  Hillanbrand Laura/SPR - CR 21192 
+		  . Added the section PLDGCHK to DEPCL to call into 
+		    AMTPDC^LNPTDPW to invoke the override PLDGPAY 
+		    (Insufficient funds to payoff loan) while posting 
+		    the transaction.
+		   
+	11/07/06 - SPR - CR 22645
+		  . Modified FILE section to update the Closed Account 
+		    file (DTJCL). 
+	
+	07/06/06 - Mugilvannan - CR 22005
+		   . Modified section CLSRFLG,CHECK to retain the value dep.grp
+		   . Replaced public variable %TRNSEQ with call to 
+		     ttx.getStoredValue("TranSeq").
+		   
+	05/25/06 - SmithCD - CR 19732
+		   Added INT parameter to VAL section (passing as 0 if not 
+		   including interest) to prevent the interest amount from 
+		   getting added in when reporting the correct amount in the 
+		   "Use exact closeout amount" error.
+	
+	05/17/06 - SmithCD - CR 20855
+		   . Added quit:ER logic in PROC section to prevent processing 
+		     from continuing despite an error occurring in the FILE 
+		     section, causing the account to get corrupted
+		   . Modified TRN section to set stored value "noPostProgram" 
+		     into secondary transactions when PROC=0 so they get into 
+		     account history but are not processed
+		   . Corrected problem in TRN and FEETR sections in which 
+		     ^TRNDRV could get called twice for the same transaction
+		   . Modified FILE section to show last credit amount as a 
+		     positive number for debit balance closeouts
+		   . Removed code to cause a file maintenance entry in HIST 
+		     for dep.stat change to bring in-line with prior versions
+		   . Moved initializing of FEESEQ, HISTSEQ, and SECSEQ to the 
+		     INIT section to prevent undefined errors on error corrects
+		     / reversals when interest is involved
+		   . Corrected problem with negative interest charged fields 
+		     getting updated erroneously on error correct / reversal 
+		     of closeout that do not include interest
+		   . Modified FILE section to update Negative Interest Tax YTD 
+		     for closeouts that include interest (error correct backs 
+		     it out, but it was never put there on the closeout itself)
+		   . Remove maintenance of DTJCL (deposit filer will maintain 
+		     it through the DTC index definition), and Patagon 
+		     development to calculate premature closeout tax code (was 
+		     obsoleted with CR 18105)
+		   . Cleaned up code, including changing PROC^BCHFEEUT call to 
+		     EXTERN^BCHFEEUT
+
+	04/19/06 - KELLYP - CR 20837
+		   Modified EFD section to return message #883 (Effective-dated
+		   closeout must be the first entry on the screen) when %TRNSEQ
+		   is greater than 1.  This change was made in lower versions
+		   under ARQ 47925 and appeared in the revision history but the 
+		   code was missing.  Also removed pre-2003 revision history.
+
+	03/24/06 - ALAGARSS - 20052
+	   	   Modified CLSINI^DEPDBS call to pass trn object.
+
+	03/09/06 - KELLYP - CR 19958
+		   Modified FILE section to remove the third parameter from
+		   the call to REMOVE^PROCEFT.
+
+	11/30/05 - TITOVE - CR 18414
+		   Modified EC section to pass additional argument (dep) to
+		   FSECTR^DEPEC1.
+
+	08/16/05 - SAHUN/ARPAV - CR16662
+		   Modified the Base table references as DEP,LN,LPSWEEP
+		   instead of XREFRACN,XREFITRF,XREFSDTA,XREFLNFEET,
+		   XREFPSWP,XREFSRVTA index tables in the CLSRFLG section.
+		   Because these index tables are already obsoleted. Removed
+		   the Nostro Account X-Ref file entry code because the code
+		   referencing to the XNOS table,which is already obsoleted.
+		   
+		   Resolved issue with BOO.get().isNull() where the isNull 
+		   method did not have () at the end, causing compilation errors.
+
+	*/
+	
+	type public Boolean ER
+	type public String OVR(,,),RM
+	type public Number BOO
+	
+	// Post-processor error
+	if ER,RM.get().isNull() set RM=$$^MSG(2206) quit
+
+	// Effective dated closeout of a segmented account
+	if dep.segflg,%EffectiveDate,%EffectiveDate<%SystemDate do { quit 
+
+		do CLOSE^RECALC(dep.cid,%EffectiveDate) quit:ER
+
+		type String RSPAR()
+
+		set RSPAR("CLOSE")=1
+
+		do EXTERN^RECALSEG(.dep,.ttx,.RSPAR())
+		}
+
+	type Number ACN,ADJ,ADJACR,ADJAWT,ADJW,AECAMT,AIACR,AWT,BWA,CID
+	type Number CINT,CPEN,CUMINT,DBAL,DBWA,DIR,DNINT,DPINT,DRINT,DSWA
+	type Number DWA,FEEACT,FEEAMT,FEESEQ,HISTSEQ,INT,NEGACR,NEGACRUN
+	type Number NEGADJ,NET,OINTNC,PEN,POSACR,PRM,RESINT
+	type Number RNDINT,SECSEQ,UNCACR,WTH
+	type String SAVEC,TAMT,TSO,UTSO()
+	type Date %EffectiveDate,DODT,SCLD,SCND
+	
+	set (ADJ,ADJACR,ADJAWT,ADJW,AWT,NEGADJ,POSACR,PEN,RNDINT,WTH)=0
+
+	// Calculate Interest
+	set CINT=CTL.extract(1)
+	// Calculate Penalty
+	set CPEN=CTL.extract(2)
+	// Negative net closeout transaction
+	set DBAL=CTL.extract(3)
+
+	do INIT(.dep,.ttx,0)
+
+	// Use greater of Date Last Renewed or Open Date
+	set DODT=$select(dep.dlr>dep.odt:dep.dlr,1:dep.odt)
+
+	// Account status must be 5 before processing closeout
+	if dep.swpf=1,dep.swpopt'=1,dep.stat'=5 do Runtime.setErrMSG("DEP",2913) quit
+
+	if CINT,dep.ircb=5 do CHECKLB^DEPDBS(dep.ircb,NEGACR,NEGACRUN,UNCACR) quit:ER
+
+	// Use tran code to close with ledger balance for discount CD
+	if dep.salesprc>0,CTL'="000" do Runtime.setErrMSG("DEP",189) quit
+
+	if 'CINT set AECAMT=0
+
+	// Invalid pledged account
+	if trn.pcfd30,'dep.pldg do Runtime.setErrMSG("DEP",3524) quit
+
+	// Override -Used pledged account transaction
+	if dep.pldg,'trn.pcfd30 set OVR(CID,"OVR","PLDGPCF")=""
+
+	// Closeout restrictions
+	do CLSRFLG(.dep)
+	if ER quit 
+
+	// Discount CD - adjust accrual to meet discount interest amount
+	if dep.orgdisc do { quit:ER
+
+		type Number ACRADJ
+
+		set ACRADJ=(dep.orgdisc-dep.posacr).roundCur(dep.crcd)
+
+		if ACRADJ do { quit:ER 
+
+			do GL(.ttx,.dep,ACRADJ,0) quit:ER 
+
+			set SAVEC=ttx.lnerc
+			set SAVEC.piece("#",19)=ACRADJ
+			set ttx.lnerc=SAVEC
+			}
+
+		set dep.posacr=0
+		}
+
+	type Number ACR,ANLTYP,BAL,FEEOPT,IAF,IRCB,IRF,INTAVLNCR,IPL
+	type Number IRN,MINACR,NEGACRPO,SVCFEECID
+	type String FEEPLN,IPF
+	type Boolean RA
+	type Date DLR,HISTCTF,INP,IPLD,ODT
+
+	do CLSINI^DEPDBS(.dep,.trn) quit:ER
+
+	do ^UMAT(.dep,.ttx)
+
+	// Consider deferred int to post
+	if 'dep.definadj set (DPINT,DNINT,DRINT,DBWA)=0
+	else  do EXT^DEPIADJ(.dep,"011",.DPINT,.DNINT,.DRINT,.DBWA) quit:ER 
+
+	// Transaction Fees - Do prior to PCF9
+	if trn.pcf.extract(10) do PCF10(.dep,.ttx,.trn)
+
+	// Service Fees at closeout
+	if trn.pcf.extract(9) do PCF9(.dep,.ttx)
+
+	do OUT^UTSO(.UTSO(),ttx.tso)
+
+	if dep.ira,'UTSO("RPAWH").exists() do {
+
+		type Number STTAX,TAMT,WA,WP
+		type String TSO=""
+
+		// Default
+		set TAMT=dep.bal+INTAVLNCR
+
+		// Interest, No Penalty
+		if CINT,'CPEN set TAMT=dep.bal+INT-BWA+ADJ-ADJW-NEGACR+INTAVLNCR
+		// Penalty, No Interest
+		if 'CINT,CPEN set TAMT=dep.bal-PEN+ADJ+INTAVLNCR
+		// Interest and Penalty
+		if CINT,CPEN set TAMT=dep.bal+INT-PEN+ADJ+INTAVLNCR
+
+		// Calculate withholding on amount received (sets DWA)
+		for STTAX=0:1:1 do CLOSE^IRAWH(.dep)
+
+		// Set default withholding amount in TSO
+		set UTSO("RPAWH")=DWA
+		set UTSO("RPASWH")=DSWA
+		
+		do IN^UTSO(.UTSO(),.TSO)
+		set ttx.tso=TSO
+		}
+
+	// Anticipated Amount
+	set AECAMT=+dep.aecamt
+
+	// Closeout Reason Code
+	if UTSO("CLR").exists() set dep.clr=UTSO("CLR")
+
+	if %EffectiveDate,%SystemDate-%EffectiveDate do { quit:ER!(CINT)
+
+		// Closeout effective in prior interest posting period
+		if %EffectiveDate<dep.ipld do Runtime.setErrMSG("DEP",557) quit
+
+		// Closeout effective in prior interest posting period
+		if dep.definadj,%EffectiveDate<dep.negipld do Runtime.setErrMSG("DEP",557) quit
+
+		/*
+		If effective-dating w/o interest, process as if there was no
+		effective date, since it would have the same net effect.
+		*/
+		if 'CINT quit 
+
+		do EFD(.dep,.ttx) quit:ER 
+		do PROC(.dep,.ttx) quit:ER
+		}
+
+	set TAMT=+TAMT
+
+	// Penalty reduction method - Reduce accrual excess waived
+	if PRM=4,PEN>INT set PEN=INT
+	set dep.bal=dep.bal-AECAMT
+
+	if dep.ira do { if ER quit 
+
+		type String SVTAMT
+
+		set INT=INT.get()
+		set SVTAMT=TAMT
+		set TAMT.piece("#",2)=dep.bal
+		set TAMT.piece("#",3)=INT
+
+		do ^IRA(.dep,.ttx)
+
+		set TAMT=SVTAMT
+		}
+
+	/*
+	If accrued interest will not be credited to the customer,
+	then no backup withholding should apply.
+	*/
+	if CINT do {
+		// Interest plus GOPT adjustment
+		set INT=INT+ADJ
+		set RNDINT=INT.roundCur(dep.crcd)
+		}
+	else  set BWA=0
+
+	set WTH=$select(dep.ira:DWA+DSWA,1:BWA)
+
+	do PROC(.dep,.ttx) quit:ER
+
+	if BOO.get().isNull() set BOO=dep.boo
+
+	do CLAWBACK^TTXCOM(.dep,.ttx,BOO) quit:ER
+
+	quit
+
+
+PROC(RecordDEP dep,		// Deposit account			/REF:RW
+     RecordTTX ttx)		// Primary transaction			/REF:R
+
+	// Process transaction
+
+	type public Number CUMINT,INT,RNDINT,POSACR,AWT,AIACR,NEGACR
+	type public Number NEGACRUN,RESINT,UNCACR
+	type public Boolean CINT,ER
+	
+	// Cumulative interest adjustment
+	set CUMINT=0
+
+	if dep.schproc,CINT do CUMDEP^DEPDBS(.dep,INT,dep.ipl) quit:ER
+
+	if 'CINT do VAL(.dep,0,0,0,0,0,0,0,0,0) quit:ER
+	if CINT do VAL(.dep,RNDINT,INT,POSACR,AWT,AIACR,NEGACR,NEGACRUN,RESINT,UNCACR) quit:ER
+
+	if dep.iaf do {
+
+		// Interest Paid Not Credited
+		if CUMINT set dep.intavlncr=dep.intavlncr+CUMINT
+
+		do INTAVL^DEPPO(.dep,.ttx)
+		}
+
+	do AUT(.dep,.ttx) quit:ER 
+
+	// Segmented Account Closeout
+	if dep.segflg do SEGMENT(.dep,.ttx) quit:ER
+
+	do TAMT(.dep,.ttx) quit:ER
+	do SAVE(.dep,.ttx) quit:ER
+	do FILE(.dep,.ttx) quit:ER
+
+	// Update the average balance buckets
+	if (%EffectiveDate.isNull())!(%EffectiveDate=%SystemDate) do UPDAVB^DEPPI(.dep,.ttx) quit:ER
+
+	quit
+
+
+SAVE(RecordDEP dep,		// Deposit account			/REF:RW
+     RecordTTX ttx)		// Primary transaction			/REF:R
+
+     	// Save data for reversal / error correct
+     	
+     	type public Number AIACR,ADJ,ADJACR,CUMINT,NEGADJ,OINTNC,POSACR
+     	type public Boolean CINT
+     	type public String SAVEC
+	
+	set SAVEC=ttx.lnerc
+
+	set SAVEC.piece("#",1)=dep.balcol
+	/*
+ 	  The adjustment is calculated in RECALC and stored in ADJACR.  RECALC already has
+ 	  adjusted +dep.posacr.  Need to save the POSACR as it existed on the account prior
+ 	  to the adjustments for the error corrects and reversals.
+	*/
+	set SAVEC.piece("#",2)=POSACR
+	set SAVEC.piece("#",3)=dep.cmp
+	set SAVEC.piece("#",35)=AIACR
+
+	/*
+ 	(SAVEC,"#",4) is the adjustment to positive accrual which includes the 
+ 	adjustment from ^RECALC (ADJACR) and the adjustment from ^UMAT (ADJ).
+
+ 	(SAVEC,"#",27) is the adjustment to negative accrual (NEGACR). If 
+ 	closeout does not include interest, save accrual that is adjusted in a 
+ 	secondary transaction. The ec/reversal will use this amount to update 
+ 	the GL.
+	*/
+	if 'CINT do {
+		set SAVEC.piece("#",4)=-dep.posacr
+		set SAVEC.piece("#",27)=dep.negacr+dep.negacrun+dep.uncacr
+		}
+	else  do {
+		set SAVEC.piece("#",4)=ADJACR+ADJ
+		set SAVEC.piece("#",27)=NEGADJ
+		}
+
+	// Overwrite value of intavlncr with original value to ensure correct value.
+	if dep.iaf=2 set SAVEC.piece("#",20)=OINTNC+CUMINT
+
+	set SAVEC.piece("#",6)=dep.negacr
+	set SAVEC.piece("#",7)=dep.ipld
+	set SAVEC.piece("#",8)=dep.scld
+	set SAVEC.piece("#",28)=dep.negacrun
+	set SAVEC.piece("#",26)=dep.resint
+	set SAVEC.piece("#",30)=dep.uncacr
+	set SAVEC.piece("#",29)=dep.negipld
+
+	set ttx.lnerc=SAVEC
+
+	quit
+
+
+FILE(RecordDEP dep,		// Deposit account			/REF:RW
+     RecordTTX ttx)		// Primary transaction			/REF:W
+     
+     	// File Data
+
+	type public Number ADJ,AECAMT,AIACR,CUMINT,DBAL,DNINT,DPINT
+	type public Number DRINT,DWA,DSWA,ECAMT,NEGACR,NEGACRUN,RNDINT
+	type public Number PEN,POSACR,PRM,RESINT,UNCACR,WTH
+     	type public Boolean CINT,CPEN,ER
+     	type public String TAMT
+     		
+	do REMOVE^PROCEFT(dep.cid,%EffectiveDate)
+
+	// Update the Account STATUS for Fund Accounts
+	if dep.swpf=1,dep.swpopt'=1 do {
+		type Number ICID
+
+		type ResultSet rs=Db.select("ICID","DEP101","CID=:dep.cid")
+		while rs.next() do {
+			set ICID=rs.getCol("ICID")
+
+			type RecordDEP dep2=Db.getRecord("DEP","CID=:ICID")
+			
+			do dep2.setAuditFlag(1)
+			set dep2.stat=4
+			do dep2.save("NOTRIGBEF/NOVALREQ/NOVALDD/NOTRIGAFT/NOUPDATE/NOVALRI/NOINDEX/NOFKCHK/JOURNAL")
+			}
+		}
+
+	// Date Account Closed
+	set dep.dtc=%SystemDate
+	// Positive Accrued Int/Div
+	set dep.posacr=0
+	// Accrued Withholding Tax
+	set dep.awt=0
+	// Compounded Int/Div
+	set dep.cmp=0
+	// Backup Withholding Financial YTD
+	set dep.bwy=dep.bwy+WTH
+	// Federal Withholding Year-to-Date
+	set dep.fwy=dep.fwy+DWA.get()
+	// State Withholding Year-to-Date
+	set dep.swy=dep.swy+DSWA.get()
+	// Backup Withholding Tax Year-to-date
+	set dep.bwtytd=dep.bwtytd+WTH
+	// Negative Accrued
+	set dep.negacr=0
+	// Negative Accrued Interest Unauthorized
+	set dep.negacrun=0
+	// Residual Interest
+	set dep.resint=0
+	// Uncollected Accrued
+	set dep.uncacr=0
+
+	// Int/Div Paid - Last Date
+	if DPINT!(DRINT&'dep.negipo) set dep.ipld=%SystemDate
+	// Negative Interest Paid - Last Date
+	if DNINT!(DRINT&dep.negipo) set dep.negipld=%SystemDate
+
+	if CPEN,PEN do {
+		// Penalty Financial Year-to-Date
+		set dep.pytd=dep.pytd+PEN
+		// Penalty Tax Year-to-date
+		set dep.pentytd=dep.pentytd+PEN
+		// Penalty Paid Life
+		set dep.ppl=dep.ppl+PEN
+		}
+
+	// Penalty from accrual
+	if CINT do { quit:ER
+
+		type Number INT
+
+		set INT=RNDINT.roundCur(dep.crcd)
+
+		if CPEN,PRM>1 set INT=INT-PEN
+
+		// Interest fields should be updated without subtracting the penalty.
+		if INT'<0 do {
+			// Int/Div Paid Financial Year-to-Date
+			set dep.iytd=dep.iytd+INT
+			
+			// Int/Div Paid Tax Year-to-date
+			set dep.itytd=dep.itytd+INT
+			
+			// Int/Div Paid - Life
+			set dep.ipl=dep.ipl+INT
+						
+			// Int/Div Paid - Last Date
+			set dep.ipld=%SystemDate
+			}
+
+		if NEGACR!(NEGACRUN)!(UNCACR) do {
+
+			type Number NACR
+
+			set NACR=(NEGACR+NEGACRUN+UNCACR).roundCur(dep.crcd)
+			
+			// Negative Interest Financial YTD
+			set dep.negiytd=dep.negiytd+NACR
+			
+			// Negative Interest Tax YTD
+			set dep.negitytd=dep.negitytd+NACR
+			
+			// Negative interest Life
+			set dep.negipl=dep.negipl+NACR
+						
+			// Negative Interest Paid - Last Date
+			set dep.negipld=%SystemDate
+			}
+
+		// Adjusted not from recalc
+		if ADJ do GL(.ttx,.dep,ADJ,0) quit:ER
+
+		if AECAMT do AECADJ(.dep,.ttx,AECAMT)
+
+		if AIACR do {
+			// Int/Div Paid Financial Year-to-Date
+			set dep.iytd=dep.iytd+AIACR
+			// Int/Div Paid - Life
+			set dep.ipl=dep.ipl+AIACR
+			// Int/Div Paid Tax Year-to-date
+			set dep.itytd=dep.itytd+AIACR
+			}
+		}
+
+	if 'CINT do { quit:ER
+		// Waive interest
+	
+		// Earnings adjustment
+		if POSACR do GL(.ttx,.dep,-POSACR,0,$$^MSG(6748)) quit:ER
+		
+		// Earnings adjustment (negative)
+		if NEGACR!(NEGACRUN)!(RESINT)!(UNCACR) do GL(.ttx,.dep,NEGACR+NEGACRUN+RESINT+UNCACR,1,$$^MSG(6748))
+		}
+
+	if CUMINT do { quit:ER
+		/*
+ 		Allow interest posting adjustment routine to decrease dep.intavlncr when
+ 		processing negative cumulative interest adjustment to prevent possible 
+ 		"Transaction exceeds available int/div of ~p1" error.
+		*/
+
+		// Interest Paid Not Credited
+		if dep.iaf=2,CUMINT<0 set dep.intavlncr=dep.intavlncr-CUMINT
+
+		do POSINT(.dep,.ttx,CUMINT) quit:ER
+		do EXPENSE(.dep,.ttx,CUMINT) quit:ER
+		}
+
+	if 'DBAL do { quit:ER
+		// Number of Debits
+		set dep.cntdr=dep.cntdr+1
+		// Last Debit Amount
+		set dep.ldamt=dep.bal
+		// Last Debit Date
+		set dep.lddt=%SystemDate
+		}
+	if DBAL do { quit:ER
+		// Number of Credits
+		set dep.cntcr=dep.cntcr+1
+		// Last Credit Amount
+		set dep.lcamt=-dep.bal
+		// Last Credit Date
+		set dep.lcdt=%SystemDate
+		}
+
+	set ttx.tamt=TAMT
+	// Transaction - Last Date
+	set dep.tld=%SystemDate
+	// Ledger Balances
+	set dep.bal=0
+	// Collected Balance
+	set dep.balcol=0
+	// Interest Paid Not Credited
+	set dep.intavlncr=0
+
+	// Account Status
+	set dep.stat=4
+
+	// Update Closed Account File
+	type RecordDTJCL dtjcl=Db.getRecord("DTJCL","TJD=:%SystemDate,CLS=:dep.cls,GRP=:dep.grp,TYP=:dep.type,CID=:dep.cid",1)
+	if dtjcl.getMode()=0 do dtjcl.bypassSave()
+	
+	quit
+
+
+EFD(RecordDEP dep,		// Deposit account			/REF:RW
+    RecordTTX ttx)		// Primary transaction			/REF:R
+
+    	// Effective dated transaction
+
+	type public Boolean CINT,ER
+	type public Number AECAMT,ADJ,ADJW,BWA,DSWA,DWA,INT,NEGACR
+	type public Number NEGACRUN,NET,PEN,POSACR,RESINT,RNDINT,UNCACR,WTH
+     	type public String TAMT
+     	type public Date DODT
+
+	type Number TNEGACR
+	type String SVTAMT
+
+	set TNEGACR=(NEGACR+NEGACRUN+UNCACR).roundCur(dep.crcd)
+
+	// Cannot process with negative accrual  ~p1
+	if TNEGACR do Runtime.setErrMSG("DEP",471,TNEGACR) quit
+
+	if dep.ira do ^IRA(.dep,.ttx) quit:ER
+
+	set TAMT=+TAMT
+	set SVTAMT=TAMT
+
+	// Effective-dated closeout must be the first entry on the screen
+	if ttx.getStoredValue("TranSeq")>1 do Runtime.setErrMSG("DEP","883") quit:ER
+
+	// Set trans amount equal to current prin
+	set ttx.tamt=+dep.bal
+
+	do CLOSE^RECALC(dep.cid,%EffectiveDate) quit:ER
+
+	set dep.bal=dep.bal-AECAMT
+
+	do CWIP2^DEPDBS(dep,.ttx,dep.bal,POSACR,NEGACR,NEGACRUN,RESINT,UNCACR) quit:ER
+
+	do ^UMAT(.dep,.ttx) quit:ER
+
+	// Set trans amount back calculate prin
+	set ttx.tamt=TAMT
+	set NET=dep.bal
+	set PEN=PEN.get()
+	set WTH=$select(dep.ira:DWA+DSWA,1:BWA)
+	set TAMT=SVTAMT
+	set INT=INT+ADJ-ADJW
+	set RNDINT=INT.roundCur(dep.crcd)
+
+	quit
+
+
+TAMT(RecordDEP dep,		// Deposit account			/REF:RW
+     RecordTTX ttx)		// Primary transaction			/REF:RW
+     
+	/*
+	Build TAMT
+
+	Place the individual components into TAMT and build a descriptive
+	return message
+	*/
+	
+	type public Number ADJ,DIR,DSWA,DWA,NEGACR,NEGACRUN,RESINT,RNDINT
+	type public Number PEN,WTH,UNCACR
+     	type public Boolean CINT,CPEN
+     	type public String RM="",TAMT
+
+	if 'dep.segflg set TAMT.piece("#",2)=dep.bal*DIR
+
+	if RNDINT,'dep.segflg do {
+
+		if CINT set TAMT.piece("#",3)=RNDINT*DIR quit 
+
+		// Interest not paid:  $~p1
+		set RM=$$^MSG(1255,RNDINT)
+		}
+
+	if (NEGACRUN!(NEGACR)!(UNCACR)),'dep.segflg do {
+
+		type Number TNEGACR,AUTH,UNAUTH,UNCOLL
+
+		set AUTH=NEGACR.roundCur(dep.crcd)
+		set UNAUTH=NEGACRUN.roundCur(dep.crcd)
+		set UNCOLL=UNCACR.roundCur(dep.crcd)
+		set TNEGACR=AUTH+UNAUTH+UNCOLL
+
+		if CINT do { quit 
+			if AUTH set TAMT.piece("#",6)=AUTH*(-DIR)
+			if UNAUTH set TAMT.piece("#",11)=UNAUTH*(-DIR)
+			if UNCOLL set TAMT.piece("#",18)=UNCOLL*(-DIR)
+			}
+
+		if 'RM.isNull() set RM=RM_"  "
+
+		// ~p1 Negative interest not received: $~p2
+		if TNEGACR set RM=$$^MSG(3114,RM,TNEGACR)
+		}
+
+	if ADJ,'dep.segflg do {
+
+		if 'RM.isNull() set RM=RM_"  "
+
+		// ~p1 Interest/Dividend adjustment: ~p2
+		set RM=$$^MSG(3110,RM,ADJ.roundCur(dep.crcd))
+		}
+
+	if PEN do {
+
+		type Number RPEN
+
+		set RPEN=PEN.roundCur(dep.crcd)
+
+		if 'RM.isNull() set RM=RM_"  "
+
+		// ~p1Penalty waived:  $ ~p2
+		if 'CPEN set RM=$$^MSG(3116,RM,RPEN) quit
+
+		set TAMT.piece("#",4)=RPEN*DIR
+
+		// ~p1Penalty change:  $~p2
+		set RM=$$^MSG(3115,RM,RPEN)
+		}
+
+	if WTH do {
+
+		type Number RWTH=WTH.roundCur(dep.crcd)
+
+		if 'dep.ira set TAMT.piece("#",5)=RWTH*DIR
+		else  do {
+			set TAMT.piece("#",5)=DWA.roundCur(dep.crcd)*DIR
+			set TAMT.piece("#",15)=DSWA.roundCur(dep.crcd)*DIR
+			}
+
+		if 'RM.isNull() set RM=RM_"  "
+
+		// ~p1 Withholding: $~p2
+		set RM=$$^MSG(3121,RM,RWTH)
+		}
+
+	// PSG if no BWA remove from TSO
+	if 'WTH,ttx.tso.isLike("%BWA%") do {
+
+		type String TSO="",UTSO()
+
+		do OUT^UTSO(.UTSO(),ttx.tso)
+
+		set ttx.tso=""
+		kill UTSO("BWA")
+
+		do IN^UTSO(.UTSO(),.TSO)
+		set ttx.tso=TSO
+		}
+
+	if dep.intavlncr,'dep.segflg do {
+
+		type Number RINTNC
+
+		set RINTNC=dep.intavlncr.roundCur(dep.crcd)
+		set TAMT.piece("#",8)=RINTNC*DIR
+
+		if 'RM.isNull() set RM=RM_"  "
+
+		// ~p1 Interest/Dividend not credited: ~p2
+		set RM=$$^MSG(3111,RM,RINTNC)
+		}
+
+	if RESINT,'dep.segflg do {
+
+		type Number RNDRES
+
+		set RNDRES=RESINT.roundCur(dep.crcd)
+
+		if CINT set TAMT.piece("#",10)=RNDRES*(-DIR) quit
+		if 'RM.isNull() set RM=RM_"  "
+
+		// ~p1 residual int/div not received: ~p2
+		set RM=$$^MSG(413,RM,RNDRES)
+		}
+
+	quit
+
+
+CALC(RecordDEP dep)		// Deposit account			/REF:RW
+
+	// Calculate close-out amount
+
+	type public Number INT,NEGACR,NEGACRUN,PEN,RESINT,UNCACR,WTH
+	type public String RM
+
+	type Number AMT
+
+	set AMT=dep.bal+INT+dep.intavlncr-PEN-WTH-NEGACR-NEGACRUN-RESINT-UNCACR
+	set AMT=AMT.roundCur(dep.crcd)
+
+	if AMT<0 set AMT=-AMT
+	set RM=RM.get()_AMT
+
+	quit
+
+
+GL(RecordTTX ttx,		// Primary transaction			/REF:R
+   RecordDEP dep,		// Deposit account			/REF:RW
+   Number AMT,			// Transaction amount
+   Number NEGOPT,		// Negative accrual option
+   String TCMT)			// Teller comment			/NOREQ
+
+	/*
+	Additional notes on ARGUMENTS:
+
+		. AMT
+			Accrual adjustment. If input is positive, accrual G/L
+			will be credited. If negative, G/L will be debited.
+
+		. NEGOPT
+			0 - Post update to pos acr
+			1 - Post update to neg acr authorized/unauthorized/
+			    residual interest
+	*/
+
+	type public Cache %CACHE()
+	type public Boolean ER
+	
+	type RecordPRODCTL prodctl=%CACHE("PRODCTL").getRecord("PRODCTL","TYPE=:dep.type")
+
+	type String ETC,PTC,TSO
+	type Number GL
+
+	set TSO="GLO#"_dep.cid
+	set TSO=$$FIELDIN^UTSO(TSO,"EXACTACR",AMT)
+	set AMT=AMT.roundCur(dep.crcd)
+	set TCMT=TCMT.get()
+
+	type RecordUTBLGLSC utblglsc=%CACHE("UTBLGLSC").getRecord("UTBLGLSC","GLSC=:dep.glsc")
+
+	if dep.salesprc do {
+		set PTC=1
+		// Dep G/L # (Discount Expense)
+		set GL=utblglsc.dgldi
+		}
+	else  if 'NEGOPT do {
+		set PTC=1
+		// Dep G/L # (Interest Expense)
+		set GL=utblglsc.dgli
+		}
+	else  do {
+		set PTC=2
+		// Dep G/L # (O/D Interest Income)
+		set GL=utblglsc.dglii
+		}
+
+	if GL.isNull() set GL=CUVAR.GLTS
+
+	if AMT<0 do { quit
+		set AMT=-AMT
+
+		if PTC=1 set ETC=prodctl.dradin
+		else  set ETC=prodctl.dradna
+
+		do ACRTR(.dep,.ttx,AMT,ETC,NEGOPT) quit:ER
+
+		set ETC="MCR"
+		if dep.trb set ETC="MDR"
+
+		// Interest adjustment
+		do TRN(.dep,.ttx,AMT,ETC,"",GL,0)
+		}
+
+	// Adj Accrued Interest Tran Code
+	if PTC=1 set ETC=prodctl.cradin
+	// Adj Neg Accrual Interest Tran Code
+	else  set ETC=prodctl.cradna
+
+	do ACRTR(.dep,.ttx,AMT,ETC,NEGOPT) quit:ER
+
+	if dep.trb set ETC="MCR"
+	else  set ETC="MDR"
+
+	// Interest adj
+	do TRN(.dep,.ttx,AMT,ETC,"",GL,0) quit:ER
+
+	quit
+
+
+TRN(RecordDEP dep,		// Deposit account			/REF:RW
+    RecordTTX ttxpri,		// Primary transaction			/REF:R
+    String TAMT,		// Transaction amount
+    String ETC,			// External transaction code
+    Number CID,			// Account number			/COND
+    Number GL,			// GL account number			/COND
+    Boolean PROC)		// Process transaction
+
+	type public Cache %CACHE()
+	type public Number BRCD,HISTSEQ,SECSEQ
+	type public String TCMT,TSO
+	type public Boolean ER
+
+	// Invalid transaction code ~p1
+	if ETC.isNull() do Runtime.setErrMSG("DEP",1498) quit
+
+	type String ITC,PITC
+
+	type RecordTRN trn=%CACHE("TRN").getRecord("TRN","ETC=:ETC")
+
+	// This trancode's ITC
+	set ITC=trn.itc
+	
+	// Primary trancode's ITC
+	set PITC=ttxpri.itc
+
+	if PITC.extract(6) set ITC=$$ITC^TTXEXT(ITC,6)
+	if PITC.extract(12) set ITC=$$ITC^TTXEXT(ITC,12)
+	
+	type RecordTTX ttx=Class.new("RecordTTX")	
+
+	if CID set ttx.cid=CID
+	else  set ttx.cid=GL
+
+	set ttx.itc=ITC
+	set ttx.etc=ETC
+	set ttx.tamt=TAMT
+	set ttx.efd=%EffectiveDate
+	set ttx.tlo=%UserStation
+	set ttx.tso=TSO
+	set ttx.tcmt=TCMT
+
+	#IF CUVAR.%MCP set ttx.crcd=ttxpri.crcd
+
+	set ttx.custcd=dep.ccode
+
+	set SECSEQ=SECSEQ+.001
+	
+	// Post (update HIST / DTX) but do not process the posting program 
+	// (updates to accounts are done in this procedure instead)
+	if 'PROC do ttx.setStoredValue("noPostProgram", 1)
+
+	// Posting to same account
+	if CID=dep.cid do {
+		do TRNSINGL^TRNDRV(.ttx,.dep,%SystemDate,BRCD,5)
+		}
+	// Different account, don't pass .dep
+	else  do TRNSINGL^TRNDRV(.ttx,,%SystemDate,BRCD,5)
+
+	if ER!('PROC) quit
+
+	type RecordHISTDST histdst=Class.new("RecordHISTDST")
+
+	set histdst.cid=dep.cid
+	set histdst.tseq=HISTSEQ
+	set histdst.dstseq=SECSEQ
+	set histdst.acct=ttx.cid
+	set histdst.itc=ttx.itc
+	set histdst.etc=ttx.etc
+	set histdst.tamt=ttx.tamt
+	set histdst.tlo=ttx.tlo
+	set histdst.tso=ttx.tso
+	set histdst.tcmt=ttx.tcmt
+	set histdst.cdt=%CurrentDate
+	set histdst.uidt=%UserID
+	set histdst.crcd=ttx.crcd
+	set histdst.custcd=ttx.custcd
+
+	do histdst.bypassSave()
+
+	quit
+
+
+AECADJ(RecordDEP dep,		// Deposit account			/REF:RW
+       RecordTTX ttx,		// Primary transaction			/REF:R
+       Number AMT)		// Anticipating earnings
+
+	type public Cache %CACHE()
+	
+	type RecordPRODCTL prodctl=%CACHE("PRODCTL").getRecord("PRODCTL","TYPE=:dep.type")
+
+	type String ETC,IPETC,TCMT,TSO=""
+	type Number IPCID
+
+	// Anticipated Check Adj
+	set TCMT=$$^MSG(3466)
+
+	set ETC=prodctl.dradpr
+	if ETC.isNull() set ETC=prodctl.drtrgp
+
+	do TRN(.dep,.ttx,AMT,ETC,dep.cid,"",0)
+
+	#IF 'CUVAR.IPETC.isNull()
+		set IPETC=CUVAR.IPETC
+	#ELSE
+		set IPETC="MCR"
+	#ENDIF
+	
+	set TSO="GLO#"_dep.cid
+
+	do TRN(.dep,.ttx,AMT,IPETC,"",CUVAR.IPCID,0)
+
+	quit
+
+
+public EC(RecordDEP dep,		// Deposit account		/REF:RW
+	  RecordTTX ttx,		// Primary transaction		/REF:R
+	  RecordTRN trn,		// Transaction code		/REF:R
+	  String CTL)			// Control indicators
+
+	/*
+	   Called by deposit transaction codes to error correct account
+	   closeouts.
+	
+	   Additional notes on ARGUMENTS:
+		. CTL position 1 - Calculate Interest
+				   0 - Waive all interest accrual
+				   1 - Include all interest accrual
+		. CTL position 2 - Calculate Penalty
+				   0 - Waive penalty
+				   1 - Include penalty
+		. CTL position 3 - Negative net closeout transaction
+				   0 - Credit balnce closeout
+				   1 - Debit balance closeout
+
+	*/
+	
+	type public Boolean ER
+
+	if dep.segflg,%EffectiveDate,%EffectiveDate<%SystemDate do ^RECALSEG(.dep,.ttx) quit 
+
+	type Number ACN,ADJ,ADJW,AECAMT,AIACR,AWT,CID,CINT,CMP,CPEN,DBAL
+	type Number DIR,DSWA,DWA,INTNC,NEG,NEGACR,NEGACRUN,NEGADJ,NEGIPLD
+	type Number NET,PEN,POSACR,PRM,RESINT,UNCACR,WTH
+	type String PETC,SAVEC,TAMT,TSO
+	type Date %EffectiveDate,IPLD,SCLD,SCND
+
+	// Calculate interest
+	set CINT=CTL.extract(1)
+
+	// Calculate penalty
+	set CPEN=CTL.extract(2)
+
+	// Negative net closout transaction
+	set DBAL=CTL.extract(3)
+
+	do INIT(.dep,.ttx,1)
+
+	if dep.ira do { quit:ER
+
+		do ^IRA(.dep,.ttx) quit:ER
+
+		set DWA=+TAMT.piece("#",5)
+		set DSWA=+TAMT.piece("#",15)
+		set WTH=DWA+DSWA
+		}
+	else  do {
+		set DWA=0
+		set DSWA=0
+		set WTH=+TAMT.piece("#",5)
+		}
+
+	set NET=+$select(TAMT.isLike("%#%"):TAMT.piece("#",2),1:TAMT)
+	set POSACR=TAMT.piece("#",3)
+	set PEN=TAMT.piece("#",4)
+	set NEG=+TAMT.piece("#",6)
+	set AIACR=+TAMT.piece("#",14)
+	set PETC=ttx.etc
+	set SAVEC=ttx.lnerc
+	set CMP=SAVEC.piece("#",3)
+	// Includes ^RECALC adjustment (ADJACR) and ^UMAT adjustment (grace period)
+	set ADJ=SAVEC.piece("#",4)
+	set INTNC=SAVEC.piece("#",5)
+	set NEGACR=SAVEC.piece("#",6)
+	set IPLD=SAVEC.piece("#",7)
+	set NEGIPLD=SAVEC.piece("#",29)
+	set SCLD=SAVEC.piece("#",8)
+	set NEGACRUN=SAVEC.piece("#",28)
+	set RESINT=SAVEC.piece("#",26)
+	set NEGADJ=SAVEC.piece("#",27)
+	set UNCACR=SAVEC.piece("#",30)
+
+	// don't update account balance if segmented - section SEGPEC will handle
+	if 'dep.segflg set dep.bal=dep.bal-(NET*DIR)+AECAMT
+
+	// Number of Debits
+	if 'DBAL set dep.cntdr=dep.cntdr-1
+	// Number of Credits
+	else  set dep.cntcr=dep.cntcr-1
+
+	// Collected Balance
+	set dep.balcol=dep.balcol+SAVEC
+
+	// Interest Paid Credited
+	if dep.iaf=1 set dep.intavl=dep.intavl+SAVEC.piece("#",20)
+
+	// Interest Paid Not Credited
+	if dep.iaf=2 set dep.intavlncr=dep.intavlncr+SAVEC.piece("#",20)
+
+	// Prior Term Interest
+	set dep.intprior=dep.intprior+SAVEC.piece("#",21)
+
+	if dep.swpf=1,dep.swpopt'=1 do {
+
+		type Number ICID
+
+		// Account Status
+		set dep.stat=5
+
+		type ResultSet rs=Db.select("ICID","DEP101","CID=:CID")
+		while rs.next() do {
+			set ICID=rs.getCol("ICID")
+
+			type RecordDEP dep2=Db.getRecord("DEP","CID=:ICID")
+
+			do dep2.setAuditFlag(1)
+			set dep2.stat=5
+			do dep2.save("NOTRIGBEF/NOVALREQ/NOVALDD/NOTRIGAFT/NOUPDATE/NOVALRI/NOINDEX/NOFKCHK/JOURNAL")
+			}
+		}
+	// Account Status
+	else  set dep.stat=0
+
+	// Segmented Accounts error correct
+	if dep.segflg do SEGEC(.dep,.ttx)
+
+	// Date Account Closed
+	set dep.dtc=""
+
+	// For segmented accounts, dep.posacr is updated in section SEGAEC
+
+	// Positive Accrued Int/Div
+	if 'dep.segflg set dep.posacr=dep.posacr+SAVEC.piece("#",2)
+
+	// Compounded Int/Div
+	set dep.cmp=dep.cmp+CMP
+
+	// Available Interest Accrued
+	if 'dep.segflg set dep.aiacr=dep.aiacr+SAVEC.piece("#",35)
+
+	/*
+	POSACR is the interest from TAMT on the transaction that is being 
+	built for the error correct or reversal. If POSACR is positive, then 
+	the interest that was posted was negative and never effected interest 
+	year to date fields (See FILE section). Do not adjust interest year 
+	to date fields.
+	*/
+	if POSACR<0 do {
+
+		// Penalty was assessed from Accrual
+		if PRM>1 do {
+
+			type Number AMT
+
+			set AMT=(POSACR-PEN).roundCur(dep.crcd)
+
+			// Int/Div Paid Financial Year-to-Date
+			set dep.iytd=dep.iytd+AMT
+			
+			// Int/Div Paid Tax Year-to-date
+			set dep.itytd=dep.itytd+AMT
+			
+			// Int/Div Paid - Life
+			set dep.ipl=dep.ipl+AMT
+			}
+
+		// Penalty was not accessed from Accrual
+		else  do {
+
+			type Number AMT
+
+			set AMT=POSACR.roundCur(dep.crcd)
+
+			// Int/Div Paid Financial Year-to-Date
+			set dep.iytd=dep.iytd+AMT
+			
+			// Int/Div Paid Tax Year-to-date
+			set dep.itytd=dep.itytd+AMT
+			
+			// Int/Div Paid - Life
+			set dep.ipl=dep.ipl+AMT
+			}
+		}
+
+	if 'dep.segflg do {
+
+		// Int/Div Paid Financial Year-to-Date
+		set dep.iytd=dep.iytd+AIACR
+		
+		// Int/Div Paid - Life
+		set dep.ipl=dep.ipl+AIACR
+		
+		// Int/Div Paid Tax Year-to-date
+		set dep.itytd=dep.itytd+AIACR
+		}
+
+	// Backup Withholding Financial YTD
+	set dep.bwy=dep.bwy+WTH
+	
+	// Federal Withholding Year-to-Date
+	set dep.fwy=dep.fwy+DWA
+	
+	// State Withholding Year-to-Date
+	set dep.swy=dep.swy+DSWA
+	
+	// Backup Withholding Tax Year-to-date
+	set dep.bwtytd=dep.bwtytd+WTH
+
+	if NEGACR!(NEGACRUN)!(UNCACR) do {
+
+		type Number NACR
+
+		set NACR=(NEGACR+NEGACRUN+UNCACR).roundCur(dep.crcd)
+
+		// Update Negative Interest Financial YTD if interest was 
+		// included
+		if CINT do {
+			// Negative Interest Financial Year-to-date
+			set dep.negiytd=dep.negiytd-NACR
+			
+			// Negative Interest Tax Year-to-date
+			set dep.negitytd=dep.negitytd-NACR
+			
+			// Negative interest Life
+			set dep.negipl=dep.negipl-NACR
+			}
+		
+		// Negative Accrued
+		set dep.negacr=dep.negacr+NEGACR
+		
+		// Negative Accrued Interest Unauthorized
+		set dep.negacrun=dep.negacrun+NEGACRUN
+		
+		// Uncollected Accrued
+		set dep.uncacr=dep.uncacr+UNCACR
+		}
+
+	// Residual Interest
+	set dep.resint=dep.resint+RESINT
+
+	// If discount CD, reset accrual to dep.orgdisc minus accrual adjustment
+	if dep.orgdisc do { quit:ER
+
+		type Number ACRADJ
+
+		set ACRADJ=SAVEC.piece("#",19)
+
+		// Positive Accrued Int/Div
+		set dep.posacr=dep.orgdisc-ACRADJ
+
+		do GL(.ttx,.dep,-ACRADJ,0)
+		}
+
+	if AECAMT do AECADJ(.dep,.ttx,-AECAMT)
+
+	// Penalty Financial Year-to-Date
+	set dep.pytd=dep.pytd+PEN
+
+	// Penalty Tax Year-to-date
+	set dep.pentytd=dep.pentytd+PEN
+
+	// Penalty Paid Life
+	set dep.ppl=dep.ppl+PEN
+
+	/*
+	Save IPLD regardless of CINT, since it may have also changed as a
+	result of deferred interest posting.
+	*/
+	
+	// Int/Div Paid - Last Date
+	set dep.ipld=IPLD
+	// Negative Interest Paid - Last Date
+	set dep.negipld=NEGIPLD
+
+	// Generate adjustment to GL for accrual adjustment
+
+	// Reverse earnings adjustment
+	if ADJ do GL(.ttx,.dep,-ADJ,0,$$^MSG(6748)) quit:ER
+	
+	// Reverse earnings (negative) adjustment
+	if NEGADJ do GL(.ttx,.dep,-NEGADJ,1,$$^MSG(6748)) quit:ER
+
+	if ttx.tso.isLike("%REV#%") do ^UPDCCLD(.dep,.ttx)
+
+	// Reverse service fee data - ECFEE9 must be done before FSECTR because of ETC
+	if trn.pcf.extract(9),'SCLD.isNull() do ECFEE9(.dep)
+
+	/*
+	Reversal/error correct of deferred interest, cumulative interest,
+	direct fee secondary transaction, or premature closeout tax.
+	*/
+	if dep.definadj!dep.schproc!trn.pcf.extract(10)!trn.pcf.extract(9) do FSECTR^DEPEC1(.dep,.ttx)
+
+	/*
+	Accrual adjustments for the time the account was closed.
+	Skip for segmented accounts as this is taken care of already.
+	*/
+	if %EffectiveDate,(%SystemDate-%EffectiveDate) do { quit:ER
+
+		if ttx.itc12,'dep.segflg do ENT^RECALC(.dep,.ttx) quit
+
+		/*
+		The following variables are either modified or output by
+		RECALC. They are "newed" here to protect them or prevent
+		from being introduced unnecessarily
+		*/
+		type Number ADJACR,ADJAWT,ADJBWA,ADJINT,ADJRES,ADJUNC
+		type Number NEGADJ,NEGPST,NEGUNA,RESPST,UNCPST
+
+		if (dep.ircb=5!(dep.ircb=6)),'dep.segflg do ENT^RECALC(.dep,.ttx)
+		}
+
+	// Update the average balance buckets
+	if (%EffectiveDate.isNull())!(%EffectiveDate=%SystemDate) do UPDAVB^DEPPI(.dep,.ttx)
+
+	// Closeout Reason Code
+	set dep.clr=""
+
+	quit
+
+
+NEGAMT(String AMT)		// Negative amount
+
+	//  Negate amount fields ... for EC's
+
+	type Number I
+
+	if 'AMT.isLike("%#%") quit -AMT
+
+	for I=1:1:AMT.length("#") do {
+		if 'AMT.piece("#",I).isNull() set AMT.piece("#",I)=-AMT.piece("#",I)
+		}
+
+	quit AMT
+
+
+AUT(RecordDEP dep,		// Deposit account			/REF:RW
+    RecordTTX ttx)		// Primary transaction			/REF:R
+
+	// Authorization Verification
+	
+	type public Number DBAL,NET,POSACR
+	type public String OVR(,,)
+	
+	if 'DBAL do AUT^UHLD(.dep,NET,ttx.itc,.OVR(,,))
+
+	// Restriction Flag
+	if +dep.rflg do ^UFLG(.dep)
+
+	// Restrict Flag
+	if dep.flg do FLG^UFLG(.dep,ttx.itc)
+
+	// Stop Payments
+	if dep.stp do {
+		if 'DBAL do STOP^DEPPO(.dep,.ttx) quit
+		do STOP^DEPPI(.dep,.ttx)
+		}
+
+	// Withdrawal amount is greater than maximum of $<MAXDR>
+	if dep.maxdr,NET>dep.maxdr set OVR(dep.cid,"OVR","MAXDR")=dep.maxdr.roundCur(dep.crcd)
+
+	// Withdrawal amount is greater than maximum of $<SSWLIM>
+	if dep.sswlim,NET>dep.sswlim set OVR(dep.cid,"OVR","SSWLIM")=dep.sswlim.roundCur(dep.crcd)
+
+	// Account status
+	if dep.stat set OVR(dep.cid,"OVR","STAT"_+dep.stat)=""
+
+	do PATCHK(dep.cid)
+	do SCOCHK(dep.cid)
+	do ODCHK(dep.cid)
+
+	// Account has an accrual balance of $<ACR>
+	if DBAL,POSACR set OVR(dep.cid,"OVR","ACR")=POSACR.roundCur(dep.crcd)
+
+	// Outstanding anticipated int/div check <AECOUT>
+	if dep.intchk set OVR(dep.cid,"OVR","AECOUT")=dep.intchk
+
+	if dep.ira do RPACHK(.dep)
+	
+	if dep.pldg do PLDGCHK(.dep)
+
+	quit
+
+	
+PLDGCHK(RecordDEP dep)		// Deposit account			/REF:RW
+
+	/*
+	Returns the loan payment/payoff amount from the deposit payoff account
+	when a pledged account is closed.  This section of code will return the 
+	amount of the transaction used to debit the deposit payoff account.  
+	If the teller closes out a pledged deposit account, and the loan's balance 
+	is greater than the closeout amount, this function will return the difference 
+	between the loan balance and the closeout amount, or the balance of the 
+	deposit payoff account, which ever is the lesser.  
+	If this amount is insufficient to payoff the loan, the override 
+	PLDGPAY - "Insufficient funds to payoff loan" will be returned.
+	*/
+	
+	type public RecordTTX ttx()
+	type Number LPAD
+
+        set ttx(1) = Class.new("RecordTTX")
+	set ttx(1).cid=dep.cid
+	
+	set LPAD = $$AMTDPDC^LNPTDPW(2)
+	
+	quit
+
+
+PATCHK(Number CID)		// Account number
+
+	/*
+	Return Overrides for Pre-Authorized Transfers
+
+	Collate through PAT cross reference file to return overrides for
+	the account linked to PAT sources which have not reached the stop date
+	*/
+	
+	type public String OVR(,,)
+	
+	type ResultSet rs=Db.select("SRC","PAT","CID=:CID AND STOP>=:%SystemDate")
+
+	while rs.next() do {
+		if OVR(CID,"OVR","PAT").get().isNull() set OVR(CID,"OVR","PAT")=rs.getCol("SRC")
+		else  set OVR(CID,"OVR","PAT")=OVR(CID,"OVR","PAT")_","_rs.getCol("SRC")
+		}	
+
+	quit
+
+
+SCOCHK(Number CID)
+
+	// Return Standing Collection Order overides
+	
+	type public String OVR(,,)
+	
+	type ResultSet rs=Db.select("SEQ","EFTPAY","CID=:CID AND STATUS='A'")
+	if rs.next() set OVR(CID,"OVR","EFT")=""
+
+        quit
+
+
+ODCHK(Number CID)
+
+	// Return Override for Linked Loans
+	
+	type public String OVR(,,)
+
+	type ResultSet rs=Db.select("ODACN","DEPODP","CID=:CID")
+
+	type Number ODACN
+
+	while rs.next() do {
+
+		set ODACN=rs.getCol("ODACN")
+
+		type RecordACN acn=Db.getRecord("ACN","CID=:ODACN")
+
+		if acn.cls="L",acn.stat'=4 do {
+			if OVR(CID,"OVR","ODLINK").get().isNull() set OVR(CID,"OVR","ODLINK")=ODACN
+			else  set OVR(CID,"OVR","ODLINK")=OVR(CID,"OVR","ODLINK")_","_ODACN
+			}
+		}
+
+	quit
+
+
+RPACHK(RecordDEP dep)		// Deposit account			/REF:RW
+
+	// Check for Retirement Plan Account overrides
+
+	type public String OVR(,,),TAMT
+
+	type Number DIST,YR
+	type Date DATE
+
+	if dep.rpaseq.isNull() quit
+
+	type RecordIRATYPE iratype=Db.getRecord("IRATYPE","ACN=:dep.acn,RPASEQ=:dep.rpaseq")
+
+	set DATE=$select('%EffectiveDate.isNull():%EffectiveDate,1:%SystemDate)
+	set YR=DATE.year()
+
+	if iratype.planid.isNull() quit
+
+	// Locked In Indicator
+	if dep.rpaseq,iratype.lock set OVR(dep.cid,"OVR","LOCK")=""
+
+	// Not a Life Income Fund
+	if iratype.planid'=7 quit
+
+	type RecordIRA ira=Db.getRecord("IRA","ACN=:dep.acn,RPASEQ=:dep.rpaseq,TAXYR=:YR",1)
+
+	// Total distribution amount
+	set DIST=ira.d1+ira.d2+ira.d3+ira.d4+ira.d5+ira.d6+ira.d7+ira.d8+ira.d10+ira.d11+ira.d12
+	set DIST=DIST+ira.d13+ira.d14+ira.d15+ira.d16+ira.d17+ira.d18+ira.d19+ira.d20+ira.d21
+	set DIST=DIST+ira.d22+ira.d23+ira.d24+ira.d25+ira.d26+ira.d27
+	set DIST=DIST+$select(TAMT.isLike("%#%"):TAMT.piece("#",2),1:+TAMT)
+
+	if 'ira.maxlif.isNull(),(DIST>ira.maxlif) set OVR(dep.cid,"OVR","MAXPAY")=""
+
+	quit
+
+
+INIT(RecordDEP dep,		// Deposit account			/REF:RW
+     RecordTTX ttx,		// Primary transaction			/REF:R
+     Boolean EC)		// Error correct
+
+	/*
+	Additional notes on ARGUMENTS:
+		EC	0 - Initializing for regular transaction
+			1 - Initializing for error correct
+	*/
+	
+	type public Number ACN,AECAMT,AIACR,AWT,CID,DBAL,DIR,FEESEQ,HISTSEQ
+	type public Number NEGACR,NEGACRUN,OINTNC,POSACR,PRM,RESINT,SECSEQ
+	type public Number UNCACR
+	type public String TAMT,TSO
+	type public Date SCLD,SCND
+
+	set CID=dep.cid
+	set HISTSEQ=Db.currVal("HIST","CID=:CID")
+	set SECSEQ=Db.currVal("HISTDST","CID=:CID,TSEQ=:HISTSEQ")
+	set FEESEQ=SECSEQ
+
+	// Customer Number
+	set ACN=dep.acn
+	// Anticipated Amount
+	set AECAMT=+dep.aecamt
+	// Service Charge - Next Date
+	set SCND=dep.scnd
+	// Transaction Amount
+	set TAMT=ttx.tamt
+	// Effective Date
+	set %EffectiveDate=ttx.efd
+	if %EffectiveDate.isNull() set %EffectiveDate=%SystemDate
+	// Transaction Source of Funds
+	set TSO=ttx.tso
+	// Penalty Reduction Method
+	set PRM=dep.prm
+	if PRM.isNull() set PRM=1
+
+	// Need only to load these for non-error correct transaction
+	if 'EC do {
+		// Interest Paid Not Credited
+		set OINTNC=dep.intavlncr
+		// Positive Accrued Int/Div
+		set POSACR=+dep.posacr
+		// Accrued Withholding Tax
+		set AWT=dep.awt
+		// Available Interest Accrued
+		set AIACR=dep.aiacr.roundCur(dep.crcd)
+		// Negative Accrued
+		set NEGACR=dep.negacr
+		// Negative Accrued Interest Unauthorized
+		set NEGACRUN=dep.negacrun
+		// Residual Interest
+		set RESINT=dep.resint
+		// Service Charge - Next Date
+		set SCLD=dep.scnd
+		// Uncollected Accrued
+		set UNCACR=dep.uncacr
+		}
+
+	// Determine posting direction
+	if 'DBAL set DIR=1
+	else  set DIR=-1
+
+	quit
+
+
+CLSRFLG(RecordDEP dep)		// Deposit account			/REF:R
+
+	/*
+	Set restrictions for data items specified in user table CNTD
+
+	    CNCD  =  Closeout Notification Code
+	      "CDTUF"      =       Certificate Renewal Transfer Account
+	      "INPUF"      =       Interest Payment Transfer Cross Reference
+	      "LDISUF"     =       Loan Disbursement Target Account
+	      "LNFEEARUF"  =       Loan Fee Collection Accounts
+	      "PATUF"      =       PAT X-REF File
+	      "PTUF"       =       PAT X-REF File
+	      "SRVUF"      =       Service Charge Target Account
+	      "SWPUF"      =       Loan Payment Sweep Cross-Reference
+	    CNTDRFLG  =  Restriction Flag to display (UTBLCNTD)
+	*/
+	
+	type public Boolean ER
+	type String KEY,GRP,RFLG
+	type Number TRCID
+	type Boolean LOGF
+	
+	set GRP=dep.grp
+	type ResultSet rs=Db.select("KEY,LOGF,RFLG","UTBLCNTD","GRP=:GRP")
+
+	while rs.next() do { quit:ER
+		set KEY=rs.getCol("KEY")
+		set LOGF=rs.getCol("LOGF")
+		set RFLG=rs.getCol("RFLG")
+
+		if KEY="PATUF"!(KEY="PTUF") do { quit
+			type Boolean CHK=0
+
+			type ResultSet rs1=Db.select("SEQ,CID","PAT","ACN=:dep.acn")
+			while rs1.next() do { quit:CHK
+				type Number SEQ
+
+				set SEQ=rs1.getCol("SEQ")
+				set TRCID=rs1.getCol("CID")
+
+				if TRCID.isNull()!(TRCID=dep.cid) quit
+
+				type RecordACN acn=Db.getRecord("ACN","CID=:TRCID")
+
+				if acn.stat'=4 do {
+					do CHECK(.acn,"DEP",KEY)
+					set CHK=1
+					}
+				}
+			}
+
+		set TRCID=""
+
+		if KEY="CDTUF" do {
+			type ResultSet rs=Db.select("CID","DEP","RACN=:CID")
+			if rs.next() set TRCID=rs.getCol("CID")
+			}
+
+		else  if KEY="INPUF" do {
+			type ResultSet rs=Db.select("CID","DEP","ITRF=:CID")
+			if rs.next() set TRCID=rs.getCol("CID")
+			}
+
+		else  if KEY="LDISUF" do {
+			type ResultSet rs=Db.select("CID","LN","SDTA=:CID")
+			if rs.next() set TRCID=rs.getCol("CID")
+			}
+
+		else  if KEY="LNFEEARUF" do {
+			type ResultSet rs=Db.select("CID","LN","LNFEETA=:CID")
+			if rs.next() set TRCID=rs.getCol("CID")
+			}
+
+		else  if KEY="SRVUF" do {
+			type ResultSet rs=Db.select("CID","DEP","SVCFEECID=:CID")
+			if rs.next() set TRCID=rs.getCol("CID")
+			}
+
+		else  if KEY="SWPUF" do {
+			type ResultSet rs=Db.select("CID","LPSWEEP","LPCID=:CID")
+			if rs.next() set TRCID=rs.getCol("CID")
+			}
+
+		else  do CHECK(.dep,"DEP",KEY) quit
+
+		if TRCID.isNull() do CHECK(.dep,"DEP",KEY) quit
+
+		type RecordACN acn=Db.getRecord("ACN","CID=:TRCID")
+
+		if acn.stat=4 quit
+
+		do CHECK(.acn,"DEP",KEY)
+		}
+
+	quit
+
+
+CHECK(RecordDEP dep,		// Deposit account			/REF:RW
+      String FID,		// Table identifier
+      String KEY)		// Table key
+
+	/*
+	Check Restriction
+	
+	If the value of [DEP]data item associated with the closeout
+	notification code is same as [UTBLCNTD]LOGF, save the restriction
+	code in CNTDRFLG.
+	*/
+	
+	type public String CNCD,GRP
+	
+	type String DEPDI
+
+	// Invalid data item, ignore it
+	if 'Db.isDefined("DBTBL1D","'SYSDEV',FID=:FID,DI=:KEY") quit
+
+	set DEPDI=dep.@KEY
+
+	// Invalid closeout notification code - ~p1
+	if DEPDI.isNull() do Runtime.setErrMSG("DEP",1283,CNCD) quit
+
+	type RecordUTBLCNTD utblcntd=Db.getRecord("UTBLCNTD","GRP=:GRP,KEY=:KEY")
+
+	if DEPDI,utblcntd.logf do SETOVR(utblcntd.rflg) quit 
+	if (DEPDI-utblcntd.logf)=0 do SETOVR(utblcntd.rflg)
+
+	quit
+
+
+SETOVR(String CNTDRFLG)
+
+	// Set up the restriction code
+	
+	type public Number CID
+	type public String OVR(,,)
+
+	if 'CNTDRFLG.isNull() set OVR(CID,"RFLG",CNTDRFLG)=""
+
+	quit
+
+
+PCF9(RecordDEP dep,		// Deposit account			/REF:RW
+     RecordTTX ttx)		// Primary transaction			/REF:R
+
+	/*
+	If PCF9 is turned on, calculate service fees at closeout
+	
+	Substract service charges from default close-out if fee is subtracted
+	from account being closed.
+	*/
+	
+	type Date SCND
+	type Number FEEAMT,FEEACT
+
+	// If there is no service fee plan or frequency, quit
+	if (dep.scfre.isNull())!(dep.feepln.isNull()) quit
+
+	set SCND=%SystemDate
+	set (FEEAMT,FEEACT)=0
+
+	// Returns total fee amount FEEACT
+	do EXTERN^BCHFEEUT(.dep,"11",%EffectiveDate)
+
+	if FEEACT=0 quit
+
+	do FEEACT(.dep,.ttx)
+
+	quit
+
+
+FEEACT(RecordDEP dep,		// Deposit account			/REF:RW
+       RecordTTX ttx)		// Primary transaction			/REF:R
+
+	// Create transaction for service charges when close-out
+
+	type public Cache %CACHE()
+	type public Number FEEACT
+	
+	type Number CID,SVCFEECID,TYPE
+	type String ETC,GLSC,ITC,TAMT,TCMT,TSO
+
+	set (SVCFEECID,TSO)=""
+	set TAMT=FEEACT
+
+	if dep.svcfeecid do {
+
+		set SVCFEECID=dep.svcfeecid
+
+		type RecordACN acn=Db.getRecord("ACN","CID=:SVCFEECID")
+
+		if acn.stat=4 set SVCFEECID="" quit
+
+		set CID=SVCFEECID
+		set TYPE=acn.type
+		set GLSC=acn.glsc
+		
+		// Service fee for account ~p1
+		set TCMT=$$^MSG(8435,dep.cid)
+
+		if acn.cls="D" do {
+			// Get the default fee reason code if RPA account
+			type RecordDEP dep2={RecordDEP}acn
+			if 'dep2.ira quit
+			
+			type String UTSO()
+
+			set TSO=ttx.tso
+			set UTSO("IRAD")=CUVAR.RPAFEE
+
+			do IN^UTSO(.UTSO(),.TSO)
+			}
+		}
+
+	if 'SVCFEECID do {
+
+		set CID=dep.cid
+		set TYPE=dep.type
+		set GLSC=dep.glsc
+		// Service Fees
+		set TCMT=$$^MSG(3506)
+
+		// Get the default fee reason code if RPA account.
+		if dep.ira do {
+
+			type String UTSO()
+
+			set TSO=ttx.tso
+			set UTSO("IRAD")=CUVAR.RPAFEE
+
+			do IN^UTSO(.UTSO(),.TSO)
+			}
+		}
+
+	type RecordPRODCTL prodctl=%CACHE("PRODCTL").getRecord("PRODCTL","TYPE=:TYPE")
+
+	set ETC=prodctl.drtrsc
+	if ETC.isNull() set ETC=prodctl.drtrgp
+
+	type RecordTRN trn=%CACHE("TRN").getRecord("TRN","ETC=:ETC")
+
+	set ITC=trn.itc
+	
+	do FEETR(.ttx,.dep,CID,"")
+
+	// Service Charge - Last Date
+	set dep.scld=%SystemDate
+
+	// Create G/L fee income data
+
+	set TSO="SRVFEE#"_dep.cid
+	set ETC="MCR"
+	
+	type RecordTRN trn2=%CACHE("TRN").getRecord("TRN","ETC=:ETC")
+
+	set ITC=trn2.itc
+
+	type RecordUTBLGLSC utblglsc=%CACHE("UTBLGLSC").getRecord("UTBLGLSC","GLSC=:GLSC")
+
+	do FEETR(.ttx,.dep,"",utblglsc.dglf)
+
+	quit
+
+
+FEETR(RecordTTX ttxpri,		// Primary transaction			/REF:R
+      RecordDEP dep,		// Deposit account			/REF:RW
+      Number CID,		// Account number			/COND
+      Number GL)		// General ledger account number	/COND
+      
+	type public Number BRCD,FEESEQ,HISTSEQ
+	type public Boolean ER
+	type public String ETC,ITC,SPR,TAMT,TCMT,TSO
+
+	// Set up transaction
+	
+	type RecordTTX ttx=Class.new("RecordTTX")
+		
+	if CID set ttx.cid=CID
+	else  set ttx.cid=GL
+	
+	set ttx.itc=ITC
+	set ttx.etc=ETC
+	set ttx.tamt=TAMT
+	set ttx.tlo=%UserStation
+	set ttx.tso=TSO
+	set ttx.tcmt=TCMT
+	set ttx.cdt=%CurrentDate
+	set ttx.tim=%CurrentTime
+	set ttx.brcde=BRCD
+	set ttx.uidt=%UserID
+	set ttx.crcd=dep.crcd
+	
+	if GL set ttx.cc=dep.cc
+
+	// Different account, don't pass .dep
+	if (CID'=dep.cid)!(GL) do {
+		do TRNSINGL^TRNDRV(.ttx,,%SystemDate,BRCD,5)
+		}
+	// Posting to same account
+	else  do TRNSINGL^TRNDRV(.ttx,.dep,%SystemDate,BRCD,5)
+	if ER do LOG quit
+
+	set FEESEQ=FEESEQ+.01
+
+	type RecordHISTDST histdst=Class.new("RecordHISTDST")
+
+	set histdst.cid=dep.cid
+	set histdst.tseq=HISTSEQ
+	set histdst.dstseq=FEESEQ
+	set histdst.acct=ttx.cid
+	set histdst.itc=ttx.itc
+	set histdst.etc=ttx.etc
+	set histdst.tamt=ttx.tamt
+	set histdst.tlo=ttx.tlo
+	set histdst.tso=ttx.tso
+	set histdst.tcmt=ttx.tcmt
+	set histdst.cdt=ttx.cdt
+	set histdst.tim=ttx.tim
+	set histdst.brcde=ttx.brcde
+	set histdst.trc=ttx.trc
+	set histdst.uidt=ttx.uidt
+	set histdst.spr=SPR.get()
+	set histdst.crcd=ttx.crcd
+	set histdst.cc=ttx.cc
+	set histdst.endbal=dep.bal
+
+	do histdst.bypassSave()
+
+	quit
+
+
+ECFEE9(RecordDEP dep)		// Deposit account			/REF:RW
+
+	// Reversal of SCLD and Service Fee Summary Data File
+	
+	type public Date SCLD,SCND
+	type public Boolean ER
+
+	type String FEECAT,FEETYP
+	type Number SEQ
+
+	/*
+	Cannot use Db.fastDelete to kill SRV and SRV0 because this will kill all
+	SRVD and SRVDTL. Just null them out.
+	*/
+
+	type RecordSRV srv=Db.getRecord("SRV","CID=:dep.cid,PLTP=0,SCND=:SCLD")
+
+	set srv.feechg=""
+	set srv.feeanl=""
+	set srv.feeoff=""
+	set srv.ernall=""
+	set srv.ernadj=""
+	set srv.feeact=""
+	set srv.sysadj=""
+	set srv.netfwd=""
+	set srv.feeunp=""
+	set srv.calbal=""
+	set srv.tseq=""
+	set srv.ucr=""
+	set srv.anreqbal=""
+	set srv.anexdefbal=""
+	set srv.irn=""
+	set srv.int=""
+	set srv.netfwdo=""
+	set srv.netfwdp=""
+
+	do srv.bypassSave()
+
+	type RecordSRV0 srv0=Db.getRecord("SRV0","CID=:dep.cid,PLTP=0,SCND=:SCLD")
+
+	set srv0.feebal=""
+	set srv0.avgbal=""
+	set srv0.avgcol=""
+	set srv0.avgres=""
+	set srv0.lwbal1=""
+	set srv0.lwbal2=""
+	set srv0.ledger=""
+	set srv0.avgcolc=""
+	set srv0.avgresc=""
+	set srv0.balcol=""
+	set srv0.dlyinv=""
+
+	do srv0.bypassSave()
+
+	type ResultSet rs=Db.select("FEECAT,FEETYP","SRVD","CID=:dep.cid AND SCND=:SCND AND CHGOPT=2 AND PLTP=0")
+
+	while rs.next() do {
+
+		set FEECAT=rs.getCol("FEECAT")
+		set FEETYP=rs.getCol("FEETYP")
+
+		do Db.fastDelete("SRVD","CID=:dep.cid,PLTP=0,SCND=:SCLD,FEECAT=:FEECAT,FEETYP=:FEETYP")
+
+		type ResultSet rs1=Db.select("SEQ","SRVDTL","CID=:CID AND PLTP='0' AND SCND=:SCND AND FEECAT=:FEECAT AND FEETYP=:FEETYP")
+		if rs1.next() set SEQ=rs1.getCol("SEQ")
+
+		do Db.fastDelete("SRVDTL","CID=:dep.cid,PLTP=0,SCND=:SCND,FEECAT=:FEECAT,FEETYP=:FEETYP,SEQ=:SEQ")
+		}
+
+	if dep.scfre.isNull() quit
+
+	set SCLD=SCND.nextFreqDate(dep.scfre,,"1") quit:ER
+	if SCLD<dep.odt set SCLD=""
+
+	// Reset SCLD
+	set dep.scld=SCLD
+
+	quit
+
+
+PCF10(RecordDEP dep,		// Deposit account			/REF:RW
+      RecordTTX ttx,		// Primary transaction			/REF:R
+      RecordTRN trn)		// Transaction code			/REF:R
+
+	/*
+	If PCF10 is turned on, calculate transaction service fees at closeout.
+	
+	Subtract service charges from default close-out if fee is subtracted
+	from account being closed.
+	*/
+	
+	type public Number DBWA,DNINT,DPINT,DRINT,NEGACR,NEGACRUN,PEN
+	type public Number POSACR,RESINT,UNCACR,WTH
+	
+	type Number CLAMT,FEEAMT=0
+
+	// Tally credit amounts
+	set CLAMT=dep.bal+POSACR+dep.intavlncr+DPINT
+	// Tally debit amounts
+	set CLAMT=CLAMT-PEN-WTH-NEGACR-NEGACRUN-UNCACR-RESINT-DNINT-DRINT-DBWA
+
+	do ^SRVTRN2(.dep,.ttx,.trn,CLAMT)
+
+	quit
+
+
+LOG	// Log exceptions
+
+	type public Number CID
+	type public String RM
+
+	// Service Fees error
+	do LOG^UTLEXC($T(+0),"*",$$^MSG(5544),CID,"",RM.get())
+
+	quit 
+
+
+VAL(RecordDEP dep,		// Deposit account			/REF:RW
+    Number RNDINT,		// Rounded interest
+    Number INT,			// Interest
+    Number POSACR,		// Positive interest accrual
+    Number AWT,			// Accrued withholding tax
+    Number AIACR,		// Int on available interest accrual
+    Number NEGACR,		// Negative accrual (authorized)
+    Number NEGACRUN,		// Unauthorized negative accrual
+    Number RESINT,		// Residual interest
+    Number UNCACR)		// Uncollected accrual
+
+	// Validate transaction amount
+
+	type public Number AECAMT,CUMINT,DBAL,NET,PEN,WTH
+	type public Boolean CINT,CPEN,ER
+	type public String RM="",TAMT
+	
+	type Number CRS,RNDNEG,RNDNEGUN,RNDUNC
+	
+	set RNDNEG=NEGACR.roundCur(dep.crcd)
+	set RNDNEGUN=NEGACRUN.roundCur(dep.crcd)
+	set RNDUNC=UNCACR.roundCur(dep.crcd)
+	set AIACR=AIACR.roundCur(dep.crcd)
+
+	if 'CPEN set PEN=0
+
+	// Tally credit amounts
+	set CRS=RNDINT+dep.intavlncr+AIACR+CUMINT
+	// Tally debit amounts
+	set CRS=CRS-PEN-WTH-AECAMT-RNDNEG-RNDNEGUN-RNDUNC
+	
+	// Normal closeout
+	if 'DBAL do { quit:ER
+		// Use negative balance closeout transaction code
+		if dep.bal+CRS<0 do Runtime.setErrMSG("DEP",2835) quit
+
+		// Residual interest will bring account negative
+		if dep.bal+CRS-RESINT<0 do Runtime.setErrMSG("DEP",394) quit
+
+		set NET=TAMT-(CRS-RESINT)
+
+		// Use exact closeout amount:  $
+		if (dep.bal-NET)'=0 do Runtime.setErrMSG("DEP",2826) do CALC(.dep)
+		}
+
+	// Negative Balance
+	if DBAL do { quit:ER
+		// Please use normal closeout transaction code
+		if dep.bal+CRS>0 do Runtime.setErrMSG("DEP",2200) quit
+
+		set NET=TAMT+(CRS-RESINT)
+
+		// Use exact closeout amount:  $
+		if (dep.bal+NET)'=0 do Runtime.setErrMSG("DEP",2826) do CALC(.dep)
+		}
+
+	quit
+
+
+ACRTR(RecordDEP dep,		// Deposit account			/REF:RW
+      RecordTTX ttx,		// Primary transaction			/REF:R
+      String TAMT,		// Transaction amount
+      String ETC,		// External transaction code
+      Number NEGOPT)		// Negative accrual option
+
+	/*
+	Generate accrual transaction
+
+	   NEGOPT=0 - Pos Accrual Adjustment
+	          1 - Neg Accrual (authorized/unauthorized/residual/uncollected) 
+	              Adjustment
+	*/
+	
+	type public Number CID,NEGACR,NEGACRUN,RESINT,UNCACR
+	type public Boolean ER
+	
+	if 'NEGOPT set TAMT.piece("#",3)=TAMT
+	else  do {
+		if RESINT set TAMT.piece("#",10)=RESINT.roundCur(dep.crcd)
+		if NEGACR set TAMT.piece("#",6)=NEGACR.roundCur(dep.crcd)
+		if NEGACRUN set TAMT.piece("#",11)=NEGACRUN.roundCur(dep.crcd)
+		if UNCACR set TAMT.piece("#",18)=UNCACR.roundCur(dep.crcd)
+		}
+
+	do TRN(.dep,.ttx,TAMT,ETC,CID,"",0) quit:ER
+
+	quit
+
+
+SEGMENT(RecordDEP dep,		// Deposit account			/REF:RW
+	RecordTTX ttx)		// Primary transaction			/REF:R
+
+	// Segmented Account Closeout
+
+	type public Number DIR,INT
+     	type public Boolean CINT
+     	type public String SAVEC,TAMT
+
+	type Number AIACR,AIBAL,AIPM,AIPNM,BAL,IPM,IPNM,NUM,POSACR
+
+	set (AIPM,AIPNM,IPM,IPNM)=0
+
+	// Close all segments
+	type ResultSet rs=Db.select("SEGMENT","DEPSEG","CID=:dep.cid")
+
+	while rs.next() do {
+
+		set NUM=rs.getCol("SEGMENT")
+
+		type RecordDEPSEG depseg=Db.getRecord("DEPSEG","CID=:dep.cid,SEGMENT=:NUM")
+
+		set BAL=depseg.bal*DIR
+
+		if BAL do {
+
+			do TSOSEG^DEPPOSEG(.ttx,"SEGP",NUM,BAL,1)
+
+			// Ledger Balance
+			set depseg.bal=0
+			}
+
+		/*
+		Only use POSACR,AIBAL and AIACR from the segment if the
+		account is set to accrue at the segment level.
+		*/
+		if 'dep.segacr do {
+
+			set AIBAL=depseg.aibal*DIR
+
+			if AIBAL do {
+				do TSOSEG^DEPPOSEG(.ttx,"SEGI",NUM,AIBAL,1)
+				// Available Interest Balance
+				set depseg.aibal=0
+				}
+
+			quit:'CINT 
+
+			set POSACR=depseg.posacr*DIR
+
+			if POSACR do {
+
+				do TSOSEG^DEPPOSEG(.ttx,"SEGA",NUM,POSACR,1)
+
+				// Accrued Interest
+				set depseg.posacr=0
+
+				// increase interest paid buckets
+				if NUM set IPNM=IPNM+POSACR
+				else  set IPM=IPM+POSACR
+				}
+
+			set AIACR=depseg.aiacr*DIR
+
+			if AIACR do {
+
+				do TSOSEG^DEPPOSEG(.ttx,"SEGAA",NUM,AIACR,1)
+
+				// Available Interest Accrued
+				set depseg.aiacr=0
+
+				// increase interest paid buckets
+				if NUM set AIPNM=AIPNM+AIACR
+				else  set AIPM=AIPM+AIACR
+				}
+			}
+
+		do depseg.bypassSave()
+		}
+
+	if dep.segacr do {
+		type Number RNDXTAMT
+		type String XTAMT
+
+		if dep.intavlncr do {
+			set XTAMT=ttx.tamt
+			set RNDXTAMT=dep.intavlncr.roundCur(dep.crcd)
+			set XTAMT.piece("#",8)=XTAMT.piece("#",8)+(RNDXTAMT*DIR)
+			set ttx.tamt=XTAMT
+			// Interest Paid Not Credited
+			set dep.intavlncr=0
+			}
+
+		quit:'CINT 
+
+		set POSACR=dep.posacr*DIR
+		if POSACR do {
+			set XTAMT=ttx.tamt
+			set RNDXTAMT=POSACR.roundCur(dep.crcd)
+			set XTAMT.piece("#",3)=XTAMT.piece("#",3)+RNDXTAMT
+			set ttx.tamt=XTAMT
+			set INT=INT+POSACR
+			set dep.posacr=0
+			set IPNM=IPNM+POSACR
+			}
+
+		set AIACR=dep.aiacr*DIR
+		if AIACR do {
+			set XTAMT=ttx.tamt
+			set RNDXTAMT=AIACR.roundCur(dep.crcd)
+			set XTAMT.piece("#",14)=XTAMT.piece("#",14)+RNDXTAMT
+			set ttx.tamt=XTAMT
+			set INT=INT+AIACR
+			set AIPM=AIPM+AIACR
+			}
+		}
+
+	// Update interest paid buckets
+	if CINT do {
+
+		if IPNM do {
+
+			set IPNM=IPNM.roundCur(dep.crcd)
+
+			// Int Paid on Non-Matured Prin - Life
+			set dep.ipnmpl=dep.ipnmpl+IPNM
+			// Int Paid on Non-Matured Prin - YTD
+			set dep.ipnmpytd=dep.ipnmpytd+IPNM
+			}
+
+		if IPM do {
+
+			set IPM=IPM.roundCur(dep.crcd)
+
+			// Interest Paid on Matured Prin - Life
+			set dep.ipmpl=dep.ipmpl+IPM
+			// Interest Paid on Matured Prin - YTD
+			set dep.ipmpytd=dep.ipmpytd+IPM
+			}
+
+		if AIPNM do {
+
+			set AIPNM=AIPNM.roundCur(dep.crcd)
+
+			// Int Paid on Int on Non-Matured Prin Life
+			set dep.ipinmpl=dep.ipinmpl+AIPNM
+			// Int Paid on Int on Non-Matured Prin YTD
+			set dep.ipinmytd=dep.ipinmytd+AIPNM
+			}
+
+		if AIPM do {
+
+			set AIPM=AIPM.roundCur(dep.crcd)
+
+			// Int Paid on Int on Matured Prin - Life
+			set dep.ipimrl=dep.ipimrl+AIPM
+			// Int Paid on Int on Matured Principal YTD
+			set dep.ipimpytd=dep.ipimpytd+AIPM
+			}
+		}
+
+	// Save error correct information
+
+	// Loan Error-Correct Data
+	set SAVEC=ttx.lnerc
+	// Total Avail Int Accrual on Non-Mat Seg
+	set SAVEC.piece("#",36)=dep.taianms
+	// Total Avail Int Accrual on Matured Seg
+	set SAVEC.piece("#",37)=dep.taiams
+	// Total Accrual on Seg Prin (Non-Matured)
+	set SAVEC.piece("#",38)=dep.taspnm
+	// Total Accrual on Segment Prin (Matured)
+	set SAVEC.piece("#",39)=dep.taspm
+	// Total Avail Int on Matured Segments
+	set SAVEC.piece("#",40)=dep.taims
+	// Total Avail Int on Non-Matured Segments
+	set SAVEC.piece("#",41)=dep.tainms
+	// Loan Error-Correct Data
+	set ttx.lnerc=SAVEC
+
+	// Clear account level buckets
+	// Available Interest Accrued
+	set dep.aiacr=0
+	// Total Accrual on Segment Prin (Matured)
+	set dep.taspm=0
+	// Total Accrual on Seg Prin (Non-Matured)
+	set dep.taspnm=0
+	// Total Avail Int Accrual on Matured Seg
+	set dep.taiams=0
+	// Total Avail Int Accrual on Non-Mat Seg
+	set dep.taianms=0
+	// Total Avail Int on Matured Segments
+	set dep.taims=0
+	// Total Avail Int on Non-Matured Segments
+	set dep.tainms=0
+	// Total Segment Matured Principal Balance
+	set dep.tsmpb=0
+	// Total Segment Non-Matured Prin Balance
+	set dep.tsnmpb=0
+
+	// Update TAMT to include all pieces.
+	set TAMT=ttx.tamt
+
+	quit
+
+
+SEGEC(RecordDEP dep,		// Deposit account			/REF:RW
+      RecordTTX ttx)		// Transaction				/REF:R
+      
+       	type public Boolean CINT,ER
+       	type public String SAVEC
+
+	type Number AIPM,AIPNM,FEESEQ,HISTSEQ,IPM,IPNM,SECSEQ,SEGA,SEGAA
+	type Number SEGI,SEGP,XAIACR,XPOSACR
+	type String TSO,XTAMT
+
+	do OUT^UTSO(.TSO,ttx.tso)
+
+	set SEGP=TSO("SEGP").get()
+	set SEGI=TSO("SEGI").get()
+	set SEGA=TSO("SEGA").get()
+	set SEGAA=TSO("SEGAA").get()
+
+	// Running total of accrued interest paid
+	set (AIPM,AIPNM,IPM,IPNM)=0
+
+	// set XAIACR from TAMT to update interest buckets.
+	set XTAMT=ttx.tamt
+	set XPOSACR=-XTAMT.piece("#",3)
+	set XAIACR=-XTAMT.piece("#",14)
+
+	if 'SEGA.isNull() do SEGAEC(.dep,SEGA) if 1
+	// Update POSACR if the closeout did not include interest.
+	else  do {
+		if CINT set IPNM=IPNM+XPOSACR
+
+		// Positive Accrued Int/Div
+		set dep.posacr=dep.posacr+SAVEC.piece("#",2)
+		// Total Accrual on Seg Prin (Non-Matured)
+		set dep.taspnm=dep.taspnm+SAVEC.piece("#",38)
+		// Total Accrual on Segment Prin (Matured)
+		set dep.taspm=dep.taspm+SAVEC.piece("#",39)
+		}
+
+	if ER.get() quit
+
+	if 'SEGAA.isNull() do SEGAAEC(.dep,SEGAA) if 1
+	// Update available accrual buckets if closeout did not include interest.              
+	else  do {
+		if CINT set AIPM=AIPM+XAIACR
+		// Available Interest Accrued
+		set dep.aiacr=dep.aiacr+SAVEC.piece("#",35)
+		// Total Avail Int Accrual on Non-Mat Seg
+		set dep.taianms=dep.taianms+SAVEC.piece("#",36)
+		// Total Avail Int Accrual on Matured Seg
+		set dep.taiams=dep.taiams+SAVEC.piece("#",37)
+		}
+
+	if ER.get() quit
+
+	// Decrease interest paid fields if accrued interest was included in original closeout
+	if CINT do {
+
+		if AIPM set AIPM=AIPM.roundCur(dep.crcd)
+		if AIPNM set AIPNM=AIPNM.roundCur(dep.crcd)
+		if IPM set IPM=IPM.roundCur(dep.crcd)
+		if IPNM set IPNM=IPNM.roundCur(dep.crcd)
+
+		// Interest Paid on Matured Prin - Life
+		set dep.ipmpl=dep.ipmpl-IPM
+		// Interest Paid on Matured Prin - YTD
+		set dep.ipmpytd=dep.ipmpytd-IPM
+
+		// Int Paid on Non-Matured Prin - Life
+		set dep.ipnmpl=dep.ipnmpl-IPNM
+		// Int Paid on Non-Matured Prin - YTD
+		set dep.ipnmpytd=dep.ipnmpytd-IPNM
+
+		// Int Paid on Int on Matured Prin - Life
+		set dep.ipimrl=dep.ipimrl-AIPM
+		// Int Paid on Int on Matured Principal YTD
+		set dep.ipimpytd=dep.ipimpytd-AIPM
+
+		// Int Paid on Int on Non-Matured Prin Life
+		set dep.ipinmpl=dep.ipinmpl-AIPNM
+		// Int Paid on Int on Non-Matured Prin YTD
+		set dep.ipinmytd=dep.ipinmytd-AIPNM
+
+		// Int/Div Paid Financial Year-to-Date
+		set dep.iytd=dep.iytd-XAIACR
+		// Int/Div Paid - Life
+		set dep.ipl=dep.ipl-XAIACR
+		// Int/Div Paid Tax Year-to-date
+		set dep.itytd=dep.itytd-XAIACR
+		}
+
+	if ER.get() quit
+
+	if 'SEGI.isNull() do SEGIEC(.dep,SEGI)
+	if SEGI.isNull() do {
+		/*
+		 Update available int balances for accounts that accrue at the
+		 account level closed without interest.
+		*/
+
+		// Total Avail Int on Matured Segments
+		set dep.taims=SAVEC.piece("#",40)
+		// Total Avail Int on Non-Matured Segments
+		set dep.tainms=SAVEC.piece("#",41)
+		}
+
+	if ER.get() quit
+
+	if 'SEGP.isNull() do SEGPEC(.dep,SEGP)
+
+	quit
+
+
+SEGAEC(RecordDEP dep,		// Deposit account			/REF:RW
+       String REC)		// "SEGA" TSO subfield
+
+	type public Number IPM,IPNM
+	
+	type Number AMT,COUNT,NUM
+	type String PIECE
+	type Boolean EXIT=0
+
+	for COUNT=1:1 quit:EXIT=1  do {
+
+		set PIECE=REC.piece("^",COUNT)
+		if PIECE.isNull() set EXIT=1 quit
+
+		set NUM=PIECE.piece(":",1)
+		set AMT=PIECE.piece(":",2)
+
+		type RecordDEPSEG depseg=Db.getRecord("DEPSEG","CID=:dep.cid,SEGMENT=:NUM")
+
+		// Invalid Segment Number
+		if depseg.getMode()=0 do Runtime.setErrMSG("DEP",3326) set EXIT=1 quit
+
+		// Accrued Interest
+		set depseg.posacr=depseg.posacr+AMT
+
+		// Total Accrual on Seg Prin (Non-Matured)
+		if NUM set dep.taspnm=dep.taspnm+AMT set IPNM=IPNM+AMT
+		// Total Accrual on Segment Prin (Matured)
+		else  set dep.taspm=dep.taspm+AMT set IPM=IPM+AMT
+
+		// Positive Accrued Int/Div
+		set dep.posacr=dep.posacr+AMT
+		}
+
+	quit
+
+
+SEGAAEC(RecordDEP dep,		// Deposit account			/REF:RW
+	String REC)		// "SEGAA" TSO subfield
+	
+	type public Number AIPNM,AIPM
+	type public Boolean ER
+
+	type Number AMT,COUNT,NUM
+	type String PIECE
+	type Boolean EXIT=0
+
+	for COUNT=1:1 quit:EXIT!(ER)  do {
+
+		set PIECE=REC.piece("^",COUNT)
+		if PIECE.isNull() set EXIT=1 quit
+
+		set NUM=PIECE.piece(":",1)
+		set AMT=PIECE.piece(":",2)
+
+		type RecordDEPSEG depseg=Db.getRecord("DEPSEG","CID=:dep.cid,SEGMENT=:NUM",1)
+
+		// Invalid Segment Number
+		if depseg.getMode()=0 do Runtime.setErrMSG("DEP",3326) quit
+
+		// Available Interest Accrued
+		set depseg.aiacr=depseg.aiacr+AMT
+
+		// Total Avail Int Accrual on Non-Mat Seg
+		if NUM set dep.taianms=dep.taianms+AMT set AIPNM=AIPNM+AMT
+		// Total Avail Int Accrual on Matured Seg
+		else  set dep.taiams=dep.taiams+AMT set AIPM=AIPM+AMT
+
+		// Available Interest Accrued
+		set dep.aiacr=dep.aiacr+AMT
+		}
+
+	quit
+
+
+SEGIEC(RecordDEP dep,		// Deposit account			/REF:RW
+       String REC)		// "SEGI" TSO subfield
+       
+	type public Number DIR
+
+	type Number AMT,COUNT,NUM
+	type String PIECE
+	type Boolean EXIT=0
+
+	for COUNT=1:1 quit:EXIT=1  do {
+
+		set PIECE=REC.piece("^",COUNT)
+		if PIECE.isNull() set EXIT=1 quit 
+
+		set NUM=PIECE.piece(":",1)
+		set AMT=PIECE.piece(":",2)*DIR
+
+		type RecordDEPSEG depseg=Db.getRecord("DEPSEG","CID=:dep.cid,SEGMENT=:NUM",1)
+
+		// Invalid Segment Number
+		if depseg.getMode()=0 do Runtime.setErrMSG("DEP",3326) set EXIT=1 quit
+		
+		// Available Interest Balance
+		set depseg.aibal=depseg.aibal+AMT
+
+		// Total Avail Int on Non-Matured Segments
+		if NUM set dep.tainms=dep.tainms+AMT
+		// Total Avail Int on Matured Segments
+		else  set dep.taims=dep.taims+AMT
+		}
+
+	quit
+
+
+SEGPEC(RecordDEP dep,		// Deposit account			/REF:RW
+       String REC)		// "SEGP" TSO subfield
+       
+	type public Number DIR
+
+	type Number AMT,COUNT,NUM
+	type String PIECE
+	type Boolean EXIT=0
+
+	for COUNT=1:1 quit:EXIT=1  do {
+
+		set PIECE=REC.piece("^",COUNT)
+		if PIECE.isNull() set EXIT=1 quit
+
+		set NUM=PIECE.piece(":",1)
+		set AMT=PIECE.piece(":",2)*DIR
+
+		type RecordDEPSEG depseg=Db.getRecord("DEPSEG","CID=:dep.cid,SEGMENT=:NUM",1)
+
+		// Invalid Segment Number
+		if depseg.getMode()=0 do Runtime.setErrMSG("DEP",3326) set EXIT=1 quit
+
+		// Ledger Balance
+		set depseg.bal=depseg.bal+AMT
+
+		// Total Segment Non-Matured Prin Balance
+		if NUM set dep.tsnmpb=dep.tsnmpb+AMT
+		// Total Segment Matured Principal Balance
+		else  set dep.tsmpb=dep.tsmpb+AMT
+
+		// Ledger Balance
+		set dep.bal=dep.bal+AMT
+		}
+
+	quit
+
+
+POSINT(RecordDEP dep,		// Deposit account			/REF:RW
+       RecordTTX ttx,		// Primary transaction			/REF:R
+       Number ADJ)		// Adjustment amount
+
+	type public Cache %CACHE()
+	
+	type String ETC,TAMT,TCMT
+
+	type RecordPRODCTL prodctl=%CACHE("PRODCTL").getRecord("PRODCTL","TYPE=:dep.type")
+
+	if ADJ<0 do {
+		// DR Pos. Interest Paid TC
+		set ETC=prodctl.drtrin
+		set TAMT=-ADJ
+		}
+	else  do {
+		// CR Interest Paid TC
+		set ETC=prodctl.crtrin
+		set TAMT=ADJ
+		}
+
+	// Cumulative interest posting adj
+	set TCMT=$$^MSG(4681)
+
+	do TRN(.dep,.ttx,TAMT,ETC,dep.cid,"",1)
+
+	quit
+
+
+EXPENSE(RecordDEP dep,		// Deposit account			/REF:RW
+	RecordTTX ttx,		// Primary transaction			/REF:R
+	Number ADJ)		// Adjustment amount
+	
+	// Post interest expense GL transaction
+
+	type public Cache %CACHE()
+	type public Boolean ER
+	
+	type String ETC,TAMT,TCMT
+
+	if 'dep.trb do {
+		// Misc Credit
+		if ADJ<0 set ETC="MCR" set TAMT=-ADJ
+		// Misc Debit
+		else  set ETC="MDR" set TAMT=ADJ
+		}
+	else  do {
+		// Misc Debit
+		if ADJ<0 set ETC="MDR" set TAMT=-ADJ
+		// Misc Credit
+		else  set ETC="MCR" set TAMT=ADJ
+		}
+
+	type RecordUTBLGLSC utblglsc=%CACHE("UTBLGLSC").getRecord("UTBLGLSC","GLSC=:dep.glsc")
+
+	set TCMT=""
+
+	// Dep G/L # (Interest Expense)
+	do TRN(.dep,.ttx,TAMT,ETC,"",utblglsc.dgli,1) quit:ER
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60751^5526^Dhanalakshmi R^63324"	// Signature - LTD^TIME^USER^SIZE

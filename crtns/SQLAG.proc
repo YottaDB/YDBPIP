@@ -1,0 +1,1165 @@
+SQLAG	
+		 
+	/*
+	SQL aggregate table builder engine
+	
+	Various utilities for managing aggregates.  Builds run-time routine;
+	builds database table definitions; OPENS and FETCHES SQL aggregate
+	tables based on the aggregate table definition in DBTBL22,DBTBL22C
+	and DBTBL22R
+
+	---- Revision History -------------------------------------------------
+	10/11/05 - RussellDS - CR17418
+		   Created.
+
+	-----------------------------------------------------------------------
+	*/
+	
+	quit
+	
+	
+public CREATE(String AGID)	// Aggregate ID
+
+	/*
+	Create run-time routine to build an aggregate database.
+	
+	Approach:
+		- Get column references from main section and rows and
+		  columns to allow variable substitution
+		  
+		- Use ^UCQRYBLD to construct query code
+		
+		- Once all info gathered, generate PSL code including result set
+		  of all needed columns, code to calculate data and execute
+		  appropriate queries, and file updates.
+	*/
+	
+	type public Boolean ER = 0
+	type public String RM
+	
+	type Boolean DTL
+	type Number I
+	type String CMPERR(), COLREFS(), FRM, GRP, INFO(,,,), PSLCODE(), RTN
+	
+	type RecordDBTBL22 dbtbl22 = Db.getRecord("DBTBL22", "%LIBS='SYSDEV',AGID=:AGID", 1)
+	
+	if (dbtbl22.getMode() = 0) do { quit
+		
+		set ER = 1
+		// Missing aggregate definition for ~p1
+		set RM = $$^MSG(1302)
+	}
+
+	if '$$hasRC(AGID) do { quit
+		
+		set ER = 1
+		// Must define one column
+		set RM = $$^MSG(1304)
+	}
+	
+	set FRM = dbtbl22.frm.upperCase()				// Table list
+	set GRP = dbtbl22.grp.upperCase()
+	set INFO("MAIN", "GRP") = $$GETCOLS(FRM, GRP, .COLREFS(), .RM)
+	if 'RM.isNull() set ER = 1 quit
+	
+	// Determine if detail - if main table contains all keys, no separate
+	// detail table, even if dbtbl22.dtl is on
+	set DTL = dbtbl22.dtl
+	if DTL, 'GRP.isNull(), $$ISDETAIL(GRP, dbtbl22.frm) set DTL = 0
+	
+	// If detail, need to get all primary table's keys as well
+	if DTL do {
+	
+		type String KEYS, PRIMKEYS, PRIMTBL
+		
+		set PRIMKEYS = ""
+		set PRIMTBL = FRM.piece(",", 1)
+	
+		type RecordDBTBL1 dbtbl1 = Db.getRecord("DBTBL1", "%LIBS='SYSDEV',FID=:PRIMTBL")
+	
+		set KEYS = dbtbl1.acckeys
+	
+		for I = 1:1:KEYS.length(",") do {
+		
+			type String PRIMKEY = KEYS.piece(",", I)
+		
+			if 'PRIMKEY.isLiteral(), '{List}GRP.contains(PRIMKEY) do {
+				
+				set COLREFS(PRIMTBL_"."_PRIMKEY) = ""
+				set PRIMKEYS = PRIMKEYS_PRIMKEY_","
+			}				
+		}
+		
+		set INFO("MAIN", "DTL") = DTL
+		set INFO("MAIN", "PRIMKEYS") = PRIMKEYS.extract(1, PRIMKEYS.length() - 1)
+	}
+	
+	// Get column data
+	type DbSet dscol = Db.selectDbSet("DBTBL22C", "%LIBS='SYSDEV' AND AGID=:AGID")
+	
+	while dscol.next() do { quit:ER
+		
+		type Number N, ptr
+		type String COL, EXP, NEWEXP, tok, WHERE
+		
+		type RecordDBTBL22C dbtbl22c = dscol.getRecord("DBTBL22C")
+		
+		set INFO("COL", dbtbl22c.col, "DESC") = dbtbl22c.des
+		set INFO("COL", dbtbl22c.col, "FUN") = dbtbl22c.fun
+		
+		set EXP = $$TOKEN^%ZS(dbtbl22c.exp, .tok)
+		set NEWEXP = ""
+		
+		// Get column components of EXP (may be complex, e.g., A+B)
+		set ptr = 0
+		for  do { quit:((ptr = 0) ! ER)
+					
+			set COL = $$ATOM^%ZS(EXP, .ptr, "()+-/*#\=_,!&@", tok)
+			if ((COL?1A.AN) ! (COL?1"%".AN)) do {
+				
+				set COL = $$GETCOLS(FRM, COL, .COLREFS(), .RM)
+				if 'RM.isNull() set ER = 1
+			}
+			
+			if 'ER set NEWEXP = NEWEXP_COL
+		}
+		
+		set INFO("COL", dbtbl22c.col, "EXP") = NEWEXP
+		
+		if 'dbtbl22c.lnk.isNull() do {
+			
+			type RecordDBTBL22C lnk = Db.getRecord("DBTBL22C", "%LIBS='SYSDEV',AGID=:AGID,COL=:dbtbl22c.lnk")
+			
+			set WHERE = lnk.whr1_" "_lnk.whr2_" "_lnk.whr3_" "_lnk.whr4_" "_lnk.whr5
+		}
+		else  set WHERE = dbtbl22c.whr1_" "_dbtbl22c.whr2_" "_dbtbl22c.whr3_" "_dbtbl22c.whr4_" "_dbtbl22c.whr5
+		
+		set WHERE = WHERE.trim()
+		
+		if 'WHERE.isNull() do {
+		
+			// Locate columns used in where clause
+			do WHRCOLS(FRM, WHERE, .COLREFS())
+		
+			// Build query code
+			do GETQRYS(FRM, WHERE, "COL", dbtbl22c.col, .INFO(,,,))
+		}
+	}
+	
+	quit:ER
+	
+	// Locate columns used in row where clause and build query code
+	type DbSet dsrow = Db.selectDbSet("DBTBL22R", "%LIBS='SYSDEV' AND AGID=:AGID")
+	
+	while dsrow.next() do {
+		
+		type String WHERE
+		
+		type RecordDBTBL22R dbtbl22r = dsrow.getRecord("DBTBL22R")
+		
+		set INFO("ROW", dbtbl22r.row, "DESC") = dbtbl22r.des
+		
+		set WHERE = dbtbl22r.whr1_" "_dbtbl22r.whr2_" "_dbtbl22r.whr3_" "_dbtbl22r.whr4_" "_dbtbl22r.whr5
+		set WHERE = WHERE.trim()
+		
+		// Locate columns used in where clause
+		do WHRCOLS(FRM, WHERE, .COLREFS())
+		
+		// Build query code
+		do GETQRYS(FRM, WHERE, "ROW", dbtbl22r.row, .INFO(,,,))
+	}
+	
+	do BLDCODE(.dbtbl22, .INFO(,,,), .COLREFS(), .PSLCODE(), .RTN)
+		
+	// Call PSL compiler
+	do cmpA2F^UCGM(.PSLCODE, RTN,,,,,.CMPERR, dbtbl22.agid_"~Aggregate")
+
+	if +CMPERR.get() set ER=1		// Hard compile errors
+	
+	quit
+	
+	
+BLDCODE(RecordDBTBL22 dbtbl22,	// DBTBL22 record
+	String INFO(,,,),	// Row and column info		/MECH=REFARR:R
+	String COLREFS(),	// Column references		/MECH=REFARR:R
+	String PSLCODE(),	// Code				/MECH=REFARR:W
+	String RTN)		// Routine name			/MECH=REF:W
+	
+	/*
+	Generate the PSL code and compile the run-time routine
+	*/
+	
+	type Boolean DTL, hasAVGS
+	type Number I, VARCNT
+	type String AGTBL, AGTBLDTL, CODE, COL, DBTBL22, GRP, GRPCOL, KEYREF, KEYREFDT
+	type String N, NEWLIST(), SELECT, TAB, TABS, TYPE, VARS(), VARSLEN(,), WHERE
+	
+	set RTN = dbtbl22.rtn
+	
+	if RTN.isNull() do {
+		
+		set DBTBL22 = ""
+		lock +DBTBL22
+		
+		type ResultSet rs = Db.select("RTN", "DBTBL22", "RTN LIKE 'AG01%'", "RTN DESC")
+		
+		if rs.isEmpty() set RTN = "AG010001"
+		
+		else  if rs.next() do {
+			
+			set RTN = rs.getCol("RTN")
+			set RTN = "AG01"_(10000 + RTN.extract(5, 8) + 1).extract(2, 5)
+		}
+	
+		set dbtbl22.rtn = RTN
+		
+		do dbtbl22.save()
+		
+		lock -DBTBL22
+	}
+	
+	// Assign variable names to column references and build NEWLIST and SELECT
+	if (dbtbl22.dtp > 0) set NEWLIST("Date") = "DATE, "
+	set NEWLIST("Number") = "I, ROW, "
+	set NEWLIST("String") = "ROWS, "
+	set NEWLIST("Boolean") = ""
+
+	set (COL, SELECT) = ""
+	for I=1:1 set COL = COLREFS(COL).order() quit:COL.isNull()  do {
+		
+		type String DI, FID
+		
+		set COLREFS(COL) = "v"_I
+		set VARS(I) = COL
+		set VARSLEN(COL.length(), COL) = "v"_I	// For use in replacement
+		set SELECT = SELECT_COL_","
+		
+		set FID = COL.piece(".", 1)
+		set DI = COL.piece(".", 2)
+		
+		type RecordDBTBL1D dbtbl1d = Db.getRecord("DBTBL1D", "%LIBS='SYSDEV',FID=:FID,DI=:DI")
+		
+		if ((dbtbl1d.typ = "N") ! (dbtbl1d.typ = "$") ! (dbtbl1d.typ = "C")) set TYPE = "Number"
+		else  if (dbtbl1d.typ = "L") set TYPE = "Boolean"
+		else  if (dbtbl1d.typ = "D") set TYPE = "Date"
+		else  set TYPE = "String"
+		
+		set NEWLIST(TYPE) = NEWLIST(TYPE).get()_"v"_I_", "
+	}
+	
+	set VARCNT = I - 1
+	
+	set SELECT = SELECT.extract(1, SELECT.length() - 1)
+	
+	set TAB=$C(9)
+
+	do addcode(RTN_TAB_"// DQ Aggregate Definition Routine for AGID = "_dbtbl22.agid)
+	do addcode(TAB_"// Last compiled:  "_%CurrentDate.toString()_" "_$$TIM^%ZM_" - "_%UserID.get())
+	do addcode("")
+	do addcode(TAB_"// THIS IS A COMPILED ROUTINE.  Compiled by procedure SQLAG.")
+	do addcode("")
+	do addcode(TAB_"// Refer to table DBTBL22 for the aggregate definition.")
+	do addcode("")
+	do addcode("")
+	
+	// Add scoping, make sure line is not too long
+	set TYPE = ""
+	for  set TYPE = NEWLIST(TYPE).order() quit:TYPE.isNull()  if 'NEWLIST(TYPE).isNull() do {
+		
+		set NEWLIST(TYPE) = NEWLIST(TYPE).extract(1, NEWLIST(TYPE).length() - 2)
+		
+		for  do { quit:NEWLIST(TYPE).isNull()
+		
+			do addcode(TAB_"type "_TYPE_" "_NEWLIST(TYPE).piece(",", 1, 20))
+			set NEWLIST(TYPE) = NEWLIST(TYPE).piece(",", 21, NEWLIST(TYPE).length())
+		}
+	}
+	do addcode("")
+	
+	set DTL = INFO("MAIN", "DTL").get()
+	
+	set AGTBL = "DQA"_dbtbl22.agid
+	if DTL set AGTBLDTL = AGTBL_"DTL"
+	else  set AGTBLDTL = ""
+	
+	if (dbtbl22.dtp = 1) do addcode(TAB_"set DATE = %CurrentDate")
+	if (dbtbl22.dtp = 2) do addcode(TAB_"set DATE = %SystemDate")
+	
+	if (dbtbl22.dtp > 0) do addcode("")
+	
+	// Remove any existing data
+	if DTL do {		// Detail table
+		
+		set CODE = "do Db.fastDelete("""_AGTBLDTL
+		if (dbtbl22.dtp > 0) set CODE = CODE_""", ""DATE=:DATE"""
+		set CODE = CODE_")"
+		do addcode(TAB_CODE)
+	}
+	set CODE = "do Db.fastDelete("""_AGTBL_""""
+	if (dbtbl22.dtp > 0) set CODE = CODE_", ""DATE=:DATE"""
+	set CODE = CODE_")"
+	do addcode(TAB_CODE)
+
+	do addcode("")
+	
+	// Get main WHERE clause for result set
+	set WHERE = dbtbl22.whr1_" "_dbtbl22.whr2_" "_dbtbl22.whr3_" "_dbtbl22.whr4_" "_dbtbl22.whr5
+	set WHERE = WHERE.trim()
+	
+	// Select data
+	do addcode(TAB_"type ResultSet rs = Db.select("""_SELECT_""", """_dbtbl22.frm_""", """_WHERE_""")")
+	do addcode("")
+	
+	do addcode(TAB_"while rs.next() do {")
+	do addcode("")
+	
+	// Set variables
+	for I = 1:1:VARCNT do addcode(TAB_TAB_"set v"_I_" = rs.getCol("""_VARS(I)_""")")
+	do addcode("")
+
+	do addcode(TAB_TAB_"// Execute row level queries")
+	do addcode(TAB_TAB_"set ROWS = """"")
+	
+	// Execute row queries to determine which rows are selected
+	set N = ""
+	for  set N = INFO("ROW", N).order() quit:N.isNull()  do {
+		
+		type Number QN
+		type String QUERY
+		
+		set (QN, QUERY) = ""
+		for  set QN = INFO("ROW", N, "QRY", QN).order() quit:QN.isNull()  set QUERY = QUERY_INFO("ROW", N, "QRY", QN)_", "
+		set QUERY = QUERY.extract(1, QUERY.length() - 2)
+		
+		set CODE = ""
+		if 'QUERY.isNull() do {
+		
+			// Replace column references with variables
+			set QUERY = $$REPLVAR(QUERY, .VARSLEN(,))
+		
+			set CODE = "if "_QUERY_" "
+		}
+		set CODE = CODE_"set ROWS = ROWS_"_N_"_"","""
+		do addcode("")
+		do addcode(TAB_TAB_"// Row "_N_" - "_INFO("ROW", N, "DESC"))
+		do addcode(TAB_TAB_CODE)
+	}
+		
+	do addcode("")
+	
+	// Build key references for AG tables
+	set KEYREF = ""
+	if (dbtbl22.dtp > 0) set KEYREF = "DATE=:DATE,"
+	set KEYREF = KEYREF_"ROW=:ROW,"
+	for I = 1:1 set GRPCOL = INFO("MAIN", "GRP").piece(",", I) quit:GRPCOL.isNull()  do {
+		
+		set KEYREF = KEYREF_GRPCOL.piece(".", 2)_"=:"_COLREFS(GRPCOL)_","
+	}
+	set KEYREF = KEYREF.extract(1, KEYREF.length() - 1)
+	
+	// Detail table
+	if DTL do {
+		
+		type String PRIMKEYS, PRIMTBL
+		
+		set KEYREFDT = KEYREF_",COL=:COL,"
+		
+		set PRIMTBL = dbtbl22.frm.piece(",", 1)
+		set PRIMKEYS = INFO("MAIN", "PRIMKEYS")
+	
+		for I = 1:1:PRIMKEYS.length(",") do {
+		
+			type String PRIMKEY = PRIMKEYS.piece(",", I)
+		
+			set KEYREFDT = KEYREFDT_PRIMKEY_"=:"_COLREFS(PRIMTBL_"."_PRIMKEY)_","
+		}
+		
+		set KEYREFDT = KEYREFDT.extract(1, KEYREFDT.length() - 1)
+	}
+	
+	set CODE = "for I = 1:1 set ROW = ROWS.piece("","", I) quit:ROW.isNull()  "
+	set CODE = CODE_"do {"
+	do addcode(TAB_TAB_CODE)
+	
+	set TABS = TAB_TAB_TAB
+		
+	// Instantiate the row
+	do addcode(TABS_"type Record"_AGTBL_" rec = Db.getRecord("""_AGTBL_""","""_KEYREF_""",1)")
+	do addcode("")
+	
+	// Update each column, for selected row, based on column queries
+	set hasAVGS = 0
+	do addcode(TABS_"// Update columns")	
+	set N = ""
+	for  set N = INFO("COL", N).order() quit:N.isNull()  do {
+		
+		type Number QN
+		type String CODE, COLREF, EXP, FUN, QUERY
+		
+		set EXP = INFO("COL", N, "EXP")
+		set FUN = INFO("COL", N, "FUN")
+		
+		if (FUN = "AVG") set hasAVGS = 1
+		
+		do addcode("")
+		do addcode(TABS_"// Column "_N_" - ["_FUN_"] "_EXP_" - "_INFO("COL", N, "DESC"))
+		
+		set (QN, QUERY) = ""
+		for  set QN = INFO("COL", N, "QRY", QN).order() quit:QN.isNull()  set QUERY = QUERY_INFO("COL", N, "QRY", QN)_", "
+		set QUERY = QUERY.extract(1, QUERY.length() - 2)
+		
+		set CODE = ""
+		if 'QUERY.isNull() do {
+		
+			// Replace column references with variables
+			set QUERY = $$REPLVAR(QUERY, .VARSLEN(,))
+		
+			do addcode(TABS_"if "_QUERY_" do {")
+			set TABS = TABS_TAB
+		}
+		
+		set COLREF = N.lowerCase()
+		set CODE = "set rec."_COLREF_" = rec."_COLREF
+		
+		// Replace expression references with variable names
+		set EXP = $$REPLVAR(EXP, .VARSLEN(,))
+		
+		if (FUN = "CNT") do addcode(TABS_CODE_" + 1")
+		if (FUN = "SUM") do addcode(TABS_CODE_" + ("_EXP_")")
+		if ((FUN = "MAX") ! (FUN = "MIN")) do {
+			
+			type String OPER
+			
+			do addcode(TABS_"if (rec.getMode() = 0) set rec."_COLREF_" = "_EXP)
+			
+			if (FUN = "MAX") set OPER = " < "
+			else  set OPER = " > "
+			
+			do addcode(TABS_"if rec."_COLREF_OPER_EXP_" set rec."_COLREF_" = "_EXP)
+		}
+		else  if (FUN = "AVG") do {
+			
+			// Count and sum as go, then do average at end
+			do addcode(TABS_"set rec."_COLREF_"cnt = rec."_COLREF_"cnt + 1")
+			do addcode(TABS_"set rec."_COLREF_"sum = rec."_COLREF_"sum + ("_EXP_")")
+		}
+		
+		if DTL do {
+			
+			type Number COLNUM
+			type String KREF
+			
+			set COLNUM = $$NUMCOL(N)
+			
+			// Move literal into reference
+			set KREF = KEYREFDT.replace("COL=:COL", "COL="_COLNUM)
+			
+			do addcode("")
+			do addcode(TABS_"// Save detail")
+			do addcode(TABS_"type Record"_AGTBLDTL_" recdtl"_COLNUM_" = Db.getRecord("""_AGTBLDTL_""","""_KREF_""",1)")
+			do addcode("")
+			do addcode(TABS_"do recdtl"_COLNUM_".bypassSave()")
+		}
+		
+		if 'QUERY.isNull() do {
+		
+			set TABS = TABS.extract(1, TABS.length() - 1)
+			do addcode(TABS_"}")
+		}
+	}
+			
+	do addcode("")
+	do addcode(TABS_"do rec.bypassSave()")
+	
+	set TABS = TAB_TAB
+	
+	do addcode(TABS_"}")
+	do addcode("")
+	
+	// If averages, need to calculate them from cnt and sum.  Loop through
+	// every row and update the columns that are averages
+	if hasAVGS do {
+		
+		type String CODE, N
+		
+		do addcode(TABS_"// Calculate averages")
+		
+		set CODE = "type DbSet dsavg = Db.selectDbSet("""_AGTBL_""""
+		
+		if (dbtbl22.dtp > 0) set CODE = CODE_", ""DATE=:DATE"""
+		
+		set CODE = CODE_")"
+		
+		do addcode(TABS_CODE)
+		do addcode("")
+		do addcode(TABS_"while dsavg.next() do {")
+		do addcode("")
+		do addcode(TABS_TAB_"type Record"_AGTBL_" rec = dsavg.getRecord("""_AGTBL_""")")
+		
+		set N = ""
+		for  set N = INFO("COL", N).order() quit:N.isNull()  if (INFO("COL", N, "FUN") = "AVG") do {
+			
+			type String COLREF, COLREFC, COLREFS
+			
+			set COLREF = N.lowerCase()
+			set COLREFC = COLREF_"cnt"
+			set COLREFS = COLREF_"sum"
+			
+			// Leave average null if there is no count
+			do addcode("")
+			do addcode(TABS_TAB_"// Column "_N)
+			do addcode(TABS_TAB_"if (rec."_COLREFC_" <> 0) set rec."_COLREF_" = (rec."_COLREFS_" / rec."_COLREFC_").roundDec(5)")
+		}
+		
+		do addcode("")
+		do addcode(TABS_TAB_"do rec.bypassSave()")
+		
+		do addcode(TABS_"}")
+		do addcode("")
+	}
+	
+	do addcode(TAB_"}")
+	do addcode("")
+	do addcode(TAB_"quit")
+	
+	quit
+	
+	
+GETCOLS(String TABLES,		// Tables list
+	String COLLIST,		// Column list
+	String COLREFS(),	// Referenced columns		/MECH=REFARR:W
+	String RM)		// Error message [*]		/MECH=REF:W
+	
+	/*
+	Associate columns with tables and build column list.
+	
+	Return new COLLIST including table name.
+	
+	Build VARS("C", table.column) = variable name
+	           "V", variable name) = table.column
+	           
+	ARGUMENT NOTES:
+	
+		. RM		Returns null if no error
+		
+	RETURNS:
+	
+		. $$		Column list, including table names
+	*/
+	
+	type Number I, J
+	type String COL, REF, RETURN, TABLE
+	
+	set (RETURN, RM) = ""
+	
+	if COLLIST.isNull() quit ""
+	
+	set COLLIST = COLLIST.upperCase()
+	
+	for I = 1:1:COLLIST.length(",") do { quit:'RM.isNull()
+		
+		set COL = COLLIST.piece(",", I)
+		
+		if COL.isLike("%.%") do {	// Includes table name
+			
+			set TABLE = COL.piece(".", 1)
+			set COL = COL.piece(".", 2)
+			// Invalid table value ~p1
+			if '{List}TABLES.contains(TABLE) set RM = $$^MSG(1485, TABLE)
+			// Invalid column name - ~p1
+			if 'Db.isDefined("DBTBL1D", "%LIBS='SYSDEV',FID=:TABLE,DI=:COL") set RM = $$^MSG(1286, TABLE_"."_COL)
+		}
+		
+		else  do {
+			
+			type Boolean HIT = 0
+			
+			for J = 1:1:TABLES.length(",") do { quit:HIT
+				
+				set TABLE = TABLES.piece(",", J)
+				
+				if Db.isDefined("DBTBL1D", "%LIBS='SYSDEV',FID=:TABLE,DI=:COL") set HIT = 1
+			}
+			// Invalid column name - ~p1
+			if 'HIT set RM = $$^MSG(1286, COL)
+		}
+		
+		quit:'RM.isNull()	// Error
+		
+		set REF = TABLE_"."_COL
+		set RETURN = RETURN_REF_","
+		set COLREFS(REF) = ""
+	}
+	
+	quit RETURN.extract(1, RETURN.length() - 1)
+	
+	
+WHRCOLS(String TABLES,		// Table list
+	String WHERE,		// WHERE clause
+	String COLREFS())	// Column reference list	/MECH=REFAFF:W
+	
+	/*
+	Parse WHERE clause to find column references to add to COLREFS list
+	*/
+
+	type Number I, N
+	type String COL, TABLE, whr()
+
+	do ^SQLQ(WHERE, TABLES, .whr())
+	set N = ""
+	for  set N = whr(N).order() quit:N.isNull()  do {
+			
+		for I = 1:1:whr(N).length($C(1)) do {
+				
+			set COL = whr(N).piece($C(1), I)
+			// Don't care about RM here, since will only add if valid column
+			if COL?1A.AN1".".E set COL = $$GETCOLS(TABLES, COL, .COLREFS())
+		}
+	}
+	
+	quit
+	
+	
+GETQRYS(String TABLES,		// Tables list
+	String WHERE,		// WHERE clause
+	String TYPE,		// "COL" or "ROW"
+	String ID,		// Column or row ID
+	String INFO(,,,))	// INFO array		/MECH=REFAFF:W
+		
+	/*
+	Build query code
+	*/			
+
+	type Number I, N
+	type String INPUT(), PSLQRY(), TBLOBJS
+	
+	set INPUT("FROM") = TABLES
+	set INPUT("WHERE") = WHERE
+		
+	// Build table object reference for use with ^UCQRYBLD
+	set TBLOBJS = ""
+	for I = 1:1:TABLES.length(",") do {
+		
+		type String TABLE = TABLES.piece(",", I)
+		
+		set TBLOBJS = TBLOBJS_TABLE_"="_TABLE.lowerCase()_","
+	}
+	
+	set TBLOBJS = TBLOBJS.extract(1, TBLOBJS.length() - 1)
+	
+	do ^UCQRYBLD(.INPUT(), TBLOBJS, , , .PSLQRY())
+		
+	set N = ""
+	for  set N = PSLQRY(N).order() quit:N.isNull()  set INFO(TYPE, ID, "QRY", N) = PSLQRY(N)
+	
+	quit
+	
+		
+REPLVAR(String DATA,		// String to replace column references
+	String VARSLEN(,))	// Variable/column x-ref by length	/MECH=REFARR:R
+	
+	/*
+	Replace table.column references in DATA with variable names.
+	Replace in length order to ensure no false replacements due to
+	shorter name matches.
+	
+	RETURNS:
+	
+		. $$	DATA with variables		/TYP=T
+	*/
+	
+	type Number LEN
+	
+	set LEN = ""
+	for  set LEN = VARSLEN(LEN).order(-1) quit:LEN.isNull()  do {
+		
+		type String COL = ""
+		
+		for  set COL = VARSLEN(LEN, COL).order() quit:COL.isNull()  do {
+			
+			set DATA = DATA.replace(COL, VARSLEN(LEN, COL), 0, 1)
+		}
+	}
+	
+	quit DATA
+						
+	
+private DQBLD(String AGID,	// Aggregate ID
+	      String DDLOUT)	// DDL output file [*]	/MECH=REF:W
+	      
+	/*
+	Build DATA-QWIK DQA* table(s) from aggregate definition.  Will always
+	build DQA'AGID'.  If detail (DBTBL22.DTL) is requested, will also
+	build DQA'AGID'DTL.
+	
+	If running against a non-GT.M database, will output DDL necessary to
+	create the table(s) in the RDB.  Name of file will be returned in
+	DDLOUT.
+	
+	Argument Notes:
+	
+		. DDLOUT	Returns null for GT.M databases, output
+				file returned for non-GT.M databases
+	*/
+	
+	type public Boolean ER = 0
+	type public String %DB, RM
+
+	type Boolean DTL
+	type Number I, KEYCNT
+	type String ACCKEYS, FRM, GRP, KEY(), MATDTBL, MATTBL
+	
+	set DDLOUT = ""
+	
+	if '$$hasRC(AGID) do { quit
+		
+		set ER = 1
+		// Must define one column
+		set RM = $$^MSG(1304)
+	}
+	
+	type RecordDBTBL22 dbtbl22 = Db.getRecord("DBTBL22", "%LIBS='SYSDEV',AGID=:AGID")
+	
+	// Delete old definition(s)
+	do DELMAT(AGID)
+	
+	set KEYCNT = 0
+		
+	if (dbtbl22.dtp > 0) do {
+		
+		set KEYCNT = KEYCNT + 1 
+		set KEY(KEYCNT) = "DATE||D|10"
+
+		// Calendar date 
+		if (dbtbl22.dtp = 1) set KEY(KEYCNT).piece("|", 2) = $$^MSG(1311)
+		// System date
+		else  set KEY(KEYCNT).piece("|", 2) = $$^MSG(1313)
+	}
+	
+	set KEYCNT = KEYCNT + 1
+	set KEY(KEYCNT) = "ROW|Row|N|4"
+	
+	set GRP = dbtbl22.grp
+	set FRM = dbtbl22.frm
+	
+	if 'GRP.isNull() for I = 1:1:GRP.length(",") do { quit:ER
+		
+		type Number J
+		type String COL, KEYINFO
+		
+		set KEYINFO = ""
+		set COL = GRP.piece(",", I)
+		
+		for J = 1:1:FRM.length(",") do { quit:'KEYINFO.isNull()
+			
+			type String TABLE
+			
+			set TABLE = FRM.piece(",", J)
+			
+			type RecordDBTBL1D dbtbl1d = Db.getRecord("DBTBL1D", "%LIBS='SYSDEV',FID=:TABLE,DI=:COL", 1)
+			
+			if (dbtbl1d.getMode() = 1) set KEYINFO = COL_"|"_dbtbl1d.des_"|"_dbtbl1d.typ_"|"_dbtbl1d.len
+		}
+		
+		if KEYINFO.isNull() do {
+			
+			set ER = 1
+			// Invalid column name - ~p1
+			set RM = $$^MSG(1286, COL)
+		}
+		
+		else  do {
+			
+			set KEYCNT = KEYCNT + 1
+			set KEY(KEYCNT) = KEYINFO
+		}
+	}
+	
+	quit:ER
+	
+	set MATTBL = "DQA"_AGID
+	
+	do Runtime.start("CS")
+
+	do DBTBL1(AGID, MATTBL, .KEY(), "Aggregate for AGID "_AGID, 10, "DQA")
+	
+	// Insert columns from DBTBL22C
+	type DbSet ds = Db.selectDbSet("DBTBL22C", "%LIBS='SYSDEV' AND AGID=:AGID")
+	
+	while ds.next() do {
+		
+		type RecordDBTBL22C dbtbl22c = ds.getRecord("DBTBL22C")
+		
+		type RecordDBTBL1D dbtbl1d = Class.new("RecordDBTBL1D", "%LIBS='SYSDEV',FID=:MATTBL,DI=:dbtbl22c.col")
+		
+		if dbtbl22c.fun = "SUM" do {
+			
+			set dbtbl1d.len = 18
+			set dbtbl1d.typ = "$"
+			set dbtbl1d.dec = 2
+		}
+		else  if dbtbl22c.fun = "CNT" do {
+			
+			set dbtbl1d.len = 6
+			set dbtbl1d.typ = "N"
+			set dbtbl1d.dec = ""
+		}
+		else  if dbtbl22c.fun = "AVG" do {
+			
+			set dbtbl1d.len = 18
+			set dbtbl1d.typ = "N"
+			set dbtbl1d.dec = "5"
+		}
+		else  do {
+			
+			set dbtbl1d.len = 12
+			set dbtbl1d.typ = "N"
+			set dbtbl1d.dec = ""
+		}
+		
+		set dbtbl1d.des = dbtbl22c.des_" ("_dbtbl22c.fun_")"
+		set dbtbl1d.nod = $$NUMCOL(dbtbl22c.col)
+		set dbtbl1d.pos = 1
+		set dbtbl1d.rhd = $$RHD(dbtbl1d.des, dbtbl1d.len)
+		
+		do dbtbl1d.save()
+		
+		// For average, need to gather count and total to calculate AVG at end
+		if dbtbl22c.fun = "AVG" do {
+			
+			type RecordDBTBL1D dbtbl1d = Class.new("RecordDBTBL1D", "%LIBS='SYSDEV',FID=:MATTBL")
+			
+			set dbtbl1d.di = dbtbl22c.col_"CNT"
+			set dbtbl1d.len = 6
+			set dbtbl1d.typ = "N"
+			set dbtbl1d.dec = ""
+			set dbtbl1d.des = "CNT for average for column "_dbtbl22c.col
+			set dbtbl1d.nod = $$NUMCOL(dbtbl22c.col)
+			set dbtbl1d.pos = 2
+			set dbtbl1d.rhd = "CNT"
+		
+			do dbtbl1d.save()
+			
+			do dbtbl1d.setMode(0)
+			set dbtbl1d.di = dbtbl22c.col_"SUM"
+			set dbtbl1d.len = 18
+			set dbtbl1d.typ = "$"
+			set dbtbl1d.dec = 2
+			set dbtbl1d.des = "SUM for average for column "_dbtbl22c.col
+			set dbtbl1d.pos = 3
+			set dbtbl1d.rhd = "SUM"
+		
+			do dbtbl1d.save()
+		}
+	}
+		
+	set DTL = dbtbl22.dtl
+	if DTL, 'GRP.isNull(),$$ISDETAIL(GRP, FRM) set DTL = 0
+	
+	// Build detail table
+	if DTL do {
+		
+		type String KEYS, PRIMTBL
+		
+		set MATDTBL = "DQA"_AGID_"DTL"
+		
+		set KEYCNT = KEYCNT + 1
+		set KEY(KEYCNT) = "COL|Column Number|N|4"
+		
+		// Add keys from primary table that aren't in GRP
+		set PRIMTBL = FRM.piece(",", 1)
+	
+		type RecordDBTBL1 dbtbl1 = Db.getRecord("DBTBL1", "%LIBS='SYSDEV',FID=:PRIMTBL")
+	
+		set KEYS = dbtbl1.acckeys
+	
+		for I = 1:1:KEYS.length(",") do {
+		
+			type String PRIMKEY = KEYS.piece(",", I)
+		
+			if 'PRIMKEY.isLiteral(), '{List}GRP.contains(PRIMKEY) do {
+				
+				type RecordDBTBL1D dbtbl1d = Db.getRecord("DBTBL1D", "%LIBS='SYSDEV',FID=:PRIMTBL,DI=:PRIMKEY", 1)
+			
+				set KEYCNT = KEYCNT + 1
+				set KEY(KEYCNT) = PRIMKEY_"|"_dbtbl1d.des_"|"_dbtbl1d.typ_"|"_dbtbl1d.len
+			}
+		}
+		
+		do DBTBL1(AGID, MATDTBL, .KEY(), "Aggregate detail for AGID "_AGID, 1, "DQA")
+	}
+	
+	do Runtime.commit()
+	
+	if %DB.get().isNull() set %DB = $$SCAU^%TRNLNM("DB")
+	
+	// Generate DDL code
+	if '(%DB.isNull() ! (%DB = "GTM")) do {
+	
+		type String OUTFILE
+		
+		set OUTFILE = $$FILE^%TRNLNM(MATTBL_".DDL","SCAU$SPOOL")
+		
+		do DDL^SQLUTIL(MATTBL, OUTFILE, 1)
+		
+		set DDLOUT = OUTFILE
+		
+		if DTL do {
+			
+			set OUTFILE = $$FILE^%TRNLNM(MATDTBL_".DDL","SCAU$SPOOL")
+		
+			do DDL^SQLUTIL(MATDTBL, OUTFILE, 1)
+		
+			set DDLOUT = DDLOUT_" & "_OUTFILE
+		}
+	}
+	
+	quit
+
+	
+DBTBL1(String AGID,	// Aggregate ID
+       String TABLE,	// Table name
+       String KEY(),	// Key list
+       String DESC,	// Table description
+       Number RECTYP,	// Record type
+       String GLOBAL)	// Global
+       
+	/*
+	Create new DBTBL1 table entry
+	*/
+       
+	type Number I, KEYCNT
+	type String ACCKEYS
+	
+	set KEYCNT = KEY("").order(-1)
+	
+	set ACCKEYS = """"_AGID_""""
+	for I = 1:1:KEYCNT set ACCKEYS = ACCKEYS_","_KEY(I).piece("|", 1)
+	
+	type RecordDBTBL1 dbtbl1 = Class.new("RecordDBTBL1", "%LIBS='SYSDEV',FID=:TABLE")
+	
+	set dbtbl1.des = DESC
+	set dbtbl1.acckeys = ACCKEYS
+	set dbtbl1.del = 124
+	set dbtbl1.fdoc = TABLE
+	set dbtbl1.filetyp = 1
+	set dbtbl1.global = GLOBAL
+	set dbtbl1.rectyp = RECTYP
+	set dbtbl1.syssn = "PBS"
+	
+	do dbtbl1.save()
+	
+	// Update the access key records
+	for I = 1:1:KEYCNT do {
+		
+		type String COL
+		
+		set COL = KEY(I).piece("|", 1)
+		
+		type RecordDBTBL1D dbtbl1d = Db.getRecord("DBTBL1D", "%LIBS='SYSDEV',FID=:TABLE,DI=:COL")
+		
+		set dbtbl1d.des = KEY(I).piece("|", 2)
+		set dbtbl1d.typ = KEY(I).piece("|", 3)
+		set dbtbl1d.len = KEY(I).piece("|", 4)
+		set dbtbl1d.rhd = $$RHD(dbtbl1d.des, dbtbl1d.len)
+		
+		do dbtbl1d.save()
+	}
+	
+	quit
+
+
+RHD(String DES,		// Description
+    Number LEN)		// Length
+    
+	/*
+	Build Report Header from DES
+	
+	Returne report header
+	*/
+	
+	type Number HALF
+	type String RHD
+
+	if (DES.length() '> LEN) quit DES
+	if 'DES.isLike("% %") quit DES
+	
+	set HALF = DES.length() \ 2
+	
+	if (DES.extract(HALF) = " ") do {
+		
+		set RHD = DES
+		set RHD.extract(HALF) = "@"
+	}
+	else  if 'DES.extract(1, HALF).isLike("% %") set RHD = DES.piece(" ", 1)_"@"_DES.piece(" ", 2, 999)
+	else  do {
+		
+		type Number I
+		
+		set RHD = ""
+		
+		for I = 1:1:HALF do { quit:'RHD.isNull()
+			
+			if DES.extract(HALF + I) = " " set RHD = DES.extract(1, HALF + I - 1)_"@"_DES.extract(HALF + I + 1, DES.length())
+			if DES.extract(HALF - I) = " " set RHD = DES.extract(1, HALF - I - 1)_"@"_DES.extract(HALF - I + 1, DES.length())
+		}
+	}
+		
+	quit RHD
+	
+	
+ISDETAIL(String grp,	// DBTBL22.GRP - group by
+	 String frm)	// DBTBL22.FRM - table list
+	 
+	/*
+	Does the group by list contain all the keys of the primary table?  If
+	so, then we already have detail.
+	*/
+	
+	type Boolean NOHIT
+	type Number I
+	type String KEYS, PRIMTBL
+	
+	set PRIMTBL = frm.piece(",", 1)
+	
+	type RecordDBTBL1 dbtbl1 = Db.getRecord("DBTBL1", "%LIBS='SYSDEV',FID=:PRIMTBL")
+	
+	set KEYS = dbtbl1.acckeys
+	set NOHIT = 0
+	
+	for I = 1:1:KEYS.length(",") do { quit:NOHIT
+		
+		type String KEY = KEYS.piece(",", I)
+		
+		if 'KEY.isLiteral(), '{List}grp.contains(KEY) set NOHIT = 1
+	}
+		
+	quit 'NOHIT
+	
+	
+public STRCOL(Number numcol)	// Column in numeric form
+
+	/*
+	Return string Column from integer column
+	*/
+
+	type String RETURN
+
+	if (numcol < 27) set RETURN = (numcol+64).char()
+	else  set RETURN = (((numcol - 1) \ 26) + 64).char()_(((numcol - 1) # 26) + 65).char()
+	
+	quit RETURN
+ 
+
+public NUMCOL(String strcol)	// Column in string form
+
+	/*
+	Return integer column from string column
+	*/
+	
+	type Number RETURN
+
+	if (strcol.length() = 1) set RETURN = strcol.ascii() - 64
+	else  set RETURN = ((strcol.ascii() - 64) * 26) + strcol.ascii(2) - 64
+	
+	quit RETURN
+		
+	
+private DELMAT(String AGID)	// Aggregate definition ID
+
+	/*
+	Delete DQA and DQA...DTL (detail) tables
+	
+	Also called by ^DBSAG
+	*/
+	
+	type String FID
+
+	for FID = "DQA"_AGID, "DQA"_AGID_"DTL" do {
+		if Db.isDefined("DBTBL1", "%LIBS='SYSDEV',FID=:FID") do {
+			do DELETE^SQL(FID)
+			do Db.delete("DBTBL1D", "%LIBS='SYSDEV' AND FID=:FID")
+			do Db.delete("DBTBL1", "%LIBS='SYSDEV' AND FID=:FID")
+		}
+	}
+	
+	quit
+
+
+public RUN(String AGID)		// Aggregate ID
+
+	/*
+	Run the program for an aggregate definition
+	*/
+	
+	type public Boolean ER
+	type public String RM
+	
+	type String DQA(), RTN
+	
+	type RecordDBTBL22 dbtbl22 = Db.getRecord("DBTBL22", "%LIBS='SYSDEV',AGID=:AGID", 1)
+	
+	if (dbtbl22.getMode() = 0) do { quit
+		
+		set ER = 1
+		// Missing aggregate definition for ~p1
+		set RM = $$^MSG(1302, AGID)
+	}
+	
+	set RTN = dbtbl22.rtn
+	
+	if RTN.isNull() do { quit
+		
+		set ER = 1
+		// Aggregate definition ~p1 not compiled
+		set RM = $$^MSG(1307, AGID)
+	}
+
+	lock +DQA(AGID):5		// Prevent concurrent running
+	else  do { quit
+		
+		type String ET = "RECLOC"
+		
+		do ^UTLERR
+	}
+	
+	set RTN = "^"_RTN
+	do @RTN
+	
+	lock -DQA(AGID)
+	
+	quit
+	
+	
+hasRC(String AGID)	// Aggregate ID
+
+	/*
+	Determine if aggregate definition has at least one row and one column
+	*/
+	
+	type Boolean RETURN = 1
+	
+	type DbSet dsrow = Db.selectDbSet("DBTBL22R", "%LIBS='SYSDEV' AND AGID=:AGID")
+	
+	if dsrow.isEmpty() set RETURN = 0	// No rows
+	
+	type DbSet dscol = Db.selectDbSet("DBTBL22C", "%LIBS='SYSDEV' AND AGID=:AGID")
+	
+	if dscol.isEmpty() set RETURN = 0	// No columns
+	
+	quit RETURN
+	
+		
+addcode(String LINE)	// New line of code to add
+
+	/*
+	Add new line to CODE arry
+	*/
+	
+	type public String PSLCODE()
+
+	set PSLCODE(PSLCODE("").order(-1) + 1) = LINE
+	
+	quit
+
+vSIG()	quit "60242^50783^Dan Russell^26724"	// Signature - LTD^TIME^USER^SIZE

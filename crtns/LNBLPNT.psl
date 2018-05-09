@@ -1,0 +1,370 @@
+LNBLPNT		/*
+	ORIG: kini - 04/25/2005
+	DESC: Loan Billing Print Utility
+
+	---- Comments --------------------------------------------------------
+	This procedure is called via @LNB003, Loan Bill Print Utility function.
+	
+	---- Revision History ------------------------------------------------
+	
+	02/15/07 - RussellDS - CR25382
+		   Eliminated use of obsoleted routine DBSQRYA.
+
+	04/25/05 - KinI - 15524
+		Created based on LNBLPNT.m, LNBLINI.m and LNBLSCSR.m routines.
+
+	*/
+	
+	type public String ER, IO
+	type public String %MSKD
+	
+	type Number %PAGE, %PG, IOSL
+	type String %READ, %TAB(), CID, CLS, GRP, TYPE, SEQBY, VFMQ
+	type Date BILDT, TD
+	
+	// Set up error trapping
+	catch vERROR {
+                type public String ET,RM
+                
+                set ET = vERROR.type
+ 
+                if ET["%GTM-" do {
+                        do ZE^UTLERR
+        		}
+                else  do {
+                	set ET = ET_"-"_vERROR.thrownAt
+                	set RM = vERROR.description
+                	do ^UTLERR
+                	}
+                
+                do EXC  // Log error in exception file
+		}
+	
+	set %ProcessMode = 0
+	set %PG = 1 
+	set %PAGE = 1
+	
+	set SEQBY = "[SYSDEV,LNBLP]BILDT|[SYSDEV,LNBLP]TYPE|[SYSDEV,LNBLP]CID"
+	set SEQBY = SEQBY_"|[SYSDEV,LN]GRP"
+
+	set (GRP,TYPE,CID)="ALL"
+
+	// set default TD to the lastest date in LNBLP file
+	type ResultSet rs = Db.select("BILDT", "LNBLP", "", "BILDT DESC")
+	if rs.next() set TD = rs.getCol("BILDT")
+	
+	set %TAB("TD") = ".TD1/HLP=[SYSDEV,LNBLP]BILDT/XPP=D EXT^DBSQRY"
+	set %TAB("GRP") = ".GRP1/HLP=[SYSDEV,LN]GRP/XPP=D EXT^DBSQRY"
+	set %TAB("TYPE") = ".QI1/HLP=[SYSDEV,LNBLP]TYPE/XPP=D EXT^DBSQRY"
+	set %TAB("CID") = ".ACCOUNTS1/HLP=[SYSDEV,LNBLP]CID/XPP=D EXT^DBSQRY"
+
+	set %TAB("IO") = $$IO^SCATAB($I)
+	
+	set %READ = "@@%FN,,,TD/REQ,IO/REQ,GRP/REQ,TYPE/REQ,CID/REQ"
+
+	do ^UTLREAD if (VFMQ = "Q") set ER = 1 quit
+
+	set BILDT = $$DAT^%ZM(TD,,%MSKD.get())
+	
+	do VINIT(TD)	// gets data for CONAM, PTYPE and BMSG arrays
+	
+	do OPEN^SCAIO set:'IOSL.get() IOSL=60
+	use IO
+	
+	do BLP(TD,GRP,TYPE,CID,IO)
+	
+	quit
+	
+	
+VINIT(Date TD)	// Initialize variables used for all bills
+	
+	type public String BLNK, BMSG, CONAM(), PTYPE(,) , UTBL()
+	type public Number CNT = 0
+	type Number I = 2
+	type String A
+	type Date JAN1
+	
+	// Set up company name array (CONAM)
+	set CONAM(1) = CUVAR.CONAM.get()
+	
+	set A = CUVAR.CAD1_"|"_CUVAR.CAD2_"|"_CUVAR.CAD3
+ 
+        if '(A.piece("|",4).isNull()) set CONAM(I) = A.piece("|",4) set I = I + 1
+        if '(A.piece("|",5).isNull()) set CONAM(I) = A.piece("|",5) set I = I + 1
+        if '(A.piece("|",6).isNull()) set CONAM(I) = A.piece("|",6) set I = I + 1
+ 
+        set CONAM(I) = A.piece("|",1)_", "_A.piece("|",2)_"   "_A.piece("|",3)
+	
+	set BLNK.piece(" ",80) = ""
+	
+	set JAN1 = $$^SCAJD("01/01/"_$$DAT^%ZM(TD,"YEAR"))	
+
+	type String DATA
+	
+	// set UTBL(TRTYPE) array from LNTRS file data
+	type ResultSet rs = Db.select("TRTYPE,TRDES,MCTYP,ACTYPE,DTST,DTEND,RND,ETYP,NEPF,CALL,PMI","LNTRS")
+	while rs.next() do {
+		set DATA = rs.getCol("TRDES")_"|"_rs.getCol("MCTYP")_"|"_rs.getCol("ACTYPE")_"|"_rs.getCol("DTST")
+		set DATA = DATA_"|"_rs.getCol("DTEND")_"|"_rs.getCol("RND")_"|"_rs.getCol("ETYP")_"|"_rs.getCol("NEPF")_"|"_rs.getCol("CALL")_"|"_rs.getCol("PMI")
+
+		set UTBL(rs.getCol("TRTYPE")) = DATA
+		}
+
+				
+	// set PTYPE(GRP,KEY) array from UTBLPTYPE file data
+	type ResultSet rs1 = Db.select("GRP,KEY,PGM,CPF,RCPF,RCCBF,ABPF,AYPF,APR","UTBLPTYPE")
+	while rs1.next() do {
+		set DATA = rs1.getCol("PGM")_"|"_rs1.getCol("CPF")_"|"_rs1.getCol("RCPF")_"|"_rs1.getCol("RCCBF")
+		set DATA = DATA_rs1.getCol("ABPF")_"|"_rs1.getCol("AYPF")_"|"_rs1.getCol("APR")
+
+		set PTYPE(rs1.getCol("GRP"),rs1.getCol("KEY")) = DATA
+		}			
+
+
+	// set BMSG array from LNBMSG file data
+	type Number MSGCNT = ""		// Total number of message lines
+	type DbSet ds = Db.selectDbSet("LNBMSG")
+	while ds.next() do {
+		type RecordLNBMSG lnbmsg = ds.getRecord("LNBMSG")
+		set BMSG(lnbmsg.msgseq) = lnbmsg.ml
+		set MSGCNT = MSGCNT + 1
+		}
+	set BMSG=MSGCNT		
+	
+	quit	
+	
+
+BLP(Date TD,
+    String GRP,
+    Number TYPE,
+    Number CID,
+    String IO)	
+    
+	// Gets LNBLP records to print
+
+	type public String BILDT
+
+	type Number SEQ = 1
+	type String DQQRY(), WHERE
+			
+	if (TYPE '= "ALL") do {
+		set DQQRY(SEQ) = "[LNBLP]TYPE "_TYPE
+		set SEQ = SEQ + 1
+		}
+
+	if (CID '= "ALL") do {
+		set DQQRY(SEQ) = "[LNBLP]CID "_CID
+		set SEQ = SEQ + 1
+		}
+		
+	set DQQRY(SEQ) = "[LNBLP]BILDT "_TD
+	set SEQ = SEQ + 1
+		
+	set WHERE = $$WHERE^SQLCONV(.DQQRY(),"LNBLP")
+	
+	
+	#ACCEPT Date=04/25/05; PGM=Irina Kin; CR=15524
+	type DbSet ds = Db.selectDbSet("LNBLP", WHERE, "CID ASC")
+	while ds.next() do {
+		type RecordLNBLP lnblp = ds.getRecord("LNBLP")
+		
+		// If there are no accounts of requested group, quit
+		type Boolean QUITFLG = 0		
+		if (GRP '= "ALL") do { quit:QUITFLG
+			type ResultSet rs=Db.select("CID","LN","CID=:lnblp.cid AND GRP=:GRP AND TYPE=:lnblp.type")
+			if rs.isEmpty() set QUITFLG = 1
+			}		
+		
+		set CID = lnblp.cid
+		set TYPE = lnblp.type
+
+		do PRINT(.lnblp,IO)
+		}
+		
+	do EXIT(IO)	
+		
+	quit
+		
+	
+PRINT(RecordLNBLP lnblp,
+      String IO)	
+      
+	// BUILD ARRAY AND PRINT BILL
+	
+	type public String PTYPE()
+	type public Number PAGE
+	type public Boolean MTG, REV, REV1
+	
+	type RecordPRODCTL prodctl = Db.getRecord("PRODCTL","TYPE=:lnblp.type")
+	
+	// PRODCTL.BFP, bill print flag
+	set PTYPE = "" if 'prodctl.bfp.isNull() set PTYPE = PTYPE(prodctl.grp,prodctl.bfp).get()
+	if (PTYPE = "") set PTYPE = $S(prodctl.grp ="RC":"^LNB2",1:"^LNB1")
+	
+	if PTYPE.piece("|",2) set MTG = 1
+	if PTYPE.piece("|",3) set REV = 1
+	if PTYPE.piece("|",4) set REV1 = 1
+	
+	set PAGE = 0
+	
+	do EXEC(.lnblp,PTYPE,IO)
+	
+	quit
+	
+	
+EXEC(RecordLNBLP lnblp,
+     String PTYPE,
+     String IO)
+
+	// Single Account Processing
+
+	type public Number CNT, PAGE
+	type public String ER
+	
+	do BLINI(.lnblp) if ER do EXC quit
+	
+	// Call custom print routine
+	set PAGE = 0
+	use IO
+
+	// Call Bill Print Design procedure, e.g. LNB1 or LNB2
+	do @PTYPE.piece("|",1) if ER do EXC quit
+
+	set CNT = CNT + 1	// Total bills counter
+	
+	quit	
+	
+	
+BLINI(RecordLNBLP lnblp)  // Bill Print Initialize
+	
+	type public Boolean ER
+	type public String CRCD, %CRCD, %MSKD, NM()
+	type public Number APD, CHG, DSEQ, IDP, LCHG, MCHG, PAGE, SCHSEQ
+	type public Date %FD, %SCHDUE
+	type Date SCHDUE
+	type String BAL()
+	type Number %INTD, BB, EB, PMT, TRB
+
+	type RecordLNBIL1 lnbil1 = Db.getRecord("LNBIL1","CID=:lnblp.cid,SCHSEQ=:lnblp.schseq",1)
+
+	type RecordLN ln = Db.getRecord("LN","CID=:lnblp.cid",1)
+
+	set SCHSEQ = lnblp.schseq
+	set DSEQ = lnblp.dseq
+	set PMT = lnbil1.ctab - lnblp.unapf
+	if (DSEQ > SCHSEQ) set PMT = 0
+
+	set APD=lnblp.apd
+	set LCHG=lnblp.lchg
+	set MCHG=lnblp.mchg
+
+	set CHG = PMT + APD + LCHG + MCHG	
+	// Only subtract out partial payments
+	if ('APD),(DSEQ '> SCHSEQ) set CHG = CHG - lnblp.ppa 
+
+	if 'ln.bmet set ER=1 quit  // Bill print flag
+	
+	if (CHG < ln.mppf),(ln.tld '> (lnblp.bildt - lnblp.dic)) set ER=1 quit
+	
+	set CRCD = ln.crcd if (CRCD = "") set CRCD=%CRCD
+	
+	set TRB = ln.trb
+	set IDP = ln.idp	
+
+	set %FD = lnblp.bildt - lnblp.dic
+
+	// Last bill entry
+	type RecordLNBLP lnblp1 = Db.getRecord("LNBLP","BILDT=:%FD,TYPE=:lnblp.type,CID=:lnblp.cid",1)
+	if (lnblp1.getMode() = 1) set (BB,EB) = lnblp1.lblb
+	else  do { 
+		set BB = ln.bal
+		set %INTD = lnblp.unin
+		do LBLP(.BB,.%INTD,TRB,%FD)  			
+		}
+		
+	set BAL(lnblp.bildt-lnblp.dic+1) = BB	 // Balance for first day in period
+	
+	set SCHDUE = lnblp.schdue
+	set %SCHDUE = $S(SCHDUE:$$DAT^%ZM(SCHDUE,%MSKD.get()),1:"        ")
+	
+	// Build name/address array
+	set NM = 5 do ^UTLADDR(,"NM",5,2,"ACN",lnblp.cid)
+	// Bad Address
+	if ER do {
+		set NM(1) = ln.title1 
+		set NM(2) = $$^MSG("3897") 
+		set NM = 2
+		}
+		
+	set PAGE = 0
+		
+	quit
+	
+	
+LBLP(Number BB,
+     Number %INTD,
+     Number TRB,
+     Date %FD)	
+
+	// Last bill entry
+
+	type String ETC, ITC, TAMT
+	type Date END
+	type Number %AMT, %TRB
+
+	set END = %FD + 1
+	
+	type ResultSet rs = Db.select("TAMT,ITC,ETC","HIST","CID = :CID and TJD not < :END","TJD DESC")
+	while rs.next() do {
+		set TAMT = rs.getCol("TAMT")
+		set ITC = rs.getCol("ITC")
+		set ETC = rs.getCol("ETC")
+
+		// balance		
+		set %TRB = TRB - ITC.extract()
+		set %AMT = TAMT if (TAMT["#") set %AMT = TAMT.piece("#",2)
+		set BB = BB - $S(%TRB:%AMT,1:-%AMT)
+		
+		// total interest due
+		set %AMT = TAMT.piece("#",3) if ('%AMT) quit
+		
+		// Ignore interest paid fields
+		type RecordTRN trn = Db.getRecord("TRN","ETC=:ETC")
+		if trn.pcf.extract(20) quit
+		
+		set %INTD = %INTD - $S(%TRB:%AMT,1:-%AMT)
+		}
+	
+	quit
+
+
+EXIT(String IO)	// ALL BILLS HAVE BEEN PRINTED
+	
+	type public Number CNT
+	
+	// TOTAL BILLS PRINTED: 
+	//I18N=OFF
+	use IO write #,!!!!!!!!!!!!!!!!!!!!,?10,$$^MSG("3904")_" "_CNT
+	//I18N=ON
+
+	do CLOSE^SCAIO
+
+	quit
+
+	
+EXC	// Log error in exception file
+
+	type public String ET, %ZTSEQ
+	type public Number CID
+	
+	// Validation errors from ^LNBLINI - don't log.
+	if ET.exists(),'ET.length() quit	
+
+	// Loan Billing Print
+	do LOG^UTLEXC($T(+0),"*",$$^MSG(7065)_"|1",CID.get(),%ZTSEQ.get(),ET.get())
+
+	kill ET, %ZTSEQ
+	
+	quit	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60712^46295^Dan Russell^8645"	// Signature - LTD^TIME^USER^SIZE

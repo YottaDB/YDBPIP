@@ -1,0 +1,384 @@
+M1099		/*
+	   ORIG: Alan Mattson
+	
+	   Miscellaneous 1099's for customer or non-customer based activity.
+	   Includes 1099INT's for savings bonds redeemed, 1099A's for
+	   acquisition or abandonment of secured property, and 1099B's for real
+	   estate transactions.
+	
+	   I18N=QUIT: EXCLUDE FROM I18N
+	
+	  ---- Revision History ------------------------------------------------
+	   
+	   05/15/06 - DESHPANDE S K - CR 21167
+		      Section FMTXID of this routine is modified to set the 
+		      values into address columns of M1099 table based on values of 
+		      mailing address columns from the customer record (CIF.MAD1, 
+		      CIF.MAD2, CIF.MAD3, CIF.MCITY, CIF.MSTATE and CIF.MZIP)
+	
+	   04/19/06 - SWARNALP - CR 20418
+	   	      Added new section GETNPK which gets the IRS details for 
+	   	      a particular TAXID and SEQ. This extrinsic function is 
+	   	      called by the Insert and Delete journals of M1099 table 
+	   	      to store the record details in the data item DATA 
+	   	      available in DAYENDM1099.
+	
+	   03/08/06 - SWARNALP - CR 19849
+	   	      Modified section VER to replace 'else' statement of the 
+	   	      condition %ProcessMode=3 with the condition check of 
+	   	      %ProcessMode<>3 as it was hitting 'else' code even if 
+	   	      %ProcessMode had a value of 3.
+	   	      
+	   09/12/05 - HAILEYM - CR17143
+	   	      Updated to DBI Standards
+	   
+	   07/02/02 - ANTONOVS - 50956 (roll forward 48920 changes)
+		      Modified sections FMTXID,GETCIF to set Customer Last Name.
+
+	   01/11/02 - MBUIM - 43583
+		      Converted to PSL.
+
+	*/
+
+	quit
+	
+
+public NEW	// New Miscellaneous IRS Transaction
+	
+	do INIT(0) 
+	quit
+	
+	
+public UPD	// Miscellaneous IRS Transaction Maintenance
+
+ 	do INIT(1) 
+ 	quit
+ 	
+ 	
+public INQ	// Miscellaneous IRS Transaction Inquiry
+
+ 	do INIT(2) 
+ 	quit
+ 	
+ 	
+public DEL	// Miscellaneous IRS Transaction Deletion
+
+	do INIT(3) 
+	quit
+
+
+INIT(%ProcessMode)	// Initialize standard variables
+
+	type Number %PAGE,%PG,ACN,FORMTYP,SEQ
+	type String ADDR(),IO,M1099(),TAXID,VFMQ
+
+	type RecordM1099 ffA
+	
+	set %PG=0 
+	set %PAGE=1
+	
+	do VPG(.ffA)
+	quit
+
+
+VPG(RecordM1099 ffA)	// Page control
+
+	type public Boolean ER
+	type public Number %PG
+	type public String VFMQ
+
+	type Boolean FINISH
+
+	set FINISH=0
+	for  do { quit:FINISH
+		if %PG=0 do VPG00(.ffA) if ER!(VFMQ="Q") set FINISH=1 quit
+		if %PG>0 do VPG01(.ffA) 
+		if "DFQ"[VFMQ do VER(.ffA) set FINISH=1 quit
+		set %PG=%PG+1
+		}
+	quit
+	
+		
+VPG00(RecordM1099 ffA)	// Page set up
+
+	type public Boolean ER
+	type public Number %PG,FORMTYP,SEQ
+	type public String IO,M1099(),TAXID,VFMQ
+
+	type String %NOPRMT,%READ,%TAB()
+
+	if %ProcessMode=0 set %TAB("TAXID")=".TAXID1/HLP=[CIF]TAXID/XPP=D FMT^M1099(.X)" set SEQ=1
+	else  do {
+		set %TAB("SEQ")=".SEQ1/HLP=[M1099]SEQ/TBL=M1099(TAXID,FORMTYP,"
+		set %TAB("TAXID")=".TAXID1/HLP=[CIF]TAXID/TBL=[M1099]TAXID:DISTINCT"
+		if %ProcessMode=2 set %TAB("IO")=$$IO^SCATAB($I)
+		}
+	set %TAB("FORMTYP")=".FORMTYP1/HLP=[M1099]FORMTYP/TBL=[STBLM1099T]/XPP=D FTP^M1099(TAXID,X)"
+	
+	set %READ="@@%FN,,,TAXID/REQ,FORMTYP/REQ" 
+	set %NOPRMT="N"
+	if %ProcessMode set %READ=%READ_",SEQ/REQ" set SEQ=""
+	if %ProcessMode=2 set %READ=%READ_",IO/REQ"
+	do ^UTLREAD if VFMQ="Q" set ER=1 quit 
+
+	do PPG00(.ffA,TAXID,SEQ,FORMTYP) if ER quit 
+	
+	if %ProcessMode=2,IO'=$I do OPEN^SCAIO if ER set VFMQ="Q" quit 
+
+	quit
+	 
+	
+VPG01(RecordM1099 ffA)	// Savings bond screen
+
+	type public Number FORMTYP
+
+	type String SID
+
+	set SID="M1099MISC"
+	if FORMTYP=1 set SID="M1099INT"
+	else  if FORMTYP=2 set SID="M1099A"
+	else  if FORMTYP=3 set SID="M1099B"
+	else  if FORMTYP=5 set SID="M1099C"
+	else  if FORMTYP=6 set SID="M1099DIV" 
+	
+	if ffA.getMode() do ffA.setAuditFlag(1)
+		
+	do DRV^USID(%ProcessMode,SID,.ffA)
+
+	quit
+	
+	
+PPG00(RecordM1099 ffA,String TAXID,Number SEQ,Number FORMTYP)	// Set up screen post-processor
+
+	type public Boolean ER
+	type public Number ACN
+	type public String ET
+
+	type Date %JD
+	type Number PSEQ
+	
+	type RecordCIF cif
+
+	if %ProcessMode,'Db.isDefined("M1099","TAXID=:TAXID,SEQ=:SEQ") do Runtime.setErrSTBLER("M1099","RECNOF") quit 
+	
+	if FORMTYP=5 do GETCIF(.cif,ACN)
+	
+	if '%ProcessMode do { quit
+	
+		set ffA=Class.new("RecordM1099")
+		
+		set ffA.taxid=TAXID
+		set ffA.seq=SEQ
+		set ffA.formtyp=FORMTYP
+		
+		do CC(.ffA)	// Get default cost center
+		
+		type ResultSet rs=Db.select("SEQ","M1099","TAXID=:TAXID","SEQ DESC")
+		if rs.isEmpty() do FMTXID(.ffA,.cif,ACN) quit
+		
+		if rs.next() set PSEQ=rs.getCol(1),SEQ=PSEQ+1
+		do DFT(.ffA,TAXID,SEQ,PSEQ)
+		}
+		
+	set ffA=Db.getRecord("M1099","TAXID=:TAXID,SEQ=:SEQ")
+	
+	if %ProcessMode'=3 quit 
+	set %JD=$$^SCAJD("1.1."_(%SystemDate.year()-1)))
+	
+	if ffA.td<%JD do Runtime.setErrSTBLER("M1099","M1099") quit 
+
+	quit 
+	
+
+FMT(String X)	// Tax ID format
+
+	type public Boolean ER
+	type public Number ACN
+	
+	type Number %EXT,OLNTB
+	
+	type RecordCIF cif
+
+	if X?3N1"-"2N1"-"4N!(X?2N1"-"7N) do VERFMT^VERTIN(X) quit
+	
+        set OLNTB=4001
+        set %EXT=1 
+        do ^UCIF
+        if ER quit
+        do ^DBSPNT(0)
+        if ER quit
+        
+        set cif=Db.getRecord("CIF","ACN=:ACN")
+        set X=cif.taxid
+	
+	quit
+
+
+FMTXID(RecordM1099 ffA,RecordCIF cif,Number ACN)	// Default from CIF
+
+	if ACN.isNull() quit
+	
+	if 'cif.exists() set cif=Db.getRecord("CIF","ACN=:ACN")
+		
+	set ffA.relacn=ACN
+	set ffA.nam=cif.nam	
+	set ffA.lnam=cif.lnm
+	set ffA.ad1=cif.mad1
+	set ffA.ad2=cif.mad2
+	set ffA.ad3=cif.mad3
+	set ffA.city=cif.mcity
+	set ffA.state=cif.mstate
+	set ffA.mzip=cif.mzip
+	set ffA.cntry=cif.mcntry
+
+	quit 
+	
+
+DFT(RecordM1099 ffA,String TAXID,Number SEQ,Number PSEQ)	// Default from Prev Entry
+
+	type RecordM1099 prem1099
+	
+	set prem1099=Db.getRecord("M1099","TAXID=:TAXID,SEQ=:PSEQ")
+
+	set ffA.seq=SEQ
+	set ffA.nam=prem1099.nam
+	set ffA.lnam=prem1099.lnam
+	set ffA.ad1=prem1099.ad1
+	set ffA.ad2=prem1099.ad2
+	set ffA.ad3=prem1099.ad3
+	set ffA.city=prem1099.city
+	set ffA.state=prem1099.state
+	set ffA.mzip=prem1099.mzip
+	set ffA.cntry=prem1099.cntry
+	
+	quit
+
+
+VER(RecordM1099 ffA)	
+
+	type public Boolean ER
+	type public String ET,VFMQ
+	
+	type Number TOBSEQ
+	type String TOTIN
+
+	if (%ProcessMode=2)!(%ProcessMode=4) quit
+	if (VFMQ="Q") do END(ffA.taxid,ffA.seq) quit
+	
+	if %ProcessMode=3 do {
+		type ResultSet rs=Db.select("OTIN,OBSEQ","IRSUPD")
+		while rs.next() do { 
+			set TOTIN=rs.getCol(1)
+			set TOBSEQ=rs.getCol(2)
+			if (TOTIN=ffA.taxid)&(TOBSEQ=ffA.seq) do Runtime.setErrSTBLER("M1099","M1099DEL")
+			}
+		}
+	quit:ER
+	
+	if %ProcessMode=3 do Db.delete("M1099","TAXID=:ffA.taxid AND SEQ=:ffA.seq")
+	if %ProcessMode<>3 do ffA.save()
+	
+	do END(ffA.taxid,ffA.seq)
+	quit
+	
+	
+END(String TAXID,Number SEQ)	// End Process
+
+	type public Boolean ER
+	type public String VFMQ
+	
+	if ER.get() quit
+
+	if VFMQ="Q" do {
+		// Tax ID ~p1 sequence ~p2 not created
+		if %ProcessMode=0 do Runtime.setErrMSG("M1099",2609,"TAXID~SEQ") quit   
+	
+		// Tax ID ~p1 sequence ~p2 not modified
+		if %ProcessMode=1 do Runtime.setErrMSG("M1099",2611,"TAXID~SEQ") quit  
+	
+		// Tax ID ~p1 sequence ~p2 not deleted
+		do Runtime.setErrMSG("M1099",2610,"TAXID~SEQ")
+		}
+	else  do {
+		// Tax ID ~p1 sequence ~p2 created
+		if %ProcessMode=0 do Runtime.setErrMSG("M1099",2606,"TAXID~SEQ") quit
+	 
+	 	// Tax ID ~p1 sequence ~p2 modified
+		if %ProcessMode=1 do Runtime.setErrMSG("M1099",2608,"TAXID~SEQ") quit  
+	
+		// Tax ID ~p1 sequence ~p2 deleted
+		do Runtime.setErrMSG("M1099",2607,"TAXID~SEQ")
+		}
+	set ER="W"
+	quit 
+	
+	
+FTP(String TAXID,Number X)	// Post-processor for form type
+
+	type public Boolean ER
+	type public Number %OSAVE,ACN
+	type public String M1099()
+	
+	type DbSet ds
+	type RecordM1099 m1099
+	
+	set ACN=$$ACNFRTID^XALPHA(TAXID)
+
+	// No customer existing with tax ID ~p1
+	if X=5,(ACN.isNull()) do Runtime.setErrMSG("M1099",4750,"TAXID") quit
+	
+	if '%OSAVE quit
+
+	if $D(M1099(TAXID)) quit 
+	
+	set ds=Db.selectDbSet("M1099","TAXID=:TAXID")
+	while ds.next() do {
+		set m1099=ds.getRecord("M1099")
+		set M1099(TAXID,m1099.formtyp,m1099.seq)=m1099.desc
+		}
+	quit 
+	
+	
+CC(RecordM1099 ffA)	// Get default cost center
+
+	type Number BRCD
+	
+	type RecordUTBLBRCD utblbrcd
+	
+	set ffA.cc=""
+	
+	set BRCD=$$DBRCD^UBRCD(%UserStation)
+	if BRCD.isNull() quit
+
+	set utblbrcd=Db.getRecord("UTBLBRCD","BRCD=:BRCD",1)
+	if 'utblbrcd.getMode() quit
+	
+	set ffA.cc=utblbrcd.ccdef
+   	quit
+   	
+	
+GETCIF(RecordCIF cif,Number ACN)	// Get Customer
+
+	type public String ADDR()
+
+	type Number I
+	
+	for I=1:1:6 set ADDR(I)=""
+	do ^UTLADDR(,,6,1,"CIF",ACN)
+	
+	// Set Customer Last Name	- 50856
+	set cif=Db.getRecord("CIF","ACN=:ACN")
+	set ADDR(7)=cif.lnm
+	
+	quit 
+
+GETNPK(String tin,Number seq)		//Get Non Primary Key Values
+
+	type String DATA
+		
+	set DATA=""
+	type ResultSet rs = Db.select("NAM,TD,FORMTYP,INT,INTWH,TYPE,AD1,AD2,AD3,CITY,STATE,MZIP,DESC,CC,RELACN,ODAT,UPDT,DEBTOUT,DEBTSAT,FMKTV,BLIAB,DESC2,DESC3,PRINRES,MF,CNTRY,RECOTH,RETAX,COPRIN,COINT,COFEE,CID,BANKRUP,ORDDIV,FEDINC,RENT,ROYALTY,OTHINC,FISHBOAT,MEDPYMNT,SUBPAY,CROPINS,GOLDPARA,GPPLS,LNAM","M1099","TAXID=:tin AND SEQ=:seq")
+	if rs.next() set DATA=rs.getRow("#")
+	quit DATA
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60403^47811^Shriram Deshpande^8596"	// Signature - LTD^TIME^USER^SIZE

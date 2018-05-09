@@ -1,0 +1,253 @@
+RRIMPORT		/*
+	ORIG: SCHWARTZC - 04/26/2001
+	DESC: Rules and Results Import Routine
+
+	---- Comments --------------------------------------------------------
+
+	This routine will generate rules and results product defaults based
+	on a tab delimited file.  Everytime the import is executed all existing
+	rules and results tables are deleted.  The import then reads in and 
+	creates new rules based on the import files.
+
+	File Layout:
+	The import file is tab delimited. The first row of the file must be 
+	a list of columns with TYPE and CRCD as the first two columns in that 
+	order.  The column names that follow may be in any order.
+	The following rows contain the import data.  The data for each column
+	must be in the same order as the data items in the first row.
+
+
+	Example file.
+
+	TYPE	CRCD	MINBAL	MINDR
+	400	EUR	1000	300
+	400	NLG	2000	600
+	300	EUR	100	10
+	300	NLG	200	10
+
+
+	The values entered in the file must follow all existing rules for rules
+	and results.
+
+
+	---- Revision History ------------------------------------------------
+
+	12/14/05 - KumarSS - 16671
+		   Replaced the calls to QA^DBSFILB with COMPILE^DBSFILB.
+		   
+	05/24/05 - RussellDS - CR16071
+		   Converted M TP commands to PSL Runtime methods.
+		   
+		   Removed old revision history.
+
+	11/30/04 - Frans S.C. Witte CR12808
+		   Changed IO.read() to IO.read(.ETYP) to maintain compatibility
+		   with new implementation of class IO.
+
+	*/
+
+	quit
+
+
+	//---------------------------------------------------------------------
+START	// External entry point
+	//---------------------------------------------------------------------
+
+	type public Boolean ER
+	type public String %NOPRMT,%READ,%TAB,VFMQ
+
+	type String DIO,LIO
+
+	set %TAB("DIO")="/DES=Deposit Import File/LEN=60"
+	set %TAB("LIO")="/DES=Loan Import File/LEN=60"
+
+	set %READ="DIO/LEN=45/TYP=T,LIO/LEN=45/TYP=T",%NOPRMT="N"
+	do ^UTLREAD quit:VFMQ="Q"
+
+	if DIO.get()="",(LIO.get())="" quit
+
+	do Runtime.start("BA")
+
+	// Delete all rules and results tables.
+	do DELETE
+
+	do {
+
+		do PROC(DIO.get(),"DEP") quit:ER
+		do PROC(LIO.get(),"LN") quit:ER
+		}
+
+	if ER.get() do Runtime.rollback()  quit
+
+	do Runtime.commit()
+
+	// Compile routines to take into account for the new
+	// rules and results.
+	do ^DBSRULE(1)			// Compile routine VRULES
+	do COMPILE^DBSFILB("DEP",1)	// Build deposit filer
+	do COMPILE^DBSFILB("LN",1)	// Build loan filer
+
+	quit
+
+
+	//---------------------------------------------------------------------
+PROC(FILENAME,TABLE)	//
+	//---------------------------------------------------------------------
+
+	new COLS,READER,REC,X
+
+	catch ERROR1 {
+		set ET=ERROR1.type,FROM=ERROR1.thrownAt
+		if $G(RM)="" set RM=ERROR1.description
+		close FILENAME
+		do EXC
+		}
+
+	quit:$G(FILENAME)=""
+	
+	type IO io=Class.new("IO")
+	set io.fileName=FILENAME
+
+	// set directory to "" since FILENAME already contains the full path.
+	set io.directory=""
+
+	set io.openParams="READ"
+	set io.timeout=5
+
+	do io.open() quit:$G(ER)
+
+	set COLS=io.read(.ETYP)  quit:+ETYP'=0
+
+	// Quit if no columns other than TYPE and CRCD are defined.
+	quit:$P(COLS,$C(9),3)=""
+
+	set COLS=$$UPPER^%ZFUNC(COLS)
+
+	do INIT
+
+	// Verify Market Segment 99, Create it if it doesn't exist
+	if 'Db.isDefined("UTBLMARSEG","MARSEG") do {
+		do Db.insert("UTBLMARSEG","MARSEG,DES",":MARSEG,'Import Defaults'")
+		}
+
+	// Verify Segment ID 1 exists for Market segment 99, Create it if it doesn't exist
+	if 'Db.isDefined("UTBLMARSEGDT","MARSEG,SEGID") do {
+		do Db.insert("UTBLMARSEGDT","MARSEG,SEGID,DES",":MARSEG,:SEGID,'Import Defaults'")
+		}
+
+	// Read and Process the records.
+	for  set REC=io.read(.ETYP) quit:(+ETYP'=0)!$G(ER)  do {
+		
+		new CRCD,DECISION,RESULTSID,RULEID,TYPE
+
+		set TYPE=$P(REC,$C(9),1)
+		set CRCD=$P(REC,$C(9),2)
+
+		set RULEID=TYPE
+		set RESULTSID=TYPE
+
+		//Create new UTBLPRODRL record if it does not exist
+		if 'Db.isDefined("UTBLPRODRL","RULEID") do {
+			new UPDCOLS,DESC
+			set DESC="Product Type "_TYPE
+			set UPDCOLS="TYPE,CRCD"
+			do Db.insert("UTBLPRODRL","RULEID,MARSEG,SEGID,FILES,COLNAMES,DES",":RULEID,:MARSEG,:SEGID,:TABLE,:UPDCOLS,:DESC")
+			set DECISION=1
+			}
+
+		// Retrieve Next Decision number.  This value must match for
+		// both the Rule and the Result detail.
+		if $G(DECISION)="" set DECISION=Db.nextVal("UTBLPRODRLDT","RULEID")
+
+		//Create UTBLPRODRLDT record for the product type/currency
+		if 'Db.isDefined("UTBLPRODRLDT","RULEID,DECISION") do {
+			new TEST
+			set TEST="("_TABLE_".TYPE = "_TYPE_") AND ("_TABLE_".CRCD = '"_CRCD_"')"
+			do Db.insert("UTBLPRODRLDT","RULEID,DECISION,TEST",":RULEID,:DECISION,:TEST")
+                        }
+
+		//Loop through the columns starting at the 3rd one (type and crcd have already been read in).
+		for dinum=3:1:$L(REC,$C(9)) do {
+
+			set COLNAM=TABLE_"."_$P(COLS,$C(9),dinum)
+			//set vdi=COLNAME
+			set COLVAL=$P(REC,$C(9),dinum)
+
+			quit:COLVAL=""
+			
+			// Create new UTBLPRODRT record if it does not exist
+			if 'Db.isDefined("UTBLPRODRT","COLNAM,RESULTSID") do {
+				new DESC
+				set DESC="Product Type "_TYPE
+				do Db.insert("UTBLPRODRT","COLNAME,RESULTSID,MARSEG,SEGID,DES",":COLNAM,:RESULTSID,:MARSEG,:SEGID,:DESC")
+				}
+
+			// Create UTBLPRODRTDT record for the result
+			if 'Db.isDefined("UTBLPRODRTDT","COLNAM,RESULTSID,DECISION") do {
+				do Db.insert("UTBLPRODRTDT","COLNAME,RESULTSID,DECISION,DEFAULT",":COLNAM,:RESULTSID,:DECISION,:COLVAL")
+				}
+				
+			// Link the rule and result to the product type
+			if 'Db.isDefined("UTBLPRODLNK","TYPE,COLNAM,MARSEG,SEGID") do {
+				do Db.insert("UTBLPRODLNK","TYPE,COLNAME,MARSEG,SEGID,APPMOD,RULEID,RESULTSID",":TYPE,:COLNAM,:MARSEG,:SEGID,0,:RULEID,:RESULTSID")
+				}
+			}
+		}
+
+	if $G(ER) throw Class.new("Error",RM)
+
+	close FILENAME
+
+	quit
+
+	//---------------------------------------------------------------------
+INIT	// Init section for import
+	//---------------------------------------------------------------------
+
+	
+	set MARSEG=99
+	set SEGID=1
+
+	quit
+
+	//---------------------------------------------------------------------
+DELETE	// Delete rules and results tables
+	/*---------------------------------------------------------------------
+	
+		This section deletes the following tables.
+		
+		UTBLPRODRL
+		UTBLPRODRLDT
+		UTBLPRODRT
+		UTBLPRODRTDT
+		UTBLPRODLNK
+
+	---------------------------------------------------------------------
+	*/
+
+	do Db.fastDelete("UTBLPRODRL")
+	do Db.fastDelete("UTBLPRODRLDT")
+	do Db.fastDelete("UTBLPRODRT")
+	do Db.fastDelete("UTBLPRODRTDT")
+	do Db.fastDelete("UTBLPRODLNK")
+
+	quit
+
+	//---------------------------------------------------------------------
+EXC	//
+	//---------------------------------------------------------------------
+
+	if $ZS["%GTM" do ZE^UTLERR
+
+	if $G(PROC)="" set PROC=$T(+0)
+        if $G(DESC)="" set DESC="Rules and Results Import"
+
+	set ET=$G(ET)_","_$G(RM)_","_$G(FROM)
+	set ER=1
+	set ERRVAL=$G(ERRVAL)
+
+	if $G(RM)="" set RM=ET
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60250^41009^Sudanthiran S. Kumar^6557"	// Signature - LTD^TIME^USER^SIZE

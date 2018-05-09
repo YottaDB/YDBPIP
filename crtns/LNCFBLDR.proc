@@ -1,0 +1,661 @@
+LNCFBLDR	// PBS - LN - V3.5 - Generic Cash Flow Array Builder - Revolving Loans
+	/*
+	  ---- Revision History -------------------------------------------------
+
+	   07/31/06 - KELLYP - CR 22048
+	   	      Modified N1 and AMO sections to eliminate PRECEDENCE 
+	   	      warnings.
+
+	   12/11/01 - SCOTTC - 43584
+		      Convert to PSL.  Remove history prior to 2000.
+		      Remove EXT line tag.  Nothing calls to it.
+
+
+	
+	   Builds CF array in the following structure:
+	
+	       CF(n)=1 | 2 | 3 | 4 | 5 | 6 | 7
+	
+	       where:
+	
+	       1 = The payment amount
+	       2 = The number of occurances of #1
+	       3 = The interest rate at which the payment amount was calculated
+	       4 = Whether a fixed principal amount was included in the payment
+		   amount in #1
+	       5 = in the final CF entry, the principal balance at the end.
+	       6 = The interest portion of each cash flow
+	       7 = The due date of the payment
+	
+	*/
+	quit
+
+public APR(RecordLN ln)	
+	/*
+	Arguments: Routine expects BASE and %PR to be hanging around
+ 
+	. RecordLN ln  Loan object	 	     /TYP=object/REQ
+ 
+ 
+	Returns:
+ 
+	CF	     Cash flow array
+ 
+	Example:
+ 
+	D APR^LNCFBLDR(.ln)
+ 
+	*/
+	  
+	new APR,%EXT,NEW,PCH
+	set (NEW,APR)=1 set (%EXT,PCH)=0
+	if '$G(AF) set AF=ln.dist1af
+	if '$G(AF) set AF=1
+	do N1(.ln)
+	quit
+	
+public PCH(RecordLN ln)
+	
+	/*
+	Arguments: Routine expects BASE and %PR to be hanging around
+ 
+	. RecordLN ln  Loan object	 	     /TYP=object/REQ
+ 
+ 
+	Returns:
+ 
+	CF	     Cash flow array
+ 
+	Example:
+ 
+	D PCH^LNCFBLDR(.ln)
+ 
+	*/
+
+	new APR,%EXT,NEW,PCH
+	set (%EXT,NEW,APR)=0 set PCH=1    
+	if '$G(AF) set AF=ln.dist1af
+	if '$G(AF) set AF=1
+	do N1(.ln)
+	quit
+	
+public	NEW(RecordLN ln) 
+	/*
+	Arguments: Routine expects BASE and %PR to be hanging around
+ 
+	. RecordLN ln  Loan object	 	     /TYP=object/REQ
+ 
+ 
+	Returns:
+ 
+	CF	     Cash flow array
+ 
+	Example:
+ 
+	D NEW^LNCFBLDR(.ln)
+ 
+	*/
+
+	new APR,%EXT,NEW,PCH,TYPE
+	set (%EXT,PCH,APR)=0 set NEW=1
+	set P=ln.nfplnorg	 	    
+	set TYPE=ln.type
+	if '$G(AF) set AF=ln.dist1af
+	if '$G(AF) set AF=1
+	if P=""  set P=Db.getOneRow("FPLN","PRODCTL","TYPE") if P="" quit
+	set PLAN=P
+	set TYP="PTS"
+	set PAYEE=1
+	set PLAN(P)=Db.getOneRow("FMET","AOAMO","TYP,PAYEE,PLAN")
+	if PLAN(P) quit
+	do N1(.ln) 
+	quit
+    	
+N1(RecordLN ln) // Is an amortization going to be produced from this data? (If so, call
+
+	new B,BUSOPT,I,INTPRI,J,LDD,N,NBDC,ODD,PLAN,PRINPRI,T,X
+
+	// ^LNICM and use ^UFRE.  (AMOPT of 1 = produce based on dates).
+	set AMOPT=$G(AMOPT)
+	
+	if $G(NSIP)="" set NSIP=1
+
+	// Interest - Unearned (Original)
+	if 'PCH set BASE=ln.crlmt-ln.iun
+	
+	for I=1:1:4 Q:$D(voerr)  for J="P","I" set PRIO(I,J)=""
+	set N="" set (PRINPRI,INTPRI,CNT,X)=0
+	for  set N=$O(%PR(N)) quit:N=""  do {
+		set B=$P(%PR(N),"|",1)
+		if $P(%PR(N),"|",2),B="P"!(B="I") set P=$P(%PR(N),"|",3) set PRIO(P,B)=1 set X=1
+		set:B="P" PRINPRI=P
+		set:B="I" INTPRI=P
+		}
+	if 'X quit 
+	
+	// Account Maturity Date
+	set MDT=ln.mdt
+	// Interest Prepaid Date
+	set (LDD(1),LDD(2),LDD(3),LDD(4),ODD)=ln.amodt
+	if 'NEW set (LDD(1),LDD(2),LDD(3),LDD(4),ODD)=%SystemDate
+	
+	set (IBASE,PBASE)=BASE
+	// Original Number of Payments
+	set ONP=+ln.onp
+	// Account Term
+	set TRM=ln.ptrm if '$L(TRM) set TRM=ln.trm
+	// Payment Rounding Option
+	set ROPT=ln.ropt
+	set INDEX=$$INDDATA^LNU(.ln)
+	// Int/Div Matrix
+	set INTMAT=ln.intmat
+	// Distribution 1 Next Due
+	set (NDD,NDD(1))=ln.dist1nd
+	// Distribution 1 Annual Factor
+	set DIST1AF=ln.dist1af
+	// Distribution 1 Last Due
+	set ODT=ln.dist1ld
+	// Minimum Finance Charge Per Bill
+	set MFCB=ln.mfcb
+	// Minimum Payment Amount
+	set PMTMIN=ln.pmtmin
+	set RPP=ln.rpp 
+	// Principal Repayment Plan
+	if RPP="" quit
+	
+	set PLAN=RPP
+	if '$D(RPP(RPP)) set RPP(RPP)=Db.getOneRow("DESC,BALOP,CALOP,RECFRQ,NBBO,PBT","UTBLRPP","PLAN",124)
+	type ResultSet rs=Db.select("FACT,TIER","UTBLRPPB","PLAN=:RPP AND TIER>0")
+	if rs.isEmpty() quit
+	while rs.next() do { quit:ER
+		new T
+		set T=rs.getCol(2)
+		set RPP(RPP,T)=rs.getCol(1)
+		}
+
+	// Balance Option.  Either the changing balance is used (0 or 4) or
+	// the opiginal balance is used (1, 2 or 3).
+	set RP2=$P(RPP(RPP),"|",2)
+	if RP2=4 set RP2=0
+	if RP2=2!(RP2=3) set RP2=1
+	
+	// Calculation Option
+	set RP3=$P(RPP(RPP),"|",3)
+	
+	// Recalc Frequency
+	set RP4=$P(RPP(RPP),"|",4)
+	
+	// Inc pmt by finance charge
+	set RP5=$P(RPP(RPP),"|",5)
+	
+	// If there's no term, maturity date or amortization base (or ONP) we
+	// must build CF until base = 0.
+	if 'ONP do {
+		set BUSOPT=ln.busopt	 	  
+		set NBDC=ln.nbdc	       
+		if 'MDT,$L(TRM) set MDT=$$EXT^UMDT(TRM,ODT,0,BUSOPT,NBDC)      
+		set X=(MDT-ODT)/365 if X<0 set ONP=0 quit
+		set ONP=$$^SCARND(X*DIST1AF,0,"","",0)
+		}
+
+
+	// If for some reason we know we cannot use the existing CF, proceed.
+	if '%EXT,$G(KILLCF) kill CF,X
+
+	/*
+	If this is a standard new loan, do not subject it to this processing,
+	as ^LNNEW has already built a good CF.
+	*/
+
+	if $G(KEEPCF) do END1 quit
+	
+	/* 
+	KEEPCF indicates that we are building a good CF that may be reused
+	(if there's no KILLCF).
+	*/
+
+	set KEEPCF=1 
+	set %V("KEEPCF")="" 
+	set %VJ("KEEPCF")=""
+	
+	// Interest Accrual Method
+	set IACM=ln.iacm
+	set NUM=$S('$E(IACM):360,1:365)
+	set DENOM=$S('$E(IACM,2):36000,1:36500)
+	// Promotional Rate - Expiration Date
+	set TREXD=ln.trexd
+	// Promotional Rate
+	set TRATE=ln.trate
+	if TREXD>ODD set (OIR,IRN)=TRATE set TEASRT=1
+	else  set (OIR,IRN)=ln.irn set TEASRT=0
+	// Int/Div Check Frequency
+	set INTFRE=ln.intfre set FRE=INTFRE
+	// Int/Div Change - Next Date
+	set ICHND=ln.ichnd if 'ICHND,$L(INTFRE) do { if ER quit
+		// Original Disbursement Date
+		set JD=$S(ln.amodt:ln.amodt,1:ln.odd)
+		set NJD=$$NJD^UFRE(JD,FRE) set ICHND=NJD set ln.ichld=JD
+		}
+	// Int/Div Change - Last Date
+	set ICHLD=ln.ichld if 'ICHLD,$L(INTFRE) do { if ER quit
+		set FRE="-"_FRE set JD=ICHND set NJD=$$NJD^UFRE(JD,FRE) set ICHLD=NJD
+		}
+	// Index Rounding Option
+	set IRF=ln.irf
+	// Distribution 1 Frequency
+	set (DIST1FRE,DFRE(1))=ln.dist1fre
+	set AF(1)=DIST1AF
+	set (AF(2),AF(3),AF(4),CNT(1),CNT(2),CNT(3),CNT(4))=""
+	// Distribution 2 Frequency
+	set DFRE(2)=ln.dist2fre
+	// Distribution 3 - Frequency
+	set DFRE(3)=ln.dist3fre
+	// Distribution 4 - Frequency
+	set DFRE(4)=ln.dist4fre
+	
+	set FRE="-"_DFRE(1) 
+	set JD=NDD(1) 
+	set NJD=$$NJD^UFRE(JD,FRE) quit:ER
+	set XJD=NJD 
+	
+	/*
+	Build secondary frequencies, and determine each dist's starting point.
+	Distribution 2 Next Due
+	*/
+
+	set (JD,NDD(2))=ln.dist2nd
+	if JD do {
+		set JD=XJD 
+		set FRE=DFRE(2)
+		set NJD=$$NJD^UFRE(JD,FRE) quit:ER 
+		set AF(2)=AF do {
+			set JD=NJD 
+			set FRE="-"_DFRE(1)
+			}
+		if NJD>NDD(2) do { quit:(NJD'>NDD(2))  
+			set NJD=$$NJD^UFRE(JD,FRE) quit:ER 
+			set JD=NJD if 1
+			}
+		else  set FRE=DFRE(1)  quit:NJD'<NDD(2)  set NJD=$$NJD^UFRE(JD,FRE) quit:ER  set JD=NJD
+		}
+ 
+	// Distribution 3 - Next Due
+	set (JD,NDD(3))=ln.dist3nd
+	if JD do {
+		set FRE=DFRE(3)
+		set NJD=$$NJD^UFRE(JD,FRE) quit:ER 
+		set AF(3)=AF 
+		set JD=NJD 
+		set FRE="-"_DFRE(1)
+		
+		if NJD>NDD(3)  do { quit:NJD'>NDD(3)  
+			set NJD=$$NJD^UFRE(JD,FRE) quit:ER  
+			set JD=NJD if 1
+			}
+ 		else  do { quit:NJD'<NDD(3)  
+			set FRE=DFRE(1)  
+			set NJD=$$NJD^UFRE(JD,FRE) quit:ER  
+			set JD=NJD
+			}
+		}
+	// Distribution 4 - Next Due
+	set (JD,NDD(4))=ln.dist4nd
+	if JD do {
+		set FRE=DFRE(4)
+		set NJD=$$NJD^UFRE(JD,FRE) quit:ER 
+		set AF(4)=AF 
+		set JD=NJD 
+		set FRE="-"_DFRE(1)
+ 		if NJD>NDD(4) do { quit:NJD'>NDD(4)  
+			set NJD=$$NJD^UFRE(JD,FRE) quit:ER  
+			set JD=NJD if 1
+			}
+		else  do {
+			set FRE=DFRE(1)  
+			quit:NJD'<NDD(4)  
+			set NJD=$$NJD^UFRE(JD,FRE) quit:ER  
+			set JD=NJD
+			}
+		}
+	// Determine how often sub AF's occur in relationship to AF(1)
+	set STD(1)=NUM/AF(1)
+	set (STD(2),STD(3),STD(4))=""
+	for I=2:1:4 if AF(I) set STD(I)=NUM/AF(I) set AF(I)=AF(1)/AF(I)
+	
+	set (PPMT,OPMT,ISTP,TCHG,CHG)=0
+	
+	/* 
+	NSIP indicates whether the loan has a non-standard rate of
+	amortization.
+
+	If the loan rate is fixed, at a premium, or at a discount with no
+	prepayment penalty, or a prepayment penalty that is not 100% of term,
+	amortize to 0.00 net def fee.  In this case, NSIP is set to 1, and
+	amortization will cease at 0.00 net def fee.  This is the "standard"
+	method of handling net def fee amortization for all loans, except
+	those under methods 2 and 3.
+	
+	If the loan rate is at a discount with 100% of term prepayment
+	penalty, NSIP will be set to 2.  Amortization will run to maturity
+	but the amount required to satisfy the loan will be checked.
+	*/
+	
+	if 'ICHND do { quit
+		set ISTP=1 
+		do AMO(.ln,%EXT) 
+		}
+	if TREXD>ODD do {
+		set RATE=TRATE 
+		set TEASRT=1
+		}
+	else  do {
+		set par("INDEX")=ln.index
+		do CTL^UINDX(.ln,,ODD,BASE,par,)
+		if ER set RATE=IRN
+		set TEASRT=0
+		}
+	if (RATE-IRN=0)&('TEASRT) set ISTP=1 do AMO(.ln,%EXT) quit
+	if 'NEW do AMO(.ln,%EXT) quit
+	if RATE<IRN do AMO(.ln,%EXT) quit
+
+	/*
+	Check the loan product type to see what the prepayment %age of term is
+	If the prepayment %age of term is not 100%, we cannot amortize.
+	*/
+	
+	set PRODCTL=Db.getOneRow("EPPOFF","PRODCTL","TYPE")
+	if PRODCTL-100'=0 do AMO(.ln,%EXT) quit
+	set NSIP=2
+	do AMO(.ln,%EXT)
+	quit
+	
+AMO(RecordLN ln,%EXT)	// Amortize balance after CHG payments
+	
+	/*
+	
+	   ISTP determines whether we must recalculate the loan rate due to a
+	   premium/discount condition.  Until ISTP=1 we must do ^UFRE to track
+	   dates.  After ISTP=1, the CNT(PRI) variables maintain the timing of
+	   relationships between distributions.
+	
+	*/
+	for  do {
+
+		set (INT,PMT)=0
+		if 'TCHG,%EXT set INT=ACR
+	
+		// Regular distribution, find P or I
+	
+		set PRI=1
+		if TCHG set LDD=LDD(1)
+		if PRIO(1,"I") do {
+			set XPT=PMT 
+			do INT(.ln) 
+			set I=PMT-XPT 
+			if I<MFCB set PMT=PMT-I+MFCB
+			}
+		if PRIO(1,"P") do PRIN
+		if AMOPT!('ISTP) do {
+			set (JD,LDD(1))=NDD(1) 
+			set FRE=DFRE(1) 
+			set NJD=$$NJD^UFRE(JD,FRE) quit:ER  
+			set (NDD(1),NDD)=NJD
+			}
+
+		set CNT(1)=CNT(1)+1
+		set CNT(2)=CNT(2)+1
+		set CNT(3)=CNT(3)+1
+		set CNT(4)=CNT(4)+1
+	
+		if $G(AF(2)) do {
+			if (CNT(2)#AF(2))!((CNT(2))'>0) quit
+			set PRI=2
+			if PRIO(2,"I") do {
+				set XPT=PMT 
+				do INT(.ln) 
+				set I=PMT-XPT 
+				if I<MFCB set PMT=PMT-I+MFCB
+				}
+			if PRIO(2,"P") do PRIN
+			if AMOPT!('ISTP) do {
+				set (JD,LDD(2))=NDD(2) 
+				set FRE=DFRE(2) 
+				set NJD=$$NJD^UFRE(JD,FRE) quit:ER  
+				set NDD(2)=NJD
+				}
+			}
+		if $G(AF(3)) do {
+			if (CNT(3)#AF(3))!((CNT(3))'>0) quit
+			set PRI=3
+			if PRIO(3,"I") do {
+				set XPT=PMT 
+				do INT(.ln) 
+				set I=PMT-XPT 
+				if I<MFCB set PMT=PMT-I+MFCB
+				}
+
+			if PRIO(3,"P") do PRIN
+			if AMOPT!('ISTP) do {
+				set (JD,LDD(3))=NDD(3) 
+				set FRE=DFRE(3) 
+				set NJD=$$NJD^UFRE(JD,FRE) quit:ER  
+				set NDD(3)=NJD
+				}		       
+			}
+		if $G(AF(4)) do {
+			if (CNT(4)#AF(4))!((CNT(4))'>0) quit
+			set PRI=4
+			if PRIO(4,"I") do {
+				set XPT=PMT 
+				do INT(.ln) 
+				set I=PMT-XPT 
+				if I<MFCB set PMT=PMT-I+MFCB
+				}
+
+			if PRIO(4,"P") do PRIN
+			if AMOPT!('ISTP) do {
+				set (JD,LDD(4))=NDD(4) 
+				set FRE=DFRE(4) 
+				set NJD=$$NJD^UFRE(JD,FRE) quit:ER  
+				set NDD(4)=NJD
+				}		       
+			}
+	
+		// Consider payment rounding options
+		if ('ROPT),(PMT#1) do {
+			set R=((PMT+1)\1)-PMT 
+			set $P(PMT,"|",1)=PMT+R 
+			set IBASE=IBASE-R 
+			set:'RP2 PBASE=PBASE-R
+			}
+	
+		set PT=PMT do CF
+
+		/*
+		TCHG counts the total number of passes through this loop and is
+	   	compared to the original number of payments to know when to stop.
+	   	CHG counts the number of passes between cash flow entries.
+	
+	   	If the loan has reached its end (TCHG equals the original number of
+	  	payments), or if the balance is fully \amortized, we can stop.
+	
+		*/
+
+		set CHG=CHG+1 
+		set TCHG=TCHG+1
+		if %EXT,(NDD>EDT) quit
+		if (TCHG=ONP)!(IBASE<.01) quit
+		}
+
+	if %EXT,(NDD>EDT),IBASE>0 set IBASE=0
+	do END
+	quit
+    	
+PRIN	// Calculate principal portion, plus entire payment
+	set I=PMT 
+	if I#.01 set I=$$^SCARND(I,0,$G(CID))
+	
+	if RP4,PPMT do {
+		set P=+PPMT 
+		if RP5 set P=P-I+PMT
+		set PMT=P_"|1|"_I 
+		set PPMT=PMT 
+		}
+	else  do {
+		set F=$O(RPP(RPP,PBASE+.01),-1) set F=RPP(RPP,F)
+		if 'RP3 do {
+			set F=F/100 
+			set P=PBASE*F 
+			if P#.01 set P=$$^SCARND(P,0,$G(CID))
+			}
+		if RP3 set P=F
+		if RP5 set PMT=(PMT+P)_"|1|"_I
+		else  set PMT=P_"|1|"_I
+	
+		if PMT<PMTMIN set $P(PMT,"|",1)=PMTMIN
+		if RP4,'PPMT set PPMT=PMT
+		if 'RP2 set PBASE=PBASE-PMT+I
+		}
+	
+	set IBASE=IBASE-PMT+I
+	quit 
+	
+INT(RecordLN ln)
+
+	set FRAC=1
+	set LD=LDD(PRI) 
+	set ND=NDD(PRI)
+ 	if '(ISTP)!'(TCHG) do I2
+	for  do { quit:(ICHND>NDD(PRI))
+		if AMOPT do {
+			set %BAL=IBASE 
+			set %ND=ND-1 
+			set %LD=LD 
+			set %INT=$$^UIC(%BAL,%LD,%ND,IACM,IRN,0,DIST1AF,DIST1FRE,ICPF,SCHND,SCHLD)
+			}
+		/*
+		Substitute code to avoid doing ^LNICM 42,000,000 times.
+		STD is the standard period, i.e. for a monthly loan with an IACM of
+		11, the STD is 365/12, or 30.4166666666.  By doing this, we can make
+		a valid assumption about the interest charged for a loan, without
+		generating a CF entry for each period calculated.  FRAC represents
+		the fraction portion of the period that must be considered when
+		interest changes more frequently than the distribution's frequency.
+		*/
+		else  do {
+			// Actual number days in period
+			if IACM=10 set %INT=+$$^SCARND(IBASE*IRN/36000*STD(PRI)*FRAC,0,"","",5) quit
+			if IACM=11 set %INT=+$$^SCARND(IBASE*IRN/DENOM*STD(PRI)*FRAC,0,"","",5) quit
+	
+			// Standard number of days in period
+			if IACM="00" set %INT=+$$^SCARND(IBASE*IRN/DIST1AF/100*FRAC,0,"","",5) quit
+			if IACM="01" set %INT=+$$^SCARND(IBASE*IRN*360/DIST1AF/DENOM*FRAC,0,"","",5) quit
+			}
+
+		set INT=INT+$$^SCARND(%INT,0,"","",5)
+	
+	   	// If the loan is at a discount or premium, recalculate the new rate.
+		if (IBASE>0)!(ICHND) do I4 quit
+		if '(ISTP),'(TCHG) do I4 quit
+		if (ICHND'>NDD(PRI)) do I4 quit
+		if TREXD>NDD(PRI) set RATE=TRATE set TEASRT=1
+		else  do {
+			set par("INDEX")=ln.index
+			do CTL^UINDX(.ln,,ODD,BASE,par,) 
+			if ER do {
+				set RATE=IRN
+				set URATE=IRN
+				}
+			set TEASRT=0
+			}
+		set IRN=+RATE
+	
+		/*
+		If the calculated index rate (RATE) agrees with the current loan rate
+		(IRN) then we can stop calculating interest rate changes (ISTP).
+			
+		Check for Minimum or Maximum interest rates
+		*/
+
+		if ln.intmx=RATE set ISTP=1
+		if ln.intmn=RATE set ISTP=1
+	
+ 		if (RATE-URATE=0)&('TEASRT) set ISTP=1
+		if ICHND'>NDD(PRI) do I3
+
+		}
+	quit
+
+
+I2	set LD=ICHLD set ND=ICHND
+	if LD<LDD(PRI) set LD=LDD(PRI)
+	if ND>NDD(PRI) set ND=NDD(PRI)
+	if ND=NDD(PRI) do {
+		set JD=NDD(PRI) 
+		set FRE="-"_DFRE(PRI) 
+		set NJD=$$NJD^UFRE(JD,FRE) quit:ER  
+		if NJD=LD set FRAC=1
+		}
+	else  set FRAC=(ND-LD)/STD(PRI)
+	
+	quit	
+ 	
+I3	set JD=ICHND 
+	set FRE=INTFRE 
+	set NJD=$$NJD^UFRE(JD,FRE) quit:ER  
+	set ICHLD=ICHND 
+	set ICHND=NJD
+	if ISTP,ICHND<NDD(PRI) set ICHND=NDD(PRI)
+	quit 
+	
+I4	if INT#.01 set INT=$$^SCARND(INT+.005,0,$G(CID))
+	set PMT=PMT+INT
+	quit 
+	
+CF	// Place entry in CF array.
+	if 'CHG quit 
+	set CNT=CNT+1
+	
+	if PT#($$MOD^SCARND($G(CID))) do {
+		set PT=$$^SCARND(PT,0,$G(CID))_"|"_$P(PT,"|",2)
+		set PT=PT_"|"_$$^SCARND($P(PT,"|",3),0,$G(CID))
+		}
+	
+	set CF(CNT)=+PT_"|"_CHG_"|"_OIR_"|"_+$P(PT,"|",2)_"||"_$P(PT,"|",3)_"|"_LDD
+	set CHG=0 set OIR=IRN
+	quit 
+	
+END	set CNT=$O(CF(""),-1)
+	if $G(LDD)="" set LDD=LDD(1)
+	if PMT,CHG>0 do {
+		set PT=PMT 
+		set FRE=DIST1FRE 
+		set JD=LDD 
+		set NJD=$$NJD^UFRE(JD,FRE) quit:ER  
+		set LDD=NJD 
+		do CF
+		}	
+	if 'CNT!('IBASE) do END1 quit
+	
+	set P=CF(CNT) 
+	set N=$P(P,"|",2)-1
+       	if 'N set CNT=CNT-1 
+	if 'CNT do END1 quit
+	
+	set I=$P(CF(CNT),"|",6) 
+	set JD=$P(CF(CNT),"|",7)
+	if N set CF(CNT)=+P_"|"_N_"|"_IRN_"|"_$P(CF(CNT),"|",4)_"||"_I_"|"_JD
+	if N,$P(P,"|",4) set IBASE=IBASE+PMT-I
+	
+	set FRE=DIST1FRE 
+	set NJD=$$NJD^UFRE(JD,FRE) quit:ER 
+	set CF(CNT+1)=(I+IBASE)_"|1|"_IRN_"|1|"_IBASE_"|"_I_"|"_NJD
+
+	quit
+	
+END1	kill AF,BASE,CNT,EXP,ICHND,ISTP,TCHG,CHG,BAL,INTFRE,PT,LDD,PBASE,IBASE
+	kill NDD,NJD,RATE,URATE,SV,ONP,IRN,DFRE,STD,TEASRT  
+	quit 
+	
+
+vSIG()	quit "60477^65449^Pat Kelly^15052"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,640 @@
+public LNPTS13(RecordLN ln,RecordTTX ttx,RecordTRN trn)
+
+	// Miscellaneous fee payments
+
+	/*
+
+	---- Revision History ------------------------------------------------
+	
+	10/09/06 - KELLYP - CR 23512
+		   Removed LTRNSEQ parameter from the FEETSO^LNTPS3 calls in 
+		   section UPDFEE.
+	
+	05/30/06 - DESHPANDE S K - CR 20748
+		   Replaced public variable TRNSEQ with call to 
+		   ttx.getStoredValue("TranSeq")
+	
+	12/27/05 - Hillanbrand - 17730
+		   Added a check during unapplied funds to only do DPMT if
+		   trn.pac is null.
+
+	07/11/05 - KinI - 16566
+		   Modified UPDFEE section to use .get() for BASE variable.
+	
+	05/09/05 - KinI - 16252
+		   Modified FEEND, GETPRCNT and FEEUPD sections to add the 3rd 
+		   parameter to LNFEEP Db.getRecord method. Assess Misc Charge 
+		   transaction can be generated during a payoff that would 
+		   create "*" fee type on the loan that does not exist in loan 
+		   fee plan file.
+	
+	05/23/05 - KUMARB - CR 16072
+		   In section ADJ added parameter ADJFLG in call to 
+		   section INIT.
+	
+	05/10/05 - Carol Scott - CR 15816
+		   Added ADJFLG	to parameters being passed throughout.
+		   Calling routines should be passing the parameter depending
+		   on if the parameter is considered required as defined in this 
+		   routine. 
+		   When this is called as a posting routine, the ADJFLG is being set upon
+		   entry (ie. at the top and in the line tag ADJ).
+		   
+	04/27/05 - Georges - 13136
+		   Modified section FEEND to instantiate object
+		   lnfeep1, since there was a infinite loop
+		   while checking for the TOPFEE.
+		   Also modified section UPDFEE to replace variable
+		   SEQ with TRNSEQ. 
+
+	07/09/04 - Erik scheetz - 11008
+		   Moved the instatiation of LNFEEP inside the for loop in
+		   section FEEND. This fixes a problem when re-setting the 
+		   object the compiled code incorrectly killed incorrect
+		   objects.  By type[ing] the object in the for loop, the 
+		   object is new[ed] and no vobj entries are kill[ed].
+		   
+	06/10/03 - CARROLLJ - 51349
+		   Modified FEEND section to correct undefined error and
+		   corrected called to UPDFEE to pass ln and ttx objects.
+
+	04/25/03 - CARROLLJ - 51349
+		   Modified DPMT section to correct undefined error on TRB
+		   variable.
+
+
+	03/31/03 - CARROLLJ - 51349
+		   Added check to FEEND section on ARRAY to quit if ARRAY did 
+		   not exist.
+
+	02/04/03 - CARROLLJ - 51349
+		   Modified FEEND section to fix undefined error returned when
+		   making a payment.
+
+   	11/14/02 - CARROLLJ - 43583
+		   Modified calls to LNPTSU to pass ttx.
+
+	03/07/02 - MBUIM - 43583
+		   Converted to PSL.
+
+	   If called from the top, transaction is NOT an adjustment.  Adjustment
+	   transaction codes call into ADJ^LNPTS13 and dispatch to INIT with
+	   'ADJFLG'=1.
+
+	*/
+
+	type public Number ADJFLG = 0
+
+	do INIT(.ln,.ttx,.trn,ADJFLG)
+
+	quit
+
+INIT(RecordLN ln,RecordTTX ttx,RecordTRN trn,ADJFLG)
+	
+	type Public Number ADJFLG,ER,ICPA,INCRS,ZAMT
+
+	type Boolean PCF18
+	type String LNFEEIN,prvbil(),TSO
+	
+	// Interest Calc Principal Adjustments
+	set ICPA=ln.icpa
+
+	type RecordUTBLICPA utblicpa=Db.getRecord("UTBLICPA","KEY=:ICPA")
+       
+	if '$D(ICPA(ICPA)) set ICPA(ICPA)=utblicpa.prio
+	set ICPA=ICPA(ICPA)
+
+	// Transaction Source of Funds
+	set TSO=ttx.tso
+	set LNFEEIN=$$FIELD^UTSO(TSO,"LNFEEIN")
+
+	set PCF18=$E(trn.pcf,18)
+
+	// Unapplied funds
+	if PCF18 do { quit:ER
+		do GL^LNPTSU(.ttx,ZAMT,9)
+		if INCRS set ln.unapf=ln.unapf-ZAMT
+		else  set ln.unapf=ln.unapf+ZAMT
+		do %HSEQ^LNPTSU(.ttx,"*#F#"_ZAMT)
+		set ZAMT=0
+		if trn.pac.isNull() do DPMT(.ln,.ttx,.trn)
+		}
+
+	// Pay an individual fee
+	if 'PCF18 do LNFEE(.ln,.ttx,1,ADJFLG)
+
+	quit
+ 
+public LNFEE(RecordLN ln,RecordTTX ttx,CTL,ADJFLG)	// Apply fee amounts
+
+	/*
+
+	   ARGUMENTS:
+		   . RecordLN - Loan record			/TYP=Object/REQ
+
+		   . CTL - Control character 			/TYP=N
+		   	   position 1 - subtract billed fees.
+		     	   Used by payoff processing.
+		   . ADJFLG - Adjustment entry indicator	/REQ/TYP=N
+
+	*/
+	
+	type Public Number ADJFLG,ER,ZAMT
+	type Public String LNFEEIN
+	
+	do PRVBIL^LNBLDE(.ln)
+
+	type Date FEEND()
+	type Number TOTFEE
+	type String FEE
+
+	set TOTFEE=ZAMT
+
+	/* If fee type not defined, and there is only one fee type
+	   on this loan, force processing to use this fee.
+	*/
+	if $G(LNFEEIN)="",$$SINGFEE(.ttx) do UPDFEE(.ln,.ttx,FEE,.ZAMT,,1,ADJFLG) quit 
+
+	do FEEND(.ln,.FEEND,$E(CTL)) if ER quit
+
+	if $G(LNFEEIN)'="" do { quit:ER
+		type Number FEEAMT,PC
+		type String FEETYP
+		
+		for PC=1:1:$L(LNFEEIN,",") do {
+			set FEETYP=$P($P(LNFEEIN,",",PC),":",1)
+			set FEEAMT=$P($P(LNFEEIN,",",PC),":",2)
+			if FEEAMT="" do UPDFEE(.ln,.ttx,FEETYP,.ZAMT,,,ADJFLG) quit
+			if FEEAMT>ZAMT do UPDFEE(.ln,.ttx,FEETYP,.ZAMT,,,ADJFLG) quit
+			do UPDFEE(.ln,.ttx,FEETYP,FEEAMT,,,ADJFLG) set ZAMT=ZAMT-FEEAMT quit
+			}
+		}
+
+	// Pay all fees
+	if $G(LNFEEIN)="" do { quit:ER
+		type Number AMT
+		type String FEE
+
+		set FEE=""
+		for  set FEE=$O(FEEND(FEE)) quit:FEE=""  do { quit:'ZAMT  quit:ER
+			set AMT=FEEND(FEE)
+			if AMT>ZAMT set AMT=ZAMT
+			if $E(CTL) do UPDFEE(.ln,.ttx,FEE,AMT,,,ADJFLG) quit:ER
+			if '$E(CTL) do UPDFEE(.ln,.ttx,FEE,AMT,,1,ADJFLG) quit:ER
+			set ZAMT=ZAMT-AMT
+			}
+		}
+	quit
+
+public FEEND(RecordLN ln,	// Loan record
+	     Number ARRAY,	// fee array w/ amts	
+	     Number CTL)	// Control character 
+	     			// (CTL position 1 - subtract billed fees)
+	     
+	// Build array of fees not due
+	
+	type Public Number ER, CID
+	
+	type Number BRFAMT, BSEQ, DUEAMT, OSEQ, PC, SCHSEQ
+	type String BIL, DATA, ELMNT, FEE, TOPFEE
+
+	set ARRAY = ARRAY.get()
+	set CTL = CTL.get()
+	
+	if ER quit
+	
+	set OSEQ = ln.oseq   	// Internal Bill Oldest Unsatisfied Seq Nbr
+	
+	set BSEQ = ln.bseq	// Billing - Last Sequence Number
+
+	set CID = ln.cid
+	
+	// Step 1 - find ALL fee amounts outstanding
+	type ResultSet rs = Db.select("FEEREM,FEETYP","LNFEE","CID=:CID")
+	if 'rs.isEmpty() while rs.next() set ARRAY(rs.getCol("FEETYP")) = rs.getCol("FEEREM")
+
+	// Step 2 - subtract billed amounts
+	type RecordLNBIL1 lnbil1 = Db.getRecord("LNBIL1","CID,OSEQ",1)
+
+	set BIL = $$BIL1ELE^BILFUNCS(.lnbil1).translate($C(9),"|")
+
+	if CTL.extract() , OSEQ '> BSEQ do {
+		type ResultSet rs = Db.select("SCHSEQ","LNBIL1","CID=:CID AND SCHSEQ<=:BSEQ")
+
+		if rs.isEmpty() quit
+
+		while rs.next() do {
+			set SCHSEQ = rs.getCol("SCHSEQ")
+
+			type RecordLNBIL1 lnbil1 = Db.getRecord("LNBIL1","CID,SCHSEQ")
+
+			set BIL = $$BIL1ELE^BILFUNCS(.lnbil1).translate($C(9),"|")
+
+			for PC = 2:1:BIL.length("|") do {
+				set DATA = BIL.piece("|",PC)
+				set ELMNT = DATA.piece("#",1)
+				if ARRAY(ELMNT).get() set ARRAY(ELMNT) = ARRAY(ELMNT) - DATA.piece("#",4)
+				}
+				
+			set DUEAMT = 1
+			type ResultSet rs1 = Db.select("FEETYP,BRFAMT","LNBIL5","CID=:CID AND SCHSEQ=:OSEQ AND DUEAMT=:DUEAMT")
+				
+			if rs1.next() do {
+				set FEE = rs1.getCol("FEETYP")
+				set BRFAMT = rs1.getCol("BRFAMT")
+				if ARRAY(FEE).get() set ARRAY(FEE) = ARRAY(FEE) - BRFAMT
+				}
+			}
+		}
+
+	// Step 3 - merge all linked fees with top-level fee	
+
+	if ARRAY.data() = 0 quit
+
+	set FEE = ""
+	for  set FEE = ARRAY(FEE).order() quit:FEE = ""  do {
+		
+		type RecordLNFEEP lnfeep = Db.getRecord("LNFEEP","FEETYP=:FEE",1)
+		
+		if lnfeep.lfee do {
+			set TOPFEE = FEE 
+
+			type Number QUIT = 0
+
+			for  do { quit:QUIT
+				type RecordLNFEEP lnfeep1 = Db.getRecord("LNFEEP","TOPFEE",1) 
+				if 'lnfeep1.lfee  set QUIT = 1 quit
+				if lnfeep1.basis = "I" set QUIT = 1 quit
+				if lnfeep1.basis = "P" set QUIT = 1 quit
+				set TOPFEE = lnfeep1.basis
+				}
+				
+			if TOPFEE = FEE quit
+			set ARRAY(TOPFEE) = ARRAY(TOPFEE).get() + ARRAY(FEE) 
+			kill ARRAY(FEE)
+			}
+		}
+
+	for  set FEE = ARRAY(FEE).order() quit:FEE = ""  do {
+		if ARRAY(FEE) '> 0 kill ARRAY(FEE) quit
+		set ARRAY = ARRAY.get() + ARRAY(FEE)
+		}
+
+	quit
+
+
+DPMT(RecordLN ln,RecordTTX ttx,RecordTRN trn)	// Enough funds are in UNAPF (unapplied funds) for a full payment.
+
+
+	type Public Number %ATA,ER,PF,ZAMT
+	type Public String STR
+	
+	type Number AMT
+	type String ITC,TC
+
+	// External Transaction Code
+	set TC=ttx.etc
+	
+	set ITC=trn.itc
+
+	if ln.trb-$E(ITC) do { quit
+		// Transaction results in negative unapplied funds
+		if ln.unapf<0 do Runtime.setErrMSG("LN",2741) quit:ER
+		}
+		
+	if 'ln.dpmt quit
+	if ln.unapf<(ln.dpmt-ln.ppa) quit
+	set (ZAMT,AMT)=ln.dpmt-ln.ppa
+
+	do GL^LNPTSU(.ttx,-AMT,9)
+	set ln.unapf=ln.unapf-AMT
+	set (PF,%ATA)=1
+	set STR=""
+
+	quit
+
+UPDFEE(RecordLN ln,		// Loan Record
+       RecordTTX ttx,		// Transaction Record
+       String FEE,		// Fee Type
+       Number ZAMT,		// Fee Amount
+       Boolean SKPTSO,		// Update TSO Flag
+       Boolean AMTFLG,		// Amount Flag (1 - pay entire fee amount, 0 - only pay unbilled amount)
+       Boolean ADJFLG)		// Adjustment Entry Indicator
+
+	type Public Number ADJFLG,BASE,CID,SEQ
+	type Public String LNFEEIN,prvbil()
+	
+	type Number APPLYBL,APPLYDR
+	type Number LTRNSEQ = ttx.getStoredValue("TranSeq")
+	
+	set SKPTSO=SKPTSO.get()
+	set AMTFLG=AMTFLG.get()
+	set BASE=BASE.get()
+
+	type Number APPLIED,APPLY,FACTOR,FEEREM,PRCNT(),TOTELMNT,X
+	type String LFEE,PRVBIL,STR
+
+	set PRVBIL=prvbil(FEE).get()
+	do FINDFEE^LNFEEU(CID,$$TOPFEE^LNU(FEE),.STR)
+	if 'STR.get() set PRVBIL=0
+	if AMTFLG.extract() set PRVBIL=0
+
+	set APPLIED=0 
+	set FACTOR=1
+	
+	type ResultSet rs=Db.select("FEEREM","LNFEE","CID=:CID AND FEETYP=:FEE")
+	       
+	if 'rs.isEmpty(),rs.next() do {
+		set BASE=rs.getCol(1)
+		set X=rs.getCol(1)
+		set FEEREM=rs.getCol(1)
+		}
+
+	if LNFEEIN.get()="" set BASE=BASE-PRVBIL
+	set (APPLY,TOTELMNT)=BASE
+
+	if 'ADJFLG do GETPRCNT(FEE,TOTELMNT,1,.TOTELMNT)
+	set APPLY=TOTELMNT
+
+	if APPLY>ZAMT,TOTELMNT'=0 do {
+		set APPLY=ZAMT 
+		set FACTOR=APPLY/TOTELMNT 
+		set BASE=$$^SCARND(FACTOR*BASE,0,CID)
+		}
+	set LFEE=""
+	for  set LFEE=PRCNT(LFEE).order() quit:LFEE=""  do {
+		type Number AMT
+		
+		set (AMT,X)=$$^SCARND(PRCNT(LFEE)*BASE,0,CID)
+		set APPLYDR=FEEREM-$G(prvbil(LFEE))
+
+		// Make sure amount to be applied directly does not exceed fee amount
+		if APPLYDR>X set APPLYDR=X
+	
+		// amount to reduce bills by
+		set APPLYBL=X-APPLYDR
+	
+		do FEEUPD(.ln,LFEE,X,ADJFLG)
+		if APPLYDR do %HSEQ^LNPTSU(.ttx,"*#"_LFEE_"#"_APPLYDR)
+		if AMT>APPLYDR do REDUCBL(.ln,.ttx,LFEE,APPLYBL)
+		if 'SKPTSO do FEETSO^LNPTS3(.ttx,X,LFEE)
+		set APPLIED=APPLIED+X
+		}
+
+	// Find TOTAL amount that can be applied directly to account
+	if 'FEEREM.get() quit
+	set APPLYDR=FEEREM-prvbil(FEE).get()
+
+	// Find amount to be applied towards this fee
+	set X=APPLY-APPLIED
+
+	// Make sure amount to be applied directly does not exceed fee amount
+	if APPLYDR>X set APPLYDR=X
+
+	// amount to reduce bills by
+	set APPLYBL=X-APPLYDR
+
+	do FEEUPD(.ln,FEE,X,ADJFLG)
+
+	if APPLYDR do %HSEQ^LNPTSU(.ttx,"*#"_FEE_"#"_APPLYDR)
+	do REDUCBL(.ln,.ttx,FEE,APPLYBL)
+
+	if 'SKPTSO do FEETSO^LNPTS3(.ttx,X,FEE)
+
+	set ZAMT=ZAMT-APPLY
+	do GL^LNPTSU(.ttx,APPLY,6)
+	
+	quit
+
+
+public FEEUPD(RecordLN ln,FEE,AMT,ADJFLG)	// Update fee remaining, paid year-to-date and life amts
+
+
+	type Public Date CUVAR2
+	type Public Number ADJFLG,CID
+	
+	type Boolean DED
+	type Date BOT,BOY
+	type Number TAXYEOFF,YEOFF
+
+
+	type RecordLNFEE lnfee=Db.getRecord("LNFEE","CID,FEE")
+
+	set lnfee.feerem=lnfee.feerem-AMT
+
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+
+	type RecordLNFEEP lnfeep=Db.getRecord("LNFEEP","FEE",1)
+	
+	set YEOFF=cuvar.yeoff
+	set TAXYEOFF=cuvar.taxyeoff
+
+	// Fisrt day current year
+	set BOY=$$BOFY^SCADAT(CUVAR2,1)
+	set BOT=$$BOTY^SCADAT(CUVAR2,1)
+	set DED=lnfeep.ded
+
+	/* Update deductible assessed and nondeductible assessed prior year or
+	   year to date buckets
+	*/
+
+	// update fees assessed buckets
+	if ADJFLG do {
+		// Fee accessed life
+		set lnfee.aslf=lnfee.aslf-AMT
+		if (YEOFF)&(%EffectiveDate<BOY)&(CUVAR2'>(BOY+YEOFF)) do {
+			// Prior year
+			set lnfee.aspy=lnfee.aspy-AMT
+			if DED set ln.dafpy=ln.dafpy-AMT
+			else  set ln.ndafpy=ln.ndafpy-AMT
+			}
+		else  do {
+			// Current Year
+			set lnfee.asytd=lnfee.asytd-AMT
+			if DED set ln.dafyd=ln.dafyd-AMT
+			else  set ln.ndafyd=ln.ndafyd-AMT
+			}
+		if (TAXYEOFF)&(%EffectiveDate<BOT)&(CUVAR2'>(BOT+TAXYEOFF)) do {
+			// Prior Tax year
+			set lnfee.aspty=lnfee.aspty-AMT
+			if DED set ln.dafpty=ln.dafpty-AMT
+			else  set ln.ndafpty=ln.ndafpty-AMT
+			}
+		else  do {
+			// Current Tax Year
+			set lnfee.astytd=lnfee.astytd-AMT
+			if DED set ln.daftytd=ln.daftytd-AMT
+			else  set ln.ndaftytd=ln.ndaftytd-AMT
+			}
+		}
+	// update fees payed buckets
+	else  do {
+		// Fee payed life
+		set lnfee.feelf=lnfee.feelf+AMT
+
+		// prior year
+		if (YEOFF)&(%EffectiveDate<BOY)&(CUVAR2'>(BOY+YEOFF)) set lnfee.feepy=lnfee.feepy+AMT
+
+		// Currentyear
+		else  set lnfee.feeytd=lnfee.feeytd+AMT
+
+		// prior Tax year
+		if (TAXYEOFF)&(%EffectiveDate<BOT)&(CUVAR2'>(BOT+TAXYEOFF)) set lnfee.feepty=lnfee.feepty+AMT
+		
+		// Current Tax year
+		else  set lnfee.feetytd=lnfee.feetytd+AMT
+		}
+
+	do lnfee.save()
+
+	quit
+
+GETPRCNT(ELMNT,REMAMT,FACTOR,TOTELMNT)	//  Calculate fee % for linked fees
+
+	type Public Number BASE,CID,CTL,PRCNT
+	type Public String LNFEEIN
+	
+	type Number LFEE,FEEREM
+	type String BASIS,FEE,PRVBIL,STR
+
+	if '$E(CTL) new prvbil
+	
+	type ResultSet rs=Db.select("FEETYP,FEEREM","LNFEE","CID=:CID")
+
+	if rs.isEmpty() quit
+
+	while rs.next() do {
+		set FEE=rs.getCol(1)
+		set FEEREM=rs.getCol(2)
+		type ResultSet rs=Db.select("BASIS,LFEE","LNFEEP","FEETYP=:FEE")
+	       
+	    	if 'rs.isEmpty(),rs.next() do {
+			set BASIS=rs.getCol(1)
+			set LFEE=rs.getCol(2)
+			}
+		if BASIS.get()=ELMNT,LFEE do {
+
+			set PRVBIL=$G(prvbil(FEE)) 
+			if $G(LNFEEIN)'="" set PRVBIL=0
+			do FINDFEE^LNFEEU(CID,$$TOPFEE^LNU(ELMNT),.STR)
+			if 'STR set PRVBIL=0
+			if 'REMAMT set PRCNT=FACTOR
+			else  set PRCNT=(FEEREM-PRVBIL)/REMAMT*FACTOR
+			
+			if 'BASE set BASE=FEEREM-PRVBIL
+			set PRCNT(FEE)=PRCNT
+			do GETPRCNT(FEE,+FEEREM-PRVBIL,PRCNT,.TOTELMNT)
+			set TOTELMNT=TOTELMNT+FEEREM-PRVBIL
+			}
+		}
+	quit
+
+public REDUCBL(RecordLN ln,RecordTTX ttx,FEE,AMT)	// Reduce fee level of bill file
+
+
+	type Public Number CID
+	type Public String PBL
+	
+	type Number XBSEQ,BSEQ,I,LEVEL,N,OSEQ,PBL1,SCHSEQ,V
+	type String BL1,LNBIL1
+	
+	set SCHSEQ=0
+	set N=Db.nextKey("LNBIL1","CID,SCHSEQ")
+  	
+	// Billing - Last Sequence Number
+	set BSEQ=ln.bseq
+	if BSEQ do {
+		type ResultSet rs=Db.select("SCHSEQ","LNBIL1","CID=:CID")
+
+		if rs.isEmpty() quit
+
+		while rs.next() do {
+			set XBSEQ=rs.getCol(1)
+	  
+			type RecordLNBIL1 lnbil1=Db.getRecord("LNBIL1","CID,XBSEQ")
+
+			for LEVEL=0,1 do {
+				type RecordLNBIL5 lnbil5=Db.getRecord("LNBIL5","CID,XBSEQ,LEVEL,FEE",1)
+				if lnbil5.getMode()=0 quit
+				set V=lnbil5.brfamt 
+				if V>AMT set V=AMT
+				if 'V quit
+				set lnbil5.brfamt=lnbil5.brfamt-V
+				
+				do lnbil5.save()
+
+				do %HSEQ^LNPTSU(.ttx,XBSEQ_"#"_FEE_"#"_V)
+				set AMT=AMT-V
+				if LEVEL=1 do {
+					set BL1=lnbil1.bp1
+					set $P(BL1,"#",1)=BL1-V
+					set lnbil1.bp1=BL1
+					do CALC^LNUBIL(.ln,"01001")
+					}
+				}
+			set LNBIL1=$TR($$BIL1ELE^BILFUNCS(.lnbil1),$C(9),"|")
+			
+			for I=1:1 quit:$P(LNBIL1,"|",I)=""  if $P($P(LNBIL1,"|",I),"#",1)=FEE do {
+				set PBL=$P(LNBIL1,"|",I)
+				set PBL1=$P(PBL,"#",4) 
+				if PBL1>AMT set PBL1=AMT
+				set $P(PBL,"#",4)=$P(PBL,"#",4)-PBL1
+			   	do SETELMT^BILFUNCS(.lnbil1,I,PBL)
+				if 'PBL1 quit
+				do %HSEQ^LNPTSU(.ttx,XBSEQ_"#"_FEE_"#"_PBL1)
+				set BL1=$P(LNBIL1,"|",1)
+				set $P(BL1,"#",1)=BL1-PBL1
+				do SETELMT^BILFUNCS(.lnbil1,1,BL1)
+				do CALC^LNUBIL(.ln,"01001")
+				set AMT=AMT-PBL1
+
+				}			
+		   	 do lnbil1.save()
+			}
+		}
+	quit
+
+public ADJ(RecordLN ln,RecordTTX ttx,RecordTRN trn)	// Adjustment transaction code entry point
+
+	type Number ADJFLG
+	type String TSO
+
+	set ADJFLG=1
+	do INIT(.ln,.ttx,.trn,ADJFLG)
+
+	// Transaction Source of Funds
+	set TSO=ttx.tso
+
+	set TSO=$$FIELDIN^UTSO(TSO,"LNFEEADJ")
+      	set ttx.tso=TSO
+
+	quit
+
+SINGFEE(RecordTTX ttx)	// Does this loan have only one fee and this is a fee-only pmt ?
+
+	type Public Number CID
+	type Public String FEE
+	
+	type String P21,ETC
+
+	// External Transaction Code
+	set ETC=ttx.etc
+
+	type RecordTRN trn=Db.getRecord("TRN","ETC=:ETC")
+
+	set P21=trn.pac
+	if P21="" quit 0
+	if P21'["LNPTS13" quit 0
+	
+	set FEE=Db.nextKey("LNFEE","CID,''")
+	// no fees
+	if FEE="" quit ""
+
+	// one fee
+	if Db.nextKey("LNFEE","CID,FEE")="" quit 1
+	
+	// multiple fees
+	set FEE="" 
+	quit 0
+
+vSIG()	quit "60547^40614^Pat Kelly^15352"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,279 @@
+TTXSRTPS		/*
+	ORIG: MYERSK - 11/03/2000
+	DESC: Post Transactions in TTXSRT
+ 
+	---- Comments --------------------------------------------------------
+        This procedure is analogous to the TTXPOS routine, but instead of
+        posting transactions in the TTX file it posts transactions in the
+        TTXSRT file.
+        
+	---- Revision History ------------------------------------------------
+	
+	03/14/05 - SmithCD - 13782
+		   . Fixed undefined error in BRCDT section, by replacing B 
+		     variable references with appropriate variables
+		   . Replaced ^TTXSRT global references in look-up table 
+		     specifications in %TAB assignments, and /HLP attribute 
+		     in %TAB fields
+		   . Made ADDTLR section private (to Transaction Posting 
+		     system area) so it can be called from TTXSRTPOS
+		   . Modified to comply to current PSL standards
+
+	09/17/03 - CARROLLJ - 51630
+		 Remove to and from array's.
+
+	06/09/03 Dan Russell - 51351
+		 Removed use of schema class methods and replaced
+		 references to temporary table T with TMPRPT1 and
+		 eliminated need for T0.
+ 
+	 */
+
+	type Date SJD, TPD
+	type Number BOPT, OLNTB
+	type Boolean REQ()
+	type String %READ, %TAB, BRCDSEL(), I(), TOPT, VFMQ
+ 
+ 	set (SJD,TPD) = %SystemDate
+ 
+	set %TAB("BOPT") = ".BOPT1/HLP=[TTXSRT]BRCD/TBL=[TTXSRTUID]BRCD:DISTINCT:QUERY ""[TTXSRTUID]SJD=<<SJD>>""/XPP=D BRCDPP^TTXPOS"
+	set %TAB("TOPT") = ".TOPT1/HLP=[TTXSRT]UID/TBL=[TTXSRTUID]UID:DISTINCT:QUERY ""[TTXSRTUID]SJD=<<SJD>> AND [TTX]BRCD=<<BOPT>>""/XPP=D TLRPP^TTXPOS"
+ 
+	set %READ = "@@%FN,,BOPT/REQ,TOPT/REQ"
+ 
+	do ^UTLREAD quit:VFMQ = "Q"
+ 
+	do %EXT(%ProcessID, BOPT, TOPT)
+ 
+	quit
+ 
+
+public	%EXT(Number PROCID, Number BOPT, String TOPT)
+
+	/*
+	 External entry point for multiple batch posting.
+	*/
+
+	type public Date SJD
+
+	type Number %ODP, %RET
+	type Boolean ER	
+	type String %UserClass, %UserID, BRCD, BRCDSEL()
+
+        quit:PROCID.get().isNull()
+        quit:BOPT.get().isNull()
+        quit:TOPT.get().isNull()
+        
+        set:SJD.get().isNull() SJD = %SystemDate
+ 
+        do Db.fastDelete("TMPRPT2", "PID=:PROCID")
+        
+        do BRCDT
+        do TLRT
+ 
+ 	// Posting began
+        write !,$$^MSG(5480) do ^%T
+        
+        type DbSet ds=Db.selectDbSet("TMPRPT2", "PID=:PROCID")
+        while ds.next() do {
+        	type RecordTMPRPT2 tmprpt2 = ds.getRecord("TMPRPT2")
+
+        	set BRCD = tmprpt2.key1
+        	set %UserID = tmprpt2.key2
+
+		set ER = 0
+		do TTXSRT^TTXLOK quit:ER
+		do SRC
+		do POST
+		
+		do ^TTXP1	// Post transactions
+		
+		do Db.fastDelete("TTXSRTUID", "SJD,BRCD,%UserID")
+                }
+        
+        do Db.fastDelete("TMPRPT2", "PID=:PROCID")
+        
+        quit
+        
+        
+        //------------------------------------------------------------------
+SRC     // Posting Source
+        //------------------------------------------------------------------
+        
+        type public Number %ODP, %RET, BRCD
+        type public String SRC
+        type public Date SJD
+ 
+	type RecordSCAU scau = Db.getRecord("SCAU", "UID=:%UserID")
+
+	set %UserClass = scau.%ucls
+        set %ODP = scau.odp
+        
+	type RecordTTXSRTUID ttxsrtuid = Db.getRecord("TTXSRTUID", "SJD=:SJD,BRCD=:BRCD,UID=:%UserID", 1)
+
+	if ttxsrtuid.getMode() = 1 set SRC = ttxsrtuid.src
+	else  set SRC = ""
+
+        if SRC.isNull() set %RET = 0 quit
+
+	type RecordCTBLINC ctblinc = Db.getRecord("CTBLINC", "KEY=:SRC")
+
+	#IF CUVAR.RETOPT>0
+		if ctblinc.ret set %RET = CUVAR.RETOPT
+		else  set %RET = ctblinc.ret
+	#ELSE
+		set %RET = ctblinc.ret
+	#ENDIF
+ 
+        quit
+
+ 
+        //------------------------------------------------------------------
+POST    // Step through TTXSRT for this Branch and Teller
+        // Call into POSTASC or POSTDESC depending on the transaction sort
+        //      option in TTXSRTUID
+        //------------------------------------------------------------------
+        
+        type public Number BRCD
+        type public Date SJD
+        
+        type Number TRC
+ 
+	// Pull the last trace number used by this Date/Branch Code/Teller
+        set TRC = Db.currVal("TTX","SJD,BRCD,%UserID")
+
+	if TRC.isNull() do {
+		type RecordTTXUID ttxuid = Db.getRecord("TTXUID", "TJD=:SJD,BRCD=:BRCD,UID=%UserID")
+		set TRC = ttxuid.lpseq * 1000
+	}
+
+	type RecordTTXSRTUID ttxsrtuid = Db.getRecord("TTXSRTUID", "SJD=:SJD,BRCD=:BRCD,UID=%UserID")
+ 
+        if ttxsrtuid.trnsrt = 1 do POSTASC
+        else  do POSTDESC
+ 
+        quit
+ 
+        //------------------------------------------------------------------
+POSTASC // Create ResultSet rs  from TTXSRT Credits Before Debits, Amounts
+        // Ascending.  Pass RS into PROCRS
+        //------------------------------------------------------------------
+	type Boolean DC
+ 
+	for DC = 1, 0 do {
+		type ResultSet rs = Db.select("CIDSRT,AMT,TSEQ","TTXSRT", "SJD=:SJD AND BRCD=:BRCD AND UID=:%UID AND DC=:DC","CIDSRT ASC,AMT ASC,TSEQ ASC")
+		quit:rs.isEmpty()
+
+		do PROCRS(.rs)
+	}
+
+	quit
+
+ 
+        //------------------------------------------------------------------
+POSTDESC  // Create ResultSet rs  from TTXSRT Credits Before Debits, Amounts
+        //   Descending.  Pass RS into PROCRS   
+        //------------------------------------------------------------------
+        
+	type Boolean DC
+ 
+	for DC = 1, 0 do {
+		type ResultSet rs = Db.select("CIDSRT,AMT,TSEQ", "TTXSRT", "SJD=:SJD AND BRCD=:BRCD AND UID=:%UID AND DC=:DC", "CIDSRT ASC,AMT DESC,TSEQ ASC")
+		quit:rs.isEmpty()
+                
+		do PROCRS(.rs)
+	}
+
+	quit
+
+ 
+        //------------------------------------------------------------------
+PROCRS(ResultSet rs)
+        // Process records in rs. Copy TTXSRT records to TTX
+        // TRC is initially set in POST and incremented here
+        // Two consecutive transactions will be on the same screen only if
+        //      they have the same CIDSRT,AMT,and same screen in the keys on
+        //      TTXSRT.
+        //------------------------------------------------------------------
+        
+        type public Number BRCD, TRC
+        type public Boolean DC
+        type public Date SJD
+        
+        type Number AMT, CIDSRT, OAMT, OCID, OSCR, SCR
+        type Boolean FIRST
+ 
+        set FIRST = 1
+        set (OCID, OAMT, OSCR) = 0
+        
+        while rs.next() do {
+                set CIDSRT = rs.getCol("CIDSRT")
+                set AMT = rs.getCol("AMT")
+                set SCR = rs.getCol("TSEQ")
+                if CIDSRT = OCID, AMT = OAMT, ((SCR\1000) = (OSCR \ 1000)) S TRC = TRC + 1
+                else  set TRC = (((TRC \ 1000) + 1) * 1000) + 1
+ 
+                type RecordTTXSRT ttxsrt = Db.getRecord("TTXSRT", "SJD=:SJD,BRCD=:BRCD,UID=:%UserID,DC=:DC,CIDSRT=:CIDSRT,AMT=:AMT,TSEQ=:SCR")
+                
+                type RecordTTX ttx = Class.new("RecordTTX")
+		set ttx = ttxsrt.copy("EFD=EFFDT")
+		
+                set ttx.tjd = SJD
+                set ttx.brcd = BRCD
+                set ttx.uid = %UserID
+                set ttx.tseq = TRC
+                do ttx.bypassSave()
+ 
+                set OCID = CIDSRT
+                set OAMT = AMT
+                set OSCR = SCR
+        }
+ 
+        quit
+ 
+
+BRCDT   // Set up T0 file for selected Branch Code(s)
+
+	type public String BRCDSEL()
+	type public Number BOPT
+	type public Date SJD
+
+	if BOPT '= "ALL" set BRCDSEL(BOPT) = "" quit
+
+	type ResultSet rs = Db.select("DISTINCT BRCD", "TTXSRT", "SJD=:SJD")
+
+	while rs.next() set BRCDSEL(rs.getCol("BRCD")) = ""
+		
+	quit
+        
+       
+TLRT    // Set up T file for selected Teller(s)
+
+	type public String BRCDSEL(), TOPT
+	type public Number BOPT
+	type public Date SJD
+	
+	type Number BRCD
+
+        if TOPT'="ALL" do ADDTLR(BOPT,TOPT) quit
+        
+        set BRCD = ""
+        for  set BRCD = BRCDSEL(BRCD).order() quit:BRCD.isNull()  do {
+		type ResultSet rs = Db.select("DISTINCT UID", "TTXSRT", "SJD=:SJD AND BRCD=:BRCD AND UID>:%UserID")
+		while rs.next() do ADDTLR(BRCD, rs.getCol("UID"))
+	  	}
+	
+        quit
+        
+
+private	ADDTLR(Number BRCD, String %UserID) // Add Teller to file under Branch
+
+	type public Number PROCID
+
+	type RecordTMPRPT2 tmprpt2 = Class.new("RecordTMPRPT2", "PID=:PROCID,KEY1=:BRCD,KEY2=:%UserID")
+
+        do tmprpt2.bypassSave()
+        
+        quit
+
+vSIG()	quit "59987^38445^Chad Smith^7873"	// Signature - LTD^TIME^USER^SIZE

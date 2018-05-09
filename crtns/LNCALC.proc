@@ -1,0 +1,358 @@
+LNCALC	
+ /* 
+    ORIG: GRAY - 01/21/2000
+    DESC: LOAN CALCULATOR & MODELER
+    
+    ---- Comments --------------------------------------------------------
+	     
+	DESC:   Calculates parameters of loan types (see ^LNCALP), produces 
+	        standard or comparison amortization schedules.	
+    
+    ---- Revision History ------------------------------------------------
+
+        03/16/06 - S.Krishnan- CR17985
+        	   Cleaned up the sections DIS and DIS1 to avoid undefined
+        	   errors and to return correct Maturity Balance(FV) value.
+
+        07/26/05 - SkariahV- CR16679
+	           Removed #WARN and #OPTIMIZE directives.
+	
+	12/09/03 - CARROLLJ - CR7239
+		   Corrected precednece errors.
+
+	03/26/03 - GRAY - 51351
+		   Removed support of character interface since this procedure
+		   is only called by MRPC039, with the exception of the DIS1
+		   section which provides disclosure information via calls	
+		   from LNCALFP and LNCALR.  Made totally object oriented.
+		   Removed old revision history.
+
+	08/29/01 - GRAY - 46851
+		   Corrected problems in sections DIS and DIS1.
+	
+ */
+	
+	quit
+	
+	
+Public VPG00(RecordLN ln)	// This label is called from MRPC039
+	
+	type Public Number ER
+	type String CLS,CRCD,PCM,PCM()
+
+	set ER=0
+	set CLS="L"
+	set CRCD=%SystemCurrency
+
+	/*
+	The product type defaults were added to the ln object in MRPC039.
+	All data will be retrieved from the ln object and not the product type
+	table as was done in earlier versions.
+	*/
+				
+	// Branch off for GEM or IEM loans
+	if ln.pchm=2!(ln.pchm=3) do ^LNCALG(.ln) quit
+	
+	set PCM=ln.pcm
+		
+	type RecordSTBLPCM pcm=Db.getRecord("STBLPCM","KEY=:PCM")
+	set PCM(PCM)=pcm.pcmp
+
+	// Include loans billing a percentage of a balance
+	// Model fixed revolving loans
+	if PCM(PCM).extract(3)=4 do ^LNCALR(.ln) quit
+
+	// Model fixed interest/principal loans
+	if 'PCM(PCM).extract() do ^LNCALFP(.ln) quit
+	
+	quit
+
+	
+Public DIS(RecordLN ln)	// called from MRPC039
+
+	if 'ln.irn!(ln.trm="") quit
+	if 'ln.pmtpi!('ln.amtreq) quit
+	
+	/*
+	AMORT Indicates that the user has chosen to obtain amortization 
+	      schedules.
+	*/
+
+	type Boolean PIACM
+	type Public Boolean AMORT
+	type Date JD,LPD,MDT,NJD,ODT,PMDT
+	type Number AMBAS,BUSOPT,FV,PMT
+	type Public Number AF,COINT,ER,TYPE
+	type String CF(),DIST1FRE,LCALCCTL,NBDC,OIACM,TRM
+
+	// A loan which has already been modeled do amortization schedules
+	if ln.irn,ln.trm'="",AMORT.get(),ln.pmtpi,ln.amtreq do:ln.ambas="" TRM^LNCALP(.ln) quit
+	
+
+	// Calculation of Balloon Balance
+	set ln.schbal=0
+	set FV=0
+	
+	set CF(1)=ln.pmtpi_"|"_ln.ambas
+	
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:TYPE")
+
+	// Prepaid Interest Calculation Option
+	set LCALCCTL=prodctl.ppico
+
+	// Interest Accrual Method
+	set OIACM=$S(LCALCCTL'="":LCALCCTL,1:ln.iacm)
+	
+	// Payment Term
+	if ln.ptrm="" do DIS1(.ln) quit
+	 
+	// Distribution 1 Next Due
+	set JD=ln.dist1nd
+
+	// Distribution 1 Frequency
+	set DIST1FRE=ln.dist1fre
+
+	set NJD=$$NJD^UFRE(JD,"-"_DIST1FRE,.AF) quit:ER
+	set LPD=NJD
+
+	if AF<0 set AF=-AF
+	set ln.dist1af=AF
+
+	// Compute Payment Term
+	set ODT=LPD
+	set TRM=ln.ptrm
+	set PMDT=""
+	set BUSOPT=ln.busopt
+	set NBDC=ln.nbdc
+	if TRM'="" set PMDT=$$EXT^UMDT(TRM,ODT,0,BUSOPT,NBDC)
+	
+	// Compute Amortization Base
+	set TRM=ln.trm
+	set MDT=$$EXT^UMDT(TRM,ODT,0,BUSOPT,NBDC)
+
+	// Check the Date computed from Payment Term
+	if PMDT do {		
+		type Number Z
+		if PMDT>MDT set PMDT=MDT
+		// Payment Date - Opening Date/365 * Annual Factor
+		set Z=((PMDT-ODT)/365)*AF
+	 	if Z<1 set Z=1
+		set ln.onp=Z.roundDec(0)
+		}
+
+	// Compute balloon balance
+	if ln.onp-ln.ambas  do {
+		// Amortization Base (Number of Payments)
+		set AMBAS=ln.onp
+		// Principal and Interest Payment
+		set PMT=ln.pmtpi
+		// Calculate P&I Based on IACM
+		set PIACM=ln.piacm
+
+		if PIACM set FV=$$FVA^UFINC(ln.amtreq,ln.irn,PMT,AMBAS,ln.amodt,ln.iacm,DIST1FRE,OIACM)
+		else  set FV=$$FV^UFINC(ln.amtreq+COINT,ln.irn,AMBAS,PMT,AF)+PMT
+
+	 	if FV#.01 set FV=$$^SCARND(FV+.005,0,ln.cid)
+	
+		set ln.schbal=FV
+
+		set CF(1)=ln.pmtpi_"|"_(ln.onp-1)
+		set CF(2)=(ln.schbal_"|1")
+		}
+	
+	do DIS1(.ln)
+
+	quit
+
+		
+Public DIS1(RecordLN ln)	// Called by ^LNCALFP to perform disclosure calculations
+	
+	type Date AMODT,ODD
+	type Boolean PPIF
+	type Number %AMT,AMBAS,BAL,BALLAMT,DISAMF,DISNOT,DIST1AF,DISTFC,DISTPF
+	type Number DAYS,IAM,IR,IRN,ONP,PMTPI
+	type Public Date JD,SCHLD,SCHND
+	type Public Number COINT,DISTNOT,FV,OINT,TYPE
+	type Public String AF,CRCD
+	type String IACM,ICPF
+
+	set ONP=ln.onp
+	set IACM=ln.iacm
+	set DIST1AF=ln.dist1af
+	set COINT=COINT.get()
+	set OINT=OINT.get()
+	set BAL=ln.amtreq
+	set ln.crlmt=BAL
+	set IRN=+ln.irn
+	set ln.pmtdist="L-M-I-P"
+	set AMBAS=$S(ln.ptrm'="":ln.onp,1:ln.ambas)
+	set PMTPI=ln.pmtpi
+	set ODD=ln.odd
+	set AMODT=ln.amodt
+	set ICPF=ln.icpf
+	set BALLAMT=ln.ballamt
+	set ln.disppid=AMODT-ODD
+	set DAYS=AMODT-ODD
+	
+	set SCHND=ln.schnd
+	set SCHLD=ln.schld
+		
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:TYPE")
+	set PPIF=prodctl.ppif
+
+	/*
+	Here we are calculating Total Interest (DISTINT) which is located in
+	[LN]DISTINT.  IAM has values from 10-14 is Add-On, and 20-24 is 
+	Discount loans.
+	
+	If IAM.extract()'=2,it's mean Add-On or any different types of loans.
+	If IAM.extract()=2,We recalculate PMTPI again.
+	*/
+	
+	set IAM=ln.iam
+	
+	if IAM.extract()=2 do {
+		set PMTPI=$$PMT^UFINC(BAL+COINT,IRN,AMBAS,DIST1AF,0)
+		set PMTPI=$$^SCARND(PMTPI,0,"",CRCD.get())
+		set ln.distint=((AMBAS*$$^SCARND(PMTPI,0,ln.cid,CRCD.get()))-BAL)+FV
+		}
+
+	else  set ln.distint=((AMBAS*$$^SCARND(PMTPI,0,ln.cid,CRCD.get()))-BAL)+FV
+	
+	if BALLAMT'="" set ln.distint=(AMBAS*$$^SCARND(PMTPI,0,ln.cid,CRCD.get()))-(BAL-BALLAMT)+(AMBAS*$$^UIC(BALLAMT,AMODT,JD,"00",IRN,1,AF,PPIF,ICPF,SCHND,SCHLD))
+	
+	if ln.ambas'=ln.onp set ln.distint=ln.distint-PMTPI
+	
+	set ln.orgfa=$$^SCARND(BAL*ln.orgfp/100,0,ln.cid)
+	set ln.comfa=$$^SCARND(BAL*ln.comfp/100,0,ln.cid)
+	
+	if DAYS do { 
+		set %AMT=BAL
+		set IR=IRN 
+		do COINT(.ln) 
+		set ln.disppi=$$^SCARND(COINT,0,ln.cid)
+		set OINT=ln.disppi
+		}
+	/*
+	IAM has values from 10-14 is Add-On,and  20-24 is Discount loans.
+		DISAMF is a Total amount finaned
+		DISNOT is a Total Note.
+	These two paragraphs will determine if it's Discount or Add-On loan.
+	If $E(IAM)'=2,it's mean Add-On or any different types of loans. 
+	*/
+	
+	if IAM.extract()=2 do {    
+		set DISAMF=ln.amtreq-ln.distint
+	   	set ln.disamf=DISAMF
+		}
+
+	else  set DISAMF=ln.amtreq,ln.disamf=DISAMF
+	
+	set DISTFC=ln.disppi+ln.dispmp+ln.comfa+ln.orgfa+ln.distint
+	
+	if IAM.extract()=2 set DISTNOT=ln.amtreq+ln.dismip
+	
+	else  set DISTNOT=ln.amtreq+ln.dismip+ln.distint
+	
+	set DISTPF=ln.disppi+ln.dispmp+ln.orgfa+ln.comfa
+	
+	// ^LNCALFP expects to exit at this line (as there's no P+I)
+	if 'ln.irn!(ln.trm="")!('ln.pmtpi)!('ln.amtreq) quit
+	
+	do ^LNAPR(.ln)
+
+	quit
+
+	
+Public SETUP(RecordLN ln)	// Called by MRPC039
+
+	// This section is used to set values used to perform the modeling.
+
+	type Public Number COINT,DISAMF,DISTFC,DISTNOT,DISTPF,OINT
+
+	type String CLS,GRP
+	
+	set CLS="L"
+	set GRP=ln.grp
+
+	set ln.trm=""
+	set ln.ptrm=""	
+		
+	set ln.odt=%SystemDate
+	set ln.odd=%SystemDate
+	set ln.dico=0
+	set ln.schbal=0
+	
+	set (DISAMF,DISTFC,DISTNOT,DISTPF)=""
+	set (COINT,OINT)=0
+	
+	quit
+
+	
+COINT(RecordLN ln)	// Calculate Odd-days interest and Capitalized Odd-days interest
+	
+	
+	type Date %LD,%ND,SCHLD,SCHND
+	type Number %AMT,%BAL,%INT,DAYS,DIST1AF,IRN
+	type String DIST1FRE,PCM,PCMP
+	type Public Boolean PPIF
+	type Public Number BAL,COINT,OINT
+	type Public String CRCD,ICPF,OIACM
+
+	set (OINT,COINT)=0
+	
+	/*
+	Set the start date to ODD (Original Disbursement Date) and
+	end date to AMODT (Interest Prepaid to)
+	*/
+
+	set %LD=ln.odd
+	set %ND=ln.amodt
+	
+	set IRN=ln.irn
+	set %AMT=BAL
+	set SCHND=ln.schnd
+	set SCHLD=ln.schld
+	set DIST1FRE=ln.dist1fre
+	set DIST1AF=ln.dist1af
+	
+	/* 
+	Determine the number of days between ODD (Original Disbursement Date) 
+	and AMODT (Interest Prepaid to)
+	*/
+	set DAYS=%ND-%LD
+	set %ND=%ND-1
+
+	if DAYS do {
+		set %INT=$$^UIC(BAL,%LD,%ND,OIACM,IRN,0,DIST1AF,DIST1FRE,ICPF,SCHND,SCHLD) 
+		if %INT,%INT#.01 set %INT=$$^SCARND(%INT+.005,0,ln.cid,CRCD.get())
+		set (OINT,COINT)=%INT
+		}
+	
+	// Section to Calculate Capitalized Odd-days interest
+	
+	set PCM=ln.pcm
+	
+	type RecordSTBLPCM pcm=Db.getRecord("STBLPCM","KEY=:PCM")
+	set PCMP=pcm.pcmp
+
+	if PCMP.extract(3)=2 quit
+	
+	if DAYS!PPIF!'PCMP.extract() quit
+	
+	/* 
+	Set the start date to ODD (Original Disbursement Date) and
+	end date to SCHLD (Scheduled Payment - Last Date)
+	*/
+	set %LD=ln.odd
+	set %ND=ln.schld
+
+	if %LD-%ND do {
+		set %ND=%ND-1
+		set %BAL=ln.crlmt
+		set COINT=$$^UIC(%BAL,%LD,%ND,OIACM,IRN,0,DIST1AF,DIST1FRE,ICPF,SCHND,SCHLD)
+		if COINT,COINT#.01 set COINT=$$^SCARND(COINT+.005,0,ln.cid,CRCD.get())
+		}
+	quit
+
+vSIG()	quit "60340^31214^S. Krishnan^8320"	// Signature - LTD^TIME^USER^SIZE

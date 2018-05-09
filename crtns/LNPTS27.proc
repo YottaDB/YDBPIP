@@ -1,0 +1,125 @@
+LNPTS27(RecordDEP dep, RecordTTX ttx, RecordTRN trn)
+
+	/*
+	       ORIG:  David Caliendo (5527) - 11/06/86
+	       
+	       DESC:  Execute an escrow closeout transaction, resulting from 
+	       	      either a loan payoff transaction or an escrow closeout 
+	       	      transaction posted to the loan.
+
+	---- Revision History ------------------------------------------------
+	
+	01/27/06 - SmithCD - CR 19343 (16890)
+		   . Retrofitted several changes from p01
+		   . Removed code calls to GL^LNPTSU and %HSEQ^LNPTSU for 
+		     primary transaction (this code is better suited for 
+		     LNPTS28 and LNPTS21, where we process the loan side of 
+		     the transaction)
+		   . Removed update of columns that should already be 0 
+		     by this point (interest transactions will have already 
+		     been executed
+		   . Removed old revision history
+	
+	*/
+	
+	type public String TB()
+	
+	type String BIL0, TRTYPE, TRSFR = ""
+	type Number BILPC, PRIN, TRSFRPC
+	
+	set TRTYPE = dep.esc
+
+	// Flip the sign of the EBAL, if secondary transaction is a credit	
+	if 'ttx.itc1 set PRIN = dep.bal
+	else  set PRIN = -dep.bal
+
+	do GL^LNPTSU(.ttx, PRIN, 2)
+	
+	// Escrow payment suspense
+	do GL^LNPTSU(.ttx, ttx.tamt, 7)
+
+	// Update transfer balance array
+	set TB(TRTYPE) = TB(TRTYPE).get()
+	set TB(TRTYPE) = TB(TRTYPE) + dep.bal 
+	set TB(TRTYPE) = TB(TRTYPE)_","_dep.aref
+	
+	set dep.bal = 0			// Ledger Balance
+	set dep.balcol = 0		// Collected Balance
+
+	// Zero current payment amount
+	type RecordLNBIL0 lnbil0 = Db.getRecord("LNBIL0", "CID=:dep.aref")
+	set BIL0 = $$BIL0^BILFUNCS(.lnbil0, TRTYPE)
+
+	/*
+	Delimiter "#" must be converted to ",".
+	Piece 16 in the transaction record is already pieced by "#".
+	*/	
+	set TRSFRPC = 0
+	for BILPC = 3, 5, 6 do {
+		set TRSFRPC = TRSFRPC + 1
+		if 'BIL0.piece("#", BILPC) quit
+		
+		set TRSFR.piece(",", TRSFRPC) = BIL0.piece("#", BILPC) set BIL0.piece("#", BILPC) = ""
+		}
+	do SETBIL0^BILFUNCS(.lnbil0, TRTYPE, BIL0)
+	do lnbil0.bypassSave()
+
+	if 'TRSFR.isNull() do {
+		type String LNERC = ttx.lnerc
+		set LNERC.piece("#" , 7) = TRSFR
+		set ttx.lnerc = LNERC
+		}
+
+	quit 
+	
+
+EC(RecordDEP dep,		// Deposit (escrow) account	/REF:RW
+   RecordTTX ttx)		// Transaction			/REF:RW
+   
+	// Error Correct
+
+	type public RecordLN ln
+	
+	type Number HSEQ
+	type String TRSFR
+	
+	set HSEQ = $$FIELD^UTSO(ttx.tso, "REV")
+	type RecordHIST hist = Db.getRecord("HIST", "CID = :ttx.cid,TSEQ=:HSEQ")
+	set TRSFR = hist.xhs16.piece("#", 7)
+	
+	set dep.bal = -ttx.prin			// Ledger Balances
+	set dep.balcol = -ttx.prin		// Collected Balance
+
+	do RESET(dep.aref, TRSFR, dep.esc)
+
+	quit 
+	
+
+RESET(Number AREF,		// Loan account number
+      String TRSFR,		// Escrow  type
+      String TRTYPE)		// Escrow Transfer type
+      
+	// Reset current payment amount
+
+	type String BIL0
+	type Number BILPC, TRSFRPC
+
+	type RecordLNBIL0 lnbil0 = Db.getRecord("LNBIL0", "CID=:AREF")
+
+	set BIL0 = $$BIL0^BILFUNCS(.lnbil0, TRTYPE)
+
+	set TRSFRPC = 0
+	for BILPC = 3, 5, 6 do {
+		set TRSFRPC = TRSFRPC + 1
+		if 'TRSFR.piece(",", TRSFRPC) quit
+		
+		set BIL0.piece("#", BILPC) = TRSFR.piece(",", TRSFRPC)
+		}
+
+	do SETBIL0^BILFUNCS(.lnbil0, TRTYPE, BIL0)
+
+	do lnbil0.bypassSave()
+
+	quit 
+
+vSIG()	quit "60297^70602^Chad Smith^2983"	// Signature - LTD^TIME^USER^SIZE

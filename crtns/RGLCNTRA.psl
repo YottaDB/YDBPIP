@@ -1,0 +1,449 @@
+RGLCNTRA		/*
+	ORIG: ESTERLYP - 07/20/2000
+	DESC: G/L Contra Interest Corrections
+
+	---- Comments --------------------------------------------------------
+	
+	This procedure is called by batch process BCHRGLXFR.
+
+	In the event of errors, this process may be rerun.
+
+	This procedure makes corrections to Interest Income for 
+	the portion of interest accrual on a sold loan that is owned
+	by investors and is not owned by the institution.
+	The corrections allow the institution to have correct Interest
+	Income amounts on a daily basis that are not inflated due to
+	interest income that is actually owned by investors.
+
+	This process is not done for sold loans with an LNLS2.PICM
+	Principal and Interest Calculation Method of 6 - Contra Interest 
+	Accounts.  Sold loans with a method of 6 are always commercial 
+	loans and are handled by transaction processing.
+
+	---- Revision History ------------------------------------------------
+
+	06/21/07 - KinI - CR 27726
+		   Modified INTPMT section to send SRC as argument to SDATACR
+		   section to avoid undefined.
+		   
+	03/14/07 - KumarSS - CR 25177
+		   Removed Invalid Unicode Characters.
+
+	03/29/06 - KinI - CR 20009
+		   Added delete for TGL1 record to avoid Oracle "unique
+		   constraint violation" error in case of re-accumulation.	
+
+	07/12/05 - KELLYP - CR 16583
+		   Rewrote entire procedure to conform to current PSL
+		   standards and be more efficient and removed previous
+		   revision history.
+	*/
+
+	type public Date XTJD
+
+	type Date PDT
+	type Number CONTRA
+	type String CIDPP(),fTGL(,,,)
+	
+	// coming from batch BCHRGLXFR, XTJD should be defined
+	if 'XTJD.exists() quit
+
+	set PDT=XTJD-1	
+
+	set CONTRA=CUVAR.contra
+
+	// Process only if valid CONTRA account exists
+	if CONTRA.isNull() quit
+	
+	if 'Db.isDefined("GLAD","ACN=:CONTRA") quit
+
+	lock +TGL(XTJD,12)
+	do Db.fastDelete("TGL","TJD=:XTJD,SRC=12")
+	do Db.fastDelete("TGL1","TDT=:XTJD,SRC=12")
+
+	lock +TGL(XTJD,13)
+	
+	do Db.fastDelete("TGL","TJD=:XTJD,SRC=13")
+	do Db.fastDelete("TGL1","TDT=:XTJD,SRC=13")
+
+	lock +GLCNTRA(XTJD,13)
+	do Db.fastDelete("GLCNTRA","PDT=:XTJD,SRC=13")
+
+	do REVCORR
+	do CORR
+	do CNTRA
+	do INTPMT
+	do TGL
+
+	type RecordTGL1 tgl1=Class.new("RecordTGL1")
+	set tgl1.tdt=XTJD
+	set tgl1.src=12
+	set tgl1.prcmp=$C(42)	// $C(42)="*"
+	do tgl1.save()
+
+	set tgl1.src=13
+	do tgl1.save()
+
+	// Remove previous day's corrections
+	do Db.fastDelete("GLCNTRA","PDT,13")
+
+	lock -TGL(XTJD,12)
+	lock -TGL(XTJD,13)
+	lock -GLCNTRA(XTJD,13)
+
+	quit
+
+REVCORR
+	/*
+	Reverse Corrections
+	This section creates entries to zero out the previous day's
+	corrections. When today's corrections are complete, the previous day's
+	entries will be deleted.
+	*/
+	
+	type public Date PDT
+	type public String fTGL(,,,)
+	
+	type Literal Number SRC=13
+	
+	type DbSet ds=Db.selectDbSet("GLCNTRA","PDT=:PDT AND SRC=:SRC")
+	while ds.next() do {
+		type RecordGLCNTRA glc=ds.getRecord("GLCNTRA")
+		set fTGL(SRC,glc.crcd,glc.acn,glc.cc)=glc.drcnt_"|"_-glc.dramt_"|"_glc.crcnt_"|"_-glc.cramt
+		}		
+
+	quit
+
+
+CORR	
+	/*
+	Corrections
+	This section collates through table LNLS6 and for each sold loan
+	calculates the portion of interest accrual that is attributable to
+	investors.  This amount is then debited to Interest Income and credited
+	to Contra Interest Receivable.
+	*/
+
+	type public String CIDPP()
+
+	type Number ACR,AMT,CC,CID,LGLI,TOTPP
+	type String CRCD,GLSC,GRP,INCD,PL
+	
+	type Literal Number SRC=12
+	
+	type ResultSet rs=Db.select("CID","LNLS6")
+	while rs.next() do {
+
+		set TOTPP=0
+		set CID=rs.getCol("CID")
+		
+		type DbSet ds=Db.selectDbSet("LNLS6","CID=:CID")
+		while ds.next() do {
+			
+			// Get loan sold account level record
+			type RecordLNLS6 lnls6=ds.getRecord("LNLS6")
+
+			set PL=lnls6.pl
+			set INCD=lnls6.incd
+			set GRP=lnls6.grp
+	
+			// Get cross reference - last sequence number
+			type RecordLNLS8 lnls8=Db.getRecord("LNLS8","INCD=:INCD,PL=:PL,GRP=:GRP,CID=:CID",1)
+
+			if 'lnls8.getMode() do { quit
+				type Boolean ER
+			 	set ER=1
+			 	// Links back to non-existent index (p1)
+			 	do LOG^UTLEXC($T(+0),"*","",CID,"",$$^MSG(1614,"LNLS8 - "_CID))
+				}
+
+			// Ignore if not most recent sequence
+			if lnls6.pseq'=lnls8.pseq quit
+
+			// Get investor/pool level record
+			type RecordLNLS2 lnls2=Db.getRecord("LNLS2","INCD=:INCD,PL=:PL")
+		
+			// Do not process commercial loans
+			if lnls2.picm=6 quit
+			
+			// Add percentage to total
+			set TOTPP=TOTPP+lnls2.pp
+			}		
+		
+		if TOTPP=0 quit	
+	
+		// Set-up participation percentage array for later use
+		set CIDPP(CID)=TOTPP
+		
+		// Get LN record
+		type RecordLN ln=Db.getRecord("LN","CID=:CID")
+		
+		set ACR=ln.acr
+		set CC=ln.cc
+		set CRCD=ln.crcd
+		if CRCD.isNull() set CRCD=%SystemCurrency
+		set GLSC=ln.glsc
+	
+		// Amount to be offset
+		set AMT=(ACR*CIDPP(CID))/100
+		set AMT=AMT.fnumber("",2)
+		if 'AMT quit
+
+		// Loan G/L Interest Income account, UTBLGLSC.LGLI
+		set LGLI=$$^UTLGLSC(GLSC,"LGLI")
+
+		do fTGL(SRC,CRCD,LGLI,CC,AMT)
+		}
+
+	quit
+
+
+INTPMT
+	/*
+	Interest Payments
+	This section collates through table LNLSDT and finds payments and
+	payment reversals. The interest amount is then multiplied by the
+	total participation amount and debited to Interest Income and credited
+	to Contra Interest. These amounts are not reversed, they are permanent.
+	*/
+
+	type public String CIDPP()
+
+	type Number CC,CID,INTAMT,LGLI,TAMT,TOTPP
+	type String CRCD,GLSC
+
+	type Literal Number SRC=12
+
+	type DbSet ds=Db.selectDbSet("LNLSDT")
+	while ds.next() do {
+		
+		// Get loan sold daily transaction record
+		type RecordLNLSDT lnlsdt=ds.getRecord("LNLSDT")
+		
+		set CID=lnlsdt.cid
+
+		// Call SDATACR, this is a sale posting
+		if 'lnlsdt.sdatacr.isNull() do SDATACR(.lnlsdt,SRC) quit
+
+		// Get transaction history record
+		type RecordHIST hist=Db.getRecord("HIST","CID=:lnlsdt.cid,TSEQ=:lnlsdt.tseq")
+
+		set TAMT=hist.tamt
+
+		// Do not process, not a payment
+		if hist.etc.isNull() quit
+
+		// Get TRN.PCFL20 Ignore Interest Paid Fields
+		type RecordTRN trn=Db.getRecord("TRN","ETC=:hist.etc")
+
+		// Do not process if not an interest transaction
+		if trn.pcfl20'=0 quit
+
+		set TOTPP=CIDPP(CID).get()
+		
+		if 'TOTPP quit
+
+		set INTAMT=TAMT.piece("#",3)
+		
+		// Do not process if no interest amount
+		if 'INTAMT quit
+
+		set INTAMT=(INTAMT*TOTPP)/100
+		set INTAMT=INTAMT.fnumber("",2)
+		
+		if 'INTAMT quit
+					
+		// Get LN record
+		type RecordLN ln=Db.getRecord("LN","CID=:CID")
+		set CC=ln.cc
+		set CRCD=ln.crcd
+		if CRCD.isNull() set CRCD=%SystemCurrency
+		set GLSC=ln.glsc
+					
+		// Interest Income Account
+		set LGLI=$$^UTLGLSC(GLSC,"LGLI")
+
+		do fTGL(SRC,CRCD,LGLI,CC,INTAMT)
+		}
+
+	quit
+
+
+SDATACR(RecordLNLSDT lnlsdt,	// Loans Sold Daily Transactions object
+	Number SRC) 		// Source
+	
+	/* 
+	Sale Date Accrual entries
+	The SDATACR amount is credited to Interest Income and debited to 
+	Contra Interest. These amounts are not reversed, they are permanent.
+	*/
+	
+	type Number CC,LGLI
+	type String CRCD,GLSC
+ 
+	type RecordLN ln=Db.getRecord("LN","CID=:lnlsdt.cid")
+	set CC=ln.cc
+	set CRCD=ln.crcd
+	if CRCD.isNull() set CRCD=%SystemCurrency
+	set GLSC=ln.glsc
+
+	// Interest Income Account
+	set LGLI=$$^UTLGLSC(GLSC,"LGLI")
+ 
+	do fTGL2(SRC,CRCD,LGLI,CC,lnlsdt.sdatacr)
+
+	quit
+
+
+CNTRA
+	/*
+	GLCNTRA table entries
+	This section places the correction totals from array fTGL source 12
+	into table GLCNTRA for the system date and source 13.  These are the
+ 	entries that will be used on the next day to be reversed.
+	*/
+
+	type public Date XTJD
+	type public String fTGL(,,,)
+
+	type Number ACN,CC
+	type String CRCD
+
+	type Literal Number FSRC=12
+	type Literal Number TSRC=13
+
+	set CRCD=""
+  	for  set CRCD=fTGL(FSRC,CRCD).order() quit:CRCD.isNull()  do {
+
+		set ACN=""
+		for  set ACN=fTGL(FSRC,CRCD,ACN).order() quit:ACN.isNull()  do {
+
+			set CC=""
+			for  set CC=fTGL(FSRC,CRCD,ACN,CC).order() quit:CC.isNull()  do {
+		
+				type RecordGLCNTRA glcntra=Class.new("RecordGLCNTRA")
+				set glcntra.pdt=XTJD
+				set glcntra.src=TSRC
+				set glcntra.crcd=CRCD
+				set glcntra.efdt=XTJD
+				set glcntra.acn=ACN
+				set glcntra.cc=CC
+				set glcntra.drcnt=fTGL(FSRC,CRCD,ACN,CC).piece("|",1)
+				set glcntra.dramt=fTGL(FSRC,CRCD,ACN,CC).piece("|",2)
+				set glcntra.crcnt=fTGL(FSRC,CRCD,ACN,CC).piece("|",3)
+				set glcntra.cramt=fTGL(FSRC,CRCD,ACN,CC).piece("|",4)
+				do glcntra.save()
+				}
+			}
+		}
+	
+	quit
+
+
+TGL	
+	/*
+	TGL G/L Transaction Summary entries.
+	This section moves the fTGL array to TGL table entries.
+	The calling process - BCHRGLXFR uses the ^TGL to transfer amounts
+	to G/L.
+	*/
+
+	type public Date XTJD
+	type public String fTGL(,,,)
+
+	type Number ACN,CC,SRC
+	type String CRCD
+
+	for SRC=12,13 do {
+
+		set CRCD=""
+		for  set CRCD=fTGL(SRC,CRCD).order() quit:CRCD.isNull()  do {
+
+			set ACN=""
+			for  set ACN=fTGL(SRC,CRCD,ACN).order() quit:ACN.isNull()  do {
+	
+				set CC=""
+				for  set CC=fTGL(SRC,CRCD,ACN,CC).order() quit:CC.isNull()  do {			 
+				
+					type RecordTGL tgl=Class.new("RecordTGL")
+					set tgl.tjd=XTJD
+					set tgl.src=SRC
+					set tgl.crcd=CRCD
+					set tgl.efd=XTJD
+					set tgl.acn=ACN
+					set tgl.cc=CC
+					set tgl.drcnt=fTGL(SRC,CRCD,ACN,CC).piece("|",1)			
+					set tgl.dramt=fTGL(SRC,CRCD,ACN,CC).piece("|",2)
+					set tgl.crcnt=fTGL(SRC,CRCD,ACN,CC).piece("|",3)
+					set tgl.cramt=fTGL(SRC,CRCD,ACN,CC).piece("|",4)
+					do tgl.save()
+					}
+				}
+			}
+		}
+
+	quit
+
+
+public fTGL(Number SRC,String CRCD,Number LGLI,Number CC,Number AMT)	
+	// Store in fTGL array
+	
+	type public Number CONTRA
+	type public String fTGL(,,,)
+	
+	type Number CRAMT,CRCNT,DRAMT,DRCNT
+
+	// G/L account array
+	if fTGL(SRC,CRCD,LGLI,CC).exists() do {
+		set DRCNT=fTGL(SRC,CRCD,LGLI,CC).piece("|",1)+1
+		set DRAMT=fTGL(SRC,CRCD,LGLI,CC).piece("|",2)+AMT
+		set CRCNT=fTGL(SRC,CRCD,LGLI,CC).piece("|",3)
+		set CRAMT=fTGL(SRC,CRCD,LGLI,CC).piece("|",4)
+		set fTGL(SRC,CRCD,LGLI,CC)=DRCNT_"|"_DRAMT_"|"_CRCNT_"|"_CRAMT
+		}
+	else  set fTGL(SRC,CRCD,LGLI,CC)=1_"|"_AMT
+
+	// Contra account array
+	if fTGL(SRC,CRCD,CONTRA,CC).exists() do {
+		set DRCNT=fTGL(SRC,CRCD,CONTRA,CC).piece("|",1)
+		set DRAMT=fTGL(SRC,CRCD,CONTRA,CC).piece("|",2)
+		set CRCNT=fTGL(SRC,CRCD,CONTRA,CC).piece("|",3)+1
+		set CRAMT=fTGL(SRC,CRCD,CONTRA,CC).piece("|",4)+AMT
+		set fTGL(SRC,CRCD,CONTRA,CC)=DRCNT_"|"_DRAMT_"|"_CRCNT_"|"_CRAMT
+		}
+	else  set fTGL(SRC,CRCD,CONTRA,CC)="||1|"_AMT
+	
+	quit
+
+
+public fTGL2(Number SRC,String CRCD,Number LGLI,Number CC,Number AMT)      
+	// Store in fTGL array, but debit contra, credit interest income
+ 
+	type public Number CONTRA
+	type public String fTGL(,,,)
+	
+	type Number CRAMT,CRCNT,DRAMT,DRCNT
+ 
+	// G/L account array
+	if fTGL(SRC,CRCD,LGLI,CC).exists() do {
+		set DRCNT=fTGL(SRC,CRCD,LGLI,CC).piece("|",1)
+		set DRAMT=fTGL(SRC,CRCD,LGLI,CC).piece("|",2)
+		set CRCNT=fTGL(SRC,CRCD,LGLI,CC).piece("|",3)+1
+		set CRAMT=fTGL(SRC,CRCD,LGLI,CC).piece("|",4)+AMT
+		set fTGL(SRC,CRCD,LGLI,CC)=DRCNT_"|"_DRAMT_"|"_CRCNT_"|"_CRAMT
+		}
+	else  set fTGL(SRC,CRCD,LGLI,CC)="||1|"_AMT
+
+	// Contra account array
+	if fTGL(SRC,CRCD,CONTRA,CC).exists() do {
+		set DRCNT=fTGL(SRC,CRCD,CONTRA,CC).piece("|",1)+1
+		set DRAMT=fTGL(SRC,CRCD,CONTRA,CC).piece("|",2)+AMT
+		set CRCNT=fTGL(SRC,CRCD,CONTRA,CC).piece("|",3)
+		set CRAMT=fTGL(SRC,CRCD,CONTRA,CC).piece("|",4)
+		set fTGL(SRC,CRCD,CONTRA,CC)=DRCNT_"|"_DRAMT_"|"_CRCNT_"|"_CRAMT
+		}
+	else  set fTGL(SRC,CRCD,CONTRA,CC)=1_"|"_AMT
+ 
+        quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60802^72233^Irina Kin^10772"	// Signature - LTD^TIME^USER^SIZE

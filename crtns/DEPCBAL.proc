@@ -1,0 +1,339 @@
+public DEPCBAL
+	/*
+	Combined Balance Setup/Maintenance
+	
+	       ORIG:  HARDY - 17 DEC 1992
+	       DESC:  Permits users to select from a list of all accounts those
+		      accounts which are to have their balances totaled for
+		      determining the tiered interest rate of the primary
+		      account.
+
+		      ^UINDX collates through the lower level of ^ACN(CID,410)
+		      to find the appropriate accounts.
+	
+	--- Revision History --------------------------------------------------
+
+	07/28/06 - KELLYP - CR 22048
+		   Modified VPG00 section to eliminate PRECEDENCE warning.
+	
+	04/27/06 - RussellDS - CR21012
+		   Remove obsolete references to dep.memnbr and membership
+		   handling, since obsoleted by CR16892.
+		   
+		   Modified LOADSQL and GETACN section to eliminate member
+		   number level in SORT array.
+	  
+	03/22/06 - SmithCD - CR 20252
+		   . Modified LOADSQL section to start building CBAL() at 
+		     sequence 0 to prevent a blank first line when DEPCBAL 
+		     screen is displayed
+		   . Fixed SQLFAIL error in CIDPP that occurred when 
+		     a valid account was not returned from UACN
+		   . Further cleaned up code
+	
+	08/18/05 - Srinivasan Rajesh - CR 16726
+	  	   Converted the code to match PSL standards	
+	           Cleaned up the code for DBI3  		
+
+	------------------------------------------------------------------------
+	*/
+
+	do UPD 
+
+	quit
+	
+
+UPD	//
+
+	do INIT(1)
+
+	quit 
+
+
+INQ	//
+
+	do INIT(2)
+
+	quit 
+
+
+INIT(Number %ProcessMode)	// Process mode
+
+	type RecordDEP dep
+	type RecordCIF cif
+	type Number %PAGE, %PG, CBIND(), CBINDOLD(), CID, TACN
+	type String CBAL(), OLNTB, VFMQ
+	
+	set %PG = 0
+	set %PAGE = 1
+
+	do VPG(.dep, .cif)
+
+	quit
+
+
+VPG(RecordDEP dep,		// Deposit account			/REF:W
+    RecordCIF cif)		// Customer information file		/REF:R
+
+    	// Page control
+
+	type public Number %PG
+	type public String ER, VFMQ
+	
+	type Number FINISH = 0
+	
+	for  do { quit:FINISH
+		if %PG = 0 do VPG00(.dep, .cif) if ER set FINISH = 1 quit
+		if %PG > 0 do VPG01(.dep, .cif)
+		if "DFQ".isLike("%"_VFMQ_"%") do VER(.dep, .cif) set FINISH = 1 quit
+		set %PG = %PG + 1
+		}
+
+	quit
+
+
+VPG00(RecordDEP dep,		// Deposit account			/REF:W
+      RecordCIF cif)		// Customer information file		/REF:R
+
+       	// Set up
+
+	type public Number CID, CBIND(), CBINDOLD(), OLNTB, TACN
+	type public Number %EXT, %NOPRMT, %PAGE, %REPEAT, CCID, CNT
+	type public String CBAL(), ER, IO, VFMQ
+	
+	type String %READ, %TAB(), CLS, ZCLS
+	type Number N
+	
+	set (CLS, ZCLS) = "D"
+
+	set %TAB("CID") = ".CID1/XPP=D CIDPP^DEPCBAL"
+	if %ProcessMode = 2 set %TAB("IO") = $$IO^SCATAB($I)
+
+	set %READ = "@@%FN,,,CID/REQ"
+	set %NOPRMT = "N"
+	if %ProcessMode = 2 set %READ = %READ_",IO/REQ"
+
+	do ^UTLREAD
+
+	if "Q".isLike("%"_VFMQ_"%") set ER = 1 quit
+
+	// Available lines per page
+	set %REPEAT = 12
+
+	set dep = Db.getRecord("DEP", "CID=:CID", 1)
+	set TACN = dep.acn
+	set cif = Db.getRecord("CIF", "ACN=:TACN", 1)
+
+	do LOADSQL(.dep)
+
+	set N = ""
+	for  set N = CBAL(N).order() quit:N.isNull()  do {
+		set CCID = CBAL(N).piece("|", 2)
+		set CBIND(N) = Db.isDefined("DEPCBAL", "CID=:CID,CBCID=:CCID")
+		set CBINDOLD(N) = CBIND(N)
+		}
+
+	set %PAGE = ('((CNT # %REPEAT) = 0)) + (CNT \ %REPEAT)
+	if %ProcessMode = 2, IO '= $I do OPEN^SCAIO
+
+	quit
+
+
+CIDPP	// Post processor to account number prompt
+
+	type public Number %EXT, CID
+	type public String ER, RM, X
+		
+	type String CLS, INDEX, TIERED, ZCLS
+	
+	if X.isNull() quit 
+
+	set (CLS, ZCLS) = "D"
+	set %EXT = 1
+
+	do ^UACN quit:ER
+
+	if CID.get().isNull() quit
+
+	type RecordDEP dep = Db.getRecord("DEP", "CID=:CID")
+
+	// Validate interest index
+
+	// Int/Div Index
+	set INDEX = dep.index
+	set TIERED = 0
+
+	if 'INDEX.isNull() do {
+		type RecordINDEX index = Db.getRecord("INDEX", "INDEX=:INDEX", 1)
+		if index.basrel set TIERED=1
+		}
+
+	// Combined balance processing requires tiered int/div index
+	if 'TIERED do Runtime.setErrMSG("INDEX", 2084) quit
+
+	quit
+
+
+VPG01(RecordDEP dep,		// Deposit account			/REF:W
+      RecordCIF cif)		// Customer information file		/REF:R
+      
+   	// Setup/Maintenance/Inquiry Screen
+
+	type public Number %PG, %REPEAT, CBIND(), CBINDOLD()
+	
+	type Number %MODS, I
+	
+	set %MODS = (%PG - 1) * (%REPEAT + 1)
+	for I = %MODS:1:(%MODS + %REPEAT - 1) do {
+		if 'CBIND(I).exists() do {
+			set CBIND(I) = 0
+			set CBINDOLD(I) = CBIND(I)
+			}
+		}
+
+	do DRV^USID(%ProcessMode, "DEPCBAL", .dep, .cif)
+
+	quit 
+
+
+VER(RecordDEP dep,		// Deposit account			/REF:W
+    RecordCIF cif)		// Customer information file		/REF:R
+
+	// Verification
+
+	type public String VFMQ
+
+	if %ProcessMode = 2 ! (%ProcessMode = 4) ! (VFMQ = "Q") do END quit
+	
+	do FILE(.dep, .cif)
+
+	do END
+	
+	quit
+
+
+END	// End of processing
+	
+	type public Number CID
+	type public String ER, RM, VFMQ
+	
+	if ER.get() ! (%ProcessMode = 2) ! (%ProcessMode = 4) quit
+	set ER = "W"
+
+	// Account balance linkage modified
+	if VFMQ '= "Q" set RM = $$^MSG(2081, CID)
+
+	// Account balance linkage not modified
+	else  set RM = $$^MSG(2083)
+
+	quit
+
+
+FILE(RecordDEP dep,		// Deposit account			/REF:W
+     RecordCIF cif)		// Customer information file		/REF:R
+
+     	// File data
+
+	type public Number CID, CBCID, CBIND(), CBINDOLD()
+	type public String CBAL()
+	
+	type Number C
+	type RecordDEPCBAL fdepcb
+	
+	// If new, file references in both primary and linked accounts.
+	if '%ProcessMode do {
+		set C = ""
+		for  set C = CBIND(C).order() quit:C.isNull()  if CBIND(C) do {
+			set CBCID = CBAL(C).piece("|", 2)
+			
+			set fdepcb = Class.new("RecordDEPCBAL")
+			set fdepcb.cid = CID
+			set fdepcb.cbcid = CBCID
+			do fdepcb.save()
+			}
+		}
+
+	// If existing, delete old account, add new account
+	if %ProcessMode do {
+		type Number S, SEQ
+		set (S, SEQ) = ""
+		for  set S = CBIND(S).order() quit:S.isNull()  do { 
+			if CBINDOLD(S) = CBIND(S) kill CBIND(S)
+			}
+
+		for  set SEQ = CBIND(SEQ).order() quit:SEQ.isNull()  do {
+
+			set CBCID = CBAL(SEQ).piece("|",2)
+			if (CBINDOLD(SEQ) - 0) do Db.delete("DEPCBAL", "CID=:CID AND CBCID=:CBCID")
+
+			if (CBIND(SEQ) - 0) do {
+				set fdepcb = Class.new("RecordDEPCBAL")
+				set fdepcb.cid = CID
+				set fdepcb.cbcid = CBCID
+				do fdepcb.save()
+				}
+			}
+		}
+
+	quit 
+
+
+LOADSQL(RecordDEP dep)		// Deposit account			/REF:R
+
+	type public Number ACN, TCID
+	type public String CBAL()
+	
+	type Number SEQ = 0
+	type String SORT(), TYPE
+	
+	set (TYPE, TCID) = ""
+	
+	// Create list of all related CIFs.
+	type ResultSet rs = Db.select("ACN", "RELCIF", "CID=:CID")
+	while rs.next() do {
+		set ACN = rs.getCol("ACN")
+		if 'ACN.isNull() do GETACN(.dep)
+	}
+
+	for  set TYPE = SORT(TYPE).order() quit:TYPE.isNull()  do {
+		for  set TCID = SORT(TYPE, TCID).order() quit:TCID.isNull()  do {
+			set CBAL(SEQ) = SORT(TYPE, TCID)
+			set SEQ = SEQ + 1
+		}
+	}
+
+	quit
+
+
+GETACN(RecordDEP dep)		// Deposit account			/REF:R
+
+	// For each related CIF, find all linked accounts
+	
+	type public Number CNT
+	type public String SORT(,,)
+	
+	type literal String TAB = $char(9)
+	
+	type String DATA = ""
+	
+	set CNT = 0
+		
+	type DbSet ds = Db.selectDbSet("DEP", "ACN=:dep.acn AND STAT<>4 AND CID<>:CID", "CID")
+	while ds.next() do {
+		type RecordDEP dep = ds.getRecord()
+		
+		set DATA.piece(TAB, 1) = ""		// Obsoleted member number
+		set DATA.piece(TAB, 2) = dep.cid
+		set DATA.piece(TAB, 3) = dep.cls
+		set DATA.piece(TAB, 4) = dep.grp
+		set DATA.piece(TAB, 5) = dep.type
+		set DATA.piece(TAB, 6) = dep.bal
+		set DATA.piece(TAB, 7) = dep.stat
+		
+		set SORT(dep.type, dep.cid) = DATA.translate(TAB, $char(124))
+		set CNT = CNT + 1
+		}
+
+	quit
+
+vSIG()	quit "60477^65445^Pat Kelly^7065"	// Signature - LTD^TIME^USER^SIZE

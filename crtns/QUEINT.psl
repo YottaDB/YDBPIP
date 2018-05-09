@@ -1,0 +1,432 @@
+Public QUEINT
+ 	/*
+ 	PROCEDURE ID:	QUEINT
+ 	    Original:	Pete Chenard
+		Date:	7/3/90
+ 	        Desc:	Queue Integrity Check
+
+ 	---- Comments ---------------------------------------------------------
+ 	Called by function @QUEINT to perform an integrity check on an event.
+
+	------ Revision History -----------------------------------------------
+
+	11/24/06 - DHANALAKSHMI R - CR24213
+		   Modified to declare and pass EJD as reference argument in
+		   the call to the section MAIN.
+		   Modified the section MAIN to add EJD in the argument list
+		   and remove the declaration of EJD.
+
+	12/10/04 - RussellDS - CR13642
+		   Some restructing, eliminated warnings, reduced public
+		   scope variables, added use of table QUEUEC.
+
+	03/19/02 - Vitaliy Antonov - 43583
+		   Converted To PSL. Removed old revision history.
+
+	-----------------------------------------------------------------------
+	
+	*/
+	
+	type public Number ER
+	type public String RM
+	type public Date EJD
+	
+	set ER=$$MAIN("",.EJD, .RM)
+	
+	quit
+	
+
+Public MAIN(String EVENT,	// Event for integrity check
+	    Date EJD,		// Run Through Date		/MECH=REFNAM:W
+	    String ERMSG)	// Error message, if any	/MECH=REFNAM:W
+
+	/*
+	Perform integrity check for an event.
+	
+	Called by procedure QUEDRV
+	
+	RETURNS:
+ 		. $$	Error indicator			/TYP=L
+ 			Errors in the integrity of a event will
+ 			set this flag, but will not set a value
+ 			for ERMSG.  That will be set by ^QUEDRV.
+ 	*/
+
+	type Boolean DONE, ERROR, RETURN
+	type Number %PAGE, %PG, ZSEQ
+	type String ERROR(), IO, QUE(), QUEUE()
+	
+	set DONE=0			// Page control indicator
+	set RETURN=0			// Return value
+	set ERROR=0			// Indicates if ERROR() contains hard errors
+					// or only warnings	
+	set %PG=0 
+	set %PAGE=1 
+	set %ProcessMode=2 
+
+	set EJD=%SystemDate+1 
+	set ZSEQ=0 
+
+	// Page control
+	for  do {  quit:DONE
+		if %PG=0 do {
+			do VPG00
+			if DONE set RETURN = 1		// Quit out of first screen
+		}
+		else  do VPG01
+
+		if 'DONE set %PG=%PG+1
+	}
+	
+	if 'ERMSG.get().isNull() set RETURN=1
+	
+	if 'RETURN,ERROR do {	// Hard errors in ERROR() array
+		set RETURN = 1
+		// Integrity errors.  Event not submitted.
+		set ERMSG = $$^MSG(1247)
+	}
+	
+	quit RETURN
+
+
+VPG00	// Page set up
+
+	type public Boolean DONE
+	type public Date EJD
+	type public Number %PAGE, ZSEQ
+	type public String %FN, %MSKD, EVENT, IO
+	
+	type Date DATE
+	type String %READ, %TAB, MS1, VFMQ
+
+	// Run From: ~p1
+	set MS1=$$^MSG(5738,$$DAT^%ZM(%SystemDate,%MSKD.get()))
+	set %TAB("EVENT")=".EVENT1/TBL=[UTBLEVENT]/XPP=D EVNTPP^QUEINT"
+	set %TAB("EJD")=".EJD3/XPP=D EJDPP^QUEINT"
+	set %TAB("IO")=$$IO^SCATAB($I)
+
+	if EVENT.isNull() set %READ="@@%FN,,,EVENT/REQ,,@MS1,EJD/REQ"
+	else  set %READ="@@%FN,,,EVENT/REQ/PROT,,@MS1,EJD/REQ"
+	if %ProcessMode=2 set %READ=%READ_",,IO/REQ"
+	do ^UTLREAD 
+	if VFMQ="Q" set DONE=1 quit
+
+	do SETUP(EVENT)
+
+	// Run integ for each date
+	for DATE=%SystemDate:1:(EJD-1) do INTEG(DATE,EVENT),NRD(DATE,EJD)
+	set %PAGE=ZSEQ\13 
+	if ZSEQ#13 set %PAGE=%PAGE+1
+	if '%PAGE set %PAGE=1	
+	if %ProcessMode=2,IO'=$I do OPEN^SCAIO
+
+	quit
+
+
+VPG01	// Error Screen
+
+	type public Boolean DONE
+	type public Number %PG
+	type public String ERMSG, ERROR()
+
+	type Number %REPEAT, ER, I, INDX
+	type String QUEUE(), SID, VFMQ
+	
+	// Load Error data into QUEUE() array required by QUEINT screen
+	set INDX=((%PG-1)*13)+1 
+	set %REPEAT=0
+	for I=INDX:1:INDX+12 if 'ERROR(I).get().isNull() do {
+		set %REPEAT=%REPEAT+1
+		set QUEUE(%REPEAT)=ERROR(I)
+	}
+	
+	set ER=0
+	do DRV^USID(%ProcessMode,"QUEINT")
+	if ER do {
+		
+		type String RM
+		
+		do ^UTLERR
+	
+		set DONE=1
+		if 'RM.get().isNull() set ERMSG=RM
+		else  set ERMSG=$$^MSG(979)		// Error
+	}
+	
+	if VFMQ="Q" set DONE=1
+	
+	quit
+
+
+EVNTPP	// Event field postprocessor
+
+	type public Number ER
+	type public String RM, X
+
+	// Data required
+	if X="" set ER=1 set RM=$$^MSG(741)
+
+	quit
+
+
+EJDPP	// Date field postprocessor
+
+	type public Number ER
+	type public String RM, X
+
+	// Data required
+	if X="" set ER=1 set RM=$$^MSG(741)
+	
+	// Date must be in the future
+	if X'>%SystemDate set ER=1 set RM=$$^MSG(752)
+
+	quit
+
+
+SETUP(String EVENT)
+	// Set up the QUE array of batch/job data for all queues in this event
+	
+	type public String QUE
+
+	type Number BCHNUM, JOBNUM
+	type String REC
+
+	type ResultSet rsebch=Db.select("BATCH","UTBLEBCH","EVENT=:EVENT")
+	
+	while rsebch.next() do {
+		set BCHNUM=rsebch.getCol("BATCH")
+
+		type RecordQUEUEB queueb=Db.getRecord("QUEUEB","BCHNUM=:BCHNUM",1)
+		quit:(queueb.getMode()'>0)
+
+		set REC=queueb.desc_$C(124)_queueb.fre_$C(124)_queueb.lrd_$C(124)_queueb.nrd_$C(124)
+		set REC=REC_queueb.strt_$C(124)_queueb.aoe_$C(124)_queueb.stim_$C(124)_queueb.ctim_$C(124)
+		set REC=REC_queueb.lstat_$C(124)_queueb.mail_$C(124)_queueb.mailf_$C(124)_queueb.brcd_$C(124)
+		set REC=REC_queueb.brcdf_$C(124)_queueb.rest_$C(124)_queueb.vmstag_$C(124)_queueb.stop_$C(124)
+		set QUE(BCHNUM)=REC_queueb.subm_$C(124)_queueb.event
+
+		type DbSet dbs=Db.selectDbSet("QUEUEJ","BCHNUM=:BCHNUM")
+
+		while dbs.next() do {
+
+			type RecordQUEUEJ queuej=dbs.getRecord("QUEUEJ")
+			
+			set JOBNUM=queuej.jobnum
+
+			set REC=queuej.desc_$C(124)_queuej.fun_$C(124)_queuej.lrd_$C(124)_queuej.stim_$C(124)
+			set REC=REC_queuej.ctim_$C(124)_queuej.cstat_$C(124)_queuej.lstat_$C(124)_queuej.ttr_$C(124)
+			set REC=REC_queuej.diz_$C(124)_queuej.reti_$C(124)_queuej.maxr_$C(124)_queuej.retc_$C(124)
+			set REC=REC_queuej.aof_$C(124)_queuej.skip_$C(124)_queuej.sdat_$C(124)_queuej.cdat
+			set QUE(BCHNUM,JOBNUM)=REC
+			
+			// Load records from QUEUEC, QUEUED, and QUEUEP
+			
+			type DbSet dsqc=Db.selectDbSet("QUEUEC","BCHNUM=:BCHNUM AND JOBNUM=:JOBNUM")
+
+			while dsqc.next() do {
+
+				type RecordQUEUEC queuec=dsqc.getRecord("QUEUEC")
+
+				set QUE(BCHNUM,JOBNUM,"C",queuec.batch,queuec.job)=""
+			}
+			
+			type DbSet dsqd=Db.selectDbSet("QUEUED","BCHNUM=:BCHNUM AND JOBNUM=:JOBNUM")
+
+			while dsqd.next() do {
+
+				type RecordQUEUED queued=dsqd.getRecord("QUEUED")
+
+				set REC=queued.limit_$C(124)_queued.cdate_$C(124)_queued.ctime_$C(124)_queued.batch_$C(124)_queued.job
+				set QUE(BCHNUM,JOBNUM,"D",queued.batch,queued.job)=REC
+			}
+			
+			type DbSet dsqp=Db.selectDbSet("QUEUEP","BCHNUM=:BCHNUM AND JOBNUM=:JOBNUM")
+
+			while dsqp.next() do {
+		
+				type RecordQUEUEP queuep=dsqp.getRecord("QUEUEP")
+
+				set QUE(BCHNUM,JOBNUM,"P",queuep.seq)=queuep.param
+			}
+		}
+	}
+	
+	quit
+
+
+INTEG(Date DATE, String EVENT)	// Integrity check
+
+	/*
+	Check the integrity of all job queues in this event. Check for valid
+	dependency relationships, start dates and frequencies.  If a job is
+	dependent upon another job that is not scheduled to run today, it
+	will be flagged as an integrity error.
+	*/
+	
+	type public Boolean ERROR
+	type public Number ZSEQ
+	type public String ERROR(), QUE()
+	
+	type Number BCHNUM, JOB
+
+	// Check userclass authorization
+	if 'Db.isDefined("UTBLEVENTAUH","EVENT,%UserClass") do {
+		set ZSEQ=ZSEQ+1
+		// Userclass ~p1 not authorized to run this event
+		set ERROR(ZSEQ)=DATE_"|||"_$$^MSG(2902,%UserClass) 
+		set ERROR=1		// Hard error
+	}
+
+	// Check that all queues in the event exist
+	type ResultSet rs=Db.select("BATCH","UTBLEBCH","EVENT=:EVENT")
+
+	if 'rs.isEmpty() while rs.next() do {
+	
+		set BCHNUM=rs.getCol("BATCH")
+
+		// Batch ~p1 does not exist
+		if '$D(QUE(BCHNUM)) do {
+			set ZSEQ=ZSEQ+1
+			// Batch ~p1 does not exist
+			set ERROR(ZSEQ)=DATE_"|"_BCHNUM_"||"_$$^MSG(338,BCHNUM) 
+			set ERROR=1		// Hard error
+		}
+		// Check only for first date in multi-day run
+		else  if DATE=%SystemDate,$P(QUE(BCHNUM),$C(124),4)<DATE do {
+			set ZSEQ=ZSEQ+1
+			// Date must not be in the past
+			set ERROR(ZSEQ)=$P(QUE(BCHNUM),$C(124),4)_"|"_BCHNUM_"||"_$$^MSG(755)
+			set ERROR=1		// Hard error
+		}
+	}
+
+	else  do {
+		set ZSEQ=ZSEQ+1
+		// There are no batches tied to this event
+		set ERROR(ZSEQ)=DATE_"|||"_$$^MSG(5740) 
+		set ERROR=1		// Hard error
+	}
+
+	/*
+	Verify dependencies - collate through all jobs in each queue and checks
+	for invalid dependencies.
+	*/
+
+	set (BCHNUM,JOB)=""
+	for  set BCHNUM=$O(QUE(BCHNUM)) quit:BCHNUM=""  do { 
+		// Ignore queue if not scheduled to run today
+		quit:$P(QUE(BCHNUM),"|",4)'=DATE
+
+		/* Check integrity for invalid functions and dependencies on 
+		queues that aren't scheduled to run today */
+		for  set JOB=$O(QUE(BCHNUM,JOB)) quit:JOB=""  do {
+			do FUNC(BCHNUM,JOB,DATE)
+			do DBCHLP(BCHNUM,JOB,DATE)
+		}
+	}
+	
+	quit
+
+
+DBCHLP(Number BCHNUM, Number JOB,Date DATE)
+
+	/*
+	Loop through 4th and 5th level of QUE array and check if job has 
+	any dependencies on queues that aren't scheduled to run today, 
+	flag it as a WARNING.
+	*/
+	
+	type public Number ZSEQ
+	type public String ERROR(), QUE()
+
+	type Date RUNDAT
+	type Number DBCHNUM, DJOB
+
+	set DBCHNUM=""		// batch # that this batch is dependent upon
+	set DJOB=""		// job # that this job is dependent upon
+
+	for  set DBCHNUM=$O(QUE(BCHNUM,JOB,"D",DBCHNUM)) quit:DBCHNUM=""  do {
+		for  set DJOB=$O(QUE(BCHNUM,JOB,"D",DBCHNUM,DJOB)) quit:DJOB=""  do {
+			
+			// Note - these entries in ERROR() are warnings, not hard errors
+			
+			if '$D(QUE(DBCHNUM)) do {
+				type RecordQUEUEB queueb=Db.getRecord("QUEUEB","DBCHNUM",1)
+				set RUNDAT=queueb.nrd
+	
+				set ZSEQ=ZSEQ+1
+				/* WARNING - Conditional job not in 
+				this event: Bch ~p1 job ~p2  */
+				set ERROR(ZSEQ)=DATE_"|"_BCHNUM_"|"_JOB_"|"_$$^MSG(5741,DBCHNUM,DJOB)
+			}
+			else  set RUNDAT=$P(QUE(DBCHNUM),"|",4)
+	
+			// WARNING - Conditional job not scheduled: Bch ~p1 job ~p2
+			if RUNDAT'=DATE do {
+				set ZSEQ=ZSEQ+1
+				/* WARNING - Conditional job not scheduled: 
+				Bch ~p1 job ~p2 */
+				set ERROR(ZSEQ)=DATE_"|"_BCHNUM_"|"_JOB_"|"_$$^MSG(5742,DBCHNUM,DJOB)
+			}
+		}
+	}
+	
+	quit
+
+
+FUNC(Number BCHNUM, Number JOB,Date DATE)	// Verify function name.
+
+	type public Boolean ERROR
+	type public Number ZSEQ
+	type public String ERROR(), QUE()
+
+	type String FUNC
+
+	set FUNC=$P(QUE(BCHNUM,JOB),"|",2)
+	if 'Db.isDefined("SCATBL","FUNC") do {
+		set ZSEQ=ZSEQ+1
+		// Function ~p1 does not exist
+		set ERROR(ZSEQ)=DATE_"|"_BCHNUM_"|"_JOB_"|"_$$^MSG(1146,FUNC)
+		set ERROR=1		// Hard error
+	}
+	
+	quit
+
+
+NRD(Date DATE, Date EJD)
+
+	/*
+	Compute the next run date for each queue and insert it into piece 4
+	(NRD) of the QUE array.
+	*/
+	
+	type public Boolean ERROR
+	type public Number ZSEQ
+	type public String ERROR(), QUE()
+
+	type Date JD, NJD
+	type Number BCHNUM, ER
+	type String RM
+
+	quit:DATE'<EJD
+	
+	set ER=0
+	set BCHNUM=""
+	for  set BCHNUM=$O(QUE(BCHNUM)) quit:BCHNUM=""  do { 
+		quit:$P(QUE(BCHNUM),"|",4)'=DATE
+
+		set JD=""			// To avoid warning on being undefined
+		set NJD=$$NJD^UFRE(DATE,$P(QUE(BCHNUM),"|",2))
+
+		if (ER>0) do {
+			set ZSEQ=ZSEQ+1
+			set ERROR(ZSEQ)=JD_"|||"_RM
+			set ERROR=1		// Hard error
+		}
+
+		else  set $P(QUE(BCHNUM),"|",4)=NJD
+	}
+	
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60593^25278^Dhanalakshmi R^10179"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,365 @@
+COMPMT //Batch BCHCOMPMT - Commission Payment 
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 08/30/2007 15:07 - joynerd
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHCOMPMT Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ set vBCHSTS=$$STATUS^BCHUTL("BCHCOMPMT")
+ if vBCHSTS=1 set ER=1,RM=$$^MSG(3410) quit
+ if vBCHSTS=2 set ER=1,RM=$$^MSG(3414) quit
+ if vBCHSTS=0 set %BatchRestart=1
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit do EXIT^BCHUTL("BCHCOMPMT") quit
+ do JOBMGR^BCHUTL(%FN,"BCHCOMPMT",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ do EXIT^BCHUTL("BCHCOMPMT")
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(AGENT) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHCOMPMT","*","",AGENT.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ if %BatchRestart,$$CHKLOG^BCHUTL(%SystemDate,%FN,"BCHCOMPMT",AGENT.get()) do { quit
+ do LOG^BCHUTL(%SystemDate,%FN,"BCHCOMPMT",AGENT.get(),"Record already processed")
+ }
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,AGENT)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHCOMPMT","*","",AGENT.get(),"",et)
+ }
+ do UPDLOG^BCHUTL(%SystemDate,%FN,"BCHCOMPMT",AGENT.get(),vCONTEXT)
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,AGENT) //
+ 
+        new AMT,BAL,INTTYPE,INTCRCD,PMTTYPE,PMTCRCD,CID,COMPACCT
+	new SEQ,intrm,pmtacct,ETC,TMPBAL
+
+	// Initialize batch teller
+        do SOURCE^BCHSOURC("BOFF","COMM",.%UserID,.BRCD,.%UserClass) Quit:ER
+ 
+	// Load the agent data
+	TYPE RecordAGENT agent
+	set agent=Db.getRecord("AGENT","AGENT")
+	
+	// Get the account and lock the record
+        set CID=agent.intrm
+	set COMPACCT=agent.compacct
+	
+        // get minimum amount
+	TYPE RecordCUVAR cuvar
+	set cuvar=Db.getRecord("CUVAR")
+ 
+        // get account information
+	TYPE ResultSet intrm=Db.select("BAL,TYPE,CRCD","ACN","CID=:CID")
+	If 'intrm.next() Quit
+	set BAL=intrm.getCol(1)
+	set INTTYPE=intrm.getCol(2)
+	set INTCRCD=intrm.getCol(3)
+
+	// If there is no amount in the settlement account, quit now
+	If +BAL=0 Quit
+
+	// If the payment option is for a Profile account load data
+
+	If agent.comopt=0 do {
+	   TYPE ResultSet pmtacct=Db.select("TYPE,CRCD","ACN","CID=:COMPACCT")
+	   If 'pmtacct.next() Quit
+	   set PMTTYPE=pmtacct.getCol(1)
+	   set PMTCRCD=pmtacct.getCol(2)
+ 	   }
+
+        // Compare the two amounts
+	set TMPBAL=BAL		// VCA 5/10/99
+	if INTCRCD'=%SystemCurrency do {
+		do EXC^CRCDUTL(INTCRCD,%SystemCurrency,BAL,1,1,00)
+		set TMPBAL=$$^SCARND(EXCAMT,0,,%SystemCurrency)
+		}
+
+	If TMPBAL<cuvar.mincmamt Quit           // No Transfer
+ 
+        // Generate transactions to transfer funds
+ 
+	If agent.comopt'=1 do DEBIT(.agent) If ER do EXC Quit    // Debit interum settlement account
+
+	// Check the Commission Payment Option to determine where to transfer
+	// funds
+
+	If agent.comopt=0 do TRINT(.agent) If ER do EXC Quit   // Profile Acct
+	If agent.comopt=1 do TREXT(.agent) If ER do EXC Quit   // External Acct
+	If agent.comopt=2 do TRGL(.agent) If ER do EXC Quit   // G/L Acct
+
+	Quit
+
+        //---------------------------------------------------------------------
+DEBIT(RecordAGENT agent)  // debit the agent's interum settlement account
+        //---------------------------------------------------------------------
+	
+	type Public Cache %CACHE()
+
+	new ITC,CLS,TSO,TCMT,rs1,rs2
+
+        TYPE ResultSet rs1=Db.select("DRTRGP","PRODCTL","TYPE=:INTTYPE")
+        If 'rs1.next() Quit
+	set ETC=rs1.getCol(1)
+
+	// Invalid transaction code
+	if ETC="" set ER=1,RM=$$^MSG(1498) Quit
+	type RecordTRN trn=%CACHE("TRN").getRecord("TRN","ETC=:ETC")	
+
+	set ITC=trn.itc
+	set CLS=trn.cls
+        set TSO=""
+        set TSO=$$FIELDIN^UTSO(TSO,"COMPMT")
+	set TCMT=$$^MSG(3380)		// Commission Payment
+ 
+        // Now build the transaction
+	set SEQ=1
+	do CREATE(CID,SEQ,ITC,ETC,BAL,TSO,TCMT,INTCRCD) quit:ER
+ 
+        Quit
+
+
+        //---------------------------------------------------------------------
+TRINT(RecordAGENT agent)  // credit the agent's payable account
+        //---------------------------------------------------------------------	
+
+
+	type Public Cache %CACHE()
+
+	new ITC,TSO,TCMT,CLS,XBAL
+
+	// Check to make sure that the account is in the same currency as
+	// the balance.  If not, then convert the balance
+
+	set XBAL=BAL
+
+	If PMTCRCD'=INTCRCD do {
+	        Do EXC^CRCDUTL(INTCRCD,PMTCRCD,BAL,1,1,00)
+        	set XBAL=$$^SCARND(EXCAMT,0,,PMTCRCD)
+		}
+
+	// get the transaction code
+        TYPE ResultSet rs1=Db.select("CRTRGP","PRODCTL","TYPE=:PMTTYPE")
+        If 'rs1.next() Quit
+	set ETC=rs1.getCol(1)
+	
+	// Invalid transaction code
+	if ETC="" set ER=1,RM=$$^MSG(1498) Quit
+	type RecordTRN trn=%CACHE("TRN").getRecord("TRN","ETC=:ETC")	
+
+	set ITC=trn.itc
+	set CLS=trn.cls
+        set TSO=""
+        set TSO=$$FIELDIN^UTSO(TSO,"COMPMT")
+        set TCMT=$$^MSG(3380)           // Commission Payment
+
+        // Now build the transaction
+        set SEQ=2
+	do CREATE(COMPACCT,SEQ,ITC,ETC,XBAL,TSO,TCMT,PMTCRCD) quit:ER
+ 
+	quit
+
+        //---------------------------------------------------------------------
+TREXT(RecordAGENT agent)	// Transfer funds to an external account
+        //---------------------------------------------------------------------
+
+	/* This routine will get the external sequence number from the 
+	   AGENT file.  Based on the sequence, the external account information
+	   will be looked up in CIFEXT.  Finally, EFTBUILD will be called to
+	   process the external transaction.
+	*/
+
+	new cifext,ACN,SEQ,compacct,INTRM,CRCD,RCID,RINS,CRCD,intrm,TSO
+	new EXTACN,EXTSEQ,DATE			//VCA 12/3/99
+
+	// get interum settlement account record
+	set INTRM=agent.intrm
+	type RecordDEP intrm=Db.getRecord("DEP","INTRM")
+	
+	// get CIFEXT record	
+	set EXTACN=agent.cif
+	set EXTSEQ=agent.compacct		// This is the external sequence
+
+	TYPE RecordCIFEXT cifext
+	set cifext=Db.getRecord("CIFEXT","EXTACN,EXTSEQ")
+	
+	// call EFTBUILD
+	set CRCD=intrm.crcd	
+	set RCID=cifext.extacct
+	set RINS=cifext.extinst
+	set EXTNAME=cifext.benname
+        set EXTCITY=cifext.bencity
+	set TSO=""
+	set TSO=$$FIELDIN^UTSO(TSO,"EXTNAME",EXTNAME)
+        set TSO=$$FIELDIN^UTSO(TSO,"EXTCITY",EXTCITY)
+	set DATE=$$NBD^UNBD(%SystemDate,0)		//VCA 12/3/99
+	do ^EFTBUILD(INTRM,,RCID,RINS,BAL,CRCD,DATE,,"PO",0,TSO)		
+
+	Quit
+
+        //---------------------------------------------------------------------
+TRGL(RecordAGENT agent)	// Transfer funds to a G/L account
+        //---------------------------------------------------------------------
+
+	type Public Cache %CACHE()
+
+	new ITC,CLS,TSO,TCMT
+
+	set ETC="MCR"	// Miscellaneous Credit
+
+	type RecordTRN trn=%CACHE("TRN").getRecord("TRN","ETC=:ETC")	
+
+	set ITC=trn.itc
+	set CLS=trn.cls
+        set TSO=""
+        set TSO=$$FIELDIN^UTSO(TSO,"COMPMT")
+        set TCMT=$$^MSG(3380)           // Commission Payment
+	
+        // Now build the transaction
+        set SEQ=2
+	do CREATE(COMPACCT,SEQ,ITC,ETC,BAL,TSO,TCMT,INTCRCD) quit:ER
+		
+	quit
+
+ 
+        //---------------------------------------------------------------------
+EXC     // Log error to the exception file
+        //---------------------------------------------------------------------
+        new DESC
+        set DESC="Commission Posting"
+        do LOG^UTLEXC($T(+0),"*",DESC,$G(%ZTSEQ),$G(ET),$G(CID))
+        kill ET,%ZTSEQ
+        Quit
+
+
+CREATE(CID,SEQ,ITC,ETC,TAMT,TSO,TCMT,CRCD)
+
+	type Number TSEQ
+	type String PAR()
+
+	type TranSet ts=Class.new("TranSet")
+	type RecordTTX ttx=Class.new("RecordTTX")
+
+	set ttx.cid=CID
+	set ttx.tseq=SEQ
+	set ttx.itc=ITC
+	set ttx.etc=ETC
+	set ttx.tamt=TAMT
+	set ttx.efd=%SystemDate
+	set ttx.tlo=%UserStation
+	set ttx.tso=TSO
+	set ttx.tcmt=TCMT
+	set ttx.crcd=CRCD
+
+        set TSEQ=ts.copyTran(ttx)
+ 
+        // File the Transaction
+        set PAR("IPMODE")=3
+        set PAR("OPTION")=2
+        do ts.postTSet(%SystemDate,BRCD,.PAR)
+
+	quit
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,AGENT
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set AGENT=vRECORD.piece($C(9),1)
+ do vPROC(AGENT)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,AGENT
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>32767 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+7>32767 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("AGENT","AGENT","")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

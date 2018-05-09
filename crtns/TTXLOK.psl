@@ -1,0 +1,199 @@
+public	TTXLOK
+
+	/*
+	Lock a TTX file for posting 
+		   
+	       ORIG:  Frank R. Sanchez (2497) - 12/15/86
+	       DESC: Open and lock a TTX file for batch posting
+	
+	   INPUTS:
+	       . TJD 		Transaction posting date
+	       . TPD 		Teller posting date
+	       . BRCD 		Branch code
+	       . %UserID 	User ID
+	
+	       . STATUS Status of attempted operation
+			 0 = Format
+			 2 = Post
+	
+	       . SRC Posting source
+	
+	
+	   RETURNS:
+	       . ER Error indicator
+			 0 = OK to continue
+			 1 = Don't continue
+	
+	----- Revision History -----------------------------------------------
+	
+	10/10/06 - KELLYP - CR 23525
+		   Modified top level and ERR to unlock the TTXUID level of 
+		   the TTX semaphore before exiting.  This prevents a problem 
+		   where batches were not releasing locks on this semaphore, 
+		   which led to further problems running the UBAL03 report.
+	
+	01/31/06 - SmithCD - CR 19343 (16890)
+		   Modified setting of error messages to set ET where 
+		   applicable (UTLERR reports on ET).
+	
+	10/18/05 - TITOVE - CR 17832
+		   Modified SETPRF section to correctly set PM-d posting
+		   date in TPCTRL table.
+
+	05/31/05 - SmithCD - CR 15902
+		   . Replaced unlock of TTX(,) with TPRF(,) to concur with p01 
+		     version (was using keys of TPRF for TTX array)
+		   . Removed old revision history
+	  
+	02/01/05 - SmithCD - 13661
+		   . Removed () from top to fix multiple Actuallist expected 
+		     errors
+		   . Cleaned up compiler warnings and other minor cleanup
+		   . Modified getRecord on TTXUID to pass the third 
+		     parameter in case that level is not defined
+		   . Made TTXLOK public to eliminate accessibility warnings
+		   . Fixed error in SETPRF section when the teller posting 
+		     date is less than the system date, in which the tpctrl 
+		     record was not defined for the system date
+		   . Made error handling consistent throughout
+	
+	*/
+	
+	type public Number BRCD, STATUS
+	type public Date TPD
+	type public String ER, ET, RM, SRC, TPRF(,), TTX(,,)
+
+	if 'STATUS.exists() set STATUS = 0
+	if TPD.get().isNull() set TPD = %SystemDate
+	set SRC = SRC.get()
+
+	// Record locked by another user
+	lock +TTX(TPD, BRCD, %UserID):2 else  do { quit
+		set ET = "RECLOC"
+		do Runtime.setErrSTBLER("TTXUID", ET)
+		do ERR
+		}
+
+	type RecordTTXUID ttxuid = Db.getRecord("TTXUID", "TPD,BRCD,%UserID", 1)	
+	
+	// Record not on file
+	if STATUS, 'ttxuid.getMode() do { quit
+		set ET = "RECNOF"
+		do Runtime.setErrSTBLER("TTXUID", ET)
+		do ERR
+		}
+
+	// Bad posting file
+	if STATUS, ttxuid.badttx = 1 do Runtime.setErrMSG("TTXUID", 5158) do ERR quit 
+	if ttxuid.badttx = STATUS do { if ER quit 
+		type Number %HEX, %J 
+		
+		set %HEX = ttxuid.pid 
+		if %HEX.isNull() quit 
+		do HEX^UTLJOB 
+		
+		// Teller Transaction file [TTX] locked by process <<PID>>
+		if %J, (%J - %ProcessID) do { quit
+			set ET = "BCHLOC"
+			do Runtime.setErrSTBLER("TTXUID", ET)
+			do ERR
+			}
+		}
+	
+	if STATUS]]ttxuid.badttx set ttxuid.badttx = STATUS
+	if ttxuid.src.isNull() set ttxuid.src = SRC
+	set ttxuid.pid = $$DECHEX^%ZHEX(%ProcessID)
+	set ttxuid.time = %CurrentTime
+	
+	do ttxuid.bypassSave()
+	do SETPRF
+	
+	lock -TTX(TPD, BRCD, %UserID)
+	lock -TPRF(BRCD, %UserID)
+	kill STATUS
+	set ER = 0
+
+	quit 
+
+
+public SETPRF	// Initializes TPCTRL file for new date
+
+	/*
+	
+	   INPUTS:
+	       . TJD 		Transaction posting date
+	       . TPD 		Teller balancing date
+	       . BRCD 		Branch code
+	       . %UserID 	User ID
+
+	
+	*/
+
+	type public Number BRCD
+	type public Date TPD
+
+	type Date JD
+
+	for JD = %SystemDate:1:TPD do {
+		type RecordTPCTRL tpctrl = Db.getRecord("TPCTRL", "BRCD=:BRCD,UID=:%UserID,TPD=:JD", 1)
+		if tpctrl.getMode() = 0 do tpctrl.save()
+		}
+
+	if TPD > %SystemDate do {
+		type RecordTPCTRL tpctrl = Db.getRecord("TPCTRL", "BRCD=:BRCD,UID=:%UserID,TPD=:%SystemDate", 1)
+		if 'tpctrl.pmdate.isNull() quit
+		set tpctrl.pmdate = TPD
+		do tpctrl.save()
+		}
+
+	quit 
+
+
+ERR	// Log errors
+
+	type public Number STATUS
+	
+	lock -TTX(TPD, BRCD, %UserID)
+	
+	do ^UTLERR 
+	kill STATUS
+
+	quit 
+
+
+public TTXSRT	// Lock TTXSRT global
+
+	type public Number BRCD, TRNSRT
+	type public Date TPD
+	type public String ER, ET, SRC, TTXSRT(,,)
+
+	if TPD.get().isNull() do {
+		type RecordCUVAR cuvar = Db.getRecord("CUVAR")
+
+		set TPD = cuvar.tjd
+		}
+	set SRC = SRC.get()
+	
+	lock +TTXSRT(TPD, BRCD, %UserID):2 
+	else  do { quit
+		set ET = "RECLOC"
+		do Runtime.setErrSTBLER("TTXSRT", ET)
+		do ERR
+		}
+	 
+	type RecordTTXSRTUID ttxsrtuid = Db.getRecord("TTXSRTUID", "TPD,BRCD,%UserID", 1)
+
+	// Bad posting file
+	if ttxsrtuid.badttx = 1 do Runtime.setErrMSG("TTXSRTUID", 5158) do ERR quit 
+	if ttxsrtuid.src.isNull() set ttxsrtuid.src = SRC
+	set ttxsrtuid.pid = $$DECHEX^%ZHEX(%ProcessID)
+	set ttxsrtuid.ttime = %CurrentTime
+	set:ttxsrtuid.trnsrt.isNull() ttxsrtuid.trnsrt = TRNSRT.get()
+	
+	do ttxsrtuid.bypassSave()
+	
+	set ER = 0
+
+	quit 
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60548^41522^Pat Kelly^4599"	// Signature - LTD^TIME^USER^SIZE

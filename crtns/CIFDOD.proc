@@ -1,0 +1,443 @@
+CIFDOD
+	/*
+	Deceased Customer Information Tracking
+	
+	  ---- Revision History ------------------------------------------------
+
+	   07/28/06 - KELLYP - CR 22048
+	   	      Modified HIST section to elminiate PRECEDENCE warning.
+
+	   12/22/05 - Hillanbrand CR18740
+	              Corrected undefined on DLR at DEPOSIT+55. Changed
+	              use of variable DLR to dep.dlr
+
+	   05/27/05 - Hillanbrand - CR15762
+	              Corrected Invalid Db.select() by removing the word
+	              ORDER BY. 
+	   
+	   05/18/05 - Hillanbrand - CR13281
+	              added passing of acn in DODCALC section for error 
+	              do EXC(.acn).  Corrects stack error when error.	
+
+	   11/20/03 - CARROLLJ - CR7239
+		      Modified calls to RECALC and BCHFEEUTL to pass correct
+		      parameters.
+
+	   08/01/03 - CARROLLJ - 51629
+		      Modified call to INIT^UAVB to remove second parameter.
+
+	   01/04/02 - SCHWARTZC - 43583
+	              PSL conversion
+		      Removed pre 2000 revision history
+
+	   10/09/01 - SCHWARTZC - 47253
+	              Replace direct global references to HIST with calls to
+	              RETREC^UHFETCH.  This is required for euro processing.
+	
+	   07/02/01 - SELVANATHANS - 50389
+	              Corrected misspelled variable name STD to SDT.
+	
+	   03/06/01 - ZWITKOWITS - 44106
+	              Newed variable DTC in section CID.  Corrects problem where
+	              custom process written by Sanchez for a client uses value
+	              of DTC defined here instead of value defined within that
+	              process.
+	
+	   05/05/00 - DOUGANM- 39582
+	              Removed use of indirection in error trapping.
+	
+	*/
+
+	quit
+
+public DODCALC(RecordCIF cif)	// Calculate date of death balance, accrued interest, service fees
+
+	new %ZTHANG,%ZTSEQ,CID,DACR,DBAL,DFEE,DFMV,DIYTD,DODNEW,ET,FEEACT,WIRN
+	set ER=0
+	set RM=""
+
+	set DODNEW=cif.dod
+
+	type ResultSet rs=Db.select("CID","RELCIF","ACN=:ACN")
+	if rs.isEmpty() quit
+
+	while rs.next() do {
+
+		set CID=rs.getCol(1)
+
+		catch vERROR {
+			new ET,RM
+			set ET=vERROR.type
+
+			if ET["%GTM-" do ZE^UTLERR
+
+			set ET=ET_"-"_vERROR.thrownAt
+			set RM=vERROR.description
+
+			do EXC(.acn)
+			}
+
+		set ER=0
+		set (DACR,DBAL,DFEE,DIYTD,DFMV)=""
+		set FEEACT=0
+
+		// If date of death is removed, remove values in DOD fields
+		if DODNEW="" do FILE quit
+
+		type RecordACN acn=Db.getRecord("ACN","CID")
+
+		// Account closed prior to date of death
+		if DODNEW>acn.dtc,acn.dtc'="" do FILE quit
+
+		if acn.cls="D" do DEPOSIT(.acn) if ER do EXC(.acn) quit
+		if acn.cls="L" do LOAN(.acn) if ER do EXC(.acn) quit
+		do FILE
+		}
+
+	quit
+
+FILE	// File updates to RELCIF to disk
+
+	new ER
+	do Db.update("RELCIF","DACR=:DACR,DBAL=:DBAL,DFEE=:DFEE,DIYTD=:DIYTD,DFMV=:DFMV","ACN=:ACN AND CID=:CID")
+	quit
+
+DEPOSIT(RecordDEP dep)	//Driver function to return DOD values for a deposit account
+	/*
+	   Arguments:
+	   . dep	Deposit Object		/TYP=RecordDEP/REQ/REF
+
+	   RETURNS:
+	   . 	variables DBAL,DACR,DIYTD,DFMV,DFEE
+	*/
+
+	new %EffectiveDate,ACRINFO,IPF,IPLD,IPND,NEGIPLD,ODT,UAVB
+
+	set ODT=$S(dep.dlr'="":dep.dlr,1:dep.odt)
+	if dep.dlr>DODNEW!(DODNEW<ODT) quit
+
+	set IPLD=dep.ipld
+	set IPF=dep.ipf
+	set IPND=dep.inp
+	set NEGIPLD=dep.negipld
+
+	if dep.neginp,'NEGIPLD set NEGIPLD=ODT
+
+	if IPLD="",IPND="",NEGIPLD do {
+		set IPLD=NEGIPLD
+		set IPND=dep.neginp
+		set IPF=dep.negipf
+		}
+
+	if IPLD="",IPND'="",IPF'="" do { quit:ER
+		new FRE,JD,NJD 
+		set FRE="-"_IPF 
+		set JD=IPND 
+		set NJD=$$NJD^UFRE(JD,FRE) quit:ER  
+		set IPLD=NJD
+		}
+
+	if IPND,IPLD<ODT set IPLD=ODT
+
+	set FD=$S(IPLD<ODT:ODT,IPLD'="":IPLD,1:ODT)
+
+	// Calculate service DOD fees
+	set DFEE=0
+	do SRVFEE(.dep)
+
+	if ER do { quit
+		set DFEE=""
+		do FILE
+		}
+
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+
+	if (DODNEW<FD)!(DODNEW=FD) do RESETFD(IPF,IPLD)
+	if cuvar.ipd,ODT'=FD,'(dep.grp="CD"&(IPLD=dep.dlr)) set FD=FD+1
+
+	// If date is in future, use TJD
+	if FD>%SystemDate set FD=%SystemDate
+	set %EffectiveDate=FD
+
+	//calculate the accrual for the date
+	if IPLD="",IPND="" set ACRINFO=0
+	else  do {
+		set ACRINFO=$$RANGE^RECALC(.dep,FD,DODNEW,+dep.bal)
+
+		// if acr is neg then we may have the wrong accrual amount, redo
+		// the call to recalc using the last neg interest posting date.
+		if NEGIPLD,dep.negipf'="" do {
+			set FD=$S(NEGIPLD="":ODT,1:NEGIPLD)
+			if (DODNEW<FD)!(DODNEW=FD) do RESETFD(dep.negipf,NEGIPLD)
+			if cuvar.ipd,ODT'=FD set FD=FD+1
+			set $P(ACRINFO,"|",3)=$P($$RANGE^RECALC(.dep,FD,DODNEW,+dep.bal),"|",3)
+			}
+		}
+
+	// If error calculating accruals, ER will be set
+	if ER do FILE quit
+
+	set DACR=+ACRINFO-$P(ACRINFO,"|",3)
+	set DACR=$$^SCARND(DACR,0,CID)
+
+	// calculate balance for the date
+	do INIT^UAVB(.dep,CID,DODNEW,DODNEW,"00000000000000000001")
+
+	if ER do { quit
+		set DACR=""
+		do FILE
+		}
+
+	set DBAL=$P(UAVB(1),"|",3)
+
+	// Year to date interest
+	set DIYTD=$$DIYTD(.dep)
+
+	// Fair market value
+	set DFMV=DACR+DBAL
+
+	quit
+
+RESETFD(FRE,IPD)	//Reset the value of FD based on a frequency and last date
+	/*
+	   Arguments:
+	   .	FRE	Interest Posting Frequency	/TYP=F/REQ
+	   .	IPD	Interest Posting Last Date	/TYP=D/REQ
+
+	   Returns:
+	   . 	FD 					/TYP=D
+	
+	   Examples:
+	   	do RESETFD(INPFRE,IPLD)
+	   	do RESETFD(NEGFRE,NEGIPLD)
+
+	*/
+
+	new JD,NJD
+	set FRE="-"_FRE
+	set JD=IPD
+	set NJD=$$NJD^UFRE(JD,FRE) quit:ER 
+	set FD=NJD
+
+	if FD<ODT set FD=ODT quit 
+	if (DODNEW<FD)!(DODNEW=FD) do RESETFD(IPF,FD)
+
+	quit 
+
+
+LOAN(RecordLN ln)	//Driver function to determine DOD values for a loan
+	/*
+	   Return Balance, accrual and interest year to date as of
+	   the date of death.
+
+	   Arguments:
+	   . ln		Loan Object		/TYP=RecordLN/REQ/REF
+
+	   Returns:
+	   . DBAL,DACR,DIYTD,DFMV,DFEE
+	*/
+
+	new %TRANS,%EffectiveDate,saveacr,ODT
+	set %TRANS=0
+	set %EffectiveDate=DODNEW
+
+	set ODT=$S(ln.lrd'="":ln.lrd,1:ln.dtnt)
+
+	if DODNEW<ODT quit
+
+	if DODNEW=%SystemDate set saveacr=ln.acr
+
+	do START^LNPTS2B(.ln)
+
+	if ER do FILE quit
+
+	new EJD,%SystemDate
+
+	set EJD=%EffectiveDate
+	#ACCEPT DATE=11/20/03;PGM=John Carroll
+	set %SystemDate=%EffectiveDate
+	set DBAL=$P(WIRN($O(WIRN(%EffectiveDate+1),-1)),"|",5)
+	set DACR=$S($D(saveacr):saveacr,1:ln.acr)
+	set DACR=$$^SCARND(DACR,0,CID)
+
+	set DIYTD=-$$DIYTD(.ln)
+	set DFMV=""
+	quit 
+	
+
+DIYTD(RecordACN acn)	// Calculate year to date interest paid until date of death
+	/*
+	Argumnets:
+	.  acn	   Account Object	/TYP=RecordACN/REQ
+
+	*/
+	new BOY,CRADIE,DRADIE,TRB,TYPE
+
+	set BOY=$$BOYJD^SCADAT(DODNEW,1)       // Beginning of year
+	set TYPE=acn.type
+
+	// Define Boff adjustment tran codes for Interest Expense
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE")
+
+	set DRADIE=prodctl.dradie
+	set CRADIE=prodctl.cradie
+	set TRB=prodctl.trb
+	do HIST(.acn,.DIYTD)
+
+	quit +DIYTD
+	
+HIST(RecordACN acn,DIYTD)	//Driver through history for IYTD processing
+	//Read History to determine the interest year to date totals
+	/*
+	   Read through the most recent history and total all interest
+	   posting transactions into variable DIYTD. Stop processing
+	   when the transaction date is not in the current year.
+	
+	   Arguments:
+	   .  acn	Account Object			/TYP=RecordACN/REQ/REF
+	   .  DIYTD	year-to-date interest paid	/TYP=$/REF
+
+	*/
+
+	new %SystemDate,ETC,TSEQ
+
+	set DIYTD=0
+
+	type ResultSet rs=Db.select("TSEQ","HIST","CID=:CID AND TJD>=:BOY","TSEQ DESC")
+	quit:rs.isEmpty()
+
+	while rs.next() do {
+		set TSEQ=rs.getCol(1)
+
+		type RecordHIST hist=Db.getRecord("HIST","CID,TSEQ")
+
+		if hist.tamt="",hist.itc="" quit
+
+		#ACCEPT DATE=11/20/03;PGM=John Carroll
+		set %SystemDate=hist.tjd
+		set %EffectiveDate=hist.efd
+		if %EffectiveDate="" set %EffectiveDate=%SystemDate
+
+		set ETC=hist.etc
+
+		if (%EffectiveDate<BOY) quit 
+
+		// Determine if a secondary transaction
+		new Q
+		set Q=0
+		if acn.cls="L",hist.itc7 do { quit:Q
+			// If secondary tran, quit if an accrual adjustment
+			type RecordTRN trn=Db.getRecord("TRN","ETC")
+			if trn.pcfl20 set Q=1
+			}
+
+		set AMT=0
+
+		if acn.cls="L" set AMT=+$P(hist.tamt,"#",3)
+		if acn.cls="D" do {
+			if hist.itc4=1 set AMT=+hist.tamt quit 
+			if $$TSOINT(hist.tso) set AMT=+hist.tamt quit 
+			if ETC=DRADIE!(ETC=CRADIE) set AMT=+hist.tamt
+
+			if $P(hist.tamt,"#",3),hist.xhs16'="" do {
+				set AMT=$P(hist.tamt,"#",3)
+				set TRB=('hist.itc1)+1
+				}	
+			}
+
+		if (TRB-hist.itc1)=0 set AMT=-AMT
+
+		if %EffectiveDate>DODNEW quit 
+
+		set DIYTD=DIYTD+AMT
+
+		}
+
+	quit 
+	
+SRVFEE(RecordDEP dep)	// determine service charge's paid and anticipated
+
+	new %SystemDate,FD,FRE,JD,NJD,PLTP,SCND,SRVDT,TD
+
+	set PLTP=0
+	set SCND=DODNEW-1
+	set SRVDT=Db.nextVal("SRV","CID,PLTP,SCND")
+
+	if SRVDT="" set SRVDT=dep.scnd
+
+	set FRE=dep.scfre
+	if FRE="" set DFEE=0 quit
+
+	set FRE="-"_FRE
+	set NJD=$$NJD^UFRE(DODNEW,FRE) quit:ER
+
+	#ACCEPT DATE=11/20/03;PGM=John Carroll
+	set %SystemDate=DODNEW+1
+
+	if dep.feepln'="",SCND'="" do {
+		new SDT
+		if dep.dtc,%SystemDate>dep.dtc quit 
+
+		set SDT=dep.scld
+		if SDT="" set SDT=Db.prevVal("SRV","CID,PLTP,%SystemDate")
+		if SDT="" do {
+			set NJD=$$NJD^UFRE(%SystemDate,FRE) quit:ER
+			set SDT=NJD
+			set SDT=$S(dep.odt-1>SDT:dep.odt-1,1:SDT)
+			}
+
+		if dep.dtc,SDT>dep.dtc do { if SDT="" quit
+			for  set JD=SDT do { quit:SDT'>dep.dtc
+				set NJD=$$NJD^UFRE(JD,FRE) quit:ER  
+				set SDT=NJD
+				}
+			}
+
+		if dep.hisctf,SDT<dep.hisctf set ER=1 set ET="UAVB1" quit
+		do EXTERN^BCHFEEUT(.dep,"11",SRVDT)
+		set DFEE=FEEACT
+		}
+	quit 
+
+TSOINT(TSO)	//Examine TSO for valid interest adjustment
+
+	new UTSO
+
+	do OUT^UTSO(.UTSO,TSO)
+
+	if $D(UTSO("INT")) quit 1
+	if $D(UTSO("INTADJ")) quit 1
+	if $D(UTSO("NEGINT")) quit 1
+	if $D(UTSO("NEGINTADJ")) quit 1
+
+	quit 0
+
+EXC(RecordACN acn)	// Log error in exception file
+	/*
+
+	Arguments:
+ 
+	. acn	Account Object		/TYP=RecordACN/NOREQ
+ 
+	*/
+
+	new BAL
+
+	if $G(ET)="" set ET=$G(RM)
+
+	if $G(CID)'="" do {
+		if acn.getPointer() set BAL=acn.bal quit
+
+		set acn=Db.getRecord("ACN","CID")
+		set BAL=acn.bal
+		}
+
+	do LOG^UTLEXC($T(+0),"*",$$^MSG(1374),$G(CID),$G(%ZTSEQ),ET,$G(BAL))
+
+	kill ET,%ZTSEQ
+	set ER=""
+	set RM=""
+
+	quit
+
+vSIG()	quit "60477^65443^Pat Kelly^9419"	// Signature - LTD^TIME^USER^SIZE

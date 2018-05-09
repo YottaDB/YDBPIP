@@ -1,0 +1,445 @@
+STPXCHG	// On-Us Stop Record Exchange
+	/*
+	-------------------------- Revision History ------------------------------
+
+	07/02/07 - SATYANAS - CR 27022
+		   Converted to PSL.
+	
+	--------------------------------------------------------------------------
+	*/
+
+	type public Boolean ER
+	type public String RM
+	type String FD, %NOPRMT, %READ, SREMODE, %TAB(), VFMQ
+
+        set ER = 0,RM = ""
+        set %NOPRMT = "N"
+
+	set SREMODE = "N"
+	set %TAB("SREMODE") = ".SRE1"
+        set %TAB("FD") = ".DAT1"		// Prompt for starting date
+        set %READ = "@@%FN,,,FD,SREMODE"
+
+        do ^UTLREAD
+
+        if VFMQ.get() = "Q"!ER.get() quit
+
+        do BEGIN(ER,FD)
+
+        quit     
+
+
+BEGIN( Boolean ER,
+       Date FD)			// Starting Date
+       
+	/*
+	This is where we step through [STOPLOGA] for the specified date range
+	and then build the [STPXCHG] file that the report runs on.
+	*/
+
+	type Date TDATE
+	type Number IOSL, LOAD, LSEQ, SEQ, STPTYP, vcrt
+	type String IO, IOTYP, KEY1, KEY2, PGM, RID, T, TER(), TERD()
+
+	// get starting date
+	do DATE(.TER(),FD)
+
+	// This will be used to determine which actions to send to the territories.
+	
+	/* 
+	
+	 Go through STOPLOGA and find what needs to be sent out.
+	 We process everything in STOPLOGA between today and the starting
+	 date DATE.
+	 For each unique stop (KEY), we process all actions in reverse order
+	 to determine what action needs to be sent to the territories.
+	
+	*/
+	
+	set LOAD = 0
+	
+	type ResultSet rsstop = Db.select("TJD,STPTYP,KEY1,KEY2,SEQ","STOPLOGA",,"TJD DESC")
+
+	while rsstop.next() do { quit:(TDATE<FD)
+		set TDATE  =  rsstop.getCol("TJD")
+		set STPTYP = rsstop.getCol("STPTYP")
+		set KEY1 = rsstop.getCol("KEY1")
+		set KEY2 = rsstop.getCol("KEY2")
+		set SEQ = rsstop.getCol("SEQ")
+				
+		type ResultSet rsstlseq = Db.select("LSEQ","STOPLOGA","TJD = :TDATE AND STPTYP = :STPTYP AND KEY1 = :KEY1 AND KEY2 = :KEY2 AND SEQ = :SEQ","LSEQ DESC")
+			
+		while rsstlseq.next() do {
+			set LSEQ = rsstlseq.getCol("LSEQ")
+			do SEQ(TDATE,LOAD,LSEQ,SEQ,STPTYP,KEY1,KEY2)
+			}
+		
+		// Build the Data in STPXCHG table for this stop & territories
+		do XCHG(.TERD(),SEQ,STPTYP,KEY1,KEY2,T())
+		}
+	
+	// now run report
+	set vcrt = 0,IOSL = 99999999999
+	set IO = $I
+
+	set RID = "STPXCHG" do ^URID
+	
+	if PGM.isNull() quit
+	
+	set IOTYP = "RMS"
+	
+	do V0^@PGM
+	
+	if ER quit
+
+	// Update dates on [UTBLTER] based on contents of TERD array
+	set T = ""
+	
+	if 'TERD.exists() quit
+
+	for  set T = TERD(T).order() do { quit:T.isNull() 
+		
+		type RecordUTBLTER utblter = Db.getRecord("UTBLTER","TER = :T",1)
+				
+		if TER(T).exists() set utblter.begdt = TER(T).piece("|",2)
+			
+		else  set utblter.begdt = utblter.enddt
+		
+		set utblter.enddt = %SystemDate
+		
+		do utblter.bypassSave()
+		}
+
+	quit
+
+
+DATE( String TER(),		// Territories info array
+      Date FD)			// Get starting date
+      
+	/*
+	Find last time a tape was sent out.  That is the last
+	time the exchange was run for all territories.  Use
+	the next day as default starting date.
+	*/
+
+	type String X
+	
+	if FD.isNull() do {	
+		set X = ""
+
+		type ResultSet rs  =  Db.select("TER,DESC,ENDDT,BEGDT","UTBLTER")
+
+		while rs.next() do {
+			set X  =  rs.getCol("TER")
+			set TER(X)  =  rs.getCol("DESC")_"|"_rs.getCol("ENDDT")_"|"_rs.getCol("BEGDT")
+
+			if FD < rs.getCol("ENDDT") set FD  =  rs.getCol("ENDDT")
+			}		
+
+		if FD.isNull() do {
+			type ResultSet rs  =  Db.select("TJD","STOPLOGT")
+
+			if rs.next() set FD  =  rs.getCol("TJD")
+			}
+
+		set FD  =  FD + 1 
+
+		if FD > %SystemDate set FD  =  %SystemDate
+		}
+
+	quit
+
+
+SEQ( Date TDATE,		// System Processing Date				
+     Number LOAD,		// Load stop information Flag 
+     Number LSEQ,		// Log Sequence
+     Number SEQ,		// Stop Sequence
+     Number STPTYP,		// Stop Type
+     String KEY1,		// Account Number/Document Type 
+     String KEY2)		// Check/Document Number
+     	
+	/*
+	Process individual sequence
+	we have a give sequence (action) against a stop, now determine how
+	it will affect any territories and what to send to the territories.	
+	*/
+
+	type String NEW, OLD, T(), TACT, TER, Y 
+
+	type RecordSTOPLOGA stoploga = Db.getRecord("STOPLOGA","TJD = :TDATE,STPTYP = :STPTYP,KEY1 = :KEY1,KEY2 = :KEY2,SEQ = :SEQ,LSEQ = :LSEQ",1)
+
+	// Any territory levels for this seq?
+	type ResultSet rsstoplogt = Db.select("LSEQ","STOPLOGT","TJD = :TDATE AND STPTYP = :STPTYP AND KEY1 = :KEY1 AND KEY2 = :KEY2 AND SEQ = :SEQ AND LSEQ > :LSEQ","LSEQ ASC")
+	if rsstoplogt.next() do {
+
+		if stoploga.actflg = 0 quit
+
+		/*
+		There are territories associated with this action
+		walk through territory level and process creates and deletes.
+		*/
+
+		// process territory level
+		if STPTYP = 2 do { quit
+
+			type ResultSet rsstop2a = Db.select("TER,DTSEND","STOP2A","CID = :KEY1 AND SEQ = :SEQ")
+			while rsstop2a.next() do {
+				set TER = rsstop2a.getCol("TER")
+				set TACT = rsstop2a.getCol("DTSEND")
+
+				do TERS1(.stoploga,TACT,TER,.OLD,.NEW,.T())
+				}
+			}
+
+		if STPTYP = 3 do { quit
+
+			type ResultSet rsstop3a = Db.select("TER,DTSEND","STOP3A","CID = :KEY1 AND CHKHI = :KEY2 AND SEQ = :SEQ")
+			while rsstop3a.next() do {
+				set TER = rsstop3a.getCol("TER")
+				set TACT = rsstop3a.getCol("DTSEND")
+
+				do TERS1(.stoploga,TACT,TER,.OLD,.NEW,.T())
+				}
+			}
+
+		if STPTYP = 8 do {
+
+			type ResultSet rsstop8a = Db.select("TER,DTSEND","STOP8A","DOCTYP = :KEY1 AND DOCNUM = :KEY2 AND SEQ = :SEQ")
+			while rsstop8a.next() do {
+				set TER = rsstop8a.getCol("TER")
+				set TACT =  rsstop8a.getCol("DTSEND")
+
+				do TERS1(.stoploga,TACT,TER,.OLD,.NEW,.T())
+				}
+			}
+
+		}
+
+	// We already handled deletion, only process
+	if stoploga.actflg = 3 quit
+
+	if 'LOAD do LOAD(.stoploga,.LOAD,SEQ,STPTYP,KEY1,KEY2,.T())
+
+	/*
+	Create and modify on all after processing the territory level
+	now process Action Flag on all teritories in T.
+	*/
+
+	if 'T.exists() quit  
+
+	set Y = "" 
+	for  set Y = T(Y).order() do { quit:Y.isNull()
+		set OLD = T(Y)
+		set NEW = $$NEW(OLD,stoploga.actflg)
+
+		// Don't send anything!
+		if NEW = "*" kill T(Y) quit	
+		set T(Y) = NEW
+		}
+
+	quit
+
+NEW( String OLD, 	// Teritories in T  		
+     String NEW)	// Action Flag 	
+
+	// determine resultant action
+
+	type String X
+
+	if NEW = 0 do {
+		if OLD = 3 set X = "*" quit
+		set X = 0
+		}
+
+	if NEW = 1 set X = OLD
+
+	if NEW = 3 do {
+		if OLD = 0 set X = 1 quit
+		if OLD = 1 set X = 0 quit
+		set X = NEW
+		}
+
+	quit X
+
+
+LOAD( RecordSTOPLOGA stoploga,
+      Number LOAD,			// Load stop information Flag 
+      Number SEQ,			// Stop Sequence
+      Number STPTYP,			// Stop Type
+      String KEY1,			// Account Number/Document Type
+      String KEY2,			// Check/Document Number
+      String T())			// Teritories Array
+      
+	// Load stop information from stop file
+
+	type String TER
+
+	set LOAD = 1
+
+	if STPTYP = 2 do { quit
+
+		type RecordSTOP2 stop2 = Db.getRecord("STOP2","CID = :KEY1, SEQ = :SEQ",1)
+		if 'stop2.getMode() quit
+
+             	type ResultSet rs = Db.select("TER","STOP2A","CID = :KEY1 AND SEQ = :SEQ")
+          	while rs.next() do {
+             		set TER = rs.getCol("TER")
+             		set T(TER) = stoploga.actflg
+             		}
+    		}
+
+	if STPTYP  =  3 do { quit
+
+		type RecordSTOP3 stop3 = Db.getRecord("STOP3","CID = :KEY1, CHKHI = :KEY2, SEQ = :SEQ",1)
+		if 'stop3.getMode() quit
+
+		type ResultSet rs3 = Db.select("TER","STOP3A","CID = :KEY1 AND CHKHI = :KEY2 AND SEQ = :SEQ")
+             	while rs3.next() do {
+             		set TER = rs3.getCol("TER")
+             		set T(TER) = stoploga.actflg
+             		}
+ 		}
+
+	if STPTYP  =  8 do {
+
+		type RecordSTOP8 stop8 = Db.getRecord("STOP8","DOCTYP = :KEY1, DOCNUM = :KEY2, SEQ = :SEQ",1)
+		if 'stop8.getMode() quit
+
+		type ResultSet rs8 = Db.select("TER","STOP8A","DOCTYP = :KEY1 AND DOCNUM = :KEY2 AND SEQ = :SEQ")
+             	while rs8.next() do {
+             		set TER = rs8.getCol("TER")
+             		set T(TER) = stoploga.actflg
+             		}
+              	}
+
+	quit
+
+
+TERS1( RecordSTOPLOGA stoploga,
+       String TACT,
+       String TER,			// Territory
+       Number OLD,			// Teritories in T 
+       String NEW,			// Action Flag
+       String T()) 			// Teritories Array
+
+	// It's a deletion.
+	if TACT = 3 do { quit 	
+		if 'T(TER).exists() set T(TER) = 3 quit
+
+		// Perform action on it
+		set OLD = T(TER)	
+		set NEW = $$NEW(OLD,3)
+
+		if NEW = "*" kill T(TER) quit
+
+		set T(TER) = NEW
+		}
+
+	// It's a creation.
+	if TACT = 0 do {	
+		if ('T(TER).exists()),(stoploga.actflg = 3) set T(TER) = 3 quit
+		if ('T(TER).exists()),(stoploga.actflg = 1) set T(TER) = 0 quit
+
+		// Perform action on it.
+		set OLD = T(TER)	
+
+		if stoploga.actflg = 1 set NEW = $$NEW(OLD,0)
+		if stoploga.actflg = 3 set NEW = $$NEW(OLD,3)
+		if NEW = "*" kill T(TER) quit
+
+		set T(TER) = NEW
+		}
+
+	quit
+
+
+XCHG( String TERD(),		// TERD array
+      Number SEQ,		// Stop Sequence 	
+      Number STPTYP,		// Stop Type
+      String KEY1,		// Account Number/Document Type
+      String KEY2,		// Check/Document Number
+      String T()) 		// Teritories Array
+	
+      // Build the Data in STPXCHG table for this stop & territories
+	
+	if STPTYP = 2 do { quit
+
+		// Account stops
+		type RecordSTOP2 stop2 = Db.getRecord("STOP2","CID = :KEY1, SEQ = :SEQ",1)
+
+		// Create the exchange records for each territory in T
+		do CREATEXC(stop2.act,"","",stop2.exp,KEY1,"","","",1,SEQ,.TERD(),T())
+		}
+
+	if STPTYP = 3 do { quit
+
+		// Check stops
+		type RecordSTOP3 stop3  =  Db.getRecord("STOP3","CID = :KEY1 ,CHKHI = :KEY2, SEQ = :SEQ",1)
+
+		// create the exchange records for eact territory in T
+		do CREATEXC(stop3.act,"","",stop3.exp,KEY1,KEY2,stop3.chklo,"",2,SEQ,.TERD(),T())
+		}
+
+	if STPTYP = 8 do { 
+
+		// Document stops
+		type RecordSTOP8 stop8 = Db.getRecord("STOP8","DOCTYP = :KEY1,DOCNUM = :KEY2,SEQ = :SEQ",1)
+
+		// create the exchange records for each territory in T
+		do CREATEXC(stop8.act,KEY2,KEY1,stop8.exp,"","","","",3,SEQ,.TERD(),T())
+		}
+
+	quit
+
+
+CREATEXC( Number ACT,		// Stop Action	
+	  Number DOCNUM,	// Document Identification
+	  String DOCTYP,	// Document Type
+	  Date EXP,		// Stop Expiration Date
+	  String OUTACC,	// Account Number
+	  String OUTCHK,	// High Check Number
+	  String OUTCHKE,	// Low Check Number
+	  String OWN,		// Owner
+	  Number TYP,		// Stop Type
+	  Number SEQ,		// Sequence Number
+	  String TERD(),	// TERD Array
+	  String T())		// Teritories Array
+
+	// To create the exchange records for each territory in T
+
+	type Number TSEQ
+	type String ACTFLG, X
+
+	set X = ""
+
+	if 'T.exists() quit
+
+	for  set X = T(X).order() do { quit:X.isNull()
+		set ACTFLG = T(X)
+		set TSEQ = ""
+
+		// get next available sequence number
+		type ResultSet rsstp =  Db.select("SEQ","STPXCHG","PID = :%ProcessID AND TER = :X","SEQ DESC")
+		if rsstp.next() set TSEQ = rsstp.getCol("SEQ")
+
+		type RecordSTPXCHG stpxchg  =  Db.getRecord("STPXCHG","PID = :%ProcessID, TER = :X, SEQ = :TSEQ+1",1)
+		set stpxchg.act  =  ACT
+		set stpxchg.actflg  =  ACTFLG
+		set stpxchg.docnum  =  DOCNUM
+		set stpxchg.doctyp  =  DOCTYP
+		set stpxchg.exp  =  EXP
+		set stpxchg.inst  =  CUVAR.iso
+		set stpxchg.outacc  =  OUTACC
+		set stpxchg.outchk  =  OUTCHK
+		set stpxchg.outchke  =  OUTCHKE
+		set stpxchg.own  =  OWN
+		set stpxchg.typ  =  TYP
+
+		do stpxchg.bypassSave()
+		
+		set TERD(X) = %SystemDate
+		}
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60813^21564^Sethy, Satyanarayan^10659"	// Signature - LTD^TIME^USER^SIZE

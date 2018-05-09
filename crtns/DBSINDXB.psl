@@ -1,0 +1,499 @@
+private DBSINDXB(String fid,String pslcode())	/* Public; Build run-time index code
+	Copyright(c)2003 Sanchez Computer Associates, Inc.  All Right_s Reserved - 04/19/04 10:16:15 - RussellDS
+
+	ORIG: RussellDS - 04/19/04v
+	DESC: Generate Filer Index logic
+
+	---- Comments --------------------------------------------------------
+	This routine is a re-write of DBSINDXB from M into PSL.
+	
+	Note that this code is only generated for a GT.M database, since
+	indexes are maintained internally by an RDB.
+
+	---- Revision History ------------------------------------------------
+	08/07/07 - RussellDS - CR28507
+		   Removed references to obsolete columns in DBTBL8 - QRY1,
+		   QRY2, NULLFLG, and SAVFLG.
+	
+	03/01/07 - RussellDS - CR26386
+		   Added bypass for generated global references
+	
+	08/17/06 - RussellDS - CRs: 22719 / 20613
+		   Replace references to OBJGBL^UCUTIL with getGbl^UCXDD.
+		   
+		   Eliminate call to $$OBJNAME^UCUTIL.
+
+	05/08/06 - Allan Mattson - CR20048
+	           Replaced occurences of '$C(254)' with 'PSL.maxCharValue - 1'
+	           (Unicode support).
+
+	12/15/05 - RussellDS - CR18400
+		   Modify building of VIDXBLD section to use index names in
+		   vlist, not tag names.  This removes need for caller to
+		   have any knowledge of internal filer structure.  Build
+		   new VIDXBLD1 section for use by DBSINDXZ.
+	
+	11/17/05 - RussellDS - CR18065
+		   Make VINDEX and VIDXBLD in generated code public.
+		   
+		   Clean up deprecated features warnings.
+
+	05/10/05 - RussellDS - CR15943
+		   Fix logic in QUERY section to construct query test
+		   correctly and move quit to end of generated code to
+		   avoid incorrect early quit.
+		   
+		   Correct use of schema code.
+		
+	03/29/04 - RussellDS - CR9172
+		   Rewritten in PSL
+		   
+	09/15/03 - Allan Mattson - 51637
+		   Introduced subroutine IDXOPT to optimize UPDATES
+		   (i.e., %O=1) to table indeces.
+
+		   Eliminated subroutine CHANGE (previously, this
+		   compiled function $$vchanged in filer routines).
+
+		   Deleted pre-2001 revision history.
+
+	01/10/03 - SPIER - 51423
+		   Modified several sections to add %DB to the exclusive new
+
+	*/
+	
+	//I18N=OFF
+
+	type Public Number ER = 0
+	
+	type Number i,idxseq
+	type String idxlist(),OBJNAME,v
+	
+	quit:fid.get().isNull()
+	
+	type ResultSet rs = Db.select("FID","DBTBL8","FID = :fid")
+	quit:rs.isEmpty()
+	
+	type SchemaTable tblrec = Db.getSchemaTable(fid)
+	
+	set OBJNAME=fid.lowerCase()			// Primary table object name
+	
+	set idxseq=0
+
+	// Beginning of the section
+	do TAG("public VINDEX(Record"_fid_" "_OBJNAME_") // Update index entries")
+
+	do ADD(" ",,100)				// Reserve area for header
+
+	do INDEX(fid,OBJNAME,.idxseq,.idxlist,.tblrec)	// Build index logic
+	quit:ER
+	do EXEC(fid,OBJNAME,idxseq,.idxlist())		// Rebuild index logic
+	do IDXOPT(OBJNAME,idxseq,.idxlist())		// Index optimization
+
+	for i=1:1:idxseq do ADDH(" do vi"_i_"(."_OBJNAME_")")
+
+	do ADDH("")
+	do ADDH(" quit")
+	
+	quit
+	
+	
+INDEX(	String fid,	// Get the next index and parse
+	String OBJNAME,
+	Number idxseq,
+	String idxlist(),
+	SchemaTable tblrec)
+	
+	type Public Number ER
+	
+	type String fidkeys
+	
+	set fidkeys=","_tblrec.primaryKeys_","
+
+	type DbSet ds=Db.selectDbSet("DBTBL8","%LIBS='SYSDEV' AND FID=:fid")
+	
+	// Build code for next index
+	while ds.next() do { quit:ER
+		set idxseq=idxseq+1		// Index sequence number
+
+		type Boolean hasNonky
+		type Number i,saveline
+		type String code,gbl,global,nulllist,objgbl,ord(),orderby
+			
+		type RecordDBTBL8 dbtbl8=ds.getRecord("DBTBL8")
+			
+		set gbl=dbtbl8.global
+		set orderby=dbtbl8.orderby
+		
+		set hasNonky=0
+		set nulllist=""
+			
+		if orderby["=" do { quit
+			set ER=1
+			write " Aborted - Index "_dbtbl8.indexnm_" has assignment to a value - not valid",!
+		}
+			
+		// Map index to vi tag
+		do TAG("vi"_idxseq_"(Record"_fid_" "_OBJNAME_") // Maintain "_dbtbl8.indexnm_" index entries ("_dbtbl8.idxdesc_")")
+		
+		do ADD(" type Public String vx()")
+
+		do ADD(" type Boolean vdelete = 0")
+
+		/* Analyze order by keys, build map, and generate assignment code.
+			   
+		   Format of ord(i) = type (1=literal, 2=key, 3=non-key) |
+		   		      name |
+		   		      object name for types 2 & 3 |
+		   		      data type for types 2 & 3
+		*/
+			
+		for i=1:1:orderby.length(",") do { quit:ER
+				
+			type String key,var
+				
+			set key=orderby.piece(",",i)
+				
+			if key?1"<<".E do { quit
+				set ER=1
+				write " Aborted - Index "_dbtbl8.indexnm_" contains variable insertion (<< >>) - not valid",!
+			}
+				
+			// Dummy key (literal) - no need to do assignment
+			if key.isLiteral() set ord(i)="1|"_key
+				
+			else  do { quit:ER
+					
+				type Boolean isKey
+				type String datatyp,obj
+				
+				type RecordDBTBL1D dbtbl1d=Db.getRecord("DBTBL1D","%LIBS='SYSDEV',FID=:fid,DI=:key")
+				set datatyp=dbtbl1d.typ
+					
+				set obj=OBJNAME_"."_key.lowerCase()
+					
+				// Key to primary table
+				if (","_fidkeys_",")[(","_key_",") set ord(i)="2",isKey=1
+				else  set ord(i)="3",isKey=0,hasNonky=1
+					
+				set ord(i)=ord(i)_"|"_key_"|"_obj_"|"_datatyp
+				
+				#IF %VersionID'<7
+				// This restriction valid from 7.0 on only	
+				if 'dbtbl1d.cmp.isNull() do { quit:ER
+					set ER=1
+					write " Aborted - Index "_dbtbl8.indexnm_" used computed column "_key_" - not valid",!
+				}
+				#ENDIF
+					
+				do ASSIGN("v"_i,isKey,obj,datatyp,dbtbl8.upcase,dbtbl1d.nullind)
+			}
+
+			// Remap order by for use in global reference
+			if ord(i).piece("|",1)=1 set var=ord(i).piece("|",2)
+			else  set var="v"_i
+			set orderby.piece(",",i)=var
+		}
+		
+		quit:ER
+
+		// Define global name
+		if gbl="" set global="^XDBREF("""_fid_"."_dbtbl8.indexnm_""","_orderby_")"
+		else  set global="^"_gbl_"("_orderby_")"
+		
+		set nulllist=nulllist.extract(1,nulllist.length()-1)	// Remove trailing comma
+		
+		// Add proceesing code
+		
+		do ADD("")
+		do ADD(" if %ProcessMode=2 do { quit")		// Integrity check code
+		
+		// Get primary table global reference using object references to nodes
+		set objgbl=$$getGbl^UCXDD(tblrec, OBJNAME)
+		if objgbl.endsWith(",") set objgbl = objgbl.extract(1, objgbl.length() - 1)
+		
+		if 'nulllist.isNull() set code="  if "_nulllist_" "
+		else  set code="  "
+		
+		// If record type is 1 then assure that tables with
+		// more nodes using this global do not cause integrity errors.
+		do ADD("")
+		do ADD("  // Allow global reference")
+		do ADD("  #ACCEPT DATE=04/22/04; PGM=Dan Russell; CR=20602; Group=BYPASS")
+		do ADD("  #BYPASS")
+		if tblrec.recordType'=1 set code=code_"if '$D("_global_") "
+		else  set code=code_"if $D("_objgbl_"))#2,'$D("_global_") "
+		
+		// Code for date checking on dayend
+		if tblrec.global["DAYEND" do {
+			type RecordUTBLKILL utblkill=Db.getRecord("UTBLKILL","FID='DAYEND'",1)
+			
+			if utblkill.getMode() do {
+				type String key1
+				
+				set key1=global.piece("(",2).piece(",",1)
+			
+				set code=code_"if (TJD-"_key1_")<"_utblkill.svdys_" "
+			}
+		}
+
+		set code=code_"do vidxerr("_""""_dbtbl8.indexnm_""""_")"
+		
+		do ADD(code)
+		do ADD("  #ENDBYPASS")
+		do ADD("  }")
+		do ADD("")
+		
+		do ADD(" // Allow global reference")
+		do ADD(" #ACCEPT DATE=04/22/04; PGM=Dan Russell; CR=20602; Group=BYPASS")
+		do ADD(" #BYPASS")
+		
+		if 'nulllist.isNull() set code=" if "_nulllist_" "
+		else  set code=" "
+		
+		set code=code_"if %O<2 "_"set "_global_"="""" "
+		
+		if 'hasNonky set code=code_"quit"		// No non-key columns
+		
+		do ADD(code)
+		
+		do ADD(" #ENDBYPASS")
+		do ADD(" quit:%ProcessMode=0")
+		do ADD("")
+		do ADD(" if %ProcessMode=3 set vdelete=1")
+
+		// ========== Access vx() array for old data
+		set i=""
+		for  set i=ord(i).order() quit:i=""  if ord(i).piece("|",1)=3 do {
+			type String var,vx
+			
+			set var="v"_i
+			set vx="vx("""_ord(i).piece("|",2)_""")"
+			set code=" if "_vx_".exists() "
+			set code=code_"set "_var_"="_vx_".piece(""|"",1)"
+			if dbtbl8.upcase set code=code_".upperCase() "
+			
+			set code=code_" set:"_var_".isNull() "_var_"=(PSL.maxCharValue-1).char()"
+			if dbtbl8.upcase set code=code_" set:"_var_"'="_vx_".piece(""|"",2).upperCase() vdelete=1"
+			
+			do ADD(code)
+		}
+
+		if dbtbl8.upcase do ADD(" quit:'vdelete","Only case has changed")
+
+		do ADD("")
+		do ADD(" // Allow global reference")
+		do ADD(" #ACCEPT DATE=04/22/04; PGM=Dan Russell; CR=20602; Group=BYPASS")
+		do ADD(" #BYPASS")
+		do ADD(" kill "_global)
+		
+		do ADD(" #ENDBYPASS")
+		do ADD(" quit")
+		
+		// Create idxlist of non-key columns for optimization in IDXOPT
+		set (i,idxlist(idxseq))=""
+		for  set i=ord(i).order() quit:i=""  i ord(i).piece("|",1)=3 do {
+			set idxlist(idxseq)=idxlist(idxseq)_ord(i).piece("|",2)_","
+		}
+		set idxlist(idxseq)=dbtbl8.indexnm_"|"_idxlist(idxseq).extract(1,idxlist(idxseq).length()-1)
+	}	
+
+	quit
+	
+
+ASSIGN(	String var,	// Private - Generate assignment statement
+	Boolean isKey,
+	String obj,
+	String datatyp,
+	Boolean upcase,
+	Boolean nullind)
+	
+	type String code
+	
+	set code=" type String "_var_" = "
+	if datatyp="L" set code=code_"+"		// Eliminate null logicals
+	if "$N"[datatyp,nullind set code=code_"+"
+	set code=code_obj
+	if upcase,"FT"[datatyp set code=code_".upperCase()"
+	
+	do ADD(code)
+	
+	// Assign default value for non-key columns that are null
+	if 'isKey do ADD(" if "_var_".isNull() set "_var_"=(PSL.maxCharValue-1).char()")
+	
+	quit
+		
+	
+EXEC(	String file,	// Private - Build Executable Collating code
+	String OBJNAME,
+	Number idxseq,
+	String idxlist())
+	
+	type Number i
+
+	do TAG("public VIDXBLD(List vlist) // Rebuild index files (External call)")
+	
+	do ADD("")
+	
+	do ADD(" type Number %ProcessMode=0","Create mode")
+	do ADD(" type Number i")
+	do ADD("")
+	
+	do ADD(" if vlist.get().isNull() set vlist=""VINDEX""","Build all")
+	do ADD("")
+	
+	do ADD(" type DbSet ds=Db.selectDbSet("""_file_""")")
+	do ADD("")
+	do ADD(" while ds.next() do {")
+	do ADD("  type Record"_file_" "_OBJNAME_"=ds.getRecord("""_file_""")")
+	do ADD("  if vlist.contains(""VINDEX"") do VINDEX(."_OBJNAME_") quit")
+	
+	// Avoid indirection, handle each index individually
+	for i=1:1:idxseq do ADD("  if vlist.contains("""_idxlist(i).piece("|", 1)_""") do vi"_i_"(."_OBJNAME_")")
+	do ADD(" }")
+	
+	do ADD("")
+	do ADD(" quit")
+	do ADD("")
+	
+	do TAG("public VIDXBLD1(Record"_file_" "_OBJNAME_", List vlist) // Rebuild index files for one record (External call)")
+	
+	do ADD("")
+	
+	do ADD(" type Number i")
+	do ADD("")
+	
+	do ADD(" if vlist.contains(""VINDEX"") do VINDEX(."_OBJNAME_") quit")
+	
+	// Avoid indirection, handle each index individually
+	for i=1:1:idxseq do ADD(" if vlist.contains("""_idxlist(i).piece("|", 1)_""") do vi"_i_"(."_OBJNAME_")")
+	
+	do ADD("")
+	do ADD(" quit")
+	do ADD("")
+
+	// Add index error message
+	do TAG("vidxerr(di) // Error message")
+	do ADD(" D SETERR^DBSEXECU("_""""_file_""""_","_""""_"MSG"_""""_",1225,"_""""_file_"."_""""_"_"_"di)")
+	do ADD("")
+	do ADD(" quit")
+	
+	quit
+
+
+IDXOPT(	String OBJNAME,		// Index optimization
+	Number idxseq,
+	String idxlist())
+
+	// This sub-routine optimizes updates to table indeces (%O=1).
+	
+	type Number i
+	type String code,x
+	
+		
+	do ADDH("  type Public String vx()")
+	do ADDH("")
+
+	do ADDH(" if %ProcessMode=1 do { quit")
+	
+	
+	/* If the number of table indeces is less than 10, for each index build
+	   code that determines if any of the columns in  the index have been
+	   modified.  If so, call the applicable sub-routine to update the index.
+	*/
+	
+	if idxseq<10 do { quit
+		type Number j
+
+		for i=1:1:idxseq do {
+			set x=idxlist(i).piece("|", 2)
+			quit:x.isNull()
+			
+			set code=""
+
+			for j=1:1:x.length(",") set code=code_"vx("""_x.piece(",",j)_""").exists()!"
+			set code="  if "_code.extract(1,code.length()-1)_" do vi"_i_"(."_OBJNAME_")"
+			do ADDH(code)
+		}
+		do ADDH(" }")
+	}
+
+	/* Otherwise, build code that determines if the modified column(s) are
+	   found in the index 'map'.  If so, call the sub-routine(s) associated
+	   with the column to update the index.
+	*/
+
+	do ADDH("  type String vf,vi,viMap,vxn")
+
+	set x=""
+	for i=1:1:idxseq set x=x_","_idxlist(i).piece("|", 2)_",~"_i_"~|"
+	for i=1:400:x.length() do ADDH("  set viMap="_$S(i=1:"""",1:"viMap_""")_x.extract(i,i+399)_"""")
+
+	do ADDH("  set vf=0")
+	do ADDH("  set vxn=""""")
+	do ADDH("  for  set vxn=vx(vxn).order() quit:vxn=""""  do {")
+	do ADDH("   for  set vf=$F(viMap,("",""_vxn_"",""),vf) quit:vf=0  do {")
+	do ADDH("    set vi=viMap.extract(vf,999).piece(""~"",2)")
+	
+	/* Set the index "definition" in the map to null to avoid a
+	   second (or third or fourth) call to the same label if
+	   more than one column in the index has been modified.
+	*/
+	do ADDH("    set viMap.piece(""|"",vi)=""""")
+
+	// Dispatch to applicable sub-routine (v1-vn).
+	do ADDH("    do @(""vi""_vi_""(."_OBJNAME_")"")")
+	
+	do ADDH("   }")
+	do ADDH("  }")
+	do ADDH(" }")
+	
+	quit
+
+	
+ADD(	String code,		// Add procedural code in the output array
+	String comment,
+	Number line)
+
+	type Public String pslcode()
+ 
+	if '$G(line) set line = $order(pslcode(""),-1)+1             // Next seqence 
+
+	if 'comment.get().isNull() set code = code_"".justify(55-code.length())_" // "_comment
+	
+	// Replace leading spaces with tabs if not preformatted
+	if code'[$C(9),code.beginsWith(" ") do {
+		type Number n
+		
+		for n=1:1:code.length() quit:code.extract(n)'=" "
+		set code=code.replace(" ",$C(9),n-1)
+	}
+	
+	set pslcode(line) = code 
+	
+	quit
+	
+	
+ADDH(	String code,		// Add to header section
+	String comment)
+
+	type Public String pslcode()
+	
+	type Number line
+	
+	set line=$order(pslcode(100),-1)+1
+	
+	do ADD(code,comment.get(),line)
+	
+	quit
+
+
+TAG(tag) 	// Routine tag 
+
+	do ADD("")
+	do ADD(tag)
+	do ADD("")
+	
+	quit
+
+vSIG()	quit "60849^55184^Dan Russell^12827"	// Signature - LTD^TIME^USER^SIZE

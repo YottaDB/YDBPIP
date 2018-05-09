@@ -1,0 +1,945 @@
+private	MATRIXMC(String NEWATX(),	// Matrix data			/REF:RW
+		 Date %EffectiveDate,	// Effective date
+		 String NAME)		// Matrix name
+
+	/*
+	ORIG: SENZO - 06/12/98
+	DESC: Mass Interest Matrix Change Utility
+				
+	During a back dated mass change, this procedure will drive 
+	processing that re-computes interest and posts interest 
+	adjustments on accounts associated with the matrix that has 
+	been changed.
+		
+	Note there is no restart capability for mass matrix changes, 
+	as there is for mass interest index changes, nor is there linked 
+	matrices.
+	
+	EXAMPLE:
+		   do ^MATRIXMC(.AX(), %EffectiveDate, MAT)
+		   
+	   NEWATX: MATRIX ARRAY - NEWATX(N)=ROW|COL|SPREAD  N=1...n
+	   NEWATX: Contains all the new Matrix information
+	
+	---- Revision History ------------------------------------------------
+	
+	04/23/07 - KUMARB / SmithCD - CR 26550
+		   Modified section LN to add check for Anticipated mode for
+		   segmented accounts and also moved the RecordDAYENDMAT2 save
+		   part and Interest offset (INTOFF) call to non segmented
+		   accounts.
+		   Modified section CIDSEG to use ACN and ACNSEG instead of
+		   DEP and DEPSEG respectively in Db.select (and to use 
+		   DISTINCT so each account is processed only once, even if 
+		   multiple segments contain the same index).
+	
+	01/05/07 - KUMARB - CR24680
+		   Modified section LN to set appropriate PAR() parameters and
+		   to call EXTERN^LNPTSRV to perform unwind / reapply to
+		   produce accrual adjustments on loan with Segments Allowed
+		   (LN.SEGMENTS) selected.
+	
+	04/24/06 - SmithCD - CR 20866
+		   Removed portion of FILE section that saved data to the 
+		   matrix. The code was redundant b/c INTMAT also does this 
+		   following the call to MATRIXMC.
+
+	03/25/06 - SmithCD - CR 20345
+		   . Modified DEP section to prevent undefined error on %IND 
+		     that occurred in RECALC, and to populate DAYENDMAT2 table 
+		     with regular, residual, and available interest data
+		   . Made AX array public in PROC section to enable resultant 
+		     changes to accounts
+		   . Modified LOADAX section to properly load AX(,,,)
+		   . Modified object names to fit within the 8-character M 
+		     limit
+	
+	03/17/06 - SmithCD - CR 20124
+		   . Replaced %MAT with AX variable in LOADAX section to 
+		     prevent an undefined error (LOADAX is called from several 
+		     other places, all of which use AX)
+		   . Added initialization of DAYENDMAT table to prevent record 
+		     not found error in the FILE section
+		   . Modified FILE section to use NEW() instead of NEWATX() to 
+		     file correctly to UTBLMATATT1 and UTBLMATATT2 tables
+		   . Modified EXEC section to accept %EffectiveDate to protect 
+		     it from the reset of it by EXEC
+	
+	03/06/06 - Sreeram P - CR 19872
+		   Added one parameter %EffectiveDate to EXEC^INDEXMC call.
+	
+	02/23/06 - SmithCD - CR 19168
+	   	   . Removed code to file through TTXP1 (not feasible due to 
+	   	     p04 architecture, and simplifies the code)
+	   	   . Added runtime transaction fence to LN sections to 
+	   	     rollback database changes if in anticipated mode (deposit 
+	   	     accounts handled in EXECDRS^INDEXMC)
+	   	   . Replaced references of AX variable with %MAT to fix 
+	   	     various errors
+	   	   . Moved account status check into account select statements 
+	   	     for better efficiency
+	   	   . Renamed SETDE section to FILE
+	   	   	
+	01/19/06 - Hillanbrand - CR 19031
+	           Set JD to 0 instead of "" in LOADAX subsection to
+	           correct %PSL-E-SQLFAIL,vOpen10+6^MATRIXMC.
+	
+	08/24/05 - Srinivasan rajesh - CR 16726
+		     Modified the OLD section by removing the COL
+		     in where clause of select statement to avoid the GTM error. 	
+		     Changed the XEFD refrences to %EffectiveDate to
+		     avoid the GTM error.	
+	   	     Modified the EXEC section to use different variable 
+	   	     of type RecordLN and used that inside the block to
+	   	     prevent the problem with casting
+	
+	04/20/05 - SmithCD - CR15503
+		   . Corrected where clause in UTBLSRC retrieval to prevent 
+		     undefined error
+		   . Removed ROW specificiation from where clause in 
+		     Db.select() in OLD section to prevent null subscript error
+		   . Added classNew (third parameter) to Db.getRecord on 
+		     TPCTRL to prevent "Record not found" error
+		   . Combined SETDE and SETDE2 sections, and modified to use 
+		     Db.getRecord() instead of class.New() for UTBLMATATT and 
+		     DAYENDMAT final updates to prevent the existing records 
+		     updated earlier in the processing from being overlaid
+		   . Replaced occurrences of Db.prevKey() and Db.nextKey() 
+		     throughout
+		   . Removed call to INDDATA^LNU (no longer necessary) and 
+		     changed PAR("INDEX") to ln.index in EXF section
+		   . Modified section CLEANDI to pass required parameters to 
+		     CLEANDI^UINDX, and to process IX(,,) instead of AX(,,) 
+		     (previous code was having no effect)
+		   . Modified LN section to quit when skipping an account due 
+		     to error, to prevent an undefined error in the EXF section
+		   . Revamped error checking on %UserID and BRCD
+		   . Removed duplicate code by calling GL2 and TRC sections 
+		     of ^INDEXMC instead of handling thiem locally
+		   . Removed KILTTX section, which is not being called
+		   . Removed old revision history
+		   . Modified to comply with current PSL standards
+	
+	*/
+	
+	type public String ER, RM
+	type public Boolean ANT
+       	
+	type String %UserID, AX(,,,), OLD(), NEW(), RERUN()
+	type Date TPD
+	type Number BRCD, MATXSEQ, TSEQ = ""
+
+	do Db.fastDelete("INTMAT", "JOB=:%ProcessID")
+   
+	// Get Sequence number for processing changes
+	set MATXSEQ = Db.nextVal("DAYENDMAT", "TJD=:%SystemDate,NAME=:NAME")
+    	
+	// Anticipated mass matrix change
+	if ANT set RM = $$^MSG(3226)  
+	    
+	// Live mass matrix change
+	else  set RM = $$^MSG(3227)
+		      
+	// Get teller ID
+	type RecordUTBLSRC utblsrc = Db.getRecord("UTBLSRC", "SRCTYP='BOFF',KEY='INDEX'")
+		
+	set BRCD = utblsrc.brcd
+	set %UserID = utblsrc.uid
+		
+	// Mass index change teller not set up
+	if %UserID.isNull() do Runtime.setErrMSG("UTBLSRC", 1677) quit
+		
+	// Invalid user ~p1
+	if 'Db.isDefined("SCAU", "UID=:%UserID") do Runtime.setErrMSG("SCAU", 7591, %UserID) quit
+
+	// Branch code does not exist in the branch code table
+	if 'Db.isDefined("UTBLBRCD", "BRCD=:BRCD") do Runtime.setErrMSG("UTBLBRCD", 8678, BRCD) quit
+	
+	// Teller Posting Date
+	type RecordTPCTRL tpctrl = Db.getRecord("TPCTRL", "BRCD=:BRCD,UID=:%UserID,TPD=:%SystemDate", 1)
+
+	set TPD = tpctrl.pmdate
+	if TPD.isNull() set TPD = %SystemDate
+
+	// Load AX array for Matrix name
+    	set AX = NAME
+    	do LOADAX(.AX(,,,))
+
+	// Set MCF to 1 for all matrixes indicating Mass Change in Progress
+
+	// Mass change in Progress for array
+	set AX(AX).piece("|", 5) = 1
+	
+	if 'ANT do {
+		type RecordUTBLMATATT matatt = Db.getRecord("UTBLMATATT", "NAME=:NAME")
+		set matatt.mcf = 1
+		do matatt.bypassSave()
+		}
+	
+	type RecordDAYENDMAT mat = Class.new("RecordDAYENDMAT", "TJD=:%SystemDate,NAME=:NAME,MATXSEQ=:MATXSEQ")
+
+	// Matrix change in progress (2=Posting in progress) - same
+	set mat.status = 1
+
+	set mat.ant = ANT
+	set mat.uid = %UserID
+	set mat.efd = %EffectiveDate
+
+	do mat.bypassSave()
+	
+	// File old (current) matrix information
+	do OLD(.OLD())
+
+	// File new matrix information only if not deleting
+	if %ProcessMode '= 3 do NEW(.NEW())
+
+	// Process consequences of matrix change to accounts	
+	do PROC(ANT)
+
+	quit
+
+
+OLD(String OLD())	// File old (current) matrix information
+
+	/*
+	   Array OLD will have 1 key: CHGSEQ
+	   OLD(CHGSEQ)=ROW_"|"_COL_"|"_SPREAD_"|"_EFD
+	   CHGSEQ=1..n
+	*/
+	
+	type public String AX
+
+	type Number CHGSEQ, SPREAD
+	type String COL, ROW
+	
+	set (COL, ROW, SPREAD) = ""
+	set CHGSEQ = 0
+	
+	type ResultSet rs = Db.select("ROW,SPREAD", "UTBLMATATT1", "NAME=:AX AND EFD=:%EffectiveDate")
+
+	while rs.next() do {
+		set ROW = rs.getCol("ROW")
+		set SPREAD = rs.getCol("SPREAD")
+		
+		if SPREAD.isNull() do {
+		
+			// If spread does not exist there is a COL
+			type ResultSet rs1 = Db.select("COL,SPREAD", "UTBLMATATT2", "NAME=:AX AND EFD=:%EffectiveDate AND ROW=:ROW")
+
+			while rs1.next() do {
+				set COL = rs1.getCol("COL")
+				set SPREAD = rs1.getCol("SPREAD")
+				
+				do DAYENDOLD
+				}
+			}
+		else  do DAYENDOLD
+		}
+
+	quit
+
+
+DAYENDOLD	// Create DAYENDMAT1 record and save "old" data
+
+	type public Number CHGSEQ, COL, MATXSEQ, OLD(), ROW, SPREAD
+	type public String AX
+	
+	set CHGSEQ = CHGSEQ + 1
+			    
+	set OLD(CHGSEQ) = ROW_"|"_COL_"|"_SPREAD_"|"_%EffectiveDate
+
+	type RecordDAYENDMAT1 mat1 = Db.getRecord("DAYENDMAT1", "TJD=:%SystemDate,NAME=:AX,MATXSEQ=:MATXSEQ,CHGSEQ=:CHGSEQ", 1)
+				
+	set mat1.rowold = ROW
+	set mat1.colold = COL
+	set mat1.spreadold = SPREAD 
+	set mat1.efdold = %EffectiveDate
+
+	do mat1.bypassSave() 
+	
+	quit
+
+
+NEW(String NEW())	// New matrix information
+
+	/*
+	
+	   Array NEW will have 1 key: CHGSEQ
+	
+	   See NEWATX comment at the bottom of the program header
+	   NEWATX = NEWATX(N)=ROW|COLUMN|SPREAD
+	   AX  = (Matrix Name, Date, ROW)=SPREAD
+	   or
+	   AX  = (Matrix Name, Date, ROW, COLUMN)=SPREAD
+	
+	   Array OLD will have 1 key: CHGSEQ
+	   OLD(CHGSEQ)=ROW_"|"_COL_"|"_SPREAD_"|"_EFD
+	   CHGSEQ=1..n
+	  
+	*/
+	
+	type public Number MATXSEQ
+	type public String AX, NEWATX()
+
+	type Number CHGSEQ, NEWCOL, NEWROW, NEWSPRD
+	
+	set CHGSEQ = ""
+	for  set CHGSEQ = NEWATX(CHGSEQ).order() quit:CHGSEQ.isNull()  do {
+		// Ignore entries with no levels set up
+		if NEWATX(CHGSEQ).piece("|", 3).isNull() quit
+		
+		set NEW(CHGSEQ) = NEWATX(CHGSEQ)
+
+		set NEWROW = NEW(CHGSEQ).piece("|", 1)
+		if NEWROW.isNull() quit
+		
+		set NEWCOL = NEW(CHGSEQ).piece("|", 2)
+
+		set NEWSPRD = NEW(CHGSEQ).piece("|", 3)
+
+		// Populate DAYENDMAT1 with new data
+	
+		type RecordDAYENDMAT1 mat1 = Db.getRecord("DAYENDMAT1", "TJD=:%SystemDate,NAME=:AX,MATXSEQ=:MATXSEQ,CHGSEQ=:CHGSEQ", 1)
+	
+		set mat1.rownew = NEWROW 
+		set mat1.colnew = NEWCOL 
+		set mat1.spreadnew = NEWSPRD 
+
+		do mat1.bypassSave()
+		}
+
+	quit 
+
+
+PROC(Boolean ANT)		// Anticipated / Actual mode
+
+	// Process consequences of matrix change to accounts
+
+	type public String AX(,,,), NAME, NEW()
+	
+	type String %MAT, MAT, RERUN(), WARN()
+	type Date NID
+		 
+	set WARN(1) = "|EFDMATX2"
+
+	/* Find the next date in the matrix table.  We need to know what
+	   date range this matrix change is in effect for.  EFD through NID
+	   inclusive.
+	   NID=Next Matrix Date
+	*/
+	type ResultSet rs1 = Db.select("EFD", "UTBLMATATT1", "NAME=:NAME AND EFD>:%EffectiveDate", "EFD ASC")
+	set NID = rs1.next()
+	if NID.isNull() set NID = %SystemDate
+	
+	/* Find all offset dates within this date range.  Offset processing
+	   might need re-running for some or all of these dates.
+	*/
+
+	type ResultSet rs = Db.select("DISTINCT INTOFFDT", "LN", "INTOFFDT>=:%EffectiveDate AND INTOFFDT<=:NID")
+	
+	while rs.next() set RERUN(rs.getCol("INTOFFDT")) = ""
+
+	/* Processing will occur a maximum of once per account, no matter how
+	   many matrices are linked to a matrix or how many primary matrices are
+	   specified (regular matrix, available interest or segment matrices) on
+	   an account
+	*/
+
+	set (MAT, %MAT) = NAME
+
+	do CIDMAT 
+	do CIDSEG 
+	do CIDAI
+	
+	set MAT = ""
+
+	// Process all linked (to current) matrixes for CIDs in XREF
+	for  set MAT = AX(MAT).order() quit:MAT.isNull()  if MAT '= %MAT do {
+		do CIDMAT 
+		do CIDSEG 
+		do CIDAI
+		}
+
+	do Db.fastDelete("INTMAT", "JOB=:%ProcessID")
+
+	if 'ANT do FILE
+	
+	quit
+
+
+CIDMAT	// Collate regular matrices
+
+
+	type ResultSet rs = Db.select("CID", "ACN", "INTMAT=:MAT")
+
+	while rs.next() do PROCCID(rs.getCol("CID"))
+
+	quit 
+
+
+CIDSEG	// Collate segment matrices
+
+	type ResultSet rs = Db.select("DISTINCT CID", "ACNSEG,ACN", "ACNSEG.CID=ACN.CID AND ACNSEG.INTMAT=:MAT AND ACN.STAT<4")
+	while rs.next() do PROCCID(rs.getCol("CID"))
+
+	quit 
+
+
+CIDAI	// Collate available interest matrices (deposits only)
+
+	type ResultSet rs = Db.select("CID", "DEP", "AIINTMAT=:MAT AND STAT<4")
+
+	while rs.next() do PROCCID(rs.getCol("CID"))
+
+	quit
+
+
+PROCCID(Number CID)	// Process one account
+
+	// Account processed previously
+	if Db.isDefined("INTMAT", "JOB=:%ProcessID,CID=:CID") quit
+
+	// Process account
+	do EXEC(CID, %EffectiveDate)
+	
+	// Mark as processed
+	type RecordINTMAT intmat = Class.new("RecordINTMAT")
+
+	set intmat.job = %ProcessID
+	set intmat.cid = CID
+	set intmat.procfl = 1
+
+	do intmat.bypassSave()
+		
+	quit
+
+
+EXEC(Number CID,		// Account number
+     Date %EffectiveDate)	// Effective date
+
+	// Process adjustments for a single account
+
+	type public Boolean ANT
+
+	type String ER, ET, ETC, RM, VALUE
+
+	catch error {
+		type public Boolean %ZTHALT = 0
+		
+		set ET = error.type
+		set RM = error.description
+
+		// Log MUMPS error
+		do ZE^UTLERR
+	
+		// Error in account, not processed
+       		set ET = $$^MSG(3511)	       
+		do LOGERR
+		}
+	
+	set ER = 0
+
+	type RecordACN acn = Db.getRecord("ACN", "CID=:CID")
+
+	// Make sure effective date is not less than opening or disbursement date
+	if acn.cls = "L" do {
+		type Date ODD
+		type RecordLN ln = {RecordLN}acn
+		set ODD = ln.odd
+		if %EffectiveDate < ODD set %EffectiveDate = ODD
+		}
+	if acn.cls = "D", %EffectiveDate < acn.odt set %EffectiveDate = acn.odt
+	
+	// History Cut-Off Date
+	if %EffectiveDate '> acn.hisctf set %EffectiveDate = acn.hisctf + 1
+	
+	if acn.cls = "D" do {
+		do DEP(.acn, ANT)
+		do CLEANDI(.acn)
+		}
+	else  do LN(.acn, ANT)
+
+	quit
+
+
+LN(RecordLN ln,			// Loan account				/REF:RW
+   Boolean ANT)			// Actual / Anticipate mode
+   
+	// Process a loan account
+
+	type public String %MAT, AX(,), ER, NEW(), OLD()
+	type public Number MATXSEQ, RATE
+	
+	type String PAR(), UAVB(), WIRN()
+	type Number AVGIRN(), ACR, COL, IRN, N, OACR, ROW, SPRD, TAMT
+	
+	#IF ('CUVAR.NOSEGMENTS!(CUVAR.NOSEGMENTS=3))!($$SEGUSE^BTTOPTMZ("L"))
+		if ln.segments do {
+			do Runtime.start("BA", "", "CIDSTART")
+
+			type Number ADJACR, NEWIRN, ORIGACR = ln.acr
+			
+			// External Process Type: Mass Interest Matrix Change
+			set PAR("PRCTYP") = 2
+			set PAR("MATNAM") = %MAT
+			
+			do EXTERN^LNPTSRV(.ln, .PAR(), .NEW())
+			if ER do { quit
+				do Runtime.rollback("CIDSTART")
+				do LOGERR
+				}
+			
+			// Use sum total adjustment
+			set ADJACR = ln.acr - ORIGACR
+
+			// Get interest rate from first segment with this matrix
+			type ResultSet rs = Db.select("IRN", "LNSEG", "CID=:ln.cid AND INTMAT=:%MAT", "SEGMENT ASC")
+			if rs.next() set NEWIRN = rs.getCol("IRN")
+			else  set NEWIRN = ""
+			
+			// Save loan account changes only if in Actual mode (vs. Anticipated)
+			if ANT do Runtime.rollback("CIDSTART")
+			else  do Runtime.commit()
+			
+			// Save loan account matrix change data to Mass Matrix Change Report 
+			// table
+			type RecordDAYENDMAT2 dayendmat2 = Class.new("RecordDAYENDMAT2", "TJD=:%SystemDate,NAME=:%MAT,MATXSEQ=:MATXSEQ,CID=:ln.cid")		
+			set dayendmat2.tamt = ADJACR.roundCur(ln.crcd)
+			set dayendmat2.nirn = NEWIRN
+			do dayendmat2.bypassSave()
+			}
+	#ENDIF
+
+	// Find average rate using old (current) matrix information
+	kill AX(%MAT, %EffectiveDate)
+	
+	set N = ""
+	for  set N = OLD(N).order() quit:N.isNull()  do {
+		set ROW = OLD(N).piece("|", 1)
+		set COL = OLD(N).piece("|", 2)
+		set SPRD = OLD(N).piece("|", 3)
+		
+		if COL.isNull(), 'ROW.isNull() set AX(%MAT, %EffectiveDate, ROW) = SPRD
+		if 'COL.isNull() set AX(%MAT,%EffectiveDate, ROW, COL) = SPRD
+		}
+
+	if 'ln.segments do {
+	
+		// Interest offset
+		do INTOFF(.ln) quit:ER
+	
+		do Runtime.start("BA", "", "CIDSTART")
+		
+		do EXB(.ln)
+		if ER do { quit
+			do Runtime.rollback("CIDSTART")
+			do LOGERR
+			}
+	
+		do EXF(.ln)
+		if ER do { quit
+			do Runtime.rollback("CIDSTART")
+			do LOGERR
+			}
+	
+		// Save loan account changes only if in Actual mode (vs. Anticipated)
+		if ANT do Runtime.rollback("CIDSTART")
+		else  do Runtime.commit()
+
+		// Save loan account matrix change data to Mass Matrix Change Report 
+		// table
+		type RecordDAYENDMAT2 mat2 = Class.new("RecordDAYENDMAT2", "TJD=:%SystemDate, NAME=:%MAT,MATXSEQ=:MATXSEQ,CID=:ln.cid")
+	
+		set mat2.tamt = TAMT
+		set mat2.avgbal = +UAVB(1)
+		set mat2.avgirn1 = AVGIRN(0)
+		set mat2.avgirn2 = AVGIRN(1)
+		set mat2.nirn = IRN
+	
+		do mat2.bypassSave()
+		}
+	quit
+
+
+EXB(RecordLN ln)	// Calculate old accrual, set AX(,,,)
+
+	type public String %MAT, AX(,,,), ER, NEW()
+	type public Number ACR, OACR
+
+	type Number COL, N, ROW, SPRD
+
+	do BACK(.ln, %EffectiveDate) quit:ER
+	
+	// Expected from call in LNPTS2B called in BACK section
+	if 'ACR.exists() set ACR = +ln.acr
+	
+	set OACR = ACR
+	
+	// Load new changes into interest matrix array
+	kill AX(%MAT, %EffectiveDate)	
+	
+	set N = "" 
+	for  set N = NEW(N).order() quit:N.isNull()  do {
+		set ROW = NEW(N).piece("|", 1)
+		set COL = NEW(N).piece("|", 2)
+		set SPRD = NEW(N).piece("|", 3)
+		
+		if COL.isNull(), 'ROW.isNull() set AX(%MAT, %EffectiveDate, ROW) = SPRD
+		if 'COL.isNull() set AX(%MAT, %EffectiveDate, ROW, COL) = SPRD
+		}
+
+	quit
+
+
+EXF(RecordLN ln) // Calculate the accrual as of today using new values
+
+	/*
+	   Find the new rate based on the new information and use it
+	   for processing
+	*/
+
+	type public Cache %CACHE()
+	type public Number ACR, OACR
+	type public String AX, ER, ETC, MAT, UAVB(), RM, TAMT
+	type public Boolean ANT
+	type public Date TPD
+	
+	type String PAR(), TCMT, TSO
+	type Date JD
+	type Number RATE, RRATE, SRATE, URATE
+	
+	set JD = ln.ichld
+
+	// Interest Review Offset Date
+	if ln.intoff do { quit:ER
+		set JD = $$INTOFFDT^LNCDI(JD, ln.intoff, ln.intoffcl)
+
+		// Effective date may not be greater than ~p1
+		if JD < %EffectiveDate do Runtime.setErrMSG("LN", 875, JD) quit
+		}
+
+	set PAR("IXLOAD") = 1
+	set PAR("ROUND") = 1
+	set PAR("LIMIT") = 1
+
+	do CTL^UINDX(.ln, JD, ln.balint, .PAR()) quit:ER
+
+	// Nominal Int/Div Rate
+	set ln.irn = RATE
+	
+	do FORW(.ln) quit:ER
+	
+	set TAMT = (OACR - ACR).roundCur()
+
+	// No adjustment.  New accrual balance equals previous accrual.
+	if 'TAMT set RM = $$^MSG(7370) do LOGERR quit  
+	
+	type RecordPRODCTL prodctl = %CACHE("PRODCTL").getRecord("PRODCTL", "TYPE=:ln.type")
+	
+	// Find tran code and absolute value of tran amount
+	if TAMT > 0 set ETC = prodctl.dradin
+	else  set ETC = prodctl.cradin
+	
+	// External transaction code not defined
+	if ETC.isNull() do Runtime.setErrMSG("PRODCTL", 6655) quit
+	
+	// Save loan account changes only if in Actual mode (vs. Anticipated)
+	if ANT quit 
+	
+	set TCMT = $$TCMT(MAT, %EffectiveDate.toString())
+	
+	set TAMT = $select(TAMT < 0:-TAMT, 1:TAMT)
+
+        // Insert system generated accrual adjustment indicator
+        set TSO = $$FIELDIN^UTSO("SYS#", "SGAA", 1)
+
+        do POST^LNTRB(, ln.cid, ETC, TAMT, TPD, %UserStation, TSO, TCMT, ln.crcd) quit:ER
+
+	type RecordTRN trn = %CACHE("TRN").getRecord("TRN", "ETC=:ETC")
+	        
+        if 'trn.dc set ETC = "MCR"
+        else  set ETC = "MDR"
+        
+	type RecordUTBLGLSC utblglsc = %CACHE("UTBLGLSC").getRecord("UTBLGLSC", "GLSC=:ln.glsc")
+	
+        do POST^LNTRB(, utblglsc.lgli, ETC, TAMT, TPD, %UserStation, TSO, TCMT, ln.crcd, ln.cc) quit:ER	
+
+	quit 
+
+
+DEP(RecordDEP dep,		// Deposit account			/REF:RW
+    Boolean ANT)		// Actual / Anticipate mode
+    
+	// Process a deposit account
+
+	type public Number MATXSEQ
+	type public String %MAT, ER, NEW()
+
+	type String %IND, RPTDATA
+
+	set ER = ER.get()
+	set %IND = dep.index
+	
+	do EXECDRS^INDEXMC(.dep, 2, %MAT, .NEW(), .RPTDATA, %EffectiveDate)
+	if ER do LOGERR quit 
+	if 'RPTDATA.exists() quit 
+	
+	// Populate DAYENDMAT2 with report data
+	
+	type RecordDAYENDMAT2 mat2 = Class.new("RecordDAYENDMAT2", "TJD=:%SystemDate,NAME=:%MAT,MATXSEQ=:MATXSEQ,CID=:dep.cid")
+
+	// Deposit (regular) interest columns
+	set mat2.dacradj = RPTDATA.piece("|", 7)
+	set mat2.dintadj = RPTDATA.piece("|", 8)
+	set mat2.dacraft = RPTDATA.piece("|", 9)
+	set mat2.dacrbef = RPTDATA.piece("|", 10)
+	set mat2.dintaft = RPTDATA.piece("|", 11)
+	set mat2.dintbef = RPTDATA.piece("|", 12)
+
+	// Negative interest columns
+	set mat2.nacradj = RPTDATA.piece("|", 13) 
+	set mat2.nacrbef = RPTDATA.piece("|", 14) 
+	set mat2.nacraft = RPTDATA.piece("|", 15) 
+	set mat2.nacruadj = RPTDATA.piece("|", 16) 
+	set mat2.nacrubef = RPTDATA.piece("|", 17) 
+	set mat2.nacruaft = RPTDATA.piece("|", 18) 
+	set mat2.nintadj = RPTDATA.piece("|", 19) 
+	set mat2.nintbef = RPTDATA.piece("|", 20) 
+	set mat2.nintaft = RPTDATA.piece("|", 21) 
+	
+	// Residual interest columns
+	set mat2.rintadj = RPTDATA.piece("|", 22) 
+	set mat2.rintbef = RPTDATA.piece("|", 23) 
+	set mat2.rintaft = RPTDATA.piece("|", 24)
+	
+	// Available interest columns
+	set mat2.aiacradj = RPTDATA.piece("|", 25)
+	set mat2.aiacrbef = RPTDATA.piece("|", 26)
+	set mat2.aiacraft = RPTDATA.piece("|", 27)
+	
+	do mat2.bypassSave() 
+	
+	// Save deposit account changes only if in Actual mode (vs. Anticipated)
+	if ANT quit 
+	
+	// Save Account updates in case they weren't save already
+	do dep.bypassSave()
+
+	quit 
+
+
+BACK(RecordLN ln, Date %EffectiveDate)
+
+
+	/*
+	   Calculate average rate through UAVB when IX array preloaded 
+
+	   EFD is the effective date of the interest matrix change.
+	   This is also used as the effective date for individual account
+	   calculations. The only exception is if the loan was opened
+	   or disbursed after EFD. If this is the case, EFD will not be
+	   the same value. In all cases, EFD for account transacitions
+	   will be the first entry in WIRN.
+	*/
+	
+	type public Number AVGIRN()
+	type public String ER, UAVB(), WIRN()
+	
+	type Date ODD
+		
+	set ODD = ln.odd
+
+	// Date Account Opened
+	if ln.revf,ln.odt < ODD set ODD = ln.odt
+	if %EffectiveDate < ODD set %EffectiveDate = ODD
+
+	// Effective date must be less than current system date
+	if %EffectiveDate ' <%SystemDate do Runtime.setErrMSG("LN", 3210) quit:ER
+
+	do EXT^LNPTS2B(.ln, "10") quit:ER
+
+	set AVGIRN(0) = +UAVB(2)
+
+	quit 
+
+
+FORW(RecordLN ln)	// Calculate average rate through UAVB when IX array is loaded
+
+	type public Number AVGIRN(), IRN
+	type public String ER, UAVB(), WIRN()
+	
+	type Date %EffectiveDate
+	
+	set %EffectiveDate = WIRN("").order()
+	
+	do EXT^LNPTS2B(.ln, "11") quit:ER
+	
+	
+	set IRN = +WIRN(WIRN(%SystemDate).order(-1))
+	set AVGIRN(1) = +UAVB(2)
+
+	quit 	
+
+
+public LOADAX(String AX(,,,),		// Matrix name			/REF:RW
+	      Date BEGDT,		// Beginning date		/NOREQ
+	      Date ENDDT)		// End date			/NOREQ
+
+	/*
+	   Pre-load AX array (Matrix data)
+	
+	   Pre-load IX array for the range BEGDT-ENDDT.  Include the date
+	   prior to BEGDT.  AX(MAT,JD,ROW,COL = >OPTIONAL) = SPREAD
+	   Later piece 5, MFC, will be added.
+
+	   EXAMPLE:
+	   do LOADAX^MATRIXMC(.AX(,,,), %EffectiveDate, %SystemDate)
+	*/
+
+	type Number ROW
+	type Date JD
+	
+	if BEGDT.get().isNull() set BEGDT = %EffectiveDate
+	if ENDDT.get().isNull() set ENDDT = %SystemDate
+
+	type RecordUTBLMATATT matatt = Db.getRecord("UTBLMATATT", "NAME=:AX")
+	
+	type ResultSet rs1 = Db.select("EFD", "UTBLMATATT1", "NAME=:AX AND EFD<:BEGDT", "EFD DESC")
+	if rs1.next() set JD = rs1.getCol("EFD") - 1
+	else  set JD = 0
+
+	type DbSet ds1 = Db.selectDbSet("UTBLMATATT1", "NAME=:AX AND EFD<=:ENDDT AND EFD>:JD")
+
+	while ds1.next() do {
+		type RecordUTBLMATATT1 matatt1 = ds1.getRecord("UTBLMATATT1")
+		
+		set JD = matatt1.efd
+		set ROW = matatt1.row
+
+		// One-dimensional matrix
+		if matatt.matcol.isNull() set AX(AX, JD, ROW) = matatt1.spread quit
+
+		// Two-dimensional matrix
+		type DbSet ds2 = Db.selectDbSet("UTBLMATATT2", "NAME=:AX AND EFD=:JD AND ROW=:ROW")
+		while ds2.next() do {
+			type RecordUTBLMATATT2 matatt2 = ds2.getRecord("UTBLMATATT2")
+			set AX(AX, JD, ROW, matatt2.col) = matatt2.spread
+			}
+		}
+
+	quit 	
+
+
+INTOFF(RecordLN ln)	// Check if interest offset warning should be generated
+
+	type public String ER, RERUN(), WARN()
+	type public Date NID
+
+	type Number INTOFFDT
+	type Date NJD
+	
+	if 'RERUN.data() quit 
+	
+	set NJD = ln.ichnd 
+	if NJD.isNull() quit
+
+	if ln.intfre.isNull() quit
+
+	for  set INTOFFDT = $$INTOFFDT^LNCDI(NJD, ln.intoff, ln.intoffcl) quit:INTOFFDT '< %EffectiveDate  set NJD = NJD.nextFreqDate(ln.intfre, , 1) quit:ER
+	
+	// If EFD is within current offset period, give warning to rerun
+	// offset processing, but still update account
+	if INTOFFDT '> NID, RERUN(INTOFFDT).exists() do { 	
+		kill RERUN(INTOFFDT)
+		do WARN(1)
+		if 'RERUN.data() set WARN(1).piece("|", 1) = 1
+		}
+
+	quit
+
+
+FILE
+
+	// Mark status complete
+
+	type public String %MAT
+	type public Number MATXSEQ
+
+	// Mass change flag
+	type RecordUTBLMATATT matatt = Db.getRecord("UTBLMATATT", "NAME=:%MAT")
+	set matatt.mcf = 0
+	do matatt.bypassSave()
+
+	// Posting completed
+	type RecordDAYENDMAT mat = Db.getRecord("DAYENDMAT", "TJD=:%SystemDate,NAME=:%MAT,MATXSEQ=:MATXSEQ")
+	set mat.status = "*"
+	do mat.bypassSave()
+
+	quit 
+
+
+WARN(Number WARNUM)	// Give warning to rerun offset processing
+
+	type public String ET, RM, WARN()
+	
+	set ET = WARN(WARNUM).piece("|", 2)
+	do ^UTLERR
+
+	set ET = RM
+	do LOGERR
+
+	quit
+
+
+LOGERR	// Log error in exception file
+
+	type public String ER, ET, MAT, RM, SORT
+	type public Number CID
+
+	set SORT = MAT_" "_%EffectiveDate.toString()
+	
+	// Make sure error descriptions will fit into exception file
+	set ET = ET.get().extract(1, 60)
+	set RM = RM.get().extract(1, 60)
+	
+	if ET.get().isNull() set ET = RM, RM = ""
+	
+	do LOG^UTLEXC(%RoutineName, SORT, RM, CID.get(), RM, ET)
+
+	// Move on to next account with clean slate
+	set (ET, ER, RM) = ""
+	
+	quit
+
+
+CLEANDI(RecordDEP acn)	// Clean up (reset) data item tiers in IX(,,)
+
+	type public String IX(,)
+
+	type Date XEFD
+	 
+	set XEFD = ""
+	for  set XEFD = IX(acn.index, XEFD).order() quit:XEFD.isNull()  do CLEANDI^UINDX(acn.index, XEFD)
+
+	quit
+
+
+public	TCMT(String MAT, String EFDSTR)
+
+	// Use appropriate teller comment
+
+	type String TCMT
+	
+	// Matrix ~p1 added for ~p2
+	if %ProcessMode = 0 set TCMT = $$^MSG(3233, MAT, EFDSTR)
+	
+	// Matrix ~p1 deleted for ~p2
+	else  if %ProcessMode = 3 set TCMT = $$^MSG(3234, MAT, EFDSTR)
+	
+	// Matrix ~p1 modified for ~p2
+	else  set TCMT = $$^MSG(3235, MAT, EFDSTR)
+	
+	quit TCMT
+	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60743^70576^Chad Smith^24657"	// Signature - LTD^TIME^USER^SIZE

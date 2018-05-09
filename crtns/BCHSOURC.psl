@@ -1,0 +1,157 @@
+BCHSOURC		/*
+	----Revision History-----------------------------------------------
+	
+	10/30/06 - SmithCD - CR 22179
+		   Modified SOURCE section to return RM instead of ET when 
+		   setting "~p1 posting source not set up" to make consistent 
+		   w/other error messages going out of this section (error 
+		   reporting for dayend and driver functions expect RM to be 
+		   defined). Prevents no error message from being reported 
+		   when the teller source is not set up. Corrected bug by 
+		   setting ODP variable instead of %ODP. Brought to standards.
+	
+	02/27/02 - ABIFARINS - 49058
+		   Added code to populate the TSO field in the BDOFFSET 
+		   section.
+	*/
+
+	quit
+
+	
+public SOURCE(String SRCTYP,		// Posting type				
+	      String KEY,		// Source code				
+	      String UID,		// User ID			/REF:W
+	      Number BRCD,		// Branch code			/REF:W/NOREQ
+	      String UCLS,		// Userclass			/REF:W/NOREQ
+	      Number TSDRCID,		// Transaction Suspense (DR)	/REF:W/NOREQ
+	      Number TSCRCID,		// Transaction Suspense (CR)	/REF:W/NOREQ
+	      Boolean ODP)		// Overdraft protection		/REF:W/NOREQ
+	
+	/*
+	Batch Source init program
+	
+	 This routine will be used to retrieve the batch source teller
+	 information. It will be called by all batch programs which
+	 require teller information from the file UTBLSRC.
+	
+	Variables MARTY and REJMET along with the array RTSN are returned 
+	without parameter references.
+	
+	 EXAMPLE:
+		do SOURCE^BCHSOURC("INT","INT",.UID,.BRCD,.UCLS,.TSDRCID,.TSCRCID,.ODP)
+	
+	*/
+        
+	type public Boolean ER=0,RTSN
+	type public Number MARTY,REJMET
+	type public String RTSN()
+
+	type RecordUTBLSRC utblsrc=Db.getRecord("UTBLSRC","SRCTYP=:SRCTYP,KEY=:KEY",1)
+
+	// ~p1 posting source not set up
+	if 'utblsrc.getMode() do Runtime.setErrMSG("UTBLSRC",1184,KEY)  quit
+        
+        set BRCD=utblsrc.brcd
+        set UID=utblsrc.uid
+	
+	// Branch code does not exist in the branch code table
+	if 'Db.isDefined("UTBLBRCD","BRCD") do Runtime.setErrMSG("UTBLBRCD",8678,BRCD) quit
+        
+	type RecordSCAU scau=Db.getRecord("SCAU","UID=:UID",1)
+
+	// User defined in the source table does not exist in the SCAU table	
+	if 'scau.getMode() do Runtime.setErrMSG("SCAU",7591,UID) quit
+	
+	set UCLS=scau.%ucls
+	set TSDRCID=scau.tsdr
+	set TSCRCID=scau.tscr
+	set ODP=scau.odp
+	set REJMET=scau.batrej
+ 
+	set MARTY=scau.marty
+	if 'MARTY quit
+
+	/*
+	 If Same Day Retry is turned on, set RTSN=1.  There is no need
+	 to build the retry reason array, since ALL rejects will be
+	 reprocessed. Also, turn off overdraft protection since rejected
+	 transactions will be reprocessed later in the day.
+
+	*/
+	set RTSN=scau.sdrty
+	if RTSN set ODP=0 quit				// Same Day Retries
+	
+	type ResultSet utbltry=Db.select("GRP,REST","UTBLRETRY")
+	while utbltry.next() set RTSN(utbltry.getCol("GRP"),utbltry.getCol("REST"))=""
+
+	quit
+
+
+public BDOFFSET(String BCHID,		// Batch ID
+		String DESC,		// Offset descriptor
+		String CRCD,		// Currency code
+		Number TYPE,		// Product type
+		String GLSC,		// General ledger set code
+		Number CC,		// Cost center
+		String GLDR,		// General ledger DR account
+		String GLCR,		// General ledger CR account
+		String DRETC,		// General ledger DR Transaction Code
+		String CRETC,		// General ledger CR Transaction Code
+		String TCMT,		// Teller comment			/NOREQ
+		String TSO)		// Transaction source			/NOREQ
+
+	/*
+	This utility program is used by batch programs to create the initial
+	global entry to store the information about the offset amounts for
+	the transaction. These amounts are stored globally until the scheduler
+	exit program can build one mass entry for the offsets.
+	*/
+
+	type RecordTMPBCHOFF tmpbch=Class.new("RecordTMPBCHOFF")
+
+	set tmpbch.tjd=%SystemDate
+	set tmpbch.bchid=BCHID
+	set tmpbch.job=%ProcessID
+	set tmpbch.desc=DESC
+	set tmpbch.crcd=CRCD
+	set tmpbch.type=TYPE
+	set tmpbch.glsc=GLSC
+	set tmpbch.cc=CC
+	set tmpbch.debit=0
+	set tmpbch.credit=0
+	set tmpbch.gldr=GLDR
+	set tmpbch.glcr=GLCR
+	set tmpbch.gldretc=DRETC
+	set tmpbch.glcretc=CRETC
+	set tmpbch.tcmt=TCMT.get()
+	set tmpbch.tso=TSO.get()
+
+	do tmpbch.bypassSave()
+
+	quit
+
+
+public UPOFFSET(String BCHID,		// Batch ID
+		String DESC,		// Description
+		String CRCD,		// Currency code
+		Number TYPE,		// Product type
+		String GLSC,		// General ledger set code
+		Number CC,		// Cost center
+		Boolean DRCR,		// Debit / credit indicator
+		Number AMOAMT)		// Amount of the transaction
+
+	/*
+	Update the temporary batch global used by batch processes to store
+	the accumlated totals of transactions already posted.
+	*/
+
+	type RecordTMPBCHOFF tmpbch=Db.getRecord("TMPBCHOFF","TJD=:%SystemDate,BCHID=:BCHID,JOB=:%ProcessID,DESC=:DESC,CRCD=:CRCD,TYPE=:TYPE,GLSC=:GLSC,CC=:CC")
+
+	if DRCR set tmpbch.credit=tmpbch.credit+AMOAMT
+	if 'DRCR set tmpbch.debit=tmpbch.debit+AMOAMT
+
+	do tmpbch.bypassSave()
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60568^62498^Chad Smith^4621"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,326 @@
+STPLOAD		
+	/*
+ 	 PROCEDURE ID:	STPLOAD
+ 	         Desc:	On-Them Stop Loader
+ 	         
+	 ---- Revision History ------------------------------------------------
+		
+	06/25/2007 - Chaithra - CR 27206
+		     Converted to PSL. This procedure is called by @CHK016.
+
+	*/
+
+	
+	type public Boolean ER
+	type public String RM 
+	type String %FN,%NOPRMT,%READ,%TAB(),RMS,VFMQ
+		
+	set ER=0,RM=""
+	set %NOPRMT="N"
+	
+	set %TAB("RMS")=".INFILE"		// input file name
+	
+	set %READ="@@%FN,,,RMS/REQ"
+	
+	do ^UTLREAD
+	if (VFMQ="Q"!ER) quit
+	do SCAN quit
+	
+SCAN	
+	/* 
+	Scan the file for header, trailer, and verify record count.
+	this is the first pass of the input file to determine if it is
+	complete.  integrity of the data is performed by the DQ exchange
+	programs called in PROC2 
+	*/
+	
+	// Create TMP global with institutions 
+	
+	type public Boolean ER
+	type public String EOF,RMS,RM,VFMQ
+	type Number CNT,SRECNT,SREMODE,YN
+	type String HEAD,INST,REC(),TRAIL
+		
+	type IO iorms = Class.new("IO")
+	
+	set CNT=0
+	set EOF=0
+	set (HEAD,TRAIL)=""
+	
+	do OPEN(.iorms) quit:ER
+	do Db.fastDelete("TMPRPT1","PID=:%ProcessID")
+		
+	for  set REC=iorms.read() quit:REC.isNull()  do {  quit:(EOF!ER)
+		
+		// Error in record ~p1
+		if 'TRAIL.isNull() do Runtime.setErrMSG("TMPRPT1",8149,CNT) quit  
+		if REC.extract(1,7)="*** SRE" do {
+			
+			// Error in record ~p1
+			if (HEAD.isNull())&(CNT'=0) do Runtime.setErrMSG("TMPRPT1",8149,CNT) quit
+			if HEAD.isNull() set HEAD=REC quit
+			if TRAIL.isNull() set TRAIL=REC quit
+			
+			// Error in record ~p1
+			do Runtime.setErrMSG("TMPRPT1",8149,CNT) quit	
+			}
+		else  do {
+			set CNT=CNT+1			// number of records read in
+			set INST=REC.piece("|",3)	// get institution ID from record
+			quit:INST.isNull()
+			type RecordTMPRPT1 tmprpt=Class.new("RecordTMPRPT1")
+				set tmprpt.PID=%ProcessID
+				set tmprpt.KEY1=INST
+				set tmprpt.DATA=""
+				do tmprpt.save()
+			
+				// store this for next process
+			}
+		 // Error in record ~p1
+		if HEAD.isNull() do Runtime.setErrMSG("TMPRPT1",8149,CNT) quit 
+			
+	}
+	
+	if ER do {  quit
+		do iorms.close()
+	        do Db.fastDelete("TMPRPT1","PID=:%ProcessID")
+	}
+			
+	do iorms.close()
+	
+	// Error in record ~p1
+	if TRAIL.isNull() do Runtime.setErrMSG("TMPRPT1",8149,CNT) quit  	
+	
+	set SRECNT=TRAIL.piece("|",2)
+	
+	// Record count does not match trailer
+	if SRECNT'=CNT do Runtime.setErrMSG("TMPRPT1",207) quit
+	
+	set SREMODE=HEAD.piece("|",2)
+	if SREMODE=1 set YN=$$^DBSMBAR(172)	// SRE replace mode
+	
+	if (SREMODE=1),((VFMQ="Q")!ER!(YN=2)) do Runtime.setErrMSG("TMPRPT1",4556) quit
+	if SREMODE=1 do STPDEL		// remove all stops for institutions
+				        // listed in the input file
+	do PROC1
+	quit
+	
+	
+PROC1	
+	/* 
+	Process input file this is the main driver for processing all 
+        records contained in the input file 
+        */
+	
+	type public Boolean ER
+	type public Date TJD
+	type public String EOF,fSTOP,PGM,REC,RMS 
+	type String %LIBS,DOCNUM,DOCTYP,OUTACC,OUTCHK,OUTCHKE,OWN
+	type Number ACTFLG,ACT,CNT
+	
+	
+	set %LIBS="SYSDEV"
+	
+	do Db.fastDelete("STOPLOGE","DATE=:TJD,FILE=:RMS")
+	
+	type IO iorms = Class.new("IO")	
+	do OPEN(.iorms) quit:ER
+	
+	set CNT=0
+	
+	for  set REC=iorms.read() quit:REC.isNull()  do {
+		
+		quit:REC.extract(1,7)="*** SRE"
+		set CNT=CNT+1		// number of records read (record seq)
+		do PROC2
+		}
+	do iorms.close()
+	quit
+
+	
+PROC2	// Process an individual record
+	
+	type public Boolean ER
+	type public Date TJD
+	type public Number ACTFLG
+	type public String fSTOP,REC,RM,RMS
+	type Number TYP
+	
+	set TYP=REC.piece("|",2)	// stop type (as per SRE format)
+	set ACTFLG=REC.piece("|",1)	// get all possible data items from record
+	set ER=0,RM=""
+	
+	// Set fSTOP with values which are common to all files
+	set fSTOP=REC.piece("|",8)
+	if ER do LOGEXC quit				//invalid date
+	if ACTFLG=0 set fSTOP.piece("|",3)=TJD
+	if ACTFLG=0 set fSTOP.piece("|",4)=RMS
+	if ACTFLG=0 set fSTOP.piece("|",6)=%CurrentTime
+	set fSTOP.piece("|",10)=REC.piece("|",10)
+	
+	if TYP=1 do STOP6 quit	// on-them account stop
+	if TYP=2 do STOP7 quit	// on-them check stop
+	if TYP=3 do STOP9 quit	// on-them document stop
+	
+	// invalid ~p1 type
+	set RM=$$^MSG(1514,TYP)  
+		
+	do LOGEXC
+	quit
+	
+	
+STOP6	// On-them account stop
+
+	type public Number ACTFLG
+	type public Boolean ER
+	type public String fSTOP,REC
+	type String ACT,INST,OUTACC
+	
+	set INST=REC.piece("|",3)
+	set OUTACC=REC.piece("|",4)
+	
+	type RecordSTOP6 stop6 = Db.getRecord("STOP6","INST=:INST,OUTACC=:OUTACC",1)
+	
+	set stop6.dp=fSTOP.piece("|",3)
+	set stop6.time=fSTOP.piece("|",6)
+	set stop6.who=fSTOP.piece("|",4)
+	set stop6.act = ACTFLG
+	set %ProcessMode = ACTFLG		
+	
+	do stop6.save()
+	if ER do LOGEXC
+	quit
+	
+	
+STOP7	// On-them check stop
+	
+	type public Boolean ER
+	type public Number ACTFLG
+	type public String fSTOP,REC
+	type String ACT,INST,OUTACC,OUTCHK
+		
+	set INST=REC.piece("|",3)
+	set OUTACC=REC.piece("|",4)
+	set OUTCHK=REC.piece("|",5)
+	
+	type RecordSTOP7 stop7 = Db.getRecord("STOP7","INST=:INST,OUTACC=:OUTACC,OUTCHK=:OUTCHK",1)
+	
+	set stop7.dp=fSTOP.piece("|",3)
+	set stop7.who=fSTOP.piece("|",4)
+	set stop7.time=fSTOP.piece("|",6)
+	set stop7.act = ACTFLG
+	set %ProcessMode = ACTFLG	
+	
+	if ACTFLG'=3 set stop7.outchke = REC.piece("|",11)
+	
+	do stop7.save()
+	if ER do LOGEXC
+	quit
+	
+	
+STOP9	// On-them document stop
+	
+	type public Boolean ER
+	type public Number ACTFLG
+	type public String fSTOP,REC
+	type String ACT,DOCTYP,DOCNUM,INST
+	
+	set DOCTYP=REC.piece("|",6)
+	set DOCNUM=REC.piece("|",7)
+	set INST=REC.piece("|",3)
+	
+	type RecordSTOP9 stop9 = Db.getRecord("STOP9","DOCTYP=:DOCTYP,DOCNUM=:DOCNUM,INST=:INST",1)
+	
+	set stop9.dp=fSTOP.piece("|",3)
+	set stop9.who=fSTOP.piece("|",4)
+	set stop9.time=fSTOP.piece("|",6)
+	set stop9.act = ACTFLG
+	
+	set %ProcessMode = ACTFLG	
+	
+	do stop9.save()
+	if ER do LOGEXC
+	quit
+	
+	
+STPDEL	
+	/* 
+	Delete all stops for all institutions listed in the input file
+	walk through STOP6, STOP7, and STOP9 and remove all stops 
+	pertaining to institutions with entries in ^TMP... 
+	*/
+	
+	// Remove on-them account and check level stops 
+	type String INST
+	
+	set INST=""
+	type ResultSet tmp=Db.select("KEY1","TMPRPT1","PID=:%ProcessID")
+	while tmp.next() do {
+		set INST=tmp.getCol("KEY1")
+		do Db.fastDelete("STOP6","INST=:INST")
+		do Db.fastDelete("STOP7","INST=:INST")
+	}
+	
+	
+	// Remove on-them document level stops
+	type String DOCTYP,DOCNUM
+	set DOCTYP=""
+	type ResultSet stop=Db.select("DOCTYP,DOCNUM,INST","STOP9")
+	while stop.next() do {
+		set INST=stop.getCol("INST")
+		set DOCTYP=stop.getCol("DOCTYP")
+		set DOCNUM=stop.getCol("DOCNUM")
+		type RecordTMPRPT1 tmpr=Db.getRecord("TMPRPT1","PID=:%ProcessID,KEY1=:INST")
+		if 'tmpr.getMode() quit
+		do Db.fastDelete("STOP9","DOCTYP=:DOCTYP,DOCNUM=:DOCNUM,INST=:INST")
+	}
+	quit
+	
+	
+OPEN(IO iorms)	// Open the RMS file and display message Please Wait
+	
+	type public Boolean ER
+	type public String EOF,RMS,RM 
+		
+	set iorms.fileName = RMS
+	set iorms.openParams = "READ"
+	set iorms.timeout = 10
+	set iorms.recordSize = 94
+ 	
+ 	catch ioxcpt {
+        
+            	// if not an IO exception, it's not for us
+	        if 'ioxcpt.type.isLike("%%PSL-E-IO%") throw ioxcpt
+        	set ER = 1
+		// Unable to open file ~p1
+        	if ioxcpt.type.isLike("%IOOPEN%") set RM =$$^MSG(2799,"") quit
+		if ioxcpt.type.isLike("%IOEOF%")  set EOF=1 quit
+        }
+		 
+	do iorms.open()
+	
+	// Please Wait ...
+	write $$MSG^%TRMVT($$^MSG("5624"),0,0)	
+	quit
+	
+	
+LOGEXC	// Log the errors in ^STOPLOG("EXC" global
+	
+	type public Boolean ER
+	type public Date TJD
+	type public Number CNT
+	type public String RM,RMS 
+
+	type RecordSTOPLOGE stoploge = Db.getRecord("STOPLOGE","DATE=:TJD,FILE=:RMS,SEQ=:CNT",1)
+	if stoploge.getMode() do {
+		set stoploge.ERR=RM.piece("|",1)
+		set stoploge.REC="""_REC_"""
+		do stoploge.save()
+	}
+			
+	set ER=0,RM=""	// allow processing of other record to continue
+	
+	quit
+	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60813^3833^Chaithra Bokkasa Shankar^7446"	// Signature - LTD^TIME^USER^SIZE

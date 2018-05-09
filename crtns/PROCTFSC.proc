@@ -1,0 +1,815 @@
+PROCTFSC ; Procedure TFSCIFTR - IBS/TFS Customer Data Transfer
+ ;;Copyright(c)2005 Sanchez Computer Associates, Inc.  All Rights Reserved - 08/09/05 10:36 - spatola
+ ;
+ ; **** This is a DATA-QWIK generated routine (level 25) ****
+ ;
+
+
+	/* 
+
+	 ----- Revision History ------------------------------------------------
+	
+	08/24/99 - MOTENJ - 31126
+		   Converted to PSL            	
+
+	02/22/99 - REEDD - 31999
+		   Modified section UPDATE to fix a problem with the
+		   incorrect information being passed for a bank in
+		   the update statement.
+	
+	Rolled forward changes from 5.3 that did not roll forward.
+	
+	*/
+	
+
+START	
+ 
+	/*
+	 Private Initiates the extraction of information from PROFILE to the 
+	 IMEX system.
+	
+	 This program is to extract information from the PROFILE system where
+	 a customer is a trade finance customer and pass this information to the
+	 IMEX system.
+		
+	 The following arrays to store imformation until processing is finished:
+
+	 CUSTARRY - array created to store the mapping of the PROFILE
+	            data items to the IMEX table and data item for
+	            non-bank customers.
+
+	 BNKARRY  - array created to store the mapping of the PROFILE
+	            data items to the IMEX table and data item for
+	            bank customers.
+	 TFSARR   - array containing the values which should be stored in
+	            the IMEX system.
+
+	*/
+
+
+	new ACN,DATA,BNKARRY,CIFDILST,CUSTARRY
+	new FILENAME,MODE,SEQ,TFSARR,TJDDATE
+	
+	set Z=Db.getOneRow("CIFCLASS","TFSOPTS")
+
+	if Z="" do { if ER quit
+
+		set TFSOPTS="TFSOPTS"    	// ~p1 not found
+		do Runtime.setErrMSG("CIF",3060,"TFSOPTS") if ER quit 
+
+		}
+	
+	do INIT(.BNKARRY,.CUSTARRY,.TFSTYPLS)	
+	
+	new rs
+	type ResultSet rs=Db.select("ACN,MODE,TJD","CIFTFS")
+	// No TFS customer data to be transferred
+
+	if rs.isEmpty() do { quit 
+		do Runtime.setErrMSG("CIF",2165) if ER quit
+		}
+
+	write $$MSG^%TRMVT($$^MSG(2166),0)
+
+	do GETFILE(.FILENAME) if ER quit
+
+	while rs.next() do { 
+
+		set ACN=rs.getCol(1)
+		set MODE=rs.getCol(2)
+		set TJDDATE=rs.getCol(3)
+		if MODE=0 do INSERT
+		if MODE=1 do UPDATE
+		do DAYEND
+		}
+
+	close FILENAME
+	do TRANSFER
+	do CLEANUP
+	
+	// TFS customer data transfer complete
+	do Runtime.setErrMSG("CIF",2164) if ER quit 
+	
+	quit 
+	
+GETVALS(BNKARRY,CUSTARRY,TFSARR)  	   // Extract values from CIF file
+	
+	new BRANCH,CIFDATA,DATE,DI,I,POSITION,RETVAL,SEQ,TYP,VAL,X,TFSBANK
+	set TFSBANK=+Db.getOneRow("TFSBANK","CIF","ACN")
+	if 'TFSBANK do {                   // Customer Information
+	
+		set DI="" 
+		set POSITION=1
+	// I18N=OFF
+
+  	do SELECT^SQL(CULIST_"  from CIF where ACN=:ACN",,,.CIFDATA)
+	for  set DI=$O(CUSTARRY(DI)) quit:DI=""  do {
+	// I18N=ON
+		set X="[CIF]"_DI
+		set SEQ=""
+		for  set SEQ=$O(CUSTARRY(DI,SEQ)) quit:SEQ=""  do {
+
+			set TYP=$P(CUSTARRY(DI,SEQ),",",4)
+			if $P(CUSTARRY(DI,SEQ),",",3)'="" do {
+					set RETVAL=$$FORMAT($P(CIFDATA,TAB,POSITION),$P(CUSTARRY(DI,SEQ),",",3))
+					set TFSARR($P(CUSTARRY(DI,SEQ),",",1),$P(CUSTARRY(DI,SEQ),",",2))=$P(CIFDATA,TAB,POSITION)_"|"_TYP
+					}
+
+	       // Sets up array TFSARR containing the values for the trade finance data items
+			
+			else  set TFSARR($P(CUSTARRY(DI,SEQ),",",1),$P(CUSTARRY(DI,SEQ),",",2))=$P(CIFDATA,TAB,POSITION)_"|"_TYP
+			set POSITION=POSITION+1
+
+			}
+		}
+	}
+
+	else  do {
+
+		// I18N=OFF
+		do SELECT^SQL(BLIST_" from CIF where ACN=:ACN",,,.CIFDATA)
+
+		// I18N=ON
+		set DI="" 
+		set POSITION=1
+		for  set DI=$O(BNKARRY(DI)) quit:DI=""  do {
+			set X="[CIF]"_DI
+			set SEQ=""
+			for  set SEQ=$O(BNKARRY(DI,SEQ)) quit:SEQ=""  do {
+
+				set TYP=$P(BNKARRY(DI,SEQ),",",4)
+				if $P(BNKARRY(DI,SEQ),",",3)'="" do {
+					
+					set RETVAL=$$FORMAT($P(CIFDATA,TAB,POSITION),$P(BNKARRY(DI,SEQ),",",3))
+					set TFSARR($P(BNKARRY(DI,SEQ),",",1),$P(BNKARRY(DI,SEQ),",",2))=RETVAL_"|"_TYP
+					}
+
+				else  set TFSARR($P(BNKARRY(DI,SEQ),",",1),$P(BNKARRY(DI,SEQ),",",2))=$P(CIFDATA,TAB,POSITION)_"|"_TYP				
+				set POSITION=POSITION+1
+					
+				}
+			}
+		}
+	quit
+	
+	
+INSERT // Private Build list of data items for INSERT into the Trade Finance System
+	
+	new BNLIST,BNVALS,CNALIST,CNAVALS,CSTLIST,CSTVALS,DATA,DILIST
+	new EXTLIST,EXTVALS,PRTLIST,PRTVALS,TYPLIST,VALUES,X,Z
+
+	
+	use FILENAME
+	do GETVALS(.BNKARRY,.CUSTARRY,.TFSARR)
+	
+	if 'TFSBANK do {
+		// Retrieve infromation from the TFSOPTS file
+		
+		set OPTSDATA=Db.getOneRow("ADVISEBY,LANGUAGE,CIFCLASS,CRISKCAT,SECTID,CUSTTYPE,CUSTDEPT","TFSOPTS") quit:ER 
+		
+		// This section is used for the hard coded information which is to be passed to the IXQDBCST table
+	 
+		set CSTLIST="CUSTOMER_TYPE,CUST_CLASSIFIC,RISK_GRADE_CATEGOR,CUST_SECTION,STATEMENT_FREQUENC,ZERO_VALUE_DATE_CR"
+		set CSTLIST=CSTLIST_","_"ZERO_VALUE_DATE_DR,IMP_COVER_SW,EXP_COVER_SW,CUST_BRANCH"
+		set CSTVALS="'"_$P(OPTSDATA,TAB ,6)_"','"_$P(OPTSDATA,TAB,3)_"','"_$P(OPTSDATA,TAB,4)_"','"_$P(OPTSDATA,TAB,5)_"','M'"
+		set CSTVALS=CSTVALS_",'N','N','N','N','"_$P(OPTSDATA,TAB,7)_"'"
+		 
+		new rs 
+		type ResultSet rs=Db.select("BPH,BPHEXT,PAD1,PAD2,PCSZ","CIF","ACN=:ACN") 
+		set RETVAL="" if rs.isEmpty() quit
+		set RETVAL=rs.getRow()
+	
+		if $L($P(RETVAL,TAB,1))+$L($P(RETVAL,TAB,2))=16 set PHONE="'"_$P(RETVAL,TAB,1)_$P(RETVAL,TAB,2)_"'"
+		else  do {
+			if $P(RETVAL,TAB,1)'="",$P(RETVAL,TAB,2) do {
+				set PHONE="'"_$P(RETVAL,TAB,1)
+				if $P(RETVAL,TAB,2)'="" set PHONE=PHONE_"*"_$P(RETVAL,TAB,2)_"'"
+				else  set PHONE=PHONE_"'"
+				}
+			else  set PHONE="' '"
+			}
+		set CSTLIST=CSTLIST_",TELEPHON_NO"
+		set CSTVALS=CSTVALS_","_PHONE
+	
+		/*
+		   This section checks to determine if a customer has an account
+		   else defaults a "dummy" account
+		*/
+		set COUNT=0
+		new rs  
+		type ResultSet rs=Db.select("CID","RELCIF","ACN=:ACN")
+		if rs.isEmpty()  do {
+
+			set CSTLIST=CSTLIST_",ACCOUNT_1,CURR_1,BY_1"
+                        set CSTVALS=CSTVALS_",'DUMMY','"_%CRCD_"','DUMMY'"
+
+			}
+	
+		while rs.next()!(COUNT=5)  do {
+			set CID=rs.getCol(1) 
+			set ACCINFO=Db.getOneRow("TYPE,CRCD","ACN","CID")
+			set TYPE=$P(ACCINFO,$C(9),1)
+                        set CRCD=$P(ACCINFO,$C(9),2)
+			
+			if $D(TFSTYPLS(TYPE)) do {
+				if '$D(TYPLIST(CRCD)) do {
+					set COUNT=COUNT+1
+					set CSTLIST=CSTLIST_",ACCOUNT_"_COUNT_",CURR_"_COUNT_",BY_"_COUNT
+					set CSTVALS=CSTVALS_",'"_CID_"','"_CRCD_"','"_TFSTYPLS(TYPE)_"'"
+					set TYPLIST(CRCD)=""
+					}
+				}
+			}
+		do WRITEINS("IXQDBCST",CSTLIST,CSTVALS)
+	
+		// This section is used for the hard coded information which is to be passed to the IXQDBCNA table
+		set CNALIST="ADVICE_CUST_BY,LANGUAGE_CODE,ADDRESS_1,ADDRESS_2,ADDRESS_3"
+		set CNAVALS="'"_$P(OPTSDATA,TAB,1)_"','"_$P(OPTSDATA,TAB,2)_"','"_$E($P(RETVAL,TAB,3),1,35)
+
+		if $P(RETVAL,TAB,4)="" do {
+			set CNAVALS=CNAVALS_"','"_$E($P(RETVAL,TAB,5),1,35)_"',' '"
+			}
+		else  set CNAVALS=CNAVALS_"','"_$E($P(RETVAL,TAB,4),1,35)_"','"_$E($P(RETVAL,TAB,5),1,35)_"'"
+	
+		do WRITEINS("IXQDBCNA",CNALIST,CNAVALS)
+		
+		write "COMMIT",!
+		}
+
+	else  do { // Bank Information
+	
+		// Retrieve infromation from the TFSOPTS file
+		set OPTSDATA=Db.getOneRow("REGION,EXPIRY,BNKCLASS,BRISKCAT,BANKST","TFSOPTS") if ER  quit
+	
+		// This section is used for the hard coded information that is to passed to the IXQDBPRT table
+		new rs 
+		type ResultSet rs=Db.select("BPH,BPHEXT,PAD1,PAD2,PCSZ","CIF","ACN=:ACN") 
+		set RETVAL="" if rs.isEmpty()  quit
+		set RETVAL=rs.getRow()
+	
+		set ADD1=$E($P(RETVAL,TAB,3),1,35)
+		for I=1:1:(35-$L(ADD1)) set ADD1=ADD1_" "
+	
+		set ADD2=$E($P(RETVAL,TAB,4),1,35)
+		if ADD2'="" do {
+			for I=1:1:(35-$L(ADD2)) set ADD2=ADD2_" "
+			}
+		else  set ADD2=""
+	
+		set ADD3=$E($P(RETVAL,TAB,5),1,35)
+		set ADDRESS=ADD1_ADD2_ADD3
+	
+		// I18N=OFF
+		set PRTLIST="PARTY_TYPE,PARTY_EFFECT_DATE,PARTY_EXPIRY_DATE,PARTY_CLASSIFIED"
+		set PRTLIST=PRTLIST_",RISK_GRADE_CATEGOR,BANKER_REPORT_STAT,BANKER_EXPIRY_DATE"
+		set PRTLIST=PRTLIST_",COMMENTS,BANK_STATUS,PARENT_BANK_ID,CR_INCLUDED_SW,CORR_SW,WITHIN_GROUP,PARTY_SOUNDEX"
+		set PRTLIST=PRTLIST_",ADDITIONAL_SECTOR,CHILDREN_COUNTER,HEAD_OFFICE_ADDRSS"
+		set EXPDATE=$$FORMAT($P(OPTSDATA,TAB,2),6) // PARTY_EXPIRY_DATE
+		set PARTYDAT=$$FORMAT(TJD,6)  	  // PARTY_EFFECT_DATE
+		set PRTVALS="'2',"_PARTYDAT_","_EXPDATE_",'"_$P(OPTSDATA,TAB,3)_"','"_$P(OPTSDATA,TAB,4)_"',' ',"_EXPDATE
+		set PRTVALS=PRTVALS_",' ','"_$P(OPTSDATA,TAB,5)_"',' ','N','Y','N',' ',' ','000','"_ADDRESS_"'"
+		
+		// I18N=ON
+		do WRITEINS("IXQDBPRT",PRTLIST,PRTVALS)
+	
+		// This section is used for the hard coded information that is to be passed to the IXQDBEXT table
+		if $L($P(RETVAL,TAB,1))+$L($P(RETVAL,TAB,2))=16 set PHONE="'"_$P(RETVAL,TAB,1)_$P(RETVAL,TAB,2)_"'"
+		else  do {
+			if $P(RETVAL,TAB,1)'="",$P(RETVAL,TAB,2) do {
+				set PHONE="'"_$P(RETVAL,TAB,1)
+				if $P(RETVAL,TAB,2)'="" set PHONE=PHONE_"*"_$P(RETVAL,TAB,2)_"'"
+				else  set PHONE=PHONE_"'"
+				}
+			else  set PHONE="' '"
+			}
+	
+		set EXTLIST="REGION_CODE,EFFECTIVE_DATE,EXT_PHONE,EXT_ADDRESS,COMMENTS"
+		set EXTLIST=EXTLIST_",TELEGRAM_KEY,ANSWER_BACK,ADD_ADDRESS,CHATS_CODE"
+		set DATE=$$FORMAT(TJD,6)
+		set EXTVALS="'"_$P(OPTSDATA,TAB,1)_"',"_DATE_","_PHONE_",'"_ADDRESS_"'"
+		set EXTVALS=EXTVALS_",' ',' ',' ',' ','000'"
+	
+
+		do WRITEINS("IXQDBEXT",EXTLIST,EXTVALS)
+	
+		/*
+		   This section is used for the hard coded information that is to passed to the IXQDBBNK table
+		   I18N=OFF
+		*/
+
+		set ID=Db.getOneRow("TFSCIFID","CIF","ACN") if ER  quit
+		set BNLIST="CORR_MAIL_SIGN_SW,CORR_TELEX_SW,CORR_SWIFT_KEY_SW,CORR_TERMS_YEAR,CORR_TERM_EFFEC,CORR_REPORTS_YEAR"
+		set BNLIST=BNLIST_",OUR_MAIL_SIGN_SW,OUR_TELEX_SW,OUR_SWIFT_KEY_SW"
+		set BNLIST=BNLIST_",OUR_TERMS_YEAR,OUR_REPORTS_YEAR,FILLERX"
+		set BNVALS="'N','N','N','0000','0000','0000','N','N','N','0000','0000',' '"
+		
+		// I18N=ON
+	
+		do WRITEINS("IXQDBBNK",BNLIST,BNVALS)
+		write "COMMIT",!
+		}
+	
+	do Db.update("CIF","TFSTRANS=1","ACN=:ACN","/NOJOURNAL") quit:ER 
+	
+	quit 
+	
+	
+UPDATE	
+
+	/*
+	 Private Build list of data items for UPDATE into the Trade Finance 
+	 System.
+	 
+	 This section is to build the UPDATE SQL statements when a customer or
+	 a bank is updated.
+	
+	 The following temp array is used:
+	
+	 TFSARR - this array is used to determine if a data item has been 
+	 modified since the last transfer
+	
+	 This will determine wether a customer/bank's trade finance number has 
+	 been added and not transfered.
+	
+	 If so it will create a new customer in IMEX with the new trade finance
+	 number.
+	 I18N=OFF
+
+	*/
+
+	new ADDLIST,CIFHDATA,CONV,DATA,DATAITEM,DI,DIARR,INFO,LISTVALS
+	new NEWV,PHONE,SEQ,TABLE,TFSBANK,TFSCIFID,TFSDI,TYP,VAL,VAR,X,Z
+
+	set DI=$$^SQL("SELECT DI FROM CIFH WHERE DI IN('CIF.TFSCIFID','CIF.TFSBANK','CIF.TFSHOEXT') AND ACN=:ACN AND TJD>=:TJDDATE",,,.DATA)
+	
+	// I18N=ON
+
+	if $D(DATA) do { quit:DONE 
+		set Z=Db.getOneRow("TFSTRANS","CIF","ACN")
+		set DONE=0
+		if 'Z do { quit 
+			do INSERT
+			set DONE=1
+			}
+		}
+	
+	use FILENAME
+	
+	/*
+
+	 Extracts information from CIF to determine if the account belongs to
+	 a bank or a customer.  Also extracts the trade finance number.
+
+	*/
+
+	set INFO=Db.getOneRow("TFSBANK,TFSCIFID","CIF","ACN")
+	set TFSBANK=+$P(INFO,TAB,1)
+	set TFSCIFID=$P(INFO,TAB,2)
+	
+	/*
+ 
+	 This section searches through customer history for all trade finance
+	 to determine which data items have been modified.
+
+	*/
+	
+	new rs  
+	type ResultSet rs=Db.select("DI,NEWV,SEQ","CIFH","ACN=:ACN AND TJD>=:TJDDATE","SEQ DESC")
+	
+	// Consider using rs.isEmpty coding at this location
+
+	if rs.isEmpty() quit 
+	while rs.next() do {
+		set VAR=rs.getCol(1)
+		if (VAR="CIF.TFSCIFID")!(VAR="CIF.TFSBANK")!(VAR="CIF.TFSHOEXT") quit 
+
+		// This section is when the customer is a non-bank customer
+		if 'TFSBANK do {
+			set DATAITEM=$P($P(CIFHDATA,TAB,1),".",2)
+			if $P($P(CIFHDATA,TAB,1),".",1)'="CIF" quit 
+	
+			set DI="["_$P($P(CIFHDATA,TAB,1),".",1)_"]"_DATAITEM
+			if $D(CUSTARRY(DATAITEM))'=0 do {
+				if '$D(DIARR(DATAITEM)) do {
+
+					set DIARR(DATAITEM)=""
+					set NEWV=$P(CIFHDATA,TAB,2)
+
+					/* 
+					   This section determines the type of 
+					   data item modified and builds 
+					   the appropriate SQL UPDATE.
+					*/
+					set SEQ=""
+					for  set SEQ=$O(CUSTARRY(DATAITEM,SEQ)) quit:SEQ=""  do {
+
+						set TYP=$P(CUSTARRY(DATAITEM,SEQ),",",4)
+						set TABLE=$P(CUSTARRY(DATAITEM,SEQ),",",1)
+					
+						// Item modified is a date or the branch code
+
+						if $P(CUSTARRY(DATAITEM,SEQ),",",3)'="" do {
+							set TFSDI=$P(CUSTARRY(DATAITEM,SEQ),",",2)_" = '"_$$FORMAT(NEWV,$P(CUSTARRY(DATAITEM,SEQ),",",3))_"'"
+							write "UPDATE "_TABLE_" SET "_TFSDI_" WHERE CUSTOMER_ID='"_TFSCIFID_"';",!
+							}
+
+						else  do {
+
+							if TYP="T" set TFSDI=$P(CUSTARRY(DATAITEM,SEQ),",",2)_" = '"_NEWV_"'"
+							else  set TFSDI=$P(CUSTARRY(DATAITEM,SEQ),",",2)_" = "_NEWV
+							write "UPDATE "_TABLE_" SET "_TFSDI_" WHERE CUSTOMER_ID='"_TFSCIFID_"';",!
+							}
+						}
+					}
+				}
+			}
+
+			// This is for a data item that has a special formatting requirement
+	
+			else  if $D(CUCONLST(DATAITEM))'=0 do {
+				if '$D(DIARR(DATAITEM)) do {
+					set DIARR(DATAITEM)=""
+			
+					/* 
+					  This section determines the type of the data item modified
+					  and builds the appropriate SQL UPDATE
+					*/
+					
+					set TYP=$P(CUCONLST(DATAITEM),",",3)
+					set CONV=$P(CUCONLST(DATAITEM),",",2)
+					set TABLE=$P(CUCONLST(DATAITEM),",",1)
+					
+					/*
+					   Conversion 3 is for an address conversion
+					   For a customer PAD1, PAD2 and PCSZ are used
+					*/
+
+					if CONV=3 do {
+						// I18N=OFF
+						new rs 
+						type ResultSet rs=Db.select("PAD1,PAD2,PCSZ","CIF","ACN=:ACN") 
+						set ADDRESS="" if rs.isEmpty() quit
+						set ADDRESS=rs.getRow()
+					
+						if $P(ADDRESS,TAB,2)'="" set ADDLIST="ADDRESS_1 = '"_$P(ADDRESS,TAB,1)_"',ADDRESS_2 = '"_$P(ADDRESS,TAB,2)_"',ADDRESS_3 ='"_$P(ADDRESS,TAB,3)_"'"
+						else  set ADDLIST="ADDRESS_1 = '"_$P(ADDRESS,TAB,1)_"',ADDRESS_2 = '"_$P(ADDRESS,TAB,3)_"',ADDRESS_3 = ' '"
+						write "UPDATE "_TABLE_" SET "_ADDLIST_" WHERE CUSTOMER_ID='"_TFSCIFID_"';",!
+						// I18N=ON
+						}
+	
+					// Conversion 5 is for a phone conversion
+					if CONV=5 do {
+						set RETVAL=Db.getOneRow("BPH,BPHEXT","CIF","ACN")
+						if $L($P(RETVAL,TAB,1))+$L($P(RETVAL,TAB,2))=16 set PHONE="'"_$P(RETVAL,TAB,1)_$P(RETVAL,TAB,2)_"'"
+						else  do {
+							if $P(RETVAL,TAB,1)'="" do {
+								set PHONE="'"_$P(RETVAL,TAB,1)
+								if $P(RETVAL,TAB,2)'="" set PHONE=PHONE_"*"_$P(RETVAL,TAB,2)_"'"
+								else  set PHONE=PHONE_"'"
+								}
+							else  set PHONE="' '"
+							}
+						write "UPDATE "_TABLE_" SET TELEPHON_NO = "_PHONE_" WHERE CUSTOMER_ID='"_TFSCIFID_"';",!
+						}
+					}
+				}
+			}
+		
+		// This section is for when the customer is a bank
+	
+		else  do {
+			set DATAITEM=rs.getCol(2)
+			set DI="["_$P($P(CIFHDATA,TAB,1),".",1)_"]"_DATAITEM
+
+			if $D(BNKARRY(DATAITEM)) do {
+				if '$D(DIARR(DATAITEM)) do {
+					set DIARR(DATAITEM)=""
+					set NEWV=$P(CIFHDATA,TAB,2)
+	
+					/*
+					  This section determines the type of 
+					  the data item modified and builds 
+					  the appropriate SQL UPDATE
+					*/
+		
+					set SEQ=""
+					for  set SEQ=$O(BNKARRY(DATAITEM,SEQ)) quit:SEQ=""  do {
+						set TYP=$P(BNKARRY(DATAITEM,SEQ),",",4)
+						set TABLE=$P(BNKARRY(DATAITEM,SEQ),",",1)
+						// If data item is a date or the branch code
+						if $P(BNKARRY(DATAITEM,SEQ),",",3)'="" do {
+							set TFSDI=$P(BNKARRY(DATAITEM,SEQ),",",2)_" = '"_$$FORMAT(NEWV,$P(BNKARRY(DATAITEM,SEQ),",",3))_"'"
+							}
+						else  do {
+							if TYP="T" set TFSDI=$P(BNKARRY(DATAITEM,SEQ),",",2)_" = '"_NEWV_"'"
+							else  set TFSDI=$P(BNKARRY(DATAITEM,SEQ),",",2)_" = "_NEWV
+							}
+						write "UPDATE "_TABLE_" SET "_TFSDI_" WHERE PARTY_ID='"_TFSCIFID_"';",!
+						}
+					}
+				}
+	
+			// This is for a data item that has a special formatting requirement
+			
+			else  if $D(BNCONLST(DATAITEM)) do {
+				set DIARR(DATAITEM)=DATAITEM
+			
+				/*
+				   This section determines the type of the data item modified
+				   and builds the appropriate SQL UPDATE
+				*/
+
+				set TABLE=$P(BNCONLST(DATAITEM),",",1)
+				set CONV=$P(BNCONLST(DATAITEM),",",2)
+				set TYP=$P(BNCONLST(DATAITEM),",",3)
+				
+				/*
+				   Conversion 3 is an address conversion
+				   For a bank the first 30 characters from PAD1 and PAD2 are concatenated onto PCSZ
+				*/
+
+				if CONV=3 do {
+					new rs 
+					type ResultSet rs=Db.select("PAD1,PAD2,PCSZ","CIF","ACN=:ACN") 
+					set CIFVAL="" if 'rs.next()  quit
+					set CIFVAL=rs.getRow()
+
+					set ADDLIST="HEAD_OFFICE_ADDRSS"
+					set ADD1=$E($P(CIFVAL,TAB,1),1,35)
+					for I=1:1:(35-$L(ADD1)) set ADD1=ADD1_" "
+
+					set ADD2=$E($P(CIFVAL,TAB,2),1,35)
+					for I=1:1:(35-$L(ADD2)) set ADD2=ADD2_" "
+
+					set ADD3=$E($P(CIFVAL,TAB,3),1,35)
+
+					if ADD2'="" set ADDRESS=ADD1_ADD2_ADD3
+					else  set ADDRESS=ADD1_ADD3_"' '"
+
+					write "UPDATE IXQDBPRT SET HEAD_OFFICE_ADDRSS = '"_ADDRESS_"' WHERE PARTY_ID='"_TFSCIFID_"';",!
+					write "UPDATE IXQDBEXT SET EXT_ADDRESS = '"_ADDRESS_"' WHERE PARTY_ID='"_TFSCIFID_"';",!
+					}
+			
+				/*
+				   Conversion 5 is a phone conversion
+				   The phone number is concatenated with the extinsion with an * as a delimitor
+				*/
+
+				if CONV=5 do {
+					set RETVAL=Db.getOneRow("BPH,BPHEXT","CIF","ACN")
+					if $L($P(RETVAL,TAB,1))+$L($P(RETVAL,TAB,2))=16 set PHONE="'"_$P(RETVAL,TAB,1)_$P(RETVAL,TAB,2)_"'"
+					else  do {
+						if $P(RETVAL,TAB,1)'="" do {
+							set PHONE="'"_$P(RETVAL,TAB,1)
+							if $P(RETVAL,TAB,2)'="" set PHONE=PHONE_"*"_$P(RETVAL,TAB,2)_"'"
+							else  set PHONE=PHONE_"'"
+							}
+
+						else  set PHONE="' '"
+						}
+						write "UPDATE "_TABLE_" SET EXT_PHONE = "_PHONE_" WHERE PARTY_ID='"_TFSCIFID_"';",!
+					}
+				}
+		}
+	write "COMMIT",!
+	quit
+	
+INIT(BNKARRY,CUSTARRY,TFSTYPLS)
+	
+	new CONV,DATA,DI,SEQ,Z
+	set CULIST="" set BLIST=""
+
+	new rs
+	type ResultSet rs=Db.select("DI,SEQ,TABLE,TFSDI,CONV,TYP,TFSBANKID","STBLTFSCDI","")
+	if rs.isEmpty()  quit
+	while rs.next()  do {
+		set DI=$P(rs.getCol(1),"]",2)
+		set SEQ=rs.getCol(2)
+		set CONV=rs.getCol(5)
+		set TYPE=rs.getCol(6)
+		set TABLE=rs.getCol(3)
+		set TFSBANKID=+rs.getCol(7)
+		set TFSDI=rs.getCol(4)
+
+		if 'TFSBANKID do {	// Customer
+
+			if CONV'=3,CONV'=5 do {
+				// CUSTARRY POSITIONS:  1-TFS TABLE, 2-TFS DATA ITEM, 3-CONVERSION ID, 4- TYPE
+				set CUSTARRY(DI,SEQ)=TABLE_","_TFSDI_","_CONV_","_TYPE
+				if CULIST="" set CULIST=DI
+				else  set CULIST=CULIST_","_DI
+				}
+			else  set CUCONLST(DI)=TABLE_","_CONV_","_TYPE
+			}
+	
+		else  do {	// Bank
+			if CONV'=3,CONV'=5 do {	// Bank
+			// BNKARRY POSITIONS:  1-TFS TABLE, 2-TFS DATA ITEM, 3-CONVERSION ID, 4- TYPE
+				set BNKARRY(DI,SEQ)=TABLE_","_TFSDI_","_CONV_","_TYPE
+				if BLIST="" set BLIST=DI
+				else  set BLIST=BLIST_","_DI
+				}
+			else  set BNCONLST(DI)=TABLE_","_CONV_","_TYPE
+			}
+		}
+	
+	// Sets up the TFSTYPLS array to store
+	new rs
+	type ResultSet rs=Db.select("TYPE,TFSTYP","UTBLTFSACTYP","")
+	if rs.isEmpty()  quit
+	while rs.next() do { 
+		set TFSTYPLS=rs.getCol(1)
+		}
+
+	quit
+	
+WRITEINS(TFSTBL,LIST,VALS)
+
+	new DILIST,VALUES,Z
+	
+	// Builds and writes the SQL insert commands to a file for a particular table
+	
+	set Z="" 
+	set DILIST="" 
+	set VALUES=""
+	for  set Z=$O(TFSARR(TFSTBL,Z)) quit:Z=""  do {
+		if $P(TFSARR(TFSTBL,Z),"|",1)'="" do {
+			set TYP=$P(TFSARR(TFSTBL,Z),"|",2)
+			if VALUES="" do {
+				if TYP="T" set VALUES="'"_$P(TFSARR(TFSTBL,Z),"|",1)_"'"
+				else  set VALUES=$P(TFSARR(TFSTBL,Z),"|",1)
+				}
+			else  do {
+				if TYP="T" set VALUES=VALUES_",'"_$P(TFSARR(TFSTBL,Z),"|",1)_"'"
+				else  set VALUES=VALUES_","_$P(TFSARR(TFSTBL,Z),"|",1)
+				}
+			if DILIST="" set DILIST=Z
+			else  set DILIST=DILIST_","_Z
+			}
+		else  do {
+			if VALUES="" do {
+				if $P(TFSARR(TFSTBL,Z),"|",2)="T" set VALUES="' '"
+				else  set VALUES="0"
+				}
+			else  do {
+				if $P(TFSARR(TFSTBL,Z),"|",2)="T" set VALUES=VALUES_",' '"
+				else  set VALUES=VALUES_",0"
+				}
+			if DILIST="" set DILIST=Z
+			else  set DILIST=DILIST_","_Z
+			}
+		}
+	
+	set DILIST=DILIST_","_LIST
+	set VALUES=VALUES_","_VALS
+	write "INSERT INTO "_TFSTBL_"("_DILIST_") VALUES ("_VALUES_");",!
+	quit 
+	
+TRANSFER // Private Transfer information to the OS/2 platform
+
+	new ARCHDIR,IMPDIR,TOFILE,X
+	set ARCHDIR="SCAU$TFSA"
+	set TOFILE=ARCHDIR_":"_$P($P(FILENAME,".",1),":",2)_".OLD"
+	
+	/*
+	  I18N=OFF
+	  Transferring TFS customer data
+	*/
+
+	write $$MSG^%TRMVT($$^MSG(2158),0)	//Transferring TFS customer data
+	// I18N=ON:
+	
+	do GETINFO(.UserName,.PASSWORD,.HOST)
+	do TFSFTP^%OSSCRPT(HOST,UserName,PASSWORD,TOFILE,FILENAME)
+	
+	quit 
+	
+GETINFO(UserName,PASSWORD,HOST)
+
+	new CTBLDATA
+	set CTBLDATA=Db.getOneRow("USERNAME,PASSWORD,IPADDR","CTBLFTPSYS","'TFS'") quit:ER 
+	set UserName=$P(CTBLDATA,TAB,1)
+	// Call to decript password
+	set PASSWORD=$$PASSWORD^%ZFUNC(0,$P(CTBLDATA,TAB,2))
+	set HOST=$P(CTBLDATA,TAB,3)
+	quit 
+	
+FORMAT(INPUT,TYPE)
+
+	new BRANCH,CONVDATE
+	
+	// TYPE 6 formats date from PROFILE to IMEX
+	if TYPE=6 do { quit CONVDATE
+		set CONVDATE=$$DAT^%ZM(INPUT,"YEAR-MM-DD")
+		set CONVDATE=$P(CONVDATE,"-",1)_$P(CONVDATE,"-",2)_$P(CONVDATE,"-",3)
+		}
+	
+	// TYPE 7 formats branch code from PROFILE to IMEX
+	else  if TYPE=7 do { quit BRANCH
+		if $L(INPUT)=3 set BRANCH=INPUT
+		else  if $L(INPUT)=2 set BRANCH=INPUT_" "
+		else  if $L(INPUT)=1 set BRANCH=INPUT_"  "
+		}
+	
+	// TYPE 8 formats name or local address field
+	if TYPE=8 quit $E(INPUT,1,35)
+	
+	// TYPE 9 formats the fax number
+	if TYPE=9 quit $E(INPUT,1,16)
+	
+	// TYPE 10 formats the contact person
+	if TYPE=10 quit $E(INPUT,1,24)
+	
+	quit 0
+	
+MAN // Private Manually start the process
+	
+	new ACN1,BNKARRY,CUSTARRY,MODE
+	new TAB,TFSARR,TFSTYPES,UMODE,Z
+	
+	set %TAB("ACN")=".ACN1/XPP=S %EXT=1 D ^UCIF"
+	set %TAB("UMODE")=".UMODE"
+	set %READ="@@%FN,,,ACN/REQ,UMODE"
+	do ^UTLREAD if VFMQ="Q" set ER=1 quit 	
+	set TAB=$C(9)
+	
+	// Get account from CIFTFS journal file
+	if UMODE do { 
+		new rs 
+		type ResultSet rs=Db.select("TJD","CIFTFS","ACN=:ACN") 
+		set TJDDATE="" if 'rs.next()  quit
+		set TJDDATE=rs.getRow() 
+	
+		// No TFS customer data to be transferred
+		if TJDDATE="" do Runtime.setErrMSG("CIF",2165) quit:ER 
+		}
+
+	else  do {
+		set Z=Db.getOneRow("TFSCIFID","CIF","ACN")
+		if Z'="" do {
+			set TJDDATE=%SystemDate
+			}
+
+		// No TFS customer data to be transferred
+		else  do {
+			do Runtime.setErrMSG("CIF",2165) quit:ER 
+			}
+		}
+	
+	if ER quit 
+	
+	// Check to make sure information is in TFSOPTS
+	set Z=Db.getOneRow("CIFCLASS","TFSOPTS")
+	set TFSOPT="TFSOPTS"
+	// ~p1 not found
+	if Z="" do Runtime.setErrMSG("CIF",3060,"TFSOPT") quit:ER 
+	
+	// Initialize arrays
+	do INIT(.BNKARRY,.CUSTARRY,.TFSTYPES)
+	
+	do GETFILE(.FILENAME)
+	
+	set MODE=UMODE
+	if UMODE=0 do INSERT
+	else  if UMODE=1 do UPDATE
+	do DAYEND
+	close FILENAME
+	do TRANSFER
+	set ER=0 do Db.delete("CIFTFS","ACN=:ACN") quit:ER 
+	
+	// TFS customer data transfer complete
+	do Runtime.setErrMSG("CIF",2164) quit:ER 
+	
+	quit 
+	
+CLEANUP // Private Deletes Entries in the CIFTFS journal file
+	
+	new X
+	do Db.delete("CIFTFS","SEQ=:SEQ") 
+	quit 
+
+GETFILE(FILENAME)
+
+	new DATE,FILE,PATH,TIME
+	set DATE=$$DAT^%ZM($P($H,",",1),"MM-DD-YY")
+	set DATE=$P(DATE,"-",1)_$P(DATE,"-",2)
+	set TIME=$$TIM^%ZM($P($H,",",2),"24:60")
+	set TIME=$P(TIME,":",1)_$P(TIME,":",2)
+	set PATH="SCAU$TFSI:"
+	set FILENAME=PATH_"TFC"_DATE_TIME_".CIF"
+	set FILE=$$FILE^%ZOPEN(FILENAME,"NEWV")
+	// Unable to open file ~p1
+	if 'FILE do Runtime.setErrMSG("CIF",2799,FILENAME) quit:ER 
+	
+	quit 
+	
+DAYEND // PRIVATE Writes information to DAYENDCIFTFS file
+
+	new X,XTJD
+	set XTJD=%SystemDate
+	do Db.insert("DAYENDCIFTFS","TJD,ACN,DATE,MODE",":XTJD,:ACN,:TJDDATE,:MODE")
+	quit
+
+	
+
+vSIG()	quit "59886^43617^Sanchez SCM Administrator^22249"	// Signature - LTD^TIME^USER^SIZE

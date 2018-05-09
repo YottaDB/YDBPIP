@@ -1,0 +1,1027 @@
+TTXFMT	
+	/*
+	       ORIG: Michael Winigrad
+	       DESC:
+	
+	   If this inclearing is going to create transaction that are going to
+	   use the transaction source field for processing then use this guide
+	   to aid in the formating of the TSO local variable.
+	
+	   create a local array i.e. ARRAY with the key being a valid entry
+	   from ctbl table TSO and the data being the value for the source.
+	   then make a call to IN^UTSO(.ARRAY,TSO) this will load the values
+	   from the local array into the local variable TSO.  TSO is what will be
+	   filed into the transaction.
+	            example:
+	
+	        create a float hold transaction for 10 days
+	      S ARRAY("KEY")=7
+	      S ARRAY("DAYS")=10
+	      D IN^UTSO(.ARRAY,TSO)
+	
+	   after the call to UTSO   TSO="KEY#7~DAYS#10"
+	
+	   If you have a value in TSO and you need to know the source
+	   here is what to do:
+	      S ARRAY="",TSO=ttx.tso
+	      D OUT^UTSO(.ARRAY,TSO)
+	   after the call to UTSO
+	
+	      ARRAY("KEY")=7
+	      ARRAY("DAYS")=10
+	
+	  ------Revision History------------------------------------------------
+	  07/18/06 - RussellDS - CR22121
+  		Modified to allow call to FILE^%ZOPEN to consider character
+  		set exceptions for Unicode
+	  
+	  03/15/06 - SATYANAS - 19687
+	  	Changed the Code for the below sections to fix the run time error
+	  	while exectuing the Function TTXINI. Replaced "|" by $C(9) from all the .piece() method. 
+	  	Scoped the variables properly, because it was throwing the undefined runtime error. 
+	  	Removed all the call from the dummy sections.
+
+		MOUNT	: Removed the declaration of RECSIZE because it is nowhere used. 
+			  Removed the condition if 'READER.exists() and directly set NREC.
+		  
+		CONT	: Added the condition if 'EOT,'REC.isNull() to avoid when the 
+			  REC value is blank. Otherwise it is throwing the error 
+			  NOTEXTRINSIC in %ZREAD routine.
+
+		BCHINIT	: Replaced the .get() method by .exists() method, 
+			  because it is giving the different value at the time of debugging. 
+			  That's what the conditions are failed. Added .getMode() condition 
+			  for the table TTXUID, while it is getting the record from this table.
+
+		BCHEND	: Added the .getMode() condition for INCTAPEB and TTXUID while it is getting the 
+			  record from this table. Replaced the .get() method by .exists() method.
+		
+		TTXFILE	: Set OCID and DISC to "", because it was throwing the undefined runtime error.
+
+		%UID	: Redeclare the BRCD as public.
+
+		END	: Replaced the Db.select() of SCAU by Db.getRecord(), because it is selecting 
+			  the record directly from the table SCAU by using its primary key.
+			  Added set inctape.tapenum=TAPENUM, because TAPENUM is the primary key for the
+			  table INCTAPE.
+
+		DUPBCH	: Use %INST instead of INST, because it is throwing the undefined error 
+			  for INST. Added the .getMode() condition for the table INCINDEX, 
+			  while it is getting the record.
+	  
+	  02/03/06 - KELLYP - CR 17423
+	        Modified DUPBCH section to remove the text "ORDER BY" from the 
+	        order by clause in a Db.select method call.
+	  
+	  12/27/05 - PRAKASHJ - 17423
+	  	Removed depricated warnings and scoped variables.
+	  	
+	  06/23/03 - GRAY - 51351
+		Modified to remove toArray and fromArray methods used
+		against the file INCINDEX.  The column structure for this
+		file was modified.  Also, removed the toArray/fromArray
+		methods from being used for TTX and TTXSRT.
+		
+		Also, included roll forward changes as follows:
+
+	   	06/18/02 - MYERSK - 50884
+		Roll forward of ARQ 48421 and replaced %UserID in Db.select
+		where clauses with %UID since PSL compiler doesn't do this
+		automatically.
+
+		Added functionality to format duplicate batches and log
+		error if no trailer record was processed. Changes included:
+
+		In FILINIT section set DUPFLG=CTBLINC.DUPFLG and CTL=0
+		In BCHINIT section, BRCD and TRNSRT are now pulled from Z array.
+		In %UID section, BRCD and TRNSRT are now stored in Z array.
+		In END section, TTXUID.BADTTX or TTXSRTUID.BADTTX now
+		    being set for all dates processed by the inclearing
+		    if CTL=1 (i.e. Missing Trailer Record)
+		In DUPBCH section, modifications made to not kill out
+		    TTX/TTXSRT entries for duplicate batches if
+		    CTBLINC.DUPBCH is 1. BADTTX flag will still be set
+
+		If a formatting program wants to generate an error when
+	            a trailer record is not received, the variable CTL should
+		    be set to 1 in the section that processes the header record
+		    and CTL should be set to 0 in the section that processes
+		    the trailer record.  See ACHIN for an example
+
+	   02/06/02 - SCOTTC - 43583
+		Convert to PSL.  Remove history prior to 2001.
+		Removed EXCFILE section and the call to it in the LOGERR
+		section.  TTXEXC was obsoleted in V5.0.  Exceptions are
+		logged in INCTTXBADBCH and subsequently printed on the 
+		Teller Report; TTXDIS.
+		
+	   10/14/01 - OFALTR - 44561
+	        Modified section TTXFILE to set piece 13 of ITC to 1 if
+	        $G(ITC13)=1, Removal of Permanent Holds.
+	
+	   06/01/01 - OFALTR - 45540
+	        Modified the BCHINIT Section to include TTXUID.LPSEQ value
+	        when determining TRC.
+	
+
+	*/
+	do FILINIT
+	
+	quit
+	
+FILINIT	// File initialization
+
+	//   set error trap
+
+	type public Boolean ER
+	type Boolean DUPFLG
+	type Number BCHCNT,BCHCR,BCHDR,BCHNUM,EOT,ERR,QER,FILCNT,FILCR,FILDR,RECCNT
+	type Number CTL,INITFLG,REJBCH,REJCR,REJDR,TYPEPOS1,TYPEPOS2
+	type Date TRANDATE,TRANTIME
+	type String KEY2,KEY3,CRCD,CROFF,DROFF,SPR
+	type public String %ZTSEQ,%SAVE,ET,ERRORMSG,GL,NREC,Z,OREC
+	type public String ORIGIN,ORECTYPE,REC,RECTYPE,RM,SRC,TFMT,UFILINIT
+	
+
+	catch vERROR {
+		set ET=vERROR.type
+		set ERRORMSG=vERROR.description
+		if ET["%GTM-" do ZE^UTLERR quit
+		if $TLevel do Runtime.rollback()
+		set ET=ET_"-"_vERROR.thrownAt
+		// System error # ~p1, contact system manager
+		do ZE^UTLERR set RM=$$^MSG("6747",%ZTSEQ)
+		do ZTC
+		}
+
+	// Default parameters
+	set TFMT="EBCDIC/FIXED/RECORD=94/BLOCK=940"
+	
+	set (BCHCR,BCHDR,BCHCNT,EOT,ERR,FILCR,FILDR,FILCNT,INITFLG)=0
+	set (QER,RECCNT,REJBCH,REJDR,REJCR,TRANDATE,TRANTIME)=0
+	set (BCHNUM,TYPEPOS1,TYPEPOS2)=1
+	set (CRCD,ORIGIN,SPR,DROFF,CROFF)=""
+	set (KEY2,KEY3)="*"
+	
+        /* 50884 - myersk
+           Determine if duplicate batches should be formatted and set CTL to 0
+	*/
+	type RecordCTBLINC ctblinc=Db.getRecord("CTBLINC",SRC)
+	set DUPFLG=+ctblinc.dupflg
+	set CTL=0
+
+	kill %SAVE,ER,GL,NREC,OREC,ORECTYPE,REC,RECTYPE,RM,Z
+	// User defined file initialization
+	if '$T(UFILINIT).isNull() do UFILINIT        
+	do MOUNT
+	quit
+	
+MOUNT	// Mount the tape
+
+	type public Boolean ER
+	type public Number TFMT,QER,RECSIZ
+	type public String %TDRV,IODUMP,MODE,NREC,RM,POSTREAD,PREOPEN,REC,READER,TDRV,EOT
+	type public IO IO
+	type String MSG,X
+	
+	
+	do:'$T(PREOPEN).isNull() PREOPEN quit:ER.get() 
+	
+	if MODE="TAPE" do { quit:ER
+		do ENT^%ZMOUNT 
+		if ER do ZTC quit
+		do PPTDRV^%ZINIT(%TDRV,.TDRV)
+		}
+
+	if MODE="RMS" do {
+		
+		type String PARAMS
+		
+		set PARAMS = "READ"
+		if $$VALID^%ZRTNS("UCIOENCD") do {
+		
+			// Accept warning if ^UCIOENCD does not exist
+			#ACCEPT Date=07/26/06; Pgm=RussellDS; CR=22121; Group=MISMATCH
+			type String CHARSET = $$^UCIOENCD("Routine", "BCHGLXFR", "*", "*")
+		
+			if 'CHARSET.isNull() set PARAMS = PARAMS_"/ICHSET="_CHARSET
+		}
+		
+		set X=$$FILE^%ZOPEN(TDRV,PARAMS,1,RECSIZ.get())
+	}
+	
+	if MODE="TAPE" set X=$$TAPE^%ZOPEN(TDRV,TFMT)
+	
+	if 'X do { quit
+		set ER=1 
+		set RM=X.piece($C(9),2) 
+		do ZTC
+		}	
+	// Master control section
+	
+	// File processing started at ~p1
+	set MSG=$$^MSG("5130",$$TIM^%ZM)
+	
+	// I18N=OFF
+	use 0 write !!,$$MSG^%TRMVT(MSG)
+	
+	// I18N=ON
+	set REC=$$^%ZREAD(TDRV,.READER) 
+	
+	if READER.get() do { quit:QER 
+		do ZTB
+		do CONT
+		}
+		
+	// I18N=OFF
+	if IODUMP.exists() use IODUMP write REC,!
+			
+	// End of tape control
+
+	for  do { quit:(QER)
+		
+		if EOT do { quit
+			if '$T(POSTREAD).isNull() do POSTREAD
+			do END
+			set QER=1
+			}
+			
+		// Record reader
+		set NREC=$$^%ZREAD(TDRV,.READER) 
+		if READER do { quit:QER
+			do ZTB
+			}
+		else  do {
+			// I18N=OFF
+			//write to dumpfile
+			if IODUMP.exists() use IODUMP write NREC,!
+			// I18N=ON
+			}	
+		
+		do CONT
+	}
+	quit
+	
+	
+CONT	// Determine the record type code
+
+	type String RECTYPE,CHKTYP,CRCD,VDT,BCRCD,BSEAMT,CUSTCD,MULT,RATE,TRESREF
+	type public String REC,%MCP,NREC,OREC,ORECTYPE
+	type public Number ERR,RECCNT,TYPEPOS1,TYPEPOS2
+	
+	if 'EOT,'REC.isNull() set RECTYPE=REC.extract(TYPEPOS1,TYPEPOS2) 
+	else  set RECTYPE=""
+	
+	set RECCNT=RECCNT+1
+	//  records have been processed at ~p1
+	//I18N=OFF
+	if RECCNT#100=0 use 0 write !,RECCNT,$$^MSG("5126",$$TIM^%ZM)
+	//I18N=ON
+		
+	// Init TTX fields that are not required
+	if %MCP set (BCRCD,BSEAMT,CUSTCD,MULT,RATE,TRESREF)="" 
+	set (CHKTYP,CRCD,VDT)=""	
+	
+	// Execute the all record section
+	do ALLREC
+		
+	// Error control
+	if ERR do END quit
+	
+	// Execute the record menu section
+	do RECCALL
+	
+	// Error control
+	if ERR do END quit
+	
+	// Transfer current record to old record
+	set ORECTYPE=RECTYPE 
+	set OREC=REC 
+	set REC=NREC
+	quit
+
+
+	// vvvvvvvvvvvvvvv CUSTOM CODE SECTION vvvvvvvvvvvvvvvvvvvv
+	
+FMT	// Compiled from ^CTBL("INC",SRC,LINE)
+	/*
+	
+	   ^^^^^^^^^^^^^^^ CUSTOM CODE SECTION ^^^^^^^^^^^^^^^^^^^^
+	*/
+	
+BCHINIT	// Batch initialization
+
+	type public Boolean ER
+	type public Date IDXEFD
+	type public Number BCHNUM,BRCD,TAPENUM,TRNSRT
+	type public Date TRANDATE,TRANTIME
+	type public String ERRMSG,%INST,%SAVE,%NODE,ETC,OFFSET,UBCHINIT,SRC,TRC,TTXUID,TJD(),UID,Z(,)
+	type Date BCHEFD
+	type Number BCHCR,BADTTX,BCHDR,BCHCNT
+	type String DISC,OCID,TCMT,TSO
+
+	// Protect subroutine from undefined variables
+	if '%INST.exists() do { quit 
+		// INSTITUTION DIRECTORY IS NOT DEFINED
+		set ERRMSG=$$^MSG("5131")
+		do LOGERR
+		}
+	
+	if '(%EffectiveDate) do { quit 
+		// EFFECTIVE DATE IS NOT DEFINED
+		set ERRMSG=$$^MSG("5128")
+		do LOGERR
+		}
+	
+	// Check for incomplete end of batch
+	if %SAVE.exists() do FRCEND
+	
+	set (DISC,OCID,TCMT,%UserStation,TSO)=""
+	set (BCHCR,BCHDR,BCHCNT)=0
+	set UID=%UserID
+	kill ETC,TRC,OFFSET
+	
+	// Increment the batch counter
+	set BCHNUM=Db.nextVal("INCTAPEB","TAPENUM")
+	set BCHEFD="" 
+	set IDXEFD=%EffectiveDate
+	
+
+	if 'TJD(%INST).exists() set TJD(%INST)=%SystemDate
+	if %EffectiveDate<TJD(%INST) do {
+		set BCHEFD=%EffectiveDate
+		set EFD=TJD(%INST)
+		}
+
+	// Init Teller
+	// 50884 - myersk - Pull BRCD and TRNSRT from Z array
+	if Z(%INST,%EffectiveDate).exists() do {
+		set %UserID=+Z(%INST,%EffectiveDate)
+		set BRCD=Z(%INST,%EffectiveDate).piece($C(9),2)
+		set TRNSRT=Z(%INST,%EffectiveDate).piece($C(9),3)
+		}
+	else  do %UID                          
+	
+	// Save variables for incomplete batch usage
+	set %SAVE=%INST_$C(9)_EFD_$C(9)_IDXEFD
+	
+	// Determine the starting ^TTX sequence number
+	if 'TRNSRT do { if 1
+		set TRC=Db.currVal("TTX","EFD,BRCD,UID")
+		if TRC.isNull() do { quit:ER
+			type RecordTTXUID ttxuid=Db.getRecord("TTXUID","TJD=:EFD,BRCD=:BRCD,UID=:UID",1)
+			if ttxuid.getMode() do {
+				set TRC=ttxuid.lpseq*1000
+				set BADTTX=ttxuid.badttx
+				}
+			}
+		}
+	else  do {
+		type RecordTTXSRTUID ttxuid=Db.getRecord("TTXSRTUID","SJD=:EFD,BRCD=:BRCD,UID=:UID",1)
+		if ttxuid.getMode() do {
+			set TRC=ttxuid.lpseq
+			set BADTTX=ttxuid.badttx
+			}	
+		}
+
+	type RecordINCTAPEB existtapbch=Db.getRecord("INCTAPEB","TAPENUM=:TAPENUM,BCHNUM=:BCHNUM",1)
+	if 'existtapbch.getMode() do {
+		
+		type RecordINCTAPEB inctapeb=Class.new("RecordINCTAPEB")
+		// Record the batch in the ^INC global
+		set inctapeb.tapenum=TAPENUM
+		set inctapeb.bchnum=BCHNUM
+		set inctapeb.src=SRC
+		set inctapeb.inst=%INST_$S('%NODE.isNull():"-"_%NODE,1:"")
+		set inctapeb.efdt=%EffectiveDate
+		set inctapeb.brcd=BRCD
+		set inctapeb.uid=%UserID
+		set inctapeb.starttrc=(((TRC\1000)+1)*1000)+1
+		set inctapeb.trandate=TRANDATE
+		set inctapeb.trantime=TRANTIME
+		set inctapeb.idxefd=IDXEFD
+
+		do inctapeb.bypassSave()
+		}
+		
+	// Call user defined batch init
+	if '$T(UBCHINIT).isNull() do UBCHINIT
+	quit 
+	
+BCHEND  // Batch finish up
+	
+	// Protect subroutine from undefined variables
+
+	type public Number BCHCR,BCHDR,BCHNUM,SPR,TAPENUM,BCHCNT,TRNSRT
+	type public String %INST,BCHID,BRCD,OREC,UID,TRC,MULTEFD,IODUMP
+	type public Date EFD
+	type String NVAL
+
+	set EFD=%EffectiveDate
+	if '%INST.exists()!'EFD.exists() do { quit 
+		set BCHNUM=Db.nextVal("INCTAPEB","TAPENUM")
+		kill %INST,EFD
+		}
+	
+	// Finish up the ^INC global
+	type RecordINCTAPEB inctapeb=Db.getRecord("INCTAPEB","TAPENUM=:TAPENUM,BCHNUM=:BCHNUM",1)
+	if inctapeb.getMode() do {
+	
+		set inctapeb.bchcnt=BCHCNT
+		set inctapeb.bchdr=BCHDR
+		set inctapeb.bchcr=BCHCR
+		set inctapeb.iodump=IODUMP.get()
+		if inctapeb.sts.isNull() set inctapeb.sts=2
+		set inctapeb.bchid=BCHID.get()
+		set inctapeb.spr=SPR
+
+		// Offset batch
+		if MULTEFD.get()'=1 do GL
+	
+		// Record the final TTX sequence number
+		if inctapeb.starttrc>TRC.get() do {
+			set inctapeb.starttrc=""
+			set inctapeb.endtrc=""
+			}
+
+		else  set inctapeb.endtrc=TRC
+		else  if TRNSRT do Db.update("TTXSRTUID","LPSEQ=:TRC","SJD=:EFD and BRCD=:BRCD and UID=:UID")
+	
+		do inctapeb.bypassSave()
+		}
+		
+	// Call duplicate batch checker
+	do DUPBCH
+
+	set NVAL=""
+	type RecordTTXUID ttxuid=Db.getRecord("TTXUID","TJD=:%EffectiveDate,BRCD=:BRCD,UID=:UID",1)
+	if ttxuid.getMode() do {
+		if ttxuid.badttx=0 do {
+			set ttxuid.badttx=NVAL
+			set ttxuid.pid=NVAL
+			set ttxuid.tjd=%EffectiveDate
+			set ttxuid.brcd=BRCD
+			set ttxuid.uid=UID
+
+			do ttxuid.bypassSave()
+			}
+		}
+		
+	do BCHEND1
+	quit
+	
+BCHEND1	
+	
+	type Number SEQ
+	type public Number BCHNUM,TAPENUM
+	type public String %INST,%SAVE,TRC,UBCHEND
+	
+	set SEQ=0
+	do Db.delete("INCBADTTXBCH","TAPENUM=:TAPENUM and BCHNUM=:BCHNUM and SEQ=:TRC")
+
+	// Get ready for the next batch
+	set BCHNUM=Db.nextVal("INCTAPEB","TAPENUM")
+
+	kill %INST,%EffectiveDate,%SAVE
+	
+	// User defined batch initialization
+	if '$T(UBCHEND).isNull() do UBCHEND
+	quit 
+	
+public TTXFILE	 // File record in ^TTX
+
+	type public Boolean ER
+	type public Number BCHNUM,OAMT,TAMT,TRC,CID,TRNSRT,TCMT
+	type public Date BCHEFD
+	type public String BRCD,CRCD,CROFF,DCSRT,DROFF,ETC,TLO,TSO,KEY2,KEY3,OFFSET(,,,,)
+	type public String AMTSRT,CIDSRT,%INST,%MCP,ITC13,OCC,OCID,REV,SPR,DISC,VDT,CHKTYP,RESTART
+	type Number QUIT
+	type String ITC,OCRCD,RESTTX,%TRN,UTSO()
+	
+	if '%INST.exists() do { quit 
+
+		// INSTITUTION DIRECTORY IS NOT DEFINED
+		do Runtime.setErrMSG("TTX","5131",)
+		do LOGERR
+		}
+	
+	if '(%EffectiveDate) do { quit 
+		// EFFECTIVE DATE IS NOT DEFINED
+		do Runtime.setErrMSG("TTX","5128",)
+		do LOGERR
+		}
+	
+	// Determine internal tran code
+	set ITC=""
+	set OCID=""
+	set DISC=""
+	type ResultSet rs=Db.select("ITC","TRN","ETC=:ETC")
+	if rs.next() set ITC=rs.getCol("ITC") quit:ER
+	
+	// Transaction is a reversal.
+	if REV.get()=1 set ITC=$$ITC^TTXEXT(ITC,12,1)    
+	// Removal of Permanent Holds
+	if ITC13.get()=1 set ITC=$$ITC^TTXEXT(ITC,13,1)  
+	
+	//reinitialize teller info
+	if OCC.isNull() do %UID                      
+	
+	// Default currency code
+	set:CRCD.isNull() CRCD=%SystemCurrency
+	set:OCRCD.get().isNull() OCRCD=CRCD            
+	if 'OAMT.exists() set OAMT=TAMT
+	if 'OFFSET(%CRCD,KEY2,KEY3,OCC).exists() set OFFSET(%CRCD,KEY2,KEY3,OCC)=DROFF_$C(9)_"RODR"_$C(9)_CROFF_$C(9)_"ROCR"
+	//09/05/95
+	if ITC.extract()=0 set OFFSET(%CRCD,KEY2,KEY3,OCC,1)=OFFSET(%CRCD,KEY2,KEY3,OCC,1).get()+OAMT
+	//09/05/95
+	if ITC.extract()=1 set OFFSET(%CRCD,KEY2,KEY3,OCC,0)=OFFSET(%CRCD,KEY2,KEY3,OCC,0).get()+OAMT
+	kill OAMT,OCRCD
+	
+	/* 
+	PAR RESTART if in restart mode and no duplicate records have been
+	found, search for the current record. If a record has
+	to be filed then there is no need to search ^TTX again.
+	*/
+
+	set QUIT=0
+	if RESTART.get()=1&(RESTTX.get()=0) do FINDTTX
+	quit:QUIT=1 
+	set RESTTX=1
+	
+	/*
+	Increment the ^TTX sequence number
+	File transactions on one screen unless source custom code has
+	variable screen set to indicate that each transaction should be
+	filed to separate screens.
+	
+	If a sort option is being used the following variables can be set up
+	to force transactions to be on the same screen:
+	
+	 OCID = Current Account Number
+	       DCSRT = Debit Credit sort (previous value)
+	       CIDSRT = Account Number Sort (previous value)
+	       AMTSRT = Amount Sort (previous value)
+	
+	This will allow a Transaction and it's offset to be filed consecutively
+	EXAMPLE:
+	 Transaction 1: CID=123, DC=1, AMT=$50.00
+	 Transaction 2: CID=456, DC=0, AMT=$50.00
+	 OCID=456, DCSRT=1,CIDSRT=123,AMTSRT=50.00
+	
+	This allows the 2nd transaction to be processed with the 1st.
+	The keys are set up in TTXSRT as a credit but the record filed to TTX
+	is still a debit.
+	
+	*/
+	
+	if TRC#1000>100 set TRC=(((TRC\1000)+1)*1000)+1
+	else  do {
+		if OCID=CID set TRC=TRC+1 quit 
+		set TRC=(((TRC\1000)+1)*1000)+1
+		set OCID=CID
+		}
+	
+	do Db.update("INCTAPEB","ENDTRC=:TRC","TAPENUM=:TAPENUM AND BCHNUM=:BCHNUM")
+	if TRNSRT do Db.update("TTXSRTUID","LPSEQ=:TRC","SJD=:EFD AND BRCD=:BRCD AND UID=:UID")
+	
+	// Required data
+	set %TRN=CID_$C(9)_ITC_$C(9)_ETC_$C(9)_TAMT_$C(9)_BCHEFD_$C(9)_TLO_$C(9)_TSO
+	set %TRN=%TRN_$C(9)_TCMT_$C(9)_%CurrentDate_$C(9)_%CurrentTime
+	
+	// Optional data
+	// Spray number
+	if 'SPR.isNull() set %TRN.piece($C(9),14)=SPR
+	// Discretionary data
+	if 'DISC.isNull() do {
+		set UTSO("DISC1")=DISC.piece("#",1)
+		set UTSO("DISC2")=DISC.piece("#",2)
+		do IN^UTSO(.UTSO,.TSO)
+		set %TRN.piece($C(9),7)=TSO
+		}
+	
+	// Value Date
+	if 'VDT.isNull() set %TRN.piece($C(9),19)=VDT
+	// Override cost center
+	if 'OCC.isNull() set %TRN.piece($C(9),20)=OCC
+	// Reg CC check type
+	if 'CHKTYP.isNull() set %TRN.piece($C(9),22)=CHKTYP
+	if %MCP do TTXMCP(%TRN)
+	
+	// add logic to set ^TTXSRT when Teller Sort option has a value.
+	if 'TRNSRT do {
+		
+		type RecordTTX existttx=Db.getRecord("TTX","TJD=:EFD,BRCD=:BRCD,UID=:%UserID,TSEQ=:TRC",1)
+		if 'existttx.getMode() do {
+		
+			type RecordTTX ttx=Class.new("RecordTTX")
+			set ttx.uid=%UserID
+			set ttx.tjd=EFD
+			set ttx.brcd=BRCD
+			set ttx.tseq=TRC
+			set ttx.cid=CID
+			
+			set ttx.itc=%TRN.piece($C(9),2)
+			set ttx.etc=%TRN.piece($C(9),3)
+			set ttx.tamt=%TRN.piece($C(9),4)
+			set ttx.efd=%TRN.piece($C(9),5)
+			set ttx.tlo=%TRN.piece($C(9),6)
+			set ttx.tso=%TRN.piece($C(9),7)
+			set ttx.tcmt=%TRN.piece($C(9),8)
+			set ttx.cdt=%TRN.piece($C(9),9)
+			set ttx.tim=%TRN.piece($C(9),10)
+			set ttx.spr=%TRN.piece($C(9),14)
+			set ttx.crcd=%TRN.piece($C(9),17)
+			set ttx.rate=%TRN.piece($C(9),18)
+			set ttx.vdt=%TRN.piece($C(9),19)
+			set ttx.cc=%TRN.piece($C(9),20)
+			set ttx.chktyp=%TRN.piece($C(9),22)
+			set ttx.mult=%TRN.piece($C(9),24)
+			set ttx.bseamt=%TRN.piece($C(9),25)
+			set ttx.custcd=%TRN.piece($C(9),26)
+			set ttx.tresref=%TRN.piece($C(9),27)
+			set ttx.bcrcd=%TRN.piece($C(9),32)
+
+			// File record
+			do ttx.save()
+			}
+		}
+	else  do {
+		set DCSRT=DCSRT.get()
+		if DCSRT.isNull() set DCSRT=+$E(ITC)
+		set CIDSRT=CIDSRT.get()
+		if CIDSRT.isNull() set CIDSRT=CID
+		set AMTSRT=AMTSRT.get() 
+		if AMTSRT.isNull() set AMTSRT=+TAMT
+
+		type RecordTTXSRT ttxsrt=Class.new("RecordTTXSRT")
+		set ttxsrt.uid=%UserID
+		set ttxsrt.sjd=%EffectiveDate
+		set ttxsrt.brcd=BRCD
+		set ttxsrt.tseq=TRC
+		set ttxsrt.dc=DCSRT
+		set ttxsrt.cidsrt=CIDSRT
+		set ttxsrt.amt=AMTSRT
+
+		set ttxsrt.itc=%TRN.piece($C(9),2)
+		set ttxsrt.etc=%TRN.piece($C(9),3)
+		set ttxsrt.tamt=%TRN.piece($C(9),4)
+		set ttxsrt.effdt=%TRN.piece($C(9),5)
+		set ttxsrt.tlo=%TRN.piece($C(9),6)
+		set ttxsrt.tso=%TRN.piece($C(9),7)
+		set ttxsrt.tcmt=%TRN.piece($C(9),8)
+		set ttxsrt.cdt=%TRN.piece($C(9),9)
+		set ttxsrt.tim=%TRN.piece($C(9),10)
+		set ttxsrt.spr=%TRN.piece($C(9),14)
+		set ttxsrt.crcd=%TRN.piece($C(9),17)
+		set ttxsrt.rate=%TRN.piece($C(9),18)
+		set ttxsrt.vdt=%TRN.piece($C(9),19)
+		set ttxsrt.cc=%TRN.piece($C(9),20)
+		set ttxsrt.chktyp=%TRN.piece($C(9),22)
+		set ttxsrt.mult=%TRN.piece($C(9),24)
+		set ttxsrt.bseamt=%TRN.piece($C(9),25)
+		set ttxsrt.custcd=%TRN.piece($C(9),26)
+		set ttxsrt.tresref=%TRN.piece($C(9),27)
+		set ttxsrt.bcrcd=%TRN.piece($C(9),32)
+
+		do ttxsrt.save()
+		}
+	
+	quit 
+	
+TTXMCP(%TRN)	// Multi-currency fields
+
+	type public Number BSEAMT,CUSTCD,TRNSRT
+	type public String CRCD,RATE,MULT,TRESREF,BCRCD,BRCD,OCC
+
+	if CRCD'=%SystemCurrency set %TRN.piece($C(9),17)=CRCD
+	if 'RATE.isNull() set %TRN.piece($C(9),18)=RATE
+	if 'MULT.isNull() set %TRN.piece($C(9),24)=MULT
+	if 'BSEAMT.isNull() set %TRN.piece($C(9),25)=BSEAMT
+	if 'CUSTCD.isNull() set %TRN.piece($C(9),26)=CUSTCD
+	if 'TRESREF.isNull() set %TRN.piece($C(9),27)=TRESREF
+	if 'BCRCD.isNull() set %TRN.piece($C(9),32)=BCRCD
+	quit 
+	
+%UID	// Initialize teller
+
+	type public Boolean ER
+	type public Number BRCD,OCC,TRNSRT
+	type public String %INST,Z(,)
+
+	type ResultSet rs=Db.select("BRCD,TELLER","CTBLINC","KEY=:SRC")
+	if rs.next() do {
+		set BRCD=rs.getCol("BRCD")
+		set %UserID=rs.getCol("TELLER")
+		}
+
+	type ResultSet rsbrcd=Db.select("CCDEF","UTBLBRCD","BRCD=:BRCD")
+	if rsbrcd.next() do {
+		set OCC=rsbrcd.getCol("CCDEF")
+		}
+	
+	// (Teller Transaction Sort Option)
+
+	type ResultSet rsscau=Db.select("TRNSRT","SCAU","UID=:%UserID")
+	if rsscau.next() do { quit:ER
+		set TRNSRT=rsscau.getCol("TRNSRT")
+		}			
+
+	set %UserID=%UserID.get()
+	set BRCD=BRCD.get()
+	set OCC=OCC.get()
+	set TRNSRT=TRNSRT.get()	
+	
+	set Z(%INST,%EffectiveDate)=%UserID_$C(9)_BRCD_$C(9)_TRNSRT
+
+	quit 
+	
+
+GL	// General Ledger Offset
+
+	type public Boolean ER
+	type public String BRCD
+	type String AN
+	
+	if ER.get()=1 quit                       
+	set AN="OFFSET" set %UserStation=""
+	do OFFSET^UMSC(%EffectiveDate,BRCD,%UserID,.AN,0)
+	quit 
+	
+
+END	// Finish up
+	
+	type public Boolean ER
+	type public Number ERR,QER,CTL,SRC,BCHNUM,FILCNT,FILDR,FILCR,REJBCH,REJDR,REJCR,TAPENUM,TRNSRT
+	type public Date TRANDATE
+	type public String ERRMSG,%FN,IO,%SAVE,%ZTSEQ,CUSID,FNDESC,FRCEND,TRANTIME,OPERCMT,ORIGIN,Z()
+	type Number XTRNSRT
+	type String XINST,XEFD,XUID,XBRCD
+	
+	// Check for incomplete end of batch
+	if %SAVE.exists() do FRCEND
+	
+	if TRNSRT.get().isNull() do {
+		type RecordSCAU scau=Db.getRecord("SCAU","UID=:%UserID",1)
+		if scau.getMode() set TRNSRT=scau.trnsrt
+		}
+	// Record the file totals in ^INC
+	type RecordINCTAPE inctape=Class.new("RecordINCTAPE")
+	set inctape.tapenum=TAPENUM
+	set inctape.src=SRC
+	set inctape.trandate=TRANDATE
+	set inctape.trantime=TRANTIME
+	set inctape.bchcnt=BCHNUM-1
+	set inctape.filcnt=FILCNT
+	set inctape.fildr=FILDR
+	set inctape.filcr=FILCR
+	set inctape.opercmt=OPERCMT
+	set inctape.origin=ORIGIN
+	set inctape.rejbch=REJBCH
+	set inctape.rejdr=REJDR
+	set inctape.rejcr=REJCR
+	set inctape.trnsrt=TRNSRT
+
+	do inctape.save()
+	
+	if 'ERR,CTL do {
+		// File ~p1 is incomplete. Missing trailer record.
+		set ERRMSG=$$^MSG(5153,TAPENUM)
+		do LOGERR
+		do LOG^UTLEXC(%FN,"*",FNDESC.get(),CUSID.get(),%ZTSEQ.get(),ERRMSG,"")
+		do DISPLAY^TPINERR
+		use 0 write !!,$$MSG^%TRMVT(ERRMSG)
+		set (XINST,XEFD)=""
+		for  set XINST=Z(XINST).order() quit:XINST.isNull()  do {
+			for  set XEFD=Z(XINST,XEFD).order() quit:XEFD.isNull()  do {
+				set XUID=+Z(XINST,XEFD)
+				set XBRCD=Z(XINST,XEFD).piece($C(9),2)
+				set XTRNSRT=Z(XINST,XEFD).piece($C(9),3)
+				if XTRNSRT do {
+					type RecordTTXSRTUID ttxsrt=Db.getRecord("TTXSRTUID","XEFD,XBRCD,XUID")
+					set ttxsrt.badttx=1
+					do ttxsrt.bypassSave()
+					}
+				else  do {
+					type RecordTTXUID ttxuid=Db.getRecord("TTXUID","XEFD,XBRCD,XUID")
+					set ttxuid.badttx=1
+					do ttxuid.bypassSave()
+					}
+				}
+			}
+		}
+
+	// Print the control report
+	do ^TTXDIS
+	set QER=1
+	do EXIT
+	quit
+	
+DUPBCH  // Check for duplicate batch
+	
+	type public Number BCHCR,BCHDR,BCHCNT,BCHNUM,TAPENUM,TRNSRT,X
+	type public Date IDXEFD,EFD,EFT
+	type public Boolean DUPFLG
+	type public String ERRMSG,%FN,%ZTSEQ,%INST,IO,%UID,BCHID,CUSID,FNDESC,OREC,SRC,SPR
+	type public String BRCD,REJDR,REJCR,STS,REJBCH,FILEBCH,SRTOPT
+	type Number XFILEBCH,XTAPENUM,XBCHNUM
+	type String INDEX,ENDTRC
+	
+		
+	set INDEX=SRC_"^"_IDXEFD_"^"_BCHCNT_"^"_BCHDR_"^"_BCHCR
+	set INDEX=INDEX_"^"_BCHID.get()_"^"_SPR
+	
+	type RecordINCINDEX incindex=Db.getRecord("INCINDEX","INST=:%INST,INDEX=:INDEX",1)
+	if 'incindex.getMode() do { quit
+		type RecordINCINDEX incindex=Class.new("RecordINCINDEX")
+		set incindex.inst=%INST
+		set incindex.index=INDEX
+		set incindex.filebch=TAPENUM_"#"_BCHNUM
+		do incindex.bypassSave()
+		}
+
+	// Ignore batches with zero amounts
+	if (BCHDR+BCHCR)=0 quit
+
+	//new XBCHNUM,XFILEBCH,XTAPENUM,incindx
+	type RecordINCINDEX incindx=Db.getRecord("INCINDEX","INST=:%INST,INDEX=:INDEX",1)
+	if incindx.getMode() do {
+		set XFILEBCH=incindx.filebch
+		set XTAPENUM=(XFILEBCH.toString()).piece("#",1)
+		set XBCHNUM=(XFILEBCH.toString()).piece("#",2)
+		}
+		
+	// Set sort option (SRTOPT) for call into TPINERR
+	set SRTOPT=TRNSRT.get()
+
+	// File ~p1 Batch ~p2 is a duplicate of file ~p3 batch ~p4
+	set ERRMSG=$$^MSG("5152",TAPENUM,BCHNUM,XTAPENUM,XBCHNUM)
+	do LOG^UTLEXC(%FN,"*",FNDESC.get(),CUSID.get(),%ZTSEQ.get(),ERRMSG,"")
+	do DISPLAY^TPINERR
+        use 0 write !!,$$MSG^%TRMVT(ERRMSG)
+	if 'DUPFLG do {
+		// Not formatting duplicate batches - Kill TTX entries
+		set STS=1
+		do KILBCH^TPINERR
+		set REJDR=REJDR+BCHDR
+		set REJCR=REJCR+BCHCR
+		set REJBCH=REJBCH+1
+	
+		type RecordINCINDEX existinstdx=Db.getRecord("INCINDEX","INST=:%INST,INDEX=:INDEX",1)
+		if 'existinstdx.getMode() do {
+		
+			type RecordINCINDEX incindex=Class.new("RecordINCINDEX")
+			set incindex.inst=%INST
+			set incindex.index=INDEX
+			set incindex.filebch=XTAPENUM_"#"_XBCHNUM
+
+			do incindex.bypassSave()
+			}
+
+		do Db.delete("INCTAPEB","TAPENUM=:XTAPENUM and BCHNUM=:XBCHNUM")
+
+		// Added logic to reset top level of TTXSRT with the last
+		// TRC used if it is a duplicate batch.
+		if TRNSRT do {
+
+			for  do { quit:X=1
+				type ResultSet rs=Db.select("ENDTRC,BCHNUM","INCTAPEB","TAPENUM=:TAPENUM","TAPENUM DESC")
+				if rs.isEmpty() set TAPENUM=TAPENUM-1 quit
+				if rs.next() do {
+					set ENDTRC=rs.getCol("ENDTRC")
+					set BCHNUM=rs.getCol("BCHNUM")
+					do Db.update("TTXSRTUID","LPSEQ=:ENDTRC","SJD=:EFD and BRCD=:TBRCD and UID=:UID")
+					set X=1
+					}
+				}
+			}
+		}
+
+	else  do {
+		// Formatting TTX entries, but still set BADTTX flag on TTXUID
+		set INDEX=incindx.filebch
+		set INDEX=INDEX_"~"_TAPENUM_"#"_BCHNUM
+		do incindx.bypassSave()
+
+		if TRNSRT do {
+			type RecordTTXSRTUID ttxsrt=Db.getRecord("TTXSRTUID","EFD,BRCD,%UID")
+			set ttxsrt.badttx=1
+			do ttxsrt.bypassSave()
+			}
+		else  do {
+			type RecordTTXUID ttxuid=Db.getRecord("TTXUID","EFT,BRCD,%UID")
+			set ttxuid.badttx=1
+			do ttxuid.bypassSave()
+			}
+		do ^TPINERR
+		}
+	quit 
+	
+FRCEND	// Force batch end
+
+	type public String %SAVE,SUBCAT
+	type Date IDXEFD
+	type String %INST
+	
+	set %INST=%SAVE.piece($C(9),1) 
+	set %EffectiveDate=%SAVE.piece($C(9),2)
+	set IDXEFD=%SAVE.piece($C(9),3)
+	do BCHEND
+	quit 
+	
+LOGERR	// Log error in exception file
+
+	type String SUBCAT
+
+	set SUBCAT="EXC"
+	do ^TPINERR
+	quit 
+	
+ZTB	// READ error
+
+	type public String EOT,NREC,RM,READER
+		
+	if +READER.get()=1 set NREC="" set EOT=1 quit
+	set RM=READER.piece($C(9),2)
+	do ZTC
+	quit
+	
+ZTC	// Error during mounting
+
+	type public String %SAVE,ERRMSG,RM,TDRV
+	type Number QED
+	
+	set QED=1 
+	if %SAVE.exists() do FRCEND quit
+	
+	// PROGRAM ABORT - ~p1
+	set ERRMSG=$$^MSG("3654",RM)
+	do ABORT^TPINERR
+	do EXIT
+	quit
+
+
+EXIT	// Close files and dismount tape
+
+	type public String IODUMP,IO,MODE,TDRV
+	type String XIO
+	
+	close TDRV
+	if IODUMP.exists() do {
+		set XIO=IO 
+		set IO=IODUMP 
+		do CLOSE^SCAIO 
+		set IO=XIO 
+		kill XIO
+		}
+	if MODE="TAPE" do ENT^%ZDISMOU
+	
+	quit 
+
+	
+FINDTTX	// RESTART build a cross reference of TTX records
+	/*
+	        sorted by the GIRO transaction number. If the record
+	        exists, don't file a new one.
+	*/
+
+	type Number QUIT
+	type String SEQ,TSO,TTXXREF,NVAL,SEQ
+	type public String RESTSO,G5
+	
+	if '(TTXXREF("").order()).isNull() do {
+		set NVAL=""
+		do Db.update("TTXUID","BADTTX=:NVAL","TJD=:EFD and BRCD=:BRCD and UID=:UID")
+		set SEQ=""
+		type ResultSet rs=Db.select("TSEQ,TSO","TTX","EFD=:EFD and BRCD=:BRCD and UID=:UID")
+		if rs.isEmpty() quit
+		while rs.next() do {
+			set SEQ=rs.getCol("TSEQ")
+			set TSO=rs.getCol("TSO")
+			do OUT^UTSO(.RESTSO,TSO)
+			quit:RESTSO("ORIGTRNO").get().isNull() 
+			set TTXXREF(RESTSO("ORIGTRNO"))=""
+			}
+		}
+
+	if TTXXREF(G5.get()).exists() set QUIT=1
+	quit 
+
+	// Do Not Delete!
+
+%STOPLOD	// Stop %ZRTNLOD from this point on down
+	
+ALLREC		// Dummy line reference for GT.M
+
+RECCALL		// Dummy line reference for GT.M
+	
+UBCHEND		// Dummy line reference for GT.M
+
+UBCHINIT	// Dummy line reference for GT.M
+
+UFILINIT	// Dummy line reference for GT.M
+
+POSTREAD	// Dummy line reference for GT.M
+
+PREOPEN		// Dummy line reference for GT.M
+
+vSIG()	quit "60472^45706^Dan Russell^27336"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,354 @@
+COMACCR //Batch BCHCOMACCR - Commission Accrual Processing
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 08/30/2007 15:07 - joynerd
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHCOMACCR Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit quit
+ do JOBMGR^BCHUTL(%FN,"BCHCOMACCR",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(CPLAN) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHCOMACCR","*","",CPLAN.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,CPLAN)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHCOMACCR","*","",CPLAN.get(),"",et)
+ }
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,CPLAN) //
+ 	new ALC,QUERY
+	new AGENT,TPD,CALCFRE,FRE,NJD,JD,DIM,CAMT,EXPGL,PAYGL,INTRM,CRCD
+
+        set TPD=%SystemDate
+	do SOURCE^BCHSOURC("BOFF","COMM",.%UserID,.BRCD,.%UserClass)
+ 
+	// Get commission plan detail
+ 	type RecordUTBLCOMPLN compln=Db.getRecord("UTBLCOMPLN","CPLAN")
+	
+	set FRE=compln.calcfre
+
+	// check the frequency of the commission plan.  If it is greater than
+	// one month, continue.  Otherwise, quit
+
+	set JD=$$NJD^UFRE(TPD,FRE)
+	set DIM=$$NODM^SCADAT(JD,1)
+	if (NJD-JD)'>DIM quit
+
+	// At this point, the frequency is greater than monthly so continue
+
+	set ALC=compln.alc
+	set QUERY=compln.query
+	set EXPGL=compln.expgl	
+	
+ 	// Loop through the commission plan,agent cross reference file and 
+	// get each agent
+
+ 	type ResultSet agntrs=Db.select("AGENT","AGENTCOM","CPLAN=:CPLAN")
+	while agntrs.next() do {
+		new OFF,AN,OFF1
+ 		
+ 		set AGENT=agntrs.getCol("AGENT")
+        	
+        	do AGENT
+
+		// Now the ARRAY has all transaction information.  Call UMSC 
+		// to generate all transactions
+		set AN="OFF"
+		do OFFSET^UMSC(TPD,AGENT,%UID,AN,1,0)
+		set AN="OFF1"
+		do OFFSET^UMSC(TPD,AGENT,%UID,AN,1,0,TPD+1)
+		}
+
+ 	quit
+
+	//--------------------------------------------------------------------
+AGENT 	// Calculations for each agent
+	//--------------------------------------------------------------------
+
+	new COMAMT,X,CAMT,AGNCYAMT,GLSC,TYPE,CC
+
+	// get agent detail
+	if 'Db.isDefined("AGENT","AGENT") quit  // If agent doesn't exist, quit	
+	type RecordAGENT agentrec=Db.getRecord("AGENT","AGENT")
+	set INTRM=agentrec.intrm
+	set CRCD=agentrec.crcd
+
+	// Set the payable GL account based on the GL set code of the 
+	// interum settlement account
+
+	type ResultSet glscrs=Db.select("GLSC,TYPE,CC","ACN","CID=:INTRM")
+        if glscrs.next() do {
+		set GLSC=glscrs.getCol(1)
+		set TYPE=glscrs.getCol(2)
+		set CC=glscrs.getCol(3)
+		}
+
+	type ResultSet payrs=Db.select("DGL1","UTBLGLSC","GLSC=:GLSC")
+        if payrs.next() set PAYGL=payrs.getCol(1)
+	
+	set COMAMT=0			// initialize commission amount
+
+	If ALC set X=$$CID(.agentrec)  Quit		   // if account level, call account level
+	Else  set X=$$EXT^COMPFT(CPLAN,AGENT,0)   // call portfolio calculation process
+	
+	set CAMT=$P(X,"|",1)
+	set AGNCYAMT=$P(X,"|",2)
+	if (CAMT=0)!(AGNCYAMT=0) quit
+	set AMT=CAMT+AGNCYAMT	// file both at the same time
+
+	// set the amount into the array to file later
+	do SETARRAY(CRCD,GLSC,TYPE,CC,AMT,PAYGL,EXPGL)	
+
+	quit
+	
+	//--------------------------------------------------------------------
+CID(RecordAGENT agent)	// Account Level Calculations
+	//--------------------------------------------------------------------
+		
+	new CID,CAMT,AGNCYAMT,INDEX,RATE,AGNCYRT,AGNCYIND,AGNCY,X
+	new COMTOT,ACOMTOT,RTN
+
+	// Initialize the totals
+	set COMTOT=0
+	set ACOMTOT=0
+
+	// loop through the XBRCD cross reference file for accounts
+	type ResultSet cidrs=Db.select("CID","ACN","BOO=:AGENT")
+        if cidrs.isEmpty() quit 0   // no accounts tied to agent
+
+	// get the agency
+	set AGNCY=agent.agnum
+	type RecordAGENT agncy=Db.getRecord("AGENT","AGNCY")
+ 
+        while cidrs.next() do {
+                set CID=cidrs.getCol(1)
+		If '$$CHECKCID quit 	// quit if CID is not in query  
+
+		// Process any adjustment amounts
+		do ADJUST
+		set (RATE,INDEX,AGNCYRT,AGNCYIND)=""
+                set X=$$EXT^COMCID(CPLAN,CID,AGENT,EFD,.INDEX,.RATE,.AGNCYIND,.AGNCYRT)   //single account
+
+		// The amount will always be in the CRCD of the agent
+		set CAMT=$P(X,"|",1)
+		set AGNCYAMT=$P(X,"|",2)
+
+		// add the commission amounts to the agency's total
+		set COMTOT=COMTOT+CAMT
+		set ACOMTOT=ACOMTOT+AGNCYAMT
+		}
+
+	set RTN=COMTOT_"|"_ACOMTOT
+	
+	quit RTN 
+
+
+	//--------------------------------------------------------------------
+CHECKCID()	// Check to see if account is in query
+	//--------------------------------------------------------------------
+
+	// Call to the correct line tag in COMQRY to check
+	// and see if the account is in the query.
+
+	type String pgm,X
+	
+	if QUERY="" quit 1	; If no query is defined, then the CID is valid
+	set pgm="$$"_QUERY_"^COMQRY1()"
+	if @pgm quit 1
+
+ 	quit 0
+
+
+	//--------------------------------------------------------------------
+SETARRAY(CRCD,GLSC,TYPE,CC,AMT,PAYGL,EXPGL)  // Set the amounts into the array
+	//--------------------------------------------------------------------
+
+	// Set the array with the information passed in.  The array will be
+	// passed into OFFSET^UMSC to generate transactions later.
+
+	new DEBAMT,CRAMT,TSO,TCMT
+
+	set TSO=""
+        set TSO=$$FIELDIN^UTSO(TSO,"COMACR")
+        set TCMT=$$^MSG(3607)           // Commission Accrual
+	
+	if $D(OFF(CRCD,TYPE,GLSC,CC)) do {
+		// add the amounts to the existing totals
+		set DEBAMT=OFF(CRCD,TYPE,GLSC,CC,0)
+		set CRAMT=OFF(CRCD,TYPE,GLSC,CC,1)
+		set DEBAMT=DEBAMT+AMT
+		set CRAMT=CRAMT+AMT
+		set OFF(CRCD,TYPE,GLSC,CC,0)=DEBAMT
+		set OFF(CRCD,TYPE,GLSC,CC,1)=CRAMT
+		}
+
+	Else  do {
+		// Create new entry in the array
+		set OFF(CRCD,TYPE,GLSC,CC)=EXPGL_"|MDR|"_PAYGL_"|MCR|"_TSO_"|"_TCMT
+		set OFF(CRCD,TYPE,GLSC,CC,0)=AMT
+		set OFF(CRCD,TYPE,GLSC,CC,1)=AMT
+		}
+
+	// Now set the reverse transactions into the OFF1 array to process the 
+	// next day
+
+	if $D(OFF1(CRCD,TYPE,GLSC,CC)) do {
+		// add the amounts to the existing totals
+		set DEBAMT=OFF1(CRCD,TYPE,GLSC,CC,0)
+		set CRAMT=OFF1(CRCD,TYPE,GLSC,CC,1)
+		set DEBAMT=DEBAMT+AMT
+		set CRAMT=CRAMT+AMT
+		set OFF1(CRCD,TYPE,GLSC,CC,0)=DEBAMT
+		set OFF1(CRCD,TYPE,GLSC,CC,1)=CRAMT
+		}
+
+	Else  do {
+		// Create new entry in the array
+		set OFF1(CRCD,TYPE,GLSC,CC)=PAYGL_"|MDR|"_EXPGL_"|MCR|"_TSO_"|"_TCMT
+		set OFF1(CRCD,TYPE,GLSC,CC,0)=AMT
+		set OFF1(CRCD,TYPE,GLSC,CC,1)=AMT
+		}
+		
+	quit
+
+	//--------------------------------------------------------------------
+ADJUST  // Process Commission Adjustments
+	//--------------------------------------------------------------------
+
+	// If there is any data in the commission adjustment file DAYENDCOMADJ,
+	// then call the effective dated commission process to correct
+	
+	new DATE,ADJ,PSTDT
+
+	type ResultSet adjrs=Db.select("EFD,PSTDT","DAYENDCOMADJ","PSTDT>:EFD and AGENT=:AGENT and CPLAN=:CPLAN and CID=:CID and EFD IS NOT NULL")
+	if 'adjrs.next() quit
+
+	set DATE=adjrs.getCol(1)
+	set PSTDT=adjrs.getCol(2)
+
+	set ADJ=$$CALC^PROCCOME(AGENT,CPLAN,CID,DATE)
+
+	// File the transaction to the dayendcomadj file
+ 	type RecordDAYENDCOMADJ comadj=Db.getRecord("DAYENDCOMADJ","PSTDT,AGENT,CPLAN,CID")
+
+	set comadj.crcd=CRCD		// Set the currency code
+	set comadj.posted=0		// Posted=false
+ 	set comadj.adjamt=$P(ADJ,"|",1)	// Set the adjusted amount
+	do comadj.bypassSave()		// New Dayend entry
+	
+	// File the agency amount
+ 	type RecordDAYENDCOMADJ comadja=Db.getRecord("DAYENDCOMADJ","PSTDT,AGNCY,CPLAN,CID")
+
+	set comadja.crcd=CRCD		// Set the currency code
+	set comadja.posted=0		// Posted=false
+ 	set comadja.adjamt=$P(ADJ,"|",2)	// Set the adjusted amount
+	do comadja.bypassSave()			// New Dayend entry
+	 
+  	quit
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,CPLAN
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set CPLAN=vRECORD.piece($C(9),1)
+ do vPROC(CPLAN)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,CPLAN
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>32767 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+9>32767 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("CPLAN","UTBLCOMPLN","UTBLCOMPLN.AMTH<2")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

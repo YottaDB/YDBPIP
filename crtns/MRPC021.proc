@@ -1,0 +1,206 @@
+public	MRPC021(RETURN,VERSN,CID,TSEQ,STD)	// MRPC call for Payment History Support Status
+	/*
+ 
+	   KEYWORDS: RPC
+
+	   ARGUMENTS:
+	         . RETURN       Payment History Details		/TYP=T/REQ/MECH=REFNAM:W
+
+	         . VERSN        ^MRPC021 version number		/TYP=N/REQ/MECH=VAL
+	                        current version=1
+
+	         . CID          Account Number        	 	/TYP=T/REQ/MECH=VAL
+
+	   	 . TSEQ  	Sequence   			/TYP=T/REQ/MECH=VAL
+
+	         . STD		From Date              		/TYP=T/NOREQ/MECH=VAL
+
+	   RETURNS:
+	         . $$    	Error Message              	/TYP=T
+	                	Null= No Error
+
+	   RELATED:
+	         . $$^PBSMRPC - MRPC Service Class Driver
+
+	   EXAMPLE:
+	         S RM=$$^MRPC021(.VAL,1,CID,TSEQ,STD)
+
+	-------Revision History------------------------------------------
+	  
+	12/22/05 - TITOVE - CR 18597
+		   Modified as part of DBI3 project. Transferred code from
+		   LNHS1 procedure (new sections VALTRAN and ERR).
+
+	05/02/02 - Reena Dutta - ARQ 49794
+		   Converted to PSL.	
+	-----------------------------------------------------------------
+	*/
+	type public Number ER
+	type public String ET, RM
+
+	type Date A, DT
+	type Number BDD(), I, MOD, N, STB, TBIL
+	type String CRLF, LNHS1A(), LNHS1B(), LNHS1C(), STR, TAB, TMPSTR
+	
+	set (ET, LNHS1A(4), RM) = ""
+	set TBIL = 0
+
+	// Version number of client message is not compatible with server
+	if (VERSN.get() '= 1) quit $$ERRMSG^PBSUTL($$^MSG(2951))
+
+	type RecordACN acn = Db.getRecord("ACN", "CID = :CID", 1)
+	
+	// Invalid account ~p1
+	if 'acn.getMode() quit $$ERRMSG^PBSUTL($$^MSG(1259,CID))
+	
+	// Invalid product class
+	if (acn.cls '= "L") set ET = "INVLDCLS" do ^UTLERR quit $$ERRMSG^PBSUTL(RM)
+
+	// Validate transaction; make sure it is a payment, etc.
+	do VALTRAN(CID,TSEQ)
+	
+	if ER quit $$ERRMSG^PBSUTL(RM)
+
+	// Retrieve Calculated Data
+	do ^LNHS1A
+	
+	if ER quit $$ERRMSG^PBSUTL(RM)
+
+	// Create formatted output string
+	set TAB = $C(9)
+	set CRLF = $C(13)_$C(10)
+
+	// Modify to accomodate 5 bills per screen limitation
+	set STB = "" 
+	set DT = "" 
+	
+	for I = 1:1 set DT = BDD(DT).order() quit:DT.isNull()  set BDD(DT) = I
+	
+	if STD.get().isNull() set STD = 1
+	set STD = STD - 1 
+	set MOD = 0
+	set A = "" 
+	
+	for I = 1:1 set A = BDD(A).order() quit:A.isNull()  if (A > STD) set MOD = I - 1,STB = BDD(A) quit
+		
+	set N = "" 
+	for  set N = LNHS1B(N).order() quit:N.isNull()  do {
+		
+		for A = 4:1:8 set LNHS1B(N).piece("|",A) = +LNHS1B(N).piece("|",A + MOD)		
+		set LNHS1B(N) = LNHS1B(N).piece("|",1,((4 + TBIL) - STB))
+		}
+
+	if MOD for I = 1:1:3 do {
+		
+		for A = 1:1:5 set LNHS1C(I).piece("|",A) = LNHS1C(I).piece("|",A + MOD)
+		set LNHS1C(I) = LNHS1C(I).piece("|",1,5)
+		}
+
+
+	type RecordHIST hist = Db.getRecord("HIST", "CID = :CID, TSEQ = :TSEQ")
+
+	// Teller ID, Excess Payment, Amount
+	set STR = hist.uid_TAB_LNHS1A(4).piece("|",1)_TAB_hist.tamt.piece("#",1)
+
+        // Regular Payment, Transaction Code
+        set STR = STR_TAB_LNHS1A(4).piece("|",2)_TAB_hist.etc
+
+        // Interest Collected, Posted On
+        set STR = STR_TAB_LNHS1A(4).piece("|",4)_TAB_hist.tjd
+
+        // Principal Reduction, Satisfies
+        set STR = STR_TAB_LNHS1A(4).piece("|",3)_TAB_hist.xhs16
+
+        // Misc. Charge Collected, Late Charge Collected
+        set STR = STR_TAB_LNHS1A(4).piece("|",7)_TAB_LNHS1A(4).piece("|",5)
+
+        // Add to Escrow Reserves, From Date
+        set STR = STR_TAB_LNHS1A(4).piece("|",8)_TAB_LNHS1A(4).piece("|",9)
+
+        // To Date, Negative Amount Reduction
+        set STR = STR_TAB_LNHS1A(4).piece("|",10)_TAB_hist.dir
+
+        // Unapplied Funds Change
+        set STR = STR_TAB_LNHS1A(4).piece("|",11)        
+        set TMPSTR = ""
+
+	// Extract 5 Covered Payment Dates
+        for I = 1:1:5 set TMPSTR = TMPSTR_LNHS1C(2).piece("|",I)_TAB
+        set STR = STR_TAB_TMPSTR
+        set TMPSTR = ""
+
+        // Extract 5 Covered Payment Amounts
+        for I = 1:1:5 set TMPSTR = TMPSTR_LNHS1C(3).piece("|",I)_TAB
+        set STR = STR_CRLF_TMPSTR_CRLF
+
+        // Set Covered Payment Allocations
+        set N = ""
+        for  set N = LNHS1B(N).order() quit:N.isNull()  do {
+        	
+                set TMPSTR = LNHS1B(N).translate("|",$C(9))
+
+                // Bill Element, Row Sum Total, Excess & 5 Covered Payment Allocations
+                set TMPSTR = TMPSTR.piece($C(9),1,8)
+                set STR = STR_TMPSTR_CRLF
+        	}
+
+	set RETURN = $$V2LV^MSG(STR)
+
+	quit ""
+
+
+VALTRAN(Number CID,
+        Number TSEQ)
+
+	// Verify that sequence selected is a credit transaction
+	type public String ET
+	
+	type String MSG1, MSG2, UTSO
+	
+	type RecordHIST hist = Db.getRecord("HIST", "CID = CID, TSEQ = :TSEQ", 1)
+	
+	// Invalid sequence number
+	if hist.etc.isNull(),hist.itc.isNull(),hist.tso.isNull() set ET = "INVLDSQ" do ERR quit
+	
+	// Payment transactions only
+	if hist.etc.isNull() set ET = "LNHS1" do ERR quit
+	
+	type RecordTRN trn = Db.getRecord("TRN", "ETC = :hist.etc", 1)
+	
+	// Payment transactions only
+	if 'trn.pcfl9 set ET = "LNHS1" do ERR quit
+	
+	// If the requested transaction is reversed or error corrected
+	// return a message referring to the correct transaction.
+	if (hist.itc6 ! hist.itc12),'Db.isDefined("HISTR","CID=:CID,TSEQ=:TSEQ") do {
+	
+		// Error corrected or Reversed
+		set MSG1 = $select(hist.itc6:$$^MSG(6560),1:$$^MSG(846))
+		
+		do OUT^UTSO(.UTSO,hist.tso)
+		
+		set MSG2 = UTSO("REV")
+		
+		// Transaction has been <<MSG1>> see sequence number <<MSG2>>
+		set ET = "ECREV"
+		}
+	
+ 	if 'ET.isNull() do ERR quit
+	
+	quit
+	
+	
+public	ERR
+
+	type public Number ER
+	type public String VFMQ
+
+	set ER = 1
+	
+	do DSPBP^UTLERR
+	
+	set VFMQ = "Q"
+	
+	quit
+
+vSIG()	quit "60260^52861^Eugene Titov^5288"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,505 @@
+EFAIN	 /* 
+	ORIG: conartyr - 07/18/2000 
+	DESC: Incoming eFunds Acknowledgement File Processing 
+
+	---- Comments --------------------------------------------------------
+ 
+	---- Revision History ------------------------------------------------
+	
+	02/12/07 - RussellDS - CR25044
+		   Remove change related to CR22464.  Check holds will not
+		   be suppressed.
+	
+	08/28/06 - KUMARB - CR 22464
+		     Modify section ACKPROC and REJPROC in the check XTYPE="C"
+		     to suppress the Check Hold record creation if Check Hold
+		     is not defined in Available Calculation Formula for the
+		     account.
+
+	01/04/2006 - PRAKASHJ - 17423
+		     Removed depricated warnings and scoped variables. 
+ 
+	11/04/2002 - YURKOVICG - 51137
+		       Made code PSL compliant for all versions of PSL.
+		       Removed old commented-out code.
+
+	----------------------------------------------------------------------
+
+ */
+
+	type String SPLDIR,XIO
+	type public String %READ,%TAB,DT,IO,VFMQ
+	type Date XTJD,date 
+
+	set XTJD=%SystemDate
+ 	set date=XTJD.toString("MMDDYEAR")
+	set XIO="EFUND"_date_".IN"
+	set SPLDIR=CUVAR.spldir
+	do PP03(SPLDIR)
+	set IO=$$FILE^%TRNLNM(XIO,SPLDIR)
+
+	set %TAB("IO")="/DES=eFunds Incoming Acknowledgement File/LEN=60/REQ"
+	set %READ="IO/REQ/LEN=35/TYP=T"
+	do ^UTLREAD 
+	if VFMQ="Q" quit
+	do START(IO)
+
+	quit
+
+ 	//---------------------------------------------------------------------
+START(IO)   
+	/* start eFunds acknowledgement incoming file processing
+	---------------------------------------------------------------------*/
+	type Number I,RECCNT,RECSIZ,TAMT,XHT,XLEN
+ 	type Date date
+ 	type public Date XTJD
+ 	type public String BRCD,ER,ET,RM,SPLDIR,UID
+ 	type String DATA,FROM,INTRFACE,RCODE,READ,READER,REC
+ 	type String REJMET,typ,WCRETC,WDRETC,WGRP,X,XIO,XMSG,XTYPE
+
+	type RecordSCAU scau
+	type RecordUTBLPHC utblphc
+	type RecordUTBLEXTINT extint
+	type RecordUTBLEXTTRN1 exttrn1
+
+	catch ERROR1 {
+		set ET=ERROR1.type,FROM=ERROR1.thrownAt
+		if RM.get().isNull() set RM=ERROR1.description
+		do EXC
+	}
+
+	if (XTJD.get()).isNull() set XTJD=%SystemDate
+
+	set (RECCNT,TAMT)=0
+	set (ER,READER)=""
+	set date=$$DAT^%ZM(XTJD,"MMDDYY")
+	set RECSIZ=360			//  this might have to change
+
+	if IO.get().isNull() do {
+		set XIO="EFUNDS"_date_".IN"
+		set SPLDIR=CUVAR.spldir
+		set IO=$$FILE^%TRNLNM(XIO,SPLDIR)
+ 	}
+
+	set X=$$FILE^%ZOPEN(IO,"READ",1,RECSIZ)
+	if 'X set XMSG=$$^MSG(7878,IO) throw Class.new("Error","NOOPEN,"_XMSG)
+
+	set INTRFACE="EFUNDS"
+	
+	set extint=Db.getRecord("UTBLEXTINT","INTRFACE=:INTRFACE",1)
+	if extint.getMode()=0 set RM=$$^MSG(7799) throw Class.new("Error","EFAIN")
+
+	if UID.get().isNull() set UID=extint.uid
+	if BRCD.get().isNull() set BRCD=extint.brcd
+	set XHT=extint.phc
+	set XLEN=extint.phdays
+
+	set scau=Db.getRecord("SCAU","UID")
+	set REJMET=scau.batrej
+
+	set utblphc=Db.getRecord("UTBLPHC","XHT")
+	set XTYPE=$$FUPC^%ZM(utblphc.desc)
+	set XTYPE=XTYPE.extract(1)
+	if (XTYPE'="C")&(XTYPE'="F") set RM=$$^MSG(4500) throw Class.new("Error","EFAIN")
+
+	// set up WASH account transaction codes
+	set WGRP="WASH"
+	set exttrn1=Db.getRecord("UTBLEXTTRN1","INTRFACE,WGRP")
+	set WCRETC=exttrn1.cretc
+	set WDRETC=exttrn1.dretc
+
+	for  set REC=$$^%ZREAD(IO,.READER) quit:+READER>0  do {
+
+		catch ERROR2 {
+			set ET=ERROR2.type,FROM=ERROR2.thrownAt
+			if RM.get().isNull() set RM=ERROR2.description
+			do EXC
+			}
+
+		set typ=REC.extract(1,2)
+		if typ="05" do DETAIL quit
+		if typ="01" do HEADER quit
+		if typ="09" do TRAILER quit
+		quit
+	}
+	close IO
+	quit
+
+	//-----------------------------------------------------------------
+DETAIL	/* Detail Record Processing
+	-----------------------------------------------------------------*/
+	type public String REC,RM
+	type String RCODE,XID
+	
+	if REC.extract(3,6)="0002" set XID=REC.extract(18,27)
+	else  set XID=REC.extract(53,62)
+
+	type RecordEFUNDS efunds=Db.getRecord("EFUNDS","ID=:XID",1)
+	if efunds.getMode()=0 set RM=$$^MSG(4501,REC.extract(53,62)) throw Class.new("Error","EFAIN") quit
+
+	// response code -- only acting on codes of R, I and E 
+	set RCODE=REC.extract(7)
+	if RCODE="E" do ACKPROC(RCODE) quit
+	if (RCODE="R")!(RCODE="I") do REJPROC(RCODE) quit
+
+	quit
+
+	//---------------------------------------------------------------------
+ACKPROC(String RCODE)	/* Acknowledgement File Processing
+	----------------------------------------------------------------------*/
+	type Number XEXP
+	type String AMT,CRETC,GRP,par(),TCMT,TSO,WCID,XAMT,XCID,XTSEQ,XTSO()
+	type public Number XLEN
+	type public Date XTJD
+	type public String BRCD,INTRFACE,REC,RM,WDRETC,XID,XTYPE
+	
+	type RecordTTX ttx(),ttx1()
+	type RecordTRN trn
+	type TranSet ts
+
+	// check to make sure ID has already been logged
+	type RecordEFUNDS efundsr=Db.getRecord("EFUNDS","ID=:XID",1)
+	if efundsr.getMode()=0 set RM=$$^MSG(4501,REC.extract(53,62)) throw Class.new("Error","EFAIN") quit
+
+	if RCODE="E" do {
+		type RecordUTBLEXTTRN1 exttrn1
+
+		set XAMT=$$TRIM^%ZS(+REC.extract(128,138))
+		set XCID=$$TRIM^%ZS(+REC.extract(110,126))
+		
+		type RecordDEP dep=Db.getRecord("DEP","CID=:XCID",1)
+		if dep.getMode()=0 set RM=$$^MSG(7774) throw Class.new("Error","EFAIN") quit
+		else  set GRP=dep.grp
+		
+		// get customer tran code
+		set exttrn1=Db.getRecord("UTBLEXTTRN1","INTRFACE,GRP")
+		set CRETC=exttrn1.cretc
+	}
+
+	set XTSO("FCID")=REC.extract(101,109)
+	set XTSO("XINTID")="efunds^"_REC.extract(53,62)_"^"_REC.extract(65,76)
+	set XTSO("TRC")=REC.extract(148,162)
+	set XTSO("EXTTRF")=REC.extract(26,37)
+	do IN^UTSO(.XTSO,.TSO)
+
+	set ts=Class.new("TranSet")
+	set ttx(1)=Class.new("RecordTTX")
+	set ttx(1).cid=XCID
+	set ttx(1).itc=1
+	set ttx(1).etc=CRETC
+	set ttx(1).tamt=XAMT
+	set ttx(1).efd=%SystemDate
+	set ttx(1).tlo=%UserStation
+	set ttx(1).tso=TSO
+	set ttx(1).crcd="USD"
+	set ttx(1).cdt=XTJD
+
+	set ttx1=ts.copyTran(ttx(1))
+	
+	// set G/L wash account debit
+	set TCMT=""
+	set trn=Db.getRecord("TRN","WDRETC")
+	set WCID=trn.acn
+
+	set ttx(2)=Class.new("RecordTTX")
+	set ttx(2).cid=WCID		
+	set ttx(2).itc=0
+	set ttx(2).etc=WDRETC
+	set ttx(2).tamt=XAMT
+	set ttx(2).efd=%SystemDate
+	set ttx(2).tlo=%UserStation
+	set ttx(2).crcd="USD"
+	set ttx(2).cdt=XTJD
+
+	set ttx1=ts.copyTran(ttx(2))
+
+	// Process transactions, update database
+	set par("OPTION")=2
+	// System-generated
+	set par("IPMODE")=3
+
+	do ts.postTSet(XTJD,BRCD,.par)
+
+	/* Find history seq number of credit to customer account
+	   for logging into ^EFUNDS */
+	type ResultSet hisdata=Db.select("TSEQ","HIST","CID=:XCID AND TJD=:XTJD AND TAMT=:XAMT")
+	if 'hisdata.isEmpty() while hisdata.next() do {
+		set XTSEQ=hisdata.getCol("TSEQ")
+	}
+
+	//place hold on customer account
+	set XEXP=XTJD+XLEN
+	if XTYPE="F" do {
+		type RecordHLD7 hld7=Db.getRecord("HLD7","CID=:XCID,EXPDT=:XEXP",1)
+		if hld7.getMode()=1 do {
+			do hld7.setAuditFlag(1)
+			set hld7.amt=XAMT+hld7.amt
+			do hld7.save()
+			}
+		else  do {
+			type RecordHLD7 hld7=Class.new("RecordHLD7")
+			set hld7.cid=XCID
+			set hld7.expdt=XEXP
+			set hld7.amt=XAMT
+			do hld7.save()
+			}
+
+	}
+	else  if XTYPE="C" do {
+		
+		type RecordHLD8 hld8=Db.getRecord("HLD8","CID=:XCID,EXPDT=:XEXP",1)
+		if hld8.getMode()=1 do {
+			do hld8.setAuditFlag(1)
+			set hld8.amt=XAMT+hld8.amt
+			do hld8.save()
+			}
+		else  do {
+			type RecordHLD8 hld8=Class.new("RecordHLD8")
+			set hld8.cid=XCID
+			set hld8.expdt=XEXP
+			set hld8.amt=XAMT
+			do hld8.save()
+			}
+	}
+
+	//update status on EFUNDS table -- 1=Acknowledgement
+	type RecordEFUNDS efunds=Db.getRecord("EFUNDS","XID")
+	do efunds.setAuditFlag(1)
+	set efunds.status=1
+	set efunds.amtack=XAMT
+	set efunds.hseq=XTSEQ
+	do efunds.save()
+
+	quit
+
+	//---------------------------------------------------------------------
+REJPROC(String RCODE)	/* Reject File Processing
+	----------------------------------------------------------------------*/
+	
+	type Number XAMT,XHSEQ,XTAMT
+	type Date XDT,XPDT
+	type String CRETC,GRP,par(),TSO,WCID,XCID,XDIF,XEXP,XSTAT,XTSO
+	type public String BRCD,INTRFACE,REC,RM,WCRETC,XID,XTYPE
+	type public Number XLEN
+	type public Date XTJD
+	type TranSet ts
+	type RecordTTX ttx(),ttx1()
+	type RecordTRN trn
+	type RecordHIST hist
+	type RecordUTBLEXTTRN1 exttrn1
+
+	// check to make sure ID has already been logged
+	type RecordEFUNDS efundsr=Db.getRecord("EFUNDS","ID=:XID",1)
+	if efundsr.getMode()=0 set RM=$$^MSG(4501,REC.extract(53,62)) throw Class.new("Error","EFAIN") quit
+
+	set XAMT=$$TRIM^%ZS(+$E(REC,79,89))
+
+	// look up EFUNDS global entry for date
+	type ResultSet rs1=Db.select("DT,HSEQ,CID,STATUS","EFUNDS","ID=:XID")
+	if 'rs1.isEmpty() while rs1.next() do {
+		set XDT=rs1.getCol("DT")
+		set XHSEQ=rs1.getCol("HSEQ")
+		set XCID=rs1.getCol("CID")
+		set XSTAT=rs1.getCol("STATUS")
+	}
+	type RecordDEP dep=Db.getRecord("DEP","CID=:XCID",1)
+	if dep.getMode()=0 set RM=$$^MSG(7774) throw Class.new("Error","EFAIN") quit
+	else  set GRP=dep.grp
+	
+	// get customer tran code
+	set exttrn1=Db.getRecord("UTBLEXTTRN1","INTRFACE,GRP")
+	set CRETC=exttrn1.cretc
+
+	// reverse transaction
+	set hist=Db.getRecord("HIST","XCID,XHSEQ")
+	set XTAMT=hist.tamt
+	set XPDT=hist.tjd
+
+	//set customer credit transaction reversal
+	if RCODE="R" set XTSO("TRC")=REC.extract(102,116)
+	set XTSO("REV")=XHSEQ
+	set XTSO("REJMSG")=REC.extract(99,101)
+	do IN^UTSO(.XTSO,.TSO)
+
+	set ts=Class.new("TranSet")
+	set ttx(1)=Class.new("RecordTTX")
+	set ttx(1).cid=XCID
+	set ttx(1).itc=100000000001
+	set ttx(1).etc=CRETC
+	set ttx(1).tamt=-XTAMT
+	set ttx(1).efd=%SystemDate
+	set ttx(1).tlo=%UserStation
+	set ttx(1).tso=TSO
+	set ttx(1).crcd="USD"
+	set ttx(1).cdt=XTJD	
+	
+	set ttx1=ts.copyTran(ttx(1))
+
+	// credit funds back to wash account
+	set trn=Db.getRecord("TRN","WCRETC")
+	set WCID=trn.acn
+
+	set ttx(2)=Class.new("RecordTTX")	// *** need to set
+	set ttx(2).cid=WCID
+	set ttx(2).itc=0
+	set ttx(2).etc=WCRETC
+	set ttx(2).tamt=XTAMT
+	set ttx(2).efd=%SystemDate
+	set ttx(2).tlo=%UserStation
+	set ttx(2).crcd="USD"
+	set ttx(2).cdt=XTJD
+ 
+	set ttx1=ts.copyTran(ttx(2)) 
+
+	// Process transactions Update Database
+	set par("OPTION")=2
+	// System-generated
+	set par("IPMODE")=3
+
+	// process transaction and offset
+	do ts.postTSet(XTJD,BRCD,.par)
+
+	// make sure hold hasn't already expired
+	if (XTJD-XPDT)>XLEN quit	
+	// calculate hold removal date
+	set XEXP=XPDT+XLEN
+
+	// remove hold
+	if XTYPE="F" do {
+		type RecordHLD7 hld7=Db.getRecord("HLD7","CID=:XCID,EXPDT=:XEXP",1)
+		if hld7.getMode()=0 set RM=$$^MSG(4503,"Float",XEXP) throw Class.new("Error","EFAIN") quit
+		
+		set XDIF=hld7.amt-XAMT
+		if XDIF=0 do Db.delete("HLD7","CID=:XCID AND EXPDT=:XEXP") quit
+		if XDIF<0 set RM=$$^MSG(4505) throw Class.new("Error","EFAIN") quit
+		do hld7.setAuditFlag(1)
+		set hld7.amt=XDIF
+		do hld7.save()
+	}
+	else  if XTYPE="C" do {
+		
+		type RecordHLD8 hld8=Db.getRecord("HLD8","CID=:XCID,EXPDT=:XEXP",1)
+		if hld8.getMode()=0 set RM=$$^MSG(4503,"Check",XEXP) throw Class.new("Error","EFAIN") quit
+		
+		set XDIF=hld8.amt-XAMT
+		if XDIF=0 do Db.delete("HLD8","CID=:XCID AND EXPDT=:XEXP") quit
+		if XDIF<0 set RM=$$^MSG(4505) throw Class.new("Error","EFAIN") quit
+		do hld8.setAuditFlag(1)
+		set hld8.amt=XDIF
+		do hld8.save()
+	}
+
+	//update status on EFUNDS table -- 2=Reject
+	type RecordEFUNDS efunds=Db.getRecord("EFUNDS","XID")
+	do efunds.setAuditFlag(1)
+	set efunds.status=2
+	set efunds.amtack=XAMT
+	do efunds.save()
+
+	quit
+
+	//---------------------------------------------------------------------
+HEADER	/* eFunds Header Record 
+	----------------------------------------------------------------------*/
+	type public String fid,REC
+	type public Number fseq
+
+	set fid=REC.extract(7,18)
+	set fseq=REC.extract(45,52)
+
+	quit
+ 
+	//---------------------------------------------------------------------
+TRAILER /* eFunds Trailer Record
+	----------------------------------------------------------------------*/
+	type public Number reqtot,resptot,totrec
+	type public String REC	
+
+	set totrec=+REC.extract(3,11)
+	set reqtot=+REC.extract(12,20)
+	set resptot=+REC.extract(21,29)
+
+	quit
+
+	//---------------------------------------------------------------------
+PP02    /*
+	----------------------------------------------------------------------*/
+	type public Boolean ER
+	type public String HIT,LOOKUP(),RM,X,XIO
+	type String CNT,FIL
+	
+	if X.isNull() quit
+	set LOOKUP(XIO)=""
+
+	if 'X do {
+		set X=X.piece(";",1)
+		set CNT="" for  set CNT=LOOKUP(CNT).order() quit:CNT.isNull()  if (HIT.get()).isNull() do {
+			set FIL=LOOKUP(CNT).piece(" ",1),FIL=FIL.piece(";",1)
+			quit:X'=FIL
+			set HIT=1
+			do CHANGE^DBSMACRO("TBL","")
+		}
+		if 'HIT.get() set ER=1 do Runtime.setErrMSG("1343") //Invalid file spec
+ 
+	}
+	else  do {
+		if 'LOOKUP(X).get() set ER=1 do Runtime.setErrMSG("1343")
+		set X=LOOKUP(X).piece(" ",1)
+		do CHANGE^DBSMACRO("TBL","")		//Remove lookup
+	}
+ 
+	quit
+
+	//------------------------------------------------------------------
+PP03(String SPLDIR)    /*
+	-------------------------------------------------------------------*/
+
+	type public String ET
+	type String IO,REC,Z
+
+	set IO=$$FILE^%TRNLNM("ZDIR.TMP",SPLDIR)
+	// ***place beginning file name below***
+	set Z=$$DIROUT^%OSSCRPT(IO,SPLDIR,"res*")
+	set Z=$$FILE^%ZOPEN(IO,"READ",5)
+	for  set REC=$$^%ZREAD(IO,.ET) quit:+ET=1  do RECCHK(SPLDIR)
+	do CLOSE^SCAIO
+        set Z=$$DELETE^%OSSCRPT(IO_";*")
+	U 0
+ 
+	quit
+
+
+	//------------------------------------------------------------------
+RECCHK(String SPLDIR)  /* If record meets pattern, add to lookup
+	-------------------------------------------------------------------*/
+	
+	type public Number CNT
+	type public String REC
+	type String FILNAM,LOOKUP
+	
+	if (REC.isNull())!(REC.extract(1,3)'="ack") quit
+	set CNT=CNT.get()+1
+	set FILNAM=REC.piece(" ")
+	set LOOKUP(CNT)=$$FILE^%TRNLNM(FILNAM,SPLDIR)
+ 
+	quit
+
+	//------------------------------------------------------------------
+EXC     /* Log error to exception file
+	------------------------------------------------------------------*/
+	type String ET
+	type public String %ZTSEQ,CFLAG,DESC,ERRVAL,FROM,PROC,RELNR,RELTMP(),RM,XCID
+	
+	if $ZS["%GTM" do ZE^UTLERR
+
+	if PROC.get().isNull() set PROC=$T(+0)
+	if DESC.get().isNull() set DESC="eFunds Acknowledgement Incoming File"
+ 	set ET=ET.get()_","_RM.get()_","_FROM.get()
+	if ERRVAL.get().isNull() set ERRVAL=XCID.get()
+	if 'RELNR.get().isNull(),CFLAG.get() set RELTMP(RELNR)="" 
+	do LOG^UTLEXC(PROC,"*",DESC,ERRVAL.get(),%ZTSEQ.get(),ET.get(),"")
+	kill ET,%ZTSEQ
+	set RM=""
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60673^65759^Dan Russell^13679"	// Signature - LTD^TIME^USER^SIZE

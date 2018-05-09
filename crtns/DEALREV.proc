@@ -1,0 +1,406 @@
+DEALREV	// Deal Reversal Procedure
+	/*
+	ORIG:  Rachel Yang  03/01/94
+	DESC:  Deal Reversal Routine
+
+	This procedure is used to reverse a foreign exchange deal.
+	One of the following inputs is needed: Contract Number,
+	Trader's Memo, or Transaction Reference Number.
+
+	The deal record will be displayed (with settlement instructions).  
+	The reversal process will be invoked if the user chooses menu option 
+	"File".
+
+	This procedure searches for the transactions to reverse from ttx 
+	object, comparing the EFD (effective date) to TJD.  
+	If the transaction's EFD >= TJD, then we must kill these transactions.  
+	If EFD < TJD, then these transactions have been posted and must be
+	reversed.
+
+	---- Revision History -------------------------------------------------
+	  
+	03/21/06 - RussellDS - CR20234
+		   Further clean-up.
+	  	
+
+	01/31/06 - KinI - CR 16664
+		   DBI related clean-up.
+	-----------------------------------------------------------------------
+	*/
+	
+	set %ProcessMode=2
+
+	type public String ER
+	
+	type Number %PAGE, %PG
+	type Boolean FINISH, haveDeal
+	type String OLNTB, VFMQ
+
+	set %PG=0
+	set (FINISH, haveDeal) = 0
+
+	type RecordDEALMSG2 DEALMSG2
+	type RecordDEALMSG3 DEALMSG3
+	type RecordDEAL1 fDEAL1
+	type RecordTTX ttx()
+
+        for  do { quit:FINISH
+        	
+		if %PG=0 do VPG00(.DEALMSG2,.DEALMSG3,.fDEAL1,.VFMQ) if (ER ! (VFMQ = "Q")) set FINISH=1 quit
+		if %PG=1 do VPG01(.DEALMSG2,.DEALMSG3,.fDEAL1,.ttx(),.VFMQ)
+
+		// go to excute VER (to reverse) or to abort
+		if "DFQAR"[VFMQ do VER(.DEALMSG2,.DEALMSG3,.fDEAL1,.ttx(),.VFMQ) set FINISH=1 quit
+
+        	set %PG=%PG+1
+	}
+		
+	quit
+
+
+VPG00(RecordDEALMSG2 DEALMSG2,	// Deal Message File 2 record
+      RecordDEALMSG3 DEALMSG3,	// Deal Message File 3 record
+      RecordDEAL1 fDEAL1,	// DEAL1 record
+      String VFMQ)		// Process Indicator
+      
+	type public String ER
+	type public String NOEXT, NOINT
+	
+	type String %NOPRMT, %READ, %TAB, IO, QRY
+	
+	// Only allow status 4 and 6 to be reversed - use parentheses around
+	// expression since it will get added to by ^DBSTBLA
+	set QRY="([DEAL1]STATUS=4 ! [DEAL1]STATUS=6)"
+	
+	set (NOEXT,NOINT)=""
+
+	set %TAB("NOINT")="[DEAL1]NOINT/TBL=""[DEAL1]NOINT,NOEXT,AMTB,CRCDB,AMTS,CRCDS,STATUS,TYPE/LEN=1:QU """""_QRY_"""""""/XPP=D CONPP^DEALREV(X,.fDEAL1,.haveDeal)"
+	set %TAB("NOEXT")="[DEAL1]NOEXT/TBL=""[DEALMEMO]NOEXT,NOINT,[DEAL1]AMTB,[DEAL1]CRCDB,[DEAL1]AMTS,[DEAL1]CRCDS,[DEAL1]STATUS,[DEAL1]TYPE/LEN=1:QU """""_QRY_"""""""/XPP=D MEMOPP^DEALREV(X,NOINT,.fDEAL1,.haveDeal)"
+	set %TAB("TRREFNO")="[DEAL1]TRREFNO/TBL=""[DEALREFNO]TRREFNO,NOINT,[DEAL1]AMTB,[DEAL1]CRCDB,[DEAL1]AMTS,[DEAL1]CRCDS,[DEAL1]STATUS,[DEAL1]TYPE/LEN=1:QU """""_QRY_"""""""/XPP=D REFPP^DEALREV(X,NOINT,NOEXT,.fDEAL1,.haveDeal)"
+
+	set %READ="@@%FN,,,NOINT#0,NOEXT#0,TRREFNO#0"
+	set %NOPRMT="N"
+	set IO=$I
+	
+	do ^UTLREAD
+
+	if "Q"[VFMQ quit
+	
+	if 'fDEAL1.exists() set fDEAL1=Db.getRecord("DEAL1","NOINT=:NOINT")
+	set DEALMSG2=Db.getRecord("DEALMSG2","NOINT=:NOINT,MSG=5")
+	set DEALMSG3=Db.getRecord("DEALMSG3","NOINT=:NOINT,MSG=6")	
+
+	if %ProcessMode=2,IO'=$I do OPEN^SCAIO
+
+	quit
+
+
+VPG01(RecordDEALMSG2 DEALMSG2,	// Deal Message File 2 record
+      RecordDEALMSG3 DEALMSG3,	// Deal Message File 3 record
+      RecordDEAL1 fDEAL1,	// DEAL1 record
+      RecordTTX ttx(),		// TTX record
+      String VFMQ)		// Process Indicator
+      
+	type public Boolean ER
+	type public String DEAL1(), NOINT, SID
+	
+	// Purchase/Sale
+	set SID=$S(fDEAL1.dealps="S":"DEAL1SIS",1:"DEAL1SIP")
+
+	// Record locked by another user
+	lock +DEAL1(NOINT):2 else  set VFMQ="Q" do Runtime.setErrMSG("DEAL1",2333) quit:ER
+
+	// Pass SID by reference since will need value in VER
+	do DRV^USID(%ProcessMode, .SID, .DEALMSG2, .DEALMSG3, .fDEAL1)
+
+	// Default screen menu to file
+	set VFMQ="F"
+
+	quit
+
+
+CONPP(String X,	 		// Contract Number
+      RecordDEAL1 fDEAL1,	// DEAL1 record
+      Boolean haveDeal)		// Loaded DEAL1 flag
+      
+	// Contract number (NOINT) post processor
+
+	if X.isNull() quit
+
+	if 'haveDeal do {
+	
+		set fDEAL1=Db.getRecord("DEAL1", "NOINT=:X", 1)
+		set haveDeal = 1
+	}
+	
+	if 'fDEAL1.getMode() quit
+
+	// Inputting only Contract Number is sufficient
+	do GOTO^DBSMACRO("END")
+
+	quit
+
+
+MEMOPP(String X,	 	// Contract Number
+       String NOINT,		// Contract Number
+       RecordDEAL1 fDEAL1,	// DEAL1 record
+       Boolean haveDeal)	// Loaded DEAL1 flag
+
+	// Trader's memo (NOEXT) post Processor
+
+	if X.isNull() quit
+
+	type public Boolean ER
+	
+	if NOINT.isNull() do { 
+		type RecordDEALMEMO dealmemo=Db.getRecord("DEALMEMO","NOEXT=:X",1)
+		set NOINT=dealmemo.noint
+		}
+
+	// Invalid contract number
+	if NOINT.isNull() do Runtime.setErrMSG("DEAL1",7607) quit:ER
+
+	if 'haveDeal do {
+	
+		set fDEAL1=Db.getRecord("DEAL1", "NOINT=:NOINT", 1)
+		set haveDeal = 1
+	}
+	if 'fDEAL1.getMode() quit
+	
+	// Check if the deal is 'In Process' or 'Completed'
+	if ('fDEAL1.status=4) ! ('fDEAL1.status=6) quit
+	
+	do GOTO^DBSMACRO("END")
+
+	quit
+
+
+REFPP(Number X,			// Transaction Reference Number
+      String NOINT,		// Contract Number
+      String NOEXT,		// Trader's Memo	
+      RecordDEAL1 fDEAL1,	// DEAL1 record
+      Boolean haveDeal)		// Loaded DEAL1 flag
+      	
+	// Transaction Reference Number (TRREFNO) Post-Processor
+
+	type public Boolean ER
+	
+	// Must enter contract number
+	if X.isNull() ! (NOINT.isNull() & NOEXT.isNull()) do Runtime.setErrMSG("DEAL1",7603) quit:ER
+	
+	if NOINT.isNull() do {
+		type RecordDEALREFNO dealrefno=Db.getRecord("DEALREFNO","TRREFNO=:X")
+        	set NOINT=dealrefno.noint
+		}
+
+	// Invalid transaction reference number
+	if NOINT.isNull() do Runtime.setErrMSG("DEAL1",7553) set X="" quit:ER
+
+	if 'haveDeal do {
+	
+		set fDEAL1=Db.getRecord("DEAL1", "NOINT=:NOINT", 1)
+		set haveDeal = 1
+	}
+
+	quit
+
+
+VER(RecordDEALMSG2 DEALMSG2,	// Deal Message File 2 record
+    RecordDEALMSG3 DEALMSG3,	// Deal Message File 3 record
+    RecordDEAL1 fDEAL1,		// DEAL1 record
+    RecordTTX ttx(),		// TTX record
+    String VFMQ)		// Process Indicator
+    
+	type public String SID    
+
+        // User needs to get to the last linked page to reverse the deal
+        if (SID '= "DEAL1SI7") do END(.fDEAL1) quit
+    
+	// Verify user's choice: Reverse or Quit
+	// "Reverse  Quit"
+	set VFMQ=$$^DBSMBAR(145)
+
+	if VFMQ.isNull() set VFMQ="Q" quit
+
+	if (VFMQ="Q") ! (VFMQ=2) do END(.fDEAL1) quit
+
+	do FILE(.DEALMSG2,.DEALMSG3,.fDEAL1,.ttx())
+
+	quit
+
+
+FILE(RecordDEALMSG2 DEALMSG2,
+     RecordDEALMSG3 DEALMSG3,
+     RecordDEAL1 fDEAL1,
+     RecordTTX ttx())	
+
+	// File data for reversal process
+		
+	type public String NOINT, RM
+	type public String ER
+	
+	type Date EFT
+	type String INDEX, ITC, RJ()
+	type Number TSEQ
+  
+  	/* Get ttx object by executing POSTDEAL^BCHDEALEOD -> BUILDTR^DEALUTL 
+  	   that builds ttx by accessing DEALENT, Deal Accounting Entry file.
+  	*/
+  	
+	for INDEX="TRADE","SPOT","VALUE" do { quit:ER
+		
+		set ER = $$POSTDEAL^BCHDEALE(.fDEAL1, .ttx())
+
+		// Error building transaction
+		if ER, RM.get().isNull() set RM = $$^MSG(7562)
+	}
+
+	/*   
+	   For the reversal process, read through ttx object. 
+
+	   If transaction's EFD < TJD:
+	    1. Negate ttx amount to -TAMT
+	    2. Update ttx comment to REV
+	    3. Update Internal Transaction Code ITC
+	    4. Update status to "reversed" (7) for DEAL1 and DEALHIST tables
+
+	   If transaction's EFD > TJD (future date), kill these entry from ttx.
+
+	   Use updated ttx object to complete the reversal process.
+	*/
+	
+	set (TSEQ,EFT,ITC)=""
+
+	for TSEQ=1:1 quit:('ttx(TSEQ).exists())  do {
+
+		set EFT=ttx(TSEQ).efd
+
+		// Not future-dated transaction
+		if (EFT <= %SystemDate) do {
+
+			// Reverse amount
+			set ttx(TSEQ).tamt=$$TAMT^TRNUTL(ttx(TSEQ).tamt)
+
+			// REVERSAL: Deal ~p1
+			set ttx(TSEQ).tcmt=$$^MSG(7613,NOINT)  
+			
+			// Reversal indicator			
+			set ITC=$$ITC^TTXEXT(ttx(TSEQ).itc,12,1)  
+			set ttx(TSEQ).itc=ITC						
+
+			/* If ETC class is "D" or "L", is't a customer's 
+			   account; if class is "M", it's G/L account. When 
+			   the account is customer's account, reversal process 
+			   needs to update TSO to "REV#seq".
+			*/
+
+			type RecordTRN trn=Db.getRecord("TRN","ETC=:ttx(TSEQ).etc")
+	
+			// Class of customer account or nostro account
+	
+			if trn.cls'="M" do { 
+			
+				type String H(), TSO
+				type Number HSEQ, x()
+
+				set H(3)=ttx(TSEQ).etc
+
+				set H(4)=-ttx(TSEQ).tamt
+		
+				set H(5)=ttx(TSEQ).efd
+		
+				set H(7)=ttx(TSEQ).tso
+
+				// Original history sequence
+				set HSEQ=$$^UTLHIST(ttx(TSEQ).cid,.H())
+		
+				if HSEQ.isNull() quit
+	
+				set TSO=ttx(TSEQ).tso
+				set x("REV")=HSEQ
+
+				do IN^UTSO(.x,.TSO)
+	
+				set ttx(TSEQ).tso=TSO
+			}
+		}
+
+		// Always kill transaction if it is future-dated
+		if (EFT > %SystemDate) kill ttx(TSEQ)
+	}
+
+	// Complete reversal
+	if ttx.data() do { quit:ER=1
+		
+		type RecordSCAU scau = Db.getRecord("SCAU", "UID=:%UserID")
+		
+		do Runtime.start("CS", "", "SAVEPTR")
+			
+		do TRNSET^TRNDRV(.ttx(),%SystemDate,scau.brcd,2,,.RJ,,,)
+
+		if RJ.exists() set ER=1
+
+		if ER=1 do {
+			
+			do Runtime.rollback("SAVEPTR") quit
+			
+			set RM=RM.get()
+			if 'RM.isNull() quit
+	
+			// Error detected during deal reversal
+			else  do Runtime.setErrMSG("DEAL1",7612) quit:ER
+		}
+			
+		else  do Runtime.commit()	
+
+	}
+
+	// Update DEAL1 and DEALHIST by setting status to 7 (reversed).
+
+	set fDEAL1.status=7
+	do fDEAL1.save()
+
+	// Verify Deal's value date before updating future-dated history
+
+	if (fDEAL1.vdt<%SystemDate) quit
+
+	type Boolean QUITFL=0
+	type String TYPE="VALUE"
+	
+	if (fDEAL1.vdt=%SystemDate) do { quit:QUITFL
+
+		// Check if this particular record exists by selecting required 
+		// STATUS column before updating future-dated history
+		type ResultSet rs = Db.select("STATUS","DEAL1","NOINT=:NOINT AND TYPE=:TYPE AND VDT=:%SystemDate")
+		if 'rs.isEmpty() set QUITFL=1
+	}
+
+	// Update future-dated history for Buy deal
+	do FDHIST^DEALVRFY("B","deleted",.fDEAL1)
+
+	// Update future-dated history for Sell deal
+	do FDHIST^DEALVRFY("S","deleted",.fDEAL1)				
+
+	// Deal record ~p1 reversed	
+	do Runtime.setErrMSG("DEAL1",7611,NOINT) set ER="W"
+	
+	do END(.fDEAL1)  
+
+	quit
+
+
+END(RecordDEAL1 fDEAL1)		// DEAL1 record
+
+	// End reversal process
+
+	type public String ER, DEAL1(), NOINT
+
+	if fDEAL1.exists() lock -DEAL1(NOINT)
+
+	if ER.get() ! (%ProcessMode=2) ! (%ProcessMode=4) quit
+
+ 	set ER="W"
+
+	quit		
+
+vSIG()	quit "60367^44240^Laura Hillanbrand^9750"	// Signature - LTD^TIME^USER^SIZE

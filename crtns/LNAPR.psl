@@ -1,0 +1,688 @@
+public	LNAPR(RecordLN ln)	// Calculation of Reg Z APR
+	/*
+	   Calculates Annual Percentage Rate for open and closed ended loans,
+	   construction loans, and revolving credit monthly statements, using
+	   an internal rate of return calculation.  Using the IRR calculation,
+	   variable payment amounts can be utilized.
+	
+	  ---- Revision History ------------------------------------------------
+
+	   12/21/06 - KELLYP - CR 24625
+	   	      Modified multiple sections to round APR correctly (wrong
+	   	      parameters were being passed to SCARND).
+  
+	   05/11/06 - TITOVE - CR 21220
+	  	      Removed code that reset the value of public variable DISAMF
+	  	      to zero at the top of the procedure - this value is passed
+	  	      in by LNNEW10A and LNCALC procedures.
+
+	   05/03/06 - RATHT - CR 20921
+	   	      Removed the condition for checking the CID=999999999999 
+	   	      from the section CLSIN because it is always quiting from
+	   	      this section. Set the value of pcmval of LN table to PCMVAL
+	   	      if PCMVAL is NULL in the section CLS1.
+
+	   01/26/06 - TITOVE - CR 19238
+	   	      Corrected scoping of variables to make sure values set
+	   	      by LNNEW10* procedures are used. Removed old revision
+	   	      history.
+
+	   10/13/05 - S.Krishnan - CR16885
+	     	      Top of the procedure is made as Public.
+
+           07/26/05 - SkariahV- CR16679
+	              Removed #WARN and #OPTIMIZE directives.
+	              
+	   08/11/04 - KELLYP - CR 11059
+	   	      Rewrote entire procedure to prevent various undefined
+		      errors from occurring and cleaned up conversion-related
+		      issues.  Also added LNAPR routine name to recursive calls
+		      to avoid a problem with the PSL compiler.
+	  
+	  ----------------------------------------------------------------------
+	*/
+	type public Number DISAMF, DISTFC, DISTPF, PPIF, TBAL
+	type public String changes()	
+	
+	type Number AMTREQ, BASE, BASIS, DISIM, DISTPMT, FMET, IRR, PV
+	type String PL
+	
+	// APR Calculation Method
+	if (ln.aprmthd = 2) do { quit
+
+		type Number APRTMP = $$^LNAPR2(ln.irn,ln.icpf,ln.dist1af)
+		
+		set ln.disapr = APRTMP.roundDec(5,,0)
+		set changes("DISAPR") = ln.disapr
+		}
+	
+	// Determine whether loan is "open end" or "closed end"
+	
+	// Payment Schedule loans should always be "closed end"
+	if (ln.dist1fre = "*") do CLS(.ln) quit
+	
+	// P+I loans are always "closed end"
+	if ln.pcmval.extract(1) do CLS(.ln) quit
+	
+	// Maturity date signals closed
+	if ln.mdt do CLS(.ln) quit
+	
+	if 'Db.isDefined("LNAOPTS","CID=:ln.cid") do OPN(.ln) quit
+
+	type RecordLNAOPTS lnaopts = Db.getRecord("LNAOPTS", "CID = :ln.cid")
+	
+	// No deferred fees - "open end"
+	if 'lnaopts.amt do OPN(.ln) quit
+
+	// No fee amort method - "closed"
+	if lnaopts.plan.isNull() do CLS(.ln) quit
+	
+	set PL = lnaopts.plan
+
+	type ResultSet rs = Db.select("FMET","AOAMO","PLAN=:PL AND TYP='PTS'")
+	
+	if rs.isEmpty() set FMET = 0
+	else  while rs.next() set FMET = rs.getCol("FMET")
+
+	// Straight-line amort meth - "open"
+	if (FMET = 1) do OPN(.ln) quit
+
+	// Revolving loans
+	if (ln.pcmval.extract(3) = 4) do CLS(.ln) quit
+	
+	// No term, mdt or onp is "open end"
+	if ln.trm.isNull(),ln.ptrm.isNull(),ln.mdt.isNull(),'ln.onp do OPN(.ln) quit
+	
+	do CLS(.ln)
+	
+	quit	
+
+
+public	CLS(RecordLN ln)	// Closed End Financing
+
+	type public String COINT,DISTPF
+	type public Number AMTREQ,BASIS,DISTPMT,PPIF,PV
+
+	type String %EXT
+	type Number AF,DIST1AF,IR
+	type Date ODYS
+
+	// Distribution 1 Annual Factor
+	set (DIST1AF,AF)=ln.dist1af if 'AF set (DIST1AF,AF)=1
+	set IR=ln.irn/(AF*100)
+	
+	set ODYS=0
+	
+	// Original Disbursement Date
+	if PPIF set ODYS=ln.schld-ln.odd
+	
+	set DISTPF=DISTPF.get()
+	set COINT=COINT.get()
+	if +COINT'=+$$^SCARND(COINT,0,ln.cid) set COINT=$$^SCARND(COINT+.005,0,ln.cid)
+	
+	// Amount Requested
+	set AMTREQ=ln.amtreq
+	set PV=$S(AMTREQ:AMTREQ,1:ln.crlmt)
+
+	// Disclosure - Total Interest
+	if $E(ln.iam)=2 set PV=PV-ln.distint
+	if ln.ballamt'="" set PV=PV-ln.ballamt
+	set BASIS=$$DY^UIC(ln.iacm,ln.odd)
+
+	// Disclosure - Tot of Pymts
+	set DISTPMT=ln.distpmt
+	
+	if ln.sldtd,'ln.idpf do CON(.ln) quit
+	do C(.ln)
+	quit
+	
+C(RecordLN ln) 
+
+	type public Number DISAMF,DISTPMT
+	
+	set DISAMF=DISAMF-ln.aprapp
+	set DISTPMT=DISTPMT+ln.aprapp
+	set ln.distpmt=DISTPMT
+	do CLSIN(.ln)
+	
+	quit
+
+	
+CLSIN(RecordLN ln)
+
+	type public Number AMTREQ,PV
+
+	/* 
+	   Check to see if the loan has Credit Life, Accident/Health, or
+	   Disability insurance; if APR flag is set, include in APR calculation
+	*/
+	
+
+	type String TYP
+	type Number AMT,APR,PDBY
+
+	type ResultSet rs=Db.select("TYP,AMT,PDBY,APR","LNAMOAO","CID=:ln.cid")
+
+	if 'rs.isEmpty() do {
+		while rs.next() do {
+			set TYP=rs.getCol(1)
+			set AMT=rs.getCol(2)
+			set PDBY=rs.getCol(3)
+			set APR=rs.getCol(4)
+			
+			if APR do CLSI(.ln) quit
+			if PDBY'=1 quit
+			
+			set AMTREQ=AMTREQ+AMT
+			set PV=PV+AMT
+			}
+		}
+	
+	do CLSIM(.ln)
+	
+	quit
+
+
+	
+CLSI(RecordLN ln)	// Update disclosure data to include ins in APR
+
+	type public Number AMT,DISAMF,DISTPMT,DISTFC,PDBY,PV
+
+	if 'PDBY quit
+
+	set DISAMF=DISAMF-AMT 
+	set DISTFC=DISTFC+AMT
+	set PV=$S(PDBY=2:PV-AMT,1:PV)
+	set DISTPMT=DISTPMT+AMT
+	
+	set ln.distpmt=DISTPMT
+
+	quit	
+
+
+CLSIM(RecordLN ln) 
+
+	/*
+	Check to see if mortgage has MGIC insurance; if so include
+        total and prepaid premiums in APR calculation
+	*/	
+
+	type public Number DISAMF,DISIM,DISTPMT
+
+	if 'ln.dismip do CLS1(.ln) quit
+
+	set DISAMF=DISAMF-DISIM 
+	set DISTPMT=DISTPMT+DISIM
+	set ln.distpmt=DISTPMT
+	do CLS1(.ln) 
+	quit
+
+	
+CLS1(RecordLN ln)
+
+	type public Boolean KILLCF,PPIF
+	type public Number BASE,COINT,DISTPF,IRR,PV
+	type public String changes(),CF(),ER,PCMVAL
+	type public Date ODYS
+	
+	type Number AF,CTAF
+	type String OIACM
+	type Date zEFD
+
+	if PCMVAL.get().isNull() set PCMVAL = ln.pcmval
+	
+	set PV=$$^SCARND(PV-DISTPF,0,ln.cid)
+	set BASE=ln.crlmt-ln.iun+COINT.get()
+	
+	set zEFD=$S(%EffectiveDate.get():%EffectiveDate,1:%SystemDate)
+	if ln.trexd>zEFD set KILLCF=1
+
+	// Loan Payment Schedules
+	if ln.dist1fre="*" do {
+		do APR^LNCFBLDP(.ln)
+		set CTAF=365
+		}
+	
+	// Standard P&I Loans
+	else  if PCMVAL.extract(1) do APR^LNCFBLD(.ln) if 1
+	
+	// Revolving loans
+	else  if PCMVAL.extract(3)=4 do APR^LNCFBLDR(.ln) if 1
+
+	//Interest only/fixed principal
+	else  do {
+		type Number AMOPT,FIA
+		set AMOPT=1 
+		do APR^LNCFBLDI(.ln)
+		set ln.fia=FIA
+		set changes("FIA") = FIA
+		}	
+
+	if $O(CF(0))="" do END(.ln) quit
+	
+	// Add in any PMI payments.
+	do PMI(.ln)
+	
+	// Calculates Annual Percentage Rate through IRR calculation
+	set CF(0)=-PV
+	set AF=$S(CTAF.exists():CTAF,1:ln.dist1af)
+	
+	// This will calculate non P & I product types with Odd Days Interest.
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:ln.type")
+	set OIACM=prodctl.ppico
+	if OIACM="" set OIACM=ln.iacm
+	
+	if (PCMVAL.extract(3))>2 set ODYS=ln.schld-ln.odd
+
+	if 'PCMVAL.extract(1),ODYS do {
+	
+		type Number ODI
+		
+		if OIACM.extract(1)'=0 set ODI=$$^SCARND($$^UIC(PV,ln.odd,ln.schld-1,OIACM,ln.irn,10),10,ln.cid)
+		if OIACM.extract(1)=0 set ODI=$$^SCARND($$^UIC(PV,ln.odd,ln.schld-1,OIACM,ln.irn,10,AF),10,ln.cid)
+		set CF(0)=CF(0)-ODI
+		set $P(CF(1),"|",1)=CF(1)+ODI
+		}
+	
+	// Compute APR
+	do { if ER do END(.ln) quit
+	
+		type Number CMP
+		
+		set CMP='PPIF
+	
+		// UIRR deals with COINT if PIACM=1
+		if 'ln.piacm set CF(0)=CF(0)-COINT
+		if ln.amodt'=ln.dist1ld do { quit:ER
+			type Date ND
+			set ND=$$NJD^UFRE(ln.amodt,ln.dist1fre) quit:ER 
+			if ND=ln.dist1nd set CMP=CMP_1
+			}
+	
+		if ln.dist1fre="*" do { quit
+			if 'IRR.exists() set IRR=0 quit
+			if 'ln.piacm set IRR=$$^DEPCALC("F7",365,(IRR/36500),100,0,"",5)-100
+			}
+		// dist1fre not = "*"
+		set IRR=$$^UIRR(.CF,ln.dist1fre,ln.piacm,ln.iacm,ln.amodt,OIACM,CMP)
+		}
+	
+	/*
+	Because PMI is not included in net deferred fee calculations, we
+	must flag this CF array to be deleted.
+	*/
+	if ln.distip set KILLCF=1
+	do END(.ln) quit
+	
+
+OPN(RecordLN ln) // Open End Financing - New Accounts
+	
+	
+	type public Number DISAMF,IRR,PV
+
+	type Number IRRTEAS,IRRNOM
+	type Date NOMEXD
+
+	if DISAMF=0 set IRR=0 do END(.ln) quit
+	set DISAMF=DISAMF-ln.aprapp
+	set IRR=((ln.crlmt*ln.irn)/DISAMF).roundDec(5,,0)
+
+	//Calculate the IRR for teaser rate + nominal rate (for MDT=T+1Year
+	if ln.trate do {
+		set PV=$S(ln.amtreq:ln.amtreq,1:ln.crlmt)
+		set NOMEXD=$$ADDMJD^SCADAT(ln.odd,12)    // T+1YEAR
+		if ln.trexd<NOMEXD do {
+			set IRRTEAS=$$REV^UIC(ln.odd,ln.trexd,ln.iacm,PV,ln.trate)
+			set IRRNOM=$$REV^UIC(ln.trexd,NOMEXD,ln.iacm,PV,ln.irn)
+			set IRR=IRRTEAS+IRRNOM
+			}
+		if ln.trexd'<NOMEXD do {
+			set IRRTEAS=$$REV^UIC(ln.odd,NOMEXD,ln.iacm,PV,ln.trate)
+			set IRR=IRRTEAS
+			}
+		set IRR=IRR*100
+		set IRR=(IRR/DISAMF).roundDec(5,,0)
+		}
+	do END(.ln)
+	quit
+
+END(RecordLN ln)	// Return APR value
+	
+	
+	type public String changes(), ER
+	type public Number IRR
+	
+	set ER=0
+	set ln.disapr=(+IRR.get()).roundDec(5,,0)
+	set changes("DISAPR") = ln.disapr
+	do KVAR
+	quit
+	
+KVAR	// Kill all local variables
+
+	type public Date ODD
+	type public Number N,IN,CRLMT,APRAPP,IRN
+
+	kill N,IN,CRLMT,APRAPP,ODD,IRN
+	
+	quit 
+
+
+	
+CON(RecordLN ln) // Set up for construction & construction/permanent loans
+
+	type public Boolean PPIF
+	type public Date ODYS
+	type public Number COINT,DISAMF,DIST1AF,PV,TBAL
+	type public String ER,PCMVAL
+	
+	type String DIST1FRE,FRE
+	type Date %LD,%ND,MDT
+	type Boolean PERM
+	type Number %BAL,%INT
+
+	set ODYS=0
+	set (FRE,DIST1FRE)=ln.dist1fre         // Distribution 1 Frequency
+	set MDT=ln.sldtd                       // SL Deferment Ending Date
+	set PERM=ln.mdt'=MDT                   // Account Maturity Date
+	
+	// Calculate construction interest from ODD to construction expiration
+	set %LD=ln.odd
+	set %ND=MDT 
+	set %BAL=ln.crlmt
+	if ln.maxdrct>1 set %BAL=$$^SCARND(%BAL/2,0,ln.cid)
+	set %INT=$$^UIC(%BAL,%LD,%ND,ln.iacm,ln.irn,0,DIST1AF,ln.dist1fre,ln.icpf,ln.schnd,ln.schld) quit:ER
+	if %INT-(%INT\1) set %INT=$$^SCARND(%INT+.005,0,ln.cid)
+	
+	set TBAL=TBAL.get()-%INT
+	set DISAMF=ln.crlmt-(ln.orgfa+ln.comfa+%INT)
+	
+	if 'PERM set PV=$$^SCARND(PV/2,0,ln.cid)
+	set PV=PV-%INT
+	if 'PERM do CON2(.ln) quit
+	
+	set ODYS=(MDT-ln.odd)/2
+	
+	/*
+	Redefine odd days interest (OINT or COINT)
+	Calculate Odd Days Interest
+	*/
+
+	type Number DAYS,OINT,SVCOINT
+	type String IACM
+	type Date JD,NJD
+	
+	set SVCOINT=COINT.get()
+	set (%INT,OINT,COINT)=0
+	
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:ln.type")
+	
+	set IACM=$S(prodctl.ppico'="":prodctl.ppico,1:ln.iacm)
+	set (%ND,%LD,JD)=MDT do FULL^UFRE
+	set NJD=$$NJD^UFRE(NJD,ln.dist1fre,,1) quit:ER 
+	if NJD>MDT set %ND=NJD
+	set DAYS=%ND-%LD if 'DAYS do CON1(.ln) quit
+	set %BAL=ln.crlmt
+	set %ND=%ND-1
+	if DAYS set %INT=$$^UIC(%BAL,%LD,%ND,IACM,ln.irn,0,DIST1AF,ln.dist1fre,ln.icpf,ln.schnd,ln.schld) quit:ER
+	if %INT-(%INT\1) set %INT=$$^SCARND(%INT+.005,0,ln.cid)
+	if DAYS set OINT=%INT do CON1(.ln) quit
+	
+	// Calculate Capitalized Odd-days interest
+	if '('DAYS&('PPIF)&(PCMVAL.extract(1))) do CON1(.ln) quit
+	set %INT=$$^UIC(%BAL,%LD,%ND,IACM,ln.irn,0,DIST1AF,ln.dist1fre,ln.icpf,ln.schnd,ln.schld) quit:ER
+	if %INT-(%INT\1) set %INT=$$^SCARND(%INT+.005,0,ln.cid)
+	if '%INT do CON1(.ln) quit
+	set COINT=%INT
+	do CON1(.ln) 
+	quit	
+
+CON1(RecordLN ln) // Reset account for odd period at the end of the contruction term
+	
+	type public String PCMVAL
+	type public Number COINT,DAYS,DISTPF,OINT,SVCOINT,TBAL
+	
+	type String IACM
+	
+	set TBAL=TBAL+COINT-SVCOINT
+	set DISTPF=DISTPF-ln.disppi+OINT
+	set ln.disppi=OINT
+
+	set ln.disppid=DAYS
+
+	set IACM=ln.iacm
+	
+	if PCMVAL.extract(1) do C(.ln) quit
+	do CON2(.ln) 
+	quit
+
+CON2(RecordLN ln) // Modify CF(1) array for construction term
+	
+	type public Date MDT,ODD,PERM
+	type public Number %INT,BASIS,CTAF,PV
+	type public String CF()
+	
+	type Number X
+	
+	// Already built by ^LNCFBLDI
+	if $O(CF(1))'="" quit
+	
+	set CTAF=BASIS/(MDT-ODD)
+	set PV=PV+%INT
+	set X=1 if 'PERM set X=2
+
+	// Interest - Unearned (Original)
+	set CF(1)=(((ln.crlmt-ln.iun)/X)+%INT)_"|1"
+	do C^LNAPR(.ln) 
+	
+	quit
+
+
+PMI(RecordLN ln) // Add in any private mortgage insurance periodic payments
+	
+	type public Number BASE,BASE1,COINT
+	
+	type Number %C,%D,SEQ
+	
+	set SEQ=1 
+	set (%C,%D)=""
+	set (BASE,BASE1)=ln.crlmt-ln.iun+COINT
+	if ln.lvr set BASE=BASE/ln.lvr*100
+	do P(.ln)
+	quit
+
+P(RecordLN ln)
+	
+	type public Number %C
+	type public String %PR()
+	
+	set %C=$O(%PR(%C))
+	if %C="" do P2(.ln) quit
+	do P1(.ln) 
+	
+	quit
+
+P1(RecordLN ln) 
+	
+	type public Number %C,%D,BASE,BASE1,SEQ
+	type public String changes(),%PR(),ER
+	
+	type String CNP(),PR
+	type Number FV,NP
+	
+	set %D=$O(%PR(%C,%D))
+	if %D="" do P^LNAPR(.ln) quit
+	
+	set PR=%PR(%C,%D)
+	if $P(PR,"|",19)="" quit
+	
+	set FV=BASE*($P(PR,"|",19)/100)
+	
+	// If the loan amount is less than the cutoff now
+	if FV>BASE1 quit
+	
+	do NP(.ln) if ER quit 
+	set CNP(SEQ)=$P(PR,"|",16)_"|"_NP
+	set ln.distip=ln.distip+(CNP(SEQ)*NP)
+	set changes("DISTIP") = ln.distip
+	set SEQ=SEQ+1
+	
+	do P1^LNAPR(.ln)		// Recursive
+	
+	quit
+		
+P2(RecordLN ln) // Integrate CNP with CF
+	
+	type public String CF()
+	
+	type Number CFS
+	
+	if 'ln.distip quit                     // Total Estimated Mortgage Ins Premiums
+	
+	set CFS=0
+	for  set CFS=$O(CF(CFS)) quit:CFS=""  do P3(.ln)
+	do P5(.ln)
+	quit
+
+P3(RecordLN ln)
+
+	type public String CF()
+	type public Number CFS
+	
+	type String CNF,CNP
+	type Number SEQ
+
+	set CNF=$P(CF(CFS),"|",2)
+	
+	set SEQ=0
+	set SEQ=$O(CNP(SEQ))
+	if SEQ="" do P5(.ln) quit
+	
+	set CNP=$P(CNP(SEQ),"|",2)
+
+	if CNP'>CNF do PL(.ln) quit
+
+	do PG(.ln)
+	
+	quit
+	
+PL(RecordLN ln)	// PMI term is less than CF term
+
+	type public String CF(),CNP()
+	type public Number CFS,SEQ
+
+	type String CNF,X,Y
+	
+	set X=CF(CFS)
+	set Y=CNP(SEQ)
+	set CF(CFS)=(X+Y)_"|"_$P(Y,"|",2)_"|"_$P(X,"|",3,999)
+	set CNF=$P(X,"|",2)-$P(Y,"|",2)
+	set CFS=CFS+.01
+	for CFS=CFS:-.001 if '$D(CF(CFS)) quit 
+	set CF(CFS)=(+X)_"|"_CNF_"|"_$P(X,"|",3,999)
+	kill CNP(SEQ)
+	set CFS=0
+	
+	do P3^LNAPR(.ln)
+	
+	quit
+
+PG(RecordLN ln)	// PMI term is greater than CF term
+	
+	type public String CF(),CNP()
+	type public Number CFS,SEQ
+	
+	type String X,Y
+
+	set X=CF(0)
+	set Y=CNP(SEQ)
+	set CF(0)=(X+Y)_"|"_$P(X,"|",2,999)
+	set CNP(SEQ)=(+Y)_"|"_($P(Y,"|",2)-$P(X,"|",2))
+	if '$P(CNP(SEQ),"|",2) kill CNP(SEQ) set CFS=0
+	
+	do P3^LNAPR(.ln)
+	
+	quit
+	
+P5(RecordLN ln) // Set up disclosure payment changes
+
+	type public String CF()
+
+	type Number N,P,S
+	
+	set (N,P)=1
+	set S=""
+	for  set S=$O(CF(S)) quit:S=""!(P>15)  do {
+		do ^LNPMT(.ln,P,N,$P(CF(S),"|",2)+(N-1),+CF(S))
+		set P=P+1
+		set N=N+$P(CF(S),"|",2)
+		}
+	quit
+	
+NP(RecordLN ln) // Determine number of payments to reach PMI expiration
+	
+	type public String CF()
+	type public Number BASE1,DIST1AF,FV,NP
+	
+	type Number F,IR,PMT,N,NN,S
+	
+	set NP=0 
+	set F=BASE1
+	set IR=ln.irn/(DIST1AF*100)
+	
+	if ln.pchm'=2,ln.pchm'=3 do N2^LNAPR quit
+	
+	// If this is a GEM or IEM we must use alternative means
+	set S=""
+	for  set S=$O(CF(S)) quit:S=""  do {
+		set PMT=+CF(S) 
+		set N=$P(CF(S),"|",2) 
+		do FV(.ln)
+		set NP=NP+N 
+		if F<FV quit 
+		}
+	if S="" set NP=ln.onp quit
+	
+	set NN=N
+
+	for NN=NN:-1 set:NN=0 S=$O(CF(S),-1) quit:S=""  do {
+		set:NN=0 PMT=+CF(S) 
+		set:NN=0 NN=$P(CF(S),"|",2) 
+		set:PMT>0 PMT=-PMT 
+		set N=0 
+		do FV(.ln) quit:F>FV  
+		set NP=NP-1
+		}
+	quit 
+	
+	
+N2	// Number of payments for GEM/IEM loans
+
+	type public Number BASE1,FV,IR,NP,PMTPI
+	type public String ER
+
+	type Number BOT,TOP,X
+	
+	set X=(PMTPI-(IR*FV))/(PMTPI-(IR*BASE1))
+	set TOP=$$LNX^%ZFUNC(X)
+	set X=1+IR
+	set BOT=$$LNX^%ZFUNC(X)
+	if 'BOT set ER=1 quit 
+	set NP=NP+(TOP/BOT)
+	if '(NP-(NP\1)) quit 
+	set NP=$$^SCARND(NP+.5,0,"","",0)
+	quit 
+	
+	
+FV(RecordLN ln)	// Calculate future value (used with GEM's)
+	
+	type public Number F,IR,N,PMT
+	
+	type Number X
+	
+	set X=$$EXP^%ZFUNC($$LNX^%ZFUNC(1+IR)*(N+1))
+	set F=$$^SCARND((((1-X)/IR)*PMT)+(F*X),0,ln.cid)
+	quit 
+	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60620^44855^Pat Kelly^14853"	// Signature - LTD^TIME^USER^SIZE

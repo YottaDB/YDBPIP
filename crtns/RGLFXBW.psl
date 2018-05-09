@@ -1,0 +1,272 @@
+public	RGLFXBW(%SystemDate)	//Exchange Foreign currency withholding
+	/*
+	   ORIG:  FSANCHEZ - 28 APR 1993
+
+	   This routine finds the backup withholding G/L accounts by scanning
+	   the [UTBL]GLSC table, and then checks the G/L accounts for backup
+	   withholding in all of the foreign currency ledgers for balances.  
+	   If balances exist, they are exchanged into the system base currency.
+
+	   %SystemDate is passed by value from BCHRGLXFR.
+
+	---- Revision History -------------------------------------------------
+
+	06/20/07 - KinI - CR 27726
+		   Modified main section to add TGLDTL record deleting 
+		   to avoid records double-counting when RGLXFR function is 
+		   re-run. Cleaned up compilation warnings in main section.
+
+	03/14/07 - KumarSS - CR 25177
+		   Removed Invalid Unicode Characters.
+
+	03/29/06 - KinI - CR 20009
+		   Added delete for TGL record to avoid Oracle "unique 
+		   constraint violation" error in case of re-accumulation.
+
+	12/13/05 - KinI - CR 16664
+		   Modified to remove BLDTR section that was only called by 
+		   the TEST tag, which was obsoleted previously. Removed old
+		   revision history.
+	
+	04/07/03 - GRAY - 51351
+		   Removed the TEST sub-routine.  Nothing calls into it.
+
+	*/
+	
+	type public String TGL(,)
+	type Number AMT, CC, CRAMT, DRAMT, FXPOSRT, SRC, TAXGL
+	type String CO, CMT, CRCD
+	type Boolean I
+	
+	// Lock DTJ Level of TGL
+	lock +TGL(%SystemDate,1)
+
+	// Lock Position
+	lock +TGL(%SystemDate,6)
+
+	// Delete TGL level
+	do Db.fastDelete("TGL1","TDT=:%SystemDate,SRC=6")
+	do Db.fastDelete("TGL","TJD=:%SystemDate,SRC=6")
+	do Db.fastDelete("TGLDTL","TJD=:%SystemDate,SRC=6")
+
+	// System Currency and System Date should already be defined.
+
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+	set CO=cuvar.co
+
+	// FX Rate type
+	set FXPOSRT=cuvar.fxposrt
+	if FXPOSRT="" set FXPOSRT=1
+
+	// Get Withholding accounts
+	do GETBWA(.TAXGL)
+
+	set TAXGL="" 
+	set SRC=1
+
+	for  set TAXGL=TAXGL(TAXGL).order() quit:TAXGL.isNull()  do {
+		type ResultSet rs=Db.select("CRCD,EFD,CC","TGL","TJD=:%SystemDate AND SRC=:SRC AND ACN=:TAXGL")
+		while rs.next() do {
+			set CRCD=rs.getCol("CRCD")
+			set %EffectiveDate=rs.getCol("EFD")
+			set CC=rs.getCol("CC")
+			
+			type RecordTGL tgl=Db.getRecord("TGL","TJD=:%SystemDate,SRC=:SRC,CRCD=:CRCD,EFD=:%EffectiveDate,ACN=:TAXGL,CC=:CC")
+
+			set DRAMT=tgl.dramt
+			if DRAMT set AMT=DRAMT set I=0 do EXCH(.cuvar)
+			set CRAMT=tgl.cramt
+			if CRAMT set AMT=CRAMT set I=1 do EXCH(.cuvar)
+			}
+		}
+
+	lock -TGL(%SystemDate,1)
+	lock -TGL(%SystemDate,6)
+
+	quit
+
+
+EXCH(RecordCUVAR cuvar)	// CUVAR object	
+
+	//Exchange Foreign Currency Tax Liability Balance to Base
+	/*
+	   Assume in this example that the Tax G/L account has a Credit Balance
+
+	   1)    DR the foreign currency Tax G/L account at cost center
+	   2)    CR the foreign currency position account at cost center
+	   3)    DR the base to foreign currency position account at cost center
+	   4)    CR the base currency Tax G/L account at the cost center
+
+	*/
+
+	type Number BSOTCGL, OTCGL, RATE
+	type String Z
+	
+        type RecordCRCD crcd=Db.getRecord("CRCD","CO=:CO,CRCD=:CRCD")
+
+	set OTCGL=crcd.otcgl 
+	if OTCGL="" set OTCGL=cuvar.glts
+
+	set BSOTCGL=crcd.bsotcgl
+	if BSOTCGL="" set BSOTCGL=cuvar.glts
+
+	set RATE=""
+	set Z=""
+
+	if %SystemDate<cuvar.tjd do {
+		
+		type Date %EffectiveDate,XEFD
+		set XEFD=%SystemDate+1
+		
+        	type ResultSet rs
+        	set rs=Db.select("EFD,SEQ","CRCDRATEH","CO=:CO AND CRCD=:CRCD AND EFD<:XEFD","EFD DESC,SEQ DESC")
+
+		while rs.next() do {
+			set %EffectiveDate=rs.getCol("EFD")
+			set SEQ=rs.getCol("SEQ")
+
+			type RecordCRCDRATEH zz=Db.getRecord("CRCDRATEH","CO=:CO,CRCD=:CRCD,EFD=:%EffectiveDate,SEQ=:SEQ",1)
+			if zz.getMode()=0 quit
+
+			set Z=zz.midrate_"|"_zz.spotbid_"|"_zz.spotoffer_"|"
+			set Z=Z_zz.otcbid_"|"_zz.otcoffer_"|"_zz.offbid_"|"
+			set Z=Z_zz.offoffer_"|"_zz.finspot
+			}
+		}
+
+	if Z="" do {
+		type RecordCRCD crcd=Db.getRecord("CRCD","CO=:CO,CRCD=:CRCD")
+		
+		set Z=crcd.midrate_"|"_crcd.spotbid_"|"_crcd.spotoffer_"|"
+		set Z=Z_crcd.otcbid_"|"_crcd.otcoffer_"|"_crcd.offbid_"|"
+		set Z=Z_crcd.offoffer_"|"_crcd.finspot
+		}
+
+	set RATE=Z.piece("|",FXPOSRT)
+	if RATE="" quit
+
+	set CMT=CRCD_" "_AMT.roundCur(CRCD)_" * "_RATE
+	set EXAMT=(AMT*RATE).roundCur(CRCD) if 'EXAMT quit
+
+	set SRC=6
+	
+	// TAXGL entries
+ 	type RecordTGL tgl0=Db.getRecord("TGL","TJD=:%SystemDate,SRC=:SRC,CRCD=:CRCD,EFD=:%EffectiveDate,ACN=:TAXGL,CC=:CC",1)
+
+	if I=0 do {
+		set tgl0.drcnt=tgl0.drcnt+1
+		set tgl0.dramt=tgl0.dramt+AMT
+		}
+
+	if I=1 do {
+		set tgl0.crcnt=tgl0.crcnt+1
+		set tgl0.cramt=tgl0.cramt+AMT
+		}
+
+	do tgl0.bypassSave()	
+
+	do DETAIL(CRCD,%EffectiveDate,TAXGL,CC,'I,AMT,CMT)
+
+	// Update the foreign currency exchange position (OTCGL)
+        type RecordTGL tgl2=Db.getRecord("TGL","TJD=:%SystemDate,SRC=:SRC,CRCD=:CRCD,EFD=:%EffectiveDate,ACN=:OTCGL,CC=:CC",1)
+
+	if I=0 do {
+		set tgl2.drcnt=tgl2.drcnt+1
+		set tgl2.dramt=tgl2.dramt+AMT
+		}
+
+	if I=1 do {
+		set tgl2.crcnt=tgl2.crcnt+1
+		set tgl2.cramt=tgl2.cramt+AMT
+		}
+
+	do tgl2.bypassSave()	
+
+	do DETAIL(CRCD,%EffectiveDate,OTCGL,CC,I,AMT,CMT)
+
+	// Update the base to foreign currency position account at cost center
+	// (BSOTCGL)
+	
+        type RecordTGL tgl3=Db.getRecord("TGL","TJD=:%SystemDate,SRC=:SRC,CRCD=:%SystemCurrency,EFD=:%EffectiveDate,ACN=:BSOTCGL,CC=:CC",1)
+
+	if I=0 do {
+		set tgl3.drcnt=tgl3.drcnt+1
+		set tgl3.dramt=tgl3.dramt+EXAMT
+		}
+
+	if I=1 do {
+		set tgl3.crcnt=tgl3.crcnt+1
+		set tgl3.cramt=tgl3.cramt+EXAMT
+		}
+
+	do tgl3.bypassSave()	
+
+	do DETAIL(%SystemCurrency,%EffectiveDate,BSOTCGL,CC,'I,EXAMT,CMT)
+
+	// Update the base currency Tax G/L account at the cost center
+
+        type RecordTGL tgl4=Db.getRecord("TGL","TJD=:%SystemDate,SRC=:SRC,CRCD=:%SystemCurrency,EFD=:%EffectiveDate,ACN=:TAXGL,CC=:CC",1)
+
+	if I=0 do {
+		set tgl4.drcnt=tgl4.drcnt+1
+		set tgl4.dramt=tgl4.dramt+EXAMT
+		}
+
+	if I=1 do {
+		set tgl4.crcnt=tgl4.crcnt+1
+		set tgl4.cramt=tgl4.cramt+EXAMT
+		}
+
+	do tgl4.bypassSave()	
+
+	do DETAIL(%SystemCurrency,%EffectiveDate,TAXGL,CC,I,EXAMT,CMT)
+
+	quit
+
+
+DETAIL(CRCD,%EffectiveDate,CID,CC,ITC,AMT,CMT)	// Create Detail Entry in ^TGL
+
+	type Number SEQ
+
+	set SEQ=Db.nextVal("TGLDTL","TJD=:%SystemDate,SRC=:SRC,CRCD=:CRCD,EFD=:%EffectiveDate,ACN=:CID,CC=:CC")
+
+	type RecordTGLDTL tgldtl=Class.new("RecordTGLDTL")
+
+	set tgldtl.tjd=%SystemDate
+	set tgldtl.src=SRC
+	set tgldtl.crcd=CRCD
+	set tgldtl.efd=%EffectiveDate
+	set tgldtl.acn=CID
+	set tgldtl.cc=CC
+	set tgldtl.seq=SEQ
+
+	set tgldtl.glacn=CID
+	set tgldtl.ccntr=CC
+	set tgldtl.trn=$select(ITC=0:"CR",1:"DR")
+	set tgldtl.tamt=AMT
+	set tgldtl.ref=""
+	set tgldtl.cmt=CMT
+	set tgldtl.uid=""
+
+	do tgldtl.bypassSave()	
+
+	quit
+
+
+GETBWA(array)	// Get the list of backup witholding accounts
+
+
+	type String GLSC
+	
+	type ResultSet rs=Db.select("GLSC","UTBLGLSC")
+	while rs.next() do {
+		set GLSC=rs.getCol("GLSC")
+		
+		type RecordUTBLGLSC utblglsc=Db.getRecord("UTBLGLSC","GLSC=:GLSC")
+
+		if utblglsc.dgl4 set array(utblglsc.dgl4)=array(utblglsc.dgl4).get()_GLSC_","
+		}
+	
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60803^41497^Irina Kin^6642"	// Signature - LTD^TIME^USER^SIZE

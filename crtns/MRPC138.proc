@@ -1,0 +1,269 @@
+MRPC138( String RETURN, Number VERSN, Number CID, Number EVENTID, String INPUT)
+
+	/*
+	 Procedure Id: MRPC138
+	 DESC: Event Registration RPC
+	 ORIG: Ed Sigda
+	 DATE: 02/15/2005
+
+	 ARGUMENTS:
+		. RETURN	Return value		/TYP=T/REQ/MECH=REFNAM:W
+		. VERSN		Version number		/TYP=N/REQ/MECH=VAL
+		. CID		Account/Customer Number	/TYP=N/REQ/MECH=VAL
+		. EVENTID	Event ID		/TYP=N/REQ/MECH=VAL
+		. INPUT		Input string		/TYP=T/REQ/MECH=VAL
+
+	 EXAMPLE:
+	 	// Notify when a regular deposit for $500.00 is made
+		set CID=420000000026
+		set EVENTSEQ=6
+		set INPUT="EVENTARGVALS1.TESTID='2',EVENTARGVALS1.ARGUMENTNUM='3',EVENTARGVALS1.EXPRESSION='500.00'"
+		set X=$$^MRPC135(.R,1,CID,EVENTID,INPUT)
+
+	   This RPC is a public RPC for Event Registrations.
+	
+	   This MRPC will accept the Account number, an Event ID and a comma 
+	   separated string in the form FID.DI=VAL, FID.DI=VAL,... which will 
+	   be used to create the appropriate event table entries.  The valid
+	   table entries in the Input String are as follows:
+	   	EVENTS		- Registered Events
+	   	ACCTTOEVENTS	- Account To Events (CID is an Account Number)
+	   	CUSTTOEVENTS	- Customer To Events (CID is an Customer Number)
+	   	EVENTARGVALS	- Event Argument Values
+
+	   This form of input is used vs. individual parameters to provide
+	   the flexibility of changes to the input data without changes
+	   to this routine.
+	   
+	   In order to handle multiple EVENTARGVALS, an exception to the 
+	   FID.DI=VAL format must be used.  For these records, add a 
+	   sequential number to the FID field.  For example,
+	   if there are 2 argument values that should be attached to an 
+	   event, this should be set up as EVENTARGVALS1.TESTID='2',
+	   EVENTARGVALS2.TESTID='3'...
+	   
+	   To reduce the amount of information required by the user of
+	   this MRPC, all commonly shared fields between the EVENTS table
+	   and the EVANTAVAIL table will be defaulted from EVENTSAVAIL if 
+	   the corresponding EVENTS column is not passed.  Likewise, all
+	   commonly shared fields between the EVENTARGVALS table and the
+	   EVANTSYSARGV table will be defaulted from EVENTSYSARGV if 
+	   the corresponding EVENTARGVALS column is not passed.
+	   
+	   Special Character Considerations:
+		o	Place single quotes around input strings that may 
+			return data to the host containing a comma. 
+			For example, EVENTS.EMAIL='jsmith@service.com'.
+		o	Use two single quotes when including a quote in a 
+			name-value pair. For example, to pass 'O'Neal' you 
+			will need to send 'O''Neal'. Use this logic for any 
+			input strings or any user input text fields that may 
+			return data to the host containing a single-quote.
+	   
+
+	 ---- Comments --------------------------------------------------------
+
+	 ---- Revision History ------------------------------------------------
+
+	01/03/07 - NATRAJAH - 24542
+	 	Retrofited new procedure from ICGWeb01_Dev_Profile view as per
+	 	the below mentioned CR.	
+		02/15/05 Ed Sigda - CR20082
+		Create procedure.
+		 	
+	*/
+
+	type public Boolean ER
+	type public String RM
+	
+	type Boolean ERV
+	type String ERRMSG
+
+	set (ER,ERV)=0
+	set (ERRMSG,RM)=""
+	set RETURN=""
+
+	// Process application id
+	do PROC($G(VERSN),$G(CID),$G(EVENTID),$G(INPUT),.RETURN)
+	if ERV set ER=1,RM=ERRMSG
+
+	if ER quit $$ERRMSG^PBSUTL(RM)
+
+	// Build return value
+	set RETURN=$$V2LV^MSG(.RETURN) 
+
+	quit ""
+
+
+public PROC( Number VERSN, Number CID, Number EVENTID, String INPUT, String RETURN)
+
+	/*
+	 Process Appplication Origination
+
+	 ARGUMENTS:
+		. VERSN		Version number		/TYP=N/REQ/MECH=VAL
+		. CID		Account/Customer Number	/TYP=N/REQ/MECH=VAL
+		. EVENTID	Event ID		/TYP=N/REQ/MECH=VAL
+		. INPUT		Input String		/TYP=T/REQ/MECH=VAL
+
+	 RETURNS
+		. RETURN	Return value		/TYP=T/REQ/MECH=REFNAM:W
+	*/
+
+	type public Boolean ER,ERV
+	type public String ERRMSG,ET,FROM,RM
+	
+	catch error {
+		set ET=error.type
+		set RM=error.description
+		set FROM=error.thrownAt
+		if error.type["%GTM-" do ZE^UTLERR
+
+		do Runtime.rollback()
+		
+		// Set error flag
+		set ERV=1
+		set ERRMSG=RM
+	}
+
+	type String ARGNUM,ARGS(),DATA()
+	type Boolean STOP
+	type Number CNT,EVENTSEQ,SEQ,TIM
+	
+	type RecordEVENTS event
+	type RecordACCTTOEVENTS eventcid
+	type RecordCUSTTOEVENTS eventacn
+	type RecordEVENTARGVALS eventarg
+	type RecordEVENTSAVAIL eventavl
+
+	// Version number of client message is not compatible with server
+	if VERSN'=1 set RM=$$^MSG(2951) throw Class.new("Error",","_RM)
+	
+	// Missing ~p1
+	if CID.isNull() set RM=$$^MSG(3113,"CID") throw Class.new("Error",","_RM)
+	if EVENTID.isNull() set RM=$$^MSG(3113,"EVENTID") throw Class.new("Error",","_RM)
+
+	// Parse tax id data into an array
+	do STR2ARR^UTLMRPC(INPUT,.DATA,",")
+
+	// Invalid event type
+	if 'Db.isDefined("EVENTSAVAIL",":EVENTID") set RM=$$^MSG(4430) throw Class.new("Error",","_RM)
+	
+	// Generate event sequence
+	set SEQ=$$GET^NXTSEQ("MRPC578",2)
+	set TIM=%CurrentTime
+	set EVENTSEQ=%CurrentDate_TIM.zero(5)_SEQ.zero(2)
+
+	// Create EVENTS record, use EVENTSAVAIL for defaults via trigger
+	set event=Class.new("RecordEVENTS")
+	set event.eventid=EVENTID
+	set event.eventseq=EVENTSEQ
+	
+	do event.overlay("DATA")
+
+	// Save the EVENTS data to the database
+	do event.save("/NOFKCHK=1/VALDD/VALRI/VALREQ/KEEPVFKEY")
+	if ER throw Class.new("Error",","_RM)
+	
+	set eventavl=Db.getRecord("EVENTSAVAIL",":EVENTID")
+	
+	// Create ACCTTOEVENTS record
+	if eventavl.entity="A" do {
+		set eventcid=Class.new("RecordACCTTOEVENTS")
+		set eventcid.cid=CID
+		set eventcid.eventseq=EVENTSEQ
+	
+		// Save the ACCTTOEVENTS data to the database
+		do eventcid.save("/NOFKCHK=1/VALDD/VALRI/VALREQ/KEEPVFKEY")
+		if ER throw Class.new("Error",","_RM)
+	}
+
+	// Create CUSTTOEVENTS record
+	if eventavl.entity="C" do {
+		set eventacn=Class.new("RecordCUSTTOEVENTS")
+		set eventacn.acn=CID
+		set eventacn.eventseq=EVENTSEQ
+	
+		// Save the ACCTTOEVENTS data to the database
+		do eventacn.save("/NOFKCHK=1/VALDD/VALRI/VALREQ/KEEPVFKEY")
+		if ER throw Class.new("Error",","_RM)
+	}
+		
+	// Load default arguments
+	type ResultSet rs = Db.select("ARGUMENTNUM,TESTID,EXPRESSION","EVENTSYSARGV","EVENTID=:EVENTID")		
+	while rs.next() set ARGS(rs.getCol(1))=rs.getCol(2)_"|"_rs.getCol(3)
+	
+	// Overlay argument values
+	// ??? What if I didn't want to use all default arguments?
+	set STOP=0
+	for CNT=1:1 do { quit:STOP
+		set ARGNUM=DATA("EVENTARGVALS"_CNT_".ARGUMENTNUM").get()
+		if ARGNUM="" set STOP=1 quit
+
+		if DATA("EVENTARGVALS"_CNT_".TESTID").data() set ARGS(ARGNUM).piece("|",1)=DATA("EVENTARGVALS"_CNT_".TESTID")
+		if DATA("EVENTARGVALS"_CNT_".EXPRESSION").data() set ARGS(ARGNUM).piece("|",2)=DATA("EVENTARGVALS"_CNT_".EXPRESSION")
+	}
+
+	// Create EVENTARGVALS entries
+	set ARGNUM=""
+	for  set ARGNUM=ARGS(ARGNUM).order() quit:ARGNUM=""  do {
+		set eventarg=Class.new("RecordEVENTARGVALS")
+		set eventarg.eventseq=EVENTSEQ
+		set eventarg.argumentnum=ARGNUM
+		set eventarg.testid=ARGS(ARGNUM).piece("|",1)
+		set eventarg.expression=ARGS(ARGNUM).piece("|",2)
+
+		// Save the ACCTTOEVENTS data to the database
+		do eventarg.save("/NOFKCHK=1/VALDD/VALRI/VALREQ/KEEPVFKEY")
+		if ER throw Class.new("Error",","_RM)
+	}
+	
+	// Verify foreign keys
+	do vfkey^SQLBUF
+	if ER throw Class.new("Error",","_RM)
+
+	// Copy the previously built return string to the RETURN variable
+	set RETURN=EVENTSEQ
+
+	quit
+
+
+TEST( String %UserID)
+
+	type String APPID,INPUT,TLO,X
+	type public Boolean ER
+	type public String CID,EVENTID,FLD(),RETURN,RM,%LOGID
+	type public Number %IPMODE,PTR
+	
+	// User ID required
+	if %UserID.isNull() set ER=1 write !,$$^MSG(2849)
+
+	// Initialization
+	set TLO="_ELWOOD$NTA209:"
+	do SYSVAR^SCADRV0()
+	set %LOGID=$$LOGID^SCADRV
+	set %IPMODE="NOINT"
+
+	set ER=0
+	set RM=""
+
+	// Read input
+	read !,"Account/Customer Number: ",CID
+	read !,"Event ID: ",EVENTID
+	read !,"Input string: ",INPUT
+
+	// Execute RPC
+	set X=$$^MRPC138(.RETURN,1,CID,EVENTID,INPUT)
+	if X'="" do {
+		set PTR=$$LV2V^MSG(X,.FLD)
+		set ER=1
+		if RM="" set RM=FLD(5)
+	}
+
+	// Display return values
+	write !!,"Error Flag: ",ER.get(),"   ",RM.get()
+	write !,"Return: ",RETURN.get()
+
+	quit
+
+vSIG()	quit "60633^52665^Hari Natrajan^7634"	// Signature - LTD^TIME^USER^SIZE

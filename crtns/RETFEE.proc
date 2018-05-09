@@ -1,0 +1,276 @@
+RETFEE		/*
+	Procedure ID:  RETFEE
+
+	Description:
+ 	This procedure will build the fee transaction and offset transaction
+	for return item fees.  Three conditions must be met for an item in the
+	return item file to have a fee assessed.
+		1.  The item must be flagged for charge fee (RET.FEE=1).
+		2.  The item must have a valid primary return reason
+		    (RET.PRETRES) defined in the UTBLRETFEE table.
+
+	The fee and offset transactions will include the teller coment (TCMT) 
+	"Fee for Returned Item" and the TSO from the original returned item.  
+
+	---- Revision History ------------------------------------------------
+	
+	05/15/06 - RussellDS - CR21296
+		   Changed to use cache array instead of %CACHE, which is
+		   reserved for PSL record objects.
+	 
+	11/18/05 - HAILEYM - CR18146
+		   Updated to DBI Standards.
+	
+	05/08/02 - MENYAJ - 50423
+                   Modified section EXT to post the return item fee to
+                   the General Ledger Account specified in user table
+                   UTBLRETFEE, if defined there. If not, then post the
+                   return item fee to the Penalty Income (UTBLGLSC.DGL3)
+                   general ledger account.
+	
+	04/17/02 - GARBERB - 50406
+                   Modified section EXT so CUVAR will pull the proper
+                   information from the right data item (Changed:
+                   [CUVAR]GLSC - which not a valid data item in CUVAR
+                   to [CUVAR]GLTS - G/L suspense).
+
+	02/20/01 - SCHWARTZC - 42691
+		   Changed the default user ID used when creating the return
+		   item fee history record.  Previously, the user ID used was
+		   the posting user (RET.UID).  The current default is the
+		   reviewed by user (RET.UID1).
+
+	01/24/01 - ITIGIB - 43028
+		   Modified section EXT to display the check number
+		   associated with a return item within the return 
+		   item fee history entry.  		  	
+				
+        11/29/00 - SCHWARTZC - 42942
+                   Changed the tran code used to debit the customer account
+                   from general purpose (PRODCTL.DRTRGP) to the service fee
+                   transaction code (PRODCTL.DRTRSC).
+
+	08/28/00 - SCHWARTZC - 41591
+                   Update return item YTD and Prior year fields for both
+                   Deposit and Loan accounts.
+	
+	08/16/00 - SCHWARTZC - 41392/41545
+	           Added code to quit if CID is not a valid PROFILE account.
+	           We cannot charge fees to an account that does not exist.
+
+	08/14/00 - SCHWARTZC - 41393
+                   Modified the teller comment message for the fee transaction.
+                   this message now includes the amount and fee type (PRETRES).
+
+	06/01/00 - SCHWARTZC - 40285
+                   Removed the use of the PRODTYPE table.  This has been
+                   replaced with PRODCTL.  Removed the defaulting of ETC to
+                   MDR for customer accounts.  The MDR tran code must be used
+                   with a G/L account.  Added code to quit if ETC is not defined
+                   in prodctl.drtrgp.
+
+	03/01/00 - SCHWARTZC - 35136
+	           Correct compiler issue occuring in QA directory.
+	
+	02/07/00 - SCHWARTZC - 35136
+		   Fix change made on 1/28/00.  The db.update for FEEPROC was 
+		   triggering edit checks in the filer that should not have 
+		   been hit.  The code has been changed to use a bypassSave.
+	            
+	01/28/00 - SCHWARTZC - 35136
+		   Modified EXT section to verify that a return item fee has
+		   not been charged already.  Also added code to update 
+		   RET.FEEPROC once the fee has been charged.
+	
+	01/27/00 - SCHWARTZC - 35136
+	           Correct the setting of FEEUID when no user has modified any
+		   fee values.  This value will default to the user the return
+		   item was entered under if no FEEUID exists.
+	
+	01/06/00 - SCHWARTZC - 35136
+	           Correct misspelled variable name RETFCTYD (should be
+		   RETFCYTD).  Fixed the setting of the userID for the return
+		   item fee history file.  It should be set under the user
+		   who made the last decision regarding fees.
+	
+	12/23/99 - MOHAMEDE - 35136
+		   Removed code sections which were prompting for input of date
+		   and source, modified section EXT to add parameters to 
+		   include argument BRCD,UID,TSEQ,PRETRES,CID and FEE.
+		   This section will now process only one return item record 
+		   at a time. Added code to post non-financial history record
+		   for waived fee items, return item fee history record and 
+		   update dep year to date fee coulmns.
+
+	10/25/99 - SCHWARTZC - 35517
+	           Do not process fees for items that do not match the source
+		   entered at the prompts.
+
+	10/06/99 - SCHWARTZC - 35224
+	           Added code to properly allow the @RETFEE function to be 
+		   queued as part of DAYEND.  It was necessary to retrieve the
+		   back office teller for return item fees from UTBLSRC and 
+		   define it as %UID and %UCLS.
+	
+	09/14/99 - SCHWARTZC - 33301
+	           Added code to prevent UNDEFINED error when the charge
+		   fee flag is on and no primary return reason has been 
+		   selected by the user.
+
+	----------------------------------------------------------------------
+	*/
+	quit
+	
+
+public EXT(Date FDATE,	// Return Item Fee Processing Date
+	Number BRCD,	// Return Item Branch
+	Number CID,	// Return Item Account Number
+	String UID,	// User Processing the Return Item
+	Number TSEQ,	// Return Item Transaction Sequence
+	String PRETRES,	// Primary Return Reason
+	Number FEE)	// Return Item Charge Fee Indicator
+	
+	// Public --External entry point;  Build and post transactions
+
+	quit:PRETRES.get().isNull()
+	quit:+FEE.get()=0
+	
+	type public Boolean ER
+	type public String cache(,,)
+	type public String ET
+
+	type Number par,FEEAMT,FEESTAT,GENLGR,GL,REJMET
+	type String ETC,FEEUID,TCMT
+	
+	type RecordACN acn
+	type RecordEXC exc
+	type RecordRET ret
+	type RecordRETFHIST retfhist
+	type RecordSCAU scau
+	type RecordUTBLRETFEE uretfee
+	type TranSet ts
+	
+	set ret=Db.getRecord("RET","TJD=:FDATE,BRCD=:BRCD,CID=:CID,UID=:UID,TSEQ=:TSEQ",1)
+	quit:'ret.getMode()
+	quit:ret.src.isNull()
+	quit:ret.feeproc
+	
+	set acn=Db.getRecord("ACN","CID=:CID",1)
+	quit:'acn.getMode()
+	
+	do acn.setAuditFlag(1)
+
+	set scau=Db.getRecord("SCAU","UID=:UID",1)
+	if 'scau.getMode() set REJMET=1
+	else  set REJMET=$S('scau.batrej.isNull():scau.batrej,1:1)
+
+	set exc=Db.getRecord("EXC","TJD=:FDATE,BRCD=:BRCD,UID=:UID,TSEQ=:TSEQ",1)
+	
+	set uretfee=Db.getRecord("UTBLRETFEE","RETFEE=:PRETRES,TYPE=:acn.type,ETC=:exc.etc",1)
+	if 'uretfee.getMode() set (FEEAMT,GENLGR)=""
+	else  set FEEAMT=uretfee.feeamt,GENLGR=uretfee.genlgr
+	
+	// Check charge fee indicator and set fee status
+	if FEE=1 set FEESTAT=1
+	if FEE=2 set FEESTAT=0	
+
+	// No need to trace charged, waived fees since already done in triggers
+	// Proceed for charged and waived fees
+	if FEE=1  do {
+		if 'cache("RETFEE", "PRODCTL", acn.type).exists() do {
+			type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:acn.type",1)
+			if 'prodctl.getMode() set cache("RETFEE", "PRODCTL", acn.type)="" quit
+			set cache("RETFEE", "PRODCTL", acn.type)=prodctl.drtrsc
+			}
+		
+		quit:cache("RETFEE", "PRODCTL", acn.type).isNull()
+		
+		set ts=Class.new("TranSet")
+		
+		// Build Debit Transaction for the Charge account
+		set ETC = cache("RETFEE", "PRODCTL", acn.type)
+		// Fee ~p1: ~p2
+		if exc.ck.isNull() set TCMT=$$^MSG(8746,FEEAMT,PRETRES)
+		// Returned item fee of ~p1 for check #~p2: ~p3            
+		if 'exc.ck.isNull() set TCMT=$$^MSG(4716,FEEAMT,exc.ck,PRETRES)
+		do bldtr(CID,FEEAMT,.ts,acn.cc,ETC,TCMT,exc.tso)
+
+		if 'cache("RETFEE", "UTBLGLSC", acn.glsc).exists() do {
+			type RecordUTBLGLSC utblglsc=Db.getRecord("UTBLGLSC","GLSC=:acn.glsc",1)
+			if 'utblglsc.getMode() set cache("RETFEE", "UTBLGLSC", acn.glsc)="" quit
+			set cache("RETFEE", "UTBLGLSC", acn.glsc)=utblglsc.dgl3
+			}
+		
+		// Build Credit Transaction for the Penalty GL account
+		// associated with the Charge account
+		set GL=GENLGR
+		if GL.isNull() set GL=cache("RETFEE", "UTBLGLSC", acn.glsc)
+		if GL.isNull() set GL=CUVAR.GLTS
+		set ETC="MCR"
+		do bldtr(GL,FEEAMT,.ts,acn.cc,ETC,TCMT,exc.tso)
+			
+	   	// Post the Return Item Fee Transactions
+	   	set par("IPMODE")=3     //System-Generated
+	   	set par("OPTION")=2     //Process Transactions, update Database
+	   	do ts.postTSet(%SystemDate,BRCD,.par) quit:ER.get()!ET.get()
+		}
+
+	// Post non-financial history record
+	if FEE=2 do HISTBLD^ACNFUNCS($$^MSG(4181,FEEAMT))
+
+	// Create return item fee history record
+	if FEE>0 do {
+                set retfhist=Class.new("RecordRETFHIST")
+
+		set FEEUID=ret.feeuid
+		if FEEUID="" set FEEUID=$S(ret.uid1.isNull():ret.uid,1:ret.uid1)
+
+		set retfhist.uid=FEEUID
+		set retfhist.feestat=FEESTAT
+		set retfhist.pretres=PRETRES
+		set retfhist.fdate=FDATE
+		set retfhist.cid=CID
+		set retfhist.fseq=Db.nextVal("RETFHIST","UID=:FEEUID,FEESTAT=:FEESTAT,PRETRES=:PRETRES,FDATE=:FDATE,CID=:CID")
+		set retfhist.feeamt=FEEAMT
+		do retfhist.save()
+		}
+
+	// Update account for the year-to-date values
+	if FEE=1 set acn.retfcytd=acn.retfcytd+FEEAMT
+	if FEE=2 set acn.retfwytd=acn.retfwytd+FEEAMT
+	do acn.save()
+
+	set ret.feeproc=1
+	do ret.bypassSave()
+
+	quit
+	
+
+bldtr(Number CID,	// Account Number
+	Number tamt,	// Amount
+	TranSet ts,	// Transaction Set
+	Number CC,	// Cost Center
+	String ETC,	// PROFILE Transaction Code
+	String TCMT,	// Teller Comment
+	String TSO)	// Transaction Source
+
+	// Build the fee/offset transactions
+
+	type String ttx1
+	
+	type RecordTTX ttx=Class.new("RecordTTX")
+	
+	set ttx.cid=CID
+	set ttx.etc=ETC
+	set ttx.tamt=tamt
+	set ttx.efd=%SystemDate
+	set ttx.tlo=%UserStation
+	set ttx.tcmt=TCMT
+	set ttx.tso=TSO
+	set ttx.cc=CC
+	set ttx.crcd=%SystemCurrency
+	set ttx1=ts.copyTran(ttx)
+
+	quit
+
+vSIG()	quit "60401^67466^Dan Russell^9375"	// Signature - LTD^TIME^USER^SIZE

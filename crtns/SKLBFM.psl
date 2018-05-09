@@ -1,0 +1,329 @@
+SKLBFM		/*
+	PROCEDURE:  SKLBFM
+	ORIG: Bill Greene
+	DESC: Batch file maintenance input
+
+	---- Comments --------------------------------------------------------
+	Used for input of batch file maintenance, i.e., changes to be applied
+	to selected CIF or account (DEP or LN) records.  This procedure allows
+	input of the changes, which are applied at end-of-day by function
+	QUE010.
+
+	RETURNS:
+		. ER		Error flag	/TYP=L
+
+		. RM		Error message	/TYP=T
+
+ 	---- Revision History ------------------------------------------------
+ 	02/15/07 - RussellDS - CR25382
+		   Eliminated use of obsoleted routine DBSQRYA.
+ 	
+	12/07/06 - chhabris - CR23446
+		   Modified GETDESC section to quit with (stblcls.des).
+		   piece(" ",1). Removed the concatination of the text
+		   " Data Item Batch File Maintenance Input Screen" as the
+		   same is taken care in the screen SKLBFM. Reverted back
+		   the changes to CIF,LN,DEP,GETDESC,START sections (removed
+		   the use of DESC1 variable).
+
+	01/19/06 - chhabris - CR19002
+		   Modified GETDESC section to quit with 1st piece
+		   of stblcls.des. Also, concatinated the same with
+		   " Data Item Batch File Maintenance Input Screen".
+		   Modified FILE section to replace 'while' with 'if'
+		   while retrieving CHGNUM from DAYENDBFM file.
+
+	01/11/06 - chhabris - CR18908
+		   In START section replaced calling of screens
+		   using @PGM with ^USID. Also, included code to
+		   default the Queries specific to CIF,LN and DEP.
+
+ 	05/24/05 - RussellDS - CR160710
+		   Converted M TP commands to PSL Runtime methods.
+		   
+		   Removed old revision history.
+
+	01/12/05 - ARPAVC - 13861
+	  	   Fixed compile errors and miscellaneous issues
+		   due to conversion.  
+		   - Properly scoped all variables
+	*/
+
+	// Catch GT.M errors
+	catch error {
+		type Public Boolean ER
+		type Public String RM
+		
+		do ZE^UTLERR
+		set ER=1
+	}
+	
+	do CIF
+	
+	quit
+
+
+CIF	// Customer accounts - called by function SKLCIF
+	type String CLS,DESC,OFID,CFID
+	
+	set CLS="*",(OFID,CFID)="CIF"
+	set DESC=$$GETDESC("*")
+	do START
+	quit
+
+DEP	// Deposit accounts - called by function SKLDEP 
+	type String CLS,DESC,OFID,CFID
+	
+	set CLS="D",(OFID,CFID)="DEP"
+	set DESC=$$GETDESC("D")
+	do START
+	quit
+
+LN	// Loan accounts - called by function SKLLN
+	type String CLS,DESC,OFID,CFID
+	
+	set CLS="L",(OFID,CFID)="LN"
+	set DESC=$$GETDESC("L")
+	do START
+	quit
+
+ZCIF	// Custom CIF - called by function SKLZCIF
+	type String CLS,DESC,OFID,CFID
+	
+	set CLS="*",OFID="ZCIF",CFID="CIF"
+	set DESC=$$^MSG(4925)
+	do START
+	quit
+
+ZDEP	// Custom Deposit - called by function SKLZDEP
+	type String CLS,DESC,OFID,CFID
+	
+	set CLS="D",OFID="ZDEP",CFID="DEP"
+	set DESC=$$^MSG(4926)
+	do START
+	quit
+
+ZLN	// Custom Loan - called by function SKLZLN
+	type String CLS,DESC,OFID,CFID
+	
+	set CLS="L",OFID="ZLN",CFID="LN"
+	set DESC=$$^MSG(4927)
+	do START
+	quit
+
+
+GETDESC(CLS)	// Get description for CLS
+	type RecordSTBLCLS stblcls=Db.getRecord("STBLCLS","CLS=:CLS")
+	quit (stblcls.des).piece(" ",1)
+
+START	// Call screens to gather input
+
+	/* First scrren -- SKLBFM, used to define input of data item(s)
+	   to be changed.  Screen data item post-processors handle restrictions
+	   which may be applied to data items requested.
+
+	   Screen returns arrays DI(n)   = [table]column
+				 DDAT(n) = delete value?
+				 NDV(n)  = new value
+	*/
+
+	new DDAT,DI,DI1,DI2,LIB,N,NDV,%O,OLNTB,%PG,%PAGE,QRY1,QRY2,QRY3,QRY4
+	new QRY5,QRY6,QRY7,QRY8,QRY9,QUERY,SID,TYPE,TYPELIST
+
+	type Public Boolean ER
+	type Public String CLS,DESC,ET,OFID,CFID,RM,SQTYPE
+	type String GRP,PGM,QTYPE,VFMQ
+	
+	set ER=0,LIB="SYSDEV"
+	
+	set %ProcessMode=0,%PG=0,%PAGE=1	
+
+	do DRV^USID(%ProcessMode,"SKLBFM") 
+
+	kill OLNTB
+
+	/* Build string DI1 and DI2 equal to the columns being changed
+	   for use on the second screen.  If DI1 length exceeds 70
+	   characters, excess goes into DI2
+	*/
+
+	set (DI1,DI2,N)=""
+	for  set N=$O(DI(N)) quit:N=""  if DI(N)'="" do {
+		if $L(DI1)+$L(DI(N))>70 set DI2=DI2_DI(N)_","
+		else  set DI1=DI1_DI(N)_","
+	}
+	// If no data items entered on screen, quit out of function
+	if DI1="" quit
+
+	// Strip trailing ","
+	set DI1=$E(DI1,1,$L(DI1)-1))
+	set DI2=$E(DI2,1,$L(DI2)-1))
+
+	// Establish variables for second screen presentation of initial queries
+
+	/* QRY1="[CFID]CLS="D"" - class equals selected, D, L, or *
+	   QRY2=[CFID]GRP=GRP - group equals first screen input ALL or one 
+	   QRY3 if type query entered, then that value, if no type query then ""
+	   QRY4 (or QRY3, if no QRY3) - STAT'=4 to eliminate closed accounts
+	*/
+
+	set QRY1="["_CFID_"]"_"CLS="_""""_CLS_""""
+	set QRY2="["_CFID_"]"_"GRP="_""""_GRP_"""" 
+	set QRY3=""
+
+	if QTYPE'="ALL" set QRY3=SQTYPE.get()
+	
+	if CFID'="CIF" set QRY4="["_CFID_"]STAT'=4" if QRY3="" set QRY3=QRY4,QRY4="" 
+
+	// Screen SKLBFMQ, used to introduce queries to select records to which
+	// changes will be applied
+
+	kill %PG,%PAGE		// Force "file" prompt
+
+	do DRV^USID(%ProcessMode,"SKLBFMQ")
+
+	if VFMQ="Q" quit
+
+	// Transform query in SQL where clause
+	do {
+		new DQQRY,I,TABLES
+		set TABLES=CFID
+		if OFID'=CFID set TABLES=TABLES_","_OFID
+		if CFID="DEP"!(CFID="LN") set TABLES=TABLES_",CIF"
+		if OFID="ZDEP"!(OFID="ZLN") set TABLES=TABLES_",ZCIF"
+		set DQQRY(1)=QRY1
+		set DQQRY(2)=QRY2
+		set DQQRY(3)=QRY3
+		set DQQRY(4)=QRY4
+		set DQQRY(5)=QRY5
+		set DQQRY(6)=QRY6
+		set DQQRY(7)=QRY7
+		set DQQRY(8)=QRY8
+		set DQQRY(9)=QRY9
+		set QUERY=$$WHERE^SQLCONV(.DQQRY,TABLES)
+	}
+
+	quit:ER
+
+	// File data to DAYENDBFM
+	// Get list of types
+	if CFID="CIF" do {
+		if QTYPE="ALL" do {
+			type ResultSet cifrs=Db.select("DISTINCT TYPE","CIF")
+			if 'cifrs.isEmpty() while cifrs.next() set TYPELIST(cifrs.getCol(1))=""
+		}
+		else  do TYPESET
+	}
+
+	if CFID="DEP" do {
+		if QTYPE="ALL" do {
+			if GRP="ALL" do {
+				// Get all types for DEP
+				type ResultSet deprs=Db.select("DISTINCT TYPE","DEP")
+				if 'deprs.isEmpty() while deprs.next() set TYPELIST(deprs.getCol(1))=""
+			}
+			else  do {
+				// Get all types for specific group
+				type ResultSet deprs=Db.select("DISTINCT TYPE","DEP","GRP=:GRP")
+				if 'deprs.isEmpty() while deprs.next() set TYPELIST(deprs.getCol(1))=""
+			}
+		}
+		// Otherwise, we have a list of types (1 or more)
+		else  do TYPESET
+	}
+
+	if CFID="LN" do {
+		if QTYPE="ALL" do {
+			if GRP="ALL" do {
+				// Get all types for LN
+				type ResultSet lnrs=Db.select("DISTINCT TYPE","LN")
+				if 'lnrs.isEmpty() while lnrs.next() set TYPELIST(lnrs.getCol(1))=""
+			}
+			else  do {
+				// Get all types for specific group
+				type ResultSet lnrs=Db.select("DISTINCT TYPE","LN","GRP=:GRP")
+				if 'lnrs.isEmpty() while lnrs.next() set TYPELIST(lnrs.getCol(1))=""
+			}
+		}
+		// Otherwise, we have a list of types (1 or more)
+		else  do TYPESET
+	}
+
+	// File info for each type
+	set TYPE=""
+	for  set TYPE=$O(TYPELIST(TYPE)) quit:TYPE=""  do FILE(TYPE)
+
+	// Data item changes will be transferred to accounts
+	set ER="W",RM=$$^MSG(3124)
+
+	quit
+
+
+FILE(TYPE)	// Private - file data to DAYENDBFM
+
+	new CHGNUM,CLS,DATE,N,SEQ
+	
+	type Public String DDAT(),DI(),NDV(),OFID,CFID,QUERY
+
+	set DATE=%SystemDate
+
+	if CFID="CIF" set CLS="*"
+	else  if CFID="DEP" set CLS="D"
+	else  set CLS="L"
+
+	do Runtime.start("BA")
+
+	// Get next change number
+	type ResultSet debfmrs=Db.select("CHGNUM","DAYENDBFM","TJD=:DATE AND CLS=:CLS AND TYPE=:TYPE","CHGNUM DESC")
+	if debfmrs.isEmpty() set CHGNUM=1
+	else  if debfmrs.next() set CHGNUM=debfmrs.getCol(1)+1
+
+	set SEQ=1
+	set N=""
+	for  set N=$O(DI(N)) quit:N=""  if DI(N)'="" do {
+		type RecordDAYENDBFM debfm=Class.new("RecordDAYENDBFM")
+		set debfm.tjd=DATE
+		set debfm.cls=CLS
+		set debfm.type=TYPE
+		set debfm.chgnum=CHGNUM
+		set debfm.seq=SEQ
+		set debfm.col=DI(N)
+		if DDAT(N) set debfm.newvalue=""
+		else  set debfm.newvalue=NDV(N)
+		if SEQ=1 do {
+			set debfm.uid=%UserID
+			set debfm.tlo=%UserStation
+			set debfm.qry=QUERY
+			set debfm.tbl=OFID
+		}
+		do debfm.bypassSave()
+		set SEQ=SEQ+1
+	}
+
+	do Runtime.commit()
+
+	quit
+	
+
+TYPESET	// Private - set up type list from QTYPE
+
+	type Public String TYPELIST(),QTYPE
+	
+	if QTYPE["," do {
+		new I
+		for I=1:1:$L(QTYPE,",") set TYPELIST($P(QTYPE,",",I))=""
+	}
+	else  set TYPELIST(QTYPE)=""
+	quit
+
+
+ERR	// Private
+
+	type Public Boolean ER
+	type Public String RM
+		
+	set ER=1
+	do ^UTLERR
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60712^46301^Dan Russell^7820"	// Signature - LTD^TIME^USER^SIZE

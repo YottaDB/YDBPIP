@@ -1,0 +1,559 @@
+LNCALP	// LOAN MODELER CALCULATION PRE PROCESSORS
+	/*
+	ORIG:  Chuck Hardy (6721) - 02/08/86
+	DESC:  Uses financial formulas to calculate a loan's TERM,
+	       BALANCE,INTEREST RATE, or PAYMENT.  Considers odd days
+	       interest for installment loans.
+
+	INPUT:  BAL - BALANCE     COINT - CAP. ODD DYS INT   IRN - INT RATE
+	        FRE - PMT FREQ    PMTPI - PAYMENT            TAF - TRM AN FACT
+	        ODD - ORIG DAT    NDD   - NEXT DUE DT        DFP - DYS FST PMT
+	        OINT - ODD DYS INT			     PAF - PMT AN FACT
+
+	OUTPUT: COMPUTED:  BAL - BALANCE     
+			   IRN - ANNUAL NOMINAL RATE
+	                   TRM - TERM (EXPRESSED AS SAME FREQ AS PAYMENT)
+	                   PMTPI - PERIODIC P+I PAYMENT
+
+	---- Revision History ------------------------------------------------
+	
+	04/25/07 - MbuiM - CR 26703
+		   Modified SEND section to type ER,ET and RM as public as this
+		   was causing an undefined error.
+ 
+        03/24/06 - S.Krishnan- CR 17985
+        	   In the section SEND, modified the variable T
+        	   to round off the Account term.
+
+        07/26/05 - SkariahV- CR16679
+	           Removed #WARN directive.
+	              
+	12/09/03 - CARROLLJ - CR7239
+		   Corrected precedence errors.
+
+	04/01/03 - GRAY - 51351
+		   Converted to PSL.
+	*/
+
+
+	quit
+	
+	
+Public CALC1(RecordLN ln)	// MONTHLY PAYMENT CALCULATOR - COMPARISON AMORTIZATIONS & IEM
+
+	type Boolean PIACM,PPIF
+	type Date AMODT,LD,ND,SCHLD,SCHND
+	type Number AMBAS,BAL,BAL2,COINT2,DIST1AF,ER,INT,IR,IRN,PMTPI,X
+	type String DIST1FRE,IACM,ICPF,PPICO,TRM
+	type Public Number AF,COINT,TYPE
+	type Public String CRCD
+
+	set ER=0
+
+	// Distribution 1 Frequency
+	set DIST1FRE=ln.dist1fre
+
+	// Distribution 1 Annual Factor
+	set DIST1AF=ln.dist1af
+
+	if 'AF do { if ER quit
+		set X=$$NJD^UFRE(%SystemDate,DIST1FRE,.AF)
+		if ER quit
+		// Distribution 1 Annual Factor
+		set ln.dist1af=AF
+		set DIST1AF=AF
+		}
+
+	// Calculate P&I Based on IACM
+	set PIACM=ln.piacm
+
+	// Interest Prepaid Date
+	set AMODT=ln.amodt
+
+	if AMODT="" set AMODT=%SystemDate
+
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:TYPE")
+	set PPICO=prodctl.ppico
+	set PPIF=prodctl.ppif
+
+	type RecordPRODDFTL dftl=Db.getRecord("PRODDFTL","TYPE=:TYPE")
+	set IACM=dftl.iacm
+
+	if ln.pchm=3 do {  			// IEM
+		set BAL=+ln.bal 
+		set AMBAS=ln.ambas 
+		set IRN=ln.irn
+		}
+
+	else  do {
+		// the AMORT array was being sent in by screen LNCAL4 (obsolete)
+		set TRM=ln.trm
+		set AMBAS=$$TRM^UFINC(AMODT,TRM,DIST1AF)
+		set ln.ambas=AMBAS
+
+		set COINT=COINT.get()
+		set BAL=ln.crlmt+COINT
+		set IRN=ln.irn
+		}
+	
+	set IR=IRN/(AF*100)
+
+	if PIACM set PMTPI=$$PI^UFINC(BAL,IRN,AMBAS,0,AMODT,IACM,DIST1FRE,DIST1AF,'PPIF)
+	else  set PMTPI=$$PMT^UFINC(BAL,IRN,AMBAS,AF,0)
+
+	set PMTPI=$$^SCARND(PMTPI,0,"",CRCD.get())
+
+	// If this is an IEM quit
+	if ln.pchm=3 set ln.pmtpi=PMTPI quit
+
+	// Calculate odd-days interest
+
+	// Interest Prepaid Date
+	set LD=ln.amodt
+	// Distribution 1 Last Due
+	set ND=ln.dist1ld
+	set COINT2=0
+
+	if ND-LD do {
+		type String IACM
+		set IACM=$S(PPICO.length():PPICO,(ln.iacm).length():ln.iacm,1:dftl.iacm)
+		set BAL2=ln.crlmt
+
+		// Interest Calculation Period Frequency
+		set ICPF=ln.icpf
+
+		// Scheduled Payment - Next Date
+		set SCHND=ln.schnd
+
+		// Scheduled Payment - Last Date
+		set SCHLD=ln.schld
+
+		set INT=$$^UIC(BAL2,LD,ND-1,IACM,IRN,0,DIST1AF,DIST1FRE,ICPF,SCHND,SCHLD)
+		if INT'=(INT\1) set INT=$$^SCARND(INT,0,"",CRCD.get())
+
+		set COINT2=INT
+		set BAL=BAL-COINT+COINT2
+
+		// Interest Accrual Method
+		if PIACM set PMTPI=$$PI^UFINC(BAL,IRN,AMBAS,0,AMODT,ln.iacm,DIST1FRE,DIST1AF,PPIF)
+		else  set PMTPI=$$PMT^UFINC(BAL,IRN,AMBAS,AF,0)
+
+		set PMTPI=$$^SCARND(PMTPI,0,"",CRCD.get())
+		}
+
+	set ln.pmtpi=PMTPI
+	set BAL=BAL-COINT
+
+	quit
+
+
+Public SEND(RecordLN ln)	//
+
+	/* 
+	Determines which of the four variables needs to be calculated.
+	Dispatches to the proper calculation line tag.
+	*/
+
+	type public Boolean ER
+	type public Number TYPE
+	type public String CMP,CRCD,ET(),RM
+	
+	type Boolean PPIF
+	type Date AMODT,JD,LDD,NDD,NJD,ODD,SCHLD,SCHND
+	type Number AF,AMBAS,BAL,BALLAMT,COINT,COINT1,DIST1AF,FV,INT,IR,IRN
+	type Number NP,PAF,PMT,PMTPI,PV,T
+	type String DIST1FRE,FREN,FRET,IACM,ICPF,OIACM,PIACM,PPICO,TRM
+	
+
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:TYPE")
+	set PPICO=prodctl.ppico
+	set PPIF=prodctl.ppif
+
+	type RecordPRODDFTL dftl=Db.getRecord("PRODDFTL","TYPE=:TYPE")
+	set IACM=dftl.iacm
+
+	// Amount Requested
+	set BAL=+ln.amtreq
+	
+	set BALLAMT=ln.ballamt
+
+	set (IR,IRN)=ln.irn
+	
+	set AMBAS=ln.ambas
+
+	// Principal and Interest Payment
+	set PMTPI=+ln.pmtpi
+
+	set COINT=0
+
+	// Account Term
+	set TRM=+ln.trm
+
+	// Original Disbursement Date
+	set ODD=ln.odd
+
+	// Distribution 1 Next Due
+	set NDD=ln.dist1nd
+
+	// Interest Prepaid Date
+	set AMODT=ln.amodt
+	if AMODT="" set AMODT=ODD
+
+	// Calculate P&I Based on IACM
+	set PIACM=ln.piacm
+
+	// Interest Accrual Method
+	set IACM=ln.iacm
+
+	set CMP='PPIF
+
+	set OIACM=PPICO
+	if OIACM="" set OIACM=IACM
+
+	// Distribution 1 Frequency
+	set DIST1FRE=ln.dist1fre
+
+	set (JD,SCHND)=NDD
+
+	set NJD=$$NJD^UFRE(NDD,"-"_DIST1FRE,.AF)
+	if ER quit
+
+	if AF<0 set AF=-AF
+
+	set (DIST1AF,PAF)=AF
+	set (LDD,SCHLD)=NJD
+
+	// Distribution 1 Annual Factor
+	set ln.dist1af=AF
+
+	// Distribution 1 Last Due
+	set ln.dist1ld=NJD
+
+	// Scheduled Payment - Next Date
+	set ln.schnd=JD
+
+	// Scheduled Payment - Last Date
+	set ln.schld=NJD
+
+	// Short first payment
+	if LDD<AMODT set CMP=CMP_1
+
+	set COINT=$$COINT(.ln,BAL,IRN)
+
+	set ER=0
+	// Enter three of the four values, or answer yes
+	set ET(1)="SEL3OF4"
+	// Invalid - interest only.  Term is outside calculable range.
+	set ET(2)="INVI"
+	// Payment amount must exceed the first payment's interest due
+	set ET(3)="INVP"
+	// Term is less than or equal to zero
+	set ET(4)="INVT"
+
+
+	if 'BAL,IRN,PMTPI,TRM do { quit		// old CALPV & CALPV1 sections
+
+		// Pre processor to LOAN AMOUNT
+		set (COINT1,FV)=0
+		set PMT=PMTPI
+		do TRM(.ln)
+	
+		if PIACM do {
+			set PV=$$PVI^UFINC(PMT,IRN,AMBAS,FV,AMODT,IACM,DIST1FRE,OIACM,AF,CMP)
+			set PV=PV.justify(0)
+			if 'PPIF set COINT=$$COINT(.ln,PV,IRN)
+			}
+
+		if 'PIACM do {
+			for  do { quit:COINT=COINT1
+				type Number P
+
+				set PV=$$PV^UFINC(FV,IRN,AMBAS,PMT,AF)
+				set PV=PV.justify(0)
+				if 'PPIF set COINT=$$COINT(.ln,PV,IRN)
+
+				set P=$$PMT^UFINC(-COINT,IRN,AMBAS,AF,0)
+				// Adjusts LOAN AMOUNT for Odd Days Interest (COINT)
+				set PMT=PMTPI+P.justify(0)
+				}
+			}
+		/*
+		Here we are calculating Amount Requested (AMTREQ).
+		Basically, we need PMTPI (Payment and Interest) * AMBAS
+		(Number of Payments).
+		IAM can have a value of 10-14 for Add-On, or 20-24 for 
+		Discount loans.
+		If $E(IAM)'=2, it means Add-On or any other different type 
+		of loans.
+		*/
+
+		if (ln.iam).extract()=2 set PV=PMT*AMBAS
+
+		else  do {
+			set PV=$$PV^UFINC(FV,IRN,AMBAS,PMT,AF)
+			set PV=PV.justify(0)
+			set COINT1=$$COINT(.ln,PV,IRN)
+			}
+
+		// Credit Limit - Current
+		set ln.crlmt=PV
+
+		// Amount Requested
+		set ln.amtreq=PV
+		}
+
+	if BAL,'IRN,PMTPI,TRM do { quit		// old CALI,CALIA & CALI1 sections
+		// Pre processor to INTEREST RATE
+
+		set FV=FV.get()
+		set COINT=COINT.get()
+		do TRM(.ln)
+
+		// Cannot calculate interest rate for discount loans
+		if (ln.iam).extract()=2 set ER=1 set RM=$$^MSG(4192) quit
+		
+		if PIACM set IRN=$$IRNS^UFINC(BAL,AMBAS,PMTPI,FV,PAF,1_CMP,AMODT,IACM,DIST1FRE,OIACM)
+
+		if 'PPIF!'PIACM do {
+			for  do { quit:COINT=COINT1
+				set IRN=$$IRNS^UFINC(BAL+COINT,AMBAS,PMTPI,FV,PAF)
+				set COINT1=COINT
+				// Nominal Int/Div Rate
+				set ln.irn=IRN
+				set COINT=$$COINT(.ln,BAL,IRN)
+				}
+			}
+
+		// Nominal Int/Div Rate
+		if ER do { quit
+			set ET=ET(2) 
+			set ln.irn="" 
+			do ^UTLERR
+			}
+
+		// Nominal Int/Div Rate
+		if IRN<.000001 do { 
+			set ER=1 
+			set ET=ET(2) 
+			set ln.irn="" 
+			do ^UTLERR
+			}
+		// Nominal Int/Div Rate
+		else  set ln.irn=$$^SCARND(IRN,0,"","",5)
+		}
+
+	if BAL,IRN,'PMTPI,TRM do { quit		// old CALPT section
+		// Pre processor to PAYMENT - P & I
+		do TRM(.ln)
+		if (ln.iam).extract()'=2 do {
+			if BALLAMT do { quit
+				set BAL=BAL-BALLAMT
+				// Interest Calculation Period Frequency
+				set ICPF=ln.icpf	
+				set INT=$$^UIC(BALLAMT,AMODT,NDD,"00",IRN,1,AF,PPIF,ICPF,SCHND,SCHLD)
+				set PMTPI=$$PMT^UFINC(BAL+COINT,IRN,AMBAS,DIST1AF,0)
+				set PMTPI=PMTPI+$$^SCARND(INT,0,"",CRCD.get())
+				}
+			if PIACM set PMTPI=$$PI^UFINC(BAL,IRN,AMBAS,0,AMODT,IACM,DIST1FRE,OIACM,DIST1AF,CMP)
+			else  set PMTPI=$$PMT^UFINC(BAL+COINT,IRN,AMBAS,DIST1AF,0)
+			}
+	
+		else  set PMTPI=BAL/AMBAS
+		set PMTPI=$$^SCARND(PMTPI,0,"",CRCD.get())
+	
+		// Principal and Interest Payment
+		set ln.pmtpi=PMTPI
+		}
+
+
+	if BAL,IRN,PMTPI,'TRM do { quit		// old CALN section
+		// Pre processor to ACCOUNT TERM
+
+		set FREN=+DIST1FRE
+		if 'FREN set FRET=DIST1FRE.extract() set FREN=1
+		else  set FRET=DIST1FRE.piece(+DIST1FRE,2).extract()
+		if FRET="" quit
+		set COINT=COINT.get()
+
+		if ln.ballamt'="" set BAL=BAL-ln.ballamt
+		set FV=0
+
+		if 'PIACM set NP=$$NP^UFINC(BAL+COINT,IRN,PMTPI,FV,PAF)
+		else  set NP=$$NPI^UFINC(PMTPI,IRN,BAL,FV,AMODT,IACM,DIST1FRE,OIACM,AF,CMP)
+
+		/*
+		Here we are calculating Account Term (TRM).
+		Basically, if IAM>20, we need to recalclate NP.
+		IAM can have a value of 10-14 for Add-On, or 20-24 for 
+		Discount loans.
+		If $E(IAM)'=2, it means Add-On or any other different type 
+		of loans.
+		*/
+
+		if (ln.iam).extract()=2 set NP=$$NPI^UFINC(PMTPI,IRN,BAL,FV,AMODT,IACM,DIST1FRE,OIACM,AF,CMP)
+
+		
+		set NP=+NP.justify(0,2)
+
+		if ER do { quit
+			// Term is less than or equal to zero
+			if NP=0 set ET=ET(4)
+			// Payment amount must exceed the first payment's interest due
+			else  set ET=ET(3) set (TRM,NP,FRET)=""
+			do ^UTLERR
+			}
+
+		set T=FREN*NP
+
+		if FRET="Q" set FRET="M" set T=T*3
+		//if FRET="S" set FRET="M" set T=(T/2+.5).justify(0,0)
+		if FRET="S" set FRET="M" set T=((T/2)+.5).justify(0,0)
+
+		if T#1 set T=(T+.5).justify(0,0)
+
+		set T=T.roundDec(0)
+		set TRM=T_FRET
+
+		// Account Term
+		set ln.trm=TRM
+
+		if NP#1 set NP=$$^SCARND(NP+.5,0,"","",0)
+
+		// Amortization Base (Number of Payments)
+		set ln.ambas=NP
+
+		// Original Number of Payments
+		set ln.onp=NP
+		}
+	
+	quit
+
+
+
+COINT(RecordLN ln,Number BAL,Number IRN)	// Calculate Capitalized Odd-days interest
+
+	//   Section to Calculate Odd Days Interest
+	
+	type Date LD,ND,SCHLD,SCHND
+	type Number COINT,DAYS,DIST1AF,INT,OINT
+	type String DIST1FRE,IACM,ICPF,OPT,PCM
+	type Public Boolean PPIF
+	type Public String CRCD,PPICO
+
+	set (OINT,COINT)=0
+
+	/*
+	Set the start date to ODD (Original Disbursement Date) and
+	end date to AMODT (Interest Prepaid to)
+	*/
+
+	// Original Disbursement Date
+	set LD=ln.odd
+
+	// Interest Prepaid Date
+	set ND=ln.amodt
+
+	set IACM=$S(PPICO'="":PPICO,1:ln.iacm)
+
+	// Scheduled Payment - Next Date
+	set SCHND=ln.schnd
+
+	// Scheduled Payment - Last Date
+	set SCHLD=ln.schld
+
+	// Interest Calculation Period Frequency
+	set ICPF=ln.icpf
+
+	// Distribution 1 Frequency
+	set DIST1FRE=ln.dist1fre
+
+	// Distribution 1 Annual Factor
+	set DIST1AF=ln.dist1af
+
+	/*
+	Determine the number of days between ODD (Original Disbursement Date)
+	and AMODT (Interest Prepaid to)
+	*/
+	set DAYS=ND-LD
+	set ND=ND-1
+
+	if DAYS do {
+		set INT=$$^UIC(BAL,LD,ND,IACM,IRN,0,DIST1AF,DIST1FRE,ICPF,SCHND,SCHLD)
+		if INT,INT#.01 set OINT=$$^SCARND(INT,0,"",CRCD.get())
+		else  set OINT=INT
+		}
+
+
+	// Payment Calculation Method
+	set PCM=ln.pcm
+	
+	type RecordSTBLPCM stblpcm=Db.getRecord("STBLPCM","KEY=:PCM")
+	
+	if (stblpcm.pcmp).extract(3)=2 quit 0
+
+	if DAYS!PPIF!'(PCM.extract()) quit 0
+
+	/*
+	Set the start date to ODD (Original Disbursement Date) and
+	end date to SCHLD (Scheduled Payment - Last Date)
+	*/
+
+	// Original Disbursement Date
+	set LD=ln.odd 
+
+	// Scheduled Payment - Last Date
+	set ND=ln.schld
+
+	/*
+	Added section to calculate days in accordance with the period of
+	time till the first payment.
+	*/
+
+	set OPT="+"
+
+	//No full period till first payment
+	if LD-ND>0 set LD=LD-1 set OPT="-"
+		
+	set ND=ND-1 
+	set INT=$$^UIC(BAL,LD,ND,IACM,IRN,0,DIST1AF,DIST1FRE,ICPF,SCHND,SCHLD)
+	if INT,INT#.01 set COINT=$$^SCARND(INT,0,"",CRCD.get(),,OPT)
+	else  set COINT=INT
+
+	quit COINT
+	
+
+Public TRM(RecordLN ln)	// Compute AMBAS based on opening date and term.
+
+	type Date ODT
+	type Number ER
+	type String TRM
+	type Public Number AF,AMBAS
+
+	set ER=0
+	
+	// Original Disbursement Date
+	set ODT=ln.odd
+
+	// Account Term
+	set TRM=ln.trm
+
+	// Amortization Base (Number of Payments)
+	set AMBAS=$J($$TRM^UFINC(ODT,TRM,AF),0,0)
+	set ln.ambas=AMBAS
+
+	// Compute ONP based on Payment Term
+	// Original Number of Payments
+	set ln.onp=$J($$TRM^UFINC(ODT,TRM,AF),0,0)
+
+	// Payment Term
+	if ln.ptrm="" quit
+
+	// Payment Term		
+	if TRM=(+ln.ptrm) quit
+
+	// Original Number of Payments
+	set ln.onp=$J($$TRM^UFINC(ODT,ln.ptrm,AF),0)
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60745^47883^Marie Mbui^12005"	// Signature - LTD^TIME^USER^SIZE

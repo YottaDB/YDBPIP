@@ -1,0 +1,250 @@
+UHLD(Number CID,Number BALANCE,String CRCD,Number SKIPPAVL)	// Public - Pledged Amount Program Template
+
+	/*
+	ORIG:  Allan R. Mattson (6915) - 09/12/88
+	DESC: Calculates the hold amount if Permanent Hold Indicator
+
+	ARGUMENTS:
+		. CID		Account number		/REQ/NONULL/MECH=VAL
+		. BALANCE	Account balance		/REQ/NULL/MECH=VAL
+				(used for computed holds)
+				For deposits, pass DEP.BAL
+				For loans, pass LN.BALCMP
+		. CRCD		Account currency code	/REQ/NULL/MECH=VAL
+		. SKIPPAVL 	Skip %PAVL portion	/NOREQ/NULL/MECH=VAL
+				of any computed calculation
+
+	RETURNS:
+		. $$		Pledged amount		/TYP=$
+
+	EXAMPLE:
+		set PLDGAMT=$$^UHLD(CID,dep.cls,dep.bal,dep.crcd,0)
+
+	---Revision History--------------------------------------------------
+
+	09/23/05 - KELLYP - CR 17294
+		   Modified COMP and BALAMT sections to properly type-cast
+		   the acn object.  Previous type-casting method was causing
+		   numerous undefined errors during the Dayend.  Also removed
+		   pre-2003 revision history.
+
+	01/05/05 - TITOVE - CR 13734
+	   	   Cleaned up logic as part of DBI2 project. Removed Risk
+	   	   functionality (obsoleted).
+
+	10/05/02 - Dan Russell - 49794
+		   Major rewrite to improve efficiency and clean up code.
+
+	03/19/02 - SCOTTC - 43583
+		   Convert to PSL.  Remove history prior to 2002.
+
+	---------------------------------------------------------------------
+	*/
+
+	type Public Number %STFPLAY
+	type Number PLDGAMT=0
+
+	// Get all permanent hold records
+	type ResultSet phldrs=Db.select("AMT,COMP,AREF,PERCNT,STFHOST","PHLD","CID=:CID AND STDT <= :%SystemDate AND ( EXPDT IS NULL OR EXPDT > :%SystemDate )")
+	while phldrs.next() do {
+		type String COMP
+		if %STFPLAY.get(),phldrs.getCol("STFHOST") quit	// Ignore STF records in STF replay
+		set COMP=phldrs.getCol("COMP")
+		set PLDGAMT=PLDGAMT+phldrs.getCol("AMT")	// Fixed hold amount
+		if COMP="" quit					// No computed component
+		if COMP="%PAVL",SKIPPAVL.get() quit		// Skip %PAVL amounts
+
+		// Calculate computed amount
+		set PLDGAMT=PLDGAMT+$$COMP(CID,BALANCE,CRCD,COMP,phldrs.getCol("AREF"),phldrs.getCol("PERCNT"))
+		}
+
+	// Get all ATM permanent hold records
+	type ResultSet phld9rs=Db.select("AMT","PHLD9","CID=:CID AND ( EXPDT IS NULL OR EXPDT > :%CurrentDate ) OR (EXPDT = :%CurrentDate AND EXPTM >= :%CurrentTime )")
+	while phld9rs.next() set PLDGAMT=PLDGAMT+phld9rs.getCol("AMT")
+
+	quit PLDGAMT
+
+
+COMP(	Number CID,		// Private - Calculated variable hold
+	Number BALANCE,
+	String CRCD,
+	String COMP,
+	Number AREF,
+	Number PERCNT)
+
+	/*
+	For permanent hold amounts that are computed, calculate them.  If the
+	reference account is the same as the main account (CID=AREF), use the
+	BALANCE.  Otherwise, get the balance from the reference account.
+
+	ARGUMENTS:
+		. CID		Account number		/REQ/NONULL/MECH=VAL
+		. BALANCE	Account balance		/REQ/NULL/MECH=VAL
+				(used for computed holds)
+				For deposits, pass DEP.BAL
+				For loans, pass LN.BALCMP
+		. CRCD		Currency code for CID	/REQ/NULL/MECH=VAL
+		. COMP		PHLD.COMP value		/REQ/NONULL/MECH=VAL
+		. AREF		PHLD.AREF value		/REQ/NULL/MECH=VAL
+		. PERCNT	PHLD.PERCNT value	/REQ/NULL/MECH=VAL
+
+	RETURNS:
+		. $$		Hold amount		/TYP=$
+	*/
+
+	if 'AREF!'PERCNT quit 0
+
+	if CRCD="" set CRCD=%SystemCurrency
+
+	// If from another account, get that account's balance to use
+	if CID'=AREF do {
+		type String AREFCRCD
+		type RecordACN acn=Db.getRecord("ACN","CID=:AREF")
+		if COMP="%PCOL" set BALANCE=acn.balcol
+		else  if acn.cls="L" do {
+			type RecordLN ln={RecordLN}acn
+			if COMP="%PAVL" set BALANCE=ln.avlbal
+			else  set BALANCE=ln.balcmp		// COMP="%BAL"
+			}
+		else  do {
+			type RecordDEP dep={RecordDEP}acn
+			if COMP="%PAVL" set BALANCE=dep.balavl
+			else  set BALANCE=dep.bal		// COMP="%BAL"
+			}
+		set AREFCRCD=acn.crcd
+		if AREFCRCD="" set AREFCRCD=%SystemCurrency
+
+		// Convert to CID's CRCD, if necessary
+		if AREFCRCD'=CRCD do {
+			type Number EXCAMT
+			do EXC^CRCDUTL(CRCD,AREFCRCD,BALANCE,0,2,"00")
+			set BALANCE=EXCAMT
+			}
+		}
+
+	/* If CID=AREF and COMP="%BAL", use BALANCE as passed in.  Otherwise
+	   get balance to use.  If %PAVL, need to get available balance without
+	   consideration of %PAVL holds (since to do so would create a loop).
+	   Use PLDGAVL for deposits for that purpose.  That calculation passes
+	   in SKIPPAVL when calling back into UHLD.
+	*/
+	else  if COMP'="%BAL" do {
+		type RecordACN acn=Db.getRecord("ACN","CID=:CID")
+		if COMP="%PCOL" set BALANCE=acn.balcol
+		// Otherwise COMP="%PAVL"
+		else  if acn.cls="L" do {
+			type RecordLN ln={RecordLN}acn
+			set BALANCE=ln.avlbal
+			}
+		else  do {
+			type RecordDEP dep={RecordDEP}acn
+			set BALANCE=dep.pldgavl
+			}
+		}
+
+	if BALANCE'>0 quit 0
+
+	quit $$^SCARND((BALANCE*PERCNT/100),0,"",CRCD)
+
+
+Public AUT(	RecordDEP dep,		// Public - Authorization verification
+		Number TAMT,
+		Number ITC,
+		String OVR)
+
+	/*
+	Returns override arrays, if applicable, used in transaction processing. 
+	   
+	   ARGUMENTS:
+		. dep		Deposit Object		/REQ/NONULL/MECH=REF:R
+		. TAMT		Net transaction amount	/REQ/NONULL/MECH=VAL
+		. ITC		Internal tran code	/REQ/NONULL/MECH=VAL
+		. OVR		Override array		/REQ/MECH=REF:W
+
+	   EXAMPLE:
+	   	do AUT^UHLD(.dep,TAMT,ITC)
+	*/
+
+	type Number BALAVL,BALMPHLD
+
+	set BALAVL=dep.balavl
+	
+	if TAMT>BALAVL do {
+		// If Limit Processing is enabled, initialize
+		#if CUVAR.limpro
+		type Number CID=dep.cid
+		do INIT^PROCLIM
+		#end
+
+		// If budget processing is enabled, factor in Overdraft Limit
+		if dep.bgtpro,(BALAVL-TAMT+dep.nsflim)'<0 quit
+
+		// Only if Interest Rate Calculation Base is not "Collected"
+		if (dep.ircb=3!(dep.ircb=6))&(ITC.extract(6)!ITC.extract(12)) quit
+		set OVR(dep.cid,"OVR","BALAVL")=$$^SCARND(BALAVL,0,"",dep.crcd)
+		}
+
+	if 'dep.phld quit				// No permanent holds
+	set BALMPHLD=dep.bal-$$^UHLD(dep.cid,dep.bal,dep.crcd)
+	if TAMT>BALMPHLD set OVR(dep.cid,"OVR","PHLD")=$$^SCARND(BALMPHLD,0,"",dep.crcd)
+	quit
+
+
+Public BALAMT(	Number CID,	// Calculate variable portion of a hold
+		String COMP,
+		Number AREF,
+		Number PERCNT)
+
+	/*
+	This function is used to compute the PHLD.BALAMT field.
+
+	ARGUMENTS:
+		. CID		Account number		/REQ/NONULL/MECH=VAL
+		. COMP		PHLD.COMP value		/REQ/NULL/MECH=VAL
+		. AREF		PHLD.AREF value		/REQ/NULL/MECH=VAL
+		. PERCNT	PHLD.PERCNT value	/REQ/NULL/MECH=VAL
+
+	RETURNS:
+		. $$		Variable hold amount	/TYP=$
+	*/
+
+	type Number BALANCE=""
+
+	if COMP=""!'AREF!'PERCNT quit 0
+
+	type RecordACN acn=Db.getRecord("ACN","CID=:CID")
+
+	if CID=AREF do {				// Get balance for CID
+		if acn.cls="D" set BALANCE=acn.bal
+		else  do {
+			type RecordLN ln={RecordLN}acn
+			set BALANCE=ln.balcmp
+			}
+		}
+
+	quit $$COMP(CID,BALANCE,acn.crcd,COMP,AREF,PERCNT)
+
+
+Public THLDAMT(	Number CID,	// Calculate total hold amount for single hold
+		Number AMT,
+		String COMP,
+		Number AREF,
+		Number PERCNT)
+
+	/*
+	This function is used to compute the PHLD.THLDAMT field.
+
+	ARGUMENTS:
+		. CID		Account number		/REQ/NONULL/MECH=VAL
+		. AMT		Fixed amount PHLD.AMT	/REQ/NULL/MECH=VAL
+		. COMP		PHLD.COMP value		/REQ/NULL/MECH=VAL
+		. AREF		PHLD.AREF value		/REQ/NULL/MECH=VAL
+		. PERCNT	PHLD.PERCNT value	/REQ/NULL/MECH=VAL
+
+	RETURNS:
+		. $$		Total hold amount	/TYP=$
+	*/
+
+	quit AMT+$$BALAMT(CID,COMP,AREF,PERCNT)
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60166^61255^Pat Kelly^6766"	// Signature - LTD^TIME^USER^SIZE

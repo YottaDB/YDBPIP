@@ -1,0 +1,726 @@
+UCRESULT		/*
+	 ORIG: FSANCHEZ - 01/15/98
+	 DESC: Library of ResultSet methods
+
+	---- Comments ----------------------------------------------------------
+	The ResultSet uses the following vobj() nodes (using 'rs' as object id):
+	* vobj(rs) = ResultSet Row
+	* vobj(rs,0) = state indicator:
+		0 = end-of-result (including empty) and closed
+		1 = after one or more fetches, and before end-of-result
+		2 = immediately after open, and before first fetch
+	* vobj(rs,-1) = "ResultSet"
+	* vobj(rs,-2) = extref of fetch function
+	* vobj(rs,-3) = SQL SELECT list
+		Contains the select-clause of the SQL select statement. Spaces
+		and quotes will have been removed. The representation of compound
+		value expressions for RDB selects differs from the representation
+		for MDB selects. Simple column names will always represented by
+		their DQ name, regardless of the underlying DB.
+	* vobj(rs,-4) = value of vsql("D") (or its RDB equivalent)
+		This value will be used by the Row class to construct the return
+		value fo Row.getColumns() at runtime (e.g. for dynamic selects)
+	* vobj(rs,-5) = DB indicator
+		This node is only created when the unit is compiled in an RDB
+		environment, or when the Db.select() specifies the /PSLBOOT
+		qualifier:
+		0 = underlying tables are from MDB
+		1 = underlying tables are from RDB
+		2 = underlying tables are from file
+	* vobj(rs,-6) = Header row from file in Row.setColumns() format
+	* vobj(rs,.1) = data item protection value (value of vi)
+	* vobj(rs,.1,p) = data item protection XECUTE strings (RDB only)
+		For MDB, the code returned by the SQL engine will already
+		contain the line of code that deals with data item protection.
+		For RDB, this code must be executed before the result row is
+		returned by vFetch().
+	* vobj(rs,n) (n>0) = "row pointer" variables and others variables needed
+		to construct the cursor and access the result (the PSL equivalent
+		of vsql()).
+
+	---- Revision History --------------------------------------------------
+	03/30/07 - Frans S.C. Witte - CR: 26364
+		Turned bchPatch into a no-op (see intro of that subroutine).
+
+	09/28/06 - Frans S.C. Witte - CRs: 22719 / 20613
+		* Corrected getCol for single column select and PROTECT.exist()
+		* Documented vobj(rs,.01,p)
+		* Added $$getRowRt() to derive ResultSet.getRow().getColumns()
+		  value ar runtime for dynamic ResultSets.
+		* Renamed vgetCol to vRsGetCol in generated code.
+
+	07/21/06 - Frans S.C. Witte - CRs: 22273 / 22274
+		* Actual(1) in getRow is now optional because it will not be
+		  passed by getRowProt.
+		* Replaced long names
+
+	03/17/06 - Frans S.C. Witte - CRs: 20280 / 18164
+		* Modified ppFetch to use PSLLabelRecord metods and properties.
+
+	11/15/05 - Frans S.C. Witte - CRs: 18163 / 18164
+		* Replaced reference to PSL.varPtr (no longer public) by
+		  PSL.pslTmpLvn (see getRow)
+		* getRow does no longer reset lvn PSL.class
+		* ppFetch now generates M code not PSL code, because it is called
+		  after all PSL source code hes been handled.
+
+	11/15/05 - Frans S.C. Witte - CRs: 18727 / 18728
+		* Replaced this. by PSL. and removed #XECUTE DO init^UCMETHOD
+
+	08/30/05 - Frans S.C. Witte - CRs: 15592 / 15593
+		* Modified description of vobj() structure to include flat files
+		* Subroutine ET commented out (not called).
+
+	04/07/05 - Frans S.C. Witte - CRs: 14919 / 14920
+		* $$rdb^UCDB() changed to $$rdb^UCDBRT() (1 occurrence)
+		* Added documentation that describes vobj() structure of ResultSet
+		  object.
+		* adapted getCol and getColRt to use redefined select-list.
+		* Modified subroutines ppFetch and fetchPatch to correct problem
+		  with vFetch() call replacement
+
+	10/22/04 - Frans S.C. Witte - CRs: 13403 / 13404
+		Modified subroutine getRow: removed setting / referencing of
+		primtyp(), added $GET() around node for row protection.
+		Modified subroutine getCol to handle getColProt in all possible
+		cases (and use of $EXTRACT()).
+		Removed explicit "WARN" And "#OPTIMIZE" (no need to
+		override environment settings).
+		.data() replaced by .exists() or .order().
+		Added quit at beginning of code.
+ 
+        05/12/04 - RussellDS - CR9676
+		Move Profile04 version to Profile01 to support single code
+		base for PSL.
+
+        09/16/03 - Spier CR 6031,6032,6034  - arq 51423
+             Retrofit of changes made in v7.0 up to this date into Profile01
+             as well as release for v7.0
+	
+	 06/05/03 - Spier
+		    Modified getColRt section to remove extract from -3
+		    level of resultset
+		    Modified ppfetch section to add #accept into buffer
+		    code prior to xecute command
+
+  	 05/21/03 - FSANCHEZ
+		    Moved program to PSL procedure & added support for the
+	            Row class in the getRow method
+
+	 03/17/03 - GIRIDHARAN - 45497
+		     Included a call to MAP^DBMAP in the getCol section for a
+		     relational database
+	
+	 02/14/03 - SPIER - 51423
+		    bug fixes
+	 01/10/03 - SPIER - 51423
+		    Bug fixes for 51089 release
+	
+	 10/15/02 - Sanchez/SPIER - 51089
+		    Modifications for v7.0 enhancements
+	*/
+	// I18N=QUIT
+	// *******************************************************************
+	// * IMPORTANT NOTE:                                                 *
+	// * According to the rules that apply to PSL compiler upgrades,     *
+	// * the generated M routine associated with this procedure must be  *
+	// * checked into StarTeam and released with the procedure whenever  *
+	// * changes are made to this procedure.                             *
+	// *                                                                 *
+	// * The M routine will be loaded to the mrtns directory during      *
+	// * upgrades and will then be removed from that directory as part   *
+	// * of the upgrade process.  Therefore, other than during an        *
+	// * upgrade an mrtns version of this routine should not exist.      *
+	// *                                                                 *
+	// * Keep these comments as single line to ensure they exist in the  *
+	// * generated M code.                                               *
+	// *******************************************************************
+	quit
+
+	// ---------------------------------------------------------------------
+isEmpty	// method ResultSet.isEmpty; returns Logical
+	
+	set PSL.return = "'$G(vobj("_ PSL.objectName_ ",0))"
+	
+	if PSL.objectName.optimize() set PSL.return = PSL.patch( PSL.return)
+	quit
+	
+	// ---------------------------------------------------------------------
+getRecord	// method DbSet.getRecord; returns Record<class>, classed by identifier
+	
+	type Public Number ER
+	type Public String fsn()
+	type String keys,lvn,par,table
+	
+	set PSL.class = PSL.var.class
+	if 'PSL.isRecord( PSL.class) do PSL.error("Invalid identifier class: "_ PSL.class) quit
+	
+	set table = $$getReTable^UCGM( PSL.class)
+	
+	if 'fsn(table).exists() do fsn^SQLDD(.fsn,table) if ER quit
+	
+	set keys=fsn(table).piece("|",3),par=""
+	
+	if keys.isNull()
+	else  if keys.length(",")=1 set par=":vobj("_ PSL.objectName_")"
+
+	else  do {
+
+		type Number i
+		for i=1:1:keys.length(",") set par=par_",:$P(vobj("_ PSL.objectName_"),$C(9),"_i_")"
+		set par=par.extract(2,par.length())
+	}
+
+	set PSL.actual(1)=table.addQuotes()
+	set PSL.actual(2)=par.addQuotes()
+	set PSL.actual(3)=1
+	
+	do getRecord^UCDB	
+	do setOpti^UCGM( PSL.var, PSL.varLevel,0)
+	quit
+
+	// ---------------------------------------------------------------------
+getRow	// method ResultSet.getRow; returns Row
+	/* ---------------------------------------------------------------------
+	INPUTS:
+	. PSL.actual()
+		If and only if called for ResultSet.getRow().
+		Absent if called for ResultSet.getRowProt()
+	. PSL.ptr = character pointer
+		When ResultSet.getRow() occurs as nested property (see NOTES)
+
+	OUTPUTS:
+	. PSL.return = code to return current row, delimited as requested
+	. PSL.pslTmpLvn = symbol allocated for temporary Row instance
+		This symbol will also occur in struct("Row"). This is needed to
+		be able to translate columnnames to positions within the row.
+
+	NOTES:
+	. Because the result of ResultSet.getRow() is a Row object, and the
+		programmer may want to access "properties" of the Row, the
+		column definition of the Row object must be stored in a
+		temporary variable.
+	. When ptr>0, this subroutine redeclares var and varLevel. These names
+		shall match the names used by the caller.
+	. The use of PROTECT as public variable is bad. This shall be modified
+		as follows:
+		- this subroutine shall be redeclared as getRow( Boolean PROTECT)
+		- All occurrences of PROTECT.exist() shall be replaced by
+			PROTECT
+		- the OBJECTMET.ROUTINE entry for ResultSet.getRow() shall be
+			modified to: getRow^UCRESULT(0)
+		- the OBJECTMET.ROUTINE entry for ResultSet.getRowProt() shall
+			be modified to: getRow^UCRESULT(1)
+	*/
+	type Public String struct(,,,)
+	type Public String type(,)
+	type Public String type(,,)
+	type Public String tab
+
+	if PSL.ptr do { quit			// Nested reference
+
+		type Number ptr=0		// Stop loop
+		type Number varLevel=PSL.level
+		type String var=$$nxtSym^UCGM
+
+		set PSL.pslTmpLvn = var		// tell caller
+		set type(varLevel,var)="Row"_tab_(PSL.msrc+1)_tab_"NEW"_tab_(PSL.msrc+1)_tab
+		do getRow
+	}
+
+	type Public String PROTECT		// Signal from getRowProt 
+
+	type String del = PSL.actual(1).get()	// absent if PROTECT=1
+	type String list = PSL.actual(2).get()	// absent if PROTECT=1
+
+	if del.isNull() set del="$C(9)"
+
+	if list.isNull(),PSL.var.exists() do {	// Default to SELECT
+	
+		type Number newPtr
+		type String attrib,select,record
+
+		set newPtr=PSL.objectName.scopeLine
+		#ACCEPT DATE=4/22/03; PGM=Frank Sanchez; CR=Frank Sanchez
+		set record=struct("s",PSL.subRou,newPtr,PSL.objectName).get()
+		set select=record.piece(tab,4)
+		set attrib=record.piece(tab,6)
+
+		set list=select.piece(" FROM ",1)
+
+		if 'list.isNull() {
+			/* Literal SELECT clause, can resolve Type and Name at
+			   compile time.
+			   */
+			type Number i
+			for i=1:1:list.length(",") do {
+
+				type String att,col
+
+				set col=list.piece(",",i)
+				set att=attrib.extract(((i-1)*2)+1)
+ 
+				if "TUF"[att S att="String"	
+			        else  set att="Blob,Boolean,Date,Memo,Number,Number,Time".piece(",","BLDMN$C".find(att)-1)
+
+				set list.piece(",",i)=att_" "_col
+			}		
+			set list=list.addQuotes()
+		}
+		else  {
+			/* Dynamic select, need to defer until runtime.
+			   Use vobj(vOid,-3) for columns and vobj(vOid,-4) for
+			   types.
+			   */
+			set list=$$getRowRt
+			if PSL.objectName.optimize() do setOpti^UCGM( PSL.objectName, PSL.objectLevel, -1) 
+		}
+	}
+
+	if 'list.isNull(),PSL.var.exists() do {
+
+		set PSL.actual(3) = del
+		set PSL.actual(2) = list
+		do classNew^UCROW
+	}
+
+	if PSL.objectName.scope="LITERAL" do { quit
+		
+		if del="$C(9)" do PSL.error("<tab> delimiter is illegal") quit
+		
+		#ACCEPT DATE=4/22/03; PGM=Frank Sanchez; CR=Frank Sanchez
+		set PSL.return=type(PSL.objectLevel,PSL.objectName,0).get()
+
+		#ACCEPT DATE=4/22/03; PGM=Frank Sanchez; CR=Frank Sanchez
+		xecute "S del="_del
+		set PSL.return = PSL.return.replace(9.char(), del)
+		set PSL.return = PSL.return.addQuotes()
+	}
+
+	set PSL.return="vobj("_PSL.objectName_")"
+	if PROTECT.exists() set PSL.return="$G("_PSL.return.extract(1,PSL.return.length()-1)_",.1))"
+
+	if '(del="$C(9)") set PSL.return="$TR("_PSL.return_",$C(9),"_del_")"
+
+	if PSL.objectName.optimize() set PSL.return=PSL.patch(PSL.return)
+
+	//if PSL.class="Row",PSL.var.exists() set PSL.class=PSL.var.class
+
+	quit
+
+	// ---------------------------------------------------------------------
+getRowRt()	// Generate subroutine to get Row.getColumns() at runtime
+	// ---------------------------------------------------------------------
+	type literal String label = "vRsRowGC"
+
+	if 'PSL.subrouExists(label) {
+
+		type PSLBuffer buf = PSL.openBuffer("(List vNms,String vTps)","Runtime ResultSet.getRow().getColumns()")
+
+		do buf.add("type Public String vobj(,)")
+		do buf.add("")
+		do buf.add("type Number vL="""",vN,vO,vT")
+		do buf.add("for vO=1:1:vNms.count() {")
+		do buf.add("  set vN=vNms.elementAt(vO)")
+		do buf.add("  set vT=vTps.extract((vO-1)*2+1)")
+		do buf.add("  if ""TUF""[vT S vT=""String""")	
+		do buf.add("  else  set vT=""Blob,Boolean,Date,Memo,Number,Number,Time"".piece("","",""BLDMN$C"".find(vT)-1)")
+		do buf.add("  set vL.piece("","",v0)=vT_"" ""_vN")
+		do buf.add("}")
+		do buf.add("quit vL")
+
+		do buf.insert(label)
+	}
+	quit "$$"_ label_ "("_ PSL.oLvn_ "("_ PSL.objectName_ ",-3),"_ PSL.oLvn_ "("_ PSL.objectName_ ",-4))"
+
+	// ---------------------------------------------------------------------
+getCol	// method ResultSet.getCol; returns String
+	/* ---------------------------------------------------------------------
+	NOTES:
+	. See getCol for rewrite with respect to PROTECT
+	*/
+	
+	type Public Number ER
+	type Public String %DB
+	type Public String PROTECT		/* Signal from getColProt */
+	type Public String struct(,,,)
+	type Public String type(,,)
+	type Public String tab
+
+	type Number newPtr
+	type String del
+		
+	type String colExpr = PSL.actual(1)
+	if colExpr.isNull() do PSL.error("Column parameter required")
+	
+	set newPtr=PSL.objectName.scopeLine
+	//#ACCEPT DATE=4/22/03; PGM=Frank Sanchez; CR=Frank Sanchez
+	type String record = struct("s",PSL.subRou,newPtr,PSL.objectName).get()
+	type List colList  = record.piece(tab,4).piece(" FROM ")
+	
+	set PSL.return="vobj("_ PSL.objectName
+	
+	/* PROTECTION uses $EXTRACT() and requires $GET() in case Db.select did
+	   not include /PROTECTION=1 or /PROTECTION=2
+	   Normal retireval uses $PIECE()
+	*/
+	if PROTECT.exists() set PSL.return = "$E($G("_ PSL.return_ ",.1)),"
+	else                set PSL.return = "$P("_ PSL.return_ "),$C(9),"
+	
+	if colList.isNull()&(colExpr'?1N.N)!$$isVar^UCGM(colExpr) do { quit
+		
+
+		set PSL.return=PSL.return_ $$getColRt_ colExpr_ "))"
+		do setOpti^UCGM(PSL.objectName,PSL.objectLevel,1)
+	}
+
+	if colExpr'?1N.N do { if ER quit 
+
+		set colExpr=colExpr.stripQuotes().upperCase()
+		/* ======== old code replaced by CR14919 ========
+		if $$rdb^UCDBRT() do MAP^DBMAP(%DB,.PSL.table,.colExpr)
+
+		type Number i
+		for i=1:1:colList.length(",") if colExpr=colList.piece(",",i) quit
+		if  set colExpr=i
+		======== end old code replaced by CR14919 ======== */
+
+		type Number i = colList.position( colExpr)
+		if i > 0 set colExpr = i
+		else  do PSL.error("Column expression: "_colExpr_" is not in the select list: "_colList)
+	}
+
+	if 'colList.isNull(),colExpr,colExpr>colList.length(",") do PSL.error("Column reference ("_colExpr_") is greater than selected columns ("_colList.length(",")_")") quit 
+	
+	if PSL.objectName.scope="LITERAL" do { quit
+
+		//#ACCEPT DATE=4/22/03; PGM=Frank Sanchez; CR=Frank Sanchez
+		set PSL.return = type(PSL.objectLevel,PSL.objectName,0).get()
+		set PSL.return = PSL.return.piece(tab,colExpr)
+		set PSL.return = PSL.return.addQuotes()
+	}
+
+	set PSL.return = PSL.return_ colExpr_ ")"	
+
+	/* If the column "list" contains a single column, don't bother to take
+	   $PIECE() (getCol) or $EXTRACT() (getColProt). */
+	if colExpr=1,'colList.isNull(),'(colList[",") do {
+
+		if 'PSL.objectName.optimize() quit
+		set PSL.return = "vobj("_ PSL.objectName
+		if PROTECT.exists() set PSL.return = "$G("_ PSL.return_ ",.1)"
+		set PSL.return = PSL.patch( PSL.return_")")
+	}
+
+	else  if PSL.objectName.optimize() set PSL.return=PSL.patch(PSL.return)
+
+	quit
+
+	// ---------------------------------------------------------------------
+getColProt	// method ResultSet.getColProt; returns String
+
+	type String PROTECT=""	 	// Used by getCol
+	do getCol
+	quit
+
+	// ---------------------------------------------------------------------
+getColRt()	// Return column position at runtime
+
+	type literal String label="vRsGetCol"
+
+	if ' PSL.subrouExists(label) {
+
+		type PSLBuffer buf = PSL.openBuffer("(Number object,Number column)","Runtime ResultSet.getCol()")
+
+		do buf.add("type Public String vobj(,)")
+		do buf.add("")
+		do buf.add("if column.isNull() quit """"")
+		do buf.add("if column quit column")
+		do buf.add("")
+		do buf.add("type List select = {List}(vobj(object,-3).piece("" FROM ""))")
+		do buf.add("type Number pos = select.position(column,"","")")
+		do buf.add("quit pos")
+
+		do buf.insert(label)
+	}
+	quit "$$"_ label_ "("_ PSL.objectName_ ","
+
+	// ---------------------------------------------------------------------
+getRowProt	// method ResultSet.getRowProt; returns String
+
+	type String PROTECT=""	 	// Used by getRow
+	do getRow
+	quit
+
+	// ---------------------------------------------------------------------
+fetch	// method ResultSet.next; returns Logical
+
+	type Public String postProc()
+	type Public String struct(,,,)
+	type Public String tab
+
+	type Number newPtr,seq
+	type String record
+
+	if PSL.objectName.scope="LITERAL" do LitFetch quit
+
+	set newPtr = PSL.objectName.scopeLine
+
+	//#ACCEPT DATE=4/22/03; PGM=Frank Sanchez; CR=Frank Sanchez
+	set record=struct("s",PSL.subRou,newPtr,PSL.objectName).get()
+
+	set seq=record.piece(tab,2)
+
+	if 'seq.isNull() do { quit
+
+		set PSL.return="$$vFetch"_seq_"("_ PSL.objectName_")"
+		if PSL.objectName.optimize() set PSL.return = PSL.patch( PSL.return)
+	}
+
+	set postProc("fetch")="ppFetch^"_$T(+0)
+	set struct("fetch", PSL.subRou, PSL.msrc, PSL.objectName)=""
+	set PSL.return = "$$vFetch("_ PSL.objectName_")"
+
+	quit
+
+	// ---------------------------------------------------------------------
+LitFetch	// ResultSet.next for Literal scope
+
+	type Public Number ER
+	type Public String type(,,)
+
+	type Number sqlsta
+	type String cursor,sqldta
+
+	// [FRS] generate invalid error
+	//set cursor={String}(PSL.objectName).upperCase()
+
+	set cursor = PSL.objectName
+	set cursor=cursor.upperCase()
+	do FETCH^SQL(cursor,,.sqlsta,.sqldta) quit:ER
+	set PSL.return = sqlsta
+	if PSL.return=100 set PSL.return = 0
+	set type( PSL.objectLevel, PSL.objectName, 0) = sqldta
+	quit
+
+	// ---------------------------------------------------------------------
+ppFetch	// Post processor for fetch methods
+	/* ---------------------------------------------------------------------
+	This suroutine will be invoked because fetch^UCRESULT has set
+	postProc("fetch")="ppFetch^"_$T(+0). It will do this, when it has
+	detected a ResultSet.next() on an instance that has not been opened in
+	the same subroutine. It will have inserted a call to vFetch(rsoid),
+	passing the ResultSet instance variable.
+
+	For each (local) subroutine that contains a ResultSet.next() without a
+	ResultSet.open(), try to replace the vFetch() call by vFetchN() of the
+	caller. This can only be done if all of the following conditions are
+	satisfied:
+	* The accessibility of the subroutine is local (i.e. neither public nor
+		private.
+	* There is only one call to this subroutine.
+	* The calling subroutine contains only one ResultSet.open for the
+		actual ResultSet parameter that is bound to a formal ResultSet
+		parameter.
+
+	If, after applying this replacement, there are still entries left in
+	struct("fetch"), the code for the vFetch() subroutine will be appended.
+
+	NOTES:
+	. This subroutine is called after all PSL source code has been
+		processed. So this subroutine must deliver its additions as M
+		code.
+	*/	
+
+	type Public String called(,)
+	type Public PSLLabelRecord labels()
+	type Public String struct(,,,)
+	type Public String tab
+
+	type PSLLabelRecord lr
+	type Number line
+	type String call,calledBy,frmlList,frmlObj,label,subRou
+
+	set subRou="",line="",frmlObj=""
+
+	for  set subRou=$order(struct("fetch",subRou)) quit:subRou.isNull()  do {
+
+		set label=subRou.piece("(",1)
+
+		if 'labels(label).exists() quit		// not enough data
+		if labels(label).accessLevel>0 quit	// public or private
+
+		set lr = labels( label)
+		set label = label_ "("
+		set call = $order(called(label))
+		if 'call.beginsWith(label) quit		// no calls
+
+		set calledBy=$order(called(call,""))
+		if calledBy.isNull() quit		// no calls
+		if '$order(called(call,calledBy)).isNull() quit	// multiple
+
+		/* a single call to this subroutine occurs.  Build the
+		   formal-to-actual mapping for all ResultSet parameters */
+		type String f2a()
+		type String actList = call.extract( call.find("("), call.length() - 1)
+		type String ap,fp type Number p
+		for p = 1:1:actList.length(",") do {
+			set ap = actList.piece(",", p)
+			if ap.piece(" ")'="ResultSet",ap.piece(" ")'="DbSet" quit
+
+			if $$getFpClass^UCPSLLR(lr, p) '= ap.piece(" ") quit	// type mismatch
+			set ap = ap.piece(" ",2) if ap.isNull() quit		// no class (ap)
+			set f2a( $$getFpVsig^UCPSLLR( lr, p)) = ap.piece(" ",2)
+		}
+
+		for  set line=$order(struct("fetch",subRou,line)) quit:line.isNull()  do {
+			for  set frmlObj=$order(struct("fetch",subRou,line,frmlObj)) quit:frmlObj=""  do {
+				if 'f2a(frmlObj).exists() quit	// not mapped
+				do fetchPatch(subRou,calledBy,line,frmlObj,f2a(frmlObj))
+			}
+		}
+	}
+
+	if struct("fetch","").order()="" quit
+
+	/* 
+	Build the list(label) array of queries to mask from code generation
+	that performs runtime indirection.
+	*/
+
+	type String list(),var,z
+	set (line,subRou,var)=""
+
+	for  set subRou=$order(struct("s",subRou)) quit:subRou.isNull()  do {
+		for  set line=$order(struct("s",subRou,line)) quit:line.isNull()  do {
+			for  set var=$order(struct("s",subRou,line,var)) quit:var.isNull()  do {
+				set z=struct("s",subRou,line,var)
+				if z.piece(tab,2) set list(z.piece(tab,2))=""
+			}
+		}
+	}
+
+	type Number i
+
+	#IF 0
+	/* Old code */
+	type PSLBuffer buf = PSL.openBuffer("(String object)","Runtime Fetch")
+
+	do buf.add("type Public String vobj(,)")
+	do buf.add("type String vpgm,vtag")
+	do buf.add("set vpgm=$T(+0),vtag=vobj(object,-2)")
+
+	for i=1:1 quit:'labels("vOpen"_i).exists()  if 'list(i).exists() do {
+
+		type String tag="vFetch"_i
+		do buf.add("if vtag=(""$$"_tag_"^""_vpgm) quit $$"_tag_"(object)")
+	}
+
+	// Label is not in current routine, xecute the call
+	do buf.add("#ACCEPT DATE=4/22/03; PGM=Frank Sanchez; CR=Frank Sanchez")
+	do buf.add("xecute (""set vtag=""_vtag_""(object)"") quit vtag")
+
+	do buf.insert("vFetch")
+
+	#ELSE
+	/* New code */
+	type PSLSubrou sr = PSL.addSubrou( "vFetch", "(vRs)", "Runtime fetch", 0)
+	do sr.addCode(" new vPgm,vTag")
+	do sr.addCode(" set vPgm=$TEXT(+0),vTag=vobj(vRs,-2)")
+
+	for i=1:1 quit:'labels("vOpen"_i).exists()  if 'list(i).exists() do {
+
+		type String tag="vFetch"_i
+		do sr.addCode(" if vTag=(""$$"_tag_"^""_vPgm) quit $$"_tag_"(vRs)")
+	}
+
+	// Label is not in current routine, xecute the call
+	do sr.addCode(" xecute ""set vTag=""_vTag_""(vRs)""")
+	do sr.addCode(" quit vTag")
+	#END
+
+	quit
+
+	// ---------------------------------------------------------------------
+fetchPatch(	String subRou,
+		String calledBy,
+		Number line,
+		String frmlObj,
+		String actObj)
+
+	type Public String msrc()
+	type Public String struct(,,)
+	type Public String struct(,,,)
+
+	type String mcode,p1,p2,rec
+
+	set mcode=msrc(line+1).get() if mcode.isNull() quit  // some kinda bug!!!
+
+	//set actObj=frmlObj			 // Init to global
+
+	//set z=$order(struct("s",calledBy,"")) if z.isNull() quit
+	//set actObj=$order(struct("s",calledBy,z,"")) if actObj.isNull() quit
+
+	/* ensure that actObj is instantiated only once in calledBy */
+	type Number count = 0
+	type String z = ""
+	for  set z = struct("s",calledBy,z).order() quit:z.isNull()  do {
+		if 'struct("s",calledBy,z,actObj).exists() quit
+		set count = count + 1
+		set rec = struct("s",calledBy,z,actObj)
+	}
+	if count'=1 quit
+
+	kill struct("fetch",subRou,line,frmlObj)
+
+	/*
+	Now -- insert a test here to make sure that the actual parameter
+	is either a formal parameter or a global scope variable
+	*/
+
+	//set rec=struct("s",calledBy,z,actObj)
+
+	/* replace vFetch(fp) call in subrou by vFetchN(fp) call where N is the
+	   sequence number of the vOpen/vFetch pair of the actual parameter */ 
+	set p1="$$vFetch("_frmlObj_")",p2="$$vFetch"_rec.piece($C(9),2)_"("_frmlObj_")"
+
+	if '(p2[p1) for  quit:'(mcode[p1)  set mcode=mcode.piece(p1,1)_p2_mcode.piece(p1,2,mcode.length())
+	set msrc(line+1)=mcode
+	quit
+
+	// ---------------------------------------------------------------------
+private bchPatch	//  Patch logic to link open and fetch code for batch defs
+	/* ---------------------------------------------------------------------
+	The batch compiler DBSBCH contains the statement:
+		set commands("execute",x)="DO bchPatch^UCRESULT"
+	This will be passed into the compiler, which will XCECUTE all lines in
+	commands("execute",*) before starting any source code compilation.
+
+	The intended purpose is not documented, but it is probably related to
+	the following:
+	- The vOPEN section of a batch will open a public ResultSet
+	- The vSCHEXEC section uses this public ResultSet
+	- The public nature of the ResultSet will cause a call to vFetch() to
+		determine and call the actual vFetchN() function, using the M
+		XECUTE command (see code generated for vFetch() in ppFetch).
+	The code in ppFetch will try to "match" ResultSets that are passed
+	between subroutines. The array called(,) is used for that purpose.
+	Setting called("vSCHEXEC()","vOPEN") here is probably supposed to "link"
+	the two subroutines in order to create the match. Unfortunately, the
+	matching mechanism is based on actual-to-formal paramter mapping, and
+	not on (shared) public variables. So regardless of the presence of the
+	called(,) entry, there will be no match.
+
+	Based on the above, this subroutine is turned into a no-op, and will be
+	removed completely when either the commands("execute",) mechanism is
+	removed from UCGM, or when DBSBCH has been adapted.
+	*/
+
+	/* ================ BEGIN COMMENTED OUT (see intro)
+	type Public String called(,)
+	set called("vSCHEXEC( vINPUT, vRETURN)","vOPEN")=""
+	================ END COMMENTED OUT */
+
+	quit
+
+vSIG()	quit "60731^49520^Frans S.C. Witte^24639"	// Signature - LTD^TIME^USER^SIZE

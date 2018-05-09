@@ -1,0 +1,277 @@
+BCHDEALE //Batch BCHDEALEOD - Deal Processing End-of-Day
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 01/31/2007 12:45 - shetyes
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHDEALEOD Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ set vBCHSTS=$$STATUS^BCHUTL("BCHDEALEOD")
+ if vBCHSTS=1 set ER=1,RM=$$^MSG(3410) quit
+ if vBCHSTS=2 set ER=1,RM=$$^MSG(3414) quit
+ if vBCHSTS=0 set %BatchRestart=1
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit do EXIT^BCHUTL("BCHDEALEOD") quit
+ do JOBMGR^BCHUTL(%FN,"BCHDEALEOD",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ do EXIT^BCHUTL("BCHDEALEOD")
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(NOINT) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHDEALEOD","*","",NOINT.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ if %BatchRestart,$$CHKLOG^BCHUTL(%SystemDate,%FN,"BCHDEALEOD",NOINT.get()) do { quit
+ do LOG^BCHUTL(%SystemDate,%FN,"BCHDEALEOD",NOINT.get(),"Record already processed")
+ }
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,NOINT)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHDEALEOD","*","",NOINT.get(),"",et)
+ }
+ do UPDLOG^BCHUTL(%SystemDate,%FN,"BCHDEALEOD",NOINT.get(),vCONTEXT)
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,NOINT) //
+	
+	type RecordDEAL1 deal1=Db.getRecord("DEAL1", "NOINT=:NOINT")
+
+	// Quit if status not "In Progress"/"Verified"
+	if "-2-4-"'[deal1.status quit
+	
+	if (deal1.sdt = %SystemDate) do PROCDEAL(NOINT, .deal1, "SPOT")
+	if (deal1.tdt = %SystemDate) do PROCDEAL(NOINT, .deal1, "TRADE")
+	if (deal1.vdt = %SystemDate) do PROCDEAL(NOINT, .deal1, "VALUE")
+	
+	quit
+	
+	
+PROCDEAL(Number NOINT,		// Contract number
+	 RecordDEAL1 deal1,	// DEAL1 record
+	 String INDEX)		// SPOT, TRADE, or VALUE
+	 
+	type public Number BRCD
+	
+	type Boolean ER
+	type Date DATE
+	type Number stat
+	type String RJ(), RM
+	
+	set ER = 0
+	
+	set DATE = %SystemDate
+
+	// No settlement instructions
+	if (INDEX = "VALUE"), 'deal1.inst do Runtime.setErrMSG("DEAL1",7592) do EXC(NOINT) quit	
+	
+	type RecordTTX ttx()
+	
+	if $$POSTDEAL(.deal1,.ttx()) set ER=1 quit
+	
+	// Only invoke posting if we actually have transactions to process
+	if ttx.data() do TRNSET^TRNDRV(.ttx(),%SystemDate,BRCD,4,,.RJ())
+
+	// Check rejected transactions, log an exception if any
+	if (RJ.data() ! ER) do { quit
+		
+		if 'RM.exists(), RJ.data() do {
+		
+			type Number RJSEQ
+		
+			set RJSEQ = RJ("").order(-1)
+			set RM = RJ(RJSEQ).piece("|", 2)
+		}
+					
+		do EXC(NOINT, RM.get()) 
+	}
+		
+	if (INDEX '= "VALUE") set deal1.status = 4
+	else  set deal1.status = 6	
+	
+	do deal1.save()				
+
+	// SWIFT message generation
+	if (deal1.sdt < %SystemDate + 1) do {
+		
+		type Number REFTMP = deal1.trrefno	// Transaction Reference Number
+
+		type ResultSet rs = Db.select("MSG", "SWIFT", "SWDIRECT='OUT' AND TRREFNO=:REFTMP")
+
+		// Message does not exist
+		if rs.isEmpty() do DEAL^SWIFTGEN(NOINT, .deal1)
+	}
+
+	quit
+	
+
+private POSTDEAL(RecordDEAL1 deal1,	// Deal Record 
+	 	 RecordTTX ttx())	// Transaction Object Array
+
+	/*
+	   Build necessary parameters for BUILDTR^DEALUTL call.
+	   Returns:   0 -- success 
+		      1 -- failure
+		      
+	   Also called by DEALREV.proc
+	*/
+
+	type public Boolean ER
+	type public Number BRCD
+	type public String RM
+	
+	type String KEY
+	type Date TPD = %SystemDate
+		
+	if BRCD.get().isNull() do SOURCE^BCHSOURC("BOFF","DEAL",.%UserID,.BRCD,.%UserClass)
+
+	set KEY = "NOINT="_deal1.noint_",CO="_CUVAR.CO_",CRCDB="_deal1.crcdb_",CRCDS="_deal1.crcds
+
+	// Build transaction
+	set ER = $$BUILDTR^DEALUTL(.deal1, BRCD, %UserID, KEY, "*", .ttx()) 
+
+	if ER do { quit 1
+		
+		// Error building transaction
+		if RM.get().isNull() set RM = $$^MSG(7562)
+	}
+
+	quit 0
+
+	
+EXC(String NOINT,	// Contract Number
+    String RM)		// Error Message Text
+    
+	// Log exception
+
+	type public Boolean ER
+	type public Number %ZTSEQ
+	
+	// Error processing deal transaction 
+	if RM.get().isNull() set RM = $$^MSG(7594)
+	
+	// ~p1: Deal #~p2
+	set RM = $$^MSG(7597, RM, NOINT)
+	
+	// Deal End of Day Processing
+	do LOG^UTLEXC($T(+0), "*", $$^MSG(7590), NOINT, %ZTSEQ.get(), RM, "")
+
+        kill RM, %ZTSEQ
+
+	quit
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,NOINT
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set NOINT=vRECORD.piece($C(9),1)
+ do vPROC(NOINT)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,NOINT
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>32767 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+7>32767 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+	
+	type public Boolean ER
+	type public Date XTJD
+	type public Number BRCD
+
+	do SOURCE^BCHSOURC("BOFF","DEAL",.%UserID,.BRCD,.%UserClass) 
+	
+	if ER set %BatchExit=1 quit
+	
+	set XTJD=%SystemDate
+
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("NOINT","DEAL1","SDT=:XTJD OR TDT=:XTJD OR VDT=:XTJD")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	type public Number BRCD
+
+	do SOURCE^BCHSOURC("BOFF","DEAL",.%UserID,.BRCD,.%UserClass)
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+        
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

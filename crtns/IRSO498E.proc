@@ -1,0 +1,466 @@
+IRSO498E		/*
+	ORIG: titove - 11/04/2005
+	DESC: IRS Processing - Form 5498 ESA
+
+	---- Comments --------------------------------------------------------
+			  THIS PROCEDURE IS TO BE COMPILED
+			      DO NOT RUN STANDALONE
+
+	I18N=QUIT: Excluded from I18N standards.
+
+	---- Revision History ------------------------------------------------
+	
+	05/05/06 - TITOVE - CR 21146
+		   Modified BRECBLD to ensure we have pieces in IRA(1) and
+		   NEXT arrays that directly correspond to columns in IRA 
+		   table.
+
+	04/19/06 - RussellDS - CR20209
+		   Remove code related to obsoleted Mutual Funds/Securities.
+		   
+		   Modified BRECBLD section to append RPASEQ when building a 
+		   value for CID, instead of IRATYP.
+	
+	04/07/06 - TITOVE - CR 20641
+		   Modified BRECBLD to prevent it from using the incorrect 
+		   values for ACN when retrieving data from IRATYPE. Also
+		   restored beneficiary logic lost in PSL conversion.
+		   
+	03/24/06 - Mugilvannan - CR 20334
+		   Changes made in the BRECBLD section to properly initialize
+		   the variable SPECIAL to GTM error.
+		   
+	11/04/05 - TITOVE - CR 17287
+		   Converted into PSL. Removed tags ACN, INV1, REPORT, RPASEQ
+		   and TP1.
+		   
+	12/10/04 - SIVAKUMAR - 13439 
+		   Created from a copy of IRSO498 routine and modified 
+		   to accommodate the new form 5498-ESA. A check has been added 
+		   to use only the RPASEQ where Retirement Plan Account Type 
+		   equals 12(Coverall ESA). Modified REPORT section to remove setting
+		   of all payment amounts except 1,2 as well as IRA indicators. 
+		   Modified code for IRA.C1,IRA.C2 and IRA.C1X to report on 
+		   AMT1 variable,Coverdell ESA Contributions,Field positions 
+		   55-66 and IRA.C4 on AMT2,Rollover Contributions,Field Positions 67-78.
+		   Set FORMCODE to the value "V". Remove the tax report totals for all 
+		   amounts that are not being reported on form 5498-ESA.
+		   Modified Section B5498 to remove the un-necessary fields 
+		   on the new form. The SQL insert inserting the values in to the
+		   new file B5498ESA.
+
+	*/
+	
+        // Accept "Dead code" warning during runtime of @IRSTAPE
+        #ACCEPT Date=10/26/2005;PGM=Eugene Titov;CR=17287
+        quit
+        
+        	
+MTRCNTRL	// Master control
+
+	type public Number ER
+
+	do Db.delete("B5498ESA")
+	
+	do ARECBLD quit:ER	// Build and write the "A" record
+	
+	do BRECBLD quit:ER	// Build and write the "B" record
+	
+	do CRECBLD quit:ER	// Build and write the "C" record
+	
+	do STORETOT		// Store the TTR report totals
+	
+	do Db.delete("TMPRPT3","PID=:%ProcessID")
+	
+	quit
+	
+
+ARECBLD	// "A" record builder
+
+	type public String TAMT()
+
+	type Number AMTIND, FORMCODE
+
+	set FORMCODE = "V"		// IRS form code
+	
+	set AMTIND = "12"		// IRS amount type indicators
+	
+	set TAMT(1).piece("|",2) = "Regular IRA Contributions"
+	set TAMT(2).piece("|",2) = "Rollover Contributions"
+	
+	do ARECWRT			// Write the record to tape
+	
+	quit
+	
+
+BRECBLD	// "B" record builder
+
+	type public Boolean FMVOPT
+	type public Date BEGYR, ENDYR
+	type public Number AMT(), FAMT(), FCNT, IRAOPT, YEAR
+	
+	type Date DOD
+	type Number BACN, BENACN, BENSEQ, CONT, FMV, I, IRAD6, IRATYP, PYBAL, ROLL
+	type Number RPASEQ, TAXYR, TAXYR1, X
+	type String ACN, ADDR, CID, CITY, CNTRY, CORRTN, DOCCODE, FORCNTY, FULLADDR, IRA()
+	type String LNAME, NAME, NEXT, SPECIAL, STATE, TIN, TINTYPE, VAR, ZIP
+
+	do BENE
+	
+	type DbSet ds = Db.selectDbSet("TMPRPT3","PID=:%ProcessID")
+	
+	while ds.next() do {
+		
+		type RecordTMPRPT3 rpt3 = ds.getRecord("TMPRPT3")
+		
+		type Boolean BEN = 0, IFLG = 0
+		
+		if rpt3.key1.isLike("%-%") set BEN = 1
+		
+		set ACN = rpt3.key1
+		set RPASEQ = rpt3.key2
+		
+		if BEN set IRATYP = ""				
+		else  do {
+			
+			type RecordIRATYPE iratyp = Db.getRecord("IRATYPE", "ACN = :ACN,RPASEQ = :RPASEQ", 1)
+		
+			set IRATYP = iratyp.iratyp
+			}
+		
+		if (IRATYP '= 12) quit 		// Only include Coverdell ESA
+
+		set TAXYR = YEAR
+		set TAXYR1 = YEAR + 1
+		set (FMV,PYBAL,IRAD6,IRA(1)) = ""
+		set (NEXT,CONT,ROLL,X) = ""
+		
+		// Processing for beneficiary of a deceased (could be multiple records)
+		if BEN do {
+			
+			set BACN = ACN.piece("-",1)
+			
+			type RecordIRATYPE bentyp = Db.getRecord("IRATYPE", "ACN = :BACN,RPASEQ = :RPASEQ", 1)
+			
+			set IRATYP = bentyp.iratyp
+			
+			set FMV = rpt3.data.piece("|",2)
+			}
+
+		// Initialize IRA(1) and NEXT arrays up to a total number of IRA columns
+		for I = 1:1:17 do {
+			
+			set IRA(1).piece("|",I) = ""
+			set NEXT.piece("|",I) = ""
+			}
+
+		// Processing deceased customer's record
+		if (rpt3.data = "B") do {
+			
+			set FMV = 0
+			
+			type RecordIRA ira = Db.getRecord("IRA", "ACN = :ACN,RPASEQ = :RPASEQ,TAXYR = :TAXYR", 1)
+			
+			set IRAD6 = ira.d6
+			
+			for I = 1:1:5,7:1:17 do {
+			
+				set VAR = "C"_I
+				set IRA(1).piece("|",I) = ira.@VAR
+				}
+				
+		 	type RecordIRA ira1 = Db.getRecord("IRA", "ACN = :ACN,RPASEQ = :RPASEQ,TAXYR = :TAXYR1", 1)
+
+			for I = 1:1:5,7:1:17 do {
+			
+				set VAR = "C"_I
+				set NEXT.piece("|",I) = ira1.@VAR
+				}
+
+			if (IRATYP = 4) set CONT = IRA(1).piece("|",1) + IRA(1).piece("|",9) + IRA(1).piece("|",13) + IRA(1).piece("|",2) + IRA(1).piece("|",10)
+		 	else  set CONT = IRA(1).piece("|",1) + IRA(1).piece("|",9) + IRA(1).piece("|",13) + NEXT.piece("|",2) + NEXT.piece("|",10)
+		 	
+		 	set ROLL = IRA(1).piece("|",4) + IRA(1).piece("|",14) + IRA(1).piece("|",15)
+		 	
+		 	set X = IRA(1).piece("|",1) + IRA(1).piece("|",4) + IRA(1).piece("|",9) + IRA(1).piece("|",13)
+			}
+
+		// Processing regular (not deceased) customer's record
+		if rpt3.data.isNull() do {
+			
+			do ^IRAYEBAL
+			
+			type RecordIRA ira = Db.getRecord("IRA", "ACN = :ACN,RPASEQ = :RPASEQ,TAXYR = :TAXYR", 1)
+			
+			set IRAD6 = ira.d6
+			
+			for I = 1:1:5,7:1:17 do {
+			
+				set VAR = "C"_I
+				set IRA(1).piece("|",I) = ira.@VAR
+				}
+				
+		 	type RecordIRA ira1 = Db.getRecord("IRA", "ACN = :ACN,RPASEQ = :RPASEQ,TAXYR = :TAXYR1", 1)
+
+			for I = 1:1:5,7:1:17 do {
+			
+				set VAR = "C"_I
+				set NEXT.piece("|",I) = ira1.@VAR
+				}
+
+			if (IRATYP = 4) set CONT = IRA(1).piece("|",1) + IRA(1).piece("|",9) + IRA(1).piece("|",13) + IRA(1).piece("|",2) + IRA(1).piece("|",10)
+		 	else  set CONT = IRA(1).piece("|",1) + IRA(1).piece("|",9) + IRA(1).piece("|",13) + NEXT.piece("|",2) + NEXT.piece("|",10)
+		 	
+		 	set ROLL = IRA(1).piece("|",4) + IRA(1).piece("|",14) + IRA(1).piece("|",15)
+		 	
+		 	set X = IRA(1).piece("|",1) + IRA(1).piece("|",4) + IRA(1).piece("|",9) + IRA(1).piece("|",13)
+			}
+		
+		if BEN do {
+			
+			set DOD = ""		// Date of Death
+			set TIN = ""		// Taxpayer identification number
+			}
+		else  do {
+			
+			type RecordCIF cif = Db.getRecord("CIF", "ACN = :ACN", 1)
+			
+			set DOD = cif.dod	// Date of Death
+			set TIN = cif.taxid	// Taxpayer identification number
+			}
+
+		/*
+		  If no contributions, rollovers or year end balance, skip the account.
+		  Except the year a decendant dies, a fair market value of zero will 
+		  report.
+		*/
+		if DOD,((DOD < BEGYR)!(DOD > ENDYR)) quit
+		
+		// No activity and zero y/e bal
+		if ((X + CONT + ROLL + FMV) = 0),((DOD < BEGYR)!(DOD > ENDYR)) quit
+
+		set TINTYPE = $select(TIN?2N1"-"7N:1,TIN?3N1"-"2N1"-"4N:2,1:" ") // Type of TIN
+		
+		set AMT(1) = CONT * 100
+
+		if (IRATYP = 4) set AMT(1) = (IRA(1).piece("|",1) + IRA(1).piece("|",2) + IRA(1).piece("|",9) + IRA(1).piece("|",13) + IRA(1).piece("|",10)) * 100
+
+		set AMT(2) = IRA(1).piece("|",4) * 100	// Rollover cont
+
+		set DOCCODE = "  "		// Document specific code
+		set CORRTN = " "		// Corrected return indicator
+
+		set ADDR = ""
+		set CID = ACN_"-"_RPASEQ	// Account number (sequence number)
+
+		set BENACN = ACN.piece("-",1)	// Beneficiary Customer Number	
+		set BENSEQ = ACN.piece("-",2)	// Beneficiary Sequence
+
+		if BENSEQ do {
+			
+			set CID = BENSEQ_"-"_RPASEQ		// Sequence Number
+			
+			type RecordIRABEN iraben = Db.getRecord("IRABEN", "ACN = :BENACN,RPASEQ = :RPASEQ,BENSEQ = :BENSEQ", 1)
+			
+			set NAME = iraben.benname		// Beneficiary First Name
+			set LNAME = iraben.benlnm		// Beneficiary Last Name
+			set TIN = iraben.bentaxid		// Beneficiary TAXID
+			// Set line 2 and line 3 of Beneficiary address
+			set ADDR = iraben.benmad1_" "_iraben.benmad2_" "_iraben.benmad3
+			set FULLADDR.piece("|",1) = iraben.benmad1
+			set FULLADDR.piece("|",2) = iraben.benmad2
+			set FULLADDR.piece("|",3) = iraben.benmad3
+			set CITY = iraben.bencity
+			set STATE = iraben.benstate
+			set ZIP = iraben.benzip.piece("-",1)
+			set FULLADDR.piece("|",6) = ZIP
+			set CNTRY = iraben.bencntry
+			set FORCNTY = $select(CNTRY="US":" ",1:1)
+			}
+
+		// Profile Customer and no beneficiary information defined
+		if ADDR.piece(" ",1).isNull() do {
+			
+			type RecordCIF cif = Db.getRecord("CIF", "ACN = :BENACN", 1)
+			
+			set TIN = cif.taxid			// Tax ID
+			set NAME = cif.nam 			// Beneficiary First Name
+			set LNAME = cif.lnm			// Beneficiary Last Name
+
+			set FULLADDR = $$FULLADDR^RSPADD(BENACN,RPASEQ)
+		
+			set ADDR = FULLADDR.piece("|",1)_" "_FULLADDR.piece("|",2)_" "_FULLADDR.piece("|",3)
+			set CITY = FULLADDR.piece("|",4)	// Beneficiary City
+			set STATE = FULLADDR.piece("|",5)	// Beneficiary State
+			set ZIP = FULLADDR.piece("|",6).piece("-",1)_FULLADDR.piece("|",6).piece("-",2) // Beneficiary Zip
+			set CNTRY = FULLADDR.piece("|",7)	// Foreign country
+			set FORCNTY = $select(CNTRY="US":" ",1:1)  	// Foreign country indicator
+			}
+
+		set TINTYPE = $select(TIN?2N1"-"7N:1,TIN?3N1"-"2N1"-"4N:2,1:" ") // Type of TIN
+
+		// Special date position 544-750
+		//; Blank |544|662
+		set SPECIAL = "".justify(119)
+		//; Special data entries|663|722
+		set SPECIAL = SPECIAL_"".justify(60)
+		//; Blank |723|750
+		set SPECIAL = SPECIAL_"".justify(28)
+
+		do BRECWRT	// Write the record to tape
+	
+		/*
+		 If the trustee or issuer furnished a statement of the fair market value of
+		 the IRA to the participant by February 1 and no contributions were made to
+		 the IRA by the participant for the reporting tax-year, the trustee or issuer
+		 need not furnish another statement or 5498 form. However, form 5498 must be
+		 filed with the IRS by May 31th to report the December 31st fair market value.
+		 A 5498 form need only be produced if the IRA has contributions, or if the
+		 participant has 2 plans with one of the plans having contributions in which
+		 both IRA types will produced a 5498 form. This coding is only checked if FMVOPT
+		 is flagged as a Y.
+		*/
+		if 'BEN do {		
+			type DbSet irads1 = Db.selectDbSet("IRA","ACN=:ACN AND TAXYR=:TAXYR")
+			
+			while irads1.next() do { quit:IFLG
+				
+				type RecordIRA ira1 = irads1.getRecord("IRA")
+				
+				if ira1.c1!ira1.c4!ira1.c9!ira1.c10!ira1.c13 set IFLG = 1
+				}
+				
+			type DbSet irads2 = Db.selectDbSet("IRA","ACN=:ACN AND TAXYR=:TAXYR1")
+			
+			while irads2.next() do { quit:IFLG
+				
+				type RecordIRA ira2 = irads2.getRecord("IRA")
+				
+				if ira2.c2 ! ira2.c10 set IFLG = 1
+				}
+			}
+
+		if 'IFLG,(FMVOPT = 1),(CONT + ROLL = 0),(IRAD6 '> 0) quit
+
+		// Write the record to table B5498ESA
+		do B5498ESA
+
+		// Calculate number of records and tax form report totals
+		set FCNT = FCNT + 1
+		set FAMT(1) = FAMT(1) + (AMT(1) / 100)
+		set FAMT(2) = FAMT(2) + (AMT(2) / 100)
+		}
+
+	quit
+
+
+B5498ESA	// Insert B record data into B5498ESA table
+
+	type public Number AMT(), BENACN
+	type public String ADDR, CID, CITY, FULLADDR, LNAME, NAME, STATE, TIN, TINTYPE, ZIP
+	
+	type Number BSEQ
+	type String X
+
+	if (TINTYPE = 2) set X = LNAME
+	else  set X = NAME
+	
+	do NAMCNTRL^IRSTPMTR		// Format name
+	
+	set BSEQ = Db.nextVal("B5498ESA","PDATE=:%SystemDate,BACN=:BENACN")
+	
+	// B Record-IRS 5498ESA Form Data
+	type RecordB5498ESA b5498esa = Db.getRecord("B5498ESA", "PDATE = :%SystemDate, BACN = :BENACN, BSEQ = :BSEQ", 1)
+	
+	set b5498esa.bnamcon = X
+	set b5498esa.btintype = TINTYPE
+	set b5498esa.btin = TIN.translate(" ","-")
+	set b5498esa.bcid = CID
+	set b5498esa.bamt1 = AMT(1) / 100
+	set b5498esa.bamt2 = AMT(2) / 100
+	set b5498esa.bname = NAME
+	set b5498esa.baddr1 = ADDR.piece(" ",1)
+	set b5498esa.baddr2 = ADDR.piece(" ",2)
+	set b5498esa.baddr3 = ADDR.piece(" ",3)
+	set b5498esa.bcity = CITY
+	set b5498esa.bstate = STATE
+	set b5498esa.bzip = FULLADDR.piece("|",6)
+	
+	do b5498esa.save()
+
+	quit
+
+
+BENE	// Build temporary records for beneficiaries
+	
+	type public Number YEAR
+	
+	type String CNT, KEY1
+
+	type DbSet ds = Db.selectDbSet("IRA", "TAXYR=:YEAR")
+	
+	while ds.next() do {
+		
+		type RecordIRA ira = ds.getRecord("IRA")
+
+		type RecordTMPRPT3 tmp = Db.getRecord("TMPRPT3","PID=:%ProcessID,KEY1=:ira.acn,KEY2=:ira.rpaseq,KEY3=0", 1)
+		
+		if 'tmp.getMode() do {
+		
+			set tmp.data = ""
+			
+			do tmp.save()
+			}
+			
+		type DbSet ds1 = Db.selectDbSet("IRABEN1", "ACN=:ira.acn AND RPASEQ=:ira.rpaseq AND CYR=:YEAR")
+		
+		while ds1.next() do {
+			 
+			type RecordIRABEN1 ben1 = ds1.getRecord("IRABEN1")				
+				
+			type RecordTMPRPT3 tmp1 = Db.getRecord("TMPRPT3", "PID=:%ProcessID,KEY1=:ira.acn,KEY2=:ira.rpaseq,KEY3=0", 1)
+				
+			set tmp1.data = "B"
+				
+			do tmp1.save()
+				
+			// Cannot use Db.nextVal, because TMPRPT3.KEY3 is a text field
+			type ResultSet rs = Db.select("KEY3","TMPRPT3","PID=:%ProcessID AND KEY1=:ben1.benseq AND KEY2=:ira.rpaseq", "KEY3 DESC")
+			
+			if rs.next() set CNT = rs.getCol("KEY3")
+			else  set CNT = 1
+			
+			set KEY1 = ira.acn_"-"_ben1.benseq
+			
+			type RecordTMPRPT3 tmp2 = Db.getRecord("TMPRPT3", "PID=:%ProcessID,KEY1=:KEY1,KEY2=:ira.rpaseq,KEY3=:CNT", 1)
+			
+			set tmp2.data = ira.acn_"|"_ben1.benfair.roundDec()
+			
+			do tmp2.save()
+			}
+		}		
+	
+	quit
+	
+
+CRECBLD	// "C" record builder
+
+	do CRECWRT	// Write the record to tape
+
+	quit
+
+
+%STOPLOD	// Stop %ZRTNLOD from this point on down
+	quit
+TRECWRT	// Dummy line reference for GT.M
+	quit
+ARECWRT	// Dummy line reference for GT.M
+	quit
+BRECWRT	// Dummy line reference for GT.M
+	quit
+CRECWRT	// Dummy line reference for GT.M
+	quit
+STORETOT	// Dummy line reference for GT.M
+	quit
+
+vSIG()	quit "60390^50433^Eugene Titov^13251"	// Signature - LTD^TIME^USER^SIZE

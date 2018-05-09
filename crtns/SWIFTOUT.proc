@@ -1,0 +1,423 @@
+public SWIFTOUT	//
+	/*
+	   DESC: Outgoing SWIFT Message Server
+ 
+	   INPUTS:
+	   . System
+
+	   . Data [ddfile]di
+
+	   . v1 desc of variable /TYP=T
+
+	   RETURNS:
+	   . XX desc of return  /TYP=T
+
+	   EXAMPLE:
+	   Text of example (line one)
+
+
+	  -------- Revision History ---------------------------------------------
+
+	   09/09/05 - KELLYP - CR 17050
+		      Modified entire procedure to no longer reference the ST400
+		      interface which has been obsoleted by SWIFT.  No new core 
+		      interface for SWIFT is currently available (ICG maintains
+		      an SAA interface).  The core linetags have been preserved
+		      to allow for an easy transition to another interface at a
+		      later time.  Also removed pre-2003 revision history.
+	
+           07/26/05 - SkariahV- CR16679
+	              Removed #WARN and #OPTIMIZE directives.
+	              	  
+	   06/04/03 - SRIVASTAVAN - 51351
+	   	      Converted to PSL
+	   	      Removed history before 2000
+ 	         			
+	  -----------------------------------------------------------------------
+	*/
+	
+	do INIT
+	
+	quit
+
+
+INIT	//     Init params and timeouts etc
+
+	type public String ER,RM,status,SWIFTQ()
+	type public Number dupl,prcseq,refno,seq,type
+	type Number date,maxsleep,sleep,stopflg
+
+	do INIT^SWIFTUTL
+	
+	// First/max sleeptime
+	set sleep=10 
+	set maxsleep=10
+	set stopflg=0 
+	set date=0
+
+	// Connect as client
+
+	if status do { do CLOSE quit
+		set ER=1
+
+		// DECnet connection failed
+
+		// Time-out
+		set RM=$S(status=1:$$^MSG(7340),1:$$^MSG(7341))
+
+		// Do some error handling
+
+		do ERR^SWIFTUTL
+
+		}
+
+	catch vERROR {
+
+		type String ET,RM
+		
+		set ET=vERROR.type
+		
+		if ET["%GTM-" do ZE^UTLERR quit
+		
+		set ET=ET_"-"_vERROR.thrownAt
+		set RM=vERROR.description
+
+		do ^UTLERR
+		
+		do MAIN quit
+
+		}
+
+	set (prcseq,refno,type,seq,dupl)=""
+	
+	type ResultSet rs=Db.select("SEQ,TRREFNO,TYPE","SWIFTQ2","QUE='PRC'")
+	while rs.next() do {
+		set prcseq=rs.getCol("SEQ")
+		set refno=rs.getCol("TRREFNO")
+		set type=rs.getCol("TYPE")
+		
+		lock +SWIFTQ("PRC",prcseq,refno,type):0 else  quit
+		set dupl=1
+	
+		do PROC(prcseq,refno,type,dupl)
+
+		}
+
+	if ER do CLOSE quit
+	
+	do MAIN
+	
+	quit
+
+
+MAIN	//Begin main processing loop
+
+	type public String prcseq,svrid,stopflg,SWIFTQ()
+	type public String refno,seq,type
+	type public Date date
+	type public Number dupl,FLAG
+	
+	// Check for stop signal
+	set stopflg=$$STOPCHK^SWIFTUTL(svrid,"O")
+
+	if stopflg do CLOSE quit
+
+	set (prcseq,refno,type,seq,dupl)=""
+	set FLAG=0
+		
+	type ResultSet rs=Db.select("DT,SEQ,TRREFNO,TYPE","SWIFTQ1","QUE='RTT'")
+	if rs.isEmpty() set FLAG =1 
+	while rs.next() do { quit:FLAG
+		set date=rs.getCol("DT")
+		if date>%SystemDate set FLAG=1 quit
+		set seq=rs.getCol("SEQ")
+		set refno=rs.getCol("TRREFNO")
+		set type=rs.getCol("TYPE")
+		}
+
+	if FLAG do SLP quit
+	
+	type RecordSWQCNT swqcnt=Db.getRecord("SWQCNT","QUE='PRC'",1)
+	set prcseq=+swqcnt.nseq+1
+	set swqcnt.nseq=prcseq
+
+	lock +SWIFTQ("RTT",date,seq,refno,type):0 else  do MAIN quit
+	lock +SWIFTQ("PRC",prcseq,refno,type)
+
+	do cnt(.swqcnt)
+	
+	quit
+
+	
+cnt(RecordSWQCNT swqcnt)	//
+
+	type public Number prcseq,curr,daytot,dupl
+	type public String ER,seq,refno,type,SWIFTQ(),STsess,STseq0
+	type public Date date
+  
+	// inc curr in que count
+	set swqcnt.tot=+swqcnt.tot+1
+
+	// inc daytot count
+	set swqcnt.ptoday=+swqcnt.ptoday+1
+
+	do swqcnt.bypassSave()
+	
+	// Pending - There is no dataitem for the file SWIFTQ2
+	type RecordSWIFTQ2 swiftq2=Db.getRecord("SWIFTQ2","QUE='PRC',SEQ=:prcseq,TRREFNO=refno,TYPE=:type",1)
+
+	set swiftq2.stsess=STsess
+	set swiftq2.stseqo=STseq0
+
+	do swiftq2.bypassSave()
+
+	// decr curr in que count
+	type RecordSWQCNTD swqcntd=Db.getRecord("SWQCNTD","QUE='RTT',DT=:date",1)
+
+	set curr=swqcntd.tot-1
+	set swqcntd.tot=curr
+
+	do Db.delete("SWIFTQ1","QUE='RTT' AND DT=:date AND SEQ=:seq AND TRREFNO=:refno AND TYPE=:type")
+
+	lock -SWIFTQ("RTT",date,seq,refno,type)
+
+	set seq=prcseq 
+	set dupl=0
+
+	do PROC(seq,refno,type,dupl)
+	 
+	if ER do CLOSE quit
+
+	do MAIN
+	
+	quit
+
+
+SLP	//
+	type public Number sleep
+	
+	set sleep=5
+	hang sleep
+
+	do MAIN
+
+	quit
+	
+
+CLOSE	//
+
+	type public String CTBL(),ER,RM,status,svrid,stopflg,X
+
+	// Check value of stopflg here
+
+	// Check for time-out
+
+	// Disconnect
+
+	// Close connection failed
+	if status do {
+
+		// Closing connection failed
+		set ER=1 
+		set RM=$$^MSG(7319)
+
+		// Do some error handling
+		do ERR^SWIFTUTL
+		}
+
+	// Journal as necessary
+
+	quit
+
+
+PROC(Number seq,Number refno,Number type,Number dupl)	//
+
+	type public String chnlout,msgout,msgrply,status
+
+	// Format message
+	set msgout=$$MSGOUT^SWIFTFMT(refno,type,dupl)
+	
+	// Log the formatting error, if any
+
+	// Send message
+	set status=$$SEND^SWIFTUTL(chnlout,msgout,.msgrply)
+	
+	// Journal as necessary
+
+	// Reset sleep
+	
+	quit
+
+
+reque	// Reque from PRC to 'newque'
+
+	type public String newque,ER,RM,status,SWIFTQ()
+
+	if newque="" quit
+
+	type String tmpER
+	type public Number prcseq,refno,type
+	
+	set tmpER=""
+
+	// DQ filer messes with ER/RM
+	if ER set tmpER=ER
+
+	set status=$$REQUE^SWIFTUTL("PRC",newque,"OUT",prcseq,refno,type)
+
+	lock -SWIFTQ("PRC",prcseq,refno,type)
+
+	if status do {
+
+		// Error requeing from ~p1 to ~p2
+		set ER=1 
+		set RM=$$^MSG(7329,"PRC",newque)
+
+		// Do some error handling
+		do ERR^SWIFTUTL
+		}
+	// Restore ER as before REQUE
+	else  if tmpER set ER=tmpER
+
+	quit
+
+
+CHKMSG(String rply)	// React on the analyse from CHKREPLY^SWIFTUTL
+
+	/*
+
+	   The ^FILER messes with ER/RM so we return ERR/ERM instead if result
+	   is 8.  8 -> do filer,do reque, closedown
+
+	*/
+	type String result,tmp
+	type Public String ER,RM,refno,type,newque,TRREFNO,MSG,TYPE,SWDIRECT 
+	
+	type RecordSWIFT fSWIFT=Db.getRecord("SWIFT","SWDIRECT='OUT',TRREFNO=:refno,MSG=:type",1)
+	
+	do fSWIFT.setAuditFlag(1)
+	
+	// Check msg.reply
+	set result=$$CHKREPLY(.rply)
+
+	// reply error
+	if result=0 do { quit
+		set newque=""
+
+		// Unable to parse reply message :~p1
+	
+		// Do some error handling
+		do ERR^SWIFTUTL
+		}
+
+	// msg ok
+	if result=5 do {
+
+		set newque="PND"
+		set tmp=fSWIFT.strefno
+
+		// ST400 Reference Number
+		set fSWIFT.strefno=rply
+		}
+		
+	if result=6 do {
+		set newque="PND"
+		
+		// Error Code
+		set tmp=fSWIFT.ercd
+		//
+		set fSWIFT.ercd=rply.piece("|",1)
+
+		// Reference Number
+		set tmp=fSWIFT.strefno
+		set fSWIFT.strefno=rply.piece("|",2)
+		}
+
+	// msg err not fatal
+	if result=7 do {
+		set newque="REP"
+	
+		// Error Code
+		set tmp=fSWIFT.ercd
+
+		//
+		set fSWIFT.ercd=rply.piece("|",1)
+		}
+
+	// msg err fatal
+	if result=8 do { quit
+
+		set newque="REP"
+
+		// Error with basic header ~p1
+		set ER=1
+
+		set RM=$$^MSG(7320,rply)
+
+		do ERR^SWIFTUTL
+		}
+
+	// seq err fatal
+	if result=9 do { quit
+		set newque=""
+
+		// Output server out of sequence
+		set ER=1 
+		set RM=$$^MSG(7321)
+
+		do ERR^SWIFTUTL
+		}
+
+	set TRREFNO=refno 
+	set MSG=type 
+	set SWDIRECT="OUT"
+	
+	do fSWIFT.save()
+	
+	quit
+
+
+CHKREPLY(String str)	//Public; Checks the incoming str to find envelope info.
+
+	/*
+
+	   INPUTS:
+	   . str   message to analyse /TYP=T
+
+
+	   RETURNS:   OUTPUT:
+	   . $$ Status   .str
+	    0 - Can't read str Error
+	    1 - Swift msg.  N/A
+	    2 - Swift msg.ACK N/A
+	    3 - Swift msg.NAK N/A
+	    5 - Reply msg OK ST400 msg refno
+	    6 - Reply msg ERRfix Error code|ST400 msg refno
+	    7 - Reply msg ERR Error code - repair
+	    8 - Reply msg ERR Error code - repair - fatal
+	    9 - Reply msg ERR Required seq no - prc - fatal
+
+	*/
+	type String disp,ercd,test
+	type Number ret
+
+	set str=str.get()
+	set test=str.extract(14,14)
+
+	// Output msg. REPLY - OK
+	if test="Q" set str=str.extract(18,41) quit (5)
+
+	if test'="Q" do { quit (ret)
+		set ercd=str.extract(15,17)
+		if ercd="SEQ" set str=str.extract(18,23) set ret=9 quit
+
+		set disp=str.extract(19,21)
+		if disp="FIX" set str=ercd_"|"_str.extract(18,41) set ret=6 quit
+
+		set str=ercd
+		if ercd="TID"!(ercd="RUN") set ret=8 quit
+		else  set ret=7 quit
+		}
+	else  set str=test quit (0)
+
+vSIG()	quit "60156^58291^Pat Kelly^7382"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,334 @@
+BCHCHKED //Batch BCHCHKEOD - Dayend Check Process
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 01/31/2007 12:44 - shetyes
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHCHKEOD Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ set vBCHSTS=$$STATUS^BCHUTL("BCHCHKEOD")
+ if vBCHSTS=1 set ER=1,RM=$$^MSG(3410) quit
+ if vBCHSTS=2 set ER=1,RM=$$^MSG(3414) quit
+ if vBCHSTS=0 set %BatchRestart=1
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit do EXIT^BCHUTL("BCHCHKEOD") quit
+ do JOBMGR^BCHUTL(%FN,"BCHCHKEOD",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ do EXIT^BCHUTL("BCHCHKEOD")
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(TJD,DATETIME,CID) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHCHKEOD","*","",TJD.get()_","_DATETIME.get()_","_CID.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ if %BatchRestart,$$CHKLOG^BCHUTL(%SystemDate,%FN,"BCHCHKEOD",TJD.get()_","_DATETIME.get()_","_CID.get()) do { quit
+ do LOG^BCHUTL(%SystemDate,%FN,"BCHCHKEOD",TJD.get()_","_DATETIME.get()_","_CID.get(),"Record already processed")
+ }
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,TJD,DATETIME,CID)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHCHKEOD","*","",TJD.get()_","_DATETIME.get()_","_CID.get(),"",et)
+ }
+ do UPDLOG^BCHUTL(%SystemDate,%FN,"BCHCHKEOD",TJD.get()_","_DATETIME.get()_","_CID.get(),vCONTEXT)
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,TJD,DATETIME,CID) //
+	
+	set GL=CID	
+
+	if '$D(TEMP(GL)) quit
+	
+	set (BRCD,TPD,TRC,UID)=""
+	set %ED=$$DAT^%ZM(%SystemDate)
+	
+	new rs
+	type ResultSet rs=Db.select("TSEQ","DMJ","TJD=:XTJD and CID=:GL and DATETIME=:DATETIME")
+	while rs.next() do {
+		set SEQ=rs.getCol(1)
+		new dmj
+		type RecordDMJ dmj=Db.getRecord("DMJ","TJD,DATETIME,GL,SEQ")
+		do DMJ5(.dmj)
+		}
+	quit
+	
+DMJ5(RecordDMJ dmj)	// Process DMJ record
+	
+	set ETC=dmj.etc if ETC="" quit
+	set ITC=dmj.itc,AMT=+dmj.tamt
+	set TSO=dmj.tso,BRCD=dmj.brcd
+	set TRC=dmj.trc,UID=dmj.uid
+	
+	if '$D(TEMP(GL,ETC)) quit
+	set CTYP=$P(TEMP(GL,ETC),"|",1)
+	set REC=ETC_"|"_AMT_"|"_CTYP	
+
+	if $E(ITC,6),AMT["-" do ERRCOR(.dmj) quit  // E/C to void check in same day
+	if $E(ITC) do CREDIT(.dmj) quit  	// Credit transaction
+	
+	// Otherwise a debit (reversal to void check)
+	set CKNO=$$FIELD^UTSO(TSO,"CKREV")
+	if CKNO do RVRSE(CKNO) quit
+	if CTYP="****" do INCLEAR  	     // Process inclearing
+	
+	quit
+	
+INCLEAR					// Process inclearing debits	
+	
+	set CKINFO=$$FIELD^UTSO(TSO,"CKREG") quit:CKINFO=""
+	set CKNO=$P(CKINFO,"^",1) quit:CKNO=""	
+	
+	type RecordCHKREG1 chkreg1=Db.getRecord("CHKREG1","CO,GL,CKNO",1)
+	if 'chkreg1.getMode() quit
+			
+	// Inclear-already cleared/voided  KEY="IAC"/"IDV"
+	if (chkreg1.status=1)!(chkreg1.status=2) quit	
+		
+	// Wrong Check	KEY="IWA"
+	if (AMT'=chkreg1.tamt) quit
+		
+	set chkreg1.status=1
+	set chkreg1.clear=%SystemDate
+	do chkreg1.save()	
+
+	quit
+	
+RVRSE(CKNO)				// Process reversals to void (debit)	
+	
+	if $G(CKNO)="" quit
+	
+	type RecordCHKREG1 chkreg1=Db.getRecord("CHKREG1","CO,GL,CKNO",1)
+	if 'chkreg1.getMode() quit
+
+	// Reverse-already cleared/Void  KEY="AC"/"DV"
+	if (chkreg1.status=1)!(chkreg1.status=2) quit
+				
+	set chkreg1.status=2
+	do chkreg1.save()	
+	
+	quit
+	
+ERRCOR(RecordDMJ dmj)					// Process error corrects to void check in same day		
+	
+	set CKINFO=$$FIELD^UTSO(TSO,"CKREG")
+	set CKNO=$P(CKINFO,"^",1)
+	
+	if CKNO="" do TTXCHK(.dmj)
+	if CKNO=TRC!(CKNO="") set CKNO="ERROR"
+	
+	type RecordCHKREG1 chkreg1=Db.getRecord("CHKREG1","CO,GL,CKNO",1)
+	if 'chkreg1.getMode() quit
+		
+	// (EC)-Already Cleared/Duplicate Void  KEY="EAC"/"EDV"
+	if (chkreg1.status=1)!(chkreg1.status=2) quit			
+	
+	set chkreg1.status=2
+	do chkreg1.save()	
+	
+	quit
+	
+CREDIT(RecordDMJ dmj)				// Process credits add to check register
+	
+	new CID,CKINFO,CKNO,CKTYP,PAYEE
+	
+	set CKINFO=$$FIELD^UTSO(TSO,"CKREG")
+	set CKNO=$P(CKINFO,"^",1)
+	set CKTYP=$P(CKINFO,"^",2)
+	set CID=$P(CKINFO,"^",3)
+	set PAYEE=$P(CKINFO,"^",4)
+	
+	if CKNO="" do TTXCHK(.dmj)
+	
+	set LEN=$L(PAYEE) if $E(PAYEE,LEN)=" " set PAYEE=$E(PAYEE,1,LEN-1)
+	
+	// B/O Check or Non Check Tran.  KEY="MC"
+	if CKNO="" quit		
+	
+	// Duplicate Item   KEY="DI"
+	type RecordCHKREG1 chkreg1=Db.getRecord("CHKREG1","CO,GL,CKNO",1)
+	if 'chkreg1.getmode() quit
+			
+   	if CKTYP'=CTYP set $P(REC,"|",3)=CKTYP
+		
+	new chkreg1
+	type RecordCHKREG1 chkreg1=Class.new("RecordCHKREG1")
+	
+	set chkreg1.co=CO,chkreg1.gl=GL,chkreg1.ckno=CKNO,chkreg1.tjd=%SystemDate
+	set chkreg1.uid=UID,chkreg1.brcd=BRCD,chkreg1.trc=TRC
+	set chkreg1.tamt=AMT,chkreg1.cid=CID,chkreg1.payee=PAYEE
+	set chkreg1.ctype=CKTYP
+	if 'AMT set chkreg1.status=2
+	else  set chkreg1.status=0
+	
+	do chkreg1.save()	
+	
+	quit	
+
+EXC	// Log error in exception file
+	
+	// END-OF-DAY CHECK PROCESSING
+	do LOG^UTLEXC($T(+0),"*",$$^MSG(6615),"",$G(%ZTSEQ),$G(RM),"")
+
+	quit
+
+TTXCHK(RecordDMJ dmj)	// Check to see if the check number is in TTX
+
+	new ttx,CKINFO
+
+	type RecordTTX ttx=Db.getRecord("TTX","XTJD,BRCD,UID,TRC")	
+
+	set CKINFO=$$FIELD^UTSO(ttx.tso,"CKREG")
+	if CKINFO="" quit
+
+	set CKNO=$P(CKINFO,"^",1)
+	if CKNO="" quit
+	
+	set dmj.tso=ttx.tso
+	
+	do dmj.save()
+	
+	quit
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,TJD,DATETIME,CID
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set TJD=vRECORD.piece($C(9),1)
+ set DATETIME=vRECORD.piece($C(9),2)
+ set CID=vRECORD.piece($C(9),3)
+ do vPROC(TJD,DATETIME,CID)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,TJD,DATETIME,CID
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>32767 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+35>32767 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+	/*
+	%EXT defined For End of day process (Batch) (@QUE060)
+	%EXT not defined for on-line process (@CHK109)
+	*/
+
+	if '$D(%EXT) do { 
+		
+		set %TAB("SJD")=".DATE7/MAX="_%SystemDate
+		
+ 
+		set %READ="@@%FN,,,SJD/REQ"
+		do ^UTLREAD if VFMQ="Q" set %BatchExit=1 quit
+		#accept pgm=spier;date=12/8/03
+		set %SystemDate=SJD
+
+		}
+	if %BatchExit quit
+	set XTJD=%SystemDate
+	 
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("DISTINCT TJD,DATETIME,CID","DMJ","DMJ.TJD=:XTJD")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	do Db.fastDelete("TMP","%ProcessID")
+	
+	new cuvar
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+	set CONAM=cuvar.conam
+	set CO=cuvar.gls
+	
+	set TMPSEQ=0
+	
+	set XTJD=%SystemDate
+
+	// Initialize check GL entries
+	// Set up by tran code
+	new rs
+	type ResultSet rs=Db.select("ETC,ACN,CKTYP","TRN","ACN IS NOT NULL AND CKTYP IS NOT NULL")
+	while rs.next() do { 
+		set ETC=rs.getCol(1)
+		quit:$E(ETC)?1L
+		set GL=rs.getCol(2)
+		set CTYP=rs.getCol(3)
+		set TEMP(GL,ETC)=CTYP
+		}
+	
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+	quit
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

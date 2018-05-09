@@ -1,0 +1,314 @@
+IRSDUMP		/*
+	ORIG: titove - 10/19/2005
+	DESC: IRS File Processing - File Dump
+
+	---- Comments --------------------------------------------------------
+	
+	This procedure is used to make data in RMS files created by IRSTAPE
+	procedure more readable (e.g. for research purposes). Once IRSTAPE
+	function is run and output RMS file (e.g. <spool dir>IRSDATA-MMDD.PBS)
+	is created, run function IRSDUMP that will create another RMS file,
+	(e.g. <spool dir>IRSDUMP-MMDD.PBS) that will have parsed out individual
+	data fields from IRSDATA file and appended to them appropriate 
+	description tags.
+	
+	I18N=QUIT: Excluded from I18N standards.
+	
+	---- Revision History ------------------------------------------------
+
+	10/19/05 - TITOVE - CR 17287
+		   Converted into PSL. Removed tags HDR, INIT, LOAD, READ,
+		   RMS, SCR1, SCR2 and old revision history.
+
+
+	*/
+
+	// Declare and initialize variables
+	
+	type public Number ER
+	type public String RM	
+
+	type Boolean DISMNT, FMT
+	type Number %PAGE, %PG, %TDRV, CHARCNT, FGRP, I, J, OLNTB, RECCNT, TDRV
+	type String %READ, %TAB, IO, LN, LOADARR(,), MODE, PGM, RECLIT, REQREC, SKIPREC
+	type String TAG, VFMQ, X(), XLT()
+	
+	set (%TDRV,CHARCNT,RECCNT,DISMNT) = 0
+	set FMT = 1
+	set REQREC = "ALL"
+	set SKIPREC = "NONE"
+	
+	set %PG = -1
+	set %PAGE = 1
+
+	// Set up and display first screen
+
+	set %TAB("MODE") = ".MODE2/XPP=I ""TR""'[X S ER=1,RM=""Enter 'R' for RMS or 'T' for tape"""
+	set %TAB("FMT") = "/DES=Format Record/TYP=L/LEN=1"
+	set %TAB("FGRP") = ".FGRP1/TBL=[STBLIRSTAPE]"
+	set %TAB("SKIPREC") = ".SKIPREC1/XPP=I X'=""NONE""&(X'?.N) S ER=1,RM=""Entry must be NONE or a number only""" 
+	set %TAB("REQREC") = ".REQREC1/XPP=I X'=""ALL""&(X'?.N) S ER=1,RM=""Entry must be ALL or a number only""" 
+	
+	set %READ = "@@%FN,,,MODE/REQ,,FMT/REQ,FGRP/REQ,SKIPREC/REQ,REQREC/REQ"
+	
+	do ^UTLREAD
+	
+	if (VFMQ = "Q") set ER = "W",RM = "File dump canceled by operator" quit
+	
+	if (REQREC = "ALL") set REQREC = "9999999999"
+	
+	if (SKIPREC = "NONE") set SKIPREC = 0
+
+	// Set up and display second screen
+	
+	set (%PG,%PAGE) = 1
+	
+	if MODE = "T" set %TAB("%TDRV") = ".%TDRV1/XPP=D PPTDRV^%ZINIT(X)",%TDRV = "TAPE0"
+	else  set %TAB("%TDRV") = ".RMS5",%TDRV = CUVAR.spldir_"IRSDATA-"_%CurrentDate.month()_%CurrentDate.day()_".PBS"
+
+	set IO = CUVAR.spldir_"IRSDUMP-"_%CurrentDate.month()_%CurrentDate.day()_".PBS"
+
+	set %TAB("IO") = ".IO2/XPP=S %EXT=1 D ^SCAIO"
+	
+	set %READ = "@@%FN,,,%TDRV/REQ,IO/REQ"
+	
+	do ^UTLREAD
+	
+	if (VFMQ = "Q") set ER = "W",RM = "File dump canceled by operator" quit
+
+        catch vERROR {
+        	
+		type String ET, RM
+
+		set ET = vERROR.type
+                
+		if ET'["%GTM-" do {
+                
+			set ET = ET_"-"_vERROR.thrownAt
+                
+			set RM = vERROR.description
+        		}
+        	
+		do ERR
+        	}
+        	
+	// Load the File format
+
+	if 'FMT do DEV quit
+	
+	type RecordSTBLIRSTAPE tape = Db.getRecord("STBLIRSTAPE", "FGRP=:FGRP")
+		
+	set PGM = tape.pgm
+		
+	// Load IRS Tape Processing Master Template code into an array X and create
+	// line tag + line number cross reference array XLT
+	do ^ULODTMPL(PGM,"X",1,.XLT)
+	
+	for I = 65:1:90 do {
+		
+		set TAG = $C(I)_"RECWRT",RECLIT = $C(I)
+		
+		if 'XLT(TAG).data() set TAG = $C(I)_"42RECWRT",RECLIT = $C(I)_"42"
+		
+		if 'XLT(TAG).data() quit
+		
+		for J=0:1 set LN=X(XLT(TAG)+J) quit:LN["WRIT"  if LN["//;" set LOADARR(RECLIT,J) = LN.extract(5,999)
+		}
+		
+	do DEV
+	
+	quit
+	
+	
+DEV	// Device control
+
+	type public Boolean FMT
+	type public Number ER, RECCNT, TDRV
+	type public String %MSKD, ET, IO, MODE, REQREC, SKIPREC
+	
+	type Boolean DONE = 0
+	type Number I
+	type String %TIM
+
+	do MOUNT quit:ER
+	
+	// Open the RMS file
+	if '$$FILE^%ZOPEN(IO,"WRITE/NEWV",2) set ER = 1,ET = "NOTOPEN" do ERR quit
+	
+	// Set the formatted time (%TIM)
+	do INT^%T
+	
+	// Print the header page
+	use IO
+	  
+	write !,CUVAR.conam,?100,"RUN DATE: ",%CurrentDate.toString(%MSKD.get()) write "  ",%TIM
+	write !,"IRS File Dump Report - ",$S(FMT:"Formatted",1:"Unformatted")
+	write ! for I = 1:1:132 write "-"
+	write !!
+	
+	// Read the records from file
+	for  do { quit:ER!DONE
+		
+		type Number READER
+		type String REC
+		
+		set REC = $$^%ZREAD(TDRV,.READER)
+		
+		if (MODE = "T"),(+READER = 1) do { quit
+			
+			do DISMOUNT
+			do MOUNT
+			}
+			
+		if READER do ERR set DONE = 1 quit
+		
+		// Count the records
+		set RECCNT = RECCNT + 1
+		
+		// Check for total records requested
+		if (RECCNT > (REQREC + SKIPREC)) do END set DONE = 1 quit
+		
+		// Format, if greater, then skip record count
+		if (RECCNT > SKIPREC) do FORMAT quit:ER
+		
+		// Check for the last record
+		if REC.extract(1) = "F" do END set DONE = 1 quit
+		}		
+	quit
+	
+	
+FORMAT	// Format and write the record
+
+	type public Boolean FMT
+	type public Number FGRP, RECCNT
+	type public String IO, LOADARR(,), REC
+	
+	type Number CHARCNT, I, N
+	type String FORMAT, RECLIT
+
+	// Write the unformatted record
+	if 'FMT use IO write (RECCNT + 10000000).extract(2,8) for I = 0:100:REC.length() write ?12,REC.extract(I+1,I+100),!
+
+	if 'FMT use IO write !! quit
+	
+	use IO write (RECCNT + 10000000).extract(2,8)_"     " set CHARCNT = 12
+	
+	set RECLIT = REC.extract(1)
+	
+	if (FGRP = 4),((RECLIT="C")!(RECLIT="F")!(RECLIT="T")) set RECLIT = RECLIT_"42"
+
+	set N = ""
+	for I = 0:1 set N = LOADARR(RECLIT,N).order() quit:N.isNull()  set FORMAT = LOADARR(RECLIT,N) do WRITE
+
+	use IO write !! set CHARCNT = 0
+
+	quit
+	
+	
+WRITE	// Format and write
+
+	type public Number CHARCNT
+	type public String FORMAT, IO, REC
+	
+	type String OUTPUT
+
+	if +FORMAT.piece("|",3) set OUTPUT = FORMAT.piece("|",1)_"="_REC.extract(FORMAT.piece("|",2),FORMAT.piece("|",3))_"     "
+	else  set OUTPUT = FORMAT.piece("|",1)_"="_REC.extract(FORMAT.piece("|",2))_"     "
+
+	set CHARCNT = CHARCNT + OUTPUT.length()
+
+	use IO do {
+		
+		if (CHARCNT > 132) write !,?12
+		
+		write OUTPUT
+		}
+
+	if (CHARCNT > 132) set CHARCNT = OUTPUT.length() + 12
+
+	quit
+	
+
+END	// Finish up
+
+	type public Number ER
+	type public String IO, RM
+
+	do DISMOUNT
+	
+	close IO
+	
+	set ER = "W",RM = "File dump processing is complete"
+	
+	quit
+	
+
+MOUNT	// Mount and open the device
+
+	type public Boolean DISMNT
+	type public Number %TDRV, ER, FGRP, TDRV
+	type public String ET, MODE, RM
+
+	if (MODE = "T") do { quit:ER
+		
+		set DISMNT = 0
+		
+		do ENT^%ZMOUNT
+		
+		if ER set ET = RM do ERR quit
+		
+		set DISMNT = 1
+		
+		// Get physical drive number
+		do PPTDRV^%ZINIT(%TDRV,.TDRV)
+		
+		type RecordSTBLIRSTAPE tape = Db.getRecord("STBLIRSTAPE", "FGRP=:FGRP")
+		
+		// Open the drive
+		if '$$TAPE^%ZOPEN(TDRV,tape.params,2) set ER = 1,ET = "NOTOPEN" do ERR quit
+		}
+
+	if (MODE = "R") do { quit:ER
+		
+		set DISMNT = 0
+		set TDRV = %TDRV
+
+		// Open the RMS file
+		if '$$FILE^%ZOPEN(TDRV,"READ",2) set ER = 1,ET = "NOTOPEN" do ERR quit
+		}
+
+	quit
+
+	
+DISMOUNT	// Dismount the tape drive
+
+	type public String MODE
+	type public Number TDRV
+
+	if (MODE = "T") do TAPE^%ZUSE(TDRV,"REWIND")
+	
+	close TDRV
+	
+	if (MODE = "T") do ENT^%ZDISMOU
+	
+	quit
+	
+	
+ERR	// Error Control
+	
+	type public Boolean DISMNT
+	type public Number TDRV
+	type public String ET
+
+	if ET.exists() do DSP^UTLERR
+	
+	if 'ET.exists() do ZE^UTLERR
+	
+	if TDRV.exists() close TDRV
+	
+	if DISMNT do ENT^%ZDISMOU
+	
+	quit
+	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60219^39797^Eugene Titov^6798"	// Signature - LTD^TIME^USER^SIZE

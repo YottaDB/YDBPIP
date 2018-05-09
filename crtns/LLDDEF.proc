@@ -1,0 +1,353 @@
+LLDDEF	//Low Level Defaults
+	/*
+	   DESC: Default Low Level Default Tables using data files other
+	   than DEP,LN or CIF. This procedure will default, and file the
+	   history record for each data item defaulted.
+	
+	---- Revision History ------------------------------------------------
+
+	03/06/06 - SkariahV - CR19167
+		Modified the variable VALID() to public in the section FILE.
+
+	11/29/05 - SkariahV - CR18187
+		Modified to conform with PSL standards.Removed revision history 
+		prior to 2004.	
+		
+	----------------------------------------------------------------------
+	*/
+	
+	quit
+
+
+START(Number CID)	//Account Number
+
+	type Boolean KEY,MIFLAG
+	type String COLUMN,DFTDEF,FROM(),IN(),RELATION,VALID()
+	
+	type public Boolean ER
+	type public String END()
+	
+	type ResultSet rs1=Db.select("DFTDEF,MIFLAG","UTBLLLDT",,"DFTDEF ASC")
+	if rs1.isEmpty() quit
+	
+	while rs1.next() do {
+		set DFTDEF=rs1.getCol("DFTDEF")
+		set MIFLAG=rs1.getCol("MIFLAG")
+		type ResultSet rs=Db.select("COLUMN,KEY,RELATION","UTBLLLD","DFTDEF=:DFTDEF","KEY DESC")
+		if rs.isEmpty() quit
+		
+		while rs.next() do {
+			set COLUMN=rs.getCol("COLUMN")
+			set KEY=rs.getCol("KEY")
+			set RELATION=rs.getCol("RELATION")
+	
+			if KEY=1 do {
+
+				//FROM array will be storing the "source" or "keys" of the data tables
+				if '((RELATION.piece(".",1)="DEP")!(RELATION.piece(".",1)="LN")!(RELATION.piece(".",1)="CIF"))!(MIFLAG=1) set VALID(DFTDEF)=1
+				set FROM(DFTDEF,COLUMN)=RELATION
+				}
+			else  do {
+
+				//IN array will be storing the "destination" or "data items" of the data tables
+				if '((RELATION.piece(".",1)="DEP")!(RELATION.piece(".",1)="LN")!(RELATION.piece(".",1)="CIF"))!(MIFLAG=1) set VALID(DFTDEF)=1
+				set IN(DFTDEF,COLUMN)=RELATION
+				}
+			}
+		}
+	
+	set DFTDEF=""
+	for  set DFTDEF=FROM(DFTDEF).order() quit:DFTDEF.isNull()  do FILE(DFTDEF) quit:ER
+	if END("").order().isNull() do POST(CID)
+	quit
+
+	
+FILE(String DFTDEF)	//Low Level Default Table Definition
+
+	/*
+	   Verify whether the key of the LLD matches the account values, default 
+	   the data if nececery and file the history record for every data 
+	   item defaulted.
+	*/
+	
+	type Number CNT,FINISH,NFILES
+	type String DATA,DI,DILIST,FILES,FRSTWHR,XDATA
+	
+	type public Boolean ER
+	type public String FROM()
+	
+	// First get the values for the current account
+	set (DI,DILIST,FILES,FRSTWHR)=""
+	set FINISH=0
+	
+	for  set DI=FROM(DFTDEF,DI).order() quit:DI.isNull()  do {
+
+		if DILIST.isNull() set DILIST=FROM(DFTDEF,DI)
+		else  set DILIST=DILIST_","_FROM(DFTDEF,DI)
+		
+		if FRSTWHR.isNull() set FRSTWHR=" AND "_FROM(DFTDEF,DI)_" IS NOT NULL"
+		else  set FRSTWHR=FRSTWHR_" AND "_FROM(DFTDEF,DI)_" IS NOT NULL"
+		
+		if FILES.isNull() set FILES=FROM(DFTDEF,DI).piece(".",1)
+		else  do {
+
+			// if multiple keys from the same file only set that file once.
+			if FILES[FROM(DFTDEF,DI).piece(".",1) quit 
+			set FILES=FILES_","_FROM(DFTDEF,DI).piece(".",1)
+			}
+		}
+	
+	// Reorg the order of files for join. DEP or LN must be first.
+	
+	set NFILES=FILES.length(",")
+	if NFILES>1 do {
+		if (FILES.piece(",",1)="DEP")!(FILES.piece(",",1)="LN") quit 
+		set CNT=0
+		for CNT=1:1:NFILES do {
+			if (FILES.piece(",",CNT)="LN")!(FILES.piece(",",CNT)="DEP") quit 
+			set NFILES(1+CNT)=FILES.piece(",",CNT)
+			}
+		if FILES["DEP" set NFILES(1)="DEP"
+		if FILES["LN" set NFILES(1)="LN"
+		set (CNT,FILES)=""
+		for  set CNT=NFILES(CNT).order() quit:CNT.isNull()  do {
+			set FILES.piece(",",CNT)=NFILES(CNT)
+		}
+	}
+	
+	#ACCEPT Date=12/02/2005; PGM=SkariahV
+	type ResultSet rs2=Db.select(DILIST,FILES,"CID=:CID"_FRSTWHR)
+	while rs2.next() do {
+		
+	set DATA=rs2.getRow()
+
+	type Date EDATE,SDATE	
+	type String WHERE,WHEREIN
+	
+	// Set up the WHERE clause based on the keys
+	set (DI,DILIST,WHERE,WHEREIN)="" set CNT=1
+	
+	for  set DI=FROM(DFTDEF,DI).order() quit:DI.isNull()  do {
+		set DILIST(DI)=DATA.piece($C(9),CNT)
+		if WHERE.isNull() set WHERE=DI_"="_"'"_DILIST(DI)_"'"
+		else  set WHERE=WHERE_" AND "_DI_"="_"'"_DILIST(DI)_"'"
+
+		/*
+		If defaulting into the file with multiple primary
+		keys need to set up the where clause for the UPDATE
+		*/
+			
+		if FROM(DFTDEF,DI).piece(".",1)'="DEP",FROM(DFTDEF,DI).piece(".",1)'="LN",FROM(DFTDEF,DI).piece(".",1)'="CIF" do {
+			if WHEREIN.isNull() set WHEREIN=" AND "_DI_"="_"'"_DILIST(DI)_"'"
+			else  set WHEREIN=WHEREIN_" AND "_DI_"="_"'"_DILIST(DI)_"'"
+			}
+		set CNT=CNT+1
+		}
+	
+	// Set up the SELECT to pull data from DFTDEF
+	set (DI,DILIST)=""
+	
+	type Number NDI
+	type String file,HIST()
+	type public String IN(),END(),VALID()
+	
+	for  set DI=IN(DFTDEF,DI).order() quit:DI.isNull()  do {
+		if DILIST.isNull() set DILIST=DI
+		else  set DILIST=DILIST_","_DI
+		}
+			
+	set DILIST=DILIST_",START,END"
+	
+	// Get the number of element in DILIST to properly extract start and end date
+	set NDI=DILIST.length(",")
+
+	set FINISH=$$CHECK(DILIST,DFTDEF,FINISH)
+	if FINISH quit
+	
+	// Verify the LLD keys against those on the account and retrieve values to default
+	set XDATA=$$getXDATA(DILIST,DFTDEF,WHERE)  
+	
+	// Keys do not match.  Nothing to default
+	if XDATA.get().isNull() quit
+
+	// Verify the start and end dates of the Low Level Defaults
+	set SDATE=XDATA.piece($C(9),NDI-1)
+	set EDATE=XDATA.piece($C(9),NDI)
+
+	// Start date more than SystemDate
+	if SDATE>%SystemDate quit 
+
+	// An element in Low Level Default table ~p1 has expired
+	if 'EDATE.isNull(),EDATE'>%SystemDate set END(DFTDEF)=1 quit 
+	
+	// Set up UPDATE. Exclude null items.
+	set (DI,DILIST,DI)=""
+	set CNT=1
+
+	for  set DI=IN(DFTDEF,DI).order() quit:DI.isNull()  do {
+		set file=IN(DFTDEF,DI).piece(".",1)
+		if 'DILIST.isNull(),'XDATA.piece($C(9),CNT).isNull() set DILIST=DILIST_","_IN(DFTDEF,DI).piece(".",2)_"="_"'"_XDATA.piece($C(9),CNT)_"'"
+		if DILIST.isNull(),'XDATA.piece($C(9),CNT).isNull() set DILIST=IN(DFTDEF,DI).piece(".",2)_"="_"'"_XDATA.piece($C(9),CNT)_"'"
+		if HIST(DFTDEF,DI).order().isNull(),'XDATA.piece($C(9),CNT).isNull() set HIST(DFTDEF,DI)=file_"|"_IN(DFTDEF,DI).piece(".",2)_"|"_XDATA.piece($C(9),CNT)
+		set CNT=CNT+1
+		}
+
+	// Defaulting done by the PFW.  Only need to file History.
+	if VALID(DFTDEF).order().isNull() do HIST
+
+	// Defaulting needs to be done here.
+	if VALID(DFTDEF).get()=1 do { quit:ER
+
+		// Default the data.  File History
+		set ER=$$^SQL("UPDATE "_file_" SET "_DILIST_" WHERE CID=:CID"_WHEREIN) quit:ER
+		do HIST quit:ER
+		}
+	}
+	quit
+
+
+getXDATA(String DILIST,
+	String DFTDEF,
+	String WHERE) 
+	
+	//Getting the Value XDATA
+	type String XDATA
+	set XDATA=""
+	
+	#ACCEPT Date=12/02/2005;PGM=SkariahV
+	type ResultSet rs3=Db.select(DILIST,DFTDEF,WHERE)
+	if rs3.next() set XDATA=rs3.getRow()
+	quit XDATA
+	
+
+HIST
+	// File history record for every data item modified by the Low Level Default processing.
+
+	type String BRCD,DI,DINAM,NEWVAL
+	type Number ZTSEQ
+	
+	type public Boolean ER
+	type public Number CID,TSEQ
+	type public String DFTDEF,HIST()
+	
+	set DI=""
+	set TSEQ=TSEQ.get()
+	
+	for  set DI=HIST(DFTDEF,DI).order() quit:DI.isNull()  do { quit:ER
+		if HIST(DFTDEF,DI).get()=1 quit 
+		// FILENAME.DINAME
+		set DINAM=HIST(DFTDEF,DI).piece("|",1)_"."_HIST(DFTDEF,DI).piece("|",2)
+		set NEWVAL=HIST(DFTDEF,DI).piece("|",3)
+		
+		type RecordACN acn=Db.getRecord("ACN","CID=:CID",1)
+		if acn.getMode() set BRCD=acn.boo
+
+		type ResultSet rs=Db.select("TSEQ","LLDHIST",,"TSEQ DESC")
+		if rs.next() set ZTSEQ=rs.getCol("TSEQ")+1
+		else  set ZTSEQ=1
+		
+		type RecordLLDHIST lldhist=Class.new("RecordLLDHIST") do {
+			set lldhist.cid=CID
+			set lldhist.tjd=%SystemDate
+			set lldhist.tseq=ZTSEQ
+			set lldhist.efd=%EffectiveDate
+			set lldhist.brcd=BRCD	
+			set lldhist.llddef=DFTDEF
+			set lldhist.di=DINAM
+			set lldhist.val=NEWVAL
+			set lldhist.tlo=%UserStation
+			set lldhist.uid=%UserID
+			set lldhist.cdt=%CurrentDate
+			set lldhist.ctime=%CurrentTime
+			do lldhist.save()
+		}
+		quit:ER
+		set HIST(DFTDEF,DI)=1
+		}
+	quit
+
+
+LLDCNV
+	
+	//Low Level Default Conversion Line Tag
+	type String DFTDEF
+	
+	type ResultSet rs=Db.select("DISTINCT DFTDEF","UTBLLLD")
+	if rs.isEmpty() quit
+	while rs.next() do {
+		set DFTDEF=rs.getCol("DFTDEF")
+		if Db.isDefined("UTBLLLDT","DFTDEF=:DFTDEF") quit
+		type RecordUTBLLLDT utbllldt=Class.new("RecordUTBLLLDT","DFTDEF=:DFTDEF") do {
+			set utbllldt.miflag=0
+			do utbllldt.save()
+		}
+		}
+	quit
+
+
+POST(Number CID)	//Account Number
+
+	/*
+	A post processing section.  Once all of the LLDs are processed 
+	there could be some situations that other items are affected 
+	but not specified in the LLD.
+	
+	Example:
+	LLD is set up to default a SCH (rate schedule).This action calls 
+	for recalculation of IRN based on the new SCH.  So this section 
+	is where all logic of this type of processing should go.
+	Section is executed only if there were no errors/restrictions
+	generated by LLD processing.
+
+	Word of caution:  This section is not cure all.  Beware of the
+	filers forbiding changes to some items.  Check Before Update
+	and After Update Triggers for the item that you trying to file
+	here before using this work around.For example in v6.3 you can't 
+	change IRN if Index is defined on the account, so try to use 
+	bypassSave() instead of update() or save() */
+	
+	// Recalculate Interest Rate if Rate Schedule Changes
+	
+	type String DATA,STOP,X,Z
+	
+	type public Boolean ER
+	type public String IN(),VALID()
+	
+	set (DATA,STOP,X,Z)=""
+	for  set X=IN(X).order() quit:((X.isNull())!(STOP=1))  do { quit:ER
+		if VALID(X).get()'=1 quit
+		for  set Z=IN(X,Z).order() quit:((Z.isNull())!(STOP=1))  do { quit:ER
+			if IN(X,Z)'="DEP.SCH" quit	// Not what we are looking for
+			type RecordDEP dep=Db.getRecord("DEP","CID=:CID",1)
+			if dep.getMode() do {
+				if 'DATA.isNull(),'dep.sch.isNull() do { quit:ER
+					type String XIRN
+					set XIRN=$$RSCH^URSCH(dep.sch,dep.org,dep.odt,dep.mdt) quit:ER
+					if dep.irn'=XIRN do Db.update("DEP","IRN=:XIRN","CID=:CID") quit:ER
+					set STOP=1
+					}
+				}
+			}
+		}
+
+	quit
+	
+CHECK(String DILIST,
+	String DFTDEF,
+	Number FINISH)
+	
+	type Number CTR
+	type String ZDI      
+	set CTR=1
+
+	for  set ZDI=$P(DILIST,",",CTR) quit:ZDI.isNull()!(FINISH=1)  do {
+		set CTR=CTR+1
+		#ACCEPT Date=01/12/2006;PGM=SkariahV
+		type ResultSet rs1=Db.select("FID","DBTBL1D","FID=:DFTDEF AND DI=:ZDI")
+		if rs1.isEmpty() set FINISH=1
+		if FINISH=1 do Runtime.setErrMSG(DFTDEF,1300,DFTDEF_"."_ZDI)
+		}
+	quit FINISH
+	
+
+vSIG()	quit "60330^29745^Viji Skariah^9823"	// Signature - LTD^TIME^USER^SIZE

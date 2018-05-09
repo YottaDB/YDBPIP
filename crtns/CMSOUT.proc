@@ -1,0 +1,767 @@
+CMSOUT	// PROFILE/CMS Out-Going File Routine
+	/*
+	       ORIG: Carrie Baildon 12/02/97
+	  CALLED BY: Routines CMSBAL.M and CMSFMFMT.M
+	       DESC: General routine for files generated in PROFILE and going
+	       out to the CMS.
+
+	  ------------ Revision History -----------------------------------------
+	  
+	   12/12/05 - SPR - 18555
+		      Card Management - General DBI3 system area cleanup.
+
+	  -----------------------------------------------------------------------
+
+	*/
+	
+	quit
+	
+
+public BEGIN(String FLTYP,IO io) //
+	
+	/* Opens the file that will contain the card management information
+	   written to it and establishes the initial conditions.
+	
+	ARGUMENTS:
+	. FLTYP		String with File Type value	/REQ/NONULL/MECH=VAL
+	. io		File Handle Object		/REQ/NONULL/MECH=REF
+
+	RETURNS
+	. NONE
+	
+	*/
+
+	type public String DELIM,DLDIR,ER,FILENM,RECDELIM,RDLM,RECTYP,RM,ORD
+	type public Time TIME
+	type public Date DATE
+	type Number I
+
+	set ER=0
+	type RecordUTBLCMSFILE utblrow=Db.getRecord("UTBLCMSFILE","FLTYP=:FLTYP",1)
+
+	// Data item delimiter if one is used
+	set DELIM=utblrow.delim
+	set DLDIR=utblrow.dldir
+
+	// Formatting method for UNIX
+
+	// Record delimiter
+	set RECDELIM=utblrow.recdelim
+
+	if RECDELIM["$C(" do {
+		set RECDELIM=RECDELIM.piece("(",2)
+		set RECDELIM=RECDELIM.piece(")",1)
+		set RDLM=""
+		for I=1:1:RECDELIM.length(",") do {
+			set RDLM=RDLM_$C(RECDELIM.piece(",",I))
+			}
+		set RECDELIM=RDLM
+		}
+
+	// Name of the file contains current date and time
+	set DATE=%CurrentDate.toString("MMDD") 
+	set TIME=%CurrentTime.toString("2460")
+	set FILENM=FLTYP_"_"_DATE_"_"_TIME_".DAT"
+
+	set io.directory=DLDIR
+	set io.fileName=FILENM
+	set io.openParams="WRITE/NEWV"
+	set io.recordSize=1024
+	set io.timeout=5
+	
+	do io.open()
+	
+    	if ER do { quit
+                type String DIR,FILE,IO
+                set DIR=io.directory
+                set FILE=io.fileName
+                set IO=DIR_" "_FILE
+		// Error opening device ~p1
+                set RM=$$^MSG(7878,IO) 
+                do EXC
+                }
+ 
+
+	//only use this to process detail records for now
+	set RECTYP="DR"
+
+	do IBSDI
+	do LIST
+
+	quit ER
+
+	
+IBSDI	//  Gets the IBS data item and conversion method
+
+	type public String CRDFILES(),DI,EDI,FILE,FIXED(),FILLER,LFTJUST,VALTYP
+	type public String ACNDILST,CRDFLLST,CRDDILST,CIFDILST
+	type public String ACNCNV(),ACNDAT(),CRDDAT(),CRDCNV(),CIFDAT()
+	type public String CIFCNV(),FLTYP,RECTYP,ORD
+	type public Number LENGTH,VALUE
+	
+	set ORD=""
+	
+	type DbSet ds=Db.selectDbSet("UTBLCMSFILE2","FLTYP=:FLTYP AND RECTYP=:RECTYP")
+	while ds.next() do {
+		type RecordUTBLCMSFILE2 ORDREC()
+		type RecordUTBLCMSFILE2 temp=ds.getRecord()
+
+		set ORD=temp.ord
+		set ORDREC(ORD)=ds.getRecord("UTBLCMSFILE2")
+		
+		set LENGTH=ORDREC(ORD).length
+		set FILLER=ORDREC(ORD).filler
+
+		if FILLER="" set FILLER=" "
+
+		set LFTJUST=ORDREC(ORD).lftjust
+		set VALTYP=ORDREC(ORD).valtyp
+		set VALUE=ORDREC(ORD).value
+
+		// Handles value set up according to the type of value
+		if VALTYP.get()="" set VALTYP=4
+		if VALTYP=1 do FIXED
+		if VALTYP=2 do DATA(.ORDREC(ORD))
+		if VALTYP=3 do COMPUTED
+		if VALTYP=4 do EMPTY
+		}
+
+	quit
+
+
+FIXED	// Creates the array of fixed data items.
+	/*
+	   There will be an array for each of the four types of values.
+
+	    FIXED
+	    PROFILE Data Item
+	    COMPUTED
+	    EMPTY
+
+	   Their values will later be integrated into one list to write to
+	   the file.
+
+	*/
+
+	type public Number I,LENGTH
+	type public String FILLER,FIXED(),LFTJUST,ORD,RM,VALUE
+
+	if VALUE.length()<LENGTH do {
+		for I=1:1:LENGTH-VALUE.length() do {
+			if LFTJUST set VALUE=VALUE_FILLER
+			else  set VALUE=FILLER_VALUE
+			}
+		}
+
+	// Value has been shortened to ~p1
+	if VALUE.length()>LENGTH set VALUE=VALUE.extract(1,LENGTH) set RM=$$^MSG(3513,VALUE) do EXC
+	set FIXED(ORD)=VALUE
+
+	quit
+
+
+DATA(RecordUTBLCMSFILE2 ORDREC())	//
+
+	/*
+	   Only hold the conversion of an actual PROFILE data item
+	   This will be used to save the place in VALLIST later
+	   It will set the data item in array VAL(ORD)
+	   S DILIST(ORD)=""
+	*/
+
+	type public Number LENGTH,VALUE
+	type public String CRDFILES(),DI,FILE,FILLER,FIXED(),LFTJUST,RM
+	type public String CRDDAT(),CRDCNV(),CRDDI(),CIFDAT(),CIFCNV(),CIFDI(),ORD
+	type public String ACNDAT(),ACNCNV(),ACNDI(),EDI
+	type String temp
+
+
+	//PROFILE data item
+	set DI=ORDREC(ORD).value
+	set EDI=$select(DI["]":DI.piece("]",2),DI[".":DI.piece(".",2),1:DI)
+	set temp=DI.piece("]",1)
+	set FILE=$select(DI["]":temp.piece("[",2),DI[".":DI.piece(".",1),1:"")
+
+	if FILE'=""&'CRDFILES(FILE).exists() set CRDFILES(FILE)=""
+
+	/* A different list of data items to extract for modified accounts or
+	   customers
+	*/
+	if (DI["[CRD]")!(DI["CRD.") do {
+		set CRDDAT(ORD)=EDI
+		set CRDCNV(ORD)=ORDREC(ORD).cnv
+		set CRDDI(ORD)=""
+		}
+	if (DI["[CIF]")!(DI["CIF.") do {
+		set CIFDAT(ORD)=EDI
+		set CIFCNV(ORD)=ORDREC(ORD).cnv
+		set CIFDI(ORD)=""
+		}
+	if (DI["[ACN]")!(DI["ACN.") do {
+		set ACNDAT(ORD)=EDI
+		set ACNCNV(ORD)=ORDREC(ORD).cnv
+		set ACNDI(ORD)=""
+		}
+
+	quit
+
+
+COMPUTED	//  Creates the array of data elements that will be computed
+
+	type public String COMP(),ORD
+	type public Number VALUE
+
+	set COMP(ORD)=VALUE
+	quit
+
+
+
+EMPTY	// Creates the list of data elements that are empty in the record
+
+	type public String EMPTY(),LENGTH,ORD
+	type public Number FILLER,I,VALUE
+
+	for I=1:1:LENGTH.length() set VALUE=VALUE_FILLER
+	set EMPTY(ORD)=VALUE
+
+	quit
+
+
+
+LIST	/*  Creates the lists needed to obtain the values
+	    for the customer data items
+	*/
+	
+	type public String CIL,CRDFILES(),CRDFLLST,CRDDAT(),DIL
+	type public String ACNDILST,CRDDILST,CIFDILST
+	type public String ACNDAT(),CIFDAT(),CRDCNV(),CRDCONV(),FID
+	type public String ACNCNV(),ACNCONV(),CIFCNV(),CIFCONV()
+	type Number I
+
+	set (ACNDILST,CIFDILST,CRDDILST,CRDFLLST)=""
+
+	//  Builds the card list of files
+	for  set FID=CRDFILES(FID).order() quit:FID=""  do {
+		set CRDFLLST=CRDFLLST_","_FID
+		}
+
+	//  Builds the card list of IBS data items
+	for  set DIL=CRDDAT(DIL).order() quit:DIL=""  do {
+		set CRDDILST=CRDDILST_","_CRDDAT(DIL)
+		}
+
+	//  Builds the account list of IBS data items
+	set DIL=""
+	for  set DIL=ACNDAT(DIL).order() quit:DIL=""  do {
+		set ACNDILST=ACNDILST_","_ACNDAT(DIL)
+		}
+
+	//  Builds the customer list of IBS data items
+	set DIL=""
+	for  set DIL=CIFDAT(DIL).order() quit:DIL=""  do {
+		set CIFDILST=CIFDILST_","_CIFDAT(DIL)
+		}
+
+
+	/*
+	  Creates an array that holds conversion methods
+	  in the order of their corresponding data items
+	*/
+
+	set I=1
+	for  set CIL=CRDCNV(CIL).order() quit:CIL=""  do {
+		set CRDCONV(I)=CRDCNV(CIL)
+		set I=I+1
+		}
+
+	set CIL=""
+	set I=1
+	for  set CIL=ACNCNV(CIL).order() quit:CIL=""  do {
+		set ACNCONV(I)=ACNCNV(CIL)
+		set I=I+1
+		}
+
+	set CIL=""
+	set I=1
+	for  set CIL=CIFCNV(CIL).order() quit:CIL=""  do {
+		set CIFCONV(I)=CIFCNV(CIL)
+		set I=I+1
+		}
+
+	set CRDDILST=CRDDILST.extract(2,CRDDILST.length())
+	set CRDFLLST=CRDFLLST.extract(2,CRDFLLST.length())
+	set CIFDILST=CIFDILST.extract(2,CIFDILST.length())
+	set ACNDILST=ACNDILST.extract(2,ACNDILST.length())
+
+	quit
+
+
+
+public GVALCRD(String CRDTYP,String CRDNUM,String MOD,IO io,Number CNT,String VALLIST)	//  Retrieves the values of the data items for each card change
+	/*
+	    that has not yet been processed.
+
+	   INPUTS:
+	         . CRDTYP Card Type /TYP=T/REQ
+
+	         . CRDNUM Card Number /TYP=T/REQ
+
+	         . MOD  Mode         /TYP=N/REQ
+
+			     0 - Insert
+			     1 - Update
+			     3 - Delete
+
+	. CNT		Count for records written	/REQ/NONULL/MECH=REF
+	. VALLIST	Data to be written		/REQ/NONULL/MECH=VAL
+
+	*/
+
+
+	type public String ACNCONV,ACNDAT(),ACNDILST,ACNDI,ACNFLLST,CIFCONV,CIFDAT(),CIFDI,CLS,COMP(),CRCD,CRDDI,CRDDILST,CRDCONV,CUSTFLG,EMPTY(),ER,FIXED(),GRP,RM,X
+	type public Number ACN,CID,ORD,VAL()
+	type String ACCTFLG
+	type Number CRDFLG
+
+	//   Error Trapping
+	catch vERROR {
+
+		do ^UTLERR
+		
+		// Error extracting Card Data
+		set RM=$$^MSG(3024)
+
+		do EXC^CMSOUT
+
+		}
+
+
+	set CRDFLG=1
+	kill VAL
+
+	set VALLIST=""
+	set X=""
+	set (CID,GRP)=""
+
+	type RecordCRD crd=Db.getRecord("CRD","CRDTYP=:CRDTYP,CRDNUM=:CRDNUM",1)
+	set ACN=crd.acn
+
+	type ResultSet rs=Db.select("GRP","CRDGRP","CRDTYP=:CRDTYP AND CRDNUM=:CRDNUM")
+	if rs.next() set GRP=rs.getCol("GRP")
+
+	// Card without account
+	if GRP="" set ER=1 set RM=$$^MSG(3055) do EXC quit
+
+	type ResultSet rs1=Db.select("CID","CRDGRP","CRDTYP=:CRDTYP AND CRDNUM=:CRDNUM AND GRP=:GRP")
+	if rs1.next() set CID=rs1.getCol("CID")
+	
+	type RecordACN acn=Db.getRecord("ACN","CID=:CID",1)
+	
+	set CLS=acn.cls
+	set CRCD=acn.crcd
+
+	// is this a CMS account  
+	set ACCTFLG=acn.cmsflg
+
+	type RecordCIF cif=Db.getRecord("CIF","ACN=:ACN",1)
+
+	// is this a CMS customer
+	set CUSTFLG=cif.cmsflg
+
+	#ACCEPT DATE=09/05/03;PGM=Shaun Gray
+	type ResultSet rs1=Db.select(CRDDILST,"CRD","CRDNUM=:CRDNUM AND CRDTYP=:CRDTYP")
+	if rs1.next() set X=rs1.getRow()
+
+	// No card record
+	if X="" set ER=1 set RM=$$^MSG(3063) do EXC quit
+
+	do PARSE(.CRDDI,.CRDCONV)
+
+	do CHKACC
+	
+	quit
+	
+	
+CHKACC	// Create card information without account information.
+
+	type public String ACNCONV,ACNDAT(),ACNDILST,ACNDI,ACNFLLST,CLS,ER,RM,X
+	type public Number ACN,CID,ORD,VAL()
+
+	set X=""
+
+	if CLS.get()="L" set ACNFLLST="LN"
+	else  set ACNFLLST="DEP"
+	
+	#ACCEPT DATE=09/05/03;PGM=Shaun Gray
+	type ResultSet rs2=Db.select(ACNDILST,ACNFLLST,"CID=:CID")
+	if rs2.next() set X=rs2.getRow()
+
+	if X'="" do PARSE(.ACNDI,.ACNCONV)
+	else  do {
+
+		// No acccount information for account ~p1
+		set ER=1 set RM=$$^MSG(3078,CID)
+		do EXC
+
+		/* This record will include card information without
+		   account information.
+		*/
+		set ORD=""
+		for  set ORD=ACNDAT(ORD).order() quit:ORD=""  set VAL(ORD)=""
+
+		}
+		
+	do CHKCUST
+	
+	quit
+	
+	
+CHKCUST		// Create card information without customer information.
+
+	type public String CIFCONV,CIFDAT(),CIFDI,CNT,COMP(),EMPTY(),ER,FIXED(),RM,VALLIST,X
+	type public Number ACN,CID,MOD,ORD,VAL()
+	type public IO io
+			
+	set X=""
+
+	#ACCEPT DATE=09/05/03;PGM=Shaun Gray
+	type ResultSet rs3=Db.select(CIFDILST,"CIF","ACN=:ACN")
+	if rs3.next() set X=rs3.getRow()
+
+	if X'="" do PARSE(.CIFDI,.CIFCONV)
+	else  do {
+
+		// No customer information for customer ~p1
+		if X="" set ER=1 set RM=$$^MSG(3079,ACN) do EXC
+
+		/* This record will include card information without
+		   customer information.
+		*/
+		set ORD=""
+		for  set ORD=CIFDAT(ORD).order() quit:ORD=""  set VAL(ORD)=""
+		}
+
+	set ORD=""
+	for  set ORD=COMP(ORD).order() quit:ORD=""  set VAL(ORD)=$$^CMSCOMP(COMP(ORD),1,MOD,CID)
+
+	set ORD=""
+	for  set ORD=FIXED(ORD).order() quit:ORD=""  set VAL(ORD)=FIXED(ORD)
+
+	set ORD=""
+	for  set ORD=EMPTY(ORD).order() quit:ORD=""  set VAL(ORD)=EMPTY(ORD)
+
+	do RECD(io,.CNT,VALLIST)
+
+	quit
+
+
+PARSE(String DILIST,String CONV)	// Gets each data item to be converted
+
+	type public String CNV,CDI,DI,ORD,VAL(),X
+	type Number I
+	
+	set ORD=""
+	for I=1:1:X.length("|") do {
+		set DI=X.piece("|",I)
+		set CNV=CONV(I)
+		if DI'="",CNV'="" do {
+			set CDI=$$^CMSCONV(DI,CNV)
+			}
+		else  set CDI=DI
+
+		/* Returns the order in the record layout of the data item
+		   since PROFILE data items may be inter-mixed with hard coded
+		   values in the record. The array VAL will eventually contain
+		   values for every position in the file layout.  Here, only the
+		   values of the PROFILE data items (tracked by array DILIST)
+		   are being set.
+
+		*/
+		set ORD=DILIST(ORD).order()
+		set VAL(ORD)=CDI
+		}
+	quit
+
+
+public GVALACN(Number CID,IO io,Number CNT,String VALLIST)	//
+	/*  
+	
+	Retrieves the values of the data items for each account change
+	that has not yet been processed.
+
+	ARGUMENTS:
+
+	. CID 		Account Number  		/REQ/NONULL/MECH=VAL
+	. io		File Handle Object		/REQ/NONULL/MECH=REF
+	. CNT		Count for records written	/REQ/NONULL/MECH=REF
+	. VALLIST	Data to be written		/REQ/NONULL/MECH=VAL
+
+	*/
+	
+	type public String ACNDI,ACNCONV,ACNFLLST,CLS,CRCD,ORD,RM,X
+	type public String ACNDILST,CRDDAT(),COMP(),CIFDAT(),EMPTY(),FIXED(),VAL()
+	type public Number ACNFLG,MOD
+
+
+	// Error Trapping
+	catch vERROR {
+
+		type String RM
+
+		do ^UTLERR
+		
+		// Error extracting card data
+		set RM=$$^MSG(3024)
+
+		do EXC^CMSOUT
+		}
+
+
+	set ACNFLG=1
+
+	set VALLIST=""
+	set X=""
+	set MOD=1
+
+	type RecordACN ACN=Db.getRecord("ACN","CID=:CID",1)
+
+	set CLS=ACN.cls
+	set CRCD=ACN.crcd
+
+	if CLS="L" set ACNFLLST="LN"
+	else  set ACNFLLST="DEP"
+	
+	#ACCEPT DATE=09/05/03;PGM=Shaun Gray
+	type ResultSet rs1=Db.select(ACNDILST,ACNFLLST,"CID=:CID")
+	if rs1.next() set X=rs1.getRow()
+
+	// No account record
+	if X="" set RM=$$^MSG(3083) do EXC quit
+
+	do PARSE(.ACNDI,.ACNCONV)
+
+	set ORD=""
+	for  set ORD=CIFDAT(ORD).order() quit:ORD=""  set VAL(ORD)=""
+
+	set ORD=""
+	for  set ORD=CRDDAT(ORD).order() quit:ORD=""  set VAL(ORD)=""
+
+	set ORD=""
+	for  set ORD=COMP(ORD).order() quit:ORD=""  set VAL(ORD)=$$^CMSCOMP(COMP(ORD),2,MOD,CID)
+
+	set ORD=""
+	for  set ORD=FIXED(ORD).order() quit:ORD=""  set VAL(ORD)=FIXED(ORD)
+
+	set ORD=""
+	for  set ORD=EMPTY(ORD).order() quit:ORD=""  set VAL(ORD)=EMPTY(ORD)
+
+	do RECD(io,.CNT,VALLIST)
+
+	quit
+
+
+
+public GVALCIF(Number ACN,IO io,Number CNT,String VALLIST)  //
+	/* 
+	
+	Retrieves the values of the data items for each customer change
+	that has not yet been processed.
+
+	ARGUMENTS:
+
+	. ACN 		Customer Number  		/REQ/NONULL/MECH=VAL
+	. io		File Handle Object		/REQ/NONULL/MECH=REF
+	. CNT		Count for records written	/REQ/NONULL/MECH=REF
+	. VALLIST	Data to be written		/REQ/NONULL/MECH=VAL
+
+	*/
+	
+
+	type public String ACNDAT(),CIFDILST,CIFDI,CIFCONV,COMP(),CRDDAT(),EMPTY(),FIXED(),ORD,RM,VAL(),X
+	type public Number CIFFLG,MOD,VAL
+
+
+	//   Error Trapping
+	catch vERROR {
+
+		type String RM
+
+		do ^UTLERR
+		
+		// Error extracting card data
+		set RM=$$^MSG(3024)
+
+		do EXC^CMSOUT
+		}
+		
+
+	set CIFFLG=1
+	kill VAL
+
+	set VALLIST=""
+	set X=""
+	set MOD=1
+
+	#ACCEPT DATE=09/05/03;PGM=Shaun Gray
+	type ResultSet rs1=Db.select(CIFDILST,"CIF","ACN=:ACN")
+	if rs1.next() set X=rs1.getRow()
+
+	// No customer record
+	if X="" set RM=$$^MSG(3084) do EXC quit
+
+	do PARSE(.CIFDI,.CIFCONV)
+
+	set ORD=""
+	for  set ORD=ACNDAT(ORD).order() quit:ORD=""  set VAL(ORD)=""
+
+	set ORD=""
+	for  set ORD=CRDDAT(ORD).order() quit:ORD=""  set VAL(ORD)=""
+
+	set ORD=""
+	for  set ORD=COMP(ORD).order() quit:ORD=""  set VAL(ORD)=$$^CMSCOMP(COMP(ORD),3,MOD)
+
+	set ORD=""
+	for  set ORD=FIXED(ORD).order() quit:ORD=""  set VAL(ORD)=FIXED(ORD)
+
+	set ORD=""
+	for  set ORD=EMPTY(ORD).order() quit:ORD=""  set VAL(ORD)=EMPTY(ORD)
+
+	do RECD(io,.CNT,VALLIST)
+
+	quit
+
+
+
+public END(IO io)	/*  This copies the file with the date and time stamp to the archive
+			    directory where it can be viewed for future reference
+			    gets the directories from ITSOPT and
+			    formats them if a logical was used
+			*/
+
+	type public String ARCH,STRFL,X,FLTYP,FILENM
+	
+	
+	type RecordUTBLCMSFILE utblrow=Db.getRecord("UTBLCMSFILE","FLTYP=:FLTYP",1)
+	set ARCH=utblrow.archivedir
+	set STRFL=ARCH_FILENM
+
+	set X=$$COPYFIL^%OSSCRPT(io.fileName,STRFL)
+
+	quit
+
+
+EXC	//  Logs error in exception file
+
+	type public String RM,ZTFLAG,ZE
+	type public Number ACN,CID,CRDNUM
+
+	set ZE=$select(ZTFLAG.get()="ACN":CID.get(),ZTFLAG.get()="CIF":ACN.get(),1:CRDNUM.get())
+
+	//CMS Data Extract,ACN or CID or CRD
+	do LOG^UTLEXC(%RoutineName,"*",$$^MSG(3025),ZE,"",RM.get())
+
+	quit
+
+
+RECH(IO io,Number CNT,String VALLIST)	// Header Record
+	/*
+
+	ARGUMENTS:
+	. io		File Handle Object		/REQ/NONULL/MECH=REF
+	. CNT		Count for records written	/REQ/NONULL/MECH=REF
+	. VALLIST	Data to be written		/REQ/NONULL/MECH=VAL
+
+	*/
+
+	do RECD(io,.CNT,VALLIST)
+
+	quit
+
+
+RECD(IO io,Number CNT,String VALLIST)	// Detail Record
+
+	/*
+	   I18N=OFF
+	   Integrating data items with other values
+
+
+	ARGUMENTS:
+	. io		File Handle Object		/REQ/NONULL/MECH=REF
+	. CNT		Count for records written	/REQ/NONULL/MECH=REF
+	. VALLIST	Data to be written		/REQ/NONULL/MECH=VAL
+	
+	*/
+	
+	type public String DELIM,FILLER,FILTYP,LFTJUST,ORD,RECTYP,RM,VAL(),VALTYP
+	type public Number LENGTH
+	type Number I
+
+	type RecordUTBLCMSFILE2 ORDREC()
+
+	type DbSet ds=Db.selectDbSet("UTBLCMSFILE2","FLTYP=:FLTYP AND RECTYP=:RECTYP")
+	while ds.next() do {
+		type RecordUTBLCMSFILE2 temp=ds.getRecord()
+
+		set ORD=temp.ord
+		set ORDREC(ORD)=ds.getRecord("UTBLCMSFILE2")
+		}
+
+	set ORD=""
+	for  set ORD=VAL(ORD).order() quit:ORD=""  do {
+
+		set LENGTH=ORDREC(ORD).length
+		set FILLER=ORDREC(ORD).filler
+
+		if FILLER="" set FILLER=" "
+
+		set LFTJUST=ORDREC(ORD).lftjust
+		set VALTYP=ORDREC(ORD).valtyp
+
+		if VAL(ORD).length()<LENGTH do {
+			for I=1:1:LENGTH-VAL(ORD).length() do {
+				if LFTJUST set VAL(ORD)=VAL(ORD)_FILLER
+				else  set VAL(ORD)=FILLER_VAL(ORD)
+				}
+			}
+
+		// Value has been shortened to ~p1
+		if VAL(ORD).length()>LENGTH set VAL(ORD)=VAL(ORD).extract(1,LENGTH) set RM=$$^MSG(3513,VAL(ORD)) do EXC
+		
+		if (DELIM'=""),(VALLIST'="") set VALLIST=VALLIST_DELIM_VAL(ORD)
+		else  set VALLIST=VALLIST_VAL(ORD)
+		}
+
+	do WRITE(io,.CNT,VALLIST)
+
+	quit
+
+
+WRITE(IO io,Number CNT,String VALLIST)	// Write the detail record to the output file
+
+	/*
+	ARGUMENTS:
+
+	. io		File Handle Object		/REQ/NONULL/MECH=REF
+	. CNT		Count for records written	/REQ/NONULL/MECH=REF
+	. VALLIST	Data to be written		/REQ/NONULL/MECH=VAL
+
+	*/
+
+
+	//I18N=OFF
+	do io.write(.VALLIST)
+
+	set CNT=CNT+1
+
+	quit
+
+
+RECT	// Trailer Record
+
+	/*
+
+	*/
+
+	quit
+
+vSIG()	quit "60254^35699^Renga SP^16277"	// Signature - LTD^TIME^USER^SIZE

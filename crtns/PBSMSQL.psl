@@ -1,0 +1,769 @@
+public PBSMSQL(String REPLY,Boolean STFFLG,String RECORD,Number RECTYP,String CONTEXT)	// MSQL Service Class Driver
+	/*
+	   ORIG: MATTSON - 11/08/93
+
+	   PROFILE/SQL service class driver, called by the PROFILE Enterprise
+	   server.  This service class driver is responsible for servicing
+	   SQL requests of the PROFILE application.
+
+	   MUMPS SQL Service Class Driver
+
+	   ARGUMENTS:
+	   . REPLY  - Reply message			/TYP=T/MECH=REFNAM:W
+
+	   . STFFLG - STF flag				/TYP=L/REQ/MECH=VAL
+
+	   . RECORD - Input Message			/TYP=T/REQ/MECH=VAL
+
+	   . RECTYP - Record type -			/TYP=N/REQ/MECH=VAL
+	   		0 - Native client
+			1 - Foreign client
+
+	   . CONTEXT- Default context			/TYP=T/NOREQ/MECH=VAL
+
+	   INPUTS:
+	   . %STFHOST - Flag that indicates whether on-line updates should
+			either be suspended or disallowed, depending on the
+			application.
+
+	   RETURNS:
+	   . $$ Message reply status			/TYP=N/LEN=1
+
+	   EXAMPLE:
+
+	   S ER=$$^PBSMSQL(.REPLY,0,MSG,0)
+
+	------Revision History------------------------------------------------
+
+	02/12/07 - DHANALAKSHMI R - CR 25264
+		   Modified the section SPV to Initialize the variable DONE.
+
+	01/23/07 - DHANALAKSHMI R - CR 24957
+		   Modified the section SPVOVR to avoid the undefined error by
+		   correcting the 2 FOR loops that processes the OVR array. 
+		   Also added a conditional settings to handle "RELCIF" Table.
+
+	12/19/06 - SHRIRAM - CR 24547
+		   Modified SPVOVR section with enhanced override logic.
+
+		   Modified SPV section to make use of new automatic authorization
+		   options defined by CUVAR.AUTOAUTH 
+		   
+		   Modified MAIN section to check for verrors and to perform 
+		   rollback if restrictions exist. 
+		    
+		   	
+	07/31/06 - KELLYP - CR 22048
+		   Modified MAIN section to eliminate FUNCTION warning.
+
+	03/15/06 - RussellDS - CR20159
+		   Really remove catch block!
+	
+	03/13/06 - RussellDS - CR19962
+		   Remove catch block in MAIN section.  Error handling will
+		   trap back to PBSSRV.
+		   
+		   Eliminated PSL warnings.
+	
+	01/20/06 - GIRIDHARANB - CR18912
+		   Modified section MAIN to check if the server is a interactive
+		   session, the cursor process call is bypassed in that case.
+	
+	05/19/05 - MattsonAR
+	           Modified to direct OPEN/FETCH/CLOSE statements to PBSCURS
+	           if the underlying database is Oracle.
+	
+	05/11/05 - RussellDS - CR15943
+		   Restore code to handle verrors() array, and rollback if
+		   we have non-fatal restrictions.
+		   
+		   Cleaned up PSL scope warnings.
+		   
+		   Removed old revision history.
+
+	08/11/04 - KELLYP - CR 11059
+		   Modified OVRMSG section to use CTR variable instead of a
+		   hard-coded "1" when setting up ZAU.  This prevents a problem
+		   where only one restriction was returned to the client when 
+		   multiple restrictions were encountered.  Also retyped
+		   variables to conform to current PSL standards.
+
+	-----------------------------------------------------------------------
+	   I18N=OFF
+
+	*/
+
+	#WARN
+	#OPTIMIZE
+
+	type Boolean RETVAL
+        set RETVAL=0
+        do MAIN(.RETVAL,.REPLY)
+ 
+        // Return Value: 0 = success, 1 = processing error
+        quit RETVAL
+
+
+MAIN(Boolean RETVAL,String REPLY)    // Main processing for MSQL Service Class Driver
+
+	 /*
+ 
+           ARGUMENTS:
+ 
+              . RETVAL  - Return value from Main section	/TYP=L/REQ/MECH=REFNAM:W
+                                0 - Success
+                                1 - Processing error
+                                                        
+ 
+              . REPLY - The response built in this function	/TYP=T/MECH=REFNAM:W
+                        if there is a validation error.
+                                                        
+        */
+	type Public Boolean STFFLG,INTRCTV
+	type Public String CONTEXT,ER,ET,RECORD,RM,%STFHOST,UCLS,%ZTSEQ
+
+	type String FLD,PTR,SQLCNT,SQLCOD,SQLDTA,SQLEXPR,SQLIND,SQLPAR,SQLREC,SQLTOK,verrors(),vsupv,ZUID
+
+	// Protect system defined edit masks & initialize to SQL defaults
+	type String %MSKC,%MSKD,%MSKE,%MSKL,%MSKN
+	set (%MSKC,%MSKD,%MSKE,%MSKL,%MSKN)=""
+
+	/*
+	 FLD(1) SQL statement
+	 FLD(2) PROFILE/SQL qualifier
+	 FLD(3) Supervisory authorization
+	*/
+	set PTR=$$LV2V^MSG(RECORD,.FLD)
+	
+	// Invalid SQL Command
+	if FLD(1).get()="" do Runtime.setErrMSG("STBLER",8564) set RETVAL=$$ERRRPLY quit
+	
+	// Overlay saved context
+	if CONTEXT.get()'="" do PARSPAR^%ZS(CONTEXT,.SQLPAR)
+
+	// Overlay parameters from this message
+	if FLD(2).get()'="" do PARSPAR^%ZS(FLD(2),.SQLPAR)
+
+	if SQLPAR("FORMAT").exists() set ER=$$FORMAT(SQLPAR("FORMAT")) if ER set RETVAL=$$ERRRPLY quit
+	if SQLPAR("DATE").exists() set %MSKD=SQLPAR("DATE")
+	if SQLPAR("DEC").exists() set (%MSKE,%MSKN)=SQLPAR("DEC")
+
+	// Supvervisory override
+	if FLD(3).get()'="" do SPV(FLD(3),.vsupv) if ER set RETVAL=$$ERRRPLY quit
+
+	// Need ODBC V2.0 to match the server software
+	// Version number of client message is not compatible with server
+	if SQLPAR("ODBC").get()=1 do Runtime.setErrMSG("STBLER",2951) set RETVAL=$$ERRRPLY quit
+
+	// Already pre-processed by the ODBC driver
+	if (SQLPAR("ICODE").get()=1)!(SQLPAR("ODBC").get()=2) set SQLEXPR=$$TOKEN^%ZS(FLD(1),.SQLTOK,"'")
+
+	// Otherwise, tokenize the string
+	else  set SQLEXPR=$$SQL^%ZS(FLD(1),.SQLTOK) if ER set RETVAL=$$ERRRPLY quit
+
+	// Check 24x7 access
+	// Database Update Restricted
+	if (%STFHOST.get()),('$$VALID(SQLEXPR,SQLTOK)) do Runtime.setErrMSG("STBLER",7912) set RETVAL=$$ERRRPLY quit
+
+	// Store and forward, force check of store and forward user class in sqlbuf
+	if STFFLG do {
+		set SQLPAR("SPVOVR")=1
+		set vsupv("~")=CUVAR.DFTSTFUCLS 
+		if vsupv("~")="" set UCLS="MGR"
+		}
+
+	/*
+	Call SVXCHMSG^%DBAPI for OPEN, FETCH and CLOSE statements
+	if the underlying database is Oracle to ensure the cursor
+	operations are all performed using the same connection.
+	For all other databases, call SQL directly.
+	*/
+
+	#IF $$TRNLNM^%ZFUNC("SCAU_DB")="ORACLE"
+	
+	// NO CURSOR PROCESS FOR INTERACTIVE SESSIONS.
+	set INTRCTV='$$INTRACT^%ZFUNC
+	
+	if (",CLOSE,FETCH,OPEN,"[(","_SQLEXPR.piece(" ",1)_",")),INTRCTV do {
+
+		type public String %TOKEN
+		type String vzCURSOR,vzFLD,vzHDR,vzMSG,vzMSGTYP,vzREPLY,vzSQLCMD,vzSQLEXP,vzSQLTOK
+		
+		set vzSQLTOK=SQLTOK
+		set vzSQLCMD=SQLEXPR.piece(" ",1)
+		set vzSQLEXP=SQLEXPR.extract(vzSQLCMD.length()+2,SQLEXPR.length())
+		
+		if vzSQLCMD="OPEN" do { quit:ER
+			if vzSQLEXP.extract(1,7)="CURSOR " set vzSQLEXP=vzSQLEXP.extract(8,SQLEXPR.length())
+			set vzCURSOR=$$TOK^SQL(vzSQLEXP,"AS,USING",.vzSQLTOK)
+			if vzCURSOR.isNull() set ER=1,RM=$$^MSG(8559) quit
+			set vzMSGTYP=1
+			}
+
+		if vzSQLCMD="FETCH" do { quit:ER
+			set vzCURSOR=$$TOK^SQL(vzSQLEXP,"AS,USING",.vzSQLTOK)
+
+			if vzCURSOR.extract(1,5)="FROM " set vzCURSOR=vzCURSOR.extract(6,vzCURSOR.length())
+			if vzCURSOR.ascii()=0 set vzCURSOR=$$UNTOK^%ZS(vzCURSOR,.vzSQLTOK)
+
+			type RecordSQLCUR0 sqlcur0=Db.getRecord("SQLCUR0","TOKEN=:%TOKEN,CURSOR=:vzCURSOR",1)
+			if sqlcur0.getMode()=0 set ER=1,RM="Cursor "_vzCURSOR_" is not OPEN" quit
+			set vzMSGTYP=sqlcur0.cpid
+			}
+
+		if vzSQLCMD="CLOSE" do { quit:ER
+			if vzSQLEXP.extract(1,7)="CURSOR " set vzSQLEXP=vzSQLEXP.extract(8,SQLEXPR.length())
+			set vzCURSOR=vzSQLEXP.piece(" ",1)
+
+			type RecordSQLCUR0 sqlcur0=Db.getRecord("SQLCUR0","TOKEN=:%TOKEN,CURSOR=:vzCURSOR",1)
+			if sqlcur0.getMode()=0 set ER=1,RM="Cursor "_vzCURSOR_" is not OPEN" quit
+			set vzMSGTYP=sqlcur0.cpid
+			}
+
+		// Build message header
+		set vzHDR=(1000000000).random()
+		set vzHDR="0000000000".extract(1,10-vzHDR.length())_vzHDR
+
+		// Build message
+		set vzFLD(1)="set ER=$$^SQL(SQLEXPR,.SQLPAR,.SQLCOD,.SQLDTA,.SQLCNT,.SQLIND,.SQLTOK)"
+		set vzFLD(2)=$$VSAV^PBSUTL("*")
+		set vzFLD(3)=%ProcessID
+		set vzFLD(4)=%TOKEN.get()
+		set vzFLD(5)=vzCURSOR
+		set vzFLD(6)=vzSQLCMD
+		set vzMSG=$$V2LV^MSG(.vzFLD)
+
+		set vzMSG=vzHDR_vzMSG
+
+		set ET=$$SVXCHMSG^%DBAPI(vzMSGTYP,%ProcessID,vzMSG,.vzREPLY,30)
+		if 'ET.isNull() set ER=1 quit
+
+
+		// Strip header (bytes 1-10) from the reply message
+		set vzREPLY=vzREPLY.extract(11,vzREPLY.length())
+		do VLOD^PBSUTL(vzREPLY)
+		}
+
+	else  set ER=$$^SQL(SQLEXPR,.SQLPAR,.SQLCOD,.SQLDTA,.SQLCNT,.SQLIND,.SQLTOK)
+
+	#ELSE
+	set ER=$$^SQL(SQLEXPR,.SQLPAR,.SQLCOD,.SQLDTA,.SQLCNT,.SQLIND,.SQLTOK)
+	#ENDIF
+
+	// Returns status, error code
+	set SQLCOD=$$SQLCOD(SQLCOD.get(),.ER)
+
+	// Apply supvervisory override when they exist and authorizations exist, but not
+	// when they have already been checked by COMMIT^SQLBUF (verrors=1)
+	if verrors.data(), 'verrors.get(), vsupv.data(), (+verrors.get() = 0) do SPVOVR(.verrors)
+
+	// Check override array
+	if 'ER,'verrors.data() do { set RETVAL=0 quit
+
+		// SQL state code
+		set FLD(1)=SQLCOD
+
+		// Stored procedure name
+		set FLD(2)=RM.get()
+
+		// Number of rows returned
+		set FLD(3)=SQLCNT.get()
+
+		// Results table
+		set FLD(4)=SQLDTA.get()
+
+		// Column protection attributes
+		set FLD(5)=SQLIND.get().piece(0.char(),1)
+
+		// Column format attributes 03/03/2000
+		set FLD(6)=SQLIND.get().piece(0.char(),2)
+
+		// Convert to pack format
+		if FLD(5)'="" set FLD(5)=$$COLOUT^%ZFUNC(FLD(5))
+
+		set REPLY=$$V2LV^MSG(.FLD)
+
+		}
+
+	// Error reply
+	if ER set RETVAL=$$ERRRPLY quit
+	
+	// Got here because of restrictions
+	do Runtime.rollback() // Non-fatal restrictions
+	
+	// Override AU message
+	set REPLY=$$OVRMSG(.verrors)
+	set RETVAL=1	
+
+	
+	quit 
+
+SPV(String OVR(),String vsupv())	// Convert override information into vsupv() array
+	/*
+	   ARGUMENTS:
+
+	   . OVR	Supervisory Authorization		/TYP=T/MECH=REFARRY:R
+	   		OVR(n)=Error_type|User_Id|Password
+
+	   . vsupv	Override by type			/TYP=T/MECH=REFARRY:W
+			vsupv(Error_type)="" or vsupv("*")=""
+
+	   OUTPUTS:
+
+	   ER		Error code				/TYP=N
+	   RM		Error message				/TYP=T
+	*/
+	
+	type Public String ER, %UserID
+	
+	type String ET, I, SPVREST, SPVUID, UCLS, V, Z, ZOVR
+	
+	type Boolean DONE
+
+	kill vsupv
+
+	set ER=0
+	set DONE = 0
+
+	#IF (CUVAR.AUTOAUTH = 1)
+	 	set vsupv("*") = %UserID
+	#ELSE
+	  if 'OVR.isNull() do {
+			// Supv override
+			set Z=$$LV2V^MSG(OVR,.ZOVR)
+			
+			for I=1:1 quit:'ZOVR(I).data()  do { quit:ER!DONE
+				kill V
+		
+				// Type|UID|PSW
+				set Z=$$LV2V^MSG(ZOVR(I),.V)	
+				set SPVUID = V(2).get()
+			
+				if SPVUID.isNull() do { quit:ER
+					if CUVAR.AUTOAUTH = 2 set SPVUID = %UserID
+				 	else  do Runtime.setErrMSG("CUVAR", 1504)	// Invalid user ID
+				}
+				else  do { quit:ER
+					// Invalid user
+					if 'Db.isDefined("SCAU", "UID=:SPVUID") do { 
+						do Runtime.setErrMSG("SCAU", 7591, SPVUID) 
+						set DONE = 1
+					}
+					// Invalid password
+					if '$$VALIDATE^SCADRV1(V(3).get(),SPVUID) do { 
+						do Runtime.setErrMSG("SCAU",1419)
+						set DONE = 1
+					}
+				}
+			
+				set SPVREST = V(1).piece("_",3)
+				set vsupv(SPVREST) = SPVUID
+			
+				if SPVREST = "*" set DONE = 1
+			}
+	}
+	#ENDIF	
+	quit
+
+SPVOVR(String OVR(,))	// Apply override logic
+	
+	/*
+	   Retain all entries in OVR (verrors array) unless all restrictions are overridden.
+	   Return OVR=1 to indicate this processing already took place since may occur in SQLBUF,
+	   or in PBSMSQL for non-buffered SQL.
+	*/
+	type public String vsupv(), %UID
+	type String rest, buf, ovrsav(,)
+	type Boolean DONE
+        type String ET, IDENT, SEQ, UCLSARR(), UCLS, UID, ZTBL 
+	
+	if '(vsupv.data()) quit
+        
+        set buf="", DONE = 0, SEQ=""
+        
+        if (vsupv("*").data())!(vsupv("~").data()) do {
+        	if (vsupv("*").data()) do {
+        		set UID = vsupv("*")
+        		if '(UCLSARR(UID).data()) do {
+        			type RecordSCAU scau = Db.getRecord("SCAU", "UID = :UID", 1)
+				
+				set UCLSARR(UID)= scau.%ucls
+			}
+			set UCLS = UCLSARR(UID)
+        	}	
+		else  do {
+			set UID=%UID
+			set UCLS=vsupv("~")				
+		}
+
+		for  set buf = OVR(buf).order() quit:buf.isNull()!DONE  do {
+			for  set SEQ = OVR(buf,SEQ).order() quit:SEQ.isNull()  do { 
+	
+				// Error type
+ 				set ET = OVR(buf,SEQ).piece("|",3)
+        			
+        			// can it be overridden? if not quit
+        			if 'Db.isDefined("UTBLINT","ETYPE=:ET,UCLS=:UCLS") set DONE = 1 quit
+        			set ZTBL = OVR(buf).piece("|",1)
+        			set IDENT = OVR(buf).piece("|",2)
+        			
+        			if ZTBL = "CIF" do {
+        				type RecordDAYENDXBADC xbadc = Db.getRecord("DAYENDXBADC", "TJD=:%SystemDate,%UID=:UID,ACN=:IDENT,SEQ=:SEQ,ET=:ET", 1)
+        				set xbadc.uid = UID
+					do xbadc.save()	
+        			}
+        			else  do {
+        				if IDENT["," set IDENT = IDENT.piece(",",2)
+        				type RecordDAYENDXBAD xbad = Db.getRecord("DAYENDXBAD", "TJD=:%SystemDate,%UID=:UID,CID=:IDENT,SEQ=:SEQ,ET=:ET", 1)
+        				set xbad.uid = UID
+					do xbad.save()
+        			}
+				set ovrsav(buf,SEQ) = OVR(buf,SEQ)
+				kill OVR(buf,SEQ)
+				I OVR(buf).data()=1 set ovrsav(buf)=OVR(buf) kill OVR(buf) 
+			}
+		}	
+        }
+        else  do {
+        	for  set buf = OVR(buf).order() quit:buf.isNull()  do {
+        		for  set SEQ = OVR(buf,SEQ).order() quit:SEQ.isNull()!DONE  do {
+        			set ET = OVR(buf,SEQ).piece("|",3)	// Error type
+				
+				//No match
+        			if '(vsupv(ET).data()) set DONE = 1
+        			
+        			set UID = vsupv(ET)
+        			if '(UCLSARR(UID).data()) do {
+        				type RecordSCAU scau = Db.getRecord("SCAU", "UID = :UID",1)
+					set UCLSARR(UID)= scau.%ucls
+				}
+        			set UCLS = UCLSARR(UID)
+        			if 'Db.isDefined("UTBLINT","ETYPE=:ET,UCLS=:UCLS") set DONE = 1 quit
+				set ZTBL = OVR(buf).piece("|",1)
+				set IDENT = OVR(buf).piece("|",2)
+				if ZTBL = "CIF" do {
+        				type RecordDAYENDXBADC xbadc = Db.getRecord("DAYENDXBADC", "TJD=:%SystemDate,%UID=:UID,ACN=:IDENT,SEQ=:SEQ,ET=:ET", 1)
+        				set xbadc.uid = UID
+					do xbadc.save()	
+        			}
+        			else  do {
+					if IDENT["," set IDENT = IDENT.piece(",",2)
+        				type RecordDAYENDXBAD xbad = Db.getRecord("DAYENDXBAD", "TJD=:%SystemDate,%UID=:UID,CID=:IDENT,SEQ=:SEQ,ET=:ET", 1)
+        				set xbad.uid = UID
+					do xbad.save()
+        			}
+ 				set ovrsav(buf,SEQ) = OVR(buf,SEQ)
+				kill OVR(buf, SEQ)                          ; Delete this entry
+        			if (OVR(buf).data()) = 1 do {
+        				set ovrsav(buf)= OVR(buf)
+        				kill OVR(buf)         ; Delete empty buffer
+        			}
+			}
+        	}
+        }
+        
+	; If restrictions exist that can not be authorized, move those that could be back
+	; into OVR array and set top level of OVR to indicate that restrictions have been 
+	; checked to prevent re-processing them since COMMIT^SQLBUF and the main 
+	; label of this routine call this label.
+	
+	if (OVR.data()) do {
+		set (rest,SEQ) = "", OVR = 1
+		for  set rest = ovrsav(rest).order() do { quit:rest.isNull()
+			if (ovrsav(rest).exists()) set OVR(rest) = ovrsav(rest)
+			for  set SEQ = ovrsav(rest,SEQ).order() do { quit:SEQ.isNull()
+			  	set OVR(rest, SEQ) = ovrsav(rest,SEQ)
+			}
+		}
+	}		
+		
+	quit
+
+
+OVRMSG(String OVR())	// Build override message
+	/*
+	   ARGUMENTS:
+
+	   . OVR	Override array		/TYP=T/REQ/MECH=REFARRY:R
+
+			OVR(BUF)=FID|keys
+			OVR(BUF,SEQ)=||err_type|||||err_desc
+	*/
+
+	type Number CNT
+	type String AU(),BUF,FID,KEYS,MSG(),SEQ,Z,ZAU()
+
+	set BUF=""
+	set CNT=0
+	set SEQ=""
+
+	for  set BUF=OVR(BUF).order() quit:BUF=""  do {
+
+		// Table name
+		set FID=OVR(BUF).piece("|",1)
+
+		// Access keys
+		set KEYS=OVR(BUF).piece("|",2)
+
+		for  set SEQ=OVR(BUF,SEQ).order() quit:SEQ=""  do {
+
+			set Z=OVR(BUF,SEQ)
+			set AU(1)="XBAD_"_FID_"_"_Z.piece("|",3)
+			set AU(2)=""
+
+			// Error description
+			set AU(3)=Z.piece("|",8)
+
+			// Access keys
+			set AU(4)=KEYS
+
+			// SPVST flag
+			set AU(5)=""
+			set CNT=CNT+1
+
+			// Convert to LV format
+			set ZAU(CNT)=$$V2LV^MSG(.AU)		// 11059 - Use CNT not "1"
+
+			}
+		}
+
+	set MSG(1)="AU"
+	set MSG(2)=""
+	set MSG(3)=$$V2LV^MSG(.ZAU)
+
+	quit $$V2LV^MSG(.MSG)
+
+
+ERRRPLY()	// Build standard server error reply
+
+	type Public Boolean STFFLG
+	type Public String ET,REPLY,RM()
+
+	if RM.get()="",RM.data()>1 set RM=RM(1).get()_" "_RM(2).get()
+
+	set REPLY=$$ERRMSG^PBSUTL(RM.get(),ET.get())
+
+	// If off-line, put into exception
+	if STFFLG do STF
+
+	quit 1
+
+
+SQLCOD(Number SQLCOD,String ER)	// Return appropriate SQL status
+	/*
+	   Format and potentially change the value of the SQL state code before
+	   replying back.
+
+	   ARGUMENTS:
+	   . SQLCOD	- SQL status code returned from the
+			  application				/TYP=N/REQ/MECH=VAL
+
+	   . ER		- Error code - subject to change based
+	   		  on the value of sqlcod.		/TYP=N/REQ/MECH=REF
+
+	   RETURNS:
+	   . SQLCOD - SQL status code
+			00000 - Success
+			01500 - Success, at end of results table
+			01501 - Timeout  (not currently enabled)
+			50000 - General PROFILE/SQL error
+			50001 - Invalid stored procedure name
+	*/
+	
+	type String RETURN
+
+	set SQLCOD=$S(SQLCOD=100:"1500",1:+SQLCOD)
+
+	if SQLCOD>0,SQLCOD<1500 set SQLCOD=0
+	
+	set RETURN = {String}SQLCOD.justify(5, 1, "0")	// Zero pad
+
+	//Invalid stored procedure name
+	if (RETURN = 50001) set ER=0
+
+	quit RETURN
+
+
+FORMAT(String FMT)	// Redefine format masks for this message
+	/*
+	   If the /FORMAT qualifier is passed from the client request, this
+	   function will replace the edit masks defined by the system with
+	   those from the specified format table.  If no entry exists for the
+	   requested format, return an error.
+
+	   ARGUMENTS:
+	   . FMT    - Format to be used for current	/TYP=T/REQ/TBL=[DBTBL6E]/MECH=VAL
+		      client request.			
+
+	   RETURNS:
+	   . $$	    - Error status of the call.
+	*/
+
+	type Public String %MSKC,%MSKD,%MSKE,%MSKL,%MSKN,RM
+
+	type String X
+
+	// Load format from table
+	type RecordSTBLTFMT tfmt=Db.getRecord("STBLTFMT","FMT",1)
+	
+	// Invalid format
+	if tfmt.getMode()=0 set RM=$$^MSG(1350,FMT) quit 1
+	
+	set %MSKD=tfmt.mskd		// Date mask	
+	set %MSKL=tfmt.mskl		// Logical mask	
+	set %MSKC=tfmt.mskc		// Clock time mask	
+	set %MSKE=tfmt.mske		// Currency mask		
+	set %MSKN=tfmt.mskn		// Numeric mask	
+
+	quit 0
+
+
+STF	// Store and forward handling of rejected updates
+	/*
+	   This subroutine logs the original client message to an exception
+	   file along with the application reply when the message is a
+	   store and foward message and rejects.
+
+	*/
+
+	type Public String ER,REPLY,RM
+
+	type String NSEQ,ZBRCD,ZBUF,ZDATE,ZTOKEN,ZUID
+
+	set ZTOKEN=%SessionID	
+
+	// Buffer Name
+	type ResultSet rs=Db.select("BUFFER","DBBUF","TOKEN=:ZTOKEN")
+	if rs.isEmpty() quit	// Missing buffer name
+	if rs.next() set ZBUF=rs.getCol(1)
+		
+	type RecordTOKEN token=Db.getRecord("TOKEN","ZTOKEN",1)
+	if token.getMode()=0 quit
+	set ZUID=token.uid
+
+	type RecordSCAU scau=Db.getRecord("SCAU","ZUID",1)
+	if scau.getMode()=0 quit
+	set ZBRCD=scau.brcd	
+
+	if ZBRCD="" set ZBRCD=CUVAR.BOBR	// Back Office Branch Code
+
+	// Get next SEQ from STFSQL
+	set ZDATE=%CurrentDate
+	type ResultSet rsstf = Db.select("DISTINCT SEQ", "STFSQL", "DATE=:ZDATE", "SEQ DESC")
+	if rsstf.next() set NSEQ = rsstf.getCol("SEQ") + 1
+	else  set NSEQ = 1
+
+	type DbSet rs1=Db.selectDbSet("DBBUFCOM","TOKEN=:ZTOKEN AND BUFFER=:ZBUF")
+        if rs1.isEmpty() quit
+        while rs1.next() do {
+
+		type RecordDBBUFCOM  dbbuf=rs1.getRecord("DBBUFCOM")
+			
+           	// set the record in STFSQL
+           	type RecordSTFSQL stfsql=Class.new("RecordSTFSQL")
+           	set stfsql.date=%CurrentDate
+           	set stfsql.seq=NSEQ
+           	set stfsql.bufseq=dbbuf.bufrec
+           	set stfsql.brcd=ZBRCD
+           	set stfsql.uid=ZUID
+           	set stfsql.status=RM.get()
+           	set stfsql.sql=dbbuf.bufexpr
+           	do stfsql.bypassSave()
+           	}
+           	
+	set ER=0
+	set REPLY=""
+
+	quit
+
+
+VALID(String EXPR,String TOK,String SPEC)	// Check if message can be processed during end of day
+	/*
+	   When 24x7 mode is enabled INSERT, UPDATE and DELETE statements are
+	   prohibited for tables ACN, DEP and LN. Only public stored
+	   procedures (EXECUTE statements) are allowed.
+
+	   Note that the validity of statements in a BUFFER are checked when
+	   the transaction is committed.  This check is performed in program
+	   SQLBUF.
+	*/
+	type String CMD
+
+	set CMD=EXPR.piece(" ",1)
+	set EXPR = EXPR.extract(CMD.length()+2, EXPR.length())
+	set SPEC=0
+
+	// Do not restrict the following SQL statements during end-of-day
+	if ",BUFFER,CLOSE,CREATE,DESCRIBE,FETCH,OPEN,SELECT,"[(","_CMD_",") quit 1
+
+	// Restrict the following SQL statements during end-of-day
+	if ",ALTER,DROP,"[(","_CMD_",") quit 0
+
+	type Boolean VALID
+	type String TABLE,X
+
+	set VALID=1
+
+	if CMD="INSERT" do {
+
+		type String INTO
+
+		set X=$$TOK^SQL(EXPR,"INTO",.TOK)
+
+		if INTO.get()="" set INTO=X if INTO="" quit
+
+		set TABLE=$$FUN^SQL(INTO,,TOK)
+		set VALID=$$CHKTBL(TABLE)
+
+		if VALID=0 set VALID=1,SPEC=1
+
+		}
+
+	if CMD="UPDATE" do {
+
+		type String SET
+
+		set X=$$TOK^SQL(EXPR,"SET",.TOK)
+		if X'[(0.char()) set TABLE=X
+		else  set TABLE=$$UNTOK^%ZS(X,TOK)
+		set VALID=$$CHKTBL(TABLE)
+
+		}
+
+	if CMD="DELETE" do {
+
+		type String FROM
+
+		set X=$$TOK^SQL(EXPR,"FROM",.TOK)
+
+		if FROM.get()="" set FROM=X if FROM="" quit
+
+		set TABLE=$$FUN^SQL(FROM,,TOK)
+		set VALID=$$CHKTBL(TABLE)
+
+		}
+
+	if CMD="EXECUTE" do {
+		set X=EXPR.piece(" ",2)
+
+		if X.extract(1,2)'="$$" quit
+
+		set X=X.extract(3,X.length())
+		set X=X.piece("(",1)
+		if 'Db.isDefined("UTBLRTNS","X")  set VALID=0
+
+		}
+
+	quit VALID
+
+
+CHKTBL(String TABLE)	//Check if table is restricted
+
+	if TABLE["""" set TABLE=TABLE.stripQuotes()
+	if TABLE="ACN" quit 0
+	if TABLE="DEP" quit 0
+	if TABLE="LN" quit 0
+
+	quit 1
+
+vSIG()	quit "60673^35782^Dhanalakshmi R^20242"	// Signature - LTD^TIME^USER^SIZE

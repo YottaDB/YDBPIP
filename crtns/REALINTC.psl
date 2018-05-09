@@ -1,0 +1,458 @@
+REALINTC		/* 
+	---- Comments --------------------------------------------------------
+
+	This procedure, run by the @REALINTCALC function, performs the "real 
+	interest" calculation accepting a specific deposit product group, 
+	deposit product type and a deposit account number as the input.
+	
+	It runs for the value of the year from the current system processing 
+	date minus 1. For example, if the system processing date when the 
+	function is run is 02/10/2007 then the function will run for the year 
+	2006 (i.e., 2007 - 1).
+	
+	The "Last Annual Real Interest Amount" (DEP.REINTANLAMT) amount can be 
+	included on the annual statements for certain types of deposit accounts 
+	to disclose the total amount of "real interest" that was credited to 
+	each deposit account during the calendar year. 
+		
+	---- Revision History ------------------------------------------------
+	
+	04/06/07 - KinI - CR 26375
+		   Modified PROC section to update DEP.REINTANLAMT even when 
+		   inflation index is not positive. That also allows to avoid 
+		   "Attempt to divide by zero" error. Also modified to consider 
+		   the case when account opening or closing date is in January.
+	
+	02/17/07 - KinI - CR 24944
+		   Created procedure.
+	*/
+	
+	do START
+	
+	quit
+	
+	
+START
+	
+	type String CID, GRP, %READ, %TAB(), TYPE, VFMQ, WHERE
+	type Boolean ALLFLG = 0
+	
+	set (GRP,TYPE,CID) = "ALL"	
+	
+	set %TAB("GRP") = ".GRP1/TBL=[STBLGRP]GRP,DES:DISTINCT:QU ""[STBLGRP]CLS=""D"""":NOVAL"
+	set %TAB("TYPE") = ".QI1/DES=Product Type/TBL=[PRODDFTD]TYPE:DISTINCT:QU ""[PRODDFTD]GRP=<<GRP>>"":NOVAL"
+	set %TAB("CID") = ".ACCOUNTS1/HLP=[DEP]CID/TBL=[DEP]:DISTINCT:QU ""[DEP]TYPE=<<TYPE>>"":NOVAL/XPP=I X'=""ALL"" S %EXT=1,ZCLS=""D"",ZGRP=GRP do ^UACN"	
+	
+	set %READ = "@@%FN,,,GRP/REQ,TYPE/REQ,CID/REQ"
+	do ^UTLREAD if (VFMQ = "Q") quit
+	
+	// Build dynamic result set based upon user's input for the deposits 
+	// where Annual Inflation Rate Calculation Index is defined
+	
+	if (GRP = "ALL") , (TYPE = "ALL") , (CID = "ALL") set WHERE = "ANLINFLCALIN IS NOT NULL" , ALLFLG = 1		
+
+	else  if (GRP '= "ALL") , (TYPE '= "ALL") , (CID '= "ALL")) set WHERE = "GRP=:GRP AND TYPE=:TYPE AND CID=:CID"
+	else  if (GRP '= "ALL") , (TYPE '= "ALL") , (CID = "ALL")) set WHERE = "GRP=:GRP AND TYPE=:TYPE"
+	else  if (GRP '= "ALL") , (TYPE = "ALL") , (CID '= "ALL")) set WHERE = "GRP=:GRP AND CID=:CID"
+	else  if (GRP = "ALL") , (TYPE '= "ALL") , (CID '= "ALL")) set WHERE = "TYPE=:TYPE AND CID=:CID"
+	else  if (GRP '= "ALL") , (TYPE = "ALL") , (CID = "ALL")) set WHERE = "GRP=:GRP"
+	else  if (GRP = "ALL") , (TYPE '= "ALL") , (CID = "ALL")) set WHERE = "TYPE=:TYPE"
+	else  if (GRP = "ALL") , (TYPE = "ALL") , (CID '= "ALL")) set WHERE = "CID=:CID"
+	
+	if ALLFLG = 0 set WHERE = WHERE_" AND ANLINFLCALIN IS NOT NULL"
+									
+	#ACCEPT DATE=02/22/2007;PGM=KinI;CR=24944
+	type ResultSet rs=Db.select("CID","DEP", WHERE)
+	
+	while rs.next() do PROC(rs.getCol("CID"))
+		
+	quit
+	
+	
+PROC(String CID)	// Account Number
+
+	type public String ET, RM
+	type public Boolean ER
+	type Boolean CASE1, CASE2, CASE3, CASE4
+	type Date BEGMON, FD, TD
+	type Number AVGBAL, DADJFCTR, DTCMON, DTCYEAR, ESTINDX1DAY, ESTINDXBEG
+	type Number ESTINDXEND, I, INDXBEG1, INDXBEG2, INDXEND1, INDXEND2, J
+	type Number MONFCTRBEG, MONFCTREND, NUMDAYS, ODTMON, ODTYEAR, PRYEAR
+	type Number QUOT, YEAR
+	type String UAVB()
+
+	set (CASE1, CASE2, CASE3, CASE4) = 0
+	
+	catch error {
+
+		set ET=error.type
+ 
+		if ET["%GTM-" do ZE^UTLERR quit
+		set ET=ET_"-"_error.thrownAt
+		set RM=error.description
+		do ^UTLERR
+		}
+
+	type RecordDEP dep=Db.getRecord("DEP","CID")
+		
+	set YEAR = $$YEAR^SCADAT(%SystemDate) - 1	// Reporting year
+	set PRYEAR = YEAR - 1	      // Year prior to the reporting year
+	set ODTYEAR = $$YEAR^SCADAT(dep.odt)  	  // Account opening year
+	set ODTMON = $$MON^SCADAT(dep.odt)	 // Account opening month
+	// Account closing year and month
+	if ('dep.dtc.isNull()) do {
+		set DTCYEAR = $$YEAR^SCADAT(dep.dtc)
+		set DTCMON = $$MON^SCADAT(dep.dtc)
+		}				  	
+	
+	type RecordUTBLANLINFLR anlinflr = Db.getRecord("UTBLANLINFLR","INFLINDXNM=:dep.anlinflcalin, INFLINDXYEAR=:YEAR",1)
+	type RecordUTBLANLINFLR anlinflr1 = Db.getRecord("UTBLANLINFLR","INFLINDXNM=:dep.anlinflcalin, INFLINDXYEAR=:PRYEAR",1)
+
+	
+	// Define Inflation Indexes for the beginning and end of the investment 
+	// reporting period ---------------------------------------------------
+	
+	
+	// CASE1: account is opened prior to the reporting year and kept open
+	if (ODTYEAR < YEAR) , (dep.dtc.isNull()) do { quit:ER
+
+		set CASE1 = 1
+
+		// Get index for the prior to the reporting year's November
+		set INDXBEG1 = $$GETINDEX(.anlinflr1, 11) quit:ER
+
+		// Get index for the prior to the reporting year's December
+		set INDXBEG2 = $$GETINDEX(.anlinflr1, 12) quit:ER
+		
+		// Get index for the the reporting year's November
+		set INDXEND1 = $$GETINDEX(.anlinflr, 11) quit:ER
+
+		// Get index for the reporting year's December  
+		set INDXEND2 = $$GETINDEX(.anlinflr, 12) 	     	
+		}
+
+	// CASE2: account is opened prior to the reporting year and closed 
+	// during reporting year
+	if (ODTYEAR < YEAR) , (DTCYEAR.get() = YEAR) do { quit:ER
+		
+		set CASE2 = 1
+		
+		// Get index for prior to the reporting year's November
+		set INDXBEG1 = $$GETINDEX(.anlinflr1, 11) quit:ER
+		
+		// Get index for prior to the reporting year's December		  
+		set INDXBEG2 = $$GETINDEX(.anlinflr1, 12) quit:ER
+		
+		// Get index for the month prior to the account closing
+		// Consider when closing date is in January (DTCMON=1) 
+		if (DTCMON = 1) set INDXEND1 = $$GETINDEX(.anlinflr1, 12) quit:ER
+		else  set INDXEND1 = $$GETINDEX(.anlinflr, DTCMON.get()-1) quit:ER
+		
+		// Get index for the account closing month				
+		set INDXEND2 = $$GETINDEX(.anlinflr, DTCMON.get())	    
+		}
+
+	// CASE3: account is opened during reporting year and kept open
+	if (ODTYEAR = YEAR) , (dep.dtc.isNull()) do { quit:ER
+
+		set CASE3 = 1
+		
+		// Get index for the month prior to the account opening
+		// Consider when opening date is in January (ODTMON=1)
+		if (ODTMON = 1) set INDXBEG1 = $$GETINDEX(.anlinflr1, 12) quit:ER
+		else  set INDXBEG1 = $$GETINDEX(.anlinflr, ODTMON-1) quit:ER
+		
+		// Get index for the account opening month
+		set INDXBEG2 = $$GETINDEX(.anlinflr, ODTMON) quit:ER
+		
+		// Get index for the reporting year's November  
+		set INDXEND1 = $$GETINDEX(.anlinflr, 11) quit:ER
+		
+		// Get index for the reporting year's December  
+		set INDXEND2 = $$GETINDEX(.anlinflr, 12)  		
+		}
+	
+	// CASE4: account is opened and closed during reporting year
+	if (ODTYEAR = YEAR) , (DTCYEAR.get() = YEAR) do { quit:ER
+		
+		set CASE4 = 1
+		
+		// Get index for month prior to the account opening
+		// Consider when opening date is in January (ODTMON=1)
+		if (ODTMON = 1) set INDXBEG1 = $$GETINDEX(.anlinflr1, 12) quit:ER
+		else  set INDXBEG1 = $$GETINDEX(.anlinflr, ODTMON-1) quit:ER
+		
+		// Get index for the account opening month
+		set INDXBEG2 = $$GETINDEX(.anlinflr, ODTMON) quit:ER
+		
+		// Get index for the month prior to the account closing
+		// Consider when closing date is in January (DTCMON=1) 
+		if (DTCMON = 1) set INDXEND1 = $$GETINDEX(.anlinflr1, 12) quit:ER			  
+		else  set INDXEND1 = $$GETINDEX(.anlinflr, DTCMON.get()-1) quit:ER  
+		
+		// Get index for the account closing month
+		set INDXEND2 = $$GETINDEX(.anlinflr, DTCMON.get()) 		  
+		}
+
+	// If any index is zero or (hypothetically) negative, update 
+	// dep.reintanlamt without considering Inflation Rate.
+	if (INDXBEG1 '> 0) ! (INDXBEG2 '> 0) ! (INDXEND1 '> 0) ! (INDXEND2 '> 0) do DEPUPD(.dep) quit
+		
+						
+	// Calculations for the beginning of the investment period ------------
+
+				
+	// Find Monthly Factor for the two months related to the beginning of the 
+	// investment period.
+	set MONFCTRBEG = $$TRUNCATE(INDXBEG2 / INDXBEG1)
+		
+	// Find Quotient (based on the number of days) for the month, which 
+	// includes the day prior to the first day of the investment period.
+
+	// CASE1 and CASE2 deals with prior to reporting year month of December.
+	if (CASE1) ! (CASE2) set NUMDAYS = 31
+	// CASE3 and CASE4 deals with the account opening month.       
+	if (CASE3) ! (CASE4) set NUMDAYS = $$NODM^SCADAT(dep.odt)
+	
+	set QUOT = $$TRUNCATE(1 / NUMDAYS)
+
+	// Find daily adjustment factor (exponential) for the month, which 
+	// includes the day prior to the first day of the investment period.
+	set DADJFCTR = $$TRUNCATE(MONFCTRBEG ** QUOT)
+	
+	/*
+	 Find estimated daily index value for the first day of the month, which 
+	 includes the day prior to the first day of the investment period.
+	 
+	 It would be either the value for the December 1st for CASE1 and CASE2 
+	 or the beginning of the month when the account was opened for CASE3 
+	 and CASE4.
+	*/
+	set ESTINDX1DAY = $$TRUNCATE(INDXBEG1 * DADJFCTR)
+
+	// Find estimated daily index values for the remaining days of the month,
+	// which includes the day prior to the first day of the investment period.
+
+	// CASE1 and CASE2: calculate ESTINDXBEG up to the last day of December.		
+	if (CASE1) ! (CASE2) do {
+		
+		// Estimated Daily index for December 1st
+		set ESTINDXBEG = ESTINDX1DAY
+		
+		// Estimated Daily index for December 31st. Day 1 was 
+		// calculated already so start from the 2nd day of month.
+		for I = 2:1:31  set ESTINDXBEG = $$TRUNCATE(ESTINDXBEG) * DADJFCTR 
+		set ESTINDXBEG = $$TRUNCATE(ESTINDXBEG)
+		}						
+
+	// CASE3 and CASE4: calculate ESTINDXBEG till the account opening date.			
+	if (CASE3) ! (CASE4) do {
+		
+		/* 
+		 Get the number of remaining days from beginning of month 
+		 till the account opening date. Day 1 was calculated already 
+		 so start from the 2nd day of month.
+		*/
+		set BEGMON = $$BOMJD^SCADAT(dep.odt)
+		set J = $$NOD^SCADAT(BEGMON, dep.odt)
+
+		set ESTINDXBEG = ESTINDX1DAY
+		for I = 2:1:J  set ESTINDXBEG = $$TRUNCATE(ESTINDXBEG) * DADJFCTR
+		set ESTINDXBEG = $$TRUNCATE(ESTINDXBEG)
+		}
+
+			
+	// Calculations for the end of the investment period ------------------
+	
+
+	// Find Monthly Factor for the two months related to the end of the 
+	// investment period.
+	set MONFCTREND = $$TRUNCATE(INDXEND2 / INDXEND1)
+	
+	// Find Quotient (based on the number of days) for the month, which 
+	// includes the day prior to the last day of the investment period.
+
+	// CASE1 and CASE3 deals with prior to reporting year month of December. 
+	if (CASE1) ! (CASE3) set NUMDAYS = 31
+	// CASE2 and CASE4 deals with the account closing month. 
+	if (CASE2) ! (CASE4) set NUMDAYS = $$NODM^SCADAT(dep.dtc)
+	
+	set QUOT = $$TRUNCATE(1 / NUMDAYS)
+	
+	// The daily adjustment factor for the month, which includes the day 
+	// prior to the last day of the investment period.
+	set DADJFCTR = $$TRUNCATE(MONFCTREND ** QUOT)
+	
+	/*
+	 The estimated daily index value for the first day of the month, which 
+	 includes the day prior to the last day of the investment period.
+	
+	 It would be either the value for the December 1st for CASE1 and CASE2 
+	 or the beginning of the month when the account was closed for CASE3 
+	 and CASE4.
+	 */
+	set ESTINDX1DAY = $$TRUNCATE(INDXEND1 * DADJFCTR)
+	
+	// Find estimated daily index values for the remaining days of the month, 
+	// which includes the day prior to the last day of the investment period.
+
+	// CASE1 and CASE3: account is open.
+	// Calculate ESTINDXEND up to the last day of December.	
+	if (CASE1) ! (CASE3) do {
+		
+		// Estimated Daily index for December 1st
+		set ESTINDXEND = ESTINDX1DAY
+		
+		// Estimated Daily index for December 31st. Day 1 was 
+		// calculated already so start from the 2nd day of month.  
+		for I = 2:1:31  set ESTINDXEND = $$TRUNCATE(ESTINDXEND) * DADJFCTR 
+		set ESTINDXEND = $$TRUNCATE(ESTINDXEND)
+		}						
+
+	// CASE2 and CASE4: account was closed during reporting year.
+	// Calculate ESTINDXEND up to the account closing date. 
+	if (CASE2) ! (CASE4) do {
+		
+		// Get the number of remaining days (J) from beginning of month 
+		// till the account closing date (including one).
+		set BEGMON = $$BOMJD^SCADAT(dep.dtc)
+		set J = $$NOD^SCADAT(BEGMON, dep.dtc)
+
+		set ESTINDXEND = ESTINDX1DAY
+		for I = 1:1:J  set ESTINDXEND = $$TRUNCATE(ESTINDXEND) * DADJFCTR
+		set ESTINDXEND = $$TRUNCATE(ESTINDXEND)
+		}
+	
+	// Find the Inflation Rate. 
+	type Number INFLRATE = $$TRUNCATE((ESTINDXEND / ESTINDXBEG) - 1)
+	
+	// Update dep.reintanlamt without considering Inflation Rate.
+	if (INFLRATE '> 0) do DEPUPD(.dep) quit
+	
+	// Calculate Average Daily Balance depending on DEP.IRCB (if 1 - 
+	// calculate average ledger balance; if 3 - average collected balance).
+	
+	// Reporting year beginning is account was opened before reporting year
+	if (CASE1) ! (CASE2) set FD = ("1/1/"_YEAR).toDate()
+	// Account opening date
+	if (CASE3) ! (CASE4) set FD = dep.odt  
+	// End of reporting year is account is still open
+	if (CASE1) ! (CASE3) set TD = ("12/31"_YEAR).toDate()
+	// Account closing date  
+	if (CASE2) ! (CASE4) set TD = dep.dtc  
+	
+	/*
+	 For the Average Balance calculation, specify the following CTL 
+	 parameter's positions:
+	 3    Calculate average collected/available balance
+	 19   Use zero in place of negative balances	                         
+	 20   Evaluate history transactions according to the effecvtive date
+	*/
+	do INIT^UAVB(.dep,dep.cid,FD,TD,"00100000000000000011")
+	
+	if (dep.ircb = 1) set AVGBAL = +UAVB(1)
+	if (dep.ircb = 3) set AVGBAL = UAVB(2).piece("|",3)
+	
+	// Get the "Real Interest" by substructing the adjustment for inflation 
+	// from prior tax year interest.
+	set dep.reintanlamt = dep.ipty - (AVGBAL * INFLRATE)
+	
+	do dep.bypassSave()
+	
+	quit
+
+DEPUPD(RecordDEP dep)		// Deposit account object
+
+	set dep.reintanlamt = dep.ipty 
+	do dep.bypassSave()
+		
+	quit
+	
+	
+GETINDEX(RecordUTBLANLINFLR anlinflr,	// Annual Inflation Rate Calc - Rate Level record
+	 Number MON)			// Month as a Number
+	 
+	// Return the inflation index value for the given month
+		 
+	type public Boolean ER
+	type public String RM
+	type public Number PRYEAR, YEAR	 
+	type Number RATE
+	
+	if (MON = 1) set RATE = anlinflr.inflindxjan if 'RATE.isNull() quit RATE
+	if (MON = 2) set RATE = anlinflr.inflindxfeb if 'RATE.isNull() quit RATE
+	if (MON = 3) set RATE = anlinflr.inflindxmar if 'RATE.isNull() quit RATE
+	if (MON = 4) set RATE = anlinflr.inflindxapr if 'RATE.isNull() quit RATE
+	if (MON = 5) set RATE = anlinflr.inflindxmay if 'RATE.isNull() quit RATE
+	if (MON = 6) set RATE = anlinflr.inflindxjun if 'RATE.isNull() quit RATE
+	if (MON = 7) set RATE = anlinflr.inflindxjul if 'RATE.isNull() quit RATE
+	if (MON = 8) set RATE = anlinflr.inflindxaug if 'RATE.isNull() quit RATE
+	if (MON = 9) set RATE = anlinflr.inflindxsep if 'RATE.isNull() quit RATE
+	if (MON = 10) set RATE = anlinflr.inflindxoct if 'RATE.isNull() quit RATE
+	if (MON = 11) set RATE = anlinflr.inflindxnov if 'RATE.isNull() quit RATE
+	if (MON = 12) set RATE = anlinflr.inflindxdec if 'RATE.isNull() quit RATE
+
+	// The Inflation Rate is null - log the exception
+		
+	type Number YR
+		
+	if anlinflr.INFLINDXYEAR = YEAR set YR = YEAR
+	else  if anlinflr.INFLINDXYEAR = PRYEAR set YR = PRYEAR	
+		
+	// Get the name of the month
+	type RecordDBCTLDVFMCAL dvfmcal=Db.getRecord("DBCTLDVFMCAL","TYP='ML'",1)		
+		
+	// Annual inflation index value for month of ~p1 and year ~p2 not defined
+	set ER=1 set RM=$$^MSG(6234,dvfmcal.des.piece(",",MON),YR) do LOGERR
+
+	quit ""
+
+	
+TRUNCATE(VALUE)		// Input Value
+	
+	// Truncate the value after the 8th decimal place
+
+	type Number N = VALUE.piece(".").length() + 9 
+	
+	quit VALUE.extract(1,N)
+	
+
+LOGERR	// File DAYEND exception
+
+	type public Number CID
+	type public String %FN, RM
+	type String EXCDESC
+	type Number SEQ
+	
+	type RecordSCATBL scatbl = Db.getRecord("SCATBL","FN=:%FN")
+	set EXCDESC = scatbl.desc
+	
+	type RecordDAYENDEXCR dayendexcr = Db.getRecord("DAYENDEXCR","TJD=:%SystemDate,RTN=:%RoutineName",1)
+	if 'dayendexcr.getMode() do {
+		set dayendexcr.tjd = %SystemDate
+		set dayendexcr.rtn = %RoutineName
+		set dayendexcr.desc = EXCDESC
+		do dayendexcr.bypassSave()
+		}
+		
+	set SEQ = Db.nextVal("DAYENDEXC","TJD=%SystemDate,RTN=:%RoutineName,SORT='*'")
+	
+	// This files just generic error "Account not processed"
+	type RecordDAYENDEXC dayendexc = Db.getRecord("DAYENDEXC","TJD=%SystemDate,RTN=:%RoutineName,SORT='*',SEQ=:SEQ",1)
+	if 'dayendexc.getMode() do {
+		set dayendexc.tjd = %SystemDate
+		set dayendexc.rtn = %RoutineName
+		set dayendexc.sort = "*"
+		set dayendexc.seq = SEQ
+		set dayendexc.recid = CID
+		if RM.isNull() set dayendexc.misc = $$^MSG(4116) // Account Not Processed
+		else  set dayendexc.misc = RM
+		set dayendexc.time = %CurrentTime
+		do dayendexc.bypassSave()
+		}
+
+	quit	
+	
+	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60746^48745^Irina Kin^15977"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,342 @@
+public SWIFTPUR	// SWIFT Messages Purge Utility
+	/*
+
+	  ORIG:  YANG - 04/27/94
+	  DESC:  SWIFT Messages Purge Utility
+
+	         To be purged, a message's status must be one of the following:
+
+	                 3 - Completed
+	                 5 - Deleted
+	                 8 - Received
+
+	         For each message, there will be two file definitions to be purged:
+
+	         SWIFT             SWIFT Message File
+	         SWHIST            SWIFT History File
+
+	         For each global, there will be one archive file (ie two files):
+
+	         SCAU$SPOOL:SWT_YYYYMMDD_TYPE.PUR
+	         SCAU$SPOOL:SWT_YYYYMMDD_TYPE_HIST.PUR
+
+	  ---- Revision History -------------------------------------------------
+	  
+	  07/25/06 - Pete Chenard - CR 22835
+	  	     Modified calls to .close() method to remove the "DELETE"
+	  	     parameter, as this method does not support parameters.
+
+	   02/02/06 - KELLYP - CR 18292
+	   	      Rewrote entire procedure as the original code that wrote
+	   	      out to a file was not included when the procedure was
+	   	      converted to PSL.  Also removed pre-2003 revision history.
+
+           09/26/05 - KUMARB - CR 17050
+           	      Modifed section SWPURG, to declare ER as public Boolean.
+           	      Modified section LOOP, to check "MSG=:J" in Db.select.
+           	      Initialized SEQ to 1 in the beginning of the procedure.
+           
+           07/28/05 - SkariahV- CR16679
+	              Removed #WARN and #OPTIMIZE directives.
+	              
+	   05/28/03 - BHANGALEV - 51351
+	   	      Converted to PSL
+
+	--------------------------------------------------------------------------
+	*/
+
+	type public String ER,RM
+
+	type Number conmax,COUNT(),paymax,SEQ,SWCOLS,SWHCOLS,TYPE,Y
+	type String YEARMMDD
+	
+	set Y=1
+	
+	// Obtain the retention days from Customer Variables
+	set paymax=CUVAR.pmthis
+	
+	// Default 1 year
+	if paymax.isNull() set paymax=365
+	
+	set conmax=CUVAR.cnfrmhis
+	
+	// Default 1 year
+	if conmax.isNull() set conmax=365
+	
+	set YEARMMDD=$$DAT^%ZM(%SystemDate,"YEARMMDD")
+	
+	// Get list of SWIFT non-computed columns
+	set SWCOLS=""
+	type ResultSet swd1d=Db.select("DI","DBTBL1D","%LIBS='SYSDEV' AND FID='SWIFT' AND CMP IS NULL")
+	while swd1d.next() set SWCOLS=SWCOLS_swd1d.getCol("DI")_$C(9)
+	set SWCOLS=SWCOLS.extract(1,SWCOLS.length()-1)	// Remove trailing tab
+	
+	// Get list of SWHIST non-computed columns
+	set SWHCOLS=""
+	type ResultSet swh1d=Db.select("DI","DBTBL1D","%LIBS='SYSDEV' AND FID='SWHIST' AND CMP IS NULL")
+	while swh1d.next() set SWHCOLS=SWHCOLS_swh1d.getCol("DI")_$C(9)
+	set SWHCOLS=SWHCOLS.extract(1,SWHCOLS.length()-1) // Remove trailing tab
+		
+	type ResultSet rs=Db.select("TYPE","STBLSWFTDSC")
+	while rs.next() do {
+
+		set TYPE=rs.getCol("TYPE")
+		set COUNT(TYPE)=COUNT(TYPE).get() 
+		if COUNT(TYPE).isNull() set COUNT(TYPE)=0
+		
+		do SWPURG(TYPE)
+		
+		// Display messages when purge is done
+		set ER="W"
+		
+		type ResultSet rs1=Db.select("SEQ","PURREC","PURDAT=:%SystemDate","SEQ DESC")
+		if rs1.next() set SEQ=rs1.getCol("SEQ")+1
+		else  set SEQ=1
+		
+		type RecordPURREC purrec=Db.getRecord("PURREC","PURDAT=:%SystemDate,SEQ=:SEQ",1)
+
+		// ~p1~p2 records purged
+		set purrec.des=$$^MSG(7346,COUNT(TYPE),"MT"_TYPE)
+		do purrec.save()
+
+		set Y=Y+1
+		} 
+
+	// Run function @REP664 to view purged SWIFT records report
+	set RM=$$^MSG(4007)
+	quit
+ 
+
+SWPURG(Number TYPE)
+
+	/*
+	  ARGUMENT:
+	  	. TYPE		Message Type	/REQ/MECH=VAL
+	  	
+	   To purge two globals for a specified MT type (100,200,202,210,300,etc)
+
+	   Find the type of records to be purged from the SWIFT Index file:
+	   
+	   The records are archived in a file in the SCAU$SPOOL directory named
+	   SCA$SPOOL:SWT_YYYYMMDD_TYPE.PUR.
+
+	*/
+	
+	type public Boolean ER
+	type public String RM,SWCOLS,SWHCOLS,YEARMMDD
+
+	type IO io=Class.new("IO")
+	type IO ioh=Class.new("IO")
+
+	// For SWIFT
+	set io.directory=$$SCAU^%TRNLNM("SPOOL")
+	set io.fileName="SWT_"_YEARMMDD_"_"_TYPE_".PUR"
+	set io.openParams="NEWV/WRITE"
+	set io.recordSize=32000
+	
+	// For SWHIST
+	set ioh.directory=$$SCAU^%TRNLNM("SPOOL")
+	set ioh.fileName="SWT_"_YEARMMDD_"_"_TYPE_"_HIST.PUR"
+	set ioh.openParams="NEWV/WRITE"
+	set ioh.recordSize=32000
+		
+	// Error opening  ~p1 - Process aborted
+	do io.open()
+
+	if ER.get() do { quit
+		set RM=$$^MSG(7878,io.fileName)
+		}	
+	
+	// Error opening  ~p1 - Process aborted	
+	do ioh.open()
+	if ER.get() do { quit
+		set RM=$$^MSG(7878,ioh.fileName)
+		} 
+	
+	// Write out schema to files (one time for each file)
+	do io.write(SWCOLS_$C(13,10))
+	do ioh.write(SWHCOLS_$C(13,10))
+	
+	/*
+	 Loop through SWIFT, check each transaction reference number
+	 for purge candidates
+	*/
+	do LOOP(.io,.ioh)
+
+	quit
+
+	
+LOOP(IO io,IO ioh)
+	
+	/*
+	  ARGUMENTS:
+	  	. io		Input output file	/REQ/MECH=REF
+	  	. ioh		Input output file	/REQ/MECH=REF
+	  	
+	*/
+
+	type public Number conmax,COUNT(),paymax,TYPE
+
+	type Date DATE
+	type Number FREEPTR,STATUS,TSTDATE
+	type String SWDIRECT,TRREFNO
+
+	if TYPE=300 set TSTDATE=conmax
+	else  set TSTDATE=paymax
+
+	for STATUS=3,5,8 do {
+		type ResultSet rs=Db.select("DATE,TRREFNO,SWDIRECT,FREEPTR","SWIFT","MSG=:TYPE AND STATUS=:STATUS")
+		while rs.next() do {
+			
+			set DATE=rs.getCol("DATE")
+			set TRREFNO=rs.getCol("TRREFNO")
+			set SWDIRECT=rs.getCol("SWDIRECT")
+			set FREEPTR=rs.getCol("FREEPTR")
+
+			if ('DATE.isNull()),(DATE'>(%SystemDate-TSTDATE)) do {
+				// Archive record count
+				set COUNT(TYPE)=COUNT(TYPE).get()+1
+					
+				// Purge the record from SWIFT
+				do PSWIFT(SWDIRECT,TYPE,TRREFNO,.io)
+						
+				// Purge the record from SWHIST
+				do PSWHIST(TYPE,TRREFNO,.ioh)
+				}
+			}
+		}
+
+	// Remove unnecessary records from SWQCNTD
+	do PSWCMPQ
+
+	// Close output files, delete empty files
+	if COUNT.get(TYPE)=0 do {
+		do io.close()	// leave this here for now, for when .close()
+		do ioh.close()  // actually does support device close parameters.
+		}
+	
+	else  do {
+		do io.close()
+		do ioh.close()
+		}
+		
+	// Update the swift control FID SWIFTCRL
+	do SWIFTCRL(.COUNT)
+	
+	quit
+
+
+PSWIFT(String SWDIRECT,Number TYPE,String TRREFNO,IO io)
+
+	/*
+	  ARGUMENTS:
+	  	. SWDIRECT	Direction
+	  			(Incoming/Outgoing)	/REQ/MECH=VAL
+	  			
+	  	. TYPE		Message Type		/REQ/MECH=VAL
+	  	. TRREFNO	Reference Number	/REQ/MECH=VAL
+	  	
+	  1.  Archive SWIFT for each message type then purge SWIFT.
+	      Archive file name is: SCAU$SPOOL:SWT_YYYYMMDD_TYPE.PUR
+	  2.  Purge SWIFT message source file SWIFT
+	*/
+
+	type public Number FREEPTR
+	type public String SWCOLS
+
+	// Write out SWIFT record
+	do io.write($$DYNSEL(SWCOLS,"SWIFT","SWDIRECT=:SWDIRECT AND TRREFNO=:TRREFNO AND MSG=:TYPE",""))
+
+	if 'FREEPTR.isNull() do {
+		type DbSet ds=Db.selectDbSet("SWFREE","SWDIRECT=:SWDIRECT AND PTR=:FREEPTR","SWDIRECT,PTR,FLD,SEQ")
+		while ds.next() do {
+			type RecordSWFREE swfree=ds.getRecord("SWFREE")
+			do io.write(swfree.swdirect_$C(9)_swfree.ptr_$C(9)_swfree.fld_$C(9)_swfree.seq_$C(9)_swfree.fldtxt_$C(13,10))
+			}
+		do Db.delete("SWFREE","SWDIRECT=:SWDIRECT AND PTR=:FREEPTR")
+		}	
+		
+	do Db.delete("SWIFT","SWDIRECT=:SWDIRECT AND TRREFNO=:TRREFNO AND MSG=:TYPE")
+	do Db.delete("SWIFTSEQ","SWDIRECT=:SWDIRECT AND TRREFNO=:TRREFNO AND MSG=:TYPE")
+	
+	quit
+
+
+PSWHIST(Number TYPE,String TRREFNO,IO ioh)
+
+	/*
+	  ARGUMENTS:
+	  	. TYPE		Message Type		/REQ/MECH=VAL
+	  	. TRREFNO	Reference Number	/REQ/MECH=VAL
+	  	
+	  1.  Archive SWHIST for each message type then purge SWHIST.
+	      Archive file name is: SCAU$SPOOL:SWT_YYYYMMDD_TYPE_HIST.PUR
+	  2.  Purge history file SWHIST(TRREFNO,MSG,SEQ).
+	*/
+
+	type public String SWHCOLS
+
+	do ioh.write($$DYNSEL(SWHCOLS,"SWHIST","TRREFNO=:TRREFNO AND MSG=:TYPE","TRREFNO,MSG,SEQ"))
+
+	// Purge from SWIFT History file SWHIST
+	do Db.delete("SWHIST","TRREFNO=:TRREFNO AND MSG=:TYPE") 
+
+	quit
+
+
+DYNSEL(String SELECT,String TABLE,String WHERE,String ORDBY)	
+	// Dynamic select stub - returns tab-delimited data, CR/LF delimited rows
+
+	type String RETURN
+
+	type ResultSet rs=Db.select(SELECT,TABLE,WHERE,ORDBY)
+	while rs.next() set RETURN=rs.getRow()_$C(13,10)
+	
+	quit RETURN
+ 
+ 
+PSWCMPQ	
+	/*  
+	 Dispose of all records in the completed queue with a date prior to
+	 the "CUTOFF" date, which is today's date less the greatest number
+	 of retention days.  These records are not archived, as the SWIFTQ
+	 can be rebuilt based upon status, if necessary.
+	*/
+
+	type public Number conmax,paymax
+	type Date CUTOFF
+
+	if conmax>paymax set CUTOFF=%SystemDate-conmax
+	else  set CUTOFF=%SystemDate-paymax
+
+	do Db.delete("SWQCNTD","QUE='CMP' AND DT<:CUTOFF")
+	do Db.delete("SWQCNTD","QUE='REC' AND DT<:CUTOFF")
+
+	quit
+
+
+SWIFTCRL(Number COUNT)
+
+	/*
+	  ARGUMENTS:
+	  	. COUNT		Record count		/REQ/MECH=REF
+	  	
+	   Update the control global for restoring process:
+	   swiftcrl.count=COUNT
+
+	   With this global, the user will get look-up table with "date purged".
+	   User will also get look-up table for the types purged on that date.
+	*/
+
+	type String TYPE
+	set TYPE=""
+	for  set TYPE=COUNT(TYPE).order() quit:TYPE.isNull()  do {
+		if COUNT(TYPE)'=0 do {
+			type RecordSWIFTCRL swiftcrl=Db.getRecord("SWIFTCRL","PURDAT=%SystemDate,PURTYP=:TYPE",1)
+			set swiftcrl.count=COUNT(TYPE)
+			do swiftcrl.bypassSave()
+			}
+		}
+	quit
+
+vSIG()	quit "60472^62255^Pete Chenard^8689"	// Signature - LTD^TIME^USER^SIZE

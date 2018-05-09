@@ -1,0 +1,147 @@
+public MRPC078(String return,Number versn,Number CID,Date EFD,String ctl)
+	/*
+	Procedure ID: MRPC078
+	DESC: Loan Payoff Status
+	KEYWORDS: RPC
+
+	ARGUMENTS:
+		. return  Loan Payoff Status data	/TYP=T/REQ/MECH=REFNAM:W
+
+		. versn	  ^MRPC078 version number   	/TYP=N/REQ/MECH=VAL
+			  current version=4
+
+		. CID	  Account Number	  	/TYP=N/REQ/MECH=VAL
+
+		. EFD	  Payoff Effective Date		/TYP=D/NOREQ/MECH=VAL
+
+		. ctl	  Control			/NOREQ/MECH=VAL
+
+			  Position 1 -  0) Include payoff fees, and "I","P" fees
+					1) Include only "I","P" fees (for RPOO)
+
+			  Position 2 -  null) Not Applicable - bypass ^UANTIC
+					0) Do not anticipate pending payments
+					1) Anticipate pending payments	    
+
+	RETURNS:
+		. $$      Error Message	   		/TYP=T
+			  Null= No Error
+
+	RELATED:
+		. $$^PBSMRPC - MRPC Service Class Driver
+
+	EXAMPLE:
+		S RM=$$^MRPC078(.VAL,1,CID,EFD,"01")
+
+	---- Revision History ------------------------------------------------
+	
+	08/07/07 - CHHABRIS - CR28581
+		   Retrofit of CR8903 from Profile01 view.
+
+		   04/07/04 - KELLYP - CR 8903
+		      Modified code to include LN.POIF (XLN09 piece 3) between
+		      POEA (piece 2) and POIA (piece 4) in the return string.
+	
+	07/18/07 - MBUIM - CR 27841
+		Modified to include additional pieces 12-16 for XLN28, 22-24 
+		for XLN09 and (ln.vatintdue, ln.vatfeedue, ln.vatlchgdue)
+		in new version 4 of the MRPC. This is for VAT calculation and 
+		payoff enhancement. Please note that version 2 and 3 introduced 
+		in Profile01 of the MRPC are yet to be added to Profile_v72.
+
+	04/06/06 - KELLYP - CR 20520
+		Changed all reference of the % variable to $C(9).  % wasn't 
+		used consistently and was causing problems in $TR references.
+
+	07/12/05 - KinI - 16566
+		Replaced "data" variable with "lndata" since "data" is used 
+		and being reset by EXECSP^%DBAPI which is called when running 
+		Payoff Status report for the date in the past.
+		Removed old revision history.
+		   
+	06/06/05 - ScottC - 15816
+		Modify the set data code to remove quotes. It
+		was literally passing in the table.column values in 
+		the return string.
+					
+	----------------------------------------------------------------------
+	*/
+
+	type public Boolean ER
+	type public String %MSKD, RM
+	type String lndata, str, XLN09, XLN28
+	type Number I, %NOLOCK, PROBAL
+	
+	set %NOLOCK=1
+	set %ProcessMode=2
+
+	// Version number of client message is not compatible with server
+	if (versn.get()<1)!(versn.get()>4) quit $$ERRMSG^PBSUTL($$^MSG(2951))
+
+	// Invalid account ~p1
+	type RecordLN ln=Db.getRecord("LN","CID=:CID",1)
+	if 'ln.getMode() quit $$ERRMSG^PBSUTL($$^MSG(1259,CID))
+
+	// Default payoff effective date
+	if EFD.get()="" set EFD=%SystemDate
+
+	// Effective date may not be prior to ~p1
+	if EFD<ln.odd quit $$ERRMSG^PBSUTL($$^MSG(878,$$DAT^%ZM(ln.odd,%MSKD.get())))
+
+	// default control
+	if ctl.get()="" set ctl="00"
+	set str=""
+
+	set lndata=ln.title1_$C(9)_ln.fsinv_$C(9)_ln.balcmp_$C(9)_ln.acr_$C(9)_ln.lchg_$C(9)
+	set lndata=lndata_ln.mchg_$C(9)_ln.teb_$C(9)_ln.unapf_$C(9)_ln.ncoa
+	set lndata=lndata_$C(9)_ln.paylkamt_$C(9)_ln.paylkfrm_$C(9)_ln.paylkto
+	
+	if versn=4 set lndata=lndata_$C(9)_ln.vatintdue_$C(9)_ln.vatlchgdue_$C(9)_ln.vatfeedue
+
+	// Determine Other Payoff Charges
+	do OPCHG^LNPO2(.ln)
+
+	// Load Payoff (XLN09) and Anticpated Payoff (XLN28) data
+	type String PO=""
+		
+	do EXT^LNPO1
+
+	type RecordTTX ttx=Class.new("RecordTTX")
+
+	do PAYOFF^LNPO2(.ln,ctl,.ttx) quit:ER $$ERRMSG^PBSUTL(RM.get())
+
+	// PROBAL=BALCMP+APOP-APOPP
+	set PROBAL=lndata.piece($C(9),3)+XLN28.piece("|",11)-XLN28.piece("|",6)
+
+	// Create formatted output string
+	// TITLE1,FSINV,BALCMP,ACR,LCHG,MCHG,TEB,UNAPF,NCOA,
+	// PAYLKAMT,PAYLKFRM,PAYLKTO,<PROBAL>
+	for I=3:1:10 set lndata.piece($C(9),I)=+lndata.piece($C(9),I)
+	
+	// VATINTDUE, VATLCHGDUE, VATFEEDUE
+	if versn=4 for I=11:1:13 set lndata.piece($C(9),I)=+lndata.piece($C(9),I)
+	set str=lndata_$C(9)_PROBAL
+
+	// Normalize (plus) the numeric values in XLN28
+	for I=1:1:11 set XLN28.piece("|",I)=+XLN28.piece("|",I)
+	
+	if versn=4 for I=12:1:16 set XLN28.piece("|",I)=+XLN28.piece("|",I)
+	
+	// TEIA,APOACR,APOLC,APOMC,APOEACR,APOPP,APOIP,APOMCP,APOEB,APOEIP,APOP
+	// APOVATINTADJ,APOVATINTPMT,APOVATFEEADJ,APOVATFEEPMT,APOVATLCHADJ
+	set str=str_$C(9)_XLN28.translate("|",$C(9))
+
+	// POAM,POEA,POIF,POIA,POEP,PORB,POCHG,POMISC,POESCBAL,PONPT,POLCHG
+	// POUNAPF,POVATINT, POVATFEE, POVATLCHG
+	set str=str_$C(9)_+XLN09.piece("|",1)_$C(9)_+XLN09.piece("|",2)_$C(9)_+XLN09.piece("|",3)_$C(9)_+XLN09.piece("|",4)
+	set str=str_$C(9)_+XLN09.piece("|",5)_$C(9)_+XLN09.piece("|",6)_$C(9)_+XLN09.piece("|",7)
+	set str=str_$C(9)_+XLN09.piece("|",16)_$C(9)_+XLN09.piece("|",17)_$C(9)_+XLN09.piece("|",18)
+	set str=str_$C(9)_+XLN09.piece("|",19)_$C(9)_+XLN09.piece("|",20)
+
+	if versn=4 set str=str_$C(9)_+XLN09.piece("|",22)_$C(9)_+XLN09.piece("|",23)_$C(9)_+XLN09.piece("|",24)
+
+	set return=$$V2LV^MSG(str) 
+
+	quit ""
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60849^41582^Sanjay Chhabria^4646"	// Signature - LTD^TIME^USER^SIZE

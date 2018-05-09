@@ -1,0 +1,648 @@
+public	CHKINT
+
+	/*
+	Check integrity of online files
+	
+	*** NOTE - This procedure is called for both the CHKINT function, (%EXT 
+	           not defined) and RECONDF procedure / function (%EXT defined)
+	
+	       ORIG: Frank Sanchez
+
+	---- Revision History -----------------------------------------------
+	
+	09/08/06 - Ravindra Rathi - CR 22222
+	 	   Modified DTJ section to use Db.getRecord(,,1) instead of
+	   	   Class.new(). This prevents the RDBSAVEFAIL error while 
+	   	   running RECONDF function.
+	
+	03/21/06 - SmithCD - CR 20215
+		   Modified TTX section to build dynamic select statements on 
+		   TPCTRL table instead of using MIN() / MAX() to enable UID 
+		   specified as "ALL". The minimum / maximum arrays do not 
+		   work on UID (particularly in an Oracle environment) b/c it 
+		   is a String (text) field. Also improved efficiency of the 
+		   select statements in the TTX section.
+	  
+	03/08/06 - KELLYP - CR 19758
+	 	   Modified FILE section to use Db.getRecord(,,1) instead of
+	   	   Class.new().  This prevents an RDBSAVEFAIL caused by the 
+	   	   fact that secondary and system-generated transactions were 
+	   	   being processed here when they shouldn't have been (ITC7 
+	   	   was not being set).  That problem has also been taken care 
+	   	   of, but the CHKINT report shouldn't fail just because ITC7 
+	   	   wasn't being set properly and this will prevent that from 
+	   	   happening.  Also removed pre-2004 revision history.
+	  
+	11/18/06 - RussellDS - CR19093
+	   	   Modify TTX section to + MIN and MAX values to prevent
+	   	   Oracle error on null values.
+	  
+	10/20/05 - TITOVE - CR 17832
+	   	   Modified section FILE to make sure that transaction
+	   	   amount will be correct before inserting it into CHKINT
+	   	   table. Previously, inserts failed on values such as
+	   	   100000#100000.
+
+	03/14/05 - SmithCD - CR 13782
+	   	   . Fixed undefined variables CID and TAMT in DTJ and DMJ 
+	   	     sections
+	   	   . Added classNew parameter to Db.getRecord() on tpctrl 
+	   	     to prevent RECNOFL error
+	   	   . Corrected / cleaned up handling of EXCIND flag for 
+	   	     TEST function
+	   	   . Resurrected query logic that was commented out, and 
+	   	     included code to build dynamic select statements for 
+	   	     applicable queries (this also correct several possible 
+	   	     undefined errors that still exist in the p01 version, 
+	   	     particularly when processing DTJ records)
+	   	   . Replaced E() with %CACHE usage
+	   	   . Brought TT2 section in-line
+	   	   . Modified to conform to current standards
+	*/
+
+	type public Boolean %EXT, ER
+	type public Cache %CACHE()
+	type public String A(), IO
+		
+	type String IOPAR
+	type Number Q(,)
+
+	set ER = 0
+
+	// Called by RECONDF procedure
+	if '%EXT.get() do ^INTGINI if 'A.data() quit
+
+	if 'IO.exists() do ^SCAIO
+	if ER quit
+
+	if %EXT.exists() set IOPAR = "WRITE/APPEND"
+
+	do OPEN^SCAIO 
+	if ER quit
+
+	// Must be typed here to be used by procedures called before this point
+	type Date %SystemDate
+	
+	#ACCEPT DATE=12/02/03;PGM=John Carroll
+	set %SystemDate = A(1)
+
+	do Db.fastDelete("CHKINT", "PID=:%ProcessID")
+	do Db.fastDelete("TMPRPT4", "PID=:%ProcessID")
+
+	do DTJ quit:ER
+	do DMJ quit:ER
+	do TTX quit:ER
+	do PREPORT quit:ER
+
+	do Db.fastDelete("CHKINT", "PID=:%ProcessID")
+	do Db.fastDelete("TMPRPT4", "PID=:%ProcessID")
+
+	close IO
+	
+	quit
+
+
+DTJ	// Compare ^DTJ to ^HIST and ^TTX
+
+	type public String A()
+	type public Boolean ER
+
+	type String DATETIME, ERTYP, ETC, FROM, ITC, REC
+	type String TAMT, UID, WHERE
+	type Number BRCD, CID, NUM, OPT, PF, SEQ, TIME, TSEQ
+	type Date DATE, TPD
+
+	set OPT = 1
+
+	set (FROM, WHERE) = ""
+	
+	do DYNQRY(.A(), "DTJ", .FROM, .WHERE) quit:ER
+		
+	#ACCEPT DATE=03/11/05;PGM=SmithCD
+	type ResultSet rs = Db.select("TJD,DATETIME,CID,TSEQ", FROM, WHERE)
+
+	while rs.next() do {
+		set TPD = rs.getCol("TJD")
+		set DATETIME = rs.getCol("DATETIME")
+		set CID = rs.getCol("CID")
+		set SEQ = rs.getCol("TSEQ")
+		
+		type RecordDTJ dtj = Db.getRecord("DTJ", "TJD=:TPD,DATETIME=:DATETIME,CID=:CID,TSEQ=:SEQ")
+
+		set ITC = dtj.itc
+		set ETC = dtj.etc
+		set TAMT = dtj.tamt
+		set DATE = dtj.cdt
+		set TIME = dtj.time
+		set BRCD = dtj.brcd
+		set TSEQ = dtj.trc
+		set UID = dtj.uid
+
+		if (+TAMT = 0) ! (ITC.isNull()) quit
+
+		set TPD = %SystemDate + dtj.itc8
+		set PF = +dtj.itc7
+			
+		set REC = $$REC(CID, ITC, ETC, TAMT, DATE, TIME, BRCD, UID, TSEQ)
+		
+		type RecordHIST hist = Db.getRecord("HIST", "CID=:CID,TSEQ=:SEQ", 1)
+		
+		if hist.getMode() = 0 set ERTYP = 11
+		else  if '$$MATCH(.dtj, .hist) set ERTYP = 13
+		else  do { quit
+			set ERTYP = $$TEST(REC, 0)
+			if ERTYP <> 0 do FILE(ERTYP, REC, "DTJ")
+		}
+		
+		type RecordTMPRPT4 tmp = Db.getRecord("TMPRPT4","PID=:%ProcessID,KEY1=:TPD,KEY2=:BRCD,KEY3=:UID,KEY4=:TSEQ",1)
+		
+		set tmp.data = REC
+
+		do tmp.bypassSave()
+
+		do FILE(ERTYP, REC, "DTJ")
+	}
+
+	quit
+
+
+MATCH(RecordDTJ dtj,		// Daily Transaction journal object	/REF=R
+      RecordHIST hist)		// History object			/REF=R
+      
+	//Check if DTJ and HIST record fields match
+
+	// Internal Transaction Code
+	if dtj.itc.extract() '= hist.itc.extract() quit 0
+
+	// External Transaction Code
+	if dtj.etc '= hist.etc quit 0
+
+	// Transaction Amount
+	if dtj.tamt '= hist.tamt quit 0
+
+	// Branch Code
+	if dtj.brcd '= hist.brcd quit 0
+
+	// Transaction Trace Number
+	if dtj.trc '= hist.trc quit 0
+
+	// User ID
+	if dtj.uid '= hist.uid quit 0
+
+	quit 1
+
+
+DMJ	// Compare ^DMJ to ^TTX
+
+	type public String A(), Q(,)
+	type public Boolean ER
+
+	type String ERTYP, ETC, ITC, FROM, REC, WHERE, TAMT, UID
+	type Number BRCD, CID, OPT, PF, TIME, TSEQ
+	type Date DATE, TPD
+	
+	set OPT = 2
+
+	set (FROM, WHERE) = ""
+	
+	do DYNQRY(.A(), "DMJ", .FROM, .WHERE) quit:ER
+		
+	#ACCEPT DATE=03/11/05;PGM=SmithCD
+	type ResultSet rs = Db.select("CID,ITC,ETC,TAMT,CDT,TIME,BRCD,TRC,UID,ITC7,ITC8", FROM, WHERE)
+
+	while rs.next() do { quit:ER
+
+		// If class / group / type test not passed, ignore this record
+		if '$$QUERY(.Q(,), "M", "", "") quit
+
+		set CID = rs.getCol("CID")
+		set ITC = rs.getCol("ITC")
+		set ETC = rs.getCol("ETC")
+		set TAMT = rs.getCol("TAMT")
+		set DATE = rs.getCol("CDT")
+		set TIME = rs.getCol("TIME")
+		set BRCD = rs.getCol("BRCD")
+		set TSEQ = rs.getCol("TRC")
+		set UID = rs.getCol("UID")
+
+		if (+TAMT = 0) ! (ITC.isNull()) quit
+
+		set TPD = %SystemDate + rs.getCol("ITC8")
+		set PF = +rs.getCol("ITC7")
+		
+		set REC = $$REC(CID, ITC, ETC, TAMT, DATE, TIME, BRCD, UID, TSEQ)
+	
+		set ERTYP = $$TEST(REC, 0) if ERTYP <> 0 do FILE(ERTYP, REC, "DMJ")
+		}
+
+	quit
+
+
+TTX	// Compare ^TTX back to ^DTJ and ^DMJ; ^EXC to ^TTX
+
+	type public String A()
+	type public Boolean ER
+	
+	type String DQQRY(), UID, WHERE = ""
+	type Number BRCD, NUM, OPT = 1, QRYSEQ = 0
+	type Date TPD
+
+	if 'A("BRCD").get().isNull(), A("BRCD") '= "ALL" do {
+		set QRYSEQ = QRYSEQ + 1
+		set DQQRY(QRYSEQ) = "[TPCTRL]BRCD "_A("BRCD")
+		}
+	
+	if 'A("UID").get().isNull(), A("UID") '= "ALL" do {
+		set QRYSEQ = QRYSEQ + 1
+		set DQQRY(QRYSEQ) = "[TPCTRL]UID "_A("UID")
+		}
+
+	set WHERE = $$WHERE^SQLCONV(.DQQRY(), "TPCTRL") quit:ER
+	if 'WHERE.isNull() set WHERE = WHERE_" AND "
+	set WHERE = WHERE_"TPD=:%SystemDate"
+
+	#ACCEPT DATE=03/21/06;PGM=SmithCD	
+	type ResultSet rs = Db.select("DISTINCT BRCD,UID", "TPCTRL", WHERE, "BRCD,UID ASC")
+
+	while rs.next() do { quit:ER
+		set BRCD = rs.getCol("BRCD")
+		set UID = rs.getCol("UID")
+
+		set TPD = %SystemDate
+
+		do TTXINTEG
+		do EXCINTEG
+
+		type RecordTPCTRL tpctrl = Db.getRecord("TPCTRL", "BRCD=:BRCD,UID=:UID,TPD=%SystemDate", 1)
+
+		// Check today's PMed activity
+		set TPD = tpctrl.pmdate
+		if 'TPD quit
+
+		do TTXINTEG
+		do EXCINTEG
+		}
+		
+	quit
+
+
+TTXINTEG	// Transaction integrity
+
+	type public Cache %CACHE()
+	type public Number BRCD
+	type public String A(), Q(,), UID
+	type public Date TPD
+	type public Boolean ER
+	
+	type String CLS, ETC, FROM, ITC, REC, TAMT, WHERE
+	type Number CID, ITC8, PF, TIME, TSEQ, TYPE
+	type Date DATE
+
+	set FROM = ""
+	set WHERE = "TTX.BRCD=:BRCD AND TTX.UID=:UID"
+	
+	do DYNQRY(.A(), "TTX", .FROM, .WHERE) quit:ER
+
+	#ACCEPT DATE=03/11/05;PGM=SmithCD
+	type ResultSet rs = Db.select("CID,TSEQ,ITC,ETC,TAMT,CDT,TIM,ITC7,ITC8", FROM, WHERE)
+
+	while rs.next() do { quit:ER
+
+		set CID = +rs.getCol("CID")
+		set TSEQ = rs.getCol("TSEQ")
+		set ITC = rs.getCol("ITC")
+		set ETC = rs.getCol("ETC")
+		set TAMT = rs.getCol("TAMT")
+		set DATE = rs.getCol("CDT")
+		set TIME = rs.getCol("TIM")
+		set PF = +rs.getCol("ITC7")
+		set ITC8 = rs.getCol("ITC8")
+
+		if PF quit
+
+		if (+TAMT = 0) ! (ITC.isNull()) quit
+
+		if TPD = %SystemDate, ITC8 quit
+
+		if TPD '= %SystemDate, TPD - ITC8 '= %SystemDate quit
+
+		set REC = $$REC(CID, ITC, ETC, TAMT, DATE, TIME, BRCD, UID, TSEQ)
+
+		if ETC.isNull() do FILE(8, REC, "TTX") quit
+
+		type RecordTRN trn = %CACHE("TRN").getRecord("TRN", "ETC=:ETC")
+		
+		set CLS = trn.cls
+
+		if CLS = "*" quit
+		
+		// Get product type for accounts if TYPE query exists
+		if (CLS = "L" ! (CLS = "D")), Q(3).data() do {
+			type RecordACN acn = Db.getRecord("ACN", "CID=:CID")
+			set TYPE = acn.type
+		}
+		else  set TYPE = ""
+		
+		// If class / group / type test not passed, ignore this record
+		if '$$QUERY(.Q(,), CLS, trn.grp, TYPE) quit
+
+		if Db.isDefined("TMPRPT4", "PID=:%ProcessID,KEY1=:TPD,KEY2=:BRCD,KEY3=:UID,KEY4=:TSEQ") quit
+
+		if Db.isDefined("EXC", "TJD=:TPD,BRCD=:BRCD,UID=:UID,TSEQ=:TSEQ") quit
+
+		do FILE($select(CLS = "M":10, 1:7), REC, "TTX")
+		}
+
+	quit
+
+
+DYNQRY(String A(),		// Query (input) array		/REF:R
+      String TRNTABLE,		// Transaction table
+      String FROM,		// From clause			/REF:RW
+      String WHERE)		// Where clause			/REF:RW
+
+	// Construct dynamic SQL FROM and WHERE clauses based on queries
+	
+	type public Boolean ER
+
+	type String COLUMN, DQQRY(), SEQ, TBLLIST, TABLE
+	type Number QRYSEQ
+	
+	set (COLUMN, DQQRY, QRYSEQ, SEQ, TABLE) = ""
+
+	// Ensure at least TRNTABLE is in table list	
+	set TBLLIST = TRNTABLE
+	
+	for  set SEQ = A(SEQ).order() quit:SEQ.isNull()  do { quit:ER
+
+		// Query not specified
+		if A(SEQ) = "ALL" quit
+
+		// Class, group, type - use Account table
+		if SEQ > 4, SEQ < 8 set TABLE = "ACN"
+		// Otherwise use transaction table
+		else  set TABLE = TRNTABLE
+		
+		// SEQ is a string
+		if +SEQ = 0 set COLUMN = SEQ
+		// SEQ is a number
+		else  do {
+			if SEQ = 1 set COLUMN = "TJD" quit
+			if SEQ = 5 set COLUMN = "CLS" quit
+			if SEQ = 6 set COLUMN = "GRP" quit
+			if SEQ = 7 set COLUMN = "TYPE" quit
+			if SEQ = 8 set COLUMN = "ETC" quit
+			if SEQ = 9 set COLUMN = "TAMT" quit
+			if SEQ = 10 set COLUMN = "TIM" quit
+			if SEQ = 11 set COLUMN = "TCMT" quit
+		}
+
+		/*
+		Account table queries (class / group / type) are only 
+		valid for the Daily Transaction Journal (b/c that's the only 
+		transaction table that is guaranteed not to have miscellaneous 
+		G/L transactions in it), so must use the original (and less 
+		efficient) M query logic instead for these instead - see QUERY 
+		function.
+		*/
+		if TABLE = "ACN", TRNTABLE '= "DTJ" quit
+		
+		/* 
+		If the where clause passed in already contains a variable of 
+		the same name as this column, don't insert into WHERE clause. 
+		This measure increases the efficiency of the dynamic select 
+		statement, as it is used in the procedure.
+		*/
+		if WHERE.isLike("%"_":"_COLUMN_"%") quit
+		
+		// Build DATA-QWIK queries
+		set QRYSEQ = QRYSEQ + 1
+		set DQQRY(QRYSEQ) = "["_TABLE_"]"_COLUMN_" "_A(SEQ)
+	
+		// Build tables list
+		if 'TBLLIST.isLike("%"_TABLE_"%") set TBLLIST = TBLLIST_","_TABLE
+
+	}
+	
+	if ER quit
+	
+	set FROM = $$DQJOIN^SQLCONV(TBLLIST) quit:ER
+
+	// No "from" clause
+	if FROM.isNull() quit
+
+	if 'WHERE.isNull() set WHERE = WHERE_" AND "
+	set WHERE = WHERE_$$WHERE^SQLCONV(.DQQRY(), TBLLIST) quit:ER
+	
+	quit
+
+
+EXCINTEG	// Exception integrity
+
+	type public Cache %CACHE()
+	type public Number BRCD
+	type public String A(), Q(,), UID
+	type public Date TPD
+	type public Boolean ER
+	
+	type String CLS, ERTYP, ETC, FROM, ITC, ITCREC, REC
+	type String WHERE, TAMT
+	type Number CID, PF, TIME, TSEQ, TYPE
+	type Date DATE
+
+	set FROM = ""
+	set WHERE = "EXC.BRCD=:BRCD AND EXC.UID=:UID"
+
+	do DYNQRY(.A(), "EXC", .FROM, .WHERE) quit:ER
+
+	#ACCEPT DATE=03/11/05;PGM=SmithCD
+	type ResultSet rs = Db.select("TSEQ,CID,ITC,ETC,TAMT,CDT,TIM", FROM, WHERE)
+
+	while rs.next() do { quit:ER
+
+		set TSEQ = rs.getCol("TSEQ")
+		set CID = rs.getCol("CID")
+		set ITC = rs.getCol("ITC")
+		set ETC = rs.getCol("ETC")
+		set TAMT = rs.getCol("TAMT")
+		set DATE = rs.getCol("CDT")
+		set TIME = rs.getCol("TIM")
+
+		if (+TAMT = 0) ! (ITC.isNull()) quit
+
+		// The EXC file does not have computeds set up for the ITC bytes
+
+		if TPD = %SystemDate, ITC.extract(8) quit
+
+		if TPD '= %SystemDate, (TPD - ITC.extract(8)) '= %SystemDate quit
+		
+		set PF = +ITC.extract(7)
+
+		type RecordTRN trn = %CACHE("TRN").getRecord("TRN", "ETC=:ETC")
+		
+		set CLS = trn.cls
+		
+		// Get product type for accounts if TYPE query exists
+		if (CLS = "L" ! (CLS = "D")), Q(3).data() do {
+			type RecordACN acn = Db.getRecord("ACN", "CID=:CID")
+			set TYPE = acn.type
+		}
+		else  set TYPE = ""
+
+		// If class / group / type test not passed, ignore this record
+		if '$$QUERY(.Q(,), CLS, trn.grp, TYPE) quit
+
+		set REC = $$REC(CID, ITC, ETC, TAMT, DATE, TIME, BRCD, UID, TSEQ)
+
+		set ERTYP = $$TEST(REC, 1) if ERTYP <> 0 do FILE(ERTYP, REC, "EXC")
+		}
+
+	quit
+
+
+TEST(String REC,		// Report data record
+     Boolean EXCIND)		// Exception indicator
+
+	// Test the transactions against ^TTX
+
+	type public Date TPD
+
+	type public Number BRCD, OPT, PF, TSEQ
+	type public String ETC, ITC, TAMT, UID
+
+	if BRCD.isNull() quit 1
+	if UID.isNull() quit 3
+	if ETC.isNull() quit 8
+	if ITC.isNull() quit 9
+	if PF quit 0
+	if TSEQ.isNull() quit 0
+
+	if 'Db.isDefined("TTX", "TJD=:TPD,BRCD=:BRCD,UID=:UID,TSEQ=:TSEQ") quit 4
+
+	if 'EXCIND.get(), Db.isDefined("EXC", "TJD=:TPD,BRCD=:BRCD,UID=:UID,TSEQ=:TSEQ") quit 0
+	
+	type RecordTTX ttx = Db.getRecord("TTX", "TJD=:TPD,BRCD=:BRCD,UID=:UID,TSEQ=:TSEQ")
+
+	if OPT = 1, (ttx.tamt - TAMT) '= 0 quit 5
+	if OPT = 2, ttx.tamt '= TAMT quit 5
+
+	if Db.isDefined("TMPRPT4", "PID=:%ProcessID,KEY1=:TPD,KEY2=:BRCD,KEY3=:UID,KEY4=:TSEQ") quit 6
+
+	type RecordTMPRPT4 tmp = Class.new("RecordTMPRPT4")
+
+	set tmp.pid = %ProcessID
+	set tmp.key1 = TPD
+	set tmp.key2 = BRCD
+	set tmp.key3 = UID
+	set tmp.key4 = TSEQ
+	set tmp.data = REC
+
+	do tmp.bypassSave()
+
+	quit 0
+	
+	
+QUERY(String QUERY(,),		// Query array			/REF=REF:R
+      String CLS,		// Account class
+      String GRP,		// Account group
+      String TYPE)		// Product type
+      
+	// Execute class / group / type M queries, and return pass/fail 
+	// indicator
+
+	type Boolean PASSQRY
+	type Number SEQ, SSEQ
+
+	set PASSQRY = 1
+        
+	#ACCEPT DATE=03/11/05;PGM=SmithCD
+	if 1 for SEQ = 1:1:3 if QUERY(SEQ).data() for SSEQ = 1:1 quit:'QUERY(SEQ, SSEQ).data()  xecute QUERY(SEQ, SSEQ) else  set PASSQRY = 0 quit
+        
+	quit PASSQRY
+
+
+FILE(String ERTYP, 		// Error type
+     String REC, 		// Report data record
+     String FIL)		// File (table)
+  	
+	/* 
+	
+	Create Online Integrity File to be reported
+	
+	Error types:
+	1 - Branch code not defined
+	2 - Transaction sequence number not defined
+	3 - User ID number not defined
+	4 - No corresponding TTX file entry
+	5 - Amount fields do not match
+	6 - Multiple pointers to TTX file
+	7 - No corresponding DTJ file entry
+	8 - External transaction code not defined
+	9 - Internal transaction code not defined
+	10 - No corresponding DMJ file entry
+	11 - No corresponding HIST file entry
+	12 - Account not updated
+	13 - HIST file does not match DTJ file
+	
+	*/
+     	     
+     	type public Number CID, TSEQ
+     	type public String BRCD, CRCD, ETC, TAMT, UID
+
+	set CRCD = REC.piece("~", 17)
+
+	if CRCD.get().isNull() set CRCD = %SystemCurrency
+	
+	type RecordCHKINT chkint = Db.getRecord("CHKINT","PID=:%ProcessID,FIL=:FIL,CRCD=:CRCD,ERCD=:ERTYP,BRCD=:BRCD,UID=:UID,TSEQ=:TSEQ,CID=:CID",1)
+
+	set chkint.tamt = +TAMT
+	set chkint.time = REC.piece("~", 10)
+	set chkint.date = REC.piece("~", 9)
+	set chkint.tc = ETC
+
+	do chkint.bypassSave()
+
+	quit
+
+
+REC(Number CID, 		// Account number
+    String ITC, 		// Internal transaction code
+    String ETC, 		// External transaction code
+    Number TAMT, 		// Transaction amount
+    Date DATE, 			// Transaction date
+    Number TIME, 		// Transaction time
+    Number BRCD, 		// Branch code
+    String UID,			// User ID
+    Number TSEQ)		// Transaction sequence number
+
+    	// Build array of needed columns
+
+	type String REC
+	
+	set REC = ""
+
+	set REC = CID_"~"_ITC_"~"_ETC_"~"_TAMT_"~~~~~"_DATE_"~"_TIME
+	set REC = REC_"~"_BRCD_"~"_TSEQ_"~"_UID
+
+	quit REC
+
+	
+PREPORT	// Print report
+
+	type String PGM, RID
+
+	set RID = "SCA493" 
+
+	do ^URID 
+
+	if PGM.isNull() do { quit 
+		// Invalid report linkage <<RID>> 
+		do Runtime.setErrSTBLER("", "INVLDRPT")
+		do ^UTLERR
+		}
+
+	do V0^@PGM
+
+	quit
+
+vSIG()	quit "60516^22163^Ravindra Rathi^15976"	// Signature - LTD^TIME^USER^SIZE

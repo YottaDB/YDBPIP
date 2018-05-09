@@ -1,0 +1,661 @@
+BCHIRAD1 //Batch BCHIRADIS1 - Retirement Auto-Distribution
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 08/30/2007 15:07 - joynerd
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHIRADIS1 Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ set vBCHSTS=$$STATUS^BCHUTL("BCHIRADIS1")
+ if vBCHSTS=1 set ER=1,RM=$$^MSG(3410) quit
+ if vBCHSTS=2 set ER=1,RM=$$^MSG(3414) quit
+ if vBCHSTS=0 set %BatchRestart=1
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit do EXIT^BCHUTL("BCHIRADIS1") quit
+ do JOBMGR^BCHUTL(%FN,"BCHIRADIS1",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ do EXIT^BCHUTL("BCHIRADIS1")
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(ACN,RPASEQ) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHIRADIS1","*","",ACN.get()_","_RPASEQ.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ if %BatchRestart,$$CHKLOG^BCHUTL(%SystemDate,%FN,"BCHIRADIS1",ACN.get()_","_RPASEQ.get()) do { quit
+ do LOG^BCHUTL(%SystemDate,%FN,"BCHIRADIS1",ACN.get()_","_RPASEQ.get(),"Record already processed")
+ }
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,ACN,RPASEQ)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHIRADIS1","*","",ACN.get()_","_RPASEQ.get(),"",et)
+ }
+ do UPDLOG^BCHUTL(%SystemDate,%FN,"BCHIRADIS1",ACN.get()_","_RPASEQ.get(),vCONTEXT)
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,ACN,RPASEQ) //
+	set ER=0
+	do DTL if ER do EXC
+	quit
+
+DTL	// Process RPA Sequence
+
+	new AUTOPT,DISMTC,MADSAT,WCALC,SWCALC	// 51245
+
+	new iratype
+	type RecordIRATYPE iratype
+	set iratype=Db.getRecord("IRATYPE","ACN,RPASEQ")
+
+	set DISMTC=iratype.dismtc
+	if DISMTC="" quit
+
+	set AMT=iratype.autamt
+	set AUTOPT=iratype.autopt
+	set MADSAT=iratype.madsat
+
+	set CONDIST=iratype.condist
+
+	new trn
+	type RecordTRN trn
+	set trn=Db.getRecord("TRN","DISMTC")
+	set CT=trn.cktyp
+
+	kill SORT
+
+	if MADSAT,AUTOPT'=2 do {
+		// Reset last distribution of year to satisfy minimum annual
+		// distribution requirement
+
+		new CURYR,NXTYR
+		set JD=AUTDND
+		
+		set FRE=iratype.autfre
+		do ^UFRE
+		
+		set CURYR=$$YEAR^SCADAT(AUTDND,1)
+		set NXTYR=$$YEAR^SCADAT(NJD,1)
+		if CURYR'=NXTYR do {
+			new ira
+			type RecordIRA ira
+			set ira=Db.getRecord("IRA","ACN,RPASEQ,CURYR")
+			set AMT=ira.madamt-ira.madcy
+			}
+		}
+
+	if 'iratype.rspwind set (WA,WP,SWA,SWP)=0	// JMH - 11/07/00
+	else  do {
+		set WP=iratype.wthpct			//Withholding Percent
+		set WA=iratype.wthamt			//Withholding Amount
+		set WCALC=iratype.rspwcalc 		//RPA Withholding Calc Method
+		// 51245 State Withholding Parameters
+		set SWP=iratype.stwhpct
+		set SWA=iratype.stwhamt
+		set SWCALC=iratype.stwhcalc
+		/*
+		Do not calculate a zero amount on plans which do not have values in 
+		the plan but do have something in the WCALC field
+	        */
+	
+		if WCALC'="",(WP=""!(WA="")) do {
+			new ublwcalc
+			type RecordUTBLWCALC ublwcalc
+			set ublwcalc=Db.getRecord("UTBLWCALC","WCALC")
+	
+			if ublwcalc.key="" quit
+			if WP="" set WP=ublwcalc.wpct	//Withholding Percentage
+			if WA="" set WA=ublwcalc.wamt	//Withholding Fixed Amount
+			}
+
+		if SWCALC'="",(SWP=""!(SWA="")) do {    // 51245
+			new ublwcalc
+			type RecordUTBLWCALC ublwcalc
+			set ublwcalc=Db.getRecord("UTBLWCALC","SWCALC")
+ 
+			if ublwcalc.key="" quit
+			if SWP="" set SWP=ublwcalc.wpct   //State Withholding Percentage
+			if SWA="" set SWA=ublwcalc.wamt   //State Withholding Fixed Amount
+			}
+
+		}
+
+	set IRAD=iratype.iraaut
+
+	if IRAD="" set IRAD=iratype.iradis
+	do SORT quit:ER					// Set up SORT array
+	do BUILD(.iratype) quit:ER			// Collate SORT array
+	do XPDO quit:ER					// Set up XPDO file
+	do FILE(.iratype)				// File to CIFH, DAYEND
+	quit
+	
+FILE(RecordIRATYPE iratype)	// File to CIFH, CIFD, and DAYEND
+
+	if 'TT quit 	
+
+	// Anticipated retirement plan distribution check $~p1
+	if 'CONDIST do {
+		set %TRN=$$^MSG(1080,$$^SCARND(TT,0,$G(CID)))
+		do CIFHBLD^CIFFUNCS(%TRN)			// *** CIF history filer
+		}
+
+	set iratype=Db.getRecord("IRATYPE","ACN,RPASEQ")	// JMH - 02/24/00
+	set iratype.antchk=TT
+	do iratype.bypassSave()
+	quit
+
+SORT	//Set up SORT array to dispurse in reverse interest rate order
+
+	new relcif
+	type ResultSet relcif=Db.select("CID","RELCIF","ACN=:ACN AND DOI='Y'")
+	while relcif.next() do { quit:ER
+		set CID=relcif.getCol(1)
+		do SRSET
+		}
+	quit
+	
+	
+SRSET	//Process Individual Accounts
+
+	new dep
+        type RecordDEP dep        
+	set dep=Db.getRecord("DEP","CID")
+	if dep.stat=4 quit
+	if dep.rpaseq'=RPASEQ quit
+
+	if dep.acn'=ACN quit
+	if dep.iraexc quit
+
+	set INDEX=dep.index
+	set IOPT=dep.iopt
+	set RATE=dep.irn
+	set POSACR=dep.posacr
+	
+
+	if $L(INDEX) do { quit:ER
+		new PARAM
+                set EFD=%SystemDate
+                set BASE=dep.bal
+                set PARAM("INDEX")=dep.index
+                set PARAM("SPREAD")=dep.intspr
+                set PARAM("RNDFC")=dep.rndmtd
+                if dep.intmat'="" set PARAM("INTMAT")=dep.intmat
+                do CTL^UINDX(.dep,EFD,BASE,.PARAM) if ER quit
+                set RATE=+RATE
+                }
+ 
+ 
+        // If the auto-distribution option is 2 (interest only) use INTAVL
+
+        new BAL
+        if AUTOPT=2 set BAL=dep.intavl,AMT=AMT+BAL
+        else  set BAL=dep.bal
+
+	if BAL<0 set et=$$^MSG(3023) do EXC quit	// jcl 12/12/00
+
+        // Auto-Distribution Option
+	if AUTOPT=2 set SORT(RATE,CID)=BAL_"||||1"
+        else  set SORT(RATE,CID)=BAL
+        quit
+
+
+BUILD(RecordIRATYPE iratype)	// Collate through SORT array	
+
+	set SORTN=""
+	for  set SORTN=$O(SORT(SORTN)) quit:SORTN=""  do {
+		set SORTM=""
+		if AMT'>0 quit
+		for  set SORTM=$O(SORT(SORTN,SORTM)) quit:SORTM=""  do B1SET(.iratype)
+	}
+	quit
+
+B1SET(RecordIRATYPE iratype)	// Process SORT
+
+	new WA,DWA,DSWA		// JMH - 02/24/00, 51245
+	set CID=SORTM
+	set CR=0
+
+	new dep
+	type RecordDEP dep
+	set dep=Db.getRecord("DEP","CID")
+
+	set TYPE=dep.type
+
+	/*
+	If accrual is to remain on account, calculate closeout amount,
+	otherwise, the accrual is available.
+	*/
+
+	set IPT=$P(SORT(SORTN,SORTM),"|",5)
+	set (SKIP,OPT,TAMT)=0
+	// 51245, add State Withholding Fixed amount
+	if 'iratype.rspwind set WA=0,SWA=0			// JMH - 11/07/00
+	else  set WA=iratype.wthamt,SWA=iratype.stwhamt		// JMH - 02/24/00
+	if 'IPT do DEPCL("110",.dep,.iratype)
+	if IPT do ACRAVL
+	
+	if SKIP quit
+	
+	set $P(SORT(SORTN,SORTM),"|",4)=CR
+	set $P(SORT(SORTN,SORTM),"|",6)=$$^SCARND($G(TAMT),0,$G(CID))
+	set $P(SORT(SORTN,SORTM),"|",9)=DWA
+	set $P(SORT(SORTN,SORTM),"|",12)=DSWA		// 51245
+	quit
+	
+ACRAVL	// Accrual is available
+
+	/*
+	If AUTOPT'=2 (Interest Only) calculate the withholding
+	on a transaction.  The customer asks for 100 dollars; in order
+	for us to give that person 100 after the withholding we have
+        to debit the account 100 plus the withholding.
+	*/  
+
+	if AUTOPT=2 do {
+		set DWA=AMT*WP/100
+		set DSWA=AMT*SWP/100	    // 51245
+		}
+	else  do {
+		set DWA=AMT/(1-(WP/100))-AMT+WA
+		set DSWA=AMT/(1-(SWP/100))-AMT+SWA      // 51245
+		}
+	set DWA=$$^SCARND(DWA,0,$G(CID))
+	set DSWA=$$^SCARND(DSWA,0,$G(CID))	      // 51245
+	
+	if (AMT+DWA+DSWA)'>SORT(SORTN,SORTM) do { quit		// 51245
+		set TAMT=AMT
+		set AMT=AMT-TAMT
+		}
+	
+	if SORT(SORTN,SORTM)'>(WA+SWA) do { quit	// 51245 
+		kill SORT(SORTN,SORTM)
+		// Insufficient Funds
+		set RM=$$^MSG(1244) do EXC
+		set SKIP=1
+		}
+	
+	set AVL=SORT(SORTN,SORTM)
+	if AMT'<SORT(SORTN,SORTM) do {
+		set DWA=AVL*WP/100
+		set DSWA=AVL*SWP/100	// 51245
+		}
+	else  do {
+		set DWA=$$^SCARND(AVL-WA*(WP/100)+WA,0,CID)
+		set DSWA=$$^SCARND(AVL-SWA*(SWP/100)+SWA,0,CID)
+		}
+	set TAMT=AVL-DWA-DSWA	// 51245
+	set AMT=AMT-TAMT
+
+	quit
+	
+XPDO	// Collate through SORT array to set up XPDO file.
+
+	set TT=0
+
+	set (N,M)=""
+	for  set N=$O(SORT(N)) quit:N=""  do {
+		for  set M=$O(SORT(N,M)) quit:M=""  do XPDOSET
+		}
+	quit
+	
+XPDOSET	// Set up XPDO file to print checks
+	
+	if '$P(SORT(N,M),"|",6) quit
+	
+	set $P(TA,"#",1)=$P(SORT(N,M),"|",6)
+	set $P(TA,"#",2)=$P(SORT(N,M),"|",6)
+	set $P(TA,"#",5)=$P(SORT(N,M),"|",9)
+	set $P(TA,"#",15)=$P(SORT(N,M),"|",12)  // 51245
+
+	if AUTOPT=2 set TT=TT+SORT(N,M)
+	else  set TT=TT+TA
+
+	if CONDIST do TMP quit		// consolidated auto-distribution
+
+	new xpdo
+	type RecordXPDO xpdo
+	set CKSEQ=Db.nextVal("XPDO","%SystemDate,CT")
+
+	new xpdo1
+	type RecordXPDO xpdo1=Class.new("RecordXPDO")
+	set xpdo1.tjd=%SystemDate
+	set xpdo1.cktyp=CT
+	set xpdo1.ckseq=CKSEQ
+	set xpdo1.cid=M
+	set xpdo1.tamt=TA
+	set xpdo1.efd=AUTDND
+	set xpdo1.tso=IRAD
+	do xpdo1.bypassSave()
+
+	quit
+
+TMP	// Build temporary file
+
+	/*  The temporary file will save off the variables to be used later on
+        for consolidated check distribution process.  See section SCHEXIT.
+        
+          Record = TPAMT1 | TPAMT2 | TPAMT5 | TPAMT15 | AUTDND | IRAD | CTT | TTT
+        
+        */
+        
+        type String REC
+
+	type RecordTMPRPT2 tmprpt2=Db.getRecord("TMPRPT2","PID=:SCHPID,KEY1=:ACN,KEY2=:CONDIST",1)
+	if 'tmprpt2.getMode() set tmprpt2.data="||||"_AUTDND_"|"_IRAD_"|"_CT
+	
+	set REC=tmprpt2.data
+	
+	set REC.piece("|",1)=REC.piece("|",1)+$P(TA,"#",1)	// consolidated check amt
+	set REC.piece("|",2)=REC.piece("|",2)+$P(TA,"#",2)	// consolidated DWA amt
+	set REC.piece("|",3)=REC.piece("|",3)+$P(TA,"#",5)	// consolidated total used for history file
+	set REC.piece("|",4)=REC.piece("|",4)+$P(TA,"#",15)	// consolidated DSWA amt
+	if AUTOPT=2 set REC.piece("|",8)=REC.piece("|",8)+SORT(N,M)
+	else  set REC.piece("|",8)=REC.piece("|",8)+TA
+
+	set tmprpt2.data=REC
+
+	do tmprpt2.bypassSave()
+	
+	quit
+	
+EXC	// Log error in exception file
+
+	// RPA Auto-Distribution Posting
+	
+	new BALER,XBAL
+	if $G(CID) do {
+		new dep3
+		type RecordDEP dep3
+		set dep3=Db.getRecord("DEP","CID")
+		set XBAL=dep3.bal
+		set XIRAEXC=dep3.iraexc
+		}
+	if XIRAEXC quit
+
+        set BALER=$S($G(CID):XBAL,1:"")
+
+	do LOG^UTLEXC($T(+0),"*",$$^MSG(3678),$G(CID),$G(%ZTSEQ),$G(RM),BALER)
+	kill RM,%ZTSEQ
+	quit
+	
+DEPCL(CTL,RecordDEP dep,RecordIRATYPE iratype)	// Calculate closeout amount based upon CTL 
+
+	set PRIN=dep.bal
+
+	new TR
+
+        do {
+                new AMT,EFD,PRATE,BASE,CMP,IRN,LJD,ACR
+		set ACR=0
+                set EFD=AUTDND
+                set BASE=PRIN,CMP="",LJD=TJD,IRN=RATE
+
+        	// Create empty transaction to pass to UMAT.
+        	type RecordTTX ttx=Class.new("RecordTTX")
+ 
+               	if EFD>TJD do {
+
+			type Number AWT
+			set AWT=0
+
+                        do INIT^RECALC(.dep)
+                        do ACR^RECALC(.dep,.ttx,%SystemDate)
+			set SVINT=POSACR+$G(NEGACR)+$G(NEGACRUN)  // jcl 12/12/00
+		}
+  
+        	do ^UMAT(.dep,.ttx)
+		I $D(SVINT) S INT=SVINT   // jcl 12/12/00
+        }
+	
+	set INT=$S($E(CTL):$$^SCARND(INT,0,$G(CID)),1:0)	// JMH - 03/30/01
+	set PEN=$S($E(CTL,2):PEN,1:0)
+	set X=$$^SCARND(PRIN+INT-PEN)			// JMH - 02/24/00
+	do CLOSE(.iratype)
+	quit:SKIP
+	
+	if AMT'<$P(SORT(SORTN,SORTM),"|",2) do {
+		// JMH - 05/02/00
+		if RPANET set TAMT=$P(SORT(SORTN,SORTM),"|",2)-DWA-DSWA,AMT=AMT-(TAMT+DWA+DSWA)  // 51245
+		else  set TAMT=$P(SORT(SORTN,SORTM),"|",2),AMT=AMT-TAMT
+		}
+	else  do {
+		// JMH - 05/02/00
+		if RPANET do {
+			set DWA=$J((AMT*(WP/100))+WA,0,2)	// JMH - 04/04/01
+			set DSWA=$J((AMT*(SWP/100))+SWA,0,2)    // 51245
+			if SORT(SORTN,SORTM)'<(AMT) set TAMT=AMT-DWA-DSWA  // 51245
+			else  set CR=AMT+DWA+DSWA-SORT(SORTN,SORTM),TAMT=AMT-DWA-DSWA  // 51245
+			set AMT=AMT-(TAMT+DWA+DSWA)  // 51245
+			}
+		else  do { 
+			set DWA=$J((AMT*(1-(WP/100)))-AMT+WA,0,2)       // JMH - 04/04/01
+			set DSWA=$J((AMT*(1-(SWP/100)))-AMT+SWA,0,2)    // 51245
+			if SORT(SORTN,SORTM)'<(AMT+DWA+DSWA) set TAMT=AMT   // 51245
+			else  set CR=AMT+DWA+DSWA-SORT(SORTN,SORTM),TAMT=AMT  // 51245
+			set AMT=AMT-TAMT
+			}
+		}
+	quit
+	
+CLOSE(RecordIRATYPE iratype)	// Calculate close-out default amount
+
+	set SKIP=0
+
+	if AMT'>(WA+SWA) do { quit	// 51245
+		// Withholding amount exceeds distribution (Member=~p1; RPA=~p2)
+		set (ET,RM)=$$^MSG(3750,ACN,RPASEQ)
+		set SKIP=1
+		kill SORT(SORTN,SORTM)
+		do EXC
+		}
+	
+	set Y=$$^SCARND(X*(WP/100)+WA,0,CID)	// JMH - 02/24/00 & 05/02/00
+	// 51245, set Y1 to State Withholding amount
+	set Y1=$$^SCARND(X*(SWP/100)+SWA,0,CID)
+	if X'>(Y+Y1) do {			// JMH - 02/24/00, 51245
+		if X'<Y set SWA=$$^SCARND(X-Y,0,CID)
+		else  do {
+			set WA=$$^SCARND(X,0,CID)
+			set SWA=0
+			}
+		if Y'>X set Y1=X-Y
+		else  set Y=X,Y1=0
+ 
+		set iratype.wthamt=WA
+		set iratype.stwhamt=SWA	 // 51245
+		}
+	else  set iratype.wthamt=0,iratype.stwhamt=0
+	set DWA=Y,$P(SORT(SORTN,SORTM),"|",9)=Y
+	set DSWA=Y1,$P(SORT(SORTN,SORTM),"|",12)=Y1     // 51245
+	if RPANET set AVL=$$^SCARND(X,0,CID)	// JMH - 05/02/00
+	else  set AVL=$$^SCARND(X-Y-Y1,0,CID)	// 51245
+
+	set $P(SORT(SORTN,SORTM),"|",2)=AVL
+	quit
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+	for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+
+		type Number ACN,RPASEQ
+
+		set ACN=vRECORD.piece($C(9),1)
+		set RPASEQ=vRECORD.piece($C(9),2)
+
+		do vPROC(ACN,RPASEQ)
+		 }
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+	type Public String vBUFOVFL
+	type String vRECORD,vrow,ACN,RPASEQ
+	type Public String current
+	type Number vcur,vlen
+	set vINPUT=vBUFOVFL.get()
+	set vBUFOVFL="""",vlen=0
+	type Public ResultSet vRESULT
+	for  do { quit:'vcur
+		set vcur=vRESULT.next() if 'vcur quit
+		set vrow=vRESULT.getRow()_"|"
+		if vrow=$g(current) quit
+		set current=vrow
+		set vlen=vlen+vrow.length()
+		if vlen>32767 set vBUFOVFL=vrow,vcur=0 quit
+		set vINPUT=vINPUT_vrow if vlen+26>32767 set vcur=0 quit
+		}
+	set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+	set SCHPID=%ProcessID
+
+	new cuvar	
+	type RecordCUVAR cuvar
+	set cuvar=Db.getRecord("CUVAR")
+
+	set DAYEND4=cuvar.dayend4
+	set AUTDND=%SystemDate+DAYEND4
+	
+	do Db.fastDelete("TMPRPT2","PID=:SCHPID")
+
+	type Public ResultSet vRESULT=Db.select("ACN,RPASEQ","IRATYPE","IRATYPE.AUTDND=:AUTDND")
+	if vRESULT.isEmpty() set %BatchExit=1
+	quit
+
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("ACN,RPASEQ","IRATYPE","IRATYPE.AUTDND=:AUTDND")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	new cuvar	
+	type RecordCUVAR cuvar
+	set cuvar=Db.getRecord("CUVAR")
+
+	set DAYEND4=cuvar.dayend4
+	set AUTDND=%SystemDate+DAYEND4
+	set RPANET=cuvar.rpanet				// JMH - 05/02/00
+
+	set %UserID="BATCH"
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+	/* Data will be retrieved from the temporary table to
+        set up XPDO file for consolidated check distribution.
+        */
+
+	// 51245, add TPAMT15 for State Withholding amount
+	type ResultSet rs=Db.select("KEY1,DATA","TMPRPT2","PID=:SCHPID")
+
+	if rs.isEmpty()  quit
+	while rs.next()  do {
+		type String REC
+		set ACN=rs.getCol("KEY1")
+		set REC=rs.getCol("DATA")
+		set TPAMT1=REC.piece("|",1)		// Net distribution to customer
+		set TPAMT2=REC.piece("|",2)		// Prin reduction for full amt
+		set TPAMT5=REC.piece("|",3)		// DWA amt
+		set TPAMT15=REC.piece("|",4)		// DSWA amt 51245
+		set TA=TPAMT1_"#"_TPAMT2_"###"_TPAMT5_"##########"_TPAMT15
+		set AUTDND=REC.piece("|",5)		// Next Day
+		set IRAD=REC.piece("|",6)		// Distribution Reason Code
+		set CT=REC.piece("|",7)			// Check Type
+		set TT=REC.piece("|",8)			// Consolidated Total
+		do CXPDO
+		}
+
+	do Db.fastDelete("TMPRPT2","PID=:SCHPID")	// Delete temp table
+	
+	quit
+
+CXPDO	//  Cosolidate CHECK into XPDO
+
+        new xpdo
+        type RecordXPDO xpdo
+        set CKSEQ=Db.nextVal("XPDO","%SystemDate,CT")
+ 
+        new xpdo1
+        type RecordXPDO xpdo1=Class.new("RecordXPDO")
+        set xpdo1.tjd=%SystemDate
+        set xpdo1.cktyp=CT		// Check Type
+        set xpdo1.ckseq=CKSEQ		// Check Sequence
+        set xpdo1.cid=ACN		// Customer ID
+        set xpdo1.tamt=TA		// Distribution Amounts
+        set xpdo1.efd=AUTDND		// Next Day
+        set xpdo1.tso=IRAD		// Distribution Reason Code
+        do xpdo1.bypassSave()
+
+
+	if 'TT quit 	
+	// Anticipated retirement plan distribution check $~p1
+	set %TRN=$$^MSG(1080,$$^SCARND(TT,0,$G(ACN)))
+
+	do CIFHBLD^CIFFUNCS(%TRN)			// *** CIF history filer
+
+	quit
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

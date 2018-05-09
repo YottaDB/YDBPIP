@@ -1,0 +1,2790 @@
+UINDX
+	/*
+	ORIG: Vitaliy Antonov - 5/6/2002
+        DESC: Interest Index Utility
+        PROCEDURE ID: UINDX
+
+	LIBRARY:
+		CTL	- Int rate calculation
+		CTLCID	- Int rate calculation (no account object or no CID)
+		CLEANDI	- Clean up data item tiers in IX array
+		DEPLIM	- Compare (apply) to DEPOSIT limits
+		DUPIX	- Remove duplicate tiers
+		EDT	- Edit check - Valid Index Name
+		ERR	- Error handling and logging
+		IND2STR	- Combine int index data from INDEX tbl to a string
+		INDT2STR - Combine tier data from INDEX1 table to a string
+		LOADIX	- Load in IX array
+		LNLIM	- Compare (apply) to LOAN limits
+		RND	- Apply rounding factor to rate value
+		RNDPP	- Edit check on the rounding factor
+		SETPAR	- Construct a parameter array for calls to UINDX
+		SPRPP	- Edit check on interest spread
+		STATUS	- Returns account status based on matrix
+
+
+	------ Revision History -----------------------------------------------
+
+	07/25/07 - Anitha Chandran - CR 28149
+		   Removed all calls to ^UTLERR. The calling function is 
+		   responsible for handling application errors. Previously 
+		   ^UTLERR was called only for index errors when not called 
+		   from accruals, and for all matrix errors. In most / all 
+		   cases, the logging would get rolled back by the caller of 
+		   ^UINDX, which has it's own error handling. Removed old 
+		   revision history.
+		   
+	06/26/07 - CHHABRIS - CR 27766
+		   Modified STATUS section to quit with Null if urelmat.rowatt
+		   or urelmat.colatt is not defined. GTM errors were logged as
+		   null was passed as the 2nd parameter to GETMATST section.
+
+	11/09/06 - KELLYP - CR 23991
+		   Modified LOADIX to remove previous change made under CR
+		   23205 to resolve a problem related to unexpected/incorrect
+		   rate changes occurring in BTTDRV.  Added a change to UANTIC
+		   to resolve the problem reported under CR 23205.  Also removed
+		   change made under CR 23490 and it's revision history.
+
+	09/27/06 - PUTTASWH - CR 23205
+	           Modified LOADIX section to set the EFDATE to the last index 
+	           effective date,  since it was wrongly set to the first index
+	           effective date if an index had multiple effective dates.
+	
+	09/08/06 - PUTTASWH - CR 22250
+		   Modified DEPTRMD section to calculate the account term
+		   days based on account maturity date and date last renewed.
+	
+	08/02/06 - KELLYP - CR 22048
+		   Modified LNLIM section to eliminate PRECEDENCE warning.
+	
+	05/26/06 - Ravindra Rathi - CR 21233
+		   Modified Tier type - Interest/Dividend Index in IXCREC TAG
+		   from TRTYP=1 to TRTYP < 2 for assigning correct interest rate 
+		   when rate or index is a string. 
+   
+	04/13/06 - SmithCD - CR 20751
+		   Modified SPREAD section to check only for the current matrix
+		   before loading AX(,,,). Prevents the current matrix from 
+		   being ignored when AX(,,,) for other matrices are already 
+		   loaded.
+	
+	04/06/06 - SmithCD - CR 20637
+		   Modified SPREAD section to load AX(,,,) to avoid using 
+		   select statements with amounts in the where clause, which 
+		   are not evaluating properly due to UTBLMATATT1.MAT, 
+		   UTBLMATATT2.MAT, and UTBLMATATT2.COL being defined as text 
+		   fields even though the row / column is usually a number. 
+		   At some point a decision will need to be made as to whether 
+		   text fields will be allowed as matrix rows / columns 
+		   (currently CCODE is available in STBLMATATT, which is a 
+		   text field).
+	
+	04/05/06 - S.Krishnan - CR 20431
+		   Modified the while condition in the section AVGRT
+		   from 'EFDATE > TD to '(EFDATE > TD). 		   
+
+	04/02/06 - SmithCD - CR 20366
+		   Replaced P&I Chg Max $ Inc - Per Chg (dep.pmxdic) references
+		   with Int/Div Chg Max % Inc - Life (dep.intmxil) in DEPINC 
+		   section. Performed minor some cleanup.
+	
+	04/01/06 - S.Krishnan - CR 20253
+		   Modified the variable SEGMENT to SEGMENT.get() 
+		   which was used in the IF condition of the sections
+		   LOADIX, SRATE and GETMATDT to avoid undefined variable.
+
+	03/28/06 - SmithCD - CR 20396
+		   Corrected logic in SPRPP section to only return "Invalid 
+		   offset" if the spread is actually invalid.
+	
+	03/27/06 - SmithCD - CR 20369
+		   Added parenthesis around Db.select() parameter values that 
+		   are arithmetic expressions in the SPREAD section. Corrects 
+		   a problem where values that are exactly equal to a row / 
+		   column value were falling into the prior tier.
+	
+	03/22/06 - SmithCD - CR 20248
+		   . Modified INDSET (first) parameter in INDEXTR call in IND 
+		     section to be in the format expected by INDEXTR (solves a 
+		     problem with the Index Extension - Operator & Rounding 
+		     field (index.extension) effectively getting ignored)
+		   . Removed INDATTR section, which is not called from anywhere
+		   . Performed some additional cleanup
+
+	02/25/06 - TITOVE - CR 19437
+		   Removed code related to RECALC call from CONVDI section;
+		   RECALC calls IXVALUE instead now. Classified CONVDI as 
+		   private, to reflect this change. Corrected rounding of
+		   RATE in EXEC (.justify replaced with .roundDec).
+
+	-----------------------------------------------------------------------
+	*/
+
+	quit
+
+
+public CTLCID(Number CID,	   // Account number		/NOREQ
+	      Date %EffectiveDate, // Effective date		/NOREQ
+	      Number BASE,	   // Calculation base		/NOREQ
+	      String PAR(),	   // Processing qualifiers	/REF:R/NOREQ
+	      String RECARR())	   // Transaction array		/REF:R/NOREQ	  
+
+	/*
+	This linetag must be used if there is no account object instantiated in 
+	a calling routine but account number (CID) is specified. Also if the
+	account number does not exist.
+
+	Additional notes on ARGUMENTS:
+	. %EffectiveDate The date for which the rate is to be calculated
+	
+	. BASE  	The amount (balance) for which the rate is to be 
+			calculated.
+		 
+	. PAR()		See CTL section for itemized description.
+			
+	. RECARR() 	"X" array from RECALC. This is needed for the convert 
+			section to set an interest change entry for the day 
+			after the tier expiration date.
+
+	OUTPUT:
+		. RATE - Recalculated rate (after offsets, limits, rounding)
+		. SRATE - Index value (without offsets, rounding, and limits)
+		. URATE - Unadjusted Rate (before application of rate limits)
+		. RRATE - Index Value (without rounding, with offsets)
+		. IX(,,) - Index data array
+	*/
+
+	type public String ET, RM
+	type public Number ER
+	type RecordACN acn
+	type public String CLS
+
+	// Instantiate an account object if account number is defined
+	if 'CID.get().isNull() do { quit:ER
+		set acn  =  Db.getRecord("ACN", "CID=:CID", 1)
+
+		// Invalid account ~p1
+		if 'acn.getMode() do Runtime.setErrMSG("DEP", 1259, CID) set ET = RM quit
+		}
+	// Create a new empty account object if account number is not defined
+	else  do {
+		set acn = Class.new("RecordACN")
+		set acn.cid = ""
+		if 'CLS.get().isNull() set acn.cls=CLS
+		}
+
+	do CTL(.acn, %EffectiveDate.get(), BASE.get(), .PAR(), .RECARR())
+		
+	quit
+
+
+public CTL(RecordACN acn,		// Account			/REF:R
+	   Date %EffectiveDate,		// Effective date		/NOREQ
+	   Number BASE,			// Calculation base		/NOREQ
+	   String PAR(),		// Processing qualifiers	/REF:R/NOREQ
+	   String RECARR())		// Transaction array		/REF:R/NOREQ
+
+	/* 
+	Access - all accounts.
+	
+	This line tag should be used by any new application and existing
+	applications as they are modified for other reasons.
+
+	Addition notes on ARGUMENTS:
+	. acn		DEP or LN record object of account to be processed.
+			Object of type RecordACN is a superclass for it's 
+			subclasses - RecordLN and RecordDEP. Calling routines 
+			can pass DEP or LN object as a parameter to CTL^UINDX.
+
+	. %EffectiveDate The date for which the rate is to be calculated
+	
+	. BASE  	The amount (balance) for which the rate is to be 
+			calculated
+
+	. PAR()	INDEX 	Index name		/TYP=T
+			Index name passed in .PAR() will take precedence over 
+			the index set on the account. 
+
+		IPMODE	Input mode		/TYP=L
+						[Old $E(CTL,3)]
+			0 - not from BTTDRV
+			1 - coming in from BTTDRV
+
+		IXLOAD	IX array load flag	/TYP=L
+						[Old $E(CTL,1)]
+			0 - IX array not fully loaded.  Must reference
+				^UTBL to extract proper dates.
+			1 - IX array fully loaded for the date range
+				in use within the driving application.
+
+		LIMIT	Check for limits flag	/TYP=L
+						[Old $E(CTL,5)]
+			0 - No limit checking
+			1 - Perform limit checking
+			    (rounding performed automatically LIMIT selected)
+
+		MATFLG	Apply matrix flag	/TYP=L
+			Used inside UINDX. 
+			Must be set to 1 if index recursion occurs.
+			0 - Apply matrix
+			1 - Do not apply matrix
+
+		MATRIX	Interest Matrix Name	/TYP=T
+			Matrix name passed in .PAR() will take precedence over 
+			the one set on the account.
+
+		NOTSER	Teaser processing flag	/TYP=L
+						[Old $E(CTL,2)]
+			0 - Being called to use teaser processing
+	      		1 - No teaser processing  ...  BTT routines (deposits)
+		
+		ROUND	Rounding flag		/TYP=L
+						[Old $E(CTL,4)]
+			0 - Do not round
+			    (rounding performed automatically LIMIT selected)
+			1 - Round
+		
+		RNDFC	Rounding factor		/TYP=T
+			Rounding factor passed in .PAR() will take precedence 
+			over the rounding factor set on the account.
+
+		SEG	Segment number 		/TYP=N
+			Account segment number.
+
+		SPREAD	Int/Div spread		/TYP=N
+			Spread name will take precedence over the Spread 
+			set on the account.
+			
+		SRATE	Standard rate		/TYP=N
+			Base index value (without offsets, rounding, and 
+			limits) for the effective date. Avoids recalculation 
+			of the standard rate. Offsets, rounding, and limits 
+			may still be applied when calculating RATE. Applies 
+			to basis indexes only. Used by BTTDRV for efficiency
+			purposes.
+
+	. RECARR()	"X" array from RECALC. This is needed for the convert 
+			section to set an interest change entry for the day 
+			after the tier expiration date.
+
+	OUTPUT:
+		. RATE	Recalculated rate (after offsets, limits, rounding)
+		. SRATE	Index value (without offsets and rounding)
+		. URATE	Unadjusted Rate (before application of rate limits)
+		. RRATE	Index Value (without rounding, with offsets)
+		. IX()	Index data array
+	*/
+	
+	type public Number ER, RATE, URATE
+
+	type String INDEX, MATRIX, REXPR, RNDFC
+	type Number SEGMENT
+	type Boolean IPMODE, IXLOAD, LIMIT, MATFLG, NOTSER, ROUND
+
+	set REXPR = ""
+	set ER = 0
+	if '%EffectiveDate.get() set %EffectiveDate = %SystemDate
+	if 'BASE.get() set BASE = 0
+
+	// Get all parameters passed in PAR() array
+	do GETPAR(.acn, .PAR()) quit:ER
+
+	do EXEC(.acn) quit:ER
+
+	// Index rounding flag
+	if ROUND, 'RNDFC.isNull(), 'acn.irf set (RATE, URATE) = $$RND(RATE, RNDFC) quit:ER
+
+	// Apply limits
+	if LIMIT do {
+		if acn.cls = "L" do LNLIM(.acn, RNDFC, .RATE, .URATE)
+		if acn.cls = "D" do DEPLIM(.acn, RNDFC, .RATE, .URATE)
+		}
+
+	quit
+
+
+GETPAR(RecordACN acn,		// Acount			/REF:R
+       String PAR())		// Input parameter array	/REF:R/NOREQ
+       
+	/* Retrieve rate calculation parameters from PAR()
+
+	Additional notes on ARGUMENTS:
+		. PAR()	For detailed information on PAR() - see CTL section
+	*/
+	
+	type public Number RATE, SEGMENT, SRATE
+	type public String ET, INDEX, MATRIX, RNDFC, SPREAD
+	type public Boolean IPMODE, IXLOAD, LIMIT, MATFLG, NOTSER, ROUND
+
+	// Index passed as a parameter will take precedence
+	set INDEX = PAR("INDEX").get()
+	if INDEX.isNull() set INDEX = acn.index
+	if INDEX.isNull() set ET = 6 do ERR(.ET) quit
+
+	// Matrix passed as parameter will take precedence
+	set MATRIX = PAR("MATRIX").get()
+	if MATRIX.isNull() set MATRIX = acn.intmat
+	// Apply matrix flag
+	set MATFLG = PAR("MATFLG").get()
+
+	// Spread passed as parameter will take precedence
+	set SPREAD = PAR("SPREAD").get()
+	if SPREAD.isNull() set SPREAD = acn.intspr
+
+	// Rounding method passed as parameter will take precedence
+	set RNDFC = PAR("RNDFC").get()
+	if RNDFC.isNull() set RNDFC = acn.rndmtd
+	// Rounding flag. Round/don't round
+	set ROUND = PAR("ROUND").get()
+
+	// Account segment number
+	set SEGMENT = PAR("SEG").get()
+	// IX array load flag
+	set IXLOAD = PAR("IXLOAD").get()
+	// Teaser processing flag
+	set NOTSER = PAR("NOTSER").get()
+	// Check for limits flag
+	set LIMIT = PAR("LIMIT").get()
+	// Input mode
+	set IPMODE = PAR("IPMODE").get()
+	// Standard rate
+	set (RATE, SRATE) = PAR("SRATE").get()
+
+	quit
+
+
+EXEC(RecordACN acn)	// Account				/REF:R
+
+	/*
+	Processing section
+	
+	NOTE: this section is intended to be called from outside of this 
+	procedure. It declared as public to accept recursive call from AVGRT.
+	*/
+	
+	type public Boolean ER, IPMODE, IXLOAD, NOTSER
+	type public Number BASE, INDEX, RATE, RRATE, SRATE, URATE
+	type public String ET, IX()
+
+	type Date EFDATE
+
+	// Check if teaser (promotional) rate is active.
+	if 'NOTSER set RATE = $$TEASER(.acn) if 'RATE.isNull() set (RRATE, SRATE, URATE) = RATE quit
+
+	/* Build local IX array from UTBL("INDEX", ..) 
+	   "ET=8" = Error loading index array
+	*/
+	if '$$LOADIX(.acn, INDEX, %EffectiveDate, .EFDATE, IXLOAD) quit:ER  set ET = 8 do ERR(.ET) quit
+ 
+	/* Convert data items into the value if the Data Item Auth Flag is on.
+	Applies only to Tiered Indexes
+	"ET=8" = Error loading index array */
+	
+	if IX(INDEX).piece("|", 14) do CONVERT(.acn) quit:ER
+
+	// Calculate rate
+	set RATE = $$IND(.acn, BASE) quit:ER
+	set RATE = +RATE.roundDec(5)
+ 	if RATE < 0 set RATE = 0
+
+	// Coming in from BTTDRV
+	if IPMODE do {
+		set %EffectiveDate = EFDATE
+		if IX(INDEX).piece("|", 14) do CLEANDI(INDEX, %EffectiveDate)
+		}
+
+	quit
+	
+  
+public LOADIX(RecordACN acn,	   // Acount			/REF:R
+	      String INDEX,	   // Index data
+	      Date %EffectiveDate, // Effective date		/NOREQ
+	      Date EFDATE,	   // Index effective date	/NOREQ/REF:RW
+	      Boolean IXLOAD)	   // IX array load flag	/NOREQ
+
+	/*
+	Load in IX array. Determine index effective date (EFDATE), 
+	which will be used further in rate calculation.
+
+	Additional notes on ARGUMENTS:
+		. IXLOAD	0 - IX array not fully loaded. Must reference
+				    ^UTBL to extract proper dates.
+				1 - IX array fully loaded for the date range
+				    in use within the driving application.
+	RETURNS:
+		. $$		Error Flag		TYP=L
+				0 - error
+				1 - success
+				
+	OUTPUT:
+		. IX()	Index data array
+
+	NOTE: Records in IX array are copy of INDEX table records
+	*/
+	
+	type public String ET, IX(,,)
+	type public Boolean ER
+	type public Number SEGMENT
+	
+	type String TIER
+	type Number IRATO
+
+	if INDEX.isNull() quit 0
+	
+	if %EffectiveDate.get().isNull() set %EffectiveDate = %SystemDate
+
+	if 'IX(INDEX).exists() do { quit:ER 0
+			
+		type RecordINDEX index = Db.getRecord("INDEX", "INDEX", 1) 
+
+		// ET=1 - Invalid index name
+		if 'index.getMode() set ET = 1 do ERR(.ET) quit
+
+		// Load index data to IX array
+		set IX(INDEX) = $$IND2STR(.index)
+		}
+
+	// Comparative Index - Account Level
+	if IX(INDEX).piece("|", 3) = 3 set EFDATE = %EffectiveDate quit 1
+	
+	set IRATO = IX(INDEX).piece("|", 9)
+	
+	// Get effective date for the account
+	if (IRATO > 1), ('EFDATE.get()) do { quit:ER
+
+		/* Get effective date for segmented account
+		IRATO=4 - Rate on Segment Last Renewal/Start Date */
+		if IRATO = 4, SEGMENT.get() set %EffectiveDate = $$EFDSEG(%EffectiveDate)
+
+		// Get effective date for ln accounts
+		else  if acn.cls = "L" set %EffectiveDate = $$EFDLN(.acn, IRATO, %EffectiveDate) quit:ER
+		}
+
+	set EFDATE = ""
+	if IXLOAD.get() set EFDATE = IX(INDEX, %EffectiveDate + 1).order(-1)
+
+	if EFDATE.isNull() do {
+		type ResultSet rs = Db.select("EFD", "INDEX0", "INDEX=:INDEX AND EFD<:%EffectiveDate+1", "EFD DESC")
+		if rs.next() set EFDATE = rs.getCol(1)
+		}
+ 
+	// Index ~p1  is not valid for ~p2
+	if EFDATE.isNull() set ET = 7 do ERR(.ET) quit 0
+	
+	// Index already loaded
+	if IX(INDEX, EFDATE).data() quit 1
+
+	/*
+	Load tiers data.
+	If Basis or Tiered Index take the first tier level, and move it 
+	down to -1E15 so that any balance will be greater than the lowest 
+	tier level.
+	 */
+	type DbSet dbset = Db.selectDbSet("INDEX1", "INDEX=:INDEX AND EFD=:EFDATE", "RMIN ASC")
+	if dbset.isEmpty() quit 0
+
+	// Create boot record for non comparative indexes
+	if "23".isLike("%"_IX(INDEX).piece("|", 3)_"%"), dbset.next() do { quit:ER 0
+
+		type RecordINDEX1 index1 = dbset.getRecord("INDEX1")
+
+		set IX(index1.index, index1.efd, -1E15) = $$INDT2STR(.index1)
+		}
+
+	// Load the rest of index tiers to IX array
+	while dbset.next() do { quit:ER
+
+		type RecordINDEX1 index1 = dbset.getRecord("INDEX1")
+
+		set IX(index1.index, index1.efd, index1.rmin) = $$INDT2STR(.index1)
+		}
+
+	quit 'ER
+
+
+IND(RecordACN acn,		// Account				/REF:R
+    Number BASE)		// Calculation base
+    
+	/* Calculate interest rate according to index
+
+	RETURNS:
+		. $$	Interest Rate			TYP=N
+	*/
+	type public Boolean ER, IXLOAD
+	type public String ET, INDEX, IX(,,), MATRIX, SPREAD
+	type public Number MATFLG, RATE, RRATE, SRATE, SEGMENT, URATE
+	type public Date EFDATE
+	
+	type String INDEXTEN, UODLIM, UODEXP
+	type Boolean ODFLG
+	
+	// Index array not loaded
+	if 'IX(INDEX).exists() set ET = 9 do ERR(.ET) quit ""
+
+	// Calculate standard rate	
+	if SRATE.get().isNull() do SRATE(.acn, BASE) quit:ER 0
+
+	// Apply spread from matrix. Matrix flag "0" - Apply matrix. 
+	if 'MATFLG, 'MATRIX.isNull() set RATE = RATE + $$SPREAD(.acn, MATRIX, %EffectiveDate) quit:ER 0
+	
+	// Apply spread passed in or defined on the account
+	if 'SPREAD.isNull() set RATE = $$INDSPR(RATE, SPREAD)
+
+	// Get spread and/or rounding factor defined on index
+	set INDEXTEN = IX(INDEX).piece("|", 12)
+	
+	// Extract spread and rounding factor
+	if 'INDEXTEN.isNull() do { quit:ER 0
+		type String INDSPR, INDRND
+		
+		// Extract spread and rounding factor
+		do INDEXTR(INDEX_" "_INDEXTEN, .INDSPR, .INDRND)
+		
+		// Apply spread
+		if 'INDSPR.isNull() set RATE = $$INDSPR(RATE, INDSPR)
+		
+		// Apply rounding factor
+		if 'INDRND.isNull() set RATE = $$RND(RATE, INDRND)
+		}
+
+	// Don't allow negative rate
+	if RATE < 0 set RATE = 0
+	set (URATE, RRATE) = RATE
+	if SRATE < 0 set SRATE = 0
+	
+	quit RATE
+	
+	
+SRATE(RecordACN acn,		// Account				/REF:R
+    Number BASE)		// Calculation base
+    
+    	/*
+    	Calculate the standard (base) rate based on the index.
+    	
+	OUTPUT:
+	. RATE - Recalculated rate (after offsets, limits, rounding)
+	. SRATE - Index value (without offsets, rounding, and limits)
+    	*/
+    
+	type public Boolean ER, IXLOAD
+	type public String INDEX, IX(,,))
+	type public Number RATE, RRATE, SRATE, SEGMENT
+	type public Date EFDATE
+	
+	type Boolean ZLOAD
+	type Number BASREL, IRATO
+	type String INDTYPE
+
+	set INDTYPE = IX(INDEX).piece("|", 2)	
+	set BASREL = IX(INDEX).piece("|", 3)
+	set IRATO = IX(INDEX).piece("|", 9)
+		
+	// Add balances of linked accounts
+	set BASE = $$BASE(.acn, %EffectiveDate, BASE)
+
+	// Get effective date if not calculating average rate for last nnn days
+	if IRATO > 1 do { quit:ER
+		if IRATO = 4, SEGMENT.get() set %EffectiveDate = $$EFDSEG(%EffectiveDate)
+		else  if acn.cls = "L" set %EffectiveDate = $$EFDLN(.acn, IRATO, %EffectiveDate) quit:ER
+		set EFDATE = %EffectiveDate
+		set ZLOAD = $$LOADIX(.acn, INDEX, %EffectiveDate, .EFDATE, IXLOAD)
+		}
+
+	// Calculate Average Rate for Last nnn Days
+	if IRATO = 1 set RATE = $$AVGRT(.acn, INDEX, %EffectiveDate, BASE)
+
+	// Calculate rate based on Comparative Index 
+	else  if "23".isLike("%"_BASREL_"%") set RATE = $$COMP(.acn, INDEX, EFDATE, BASE)
+
+	// Calculate rate based on Tiered Cumulative Index
+	else  if INDTYPE = "C" set RATE = $$CUMULTV(.acn, INDEX, EFDATE, BASE)
+
+	// Calculate rate based on Tiered Incremental Index
+	else  if INDTYPE = "I", BASE set RATE = $$INCRMNTL(.acn, INDEX, EFDATE, BASE)
+
+	// Calculate rate based on Basis Index
+	else  if 'BASREL ! (INDTYPE = "I" & ('BASE)) set RATE = $$CUMULTV(.acn, INDEX, EFDATE, BASE)
+
+	set (SRATE, RATE) = +RATE
+	
+	quit
+
+
+public	INDEXTR(String INDSET,		// Index set
+		Number SPREAD,		// Spread		/REF:W/NOREQ
+		String ROUND)		// Rounding factor	/REF:W/NOREQ
+
+	/*
+	Extract spread and rounding factor from index set.
+
+	Additional notes on ARGUMENTS:
+		. INDSET	Example: INDNAME +4 R5
+
+	EXAMPLE:	do INDEXTR(INDEX,.spr,.rnd)
+	*/
+	
+	type String EXTRA, SPRSTR
+
+	// Spread and rounding factor
+	set EXTRA = INDSET.piece(" ", 2, 999)
+
+	set SPRSTR = EXTRA.piece(" ", 1)
+
+	// If the first piece is the rounding expression - there is no 
+	// spread attached...
+	if "RUD".isLike("%"_SPRSTR.extract(1)_"%") do {
+		set ROUND = SPRSTR
+		set SPREAD = ""
+		}
+	// ...otherwise define third argument of index as rounding expression
+	else  do {
+		set ROUND = EXTRA.piece(" ", 2)
+		set SPREAD = {Number}SPRSTR
+		}
+
+	quit
+
+
+INDSPR(Number RATE, String SPREAD)
+	// Validate spread and aply to rate
+	
+	type public Boolean ER
+
+	type String X
+
+	set X = SPREAD
+	do SPRPP quit:ER RATE
+
+	set RATE = $$COMPUTE(RATE, SPREAD)
+	 
+	quit RATE
+
+
+public RND(Number RATE,		// Value to be rounded
+	   String REXPR)	// Rounding factor
+	   
+	/* Extrinsic to return rounded value
+		
+	RETURNS:
+		. $$		Rounded Rate		TYP=N	
+	*/
+	
+	type public String ET
+	
+	type Number D, FACTOR, HT, R, RETRATE, RUDNUM, SIGN
+	type String RUD
+	
+	if RATE.isNull() quit ""
+	if REXPR.isNull() quit RATE
+	set RUD = REXPR.extract(1) if '"RUD".isLike("%"_RUD_"%") set ET = 3 do ERR(.ET) quit RATE
+	set FACTOR = REXPR.extract(2, REXPR.length()) if FACTOR'?1N.N set ET = 4 do ERR(.ET) quit RATE
+	
+	set SIGN = 1 
+	if RATE < 0 set SIGN = -1
+	set FACTOR = 1/FACTOR
+	set R = RATE - (RATE \ 1) 
+	set D = R \ FACTOR 
+	set HT = FACTOR / 2
+
+	// Rounding sections
+	if RUD = "R" do { quit RETRATE
+		set RUDNUM = (FACTOR * D) + (HT * SIGN) 
+		if (R * SIGN) < (RUDNUM * SIGN) set RETRATE = ((RATE \ 1) + (FACTOR * D)).roundDec(5)
+		else  set RETRATE = ((RATE \ 1) + (FACTOR * (D + (1 * SIGN)))).roundDec(5)
+		}
+	if RUD = "U" do { quit RETRATE
+		set RUDNUM = FACTOR * D 
+		if RUDNUM.roundDec(10) = R.roundDec(10) set RETRATE = RATE.roundDec(5)
+		else  set RETRATE = (RATE \ 1) + (FACTOR * (D + 1)).roundDec(5)
+		}
+	if RUD = "D" do { quit RETRATE
+		set RUDNUM = FACTOR * D
+		if RUDNUM.roundDec(10) = R.roundDec(10) set RETRATE = RATE.roundDec(5)
+		else  set RETRATE = ((RATE \ 1) + (FACTOR * D)).roundDec(5)
+		}
+
+	quit RATE
+
+
+DEPLIM(RecordDEP dep,		// Deposit account		/REF:R
+       String REXPR,		// Rounding factor
+       Number RATE,		// Recalculated rate		/REF:RW
+       Number URATE)		// Unadjusted rate		/REF:W
+
+	/*
+	Compare (apply) to DEPOSIT limits
+	
+	Additional notes on ARGUMENTS:
+		. RATE		After offsets, limits, rounding
+		. URATE		before application of rate limit
+		
+	EXAMPLE:
+		do DEPLIM(.dep, RNDFC, .RATE, .URATE) quit:ER
+
+	*/
+
+	// Maximum/minimum rate - life of DEPOSIT
+	if 'dep.intmx.isNull(), RATE > dep.intmx set RATE = dep.intmx
+	if 'dep.intmn.isNull(), RATE < dep.intmn set RATE = dep.intmn
+
+	if dep.irf = 2 set (RATE, URATE) = $$RND(RATE, REXPR)
+
+	// Decrease limits
+	if RATE < dep.irn do DEPDEC(.dep)
+
+	// Increase limits
+	if RATE '< dep.irn do DEPINC(.dep)
+
+	quit
+	
+
+DEPDEC(RecordDEP dep)		// Deposit account			/REF:R
+
+	// Maximum decrease
+
+	type public Number RATE
+	
+	type Number CHANGE, MAXDEC
+
+	if 'dep.intmxdc.isNull() do {
+		set MAXDEC = dep.irn - dep.intmxdc
+		if RATE < MAXDEC set RATE = MAXDEC
+		}
+	
+	// Check for max lifetime change
+	if 'dep.intmxdl quit 
+
+	// Life time change
+	set CHANGE = RATE - dep.iro
+	if CHANGE < 0 set CHANGE = -CHANGE
+
+	// Original Int/Div Rate
+	if CHANGE > dep.intmxdl set RATE = dep.iro - dep.intmxdl
+
+	quit
+	
+
+DEPINC(RecordDEP dep)		// Deposit account			/REF:R
+
+	// Maximum increase
+	
+	type public Number RATE
+
+	type Number CHANGE, MAXINC
+	
+	if 'dep.intmxic.isNull() do {
+		set MAXINC = dep.irn + dep.intmxic
+		if RATE > MAXINC set RATE = MAXINC
+		}
+	
+	// Check for max lifetime change
+	if 'dep.intmxil quit 
+
+	// Life time change
+	set CHANGE = RATE - dep.iro
+	if CHANGE < 0 set CHANGE = -CHANGE
+	
+	// Original Int/Div Rate
+	if CHANGE > dep.intmxil set RATE = dep.iro + dep.intmxil
+
+	quit
+	
+
+LNLIM(RecordLN ln, 		// Deposit account		/REF:R
+      String REXPR,		// Rounding factor
+      Number RATE,		// Recalculated rate		/REF:RW
+      Number URATE)		// Unadjusted rate		/REF:W
+
+	/*
+	Compare (apply) to LOAN limits
+	
+	Additional notes on ARGUMENTS:
+		. RATE		After offsets, limits, rounding
+		. URATE		before application of rate limit
+		
+	EXAMPLE:
+		do LNLIM(.ln, RNDFC, .RATE, .URATE) quit:ER
+
+	*/
+	
+	type public Number CID
+	type public Boolean ER
+
+	// Rounds index value
+ 	if 'ln.irf set (RATE, URATE) = $$RND(RATE, REXPR) quit:ER	
+
+	// Apply Interest Change Method and Round Index Variance
+	set RATE = $$CHGMTD(.ln, RATE, REXPR)
+
+	// Minimum Rate Differential Check
+	if ln.minrate do {
+		type Number DRATE
+
+		set DRATE = $$MINRATE^LNCDI(CID, 1)
+		if 'DRATE quit 
+		//Loan Rate adjusted due to Minimum Rate Differential requirement
+		if RATE < (DRATE + ln.minrate) set RATE = DRATE + ln.minrate do ER(, $$^MSG(2979))
+		}
+	
+	if RATE = ln.irn quit
+	
+	// Minimum / maximum decrease
+	if RATE < ln.irn do LNDEC(.ln)
+	
+	// Minimum / maximum increase
+	if RATE > ln.irn do LNINC(.ln)
+	
+	// Maximum / minimum rate - life of loan
+	if ln.intmx, RATE > ln.intmx set RATE = ln.intmx
+	if ln.intmn, RATE < ln.intmn set RATE = ln.intmn
+	if ln.irf = 2 set (RATE, URATE) = $$RND(RATE, REXPR)
+
+	quit
+	
+
+CHGMTD(RecordLN ln,		// Loan account			/REF:R
+       Number RATE,		// Calculate rate
+       String REXPR)		// Rounding factor
+
+	/*
+	Apply Interest Change Method. Access - loans.
+
+	RETURNS:
+		. $$		Adjusted Rate		TYP=N
+	*/
+
+	type Number NEWRATE
+
+	//Cur Ind + Offset-Orig Index + Orig Rate
+	if ln.ichm = 1 do { quit NEWRATE
+		set NEWRATE = RATE - ln.indo 
+		if ln.irf = 1 set NEWRATE = $$RND(NEWRATE, REXPR)
+		set NEWRATE = NEWRATE + ln.iro
+		}
+
+	//Cur Ind + Offset - Prev Index + Cur Rate
+	if ln.ichm = 3 do { quit NEWRATE
+		set NEWRATE = RATE - ln.invl
+		if ln.irf = 1 set NEWRATE = $$RND(NEWRATE, REXPR)
+		set NEWRATE = NEWRATE + ln.irn
+		}
+
+	//Default/other method
+	set NEWRATE = RATE - ln.irn 
+	if ln.irf = 1 set NEWRATE = $$RND(NEWRATE, REXPR)
+	set NEWRATE = ln.irn + NEWRATE
+
+	quit NEWRATE
+	
+
+LNDEC(RecordLN ln)		// Loan account				/REF:R
+
+	// Minimum / maximum decrease
+	
+	type public Number RATE
+	
+	type Number MAXDEC, MAXDECYR, MINDEC
+	
+	if 'ln.intmndc.isNull() do { if RATE = +ln.irn quit
+		set MINDEC = ln.irn - ln.intmndc
+		if RATE > MINDEC set RATE = +$select(ln.intmno:MINDEC, 1:ln.irn)
+		}
+	
+	set (MAXDEC, MAXDECYR) = "" 
+	
+	if 'ln.intmxdc.isNull() set MAXDEC = ln.irn - ln.intmxdc
+	if 'ln.intmxdy.isNull() set MAXDECYR = ln.aniro - ln.intmxdy
+	
+	if MAXDEC < MAXDECYR set MAXDEC = MAXDECYR
+	if 'MAXDEC.isNull(), RATE < MAXDEC set RATE = MAXDEC
+
+	quit
+	
+
+LNINC(RecordLN ln)		// Loan account				/REF:R
+
+	// Minimum / maximum increase
+	
+	type public Number RATE
+
+	type Number MAXINC, MAXINCYR, MININC
+	
+	if 'ln.intmnic.isNull() set MININC = ln.irn + ln.intmnic do { if RATE = +ln.irn quit
+		if RATE < MININC set RATE = +$select(ln.intmno:MININC, 1:ln.irn)
+		}
+
+	set (MAXINC, MAXINCYR) = ""
+	
+	if 'ln.intmxic.isNull() set MAXINC = ln.irn + ln.intmxic
+	if 'ln.intmxiy.isNull() set MAXINCYR = ln.aniro + ln.intmxiy
+	
+	if 'MAXINCYR.isNull(), (MAXINC > MAXINCYR ! (MAXINC.isNull())) set MAXINC = MAXINCYR
+	if 'MAXINC.isNull(), RATE > MAXINC set RATE = MAXINC
+
+	quit
+	
+
+COMP(RecordACN acn,		// Account				/REF:R
+     String INDEX,		// Index name
+     Date EFDATE,		// Index effective date
+     Number BASE)  		// Calculation base
+
+	/* 
+	Comparative Rate Processing
+	
+	This processing will loop thru the IX array pulling each rate
+	or index associated with the comparative index.  Once this is found
+	it will call out to the IXCREC tag to determine if recursive or not
+	An array will be kept with each rate once this is loaded it will
+	then return the largest or smallest rate in the array.
+	
+	The first level in the index table will be the fixed rate entered
+	If this is not null then we will compare all subsequent rates/indexes
+	to it.
+
+	RETURNS:
+		. $$		Interest Rate		TYP=N
+
+	*/
+	
+	type public String ET, IX(,,)
+	type public Boolean ER
+	type public Number BASREL, RATE
+	
+	type Number VAL, VALC
+	type String COMP, TIER
+
+	// Index array not loaded (fully)
+	if IX(INDEX).data() '> 1 set ET = 9 do ERR(.ET) quit ""
+	
+	// Comparison
+	set COMP = IX(INDEX).piece("|", 7)
+	
+	set ER = 0 
+	set (TIER, VAL) = "" 
+	set VALC = 1
+	
+	// Comparative Index - Index Level
+	if BASREL = 2 for  set TIER = IX(INDEX, EFDATE, TIER).order() quit:TIER.isNull()  do {
+		// Tier type 3 - Record Field Value
+		if IX(INDEX, EFDATE, TIER).piece("|", 3) = 3 do { 
+			type String DATAITEM
+			set DATAITEM = IX(INDEX, EFDATE, TIER).piece("|", 1)
+			set RATE = $$GETINDEX(.acn, DATAITEM) quit:ER
+			do COMPARE(.acn)
+			}
+		else  do {
+			set RATE = IX(INDEX, EFDATE, TIER)
+			do COMPARE(.acn)
+			}
+		}
+
+	// Comparative Index - Account Level	
+	if BASREL = 3 do {
+		if acn.cls = "L" do COMPLN(.acn) 
+		else  do COMPDEP(.acn)
+		}
+
+	if ER quit ""
+	
+	// Average Rate
+	if COMP = "A" set VAL = VAL/VALC
+
+	quit VAL
+
+
+GETINDEX(RecordACN acn,		// Account				/REF:R
+	 String DATAITEM)	// Table column name
+
+	/*
+	Get the index value from the account for comparative index
+	Invoked by Loans or Deposits if use Comparative Index with 
+	data item references.
+	
+	All data items that may be used in the comparative index must be setup
+	in GETDPIND or GETLNIND sections.
+	
+	RETURNS:
+		. $$		Comparative Index	TYP=T
+	*/
+	
+	type public Boolean ER
+	
+	type Boolean NEGFLG
+	type Number RETVAL
+	type String TBLNAME
+
+	set NEGFLG = 0
+
+	if acn.cls = "D" set TBLNAME = "DEP"
+	else  set TBLNAME = "LN"
+
+	// Data Item Correction
+	do CORRDI(.DATAITEM, TBLNAME, .NEGFLG) quit:ER
+	
+	if TBLNAME = "DEP" set RETVAL = $$GETDPIND(.acn, DATAITEM)
+	else  set RETVAL = $$GETLNIND(.acn, DATAITEM)
+
+	if NEGFLG set RETVAL = -RETVAL
+
+	quit RETVAL
+
+
+CORRDI(String DATAITEM,		// Column name			/REF:RW
+       String TBLNAME,		// Table name
+       Boolean NEGFLG)		// Negative flag		/REF:W
+
+	/*
+	Data Item Correction 
+	
+	Correct data item used in the index.
+	*/
+
+	// If negative, add sign after conversion
+	if DATAITEM.extract(1).isLike("%-%") set NEGFLG = 1, DATAITEM = DATAITEM.extract(2, 99)
+	// Add file (table) name to data item name if not present
+	if DATAITEM.extract(1)' = "[", 'DATAITEM.isLike("%.%") set DATAITEM = TBLNAME_"."_DATAITEM quit
+	// Convert from [table]column to table.column syntax if necessary
+	if 'DATAITEM.isLike("%.%") set DATAITEM = (TBLNAME_"."_DATAITEM).piece("]", 2)
+
+	quit
+
+
+GETDPIND(RecordDEP dep,		// Deposit account			/REF:R
+	 String DATAITEM)	// Table column name			/CASE=U
+
+	/*
+	Get comparative index value.
+
+	RETURNS:
+		. $$		Comparative index value	TYP=T
+	*/
+
+	// Comparative Index #1-10
+	if DATAITEM = "DEP.INDEX1" quit dep.index1
+	if DATAITEM = "DEP.INDEX2" quit dep.index2
+	if DATAITEM = "DEP.INDEX3" quit dep.index3
+	if DATAITEM = "DEP.INDEX4" quit dep.index4
+	if DATAITEM = "DEP.INDEX5" quit dep.index5
+	if DATAITEM = "DEP.INDEX6" quit dep.index6
+	if DATAITEM = "DEP.INDEX7" quit dep.index7
+	if DATAITEM = "DEP.INDEX8" quit dep.index8
+	if DATAITEM = "DEP.INDEX9" quit dep.index9
+	if DATAITEM = "DEP.INDEX10" quit dep.index10
+	
+	// Comparative Int/Div Rate
+	if DATAITEM = "DEP.COMPIRN" quit dep.compirn
+
+	quit ""
+
+
+GETLNIND(RecordLN ln,		// Loan account				/REF:R
+	 String DATAITEM)	// Table column name			/CASE=U
+	 
+	/*
+	Returns Comparative Index value
+
+	RETURNS:
+		. $$		Comparative index value	TYP=T
+	*/
+
+	// Comparative Index #1-10
+	if DATAITEM = "LN.INDEX1" quit ln.index1
+	if DATAITEM = "LN.INDEX2" quit ln.index2
+	if DATAITEM = "LN.INDEX3" quit ln.index3
+	if DATAITEM = "LN.INDEX4" quit ln.index4
+	if DATAITEM = "LN.INDEX5" quit ln.index5
+	if DATAITEM = "LN.INDEX6" quit ln.index6
+	if DATAITEM = "LN.INDEX7" quit ln.index7
+	if DATAITEM = "LN.INDEX8" quit ln.index8
+	if DATAITEM = "LN.INDEX9" quit ln.index9
+	if DATAITEM = "LN.INDEX10" quit ln.index10
+	
+	// Comparative Int/Div Rate
+	if DATAITEM = "LN.COMPIRN" quit ln.compirn
+
+	quit ""
+	
+
+COMPDEP(RecordDEP dep)		// Deposit account		/REF:R
+
+	/*
+	Invoked by Deposits if use Comparative Index - Account Level
+	Go through all indexes setup on the account and determine rate 
+	depending on comparison type.
+
+	INPUTS:
+		. RATE		Rate value for current tier 
+	*/
+	
+	type public Number RATE
+
+	// Comparative Indexes #1 - #10
+	if dep.index1 set RATE = dep.index1 do COMPARE(.dep)
+	if dep.index2 set RATE = dep.index2 do COMPARE(.dep)
+	if dep.index3 set RATE = dep.index3 do COMPARE(.dep)
+	if dep.index4 set RATE = dep.index4 do COMPARE(.dep)
+	if dep.index5 set RATE = dep.index5 do COMPARE(.dep)
+	if dep.index6 set RATE = dep.index6 do COMPARE(.dep)
+	if dep.index7 set RATE = dep.index7 do COMPARE(.dep)
+	if dep.index8 set RATE = dep.index8 do COMPARE(.dep)
+	if dep.index9 set RATE = dep.index9 do COMPARE(.dep)
+	if dep.index10 set RATE = dep.index10 do COMPARE(.dep)
+	
+	// Comparative Interest Rate
+	if dep.compirn set RATE = dep.compirn do COMPARE(.dep)
+
+	quit
+
+
+COMPLN(RecordLN ln)		// Loan account				/REF:R
+
+	/*
+	Invoked by Loans if use Comparative Index - Account Level.
+	Go through all indexes setup on the account and determine rate 
+	depending on comparison type.
+
+	INPUTS:
+		. RATE		Rate value for current tier 	
+	*/
+	
+	type public Number RATE
+
+	// Comparative Indexes #1 - #10
+	if ln.index1 set RATE = ln.index1 do COMPARE(.ln)
+	if ln.index2 set RATE = ln.index2 do COMPARE(.ln)
+	if ln.index3 set RATE = ln.index3 do COMPARE(.ln)
+	if ln.index4 set RATE = ln.index4 do COMPARE(.ln)
+	if ln.index5 set RATE = ln.index5 do COMPARE(.ln)
+	if ln.index6 set RATE = ln.index6 do COMPARE(.ln)
+	if ln.index7 set RATE = ln.index7 do COMPARE(.ln)
+	if ln.index8 set RATE = ln.index8 do COMPARE(.ln)
+	if ln.index9 set RATE = ln.index9 do COMPARE(.ln)
+	if ln.index10 set RATE = ln.index10 do COMPARE(.ln)
+	
+	// Comparative Interest Rate	
+	if ln.compirn set RATE = ln.compirn do COMPARE(.ln)
+
+	quit
+
+
+COMPARE(RecordACN acn)		// Account			/REF:R
+
+	/*
+	Invoked by Loans and Deposits if used Comparative Index.
+	Determine the least, the greatest rate or accumulate average rate and 
+	increment tier counter.
+
+	INPUTS:
+		. COMP		Comparison Type (Greater than/Less than/Average)
+		. BASE		Rate calculation base
+		. RATE		Current Rate Value to Compare 
+		. VAL		New Rate Value to Compare 
+		. VALC		Rate Values Counter to calculate average
+		. INDEX		Index Name
+	*/
+	
+	type public Number BASE, RATE, VAL, VALC
+	type public Boolean COMP, ER
+
+	if RATE.isNull() quit
+
+	// Check if rate is not fixed for this tier - calculate it
+	do IXCREC(.acn, .RATE, BASE) if ER quit
+ 
+	if VAL.isNull() set VAL = RATE quit
+	// Greater Than
+	if COMP = "G", RATE > VAL set VAL = RATE quit
+	// Less Than
+	if COMP = "L", RATE < VAL set VAL = RATE quit
+	// Average
+	if COMP = "A" set VAL = VAL + RATE set VALC = VALC + 1 quit
+
+	quit
+	
+
+CUMULTV(RecordACN acn,		// Account				/REF:R
+	String INDEX,		// Interest index name
+	Date EFDATE,		// Effective date
+	Number BASE)		// Calculation base
+
+	/*
+	Calculate rate from Cumulative or Basis Index
+
+	RETURNS:
+		. $$		Interest Rate		TYP=N
+	*/
+	
+	type public String ET, IX(,,)
+	type public Number RATE
+	
+	type Boolean DONE
+	type Date EXPDATE
+	type String TIER
+
+	// Index array not loaded (fully)
+	if IX(INDEX).data() '> 1 set ET = 9 do ERR(.ET) quit ""
+	
+	set TIER = BASE + .01
+	set DONE = 0
+	
+	set RATE = ""
+	for  set TIER = IX(INDEX, EFDATE, TIER).order(-1) do { quit:DONE  quit:'RATE.isNull() 
+		if TIER.isNull() set TIER = IX(INDEX, EFDATE, "").order() set DONE = 1
+		set EXPDATE = IX(INDEX, EFDATE, TIER).piece("|", 4)
+		if EXPDATE, EXPDATE < %EffectiveDate quit 
+		set RATE = IX(INDEX, EFDATE, TIER)
+		}
+
+	// No int/div rate calculated. Index tiers expired.
+	if DONE, RATE.isNull() do Runtime.setErrMSG("INDEX1", 1173) quit ""
+	do IXCREC(.acn, .RATE, BASE)
+	// Apply Positive Interest Spread
+	if BASE' < 0, acn.cls = "D" do ADJRATE(.acn, TIER, BASE, EFDATE)
+
+	quit RATE
+	
+
+INCRMNTL(RecordACN acn,		// Account				/REF:R
+	 String INDEX,		// Interest index name
+	 Date EFDATE,		// Index effective date
+	 Number	BASE)		// Calculation base
+
+	/*
+	Calculate rate based on Incremental Index
+	
+	RETURNS:
+		. $$		Interest Rate		TYP=N
+	*/
+	
+	type public String ET, IX(,,)
+
+	type Number AMTLEFT, BALXRATE, LSTRATE, POSBASE
+	type Date EXPDATE
+	type String TIER
+
+	// Index array not loaded (fully)
+	if IX(INDEX).data() '> 1 set ET = 9 do ERR(.ET) quit ""
+	
+	set (BALXRATE, LSTRATE) = 0
+
+	// Calc rate for positive balance 
+	if BASE > 0 do {
+		set TIER = BASE + .01
+		set AMTLEFT = BASE
+		do INCRPOS(.acn, .BASE)
+		if 'IX(INDEX, EFDATE, .01).exists() set BALXRATE = BALXRATE - (.01*LSTRATE)
+		}
+	// Calc rate for negative balance
+	if BASE < 0 set TIER = 0, AMTLEFT = 0 do INCRNEG(.acn, .BASE)
+
+	if BASE < 0 set POSBASE = (-BASE)
+	else  set POSBASE = BASE
+	
+	quit $select(BASE:$$FN^SCARND(BALXRATE/POSBASE, "", "", "", 5), 1:"")
+	
+
+INCRPOS(RecordACN acn,		// Account				/REF:R
+	Number BASE)		// Calculation base			/REF:R
+
+	/*
+	Calculate rate based on Incremental Index for positive balance
+
+	INPUT:
+		. AM, TLEFT, BALXRATE, EFDATE, INDEX, TIER
+		. SWP()		Array used by accruals
+
+	RETURNS:
+		. RATE		Interest Rate		TYP=N
+
+	*/
+	
+	type public String INDEX, IX(,,), SWP(), TIER
+	type public Date EFDATE
+	type public Number AMTLEFT, BALXRATE, LSTRATE, RATE
+	type public Boolean IPMODE
+
+	type Number AMT
+	type Date EXPDATE
+	type Boolean EXPFLG
+	
+	set EXPFLG = 0
+	for  set TIER = IX(INDEX, EFDATE, TIER).order(-1) quit:TIER.isNull()  do { quit:AMTLEFT < .01 
+	
+		set EXPDATE = IX(INDEX, EFDATE, TIER).piece("|", 4) 
+		set EXPFLG = 0
+		if EXPDATE, EXPDATE < %EffectiveDate set EXPFLG = 1 quit 
+	
+		set RATE = IX(INDEX, EFDATE, TIER)
+		do IXCREC(.acn, .RATE, BASE)
+
+		// Apply Positive Interest Spread	
+		if acn.cls = "D" do ADJRATE(.acn, TIER, BASE, EFDATE)
+	
+		if TIER < 0 set AMT = AMTLEFT
+		else  set AMT = AMTLEFT - TIER + .01
+	
+		// If tier type - Rate on Other Acct and came from accruals
+		if IX(INDEX, EFDATE, TIER).piece("|", 3) = 2, IPMODE do { quit
+			set RATE = acn.irn 
+			set AMTLEFT = AMTLEFT - AMT 
+			set BASE = BASE - AMT 
+			set SWP(+IX(INDEX, EFDATE, TIER)) = AMT_"|"_RATE
+			} 
+	
+		set BALXRATE = (AMT*RATE) + BALXRATE 
+		set LSTRATE = RATE 
+		set AMTLEFT = AMTLEFT - AMT 
+		}
+
+	//No int/div rate calculated. Index tiers expired.
+	if EXPFLG, RATE.get().isNull() do Runtime.setErrMSG("INDEX1", 1173)
+
+	quit
+
+
+INCRNEG(RecordACN acn,		// Account			/REF:R
+	Number BASE)		// Calculation base		/REF:RW
+
+	/*
+	Calculate rate based on Incremental Index for negative balance
+
+	INPUT:
+		. AMTLEFT, BALXRATE, EFDATE, INDEX, TIER
+
+	RETURNS:
+		. RATE		Interest Rate		TYP=N
+
+	*/
+	
+	type public String INDEX, IX(,,), TIER
+	type public Date EFDATE
+	type public Number AMTLEFT, BALXRATE, LSTRATE, RATE
+
+	type Number AMT
+	type Date EXPDATE
+	type Boolean EXPFLG
+
+	set EXPFLG = 0
+	for  set TIER = IX(INDEX, EFDATE, TIER).order(-1) quit:TIER.isNull()  do { if TIER '> BASE, 'EXPFLG quit 
+	
+		set EXPDATE = IX(INDEX, EFDATE, TIER).piece("|", 4)
+		set EXPFLG = 0
+		if EXPDATE, EXPDATE < %EffectiveDate set EXPFLG = 1 quit 
+		set AMT = $select(TIER '> BASE:AMTLEFT-BASE, 1:AMTLEFT - TIER)
+		set RATE = IX(INDEX, EFDATE, TIER)
+		do IXCREC(.acn, .RATE, BASE)
+	
+		/* Apply Authorized/Unauthorized Negative Interest Spread if
+		   account is linked to an index with DEP.ODLIM and DEP.ODTERM
+		   defined as a tier and exp date.
+		*/
+		if IX(INDEX).piece("|", 14), acn.cls = "D" do ADJRATE(.acn, TIER, BASE, EFDATE)
+	
+		set LSTRATE = RATE
+		set BALXRATE = (AMT*RATE) + BALXRATE
+		set AMTLEFT = AMTLEFT - AMT
+		}
+
+	// No int/div rate calculated. Index tiers expired.
+	if EXPFLG, RATE.get().isNull() do Runtime.setErrMSG("INDEX1", 1173) quit
+
+	quit
+
+
+IXCREC(RecordACN acn,		// Account				/REF:R
+       String RATE,		// Tier Rate Value or tier data
+       Number BASE)		// Rate calculation base		/NOREQ
+       
+	/*
+	This section is used thruout the UINDX to return calculated rate.
+	e.g. if Int/Div Index or Rate on Other Account is used as a 
+	tier, or if another index name is used on a tier.
+
+	Additional notes on ARGUMENTS:
+		. RATE		tier data set from IX array
+				rate|seq|tier type|...
+
+	*/
+	
+	type public Number URATE
+	type public String INDEX
+	
+	type String TRTYP, TRVAL
+
+	set TRVAL = RATE.piece("|", 1)
+	set TRTYP = RATE.piece("|", 3)
+
+	// Tier type - Nominal Rate. Check tier's value pattern (numeric)
+	if ('TRTYP), (TRVAL?1N.N ! (TRVAL?.N1".".N)) quit
+
+	// Tier type - Interest/Dividend Index
+	if TRTYP < 2 set RATE = $$RECIND(.acn, RATE, %EffectiveDate, BASE.get(), INDEX) set URATE = RATE quit
+
+	// Tier type - Rate on Other Account
+	if TRTYP = 2 set RATE = $$RECACN(RATE, %EffectiveDate) quit 
+	
+	// If tier type is Record Field Value
+	if TRTYP = 3 set RATE = TRVAL quit
+
+	set RATE = 0
+
+	quit
+
+
+RECIND(RecordACN acn,		// Account			/REF:R
+       String RATE,		// Rate w/attributes
+       Date %EffectiveDate,	// Effective date
+       Number BASE,		// Calculation base
+       String INDEX)		// Current index name
+       
+	/*
+	RECURSION
+	
+	If int/div index is used as a current index's tier, rate for the tier 
+	will be calculated based on the new index.
+
+	INPUTS:
+		. IXLOAD	IX array load flag	TYP=N
+		. IPMODE	Input mode		TYP=N
+
+	Prepare all data necessary for the next itaration. All variables must 
+	be newed here or in 'rec' section. 
+
+	*/
+	
+	type public Boolean ER, IPMODE, IXLOAD
+	type public Number SEGMENT
+	
+	type String INDDATA, NEXTIND, RNDFC, SPREAD
+
+	// Index data (index spread rounding_factor)
+	set INDDATA = RATE.piece("|", 1)
+	// Index only
+	set NEXTIND = INDDATA.piece(" ", 1)
+	
+	// Extract spread and rounding factor from index data
+	do INDEXTR(INDDATA, .SPREAD, .RNDFC)
+
+	if NEXTIND' = INDEX, Db.isDefined("INDEX", "NEXTIND") do { quit:ER ""
+		type String RECPAR()
+
+		// Setup a new parameter array
+		set RECPAR("INDEX") = NEXTIND
+		set RECPAR("SPREAD") = SPREAD
+		set RECPAR("RNDFC") = ""
+		set RECPAR("IXLOAD") = IXLOAD
+		set RECPAR("IPMODE") = IPMODE
+		set RECPAR("SEG") = SEGMENT
+		// Do not try to apply teaser
+		set RECPAR("NOTSER") = 1
+		// Do not apply matrix if recursive
+		set RECPAR("MATFLG") = 1
+		// Do not do limit checks
+		set RECPAR("LIMIT") = 0
+		// Do not round in CTL, rounding will be done here anyway
+		set RECPAR("ROUND") = 0
+
+		// Calculate rate
+		do CTL(.acn, %EffectiveDate, BASE, .RECPAR())
+		}
+
+	//Round index value
+	if 'RNDFC.isNull() set RATE = $$RND(RATE, RNDFC)
+
+	quit RATE
+
+
+RECACN(String LNKDATA,			// Link data
+       Date %EffectiveDate)		// Effective date
+
+	/*
+	RECURSION
+	
+	If current index tier references rate on another account this rate will 
+	be calculated according to all standard rules that apply.
+	*/
+	
+	type public String RM
+	type public Boolean ER
+
+	type Number REFCID, RATE, TRTYPE
+	
+	set REFCID = LNKDATA.piece("|", 1)
+	set TRTYPE = LNKDATA.piece("|", 3)
+
+	type RecordACN refacn = Db.getRecord("ACN", "REFCID", 1)
+
+	// Cannot link deposit account to index with IRATO value
+	if 'refacn.getMode() set ER = 1, RM = "INDEX10" quit:ER ""
+
+	// RECURSION: calculate rate on another account
+	if 'refacn.index.isNull() do {
+		type String RECPAR()
+		
+		set RECPAR("INDEX") = refacn.index
+		set RECPAR("SPREAD") = refacn.intspr
+		set RECPAR("RNDFC") = refacn.rndmtd	
+		set RECPAR("MATRIX") = refacn.intmat
+
+		do CTL(.refacn, %EffectiveDate, 0, .RECPAR())
+		}
+	else  set RATE = refacn.irn
+
+	if ER quit ""
+
+	quit RATE
+
+
+ADJRATE(RecordDEP dep,		// Account			/REF:R
+	Number TAMT,		// Tier amount
+	Number BASE,		// Calculation base
+	Date EFDATE)		// Effective date
+	
+	/*
+	This section increases or decreases the tiered index rate used to 
+	accrue interest on a positive balance, authorized overdraft balance, 
+	and unauthorized overdraft balance. The rate adjusted by values in 
+	DEP.INTSPRP, DEP.INTSPRA and DEP.INTSPRU.
+
+	INPUTS:
+		. RATE		Rate value to adjust
+		. ODFLG		Overdraft processing flag 
+		. UODLIM	Overdraft limit used by index
+		. UODEXP	Overdraft limit expiration date
+	*/
+	
+	type public Number RATE, UODLIM
+	type public Boolean ER, ODFLG
+	type public String INDEX, IX(,,)
+	type public Date UODEXP
+	
+	// Positive balance
+	if BASE '< 0, dep.intsprp set RATE = $$COMPUTE(RATE, dep.intsprp) quit
+	
+	// If DEP.ODTERM is not defined do not adjust
+	if dep.odterm.isNull() quit 
+	
+	// Determine if overdraft fields (ODLIM, ODEXP) are used by the index
+	if ODFLG.exists() do { quit:ER
+		type String XTIER		
+		set XTIER = ""
+		for  set XTIER = IX(INDEX, EFDATE, XTIER).order() quit:XTIER.isNull()  do { quit:ER 
+			if IX(INDEX, EFDATE, XTIER).piece("|", 5).isLike("%DEP.ODLIM%"), IX(INDEX, EFDATE, XTIER).piece("|", 6).isLike("%DEP.ODEXP%") do {
+				set ODFLG = 1	
+				set UODLIM = XTIER
+				set UODEXP = IX(INDEX, EFDATE, XTIER).piece("|", 4)
+				}
+			}
+		}
+	
+	// If ODLIM or ODEXP is not defined as a tier - do not adjust.
+	if 'UODLIM.exists() ! ('UODEXP.exists()) quit 
+	
+	// Negative balance
+	if BASE < 0, 'UODLIM.get().isNull() do {
+		// Apply Authorized Negative Interest Spread
+		if ((TAMT '< (UODLIM)) & ((UODEXP.isNull()) ! (UODEXP '< %EffectiveDate))) & ('dep.intspra.isNull()) set RATE = $$COMPUTE(RATE, dep.intspra)
+		// Apply Unauthorized Negative Interest Spread
+		if ((TAMT < (UODLIM)) ! (('UODEXP.isNull()) & (UODEXP < %EffectiveDate))) & ('dep.intspru.isNull()) set RATE = $$COMPUTE(RATE, dep.intspru)
+		}
+	
+	quit
+	
+
+COMPUTE(Number VAR1,	// Variable one
+	String VAR2)	// Variable two with operator as a first char
+	
+	/*
+	Returns a result of operation with two variables
+
+	Additional notes on ARGUMENTS:
+		. VAR2	with operator as a first char.
+		If no operator - plus "+" sign assumed.
+
+	RETURNS:
+		. $$	Result				TYP=N
+	*/
+
+	if "+-".isLike("%"_VAR2.extract(1)_"%") set VAR1 = VAR1 + VAR2 quit VAR1
+	if VAR2.extract(1) = "*" set VAR1 = VAR1 * VAR2.extract(2, 99) quit VAR1
+	if VAR2.extract(1) = "/" set:VAR2.extract(2, 99) VAR1 = VAR1 / VAR2.extract(2, 99) quit VAR1
+	if VAR2.extract(1)?1N set VAR1 = VAR1 + VAR2 quit VAR1
+
+	quit VAR1
+	
+
+TEASER(RecordACN acn)		// Account			/REF:R
+
+	/*
+	Check for Teasers in account
+
+	RETURNS:
+		. $$	Interest Rate		TYP=N
+	*/
+
+	if 'acn.trexd.isNull(), acn.trexd > %EffectiveDate quit acn.irn
+
+	quit ""
+	
+
+AVGRT(RecordACN acn,		// Account			/REF:R
+      String INDEX,		// Int index name
+      Date %EffectiveDate,	// Effective date
+      Number BASE)		// Calculation base
+      
+	/*
+	Calculate average rate for last nnn days
+
+	RETURNS:
+		. $$		Interest Rate		TYP=N
+	*/
+	
+	type public String IX()
+	type public Boolean ER, IXLOAD
+	
+	type Date EFDATE, JD, LJD, TD
+	type Number DAYS, DDYS, RATE
+	type Boolean Z
+
+	// Number Of Days To Average Rate
+	set DAYS = IX(INDEX).piece("|", 10) 
+	set TD = %EffectiveDate
+	set DDYS = 0 
+
+	// Temporarily remove "average" indicator to avoid infinit recursion.
+	set IX(INDEX).piece("|", 9) = ""
+	
+	set EFDATE = TD - DAYS + 1 
+	set Z = $$LOADIX(.acn, INDEX, %EffectiveDate, EFDATE, IXLOAD)
+	
+	while '(EFDATE > TD) do { quit:ER
+		type Date %EffectiveDate
+
+		set %EffectiveDate = EFDATE
+		do EXEC(.acn)
+
+		set DDYS = RATE + DDYS
+		set EFDATE = EFDATE + 1
+		}
+	if ER quit ""
+
+	// Reset "average" indicator back to original
+	set IX(INDEX).piece("|", 9) = 1
+
+	quit (DDYS / DAYS).roundDec(5)
+	
+
+EFDLN(RecordLN ln,		// Account				/REF:R
+      Number IRATO,		// Index rate calc option
+      Date EFDATE)		// Default effective date
+      
+	/*
+	Get effective date for loan
+	
+	Determine effective date for loan account if calculating rate 
+	as of the last date of the last billing cycle (IRATO=2) or 
+	as of the first date of the current cycle (IRATO=3)
+	
+	RETURNS:
+		. $$		Effective Date		TYP=D 
+	*/
+	
+	type public Number ER
+
+	type Date NEWEFD, SCHLD, SCHND
+	
+	if (IRATO < 2) ! (IRATO > 3) quit EFDATE
+
+	// Scheduled Payment - Last Date
+	if ln.schld set SCHLD = ln.schld
+	else  set SCHLD = ln.dist1ld
+
+	if 'SCHLD quit EFDATE
+
+	// Scheduled Payment - Next Date
+	if ln.schnd set SCHND = ln.schnd
+	else  set SCHND = ln.dist1nd
+
+	if EFDATE = SCHND set NEWEFD = SCHND + IRATO - 3
+	else  if EFDATE '< SCHLD set NEWEFD = SCHLD + IRATO - 3
+	else  do { quit:ER
+		type String FRE
+		type Date JD, NJD
+		set JD = SCHLD 
+		// Distribution 1 Frequency
+		set FRE = "-"_ln.dist1fre
+		for  set NJD = JD.nextFreqDate(FRE) quit:ER  quit:NJD '> EFDATE  set JD = NJD
+		set NEWEFD = NJD + IRATO - 3
+		}
+	
+	// Effective date cannot be prior to disbursement date.
+	if NEWEFD < ln.odd set NEWEFD = ln.odd
+
+	quit NEWEFD
+	
+
+EFDSEG(Date EFDATE)		// Effective date
+
+	/*
+	Get effective date for segment
+
+	INPUT:
+		. CID		Account Number
+		. SEGMENT	Segment Number
+
+	RETURNS:
+		. $$		Effective Date		TYP=D
+	*/
+	
+	type public Number CID, SEGMENT
+	
+	type Date NEWEFD
+
+	if SEGMENT.isNull() quit EFDATE
+
+	type RecordDEPSEG depseg = Db.getRecord("DEPSEG", "CID,SEGMENT", 1)
+	if (+depseg.getMode()) = 0 quit EFDATE
+
+	// Date of Last Renewal
+	set NEWEFD = depseg.dlr
+	// Segment Start Date
+	if NEWEFD.isNull() set NEWEFD = depseg.segstart
+	if NEWEFD.isNull() set NEWEFD = EFDATE
+
+	quit NEWEFD
+
+
+CONVERT(RecordACN acn)		// Account			/REF:R
+
+	/*
+	Convert data items used on index tiers to their actual values
+	Applies only to tiered indexes with data item authorization
+
+	INPUTS:
+		. EFDATE	Effective Date		TYP=D
+		. INDEX		Index Name		TYP=T	
+		. IX()		Index array
+	*/
+	
+	type public Boolean ER
+	type public Date EFDATE
+	type public String INDEX, IX(,,)
+	
+	type String FID, TIER
+	type Date TEFD
+	type Number TIERVAL
+	type Boolean XTIER
+
+	set TIER = ""
+	set ER = 0
+	if acn.cls = "D" set FID = "DEP"
+	else  if acn.cls = "L" set FID = "LN"
+
+	for  set TIER = IX(INDEX, EFDATE, TIER).order() quit:TIER.isNull()  do { quit:ER 
+		// Daily Rate
+		set XTIER = IX(INDEX, EFDATE, TIER).piece("|", 5)
+		if 'XTIER.isNull() do {
+			// Create a Daily Rate tier
+			set IX(INDEX, EFDATE, XTIER) = IX(INDEX, EFDATE, TIER)
+			kill IX(INDEX, EFDATE, TIER)
+
+			// Bring tiers from previous effective date to current
+			type ResultSet rs = Db.select("EFD", "INDEX0", "INDEX=:INDEX AND EFD<=:EFDATE", "EFD DESC")
+			if rs.next() set TEFD = rs.getCol(1)
+			else  set TEFD = ""
+
+			if 'TEFD.isNull() do {
+				type String DATA
+
+				type RecordINDEX1 index1 = Db.getRecord("INDEX1", "INDEX=:INDEX,EFD=:TEFD,RMIN=:TIER", 1)
+				if 'index1.getMode() quit
+
+				set DATA = index1.rate_"|"_index1.seq_"|"_index1.tiertyp_"|"_index1.expdate_"|"
+				set DATA = DATA_index1.dlyrate_"|"_index1.yld7d_"|"_index1.yld30d
+
+				set IX(INDEX, EFDATE, TIER) = DATA
+				}
+
+			set TIER = XTIER 
+			}
+
+		if 'TIER.isLike("%"_FID_"%") quit
+		
+		// Convert Data Items
+		if acn.cls = "D" do CONVDI(.acn) quit:ER 
+		else  if acn.cls = "L" do CONVDILN(.acn) quit:ER
+
+		if TIERVAL.isNull() quit
+
+		// Daily Rate
+		set IX(INDEX, EFDATE, TIER).piece("|", 5) = TIER
+		// Eliminate duplicate tiers
+		if IX(INDEX, EFDATE, TIERVAL).exists() do DUPIX(INDEX,EFDATE,TIERVAL)
+		set IX(INDEX, EFDATE, TIERVAL) = IX(INDEX, EFDATE, TIER)
+		
+		// Add the lowest tier
+		type ResultSet rs0 = Db.select("EFD", "INDEX0", "INDEX=:INDEX AND EFD<=:EFDATE", "EFD DESC")
+		if rs0.next() set TEFD = rs0.getCol(1)
+		else  set TEFD = ""
+
+		if 'TEFD.isNull() do {
+			type String BOTTIER
+			set BOTTIER = ""
+			type ResultSet rs1 = Db.select("RMIN", "INDEX1", "INDEX=:INDEX AND EFD=:TEFD", "RMIN ASC")
+			if rs1.next() set BOTTIER = rs1.getCol(1)
+			if TIERVAL '> BOTTIER set IX(INDEX, EFDATE, -1E15).piece("|", 1) = IX(INDEX, EFDATE, TIERVAL).piece("|", 1)
+			}
+		kill IX(INDEX, EFDATE, TIER)
+		}
+
+	quit
+
+
+CONVDI(RecordDEP dep)	// Deposit account			/REF:R
+
+	/*
+	Convert DEP data items
+
+	INPUTS:
+		. EFDATE	Index effective date
+		. IX		Index array
+		. INDEX		Index name
+		. TIER		Current tier 
+		. TIERVAL 	Value of the data item used as a tier
+	
+	RETURNS:
+		. TIERVAL 	Value of the data item used as a tier
+	*/
+	
+	type public Boolean ER, IPMODE
+	type public String INDEX, IX(,,), RECARR(), TIER
+	type public Date EFDATE
+	type public Number TIERVAL
+	
+	type Date XDATE
+	type String DATE, RATE
+	type Number XRATE
+
+	// Convert tier
+	set TIERVAL = $$IXVALUE(.dep, TIER) quit:ER ! (TIERVAL.isNull())
+ 		
+	// Convert rate
+	set RATE = IX(INDEX, EFDATE, TIER).piece("|", 1)
+	set XRATE = IX(INDEX, EFDATE, TIER).piece("|", 7)
+	if RATE.isLike("%DEP%") set XRATE = RATE
+	if 'XRATE.isNull() do { quit:ER
+		type Number RATEVAL
+		set RATE = XRATE set XRATE = ""
+		set RATEVAL = $$IXVALUE(.dep, RATE) quit:ER
+		// 30 Day Yield
+		set IX(INDEX, EFDATE, TIER).piece("|", 7) = RATE
+		// Interest Rate
+		set IX(INDEX, EFDATE, TIER).piece("|", 1) = RATEVAL
+		}
+ 
+	// Convert expiration date
+	set DATE = IX(INDEX, EFDATE, TIER).piece("|", 4)
+	set XDATE = IX(INDEX, EFDATE, TIER).piece("|", 6)
+	if DATE.isLike("%DEP%") set XDATE = DATE
+	if 'XDATE.isNull() do { quit:ER
+		type Date EXPVAL
+		/* If date already in a julian format don't
+		   convert if it is not the accrual process.
+		*/
+		if 'IPMODE, DATE?5N quit
+
+		set DATE = XDATE
+		set XDATE = ""
+
+		set EXPVAL = $$IXVALUE(.dep, DATE) quit:ER
+		// 7 Day Yield
+		set IX(INDEX, EFDATE, TIER).piece("|", 6) = DATE
+		// Tier Expiration Date
+		set IX(INDEX, EFDATE, TIER).piece("|", 4) = EXPVAL
+		}
+
+	quit
+
+
+CONVDILN(RecordLN ln)	// Loan account				/REF:R
+
+	/*
+	Convert LN data items
+	
+	Check on deposit dataitem references on index tiers if tied to loan
+	account. Currently only DEP columns supported. 
+
+	INPUTS:
+		. EFDATE	Index effective date
+		. INDEX		Index Name
+		. IX()		Index array
+		. TIER		Current tier 
+
+	RETURNS:
+		. TIERVAL 	Value of the data item used as a tier
+	*/
+	
+	type public String INDEX, IX(,,), TIER
+	type public Date EFDATE
+	
+	type Number TIERVAL
+
+	// Convert tier
+	if TIER.isLike("%DEP%") set TIERVAL = "" quit
+	// Convert rate
+	if IX(INDEX, EFDATE, TIER).piece("|", 1).isLike("%DEP%") set TIERVAL = "" quit
+	// Convert expiration date
+	if IX(INDEX, EFDATE, TIER).piece("|", 4).isLike("%DEP%") set TIERVAL = "" quit
+
+	quit
+
+
+public	IXVALUE(RecordDEP dep,		// Deposit account		/REF:R
+		String DATAITEM)	// Column name
+	
+	/*
+	Get data item value from object
+
+	INPUTS:
+		. BASE		Calculation Base	TYP=N
+
+	RETURNS:
+		. $$ 	Value of the data item.
+	
+	NOTE: every coulumn from a table that is used on index tiers must 
+	be added to this section.
+	*/
+	
+	type public Number BASE
+	
+	type Boolean NEGFLG
+	type String DIVAL
+
+	set NEGFLG = 0
+	set DIVAL = ""
+	
+	// Data Item Correction
+	do CORRDI(.DATAITEM, "DEP", .NEGFLG)
+
+	// Get data item value
+	do {
+		if DATAITEM = "DEP.ODLIM" do { quit
+			// ODLIM tier only applies to negative balances.
+			if BASE.get() '< 0, dep.odlim = 0 set DIVAL = ""
+			else  set DIVAL = dep.odlim
+			}
+
+		if DATAITEM = "DEP.INTRAMT1" set DIVAL = dep.intramt1 quit
+		if DATAITEM = "DEP.INTRAMT2" set DIVAL = dep.intramt2 quit
+		if DATAITEM = "DEP.INTRAMT3" set DIVAL = dep.intramt3 quit
+		if DATAITEM = "DEP.INTRRAT1" set DIVAL = dep.intrrat1 quit
+		if DATAITEM = "DEP.INTRRAT2" set DIVAL = dep.intrrat2 quit
+		if DATAITEM = "DEP.INTRRAT3" set DIVAL = dep.intrrat3 quit
+		if DATAITEM = "DEP.ODEXP" set DIVAL = dep.odexp quit
+		if DATAITEM = "DEP.INTREXP1" set DIVAL = dep.intrexp1 quit
+		if DATAITEM = "DEP.INTREXP2" set DIVAL = dep.intrexp2 quit
+	 	if DATAITEM = "DEP.INTREXP3" set DIVAL = dep.intrexp3 quit
+		}
+	
+	if NEGFLG = 1 set DIVAL = -DIVAL
+
+	quit DIVAL
+	
+
+public CLEANDI(String INDEX,	// Index name
+	       Date EFDATE)	// Index effective date
+	       
+	/*
+	Clean up data item tiers in IX array
+	
+	INPUTS:
+		. IX()		Index data array
+		. OLDIX()	Saved tiers array
+	*/
+	
+	type public String IX(,,), OLDIX(,,)
+	
+	type String TIER, REC
+
+	set TIER = ""
+	for  set TIER = IX(INDEX, EFDATE, TIER).order() quit:TIER.isNull()  do {
+		set REC = IX(INDEX, EFDATE, TIER)
+		if 'REC.piece("|", 5).isNull() do {
+			kill IX(INDEX, EFDATE, TIER)
+			set REC.piece("|", 4) = ""
+			set IX(INDEX, EFDATE, REC.piece("|", 5)) = REC
+			}
+		}
+	for  set TIER = OLDIX(INDEX, EFDATE, TIER).order() quit:TIER.isNull()  do {
+		set IX(INDEX, EFDATE, TIER) = OLDIX(INDEX, EFDATE, TIER)
+		kill OLDIX(INDEX, EFDATE, TIER)
+		}
+
+	quit
+	
+
+public DUPIX(String INDEX,	// Index name
+	     Date EFDATE,	// Index Effective Date
+	     Number TIERVAL)	// Index tier val
+	/* 
+	Existing tier
+		
+	If the data item value matches an existing amount tier - we need to 
+	save the amount tier and plug it back in when we are done.
+
+	OUTPUT:
+		. OLDIX()	Saved tiers array 
+	*/
+	
+	type public String IX(,,), OLDIX(,,)
+	
+		
+	if TIERVAL?.N ! (TIERVAL?1"-".N) set OLDIX(INDEX, EFDATE, TIERVAL) = IX(INDEX, EFDATE, TIERVAL)
+
+	quit
+	
+public IRN(String INDEX,		//Interest index
+	   String CLS,			//Account Class
+	   Number BASE,			//Base Amount			/NOREQ
+	   Date %EffectiveDate,		//Effective Date		/NOREQ
+	   String MATRIX) 		//Interest Matrix		/NOREQ
+		   	
+	type String PAR()	   	
+	type Number RATE,RRATE,SRATE,URATE   
+			
+	if CLS.isNull()  quit
+	if INDEX.isNull() quit
+	set MATRIX = MATRIX.get()
+	
+	if %EffectiveDate.get().isNull() set %EffectiveDate=%SystemDate
+	set BASE = BASE.get()
+	set PAR("INDEX")=INDEX
+	set PAR("MATRIX")=MATRIX.get()
+	
+	do CTLCID("",%EffectiveDate, BASE.get(), .PAR())
+	
+	quit RATE.get()
+		
+BASE(RecordACN acn,		// Account				/REF:R
+     Date %EffectiveDate,	// Effective date
+     Number BASE)		// Original calc base
+     
+	/*
+	Sum the balances of linked accounts for the interest rate 
+	determination.
+
+	RETURNS:
+		. $$		Total Base Amount
+	*/
+
+	type public Boolean ER
+
+	type Number CID, EXCAMT, LNKCID, MAXRATE, MINRATE, MULTIPLY
+	type Number RATE, VARIANCE
+	type Boolean TRESREF
+	type String UAVB()
+	
+	set ER = ""
+	if acn.cid.isNull() quit BASE
+
+	set CID = acn.cid
+	
+	// Find linked accounts' balances for each effective date.
+	type ResultSet rs = Db.select("CBCID", "DEPCBAL", "CID=:CID")
+	if 'rs.isEmpty() while rs.next() do { quit:ER
+		set LNKCID = rs.getCol(1)
+		if LNKCID = CID quit 
+
+		type RecordACN lnkacn = Db.getRecord("ACN", "LNKCID", 1)
+		if 'lnkacn.getMode() quit
+
+		// If we are looking at today's balances, no need to call UAVB.
+		if %EffectiveDate = %SystemDate do {
+			type Number BAL
+			// Convert balance if in different currency
+			if lnkacn.crcd' = acn.crcd do {
+				do EXC^CRCDUTL(acn.crcd, lnkacn.crcd, lnkacn.bal, 1, 2, 11, , , 1)
+				set BAL = EXCAMT.roundCur(lnkacn.crcd)
+				}
+			else  set BAL = lnkacn.bal
+			set BASE = BASE + BAL
+			}
+
+		/*
+		If UAVB returns an error, the assumption is that
+		this account was not open as of the effective date.
+		*/
+		else  do {
+			type Number BAL
+
+			do INIT^UAVB(.lnkacn,LNKCID, %EffectiveDate, %EffectiveDate, "000000000001") if ER set ER = 0 quit 
+
+			set BAL = UAVB(1).piece("|", 12)
+
+			// Convert balance if in different currency
+			if lnkacn.crcd' = acn.crcd do {
+           			do EXC^CRCDUTL(acn.crcd, lnkacn.crcd, BAL, 1, 2, 11, , , 1)
+				set BAL = EXCAMT.roundCur(lnkacn.crcd)
+				}
+			set BASE = BASE + BAL
+			}
+		}
+
+	quit BASE
+	
+
+SPREAD(RecordACN acn,		// Account				/REF:R
+       String MATRIX,		// Interest Matrix Name
+       Date %EffectiveDate)	// Effective Date
+       
+	/*
+	This function returns the spread on the interest rate based on the
+	account attributes that are defined in the matrix that is passed as a
+	parameter. This is a public function that is called from account
+	creation, the accrual process, and the mass interest index change
+	process.
+
+	INPUT:
+		. SEGMENT	Segment Number
+		. AX(,,,)	Matrix data array (set in MATRIXMC)
+
+	RETURNS:
+		. $$		Spread on the interest rate	
+
+	EXAMPLE:
+		set SPR=$$SPREAD^UINDX(.acn, MATRIX, %EffectiveDate) quit:ER
+	*/
+	
+	type public Number SEGMENT
+	type public String AX(,,,), ET
+	type public Boolean ER
+
+	type String CLMN, ROW
+	type Date EFDTMP = ""
+	type Number COLVAL, ROWVAL, SPREAD
+	type Boolean LOCAL = 0
+	
+	type RecordUTBLMATATT umatatt = Db.getRecord("UTBLMATATT", "MATRIX", 1)
+	if 'umatatt.getMode() quit 0
+	
+	/*
+	Make sure AX(,,,) is loaded to avoid using select statements with 
+	amounts in the where clause, which are not evaluating properly due to 
+	UTBLMATATT1.MAT, UTBLMATATT2.MAT, and UTBLMATATT2.COL being defined as 
+	text fields even though the row / column is usually a number.
+	At some point a decision will need to be made as to whether text 
+	fields will be allowed as matrix rows / columns (currently CCODE is 
+	available in STBLMATATT, which is a text field).
+	*/
+	if 'AX(MATRIX).data() do {
+		set AX = MATRIX
+		do LOADAX^MATRIXMC(.AX(,,,))
+		}
+
+	set EFDTMP = AX(MATRIX, %EffectiveDate + 1).order(-1)
+	if EFDTMP.isNull() do {
+		type ResultSet rs1 = Db.select("EFD", "UTBLMATATT1", "NAME=:MATRIX AND EFD<:%EffectiveDate+1", "EFD DESC")
+		if rs1.next() set EFDTMP = rs1.getCol("EFD")
+		}
+	else  set LOCAL = 1
+	
+	// Matrix ~p1 is not valid for ~p2
+	if EFDTMP.isNull() set ET = 7 do ERR(.ET, $$^MSG(3223, MATRIX, %EffectiveDate.toString())) quit 0
+	
+	// Row
+	if umatatt.row.isNull() quit ""
+	
+	set ROWVAL = $$GETMATDT(.acn, umatatt.row) quit:ER 0
+	
+	set ROWVAL = ROWVAL + .00001
+
+	if LOCAL set ROW = AX(MATRIX, EFDTMP, ROWVAL).order(-1)
+	else  do {
+		type ResultSet rs1 = Db.select("ROW", "UTBLMATATT1", "NAME=:MATRIX AND EFD=:EFDTMP AND ROW<:ROWVAL", "ROW DESC")
+		if rs1.next() set ROW = rs1.getCol("ROW")
+		else  set ROW = ""
+		}
+	// If row is NULL, quit and return spread as 0
+	if ROW.isNull() quit 0
+
+	// Column
+	if 'umatatt.matcol.isNull() do { quit:ER 0 
+		set COLVAL = $$GETMATDT(.acn, umatatt.matcol) quit:ER
+		
+		set COLVAL = COLVAL + .00001
+	
+		if LOCAL set CLMN = AX(MATRIX, EFDTMP, ROW, COLVAL).order(-1)
+		else  do {
+			type ResultSet rs2 = Db.select("COL", "UTBLMATATT2", "NAME=:MATRIX AND EFD=:EFDTMP AND ROW=:ROW AND COL<:COLVAL", "COL DESC")
+			if rs2.next() set CLMN = rs2.getCol("COL")
+			else  set CLMN = ""
+			}
+
+		// If column is NULL, quit and return spread as 0
+		if CLMN.isNull() set SPREAD = "" quit
+
+		if LOCAL set SPREAD = AX(MATRIX, EFDTMP, ROW, CLMN).piece("|", 1) quit
+
+		type RecordUTBLMATATT2 umatatt2 = Db.getRecord("UTBLMATATT2", "MATRIX,EFDTMP,ROW,CLMN", 1)
+		set SPREAD = umatatt2.spread
+		if SPREAD.isNull() set SPREAD = 0
+		}
+	// Process as one dimentional matrix if no column determined
+	else  do { quit:ER 0
+		if LOCAL set SPREAD = AX(MATRIX, EFDTMP, ROW).piece("|", 1) quit
+
+		type RecordUTBLMATATT1 umatatt1 = Db.getRecord("UTBLMATATT1", "MATRIX,EFDTMP,ROW", 1)
+		set SPREAD = umatatt1.spread
+		if SPREAD.isNull() set SPREAD = 0
+		}
+
+	quit SPREAD
+
+
+public STATUS(RecordACN acn,	// Account				/REF:R
+	      String MATRIX)	// Matrix name
+	      
+	/*
+	This function returns the status of the account based on the
+	attributes that are defined in the matrix.
+
+	RETURNS:
+		. $$		Account Status		
+
+	EXAMPLE:
+		$$STATUS^UINDX(.acn, MATRIX)
+
+	Status - the code that is assigned to a customer when the customer's 
+	Total Customer Balance and Total Household Balance meets the parameters 
+	of the Customer Relationship Matrix linked to the customer record.
+	A code is assigned based on the values of the account (specified by the
+	row and column attributes in the matrix definition) meeting, 
+	but not exceeding the defined row and column values.
+	*/
+
+	type public Boolean ER
+
+	type String CLMN, ROW
+	type Number COLVAL, ROWVAL, STATUS
+
+	type RecordUTBLRELMAT urelmat = Db.getRecord("UTBLRELMAT", "MATRIX", 1)
+	if 'urelmat.getMode() quit ""
+
+	// Quitting with Null if matrix row is not defined
+	if urelmat.rowatt.isNull() quit ""
+
+	// Determine value of the column corresponding to a row 
+	set ROWVAL = $$GETMATST(.acn, urelmat.rowatt) quit:ER ""
+
+	// Select matrix row which is greater or equal to the account balance
+	set ROW = ""
+	type ResultSet rs1 = Db.select("MATROW", "UTBLRELMAT1", "MATRIX=:MATRIX AND MATROW>:ROWVAL-.00001", "MATROW ASC")
+	if rs1.next() set ROW = rs1.getCol(1)
+	if ROW.isNull() do {
+		type ResultSet rs2 = Db.select("MATROW", "UTBLRELMAT1", "MATRIX=:MATRIX", "MATROW ASC")
+		if rs2.next() set ROW = rs2.getCol(1)
+	}
+	// If row is not defined for this matrix, status="" will be returned 
+	if ROW.isNull() quit ""
+
+	// Quitting with Null if matrix column is not defined
+	if urelmat.colatt.isNull() quit ""
+
+	// Determine value of the column corresponding to a matrix column
+	set COLVAL = $$GETMATST(.acn, urelmat.colatt) quit:ER ""
+
+	// Select matrix column which is greater or equal to the account balance
+	set CLMN = ""
+	type ResultSet rs3 = Db.select("MATCOL", "UTBLRELMAT2", "MATRIX=:MATRIX AND MATROW=:ROW AND MATCOL>:COLVAL-.00001", "MATCOL ASC")
+	if rs3.next() set CLMN = rs3.getCol(1)
+	if CLMN.isNull() do {
+		type ResultSet rs4 = Db.select("MATCOL", "UTBLRELMAT2", "MATRIX=:MATRIX AND MATROW=:ROW", "MATCOL ASC")
+		if rs4.next() set CLMN = rs4.getCol(1)
+	}
+	if CLMN.isNull() set CLMN = 0
+
+	// Get status
+	type RecordUTBLRELMAT2 urelmat2 = Db.getRecord("UTBLRELMAT2", "MATRIX,ROW,CLMN", 1)
+	set STATUS = urelmat2.custstat
+
+	if 'STATUS do {
+		type RecordUTBLRELMAT1 urelmat1 = Db.getRecord("UTBLRELMAT1", "MATRIX,ROW", 1)
+		set STATUS = urelmat1.custstat
+		}
+
+	quit STATUS
+
+
+GETMATST(RecordACN acn,		// Account				/REF:R
+	 String ROWCOL)		// Row / column
+	 
+	/*
+	Get status matrix attribute's data. 
+	
+	Additional notes on ARGUMENTS:
+		. ROWCOL	Refers to a data item
+
+	RETURNS:
+		. $$	Account data stored in a field which matrix's row or 
+			column is refering to.
+	*/
+	
+	type public Boolean ER
+	type public String ET, RM
+	
+	type String DATAITEM, RETDATA
+
+	set RETDATA = ""
+
+	type RecordSTBLRELATT srelatt = Db.getRecord("STBLRELATT", "ROWCOL", 1)
+
+	// Matrix values invalid for this account
+	if 'srelatt.getMode() do Runtime.setErrMSG("STBLRELATT", 3228) quit 0
+
+	if acn.cls = "D" set DATAITEM = srelatt.depdi
+	else  if acn.cls = "L" set DATAITEM = srelatt.lndi
+	// ~p1 does not exist
+	else  do Runtime.setErrMSG("ACN", 3029, "CLS") quit 0
+
+	// Matrix values invalid for this account
+	if DATAITEM.isNull() do Runtime.setErrMSG("ACN", 3228) quit 0
+	else  if DATAITEM = "LN.BAL", acn.cls = "L", 'acn.bal set RETDATA = $$GETLNM(.acn, "LN.AMTREQ")
+	else  do { quit:ER 0
+		if DATAITEM.piece(".", 1) = "LN" set RETDATA = $$GETLNM(.acn, DATAITEM)
+		else  if DATAITEM.piece(".", 1) = "DEP" set RETDATA = $$GETDEPM(.acn, DATAITEM)
+		}
+
+	quit RETDATA
+
+
+GETMATDT(RecordACN acn,		// Account			/REF:R
+	 String ROWCOL)		// Row / column
+
+	/*
+	Get matrix data
+	
+	Additional notes on ARGUMRNTS:
+		. ROWCOL	Refers to a data item
+
+	RETURNS:
+		. $$		Account data stored in a field which matrix's 
+				ROW or column refers to
+	*/
+
+	type public String ET, RM
+	type public Number ER, SEGMENT
+	
+	type String DATAITEM, RETDATA
+
+	set RETDATA = ""
+
+	type RecordSTBLMATATT smatatt = Db.getRecord("STBLMATATT", "ROWCOL", 1)
+
+	// Matrix values invalid for this account
+	if 'smatatt.getMode() do Runtime.setErrMSG("STBLMATATT", 3228) quit 0
+
+	if acn.cls = "D" set DATAITEM = smatatt.dep
+	else  if acn.cls = "L" set DATAITEM = smatatt.ln
+	// ~p1 does not exist
+	else  do Runtime.setErrMSG("ACN", 3029, "CLS") quit 0 
+
+	// Matrix values invalid for this account
+	if DATAITEM.isNull() do Runtime.setErrMSG("ACN", 3228) quit 0
+	else  if DATAITEM = "LN.BAL", acn.cls = "L", 'acn.bal set RETDATA = $$GETLNM(.acn, "LN.AMTREQ")
+	else  do { quit:ER 0
+		if DATAITEM.piece(".", 1) = "LN" set RETDATA = $$GETLNM(.acn, DATAITEM)
+		else  if DATAITEM.piece(".", 1) = "DEP" set RETDATA = $$GETDEPM(.acn, DATAITEM)
+		else  if DATAITEM.piece(".", 1) = "DEPSEG", SEGMENT.get() set RETDATA = $$GETDPSM(DATAITEM)
+		}
+
+	quit RETDATA
+
+
+GETDEPM(RecordDEP dep,		// Deposit account			/REF:R
+	String DATAITEM)	// DEP table column name		/CASE=U
+	
+	/*
+	Get deposit data for matrix. 
+
+	RETURNS:
+		. $$	DEP table column value
+	*/
+	
+	type String DI
+
+	/* These columns commonly used by matrix processing. If any other data 
+	item is referenced - it will be handled using indirection down below */
+
+	if DATAITEM = "DEP.BAL" quit dep.bal
+	if DATAITEM = "DEP.ORG" quit dep.org
+	if DATAITEM = "DEP.PROBAL" quit dep.probal
+	if DATAITEM = "DEP.BALCOL" quit dep.balcol
+	if DATAITEM = "DEP.NTR" quit dep.ntr
+	if DATAITEM = "DEP.USRDEF1" quit dep.usrdef1
+	if DATAITEM = "DEP.USRDEF2" quit dep.usrdef2
+	if DATAITEM = "DEP.USRDEF3" quit dep.usrdef3
+	if DATAITEM = "DEP.USRDEF4" quit dep.usrdef4
+	if DATAITEM = "DEP.USRDEF5" quit dep.usrdef5
+	if DATAITEM = "DEP.USRDEF6" quit dep.usrdef6
+	if DATAITEM = "DEP.USRDEF7" quit dep.usrdef7
+	if DATAITEM = "DEP.USRDEF8" quit dep.usrdef8
+	if DATAITEM = "DEP.USRDEF9" quit dep.usrdef9
+	if DATAITEM = "DEP.USRDEF10" quit dep.usrdef10
+	if DATAITEM = "DEP.TCUSTBAL" quit dep.tcustbal
+	if DATAITEM = "DEP.THHBAL" quit dep.thhbal
+	if DATAITEM = "DEP.RELCODE" quit dep.relcode
+	if DATAITEM = "DEP.TRMD" quit $$DEPTRMD(.dep)
+
+	set DI = DATAITEM.piece(".", 2)
+	if Db.isDefined("DBTBL1D", "%LIBS,""DEP"",DI") quit dep.@DI
+
+	quit ""
+
+
+DEPTRMD(RecordDEP dep)		// Deposit account			/REF:R
+
+	/*
+	Calculate the Term in Days for deposit	
+	
+	RETURNS:
+		. $$	Term in Days		TYP=N
+	*/
+	
+	type public Boolean ER
+	type Date MDT	
+	type Number TRMD
+
+	if dep.mdt.isNull() do {  quit:ER ""
+        	set MDT = $$EXT^UMDT(dep.trm, dep.odt, 0, "A", "IBS") quit:ER
+                set TRMD = MDT - dep.odt
+                }
+        else  do {
+        	if dep.dlr.isNull() set TRMD=dep.mdt-dep.odt
+                else  set TRMD=dep.mdt-dep.dlr
+       		}	
+
+	quit TRMD
+
+
+GETLNM(RecordLN ln,		// Account				/REF:R
+       String DATAITEM)		// LN table column name			/CASE=U
+
+	/*
+	Get loan data for matrix
+
+	RETURNS:
+		. $$	LN table column value
+
+	*/
+	
+	type String DI
+
+	/* These columns commonly used by matrix processing. If any other data 
+	item is referenced - it will be handled using indirection down below */
+
+	if DATAITEM = "LN.AMTREQ" quit ln.amtreq
+	if DATAITEM = "LN.BAL" quit ln.bal
+	if DATAITEM = "LN.PROBAL" quit ln.probal
+	if DATAITEM = "LN.BALCOL" quit ln.balcol
+	if DATAITEM = "LN.UDBAL" quit ln.udbal
+	if DATAITEM = "LN.BALINT" quit ln.balint
+	if DATAITEM = "LN.USRDEF1" quit ln.usrdef1
+	if DATAITEM = "LN.USRDEF2" quit ln.usrdef2
+	if DATAITEM = "LN.USRDEF3" quit ln.usrdef3
+	if DATAITEM = "LN.USRDEF4" quit ln.usrdef4
+	if DATAITEM = "LN.USRDEF5" quit ln.usrdef5
+	if DATAITEM = "LN.USRDEF6" quit ln.usrdef6
+	if DATAITEM = "LN.USRDEF7" quit ln.usrdef7
+	if DATAITEM = "LN.USRDEF8" quit ln.usrdef8
+	if DATAITEM = "LN.USRDEF9" quit ln.usrdef9
+	if DATAITEM = "LN.USRDEF10" quit ln.usrdef10
+	if DATAITEM = "LN.CRLMT" quit ln.crlmt
+	if DATAITEM = "LN.TCUSTBAL" quit ln.tcustbal
+	if DATAITEM = "LN.THHBAL" quit ln.thhbal
+	if DATAITEM = "LN.RELCODE" quit ln.relcode
+	if DATAITEM = "LN.TRMD" quit $$LNTRMD(.ln)
+
+	set DI = DATAITEM.piece(".", 2)
+	if Db.isDefined("DBTBL1D", "%LIBS,""LN"",DI") quit ln.@DI
+
+	quit ""
+
+
+LNTRMD(RecordLN ln)		// Account			/REF:R
+
+	/*
+	Calculate the Term in Days for loan
+
+	RETURNS:
+		. $$	Term in Days		TYP=N
+	*/
+	
+	type public Number ER
+	
+	type Date MDT
+	type Number TRMD
+
+	// Account Term - Days
+	set TRMD = ln.trmd
+
+	if 'ln.trm.isNull(), TRMD.isNull() do { quit:ER ""
+		// Account Maturity Date
+		set MDT = ln.mdt
+		if MDT.isNull() set MDT = $$EXT^UMDT(ln.trm, ln.odt, 0, "A", "IBS") quit:ER
+		set TRMD = MDT - ln.odt
+		}
+
+	quit TRMD
+
+
+GETDPSM(String DATAITEM)	// DEPSEG column name 
+
+	/*
+	Get segment data for matrix
+
+	INPUT:
+		. CID		Account Number
+		. SEGMENT	Account Segment
+
+	RETURNS:
+		. $$		DEPSEG table column value
+	*/
+	
+	type public Number CID, SEGMENT
+	
+	type String DI
+
+	type RecordDEPSEG depseg = Db.getRecord("DEPSEG", "CID,SEGMENT", 1)
+	if 'depseg.getMode() quit ""
+
+	if DATAITEM = "DEPSEG.DSSEND" quit depseg.dssend
+	if DATAITEM = "DEPSEG.MSSEND" quit depseg.mssend
+	if DATAITEM = "DEPSEG.YSSEND" quit depseg.yssend
+
+	set DI = DATAITEM.piece(".", 2)
+	if 'Db.isDefined("DBTBL1D", "%LIBS,""DEPSEG"",DI") quit depseg.@DI
+
+	quit ""
+
+
+public ERR(String ET,	 // Error number if index error msg	/REQ/REF:RW
+	   String ERRRM) // Error message
+	   
+	// Error handling for indeces
+
+	type public String PAR(), RM
+	type public Boolean ER
+	
+	set ER = 1
+
+	if 'ERRRM.get().isNull() set RM = ERRRM quit 
+	
+	do Runtime.setErrSTBLER("INDEX", "INDEX"_ET)
+
+	quit
+	
+
+public EDT
+
+	/*
+	Interest index validation
+
+	Input:
+		. X	Index name		/TYP=T
+
+ 	Example:
+ 		. do EDT quit:ER
+
+	NOTE : this function caled from Data-Qwik screens to perform edit check
+	of interest index name. For this purpose it accepts X variable as input.
+	*/
+	
+	type public Boolean ER
+	type public String ET, RM, X
+
+	quit:X.isNull()
+
+	set ER = 0
+	set RM = ""
+	
+	// Invalid index name (INDEX1)
+	if 'Db.isDefined("INDEX", "INDEX=:X") set ET = 1 do ERR(.ET) quit
+
+	quit
+	
+
+public RNDPP
+
+	/*
+	Perform the edit check for the Index rounding factor
+
+	Inputs:
+		. X	Rounding Factor
+
+	NOTE: This section accepts X as input because called from Data-Quik 
+	screens.
+	*/
+	
+	type public String X
+	type public Boolean ER
+	type public String ET, RM
+
+	quit:X.isNull()
+	set ER = 0
+	set RM = ""
+	
+	/*
+	Rounding method Rn: round to nearest n
+		Dn: round down to nearest n
+		Un: round up to Nearest   n
+	*/
+	if "RUD".isLike("%"_X.extract(1)_"%") do {
+		// Invalid index rounding percentage
+		if X.extract(2)'?1N ! (X.extract(2) = 0) set ET = 4 do ERR(.ET)
+		}
+	else  set ET = 3 do ERR(.ET)
+
+	quit
+
+
+public SPRPP
+
+	/*
+	Perform the edit check for the Index interest rate spread
+	
+	Inputs:
+		. X	Margin or Spread
+
+	Call this section to check the syntax of a spread. If rounding factor 
+	was used without a spread the piece being passed into this section could 
+	be the rounding parameter. No error will be generated then.
+	This section accepts X as input because called from Data-Quik screens.
+	*/
+	
+	type public Boolean ER
+	type public String ET, RM, X
+	
+	quit:X.isNull()
+
+	// This would be a rounding factor with no spread
+	if "RUD".isLike("%"_X.extract(1)_"%") quit
+
+	set ER = 0
+	set RM = ""
+	
+	/*
+	The first line checks if the first piece of the spread is a 
+	mathematic operator.  If it is the second piece must be numeric.
+	The second line will check, if the first piece is NOT a mathematic 
+	operator, the first piece must be numeric and the system will assume 
+	the operator is plus.
+	*/
+	// Invalid offset syntax (INDEX2)
+	type Number XLEN = X.length()
+	if "+-*/".isLike("%"_X.extract(1)_"%") do { quit:ER
+		if X.extract(2, XLEN)'?1N.N, X.extract(2, XLEN)'?.N1".".N do {
+			set ET = 2
+			do ERR(.ET)
+			}
+		}
+	else  do { quit:ER
+		if X.extract(1, XLEN)'?1N.N, X.extract(1, XLEN)'?.N1".".N do {
+			set ET = 2
+			do ERR(.ET)
+			}
+		}
+
+	//Division by zero is not allowed in Interest Spread column
+	if X.isLike("%/0%") do Runtime.setErrMSG("ACN", 4538) quit
+
+	quit
+
+
+public SETPAR(String PAR(),	// Parameter array		/REF:W
+	      String IND,	// Index name			/NOREQ
+	      String SPR,	// Spread			/NOREQ
+	      String RFC,	// Rounding factor		/NOREQ
+	      String MTR,	// Interest matrix name		/NOREQ
+	      Number SEG,	// Segment number		/NOREQ
+	      Boolean IXL,	// IX array load		/NOREQ
+	      Boolean NTR,	// Teaser processing		/NOREQ
+	      Boolean IPM,	// Input mode			/NOREQ
+	      Boolean RFL,	// Rounding			/NOREQ
+	      Boolean LMT,	// Check for limits		/NOREQ
+	      Boolean MFL,	// Apply matrix			/NOREQ
+	      Number SRT)	// Standard rate		/NOREQ
+
+	/*
+	This public procedure is designed to construct a parameter array
+	for calls to UINDX.
+	
+	NOTE: parameters IXL, NTR, IPM, RFL and LMT are listed in 
+	the same order as bits in previously used CTL variable. 
+
+	*/
+
+	set PAR("INDEX") = IND.get()
+	set PAR("SPREAD") = SPR.get()
+	set PAR("RNDFC") = RFC.get()	
+	set PAR("MATRIX") = MTR.get()
+	set PAR("SEG") = SEG.get()
+	set PAR("IXLOAD") = IXL.get()	
+	set PAR("NOTSER") = NTR.get()		
+	set PAR("IPMODE") = IPM.get()	
+	set PAR("ROUND") = RFL.get()	
+	set PAR("LIMIT") = LMT.get()
+	set PAR("MATFLG") = MFL.get()
+	set PAR("SRATE") = SRT.get()	
+
+	quit
+
+
+public IND2STR(RecordINDEX index)	// Interest index record
+	/*
+	Combine interest index data from INDEX table record into a string 
+
+	RETURNS:
+		. $$		Index data		TYP=T
+	*/
+	
+	type String DATA
+	
+	set DATA = index.des_"|"_index.indtyp_"|"_index.basrel_"||"_index.mcf_"|"_index.lag_"|"_index.comp_"||"
+	set DATA = DATA_index.irato_"|"_index.avgdys_"|"_index.swpflg_"|"_index.extension_"|"_index.cmrindex_"|"_index.diauth_"|"_index.dlyf
+
+ 	quit DATA
+
+
+public INDT2STR(RecordINDEX1 index1)	// Tier record
+	/*
+	Combine index tier data from INDEX1 table into a string
+
+	RETURNS:
+		. $$		Tier data	TYP=T
+	*/
+	
+	type String DATA
+
+	set DATA = index1.rate_"|"_index1.seq_"|"_index1.tiertyp_"|"_index1.expdate_"|"
+	set DATA = DATA_index1.dlyrate_"|"_index1.yld7d_"|"_index1.yld30d
+
+	quit DATA
+
+
+ER(String ET,		// Error type
+   String RM)		// Return message
+   
+   	// Accrual      Routine Processing Error
+   	
+   	type public String ZE
+   	type public Number CID
+
+	if ET.get().isNull() set ET = RM.get()
+	do LOG^UTLEXC($T(+0), "*", $$^MSG(6569), +CID, ZE.get(), ET.get())
+	kill RM
+	
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60836^17181^Anitha Chandran^72775"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,857 @@
+CGMSSRV	//
+	/*
+	ORIG: chhabris - 09/02/2005
+	DESC: CGMS specific PROFILE server
+
+	---- Comments --------------------------------------------------------
+
+	This program is a customized PROFILE server for Citibank.
+	A customized server provides an alternative to using the
+	standard PROFILE server (PBSSRV).  This avoids the over-
+	head associated with using inbound and outbound FAPs to
+	translate client and server messages.  It also provides
+	the ability to tailor the server to specific Citibank
+	requirements without negatively impacting performance.
+
+	Notes:
+
+	The Message Transport Manager (MTM) has been replaced by
+	a Digital middleware product called Reliable Transaction
+	Router (RTR).  CGMSSRV relies on the APIs provided by
+	MTAPI which interface to RTR.
+
+	In order to avoid the duplication of code, a number of calls
+	to PBSSRV exist in CGMSSRV.	
+
+	---- Revision History ------------------------------------------------
+	01/02/06 - chhabris - CR18749
+		   Modified SVCNCT section to replace variable $ZVN to
+		   $ZVERSION.	
+
+	09/02/05 - chhabris - CR 16677
+		   Converted to PSL.
+	----------------------------------------------------------------------
+	*/
+
+	quit
+
+
+	//---------------------------------------------------------------------
+SVCNCT(String vzsvtyp,		// Server connect
+       Number vzsvid,
+       Number vzdebug)	
+	/*---------------------------------------------------------------------
+
+	Entry point to start server.
+	
+	 ARGUMENTS:
+	     . vzsvtyp	Server type			/TYP=T/REQ/MECH=VAL
+							/TBL=CTBLSVTYP
+	
+	     . vzsvid	Server ID (1-n)			/TYP=N/REQ/MECH=VAL
+	
+	     . vzdebug	Server debug mode		/TYP=N/NOREQ/MECH=VAL
+	     
+	 ----------------------------------------------------------------------
+	*/
+
+	type Boolean vzlogmsg,vzlogrep,vztrap
+	type Number vzactive,vzmaxtim,vzsttim,vzsvsec,vztimout
+	type String vzermsg,vzmtname,vzrole,vzcsid,vzsvfap,vzx
+
+	// Get system role (PRIMARY or SECONDARY)
+	set vzrole=$$ROLE^PBSUTL
+
+	// If role is PRIMARY, server is active
+	if vzrole="PRIMARY" set vzactive=1
+	
+	// If role is SECONDARY, server is not active
+	else  if vzrole="SECONDARY" set vzactive=0
+	
+	// Any other role is invalid, log an error and quit
+	else  do ERRLOG^PBSUTL("SV_INVLDSTS",1) quit
+
+	type RecordCTBLSVTYP ctblsvtyp=Db.getRecord("CTBLSVTYP","SVTYP=:vzsvtyp",1)
+
+	if 'ctblsvtyp.getMode() do ERRLOG^PBSUTL("SV_INVLDSVT",1) quit
+
+	// Server FAP ID
+	set vzsvfap=ctblsvtyp.fap
+
+	// Security level
+	set vzsvsec=ctblsvtyp.trust
+
+	// Stat time interval
+	set vzsttim=ctblsvtyp.stattim
+
+	// Log client messages
+	set vzlogmsg=ctblsvtyp.logmsg
+
+	// Log server replies
+	set vzlogrep=ctblsvtyp.logreply
+
+	if $zversion.piece("GT.M V",2)>4.0 do {
+
+		// Transaction TP timeout
+		set vzmaxtim=ctblsvtyp.timeout
+
+		// (default is 45 seconds)
+		if 'vzmaxtim set vzmaxtim=45
+
+		#ACCEPT PGM=Sanjay Chhabria DATE=09/09/2005
+		set vzx="set $zmaxtptime="_vzmaxtim xecute vzx
+		}
+
+	// Server GETMSG timeout
+	set vztimout=ctblsvtyp.getmsg
+	
+	// (default is 15 seconds)
+	if 'vztimout set vztimout=15
+
+	// Trap last client message?
+	set vztrap=ctblsvtyp.trapmsg
+
+	// Message transport name
+	set vzmtname=ctblsvtyp.mtname
+
+	set vzermsg=$$SVCNCT^%MTAPI(vzsvtyp,.vzcsid,.vzrole,vzmtname)
+	if 'vzermsg.isNull() do ERRLOG^PBSUTL(vzermsg,1) quit
+
+	// Server connected with an unexpected role
+	if vzrole'="PRIMARY",vzrole'="SECONDARY" do ERRLOG^PBSUTL("SV_INVLDSTS",1) quit
+
+	type RecordSVCTRLT svctrlt=Db.getRecord("SVCTRLT","SVTYP=:vzsvtyp,SVID=:vzsvid",1)
+	set svctrlt.mtmid=vzcsid
+	set svctrlt.mtmsvrid=$$DECHEX^%ZHEX(%ProcessID)
+	set svctrlt.pid=%CurrentDate_","_%CurrentTime
+	set svctrlt.role=vzrole
+	do svctrlt.save()
+
+	// Execute debug code, if applicable
+	#ACCEPT PGM=Sanjay Chhabria DATE=09/09/2005
+	if vzdebug.get()'="" xecute vzdebug
+
+	/*
+	Compare the role returned from $$ROLE^PBSUTL with that returned
+	from the server connect to the RTR.  A difference indicates the
+	role of the system has changed since the last time the status
+	file (SCA_STATUS.DAT) was updated and when the server connect
+	to the RTR was made.  This may be due to a timing issue or it
+	may be indicative of a failure in a startup/failover script.
+	*/
+
+	if vzrole="PRIMARY",'vzactive do FAILOVER^PBSUTL
+	if vzrole="SECONDARY",vzactive do SHUTDOWN^PBSUTL(vzsvtyp,vzsvid)
+
+	quit
+
+
+	//---------------------------------------------------------------------
+MAIN	// Main process loop
+	//---------------------------------------------------------------------
+	/*
+	This subroutine is the main process loop for the server process.
+	It is responsible for calling the appropriate functions to receive
+	($$GETMSG^%MTAPI), process ($$PROC^CGMSSRV) and reply
+	($$REPLY^%MTAPI) to client messages.
+	
+	The server disconnects and terminates (via a MUMPS HALT command)
+	when a STOP message is processed in subroutine CTRL.
+	
+	Error handling in subroutine MAIN
+	---------------------------------
+	
+	A MUMPS error in this subroutine is unexpected and fatal.  If a 
+	MUMPS error is encountered, the error will be logged and the
+	server will be stopped.  Application errors are handled thru
+	error trapping set in subroutine PROC.
+	
+	Control messages are checked between message exchanges.  The server
+	will shut down if a STOP message is encountered.
+
+	If the error is non-specific (CS_MTERROR), the error is logged and
+	the server attempts to disconnect and reconnect to the message
+	transport.  If unsuccessful, the reason for the failure is also
+	logged and the server is stopped.
+	*/
+
+	type public Number vzsttim,vztimer
+	type public String $zgbldir,vzgbldir
+	type String vzsav
+
+	catch vERROR {
+		do ZTMAIN
+		}
+
+	set vztimer=$$TIM^PBSUTL($h)+(vzsttim*60)
+	set vzsav=$$INIT^PBSUTL,vzgbldir=$zgbldir
+
+	do XKILL^PBSUTL	
+
+	do LOOP
+	quit
+
+
+LOOP	//
+	type public Number vztimout
+	type public String vzsvtyp,vzsvid,vzermsg,vzcsid,vztrap,vzsvsec,vzsav,vzjrnl,vzgbldir
+	type String vzactive,vzsvstat,vztimer,vzpkt,vzpktid,vzreply
+
+	for  do {
+		do CTRL^PBSUTL(vzsvtyp,vzsvid,vzcsid,.vzactive)
+		do FILSTAT^PBSUTL(vzsvtyp,vzsvid,.vzsvstat,.vztimer)
+
+		set vzermsg=$$GETMSG^%MTAPI(.vzpkt,.vzpktid,.vzcsid,vztimout)
+
+		// Timeout; ignore
+		if vzermsg="CS_TIMEOUT" quit
+
+		// Switch to PRIMARY; failover
+		if vzermsg="CS_MTPRIMARY" do {  quit
+			do ERRLOG^PBSUTL(vzermsg,1)
+			if 'vzactive do FAILOVER^PBSUTL
+			}
+
+		// Switch to SECONDARY; shutdown
+		if vzermsg="CS_MTSECONDARY" do {  quit
+			do ERRLOG^PBSUTL(vzermsg,'vzactive)
+			if vzactive do SHUTDOWN^PBSUTL(vzsvtyp,vzsvid) Halt
+			}
+
+		// RTR facility died
+		if vzermsg="CS_FACDEAD" do { quit
+			do ERRLOG^PBSUTL(vzermsg,'vzactive)
+			if vzactive do SHUTDOWN^PBSUTL(vzsvtyp,vzsvid) Halt
+			}
+
+		// Fatal error
+		if vzermsg="CS_FATAL" do {  Halt
+			do ERRLOG^PBSUTL(vzermsg,'vzactive)
+			if vzactive do SHUTDOWN^PBSUTL(vzsvtyp,vzsvid) Halt
+			}
+
+		// Non-fatal; ignore
+		if vzermsg'="" do { quit
+			do ERRLOG^PBSUTL(vzermsg,'vzactive)
+			}
+
+		if vztrap.get() do {
+			type Number i
+
+			do Db.delete("SVTRAP","JOB=:%ProcessID")
+			for i=1:400:vzpkt.length() do {
+
+				type RecordSVTRAP svtrap=Db.getRecord("SVTRAP","JOB=:%ProcessID",1)
+				set svtrap.errormsg=vzpkt.extract(i,i+399)
+				set svtrap.message=(i\400)+1
+				do svtrap.bypassSave()
+				}
+			}
+
+		// If the server is not active, check if system is becoming active
+		if 'vzactive set vzactive=$$OK2PROC^PBSUTL if 'vzactive do ERRLOG^PBSUTL($$^MSG(3578),1) quit
+
+		// Process the client message
+		set vzreply=$$PROC(vzpkt,"",vzsvsec,.vzsav)
+
+		if vzreply'="" do {
+			set vzermsg=$$REPLY^%MTAPI(.vzreply,vzpktid,vzcsid)
+			if vzermsg'="" do ERRLOG^PBSUTL(vzermsg)
+			}
+
+		if 'vzjrnl.get().isNull() U vzjrnl W !! ZWR vzpkt,vzreply U 0
+		if 'vzjrnl.get().isNull() do {
+			
+		
+			}
+		set $zgbldir=vzgbldir
+		do XKILL^PBSUTL
+		Lock
+		}
+
+	quit
+
+
+	//---------------------------------------------------------------------
+PROC(vzpkt,vzsvfap,vzsvsec,vzsav)	//Private;Process the transaction
+	/*---------------------------------------------------------------------
+	
+	 ARGUMENTS:
+	     . vzpkt	Input message packet		/TYP=T/REQ/MECH=VAL
+	
+	     . vzsvfap	Server type table data		/TYP=T/REQ/MECH=VAL
+			[CTBLSRVTYP]SRVTYP
+	
+	     . vzsvsec	Server security level		/TYP=N/REQ/MECH=VAL
+	
+	     . vzsav	System variable string		/TYP=T/NOREQ
+							/MECH=REFNAM:RW
+	 RETURNS:
+	     .	$$	Response to GCIF, or NULL	/TYP=T
+			if Server is to not-respond
+	----------------------------------------------------------------------
+	*/
+	Lock
+
+        // Protect MAIN variables
+	type String %IPMODE,vzactive,vzcsid,vzgbldir,vzjrnl,vzpktid,vzreply
+	type String vzx,vztrap,vzsvtyp,vzopr,vzstart,vzerror,vzpgm
+	type Number vzsttim,vzsvid,vztime,vztimer,vztimout
+	type public String vzhdr,vztyp,vzmsg,vzadm,vzsrvcls
+	type public String vzlogmsg,vzlogrep,vzsvstat(),vzcltokn,vzmssgid
+
+	catch vERROR {
+		do ZTPROC
+		}
+
+	set %IPMODE="NOINT"
+	set:vzsav.get().isNull() vzsav=$$INIT^PBSUTL do VLOD^PBSUTL(vzsav)
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+	if %SystemDate'=cuvar.tjd set vzsav=$$INIT^PBSUTL do VLOD^PBSUTL(vzsav)
+
+	// Transaction start time
+	set vzstart=$$GETTIM^%ZFUNC
+
+	// Transaction start with Client/Server transaction identifier
+	TStart ():transactionid="CS"
+
+	// If transaction is restarted, clean-up symbol table
+	if $TRestart do XKILL^PBSUTL S:vzsav.get().isNull() vzsav=$$INIT^PBSUTL do VLOD^PBSUTL(vzsav)
+
+	set vzerror=$$FMTINP(vzpkt,.vzhdr,.vztyp,.vzmsg,.vzadm,.vzopr)
+	if 'vzerror set vzerror=$$EXEC(.vzreply,.vzhdr,vztyp,vzmsg,vzadm,.vzopr)
+	else  set vzreply="" if vzerror=3 do ERRLOG^PBSUTL("SV_INVLDMSG")
+
+	set vzreply=$$FMTOUT(vzerror,.vzreply,.vzhdr,vztyp,vzadm,.vzopr)
+
+	// TRollback occured in application, issue new TStart
+	if $TLevel=0 TStart ():transactionid="CS"
+
+	// Log message in message log
+	set vzx=vzsrvcls.get()_"#"_vztyp
+	do LOG^PBSUTL(vzcltokn.get(),vzmssgid.get(),vzpkt.get(),vzreply,vzerror,vzx,"CGMSSRV",vzlogmsg.get(),vzlogrep.get())
+
+	// Transaction commit
+	if $TLevel TCommit
+
+	// Accumulate statistics
+	set vzx=$S('vzsrvcls.get().isNull():vzsrvcls,1:6)
+	if 'vzx.isNull() do STATS^PBSUTL(.vzsvstat,vzx,vzstart)
+
+	// Return reply
+	quit vzreply
+
+
+	//----------------------------------------------------------------------
+EXEC(vzreply,vzhdr,vztyp,vzmsg,vzadm,vzopr)	//Execute procedure
+	/*----------------------------------------------------------------------
+
+	 ARGUMENTS:
+	     . vzreply	Response area		/TYP=T/REQ/MECH=REF:W
+	     . vzhdr	Header Array		/TYP=T/REQ/MECH=REF:R
+	     . vztyp	Message Number		/TYP=T/REQ/MECH=VAL
+	     . vzmsg	Incoming Message	/TYP=T/REQ/MECH=VAL
+	     . vzadm	Administrative Envelope	/TYP=T/REQ/MECH=VAL
+	     . vzopr	Operator Information	/TYP=T//MECH=REF:R
+
+	 RETURNS:
+		. $$	Error Flag		/TYP=N
+	----------------------------------------------------------------------
+	*/
+
+	type public String vzidx(),vzcltokn,vzmssgid,vzsvstat(),%ZTRAP
+	type Number vzerror,vzstart,X
+	type String vzlogmsg,vzlogrep,vzpgm,vzx,%LOGID
+
+	set vzcltokn=vzhdr(50020,1)
+	set vzmssgid=vzhdr(50045,1)
+
+	if Db.isDefined("MSGLOG","TOKEN=:vzcltokn,MSGID=:vzmssgid") do ERRLOG("SV_DUPLIMSG",.vzreply) quit 3
+
+	// Provide mechanism to return control back from appl
+	set %ZTRAP="D ZE^UTLERR ZG "_$ZLEVEL_":ZTPROC^CGMSSRV"
+
+	catch vERROR {
+		do ZTEXEC
+		}
+
+	// Pass-thru message
+	if vztyp=6403 quit $$MLI6403(.vzhdr,.vzmsg)
+
+	// Heartbeat message
+	if vztyp=6102 set vzreply=vzmsg quit ""
+
+	// Update message count statistics; exclude restarts
+	if $TRestart=0 set vzsvstat(6).piece("|",1)=vzsvstat(6).get().piece("|",1)+1
+
+	if 'vzidx(vztyp).data() do {
+		type RecordUTBLCGMS cgms=Db.getRecord("UTBLCGMS","MSGID=:vztyp",1)
+		set vzidx(vztyp)=cgms.des_"|"_cgms.routine_"|"_cgms.valid24x7_"|"_cgms.admin_"|"_cgms.version
+		}
+
+	set vzpgm=vzidx(vztyp).piece("|",2)
+	if vzpgm.isNull() do ERRLOG("SV_INVLDMSG",.vzreply) quit 1
+
+	// If Message not allowed while Host Store&Forward enabled, quit.
+	// Response 9999 = DO NOT RESPOND TO MESSAGE
+	type String %STFHOST
+
+	set X=""
+	type ResultSet rs=Db.select("LAST","STFHOST1")
+	if rs.next() set X=rs.getCol("LAST")	
+
+	if X set %STFHOST=X if 'vzidx(vztyp).piece("|",3) set vzreply="" quit 9999
+
+	type String %CGMSSRV
+	set %CGMSSRV=1
+	set vzx=%LOGID N %LOGID
+	set %LOGID=vzx set %LOGID.piece("|",9)=1
+
+	#ACCEPT PGM=Sanjay Chhabria DATE=09/09/2005
+	set vzx="S vzerror=$$^"_vzpgm_"(.vzreply,.vzhdr,.vzmsg,.vzopr)" xecute vzx
+
+	if vzerror=3,'vzidx(vztyp).piece("|",4) set vzerror=0
+	quit vzerror
+
+
+	//----------------------------------------------------------------------
+MLI6403(vzhdr,vzmsg)	//Private//Specialized pass-thru message
+	/*----------------------------------------------------------------------
+	 ARGUMENTS:
+	   . vzhdr	Header Array		/TYP=T/NOREQ/MECH=REF:R
+	   . vzmsg 	Request Message Array	/TYP=T/REQ/MECH=REF:R
+	
+	 RETURNS:
+	   . $$	Return Code		/TYP=N
+	
+	 REQUEST:
+	    20271 = PBSSRV message
+	
+	 REPLY:
+	    20272 = Message Reply
+	    3992  = Response Text
+	    8007  = Response Code
+	----------------------------------------------------------------------
+	*/
+
+	type Number vzerror,vzx(),x
+	type String vzclid,vzstatus,vzpass,vzreply,lv,TLO,BRCD
+	type public String vzsav
+
+	set vzclid="",vzerror=0
+
+	do unwrap(vzmsg,.vzx)
+	set vzx=vzx(20271,1).get() if vzx.isNull() quit 3
+	if $$UPPER^%ZFUNC(vzx.extract(1,12))="HEALTH CHECK" do HEALTH quit vzerror
+	if $$UPPER^%ZFUNC(vzx.extract(1,12))="SYSTEM CHECK" do SYSTEM quit vzerror
+
+	// Strip off MTM header
+	set vzpass=vzx.piece(28.char(),2,99999)
+	set vzstatus=0
+
+	// Process the message through the P/A server
+	set vzreply=$$PROC^PBSSRV(vzpass,"",0,.vzsav,"")
+	set vzerror=vzstatus.get()
+	kill vzx
+
+	set x=vzreply.length()+3,lv=$C(x\256)_$C(x#256)
+	set vzx(20272,1)=lv_"0"_vzreply
+	set vzx(8007,1)=0
+	set vzx(3992,1)=""
+
+	set vzreply=$$wrap(.vzx)
+	quit vzerror
+
+
+	//----------------------------------------------------------------------
+FMTINP(pkt,hdr,typ,msg,adm,opr)	//Parse CGMS client request message
+	/*----------------------------------------------------------------------
+
+	 RETURNS:
+	 . $$		Return Code
+			1 = Setup problem with UTBLEXTINT
+			3 = Admin Envelope problem
+	----------------------------------------------------------------------
+	*/
+
+	type String INTRFC,x,x15,x17,x19,TLO,BRCD
+
+	set (adm,msg,typ)=""
+
+	// Element Protocol Designator
+	if $$int(pkt.extract(1,2))'=1 quit 3
+	if $$int(pkt.extract(3,4))'=pkt.length() quit 3
+
+	do unwrap(pkt.extract(5,pkt.length()),.x)
+
+	// Function Header
+	set x15=x(15,1).get() if x15="" quit 3
+
+	// Operator Information
+	set x17=x(17,1).get()
+
+	// Function Vector Env.
+	set x19=x(19,1).get() if x19="" quit 3
+
+	do unwrap(x(15,1),.hdr)
+	set hdr(50005,1)=hdr(50005,1).get() if hdr(50005,1).isNull() quit 3
+	set hdr(50010,1)=hdr(50010,1).get() if hdr(50010,1).isNull() quit 3
+	set hdr(50015,1)=hdr(50015,1).get() if hdr(50015,1).isNull() quit 3
+	set hdr(50020,1)=hdr(50020,1).get() if hdr(50020,1).isNull() quit 3
+	set hdr(50045,1)=hdr(50045,1).get() if hdr(50045,1).isNull() quit 3
+
+	kill x
+	do unwrap(x17,.opr)
+	set opr(50064,1)=opr(50064,1).get()
+	set opr(50065,1)=opr(50065,1).get()
+
+	kill x
+	do unwrap(x19,.x)
+	set typ=x("").order()
+	if typ=17000 set typ=x(typ).order() if typ.isNull() quit 3
+
+	set adm=x(17000,1).get()
+	set msg=x(typ,1)
+
+	/* ********************************************************************
+	
+	 The following code was introduced until a CGMS sign-on message can be
+	 implemented.  BRCD, %UID and TLO are system variables that are req'd
+	 by the application.  TLO is defined by the FROM_ID field in the
+	 Function Header: Common Envelope.  BRCD and %UID are defined in
+	 user table UTBLEXTINT, External Interface Table.
+	
+	 First 4 bytes of TLO will be used as common identifer
+	*/
+
+	set TLO=hdr(50010,1)
+	set INTRFC=TLO.extract(1,4)
+	type RecordUTBLEXTINT extint=Db.getRecord("UTBLEXTINT","INTRFACE=:INTRFC",1)
+	if 'extint.getMode() do ERRLOG("",$$^MSG(3473,TLO)) quit 1
+
+	set BRCD=extint.brcd if BRCD.isNull() do ERRLOG("",$$^MSG(6654)) quit 1
+	set %UserID=extint.uid if %UserID.isNull() do ERRLOG("",$$^MSG(6668)) quit 1
+
+	type RecordSCAU scau=Db.getRecord("SCAU","UID=:%UserID",1)
+
+	if 'scau.getMode() do ERRLOG("",$$^MSG(7591,%UID)) quit 1
+	set %UserClass=scau.%ucls if %UserClass.isNull() do ERRLOG("",$$^MSG(3535,%UID)) quit 1
+
+	//*******************************************************************
+
+	quit 0
+
+
+	//--------------------------------------------------------------------
+FMTOUT(error,reply,hdr,typ,adm,opr)	;Private;Re-format reply into CGMS message
+	/*--------------------------------------------------------------------
+
+	 ARGUMENTS:
+	     . error	Return Code (element 50300)	/TYP=N
+	
+			0	No error
+			1	BAD CGMS SEQ_NUMBER	(Applies only to GCIF)
+			2	Application timeout 	(Applies only to GCIF)
+			3	Bad message envelope 
+			4	Session non-existant	(Applies only to GCIF)
+			5	Abort in progress	(Applies only to GCIF)
+			9999	No resposne
+	----------------------------------------------------------------------
+	*/
+
+	if error=9999 quit ""
+
+	type String admout,client,ele(),mstate,server,rsp(),x
+
+	set mstate=hdr(50005,1).get()
+	set server=hdr(50010,1).get()
+	set client=hdr(50015,1).get()
+
+	set mstate=2.char()_mstate.extract(2)
+
+	set hdr(50005,1)=mstate			// message_state
+	set hdr(50010,1)=client			// from_id
+	set hdr(50015,1)=server			// to_id
+
+	set error=$S(error=3:3,1:0)		// Limit response to 0 and 3
+	set rsp(50300,1)=$$bin(error)		// Return_code
+
+	set ele(15,1)=$$wrap(.hdr)		// Function Header: Common Env.
+	set ele(17,1)=$$wrap(.opr)		// Operator Information
+	set ele(18,1)=$$wrap(.rsp)		// Function Header: Response Env.
+
+	do unwrap(adm,.admout)
+	set admout(17002,1)=2			// Admin Msg Type. 2=reply
+
+	set x(typ,1)=reply.get()
+	set x(17000,1)=$$wrap(.admout)		// Administrative Envelope
+	set ele(19,1)=$$wrap(.x)		// Function Vector Envelope
+
+	kill x
+	set x(1,1)=$$wrap(.ele)
+
+	quit $$wrap(.x)
+
+
+	//----------------------------------------------------------------------
+wrap(ele)	//Public//Wrap CGMS message
+	/*---------------------------------------------------------------------
+	
+	 KEYWORDS: Formatting
+	
+	 ARGUMENTS:
+	     . ele	Elementized array name		/TYP=T/REQ
+							/MECH=REFARR:R
+	 RETURNS:
+	     . $$	ELF message
+	----------------------------------------------------------------------
+	*/
+
+	type Number id,seq
+	type String x
+	
+	set (id,seq,x)=""
+	for  set id=ele(id).order() quit:id.isNull()  do {
+		for  set seq=ele(id,seq).order() quit:seq.isNull()  do {
+			set x=x_$$bin(id)_$$bin(ele(id,seq).length()+4)_ele(id,seq)
+			}
+		}
+
+	quit x
+
+
+	//----------------------------------------------------------------------
+unwrap(msg,ele)	//Public//Unwrap CGMS message
+	/*---------------------------------------------------------------------
+
+	 KEYWORDS: Formatting
+	
+	 ARGUMENTS:
+	     . msg	Message (ELF format)		/TYP=T/REQ
+							/MECH=VAL
+	
+	     . ele	Elementized array name		/TYP=T/REQ
+							/MECH=REFARR:W
+	----------------------------------------------------------------------
+	*/
+
+	type String id,seq,quit,x
+	type Number ln,max,ptr
+
+	set (ptr,quit)=0,max=msg.length()
+	kill ele
+
+	for  do { quit:quit
+		set id=$$int(msg.extract(ptr+1,ptr+2)) if id<1 set quit=1 quit
+		set ln=$$int(msg.extract(ptr+3,ptr+4))
+		if ln<4 set ln=msg.length()
+		set x=msg.extract(ptr+5,ptr+ln)
+
+		set seq=ele(id,"").order(-1)+1
+		set ele(id,seq)=x
+		set ptr=ptr+ln
+		if ptr'<max set quit=1 quit
+		}
+	quit
+
+
+	//----------------------------------------------------------------------
+token()	/*	Public; Generate client token	
+	--------------------------------------------------------------------
+	 This routine will generate a unique token that can be used as a
+	 MORE token for GCIF messaging.
+	
+	 RETURNS:
+	     . $$	Client token			/TYP=T
+	----------------------------------------------------------------------
+	*/
+	type public String MLI()
+	type Number x
+	type String y
+
+	// Increment pointer, reset if value exceeds 81,450,624 (a larger value
+	// results in a token with a length greater than 4 characters).
+
+	Lock +MLI("TOKEN")
+
+	type RecordMLI mli=Db.getRecord("MLI","KEY='TOKEN'",1)
+	set x=mli.token+1
+	if x>81450624 set x=1
+	set mli.token=x
+	do mli.bypassSave()
+
+	Lock -MLI("TOKEN")
+
+	set y=""
+	for  quit:'x  set y=$C((x#95)+32)_y,x=x\95
+	quit y
+
+
+	//----------------------------------------------------------------------
+bin(int,len)	//Public;Convert integer into it's binary representation
+	/*--------------------------------------------------------------------
+	
+	 ARGUMENTS:
+	     . int	Integer 			/TYP=N/REQ/MECH=VAL
+	     . len	Data length			/TYP=N/DFT=2
+	
+	 RETURNS:
+	     . $$	Binary representation of 'int'
+	
+	 EXAMPLE:
+			set x=$$bin^CGMSSRV(50010) 	x="ÃZ"
+			set x=$$bin^CGMSSRV(50010,4)	x=$C(0,0)_"ÃZ"
+	----------------------------------------------------------------------
+	*/
+	quit $e($c(int\16777216,(int#16777216)\65536,((int#16777216)#65536)\256,((int#16777216)#65536)#256),5-len.get(2),4)
+
+
+	//---------------------------------------------------------------------
+int(bin)	//Public;Convert binary representation into an integer
+	/*---------------------------------------------------------------------
+
+	 ARGUMENTS:
+	     . bin	Binary representation		/TYP=T/REQ/MECH=VAL
+			up to 4 digits
+	
+	 RETURNS:
+	     . $$	Integer value of 'bin'
+	
+	 EXAMPLE:
+			set x=$$int^CGMSSRV("ÃZ")
+	----------------------------------------------------------------------
+	*/
+	set bin=$e($c(0,0,0,0),1,4-$l(bin))_bin
+	quit ($a(bin.extract(1))*16777216)+($a(bin.extract(2))*65536)+($a(bin.extract(3))*256)+($a(bin.extract(4)))
+
+
+	//----------------------------------------------------------------------
+pdu(num)	//Public;Convert numeric value into packed decimal unsigned
+	/*---------------------------------------------------------------------
+
+	 ARGUMENTS:
+	     . num	Numeric value			/TYP=N/REQ/MECH=VAL
+
+	 RETURNS:
+	     . $$	Packed decimal unsigned value of 'num'
+
+	 EXAMPLE:
+			set x=$$pdu^CGMSSRV(12345)
+	----------------------------------------------------------------------
+	*/
+
+	type Number i,x
+	type String pdu
+
+	set pdu=""
+	for i=1:2 set x=num.extract(i,i+1) quit:x.isNull()  set pdu=pdu_$c((x.extract()*16)+x.extract(2))
+	quit pdu
+
+
+	//--------------------------------------------------------------------
+date(dat)	//Private;Return date for state token field
+	//----------------------------------------------------------------------
+	if dat.get().isNull() set dat=%CurrentDate
+	quit $$pdu($$DAT^%ZM(dat,"YEARMMDD"))
+
+
+	//----------------------------------------------------------------------
+time(tim)	//Private;Return time for state token field
+	//----------------------------------------------------------------------
+	if tim.get().isNull() set tim=%CurrentTime
+	quit $$pdu($$TIM^%ZM(tim,"2460SSSS"))
+
+
+	//----------------------------------------------------------------------
+seqn()	//Private;Return sequence counter
+	//----------------------------------------------------------------------
+	type Number x
+
+	set x=%CurrentTime
+	quit $$pdu($e("0000000",1,(8-x.length()))_x)
+
+
+	//---------------------------------------------------------------------
+ERRLOG(ET,RM)	//Private;Log errors
+	//---------------------------------------------------------------------
+
+	if RM.get().isNull() do {
+		type RecordSTBLER stbler=Db.getRecord("STBLER","KEY=:ET")
+		set RM=stbler.rm
+		}
+	do ^UTLERR
+	quit
+
+
+	//---------------------------------------------------------------------
+ZTMAIN	//Private;Error trap for MAIN
+	//---------------------------------------------------------------------
+
+	type public Number vzactive
+
+	if vzactive.get() do ZE^UTLERR quit
+	do ERRLOG^PBSUTL("",1)
+	quit
+
+	//---------------------------------------------------------------------
+ZTPROC	//Private;Error trap for PROC
+	//---------------------------------------------------------------------
+	
+	do ZE^UTLERR
+	quit ""
+	
+	//---------------------------------------------------------------------
+ZTEXEC	//Private;Error trap for PROC
+	//---------------------------------------------------------------------
+	type public Number %ZTSEQ
+	
+	do ZE^UTLERR
+	
+	type Number x()
+	type String vzreply
+
+	set x(8007,1)=1
+	set x(3992,1)=$$^MSG(1191,%ZTSEQ)
+	set vzreply=$$wrap(.x)
+
+	// 2=APPLICATION ERROR
+	quit 2
+
+
+	//--------------------------------------------------------------------
+HEALTH	//Perform System Health Check
+	//-------------------------------------------------------------------
+	type public Number ER
+	type public String vzsvtyp
+	type String tbls,x,vzreply,vzx()
+	type Number zero,vzerror
+
+	set x=vzx(20273,1).get()	// MRPC call
+	set tbls=x.piece("|",1)		// List of tables to check
+	set zero=x.piece("|",2)		// Should we zero statistics?
+	set vzx(20272,1)=""		// Response
+	set vzx(20273,1)=$$SQL^MRPC073(tbls,vzsvtyp,zero)
+
+	set vzerror=ER
+	set vzx(8007,1)=ER		// Response code
+	set vzx(3992,1)=""		// Response text
+
+	set vzreply=$$wrap(.vzx)
+	set vzerror=0
+	quit
+
+
+	//---------------------------------------------------------------------
+SYSTEM	// Perform system check
+	//--------------------------------------------------------------------
+
+	type Number vzerror
+	type String vzreply,vzx()
+
+	set vzx(20272,1)=""		// Response
+	set vzx(3992,1)=""		// Response text
+	set vzreply=$$wrap(.vzx)
+	set vzerror=0
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60268^26981^Sanjay Chhrabria^24089"	// Signature - LTD^TIME^USER^SIZE

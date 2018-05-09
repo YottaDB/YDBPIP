@@ -1,0 +1,471 @@
+SRVTRN2(RecordDEP dep,RecordTTX ttx,RecordTRN trn,NET)
+	/*
+	Service Fee On-line Processing - Direct Transaction Fees
+
+	    ORIG:  Laura Hillanbrand
+
+	-------- Revision History ---------------------------------------------
+
+	10/11/06 - KinI - CR 23603
+		   Modified procedure to replace ACN record with DEP and use 
+		   object references instead of variables. Besides the clean-up 
+		   it also corrects some undefined in the case FEEOPT section 
+		   is called externally.
+	
+	05/25/06 - DESHPANDE S K - CR 20748
+		   Replaced public variable %TRNHSEQ with call to 
+		   ttx.getStoredValue("HistSeq") and %TRNSEQ with call to 
+		   ttx.getStoredValue("TranSeq").
+		   
+	03/29.06 - RussellDS - CR20460
+		   Fix FILETR section location of history sequence for the
+		   fee transaction to return FEEHSEQ.
+	
+	08/24/05 - RussellDS - CR16911
+		   Corrected duplicate variable name (ttx) in FILETR section
+		   and changed coding to post misc transactions.
+		   
+		   Correct saving of secondary transaction info in FILE section.
+		   
+		   Fix undefined errors.
+		   
+		   Fix minor PSL errors - scope warnings remain.
+		   
+		   Fix casting problems.
+		   
+		   Remove old revision history.
+
+	-----------------------------------------------------------------------
+	*/
+
+	type String ETC
+	type Number CID, CHGOPT, MAXDLY
+	
+	set CID=ttx.cid
+	set ETC=ttx.etc
+
+	do PROC(.dep,.trn)
+
+	if FEEAMT.get() do FILE(.dep,.ttx,.trn)
+
+	quit
+
+
+PROC(RecordDEP dep,RecordTRN trn)	// Process transaction
+
+	type String PGM
+
+	if trn.feepln="" quit 
+	if trn.feegrp="" quit
+
+	set (FEEAMT,MAXDLY)=""
+	set FEECNT = 1
+
+	// Find correct posting program
+	set PGM=$$FEEPGM^UFID(trn.feepln,$S(%EffectiveDate:%EffectiveDate,1:%SystemDate))
+
+	// Service fee program not compiled
+	if PGM="" do Runtime.setErrMSG("DEP",2481,trn.feepln) quit
+	set PGM="^"_PGM_"(.dep,3,"""_trn.feegrp_""","_FEECNT_",1,"_NET_")"
+
+	// sets CHGOPT,MAXDLY,FEEAMT
+	do @PGM
+
+	// Fee lookup table returned no service fee 
+	if FEEAMT.get()="*" set OVR(CID,"OVR","CHGOPT3")="" quit
+	if FEEAMT.get()="" quit
+
+	set DFT("AMT")=FEEAMT
+	if CHGOPT=1 quit
+
+	set DFT("AMT")=0
+	// Service fee is calculated at analysis
+	set RM=$$^MSG(2479)
+
+	quit
+
+
+FILE(RecordDEP dep,RecordTTX ttx,RecordTRN trn) // Service fee plan detail information - direct transaction
+
+	type Number FEEHSEQ, FEESEQ, FEETAMT, HISTSEQ, IRA, OFEEAMT, SECSEQ, TAMT
+	type String SAVE
+
+	set HISTSEQ = ttx.getStoredValue("HistSeq")
+	set SECSEQ=Db.currVal("HISTDST","CID,HISTSEQ")+.01
+	set FEESEQ=SECSEQ
+	set OFEEAMT=FEEAMT
+
+	set IRA = dep.ira
+
+	do FEES(.dep,.trn,.ttx, .FEEHSEQ) quit:ER
+
+	if 'FEEAMT quit
+
+	set CHGOPT=CHGOPT.get(1)
+	if CHGOPT=1,'dep.anltyp,'MAXDLY quit
+
+	// Direct Transaction fee - A fee plan not associated with account
+	if CHGOPT=1,'dep.scnd quit
+
+	set TAMT=OFEEAMT
+
+	type String FEEGRP, TR16
+	
+	set TR16=""
+	set FEEGRP=trn.feegrp
+
+	type RecordSRVD srvd=Db.getRecord("SRVD","CID=:CID,PLTP=0,SCND=:dep.scnd,FEECAT=3,FEETYP=:FEEGRP", 1)
+
+	if CHGOPT=1,MAXDLY do {
+
+		set SAVE=srvd.srvdlr_"#"_srvd.srvdly
+
+		if srvd.srvdlr-%SystemDate do {
+			set srvd.srvdlr=%SystemDate
+			set srvd.srvdly=0
+		}
+
+		set srvd.srvdly=srvd.srvdly+TAMT
+	}
+
+	if CHGOPT=1!TAMT do {
+
+		set srvd.srvcntd=srvd.srvcntd+FEECNT
+		set srvd.srvcstd=srvd.srvcstd+TAMT
+	}
+
+	do srvd.bypassSave()
+	
+	set TR16.piece("#",11)=CID
+	set TR16.piece("#",12)=FEECNT
+	set TR16.piece("#",13)=CHGOPT
+	set TR16.piece("#",14)=MAXDLY
+	set TR16.piece("#",15)=FEEAMT.get()
+	set TR16.piece("#",16)=FEETAMT
+	set TR16.piece("#",17)=SAVE.get()
+	set TR16.piece("#",24)=3
+	set TR16.piece("#",25)=trn.feegrp
+
+	if 'FEEHSEQ.isNull() do {
+		type RecordHIST hist = Db.getRecord("HIST", "CID=:CID,TSEQ=:FEEHSEQ", 1)
+		if hist.getMode()=1 do {
+
+			set hist.xhs16=TR16
+
+			do hist.bypassSave()
+		}
+	}
+
+	// get decimal of FEESEQ
+	set FEESEQ=FEESEQ#1
+
+	// Record fee reversal info in HISTDST
+	type RecordHISTDST histdst=Db.getRecord("HISTDST","CID,HISTSEQ,FEESEQ",1)
+
+	set histdst.lnerc=TR16
+
+	// Create file maintenance entry if no transaction
+	if (histdst.getMode() = 0) do {
+		set histdst.acct=CID
+		set histdst.itc=""
+		set histdst.etc="FM"
+		set histdst.tso=ttx.etc
+		// Fee Amount
+		set histdst.tcmt=dep.cid_",0,"_dep.scnd_",3,"_trn.feegrp_"[SRVD]SRVCNTD:"_(srvd.srvcntd-FEECNT)_":"_srvd.srvcntd_":"_$$^MSG(4984)_$$^SCARND(TAMT,0,CID)
+	}
+
+	do histdst.bypassSave()
+
+	quit
+
+
+FEES(RecordDEP dep,RecordTRN trn,RecordTTX ttx,Number FEEHSEQ)	// Post DR and CR fee transactions
+
+	type Public Cache %CACHE()
+
+	// Debit customer account
+
+	if 'FEEAMT quit
+
+	if CHGOPT-1 set FEEAMT=0 quit
+
+	type String CRCD, SVCMSG
+	type Number CID, TYPE
+
+	// Use Service Charge Account Number
+	if dep.svcfeecid'="" do {
+
+		set CID=dep.svcfeecid
+
+		type RecordDEP feedep=Db.getRecord("DEP","CID=:CID")
+
+		set TYPE=feedep.type
+		set CRCD=feedep.crcd
+		// Service fee for account
+		set SVCMSG=$$^MSG(8435,dep.cid)
+		set IRA=feedep.ira
+		
+		if CRCD'=dep.crcd do {
+
+			type Number EXCAMT
+
+			do EXC^CRCDUTL(CRCD,dep.crcd,FEEAMT,0,0,"00")
+
+			set FEEAMT=$$^SCARND(EXCAMT,0,CID)
+			}
+		}
+
+	else  do {
+		set TYPE=dep.type
+		set CID=dep.cid
+		set CRCD=dep.crcd
+		set SVCMSG=$$^MSG(3506)   // Service Fees
+	}
+
+	if dep.feeopt set FEEAMT=$$FEEOPT(.dep,.trn,NET)
+
+	if 'FEEAMT quit
+
+	type Number FEEGL, TAMT
+	type String ETC, TCMT
+	
+	set TAMT=FEEAMT
+	set FEETAMT=TAMT
+	set TSO=""
+	set TCMT="FEE-"_ttx.etc_": "_SVCMSG
+	// need original ETC's feegl
+	set FEEGL=trn.feegl
+
+	type RecordPRODCTL prodctl=%CACHE("PRODCTL").getRecord("PRODCTL","TYPE")
+
+	set ETC=prodctl.drtrsc
+	if ETC="" set ETC=prodctl.drtrgp
+	// Invalid transaction code
+	if ETC="" do Runtime.setErrMSG("DEP",3592) if ER quit
+
+	type RecordTRN trn2=%CACHE("TRN").getRecord("TRN","ETC")
+
+	// Get fee default reason code if an RPA account.
+	if IRA do {
+
+		type String UTSO
+
+		set UTSO("IRAD")=CUVAR.RPAFEE
+
+		do IN^UTSO(.UTSO,.TSO)
+	}
+
+	set FEESEQ = ttx.getStoredValue("TranSeq")+SECSEQ
+
+	// Post DR transaction
+	do FILETR(.dep,.ttx,.trn2, .FEEHSEQ)
+	if ER quit
+
+	// Credit transaction fee account
+	set CID=FEEGL
+
+	// Reset amounts to original FEEAMT
+	set TAMT=OFEEAMT
+	set FEEAMT=OFEEAMT
+
+	set ETC=prodctl.odtc1
+	if ETC="" set ETC="MCR"
+
+	type RecordTRN trn3=%CACHE("TRN").getRecord("TRN","ETC")
+
+	if 'CID do {
+		set CID=+trn3.acn
+		set TSO="SRVFEE#"_ttx.cid
+	}
+
+	if 'CID,dep.glsc'="" do {
+
+		type RecordUTBLGLSC utblglsc=Db.getRecord("UTBLGLSC","GLSC")
+
+		set CID=utblglsc.dglf
+	}
+
+	// Post CR transaction
+	do FILETR(.dep,.ttx,.trn3)
+
+	quit
+
+
+FILETR(RecordDEP dep, RecordTTX ttx, RecordTRN trn, Number FEEHSEQ)
+
+	type RecordTTX ttx2 = Class.new("RecordTTX")
+
+	set ttx2.cid=CID
+	set ttx2.tseq=HISTSEQ+SECSEQ
+	set ttx2.itc=trn.itc
+	set ttx2.etc=ETC
+	set ttx2.tamt=TAMT
+	set ttx2.efd=%EffectiveDate
+	set ttx2.tso=TSO
+	set ttx2.tcmt=TCMT
+	set ttx2.crcd=CRCD
+	set ttx2.brcd=BRCD
+	set ttx2.uid=%UserID
+	set ttx2.trc=ttx.trc
+
+	if "DL"'[trn.cls do {
+		set ttx2.cc=dep.cc
+		do TRNSINGL^TRNDRV(.ttx2,,TPD,BRCD,5)
+		
+		if ER do ERR
+	}
+	else  do {
+		
+		// Post as secondary transactions
+		if CID=dep.cid do {
+			do TRNSINGL^TRNDRV(.ttx2,.dep,TPD,BRCD,5)
+		}
+		else  do TRNSINGL^TRNDRV(.ttx2,,TPD,BRCD,5)
+		
+		if ER do ERR
+		
+		// Get history record to use for update of hist.xhs16 in FILE
+		type ResultSet rs = Db.select("TSEQ", "HIST", "CID=:CID AND ETC=:ETC AND TAMT=:TAMT AND TSEQ>:HISTSEQ", "TSEQ DESC")
+		
+		if rs.next() set FEEHSEQ = rs.getCol("TSEQ")
+		else  set FEEHSEQ = ""
+	}
+
+	type RecordHISTDST histdst=Class.new("RecordHISTDST")
+
+	set histdst.cid=dep.cid
+	set histdst.tseq=HISTSEQ
+	set histdst.dstseq=SECSEQ
+	set histdst.acct=ttx2.cid
+	set histdst.itc=ttx2.itc
+	set histdst.etc=ttx2.etc
+	set histdst.tamt=ttx2.tamt
+	set histdst.efd=ttx2.efd
+	set histdst.tso=ttx2.tso
+	set histdst.tcmt=ttx2.tcmt
+	set histdst.crcd=ttx2.crcd
+	set histdst.trc=ttx2.tseq
+
+	do histdst.bypassSave()
+
+	set SECSEQ=SECSEQ+.01
+
+	quit
+
+
+Public FEEOPT(RecordDEP dep,RecordTRN trn,TAMT)
+	// This function returns an adjusted fee amount based on the fee option.
+
+	type Number FEEUNP, X
+	
+	set X=""
+
+	if dep.svcfeecid'="" set TAMT=0
+
+	/*
+	 Adjust fee amount on closeout transaction if fee is taken from the
+	 account that is being closed.
+	*/
+	if trn.pcfd5,dep.svcfeecid="" do {
+		// Close Acct and Prohibit Further Proc
+		if TAMT-FEEAMT>0 quit
+		set X=$S(dep.feeopt=2:FEEAMT,1:FEEAMT-TAMT)
+	}
+
+	// Else Adjust fee amount on credit transaction.
+	else  if dep.trb-$E(trn.itc) do {
+		// Internal Transaction Code
+		if dep.bal+TAMT-FEEAMT>0 quit
+		set X=$S(dep.feeopt=2:FEEAMT,dep.bal+TAMT<0:FEEAMT,1:FEEAMT-dep.bal-TAMT)
+	}
+
+	// Else Adjust fee amount on debit transaction.
+	else  do {
+		if dep.bal-TAMT-FEEAMT>0 quit
+		set X=$S(dep.feeopt=2:FEEAMT,dep.bal-TAMT<0:FEEAMT,1:FEEAMT-dep.bal+TAMT)
+	}
+
+	set FEEUNP=X
+	set FEEAMT=FEEAMT-X
+
+	if 'FEEUNP quit FEEAMT
+
+	// Unapplied transaction fee of $<CHGOPT2> 
+	set OVR(dep.cid,"OVR","CHGOPT2")=FEEUNP
+
+	quit FEEAMT
+
+
+Public EC(RecordTTX ttx,	// Transaction object
+	  RecordDEP dep) 	// Deposit object
+	  
+	// Error correct transaction fee
+
+	type Number CID, CHGOPT, FEECAT, FEECNT,HISTSEQ, MAXDLY, SECSEQ, TAMT
+	type String SAVE, TRNGRP, X
+	
+	// Loan Error-Correct Data
+	set X=ttx.lnerc
+
+	set CID=X.piece("#",11)
+
+	if 'CID quit
+
+	set FEECNT=X.piece("#",12)
+	set CHGOPT=X.piece("#",13)
+	set MAXDLY=X.piece("#",14)
+	set SAVE=X.piece("#",17,18)
+	set FEECAT=X.piece("#",24)
+	set TRNGRP=X.piece("#",25)
+	set TAMT=+ttx.tamt
+
+	// Service Charge - Next Date
+	if 'dep.scnd quit
+
+	if CHGOPT=1,'dep.anltyp,'MAXDLY quit
+
+	type RecordSRVD srvd=Db.getRecord("SRVD","CID=:CID,PLTP=0,SCND=:dep.scnd,FEECAT=:FEECAT,FEETYP=:TRNGRP",1)
+	if srvd.getMode()=0 quit
+
+	if CHGOPT=1!TAMT do {
+		set srvd.srvcntd=srvd.srvcntd-FEECNT
+		set srvd.srvcstd=srvd.srvcstd+TAMT
+	}
+
+	if MAXDLY set srvd.srvdlr=+SAVE set srvd.srvdly=srvd.srvdly+TAMT
+
+	do srvd.bypassSave()
+
+	set HISTSEQ = ttx.getStoredValue("HistSeq")
+	set SECSEQ=Db.currVal("HISTDST","CID,HISTSEQ")+.01
+
+	// File Maintanence in history
+	type RecordHISTDST histdst=Class.new("RecordHISTDST")
+
+	set histdst.cid=CID
+	set histdst.tseq=HISTSEQ
+	set histdst.dstseq=SECSEQ
+	set histdst.acct=CID
+	set histdst.itc=""
+	set histdst.etc="FM"
+	set histdst.tso=ttx.etc
+	// Fee Amount
+	set histdst.tcmt=CID_","_dep.scnd_",3,"_TRNGRP_"[SRVD]SRVCNTD:"_(srvd.srvcntd+FEECNT)_":"_srvd.srvcntd_":"_$$^MSG(4984)_$$^SCARND(TAMT,0,CID)
+
+	do histdst.bypassSave()
+
+	quit
+
+
+ERR	// Log error in exception file
+
+	if ET.get()="" set ET=RM.get()
+
+	// Assess service fees
+	do LOG^UTLEXC($T(+0),"*",$$^MSG(4980),CID.get(),%ZTSEQ.get(),ET.get())
+
+	kill ET,%ZTSEQ
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60551^57612^Irina Kin^9919"	// Signature - LTD^TIME^USER^SIZE

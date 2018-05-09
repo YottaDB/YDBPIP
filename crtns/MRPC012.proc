@@ -1,0 +1,1265 @@
+public	MRPC012(String return, Number versn, String vzrec, Number seq)
+	/*
+	Transaction Analysis
+
+	ORIG: Steve Canfield - 8/28/96
+
+	This extrinsic function returns transaction analysis reports,  including:
+
+		1. Account Changes by data item
+		2. Transaction Amount Breakdown
+		3. Billing Application
+		4. Payment path summary
+		5. Check/Float hold summary
+		6. Primary/Secondary Transaction Display
+		7. General Ledger Transaction Analysis
+
+	SCATBL5.RPCID=12
+
+	KEYWORDS: Client/Server, CRT, Transaction, RPC
+
+	ARGUMENTS:
+	 	. return	Transaction analysis    	/TYP=T/REQ
+								/MECH=REFNAM:W
+
+	 	. versn		^MRPC012 version number 	/TYP=N/REQ
+	    			Current version = 1  		/MECH=VAL
+
+		. vzrec		TSSP transaction message,	/TYP=T/REQ/MECH=VAL
+				excluding the header, contains
+				multiple transactions sub-records.
+				This parameter is broken down into
+				multiple PROFILE transactions by 
+				calling in to the $$LV2V function.
+	                                    		
+
+		. seq		Transaction sequence  		/TYP=N/NOREQ/MECH=VAL/DEF=1
+
+	RETURNS:
+	     	. $$		Error message			/TYP=T
+	    			Null = No error
+
+	RELATED:
+		. $$^PBSMRPC - MRPC Service Class Driver
+
+	EXAMPLES:
+
+		set RM=$$^MRPC012(.val,1,lvrec,1)
+
+	---- Revision History ------------------------------------------------
+
+	09/05/06 - KELLYP - CR 22935
+		   Modified the PROCTRN section to save off the HIST sequence
+		   number in CIDLIST.  Also modified the LNINFO section to use
+		   this HIST sequence when pulling HISTSB records.  These 
+		   changes were made because nothing was being returned for 
+		   levels 3 (Billing Application) and 4 (Payment Path Summary)
+		   because LNINFO was using the transaction sequence number 
+		   instead of the hist sequence number.  Also modified LNINFO
+		   to properly set BSEQ into the INFO array and modified BLDPATH
+		   to properly format the bill due date.
+
+	07/10/06 - KELLYP - CR 22100
+		   Modified the BLDTAMT section to add an extra tab to the
+		   return string before appending the 2nd or higher subamount
+		   & description for a transaction.  This prevents datawindow 
+		   import errors from occurring in PFW on the Amount Breakdown 
+		   tab when the transaction amount is split among multiple 
+		   payment elements.
+
+	12/05/05 - SmithCD - CR 17931
+		   Made same change as below (CR 16725) for building payment 
+		   path and billing information. Changed SEQ key in 
+		   MRPC012(,,) from dtx.seq to DATASEQ to differentiate 
+		   between primary and secondary transactions, and to return 
+		   a more consistent sequence number. Further cleaned up to 
+		   meet current standards.
+	
+	08/22/05 - Radhika - CR 16725 - The code in PROCTRN was checking the 
+		   whole string instead of checking the first piece of the 
+		   CIDLIST(CID) string when checking on account class for 
+		   when processing before / after account images.
+	
+	05/31/05 - SmithCD - CR 15902
+		   Fixed undefined error on CLS / GLSC variables in PROCTRN 
+		   section that occurred when there is more than one 
+		   transaction to the same account in DTX (for example, a 
+		   backdated transaction and a system-generated interest 
+		   accrual adjustment).
+	
+	04/19/05 - SmithCD - CR15305
+		   Modified PROCTRN section to pass RJ() to TRNSET^TRNDRV 
+		   and use it to get a description for profile errors. 
+		   Previously, a generic error was returned.
+	
+	03/21/05 - RussellDS - CR14908
+		   Modified ACNDIFF section's call to EXT^UPID to pass account
+		   object.  Added record parameter and modified calls to ACNDIFF
+		   to pass record object.
+		   
+		   Removed old revision history.
+
+	02/04/05 - SmithCD - CR13608
+		   . Added setting of origseq to the original value of seq, 
+		     and use origseq to determine when to remove transactions
+		     (this is necessary to preserve the original value to 
+		     remove other transactions only when the value passed in 
+		     is not zero)
+		   . Removed setting of BRCD (this is already handled by 
+		     FMTTR^PBSTSSP)
+		   . Replaced PGLSC usage with GLDI for utblgldescd and 
+		     utblgldescl references (related to CR 13991)
+		   . Removed extra $char(9) when building output within the 
+		     MRPC012("TA",TRSEQ,ELEMSEQ) loop in BLDTAMT section
+		   . Modified to reference new dtx.summ sub-fields
+		   . Modified to comply with current PSL standards
+	*/
+
+	// Version number of client message is not compatible with server
+	if versn.get()'=1 quit $$ERRMSG^PBSUTL($$^MSG(2951))
+
+	// Client message not present
+	if vzrec.get().isNull() quit $$ERRMSG^PBSUTL($$^MSG(553))
+	
+	type public Number %MCP
+	
+	type Date %EffectiveDate
+	type Number DECPREC,ER,EXCHD,PTR,TTXRECS,origseq,vzfrn,vzstfflg
+	type String BRCD,ET,GLSCLST(,),MRPC012(,,),OUTARRY(),rec(),record()
+	type String RM,X
+
+	set X=$$LV2V^MSG(vzrec,.record())
+	// TSSP records not present
+	if 'record(1).exists() quit $$ERRMSG^PBSUTL($$^MSG(2761))
+	
+	set X=$$LV2V^MSG(record(1),.rec())	// Get individual transactions
+	// TSSP records not present
+	if 'rec.data() quit $$ERRMSG^PBSUTL($$^MSG(2761))
+
+	set (ER,EXCHD,TTXRECS)=0
+	set return=""
+	set vzfrn=1			//Foreign client validation
+	set vzstfflg=0			//Store & Forward flag (0=online)
+
+	type RecordTTX ttx()
+
+	set PTR=""
+	for  set PTR=rec(PTR).order() quit:PTR.isNull()  do { quit:ER
+		// Build ttx record
+		set ttx(PTR)=Class.new("RecordTTX")
+		set ER=$$FMTTR^PBSTSSP(PTR,rec(PTR),.ttx(PTR))
+		if 'ER set TTXRECS=TTXRECS+1
+		}
+
+	if ER quit $$ERRMSG^PBSUTL(RM.get(),ET.get())
+
+	// Respond with error if no transaction records defined
+	// Trans. array not defined
+	if 'TTXRECS quit $$ERRMSG^PBSUTL($$^MSG(2680))
+	
+	/*
+	   The MRPC012 variable will be used to indicate the amount of
+	   information that should be return. When it has a null value, info
+	   for all the transactions will be returned. When a specfic sequence
+	   is indicated, then account changes,transaction breakdown,payment
+	   record satisfaction,payment path summary,check float hold summary
+	   will be returned up to that sequence.
+	*/
+	
+	set MRPC012=seq.get()
+
+	set origseq=+seq.get()		// Preserve original value of seq
+	if 'seq.get() set seq=1		// Default sequence to 1
+
+	// Sequence does not exist
+	if 'ttx(seq).exists() set ER=1 quit $$ERRMSG^PBSUTL($$^MSG(7227))
+	
+	set %MCP=CUVAR.%MCP
+
+	set %EffectiveDate=ttx(seq).efd
+
+	// Perform database analysis with ttx record
+
+	set MRPC012=seq
+
+	// If processing a specific transaction, will include all transactions
+	// up to and including it.  Remove any that follow.
+
+	if origseq for  set seq=ttx(seq).order() quit:seq.isNull()  kill ttx(seq)
+
+	// Protect system defined edit masks & initialize to SQL defaults
+	type String %MSKC,%MSKD,%MSKE,%MSKL,%MSKN
+	
+	do {
+		type public Number %TOKEN
+		
+		type String context,sqlpar()
+		
+		set (%MSKC,%MSKD,%MSKE,%MSKL,%MSKN)=""
+
+		type RecordTOKEN token=Db.getRecord("TOKEN","TOKEN=:%TOKEN")
+		if 'token.ctxt.isNull() do {
+			do PARSPAR^%ZS(token.ctxt,.sqlpar())
+
+			//Load format
+			if sqlpar("FORMAT").exists() do { quit:ER
+				set ER=$$FORMAT^PBSMSQL(sqlpar("FORMAT"))
+				}
+			set %MSKD=sqlpar("DATE").get()
+			set (%MSKE,%MSKN)=sqlpar("DEC").get()
+			}
+		}
+	
+	if ER quit $$ERRMSG^PBSUTL(RM.get(),ET.get())
+
+	do PROCTRN(.ttx(),.MRPC012(,,))
+
+	if ER quit $$ERRMSG^PBSUTL(RM.get(),ET.get())
+
+
+	// Format output
+	
+	// Get decimal precision based on DEP.BAL
+	type RecordDBTBL1D dbtbl1d=Db.getRecord("DBTBL1D","%LIBS=""SYSDEV"",FID='DEP',DI='BAL'")
+	set DECPREC=dbtbl1d.dec
+	
+	set OUTARRY(1)=$$BUILDCHG(.MRPC012(,,))	// Column changes
+	set OUTARRY(2)=$$BLDTAMT(.MRPC012(,,))	// TAMT breakdown
+	set OUTARRY(3)=$$BLDBILLS(.MRPC012(,,))	// Billing application
+	set OUTARRY(4)=$$BLDPATH(.MRPC012(,,))	// Payment path information
+	set OUTARRY(5)=$$BUILDHLD(.MRPC012(,,))	// Deposit Check/Float holds
+	set OUTARRY(6)=$$BUILDTR(.MRPC012(,,))	// Primary and secondary information
+	set OUTARRY(7)=$$BUILDGL(.MRPC012(,,))	// Taccount information
+
+	set return=$$V2LV^MSG(.OUTARRY())
+
+	quit ""
+
+
+BUILDCHG(String MRPC012(,,))		// Transaction analysis data	/REF:RW
+
+	// Format Account change information
+
+	// MRPC012("DA",CID,N) = Column | Description | Old value | New value
+
+	type Number CID,N
+	type String REC,X
+	
+	set (CID,N,X)=""
+
+	for  set CID=MRPC012("DA",CID).order() quit:CID.isNull()  do {
+		set REC=""
+		for  set N=MRPC012("DA",CID,N).order() quit:N.isNull()  do {
+			set MRPC012("DA",CID,N).piece("|",3)=MRPC012("DA",CID,N).piece("|",3).trim(-1)
+			set MRPC012("DA",CID,N).piece("|",4)=MRPC012("DA",CID,N).piece("|",4).trim(-1)
+			set REC=REC_$char(9)_MRPC012("DA",CID,N).translate("|",$char(9))_$char(13,10)
+			}
+		set REC=CID_REC_$char(13,10)
+		set X=X_REC
+		}
+
+	quit X
+	
+	
+BLDTAMT(String MRPC012(,,))		// Transaction analysis data	/REF:R
+
+	/*
+	Build TAMT breakdown
+
+	MRPC012("TA",ttxseq) = totals (where ttxseq = primary
+	MRPC012("TA",ttxseq,element_seq) = description | amount
+	*/
+
+	type Number CNT
+	type Number ELEMSEQ,TRSEQ
+	type String REC,X
+
+	set (ELEMSEQ,TRSEQ,X)=""
+
+	for  set TRSEQ=MRPC012("TA",TRSEQ).order() quit:TRSEQ.isNull()  do {
+		// Primary transaction (totals)
+		if TRSEQ\1=TRSEQ set X=X_TRSEQ_$char(9)_$$FMT(MRPC012("TA",TRSEQ))
+
+		set CNT=0
+
+		for  set ELEMSEQ=MRPC012("TA",TRSEQ,ELEMSEQ).order() quit:ELEMSEQ.isNull()  do {
+			// Change | to TAB
+			set REC=MRPC012("TA",TRSEQ,ELEMSEQ).translate("|",$char(9))
+			set REC.piece($char(9),2)=$$FMT(REC.piece($char(9),2))
+			if CNT set X=X_$char(9)
+			set X=X_$char(9)_REC_$char(13,10)
+			set CNT=1
+			}
+		}
+		
+	// Remove trailing tab
+	if X.extract(X.length())=$char(9) set X=X.extract(1,X.length()-1)
+
+	quit X
+
+
+BLDBILLS(String MRPC012(,,))		// Transaction analysis data	/REF:R
+
+	/*
+	Display payment record application
+
+	MRPC012("BI",TRSEQ,EFDATE,BILORD,ELEMENT) = data
+	
+			TRSEQ	Transaction sequence number
+			EFDATE	Due Date of the bill
+			BILORD	Order of application within a BIL
+			ELEMENT	Element Acronym
+			
+	   Data at ELEMENT level = original amount due| amount paid |total bill
+	*/
+	
+	type Date EFDATE
+	type Number BILORD,HIT,TRSEQ
+	type String ELEMENT,REC,X
+	
+	set (BILORD,EFDATE,ELEMENT,TRSEQ,X)=""
+
+	for  set TRSEQ=MRPC012("BI",TRSEQ).order() quit:TRSEQ.isNull()  do {
+		set X=X_TRSEQ
+		for  set EFDATE=MRPC012("BI",TRSEQ,EFDATE).order() quit:EFDATE.isNull()  do {
+			set HIT=0
+			set X=X_$char(9)_EFDATE.toString()
+			for  set BILORD=MRPC012("BI",TRSEQ,EFDATE,BILORD).order() quit:BILORD.isNull()  do {
+				for  set ELEMENT=MRPC012("BI",TRSEQ,EFDATE,BILORD,ELEMENT).order() quit:ELEMENT.isNull()  do {
+					//Change | to TAB
+					set REC=MRPC012("BI",TRSEQ,EFDATE,BILORD,ELEMENT).translate("|",$char(9))
+					if 'REC.piece($char(9),3).isNull() set REC.piece($char(9),3)=$$FMT(REC.piece($char(9),3))
+					set REC=REC.piece($char(9),3)_$char(9)_ELEMENT_$char(9)_$$FMT(REC.piece($char(9),1))_$char(9)_$$FMT(REC.piece($char(9),2))
+					if HIT set REC=$char(9)_REC
+					set HIT=1
+					set X=X_$char(9)_REC_$char(13,10)
+					}
+				}
+			}
+		}
+
+	quit X
+
+
+BLDPATH(String MRPC012(,,))	// Transaction analysis data	/REF:RW
+
+	/*
+	Display payment path info
+	
+	MRPC012("HI",TRSEQ,EFDATE) = data
+	
+		TRSEQ 	Transaction sequence number
+		EFDATE 	Due Date of the bill_ORD_$char(9)_ACRONYM
+		
+	 Data at EFDATE level = original amount due| amount paid
+	*/
+	
+	type Date EFDATE
+	type Number TRSEQ
+	type String REC,X
+	
+	set (EFDATE,TRSEQ,X)=""
+	
+	for  set TRSEQ=MRPC012("HI",TRSEQ).order() quit:TRSEQ.isNull()  do {
+		set X=X_TRSEQ
+		for  set EFDATE=MRPC012("HI",TRSEQ,EFDATE).order() quit:EFDATE.isNull()  do {
+			//Change | to TAB
+			set REC=MRPC012("HI",TRSEQ,EFDATE).translate("|",$char(9))
+			set REC.piece($char(9),1)=$$FMT(REC.piece($char(9),1))
+			set REC.piece($char(9),2)=$$FMT(REC.piece($char(9),2))
+			type Date EFDT=EFDATE.piece($char(9),1)
+			set X=X_$char(9)_EFDT.toString()
+			set X=X_$char(9)_EFDATE.piece($char(9),3)_$char(9)_REC_$char(13,10)
+			}
+		}
+
+	quit X
+
+
+BUILDHLD(String MRPC012(,,))	// Transaction analysis data	/REF:R
+
+	/*
+	Check and permanent hold info
+	
+	MRPC012("HO",CID) = data
+	                   ,DATE) = data
+	
+		CID	Account number
+		DATE	Hold date
+		
+	Data at DATE level = float old amt | float new amt | check old amt | check new amt
+	Data at CID level  = same, rolled up
+	*/
+
+	type Date DATE
+	type Number CID,CNETAFT,CNETBEFO,FNETAFT,FNETBEFO
+	type String DATA,REC,X
+	
+	set (CID,DATE,X)=""
+
+	for  set CID=MRPC012("HO",CID).order() quit:CID.isNull()  do {
+		set REC=CID
+		set CNETBEFO=MRPC012("HO",CID).piece("|",3)
+		set REC.piece($char(9),4)=$$FMT(CNETBEFO)
+		set CNETAFT=MRPC012("HO",CID).piece("|",4)
+		set REC.piece($char(9),6)=$$FMT(CNETAFT)
+		set FNETBEFO=MRPC012("HO",CID).piece("|",1)
+		set REC.piece($char(9),8)=$$FMT(FNETBEFO)
+		set FNETAFT=MRPC012("HO",CID).piece("|",2)
+		set REC.piece($char(9),10)=$$FMT(FNETAFT)
+		set X=X_REC_$char(13,10)
+		
+		for  set DATE=MRPC012("HO",CID,DATE).order() quit:DATE.isNull()  do {
+			set DATA=MRPC012("HO",CID,DATE).translate("|",$char(9))
+			set REC=$char(9)_DATE.toString()_$char(9)_$$FMT(DATA.piece($char(9),3))
+			set CNETBEFO=CNETBEFO-DATA.piece($char(9),3)
+			set REC.piece($char(9),4)=$$FMT(CNETBEFO)
+			set CNETAFT=CNETAFT-DATA.piece($char(9),4)
+			set CNETAFT=$$FMT(CNETAFT)
+			set REC=REC_$char(9)_$$FMT(DATA.piece($char(9),4))_$char(9)_CNETAFT
+			set REC=REC_$char(9)_DATA.piece($char(9),1)
+			set FNETBEFO=FNETBEFO-DATA.piece($char(9),1)
+			set FNETBEFO=$$FMT(FNETBEFO)
+			set REC=REC_$char(9)_FNETBEFO
+			set FNETAFT=FNETAFT-DATA.piece($char(9),2)
+			set FNETAFT=$$FMT(FNETAFT)
+			set REC=REC_$char(9)_DATA.piece($char(9),2)_$char(9)_FNETAFT
+			set X=X_REC_$char(13,10)
+			}
+		}
+
+	quit X
+
+
+BUILDTR(String MRPC012(,,))	// Transaction analysis data	/REF:R
+
+	/* 
+	Transaction data
+	
+	MRPC012(1,SEQ) = TSEQ|blank|etc|description|account|amount|
+				blank|efd|currency|cc|debit credit
+	   Output OUTARRY(1) =Primary sequence|Secondary sequence number|etc|
+				description|account|debit amount|
+				credit amount|efd|currency|cc|TAMT subfields
+	1) Either Primary or secondary sequence will be in this record, but not both
+	2) Either debit amount or credit amount will occur, but not both.
+	*/
+
+	type Number CRTOTAL,DRTOTAL,SEQ
+	type String DATA,X
+
+	set (SEQ,X)=""
+	set (DRTOTAL,CRTOTAL)=0
+
+	for  set SEQ=MRPC012(1,SEQ).order() quit:SEQ.isNull()  do {
+		set DATA=MRPC012(1,SEQ)
+
+		if DATA.piece("|",1)\1'=DATA.piece("|",1) do {
+			set DATA.piece("|",2)=DATA.piece("|",1)
+			set DATA.piece("|",1)=""
+			}
+
+		if DATA.piece("|",11)=1 do {
+			set DATA.piece("|",7)=DATA.piece("|",6)
+			set DATA.piece("|",6)=""
+			}
+		
+		set DATA=DATA.piece("|",1,10)
+
+		if 'DATA.piece("|",6).isNull() do {
+			set DRTOTAL=DRTOTAL+DATA.piece("|",6)
+			set DATA.piece("|",6)=$$FMT(DATA.piece("|",6))
+			}
+		else  do {
+			set CRTOTAL=CRTOTAL+DATA.piece("|",7)
+			set DATA.piece("|",7)=$$FMT(DATA.piece("|",7))
+			}
+
+		set DATA=DATA.translate("|",$char(9))
+		set X=X_DATA_$char(13,10)
+		}
+
+	set DRTOTAL=$$FMT(DRTOTAL)
+	set CRTOTAL=$$FMT(CRTOTAL)
+	
+	set X=X_$char(9,9,9,9,9)_DRTOTAL_$char(9)_CRTOTAL
+
+	quit X
+
+
+BUILDGL(String MRPC012(,,))	// Transaction analysis data	/REF:R
+
+	// Format GL account information
+
+	// MRPC012(2,SEQ)= GL|CC|CRCD|AMT|DESC|debit/credit indicator|TR SEQ
+
+	type Number HIT,SEQ,TRSEQ
+	type String CC,CRCD,DATA,GL,GLDATA(),X
+
+	set SEQ=""
+
+	// Sort the data into the order that we want to send it to the client
+	for  set SEQ=MRPC012(2,SEQ).order() quit:SEQ.isNull()  do {
+		set DATA=MRPC012(2,SEQ)
+		set GL=DATA.piece("|",1)
+		set CC=DATA.piece("|",2)
+		set CRCD=DATA.piece("|",3)
+		set TRSEQ=DATA.piece("|",7)
+		set GLDATA(CRCD,CC,GL,TRSEQ)=DATA.piece("|",4,6)
+		}
+
+	set (GL,CC,CRCD,GL,TRSEQ,X)=""
+
+	for  set CRCD=GLDATA(CRCD).order() quit:CRCD.isNull()  do {
+		set X=X_CRCD
+		for  set CC=GLDATA(CRCD,CC).order() quit:CC.isNull()  do {
+			set X=X_$char(9)_CC
+			set HIT=1
+
+			for  set GL=GLDATA(CRCD,CC,GL).order() quit:GL.isNull()  do {
+				if 'HIT set X=X_$char(9)
+				set X=X_$char(9)_GL
+				set HIT=1
+
+				for  set TRSEQ=GLDATA(CRCD,CC,GL,TRSEQ).order() quit:TRSEQ.isNull()  do {
+					if HIT'=1 set X=X_$char(9,9)
+					set HIT=0
+					set DATA=GLDATA(CRCD,CC,GL,TRSEQ)
+					set X=X_$char(9)_DATA.piece("|",2)_$char(9)_TRSEQ_$char(9)
+
+					if DATA.piece("|",3)=1 do {
+						set DATA.piece("|",1)=-DATA.piece("|",1)
+						set X=X_$char(9)_$$FMT(DATA.piece("|",1))_$char(9)
+						set GLDATA(CRCD,CC)=GLDATA(CRCD,CC).get()+DATA.piece("|",1)
+						set GLDATA(CRCD)=GLDATA(CRCD).get()+DATA.piece("|",1)
+						}
+					else  do {
+						set X=X_$$FMT(DATA.piece("|",1))
+						set GLDATA(CRCD,CC)=GLDATA(CRCD,CC).get()-DATA.piece("|",1)
+						set GLDATA(CRCD)=GLDATA(CRCD).get()-DATA.piece("|",1)
+						}
+
+					set X=X_$char(13,10)
+					}
+				}
+
+			if GLDATA(CRCD,CC).get()<0 do {
+				set GLDATA(CRCD,CC)=$$FMT(-GLDATA(CRCD,CC))
+				// DR
+				set GLDATA(CRCD,CC)=GLDATA(CRCD,CC)_$char(9)_$$^MSG(2641)
+				}
+			else  if GLDATA(CRCD,CC).get()>0 do {
+				set GLDATA(CRCD,CC)=$$FMT(GLDATA(CRCD,CC))
+				// CR
+				set GLDATA(CRCD,CC)=GLDATA(CRCD,CC)_$char(9)_$$^MSG(2639)
+				}
+
+			set X=X_$char(9,9,9,9,9,9,9)_CRCD_$char(9)_CC
+			set X=X_$char(9)_GLDATA(CRCD,CC)_$char(13,10)
+			}
+
+		set X=X_$char(9,9,9,9,9,9,9)_CRCD_$char(9,9)
+		
+		if GLDATA(CRCD).get()<0 do {
+			set X=X_$$FMT(-GLDATA(CRCD))
+			// DR
+			set X=X_$char(9)_$$^MSG(2641)_$char(13,10)
+			}
+
+		else  if GLDATA(CRCD).get()>0 do {
+			set X=X_$$FMT(GLDATA(CRCD))
+			// CR
+			set X=X_$char(9)_$$^MSG(2639)_$char(13,10)
+			}
+
+		else  do {
+			set X=X_$$FMT(GLDATA(CRCD))
+			set X=X_$char(9,13,10)
+			}
+		}
+
+	quit X
+	
+	
+FMT(Number DATA)	// Format date
+
+	type public Number DECPREC
+
+	quit $$EXT^%ZM(DATA,"$",DECPREC)
+	
+	
+PROCTRN(RecordTTX ttx(),	// Process the transaction
+	String MRPC012(,,))	// Transaction analysis data		/REF:W
+
+	/*
+	Post transactions
+	
+	Approach:
+	
+		- start a transaction
+		- start a sub-transaction with a save point
+		- DTX contains both DTJ and DMJ entries for primary and secondary
+		  transactions. Prior to processing, save a high-water mark for DTX
+		- process all transactions in ttx()
+		- retrieve all DTX records since the high-water mark to get all primary
+		  and secondary transactions
+		- DTX records provide transaction amount breakdowns
+		- for GL transactions, GL Transaction analysis (#7) can be determined
+		- for non-GL transactions, load corresponding objects for accounts affected,
+		  and save list of those accounts (this gives "after-image" objects)
+		- Use DTJ and HIST for other account update info
+		- roll-back to the sub-transaction save point
+		- load and compare the "before-image" objects
+		- roll back all the way
+		
+	   The intermediate roll-back keeps the whole activity set under a transaction
+	   to prevent other processes from interferring with the account records.
+	*/
+	
+	type public Date TPD
+	type public Number ER, JOB
+	type public String %UserID, BRCD, ET, RJ(), RM
+	
+	type Number CC,CID,DTXSTART,HOLDS,NOEXC,%ODP,SEQ
+	type String CIDLIST(),DATASEQ,DBTBL1D(),ETC(),SPVUCLS,STBL(),TSPV()
+	
+	type RecordDEP depafter()
+	type RecordLN lnafter()
+	
+	// Catch GT.M errors
+	catch error {
+		do ZE^UTLERR
+		set ER=1
+		}
+
+	set ER=0
+	if %EffectiveDate.isNull() set %EffectiveDate=%SystemDate
+	set NOEXC=1			// Used by overdraft routines
+	set %ODP=CUVAR.odp		// Overdraft processing flag
+	
+	// Default supervisor userclass if not defined
+	#IF 'CUVAR.dftspvucls.isNull()
+		set SPVUCLS=CUVAR.DFTSPVUCLS
+	#ELSE
+		set SPVUCLS="MGR"
+	#ENDIF
+	
+	set TSPV("*")=%UserID_"|"_SPVUCLS
+
+	/* Process the transaction under TP.  Get data, then rollback.
+	   Note that it is assumed that this whole process is under TP so that
+	   even after the rollback of the transaction, everything is still
+	   protected by an outer transaction.
+	*/
+	
+	do Runtime.start("CS","","SAVPTR")
+	
+	// Save DTX high-water mark
+	set JOB=%ProcessID
+	set DTXSTART=+Db.currVal("DTX","SPD=:%SystemDate,PID=:JOB")
+
+	// Set TRC for error-correct transactions
+	set SEQ=""
+	for  set SEQ=ttx(SEQ).order() quit:SEQ.isNull()  do { quit:ER
+
+		if ttx(SEQ).itc6 do {
+			type String TRC
+			
+			set TRC=$$FIELD^UTSO(ttx(SEQ).tso,"EC")
+			if ttx(SEQ).trc.isNull() set ttx(SEQ).trc=TRC
+			}
+		}
+		
+	do TRNSET^TRNDRV(.ttx(),TPD,BRCD,2,,.RJ())
+	
+	// Populate return message and error type from first RJ (reject) array 
+	// entry if error occurs (RM and ET are scoped within TRNSET^TNDRV)
+	if ER, RJ.data() do {
+		type Number SEQ
+		
+		set SEQ = RJ("").order()
+		if SEQ.isNull() quit
+		
+		set RM = RJ(SEQ).piece("|", 2)
+		set ET = RJ(SEQ).piece("|", 4)
+	}
+
+	if ER do Runtime.rollback() quit
+	
+	set DATASEQ=0
+	
+	/* Gather the accounts involved and save their after state.
+	   Save history record sequences to examine history data later.
+	   Examine and process each DTX transaction entry for analysis data.
+	*/
+	type DbSet dtxds=Db.selectDbSet("DTX","SPD=:%SystemDate AND PID=:%ProcessID AND SEQ>:DTXSTART")
+	while dtxds.next() do {
+		type String CLS,GLSC
+		
+		type RecordDTX dtx=dtxds.getRecord("DTX")
+		set CID=dtx.cid
+		set CC=dtx.cc
+
+		if dtx.itc.extract(7) do {
+			/*
+			Current dtx entry is secondary / system-generated - 
+			these file to dtx before the related primary, if 
+			present.
+			*/
+
+			// If prior dtx entry was a primary (or first one) 
+			// bump out a full sequence plus fraction
+			if DATASEQ=(DATASEQ\1) set DATASEQ=DATASEQ+1.001
+			// Otherwise just bump out a fraction
+			else  set DATASEQ=DATASEQ+.001
+			}
+		// If current dtx entry is a primary and the prior one is a 
+		// primary, increment by full sequence
+		else  if DATASEQ=(DATASEQ\1) set DATASEQ=DATASEQ+1
+		// Otherwise, lop off fraction
+		else  set DATASEQ=DATASEQ\1
+			
+		// If account transaction and not already loaded DEP or LN object, load
+		if dtx.jnlid="DTJ" do {
+		
+			// Save after-images
+			if 'CIDLIST(CID).exists() do {
+				type RecordACN acn=Db.getRecord("ACN","CID=:CID")
+			
+				set CLS=acn.cls
+				set GLSC=acn.glsc
+
+				if CLS="D" do {
+					// Cast to DEP type
+					set acn={RecordDEP}acn
+					// Use copy to load all data
+					set depafter(CID)=acn.copy()
+					}
+				else  do {
+					// Cast to LN type
+					set acn={RecordLN}acn
+					// Use copy to load all data
+					set lnafter(CID)=acn.copy()
+					}
+
+				set CIDLIST(CID)=CLS_"|"_GLSC
+				}
+			else  do {
+				set CLS=CIDLIST(CID).piece("|",1)
+				set GLSC=CIDLIST(CID).piece("|",2)
+				}
+
+			// Save transaction sequence pointer
+			set CIDLIST(CID,DATASEQ)=dtx.tseq
+			}
+			
+		else  set CLS="M",GLSC=""
+		
+		do TAMT(.MRPC012(,,),DATASEQ,CID,dtx.itc,dtx.etc,dtx.tamt,dtx.crcd,CLS,CC,GLSC,dtx.tso,%EffectiveDate)
+		
+		// Transaction analysis for primary transactions
+		if 'dtx.itc.extract(7) do {
+			type Number CNT,I
+			type String DESC,TAMT
+			
+			set TAMT=dtx.tamt
+			if 'TAMT.isLike("%#%") set TAMT=TAMT_"#"_TAMT
+			
+			set CNT=0
+			for I=2:1:16 if TAMT.piece("#",I) do {
+				set CNT=CNT+1
+				if CLS="D" do {
+					if 'STBL("STBLGLDESCD",I).exists() do {
+						type RecordSTBLGLDESCD gldescd=Db.getRecord("STBLGLDESCD","KEY=:I",1)
+						set STBL("STBLGLDESCD",I)=gldescd.desc
+						}
+					set DESC=STBL("STBLGLDESCD",I)
+					}
+				else  if CLS="L" do {
+					if 'STBL("STBLGLDESCL",I).exists() do {
+						type RecordSTBLGLDESCL gldescl=Db.getRecord("STBLGLDESCL","KEY=:I",1)
+						set STBL("STBLGLDESCL",I)=gldescl.desc
+						}
+					set DESC=STBL("STBLGLDESCL",I)
+					}
+				else  do {
+					set DESC=dtx.tcmt
+					if DESC.isNull() do {
+						type RecordTRN trn=Db.getRecord("TRN","ETC=:dtx.etc",1)
+						set DESC=trn.des
+						}
+					}
+				set MRPC012("TA",DATASEQ,CNT)=DESC_"|"_TAMT.piece("#",I)
+				set MRPC012("TA",DATASEQ)=MRPC012("TA",DATASEQ).get()+TAMT.piece("#",I)
+				}
+			}
+		}
+		
+
+	// For loans, build payment path and billing information
+	set CID=""
+	for  set CID=CIDLIST(CID).order() quit:CID.isNull()  do {
+		if CIDLIST(CID).piece("|",1)="L" do LNINFO(CID,.CIDLIST(),.MRPC012(,,))
+		}
+		
+	// Build hold info for all accounts reflecting after state
+	set HOLDS=$$HLD(1,.ttx(),.CIDLIST(),.MRPC012(,,))
+	
+	// Rollback to point prior to posting transactions
+	do Runtime.rollback("SAVPTR")
+	
+	// If any hold transactions, build hold info reflecting before state
+	if HOLDS set HOLDS=$$HLD(0,.ttx(),.CIDLIST(),.MRPC012(,,))
+	
+	// Load before-image of accounts and perform compares
+	for  set CID=CIDLIST(CID).order() quit:CID.isNull()  do {
+	
+		if CIDLIST(CID).piece("|",1)="D"  do {
+			type RecordDEP dep=Db.getRecord("DEP","CID=:CID")
+
+			// Use copy to load all data
+			type RecordDEP depbefor=dep.copy()
+			
+			type ResultSet rs=depbefor.compare(.depafter(CID))
+			while rs.next() do ACNDIFF("DEP",CID,rs.getCol("COLUMNNAME"),rs.getCol("OLDVALUE"),rs.getCol("NEWVALUE"),.MRPC012(,,),.dep)
+			}
+		else  do {
+			type RecordLN ln=Db.getRecord("LN","CID=:CID")
+
+			// Use copy to load all data
+			type RecordLN lnbefor=ln.copy()
+			
+			type ResultSet rs=lnbefor.compare(.lnafter(CID))
+			while rs.next() do ACNDIFF("LN",CID,rs.getCol("COLUMNNAME"),rs.getCol("OLDVALUE"),rs.getCol("NEWVALUE"),.MRPC012(),.ln)
+			}
+		}
+	
+	do GL(.MRPC012(,,))
+	
+	quit
+
+
+ACNDIFF(String TABLE,		// Table name
+	Number CID,		// Account number
+	String COLUMN,		// Column name
+	String BEFORVAL,	// Original value
+	String AFTERVAL,	// Value after posting
+	String MRPC012(,,),	// Transaction analysis data	/REF:RW
+	Record REC)		// DEP or LN record
+
+	// Build MRPC012("DA" for account differences
+	
+	type public String DBTBL1D()
+	
+	type Number N,DEC,LEN
+	type String DES,TYP,VP
+
+	if 'DBTBL1D(TABLE,COLUMN).exists() do {
+		type RecordDBTBL1D dbtbl1d=Db.getRecord("DBTBL1D","%LIBS=""SYSDEV"",FID=:TABLE,DI=:COLUMN")
+		set DBTBL1D(TABLE,COLUMN)=dbtbl1d.typ_"|"_dbtbl1d.des.extract(1,30)_"|"_dbtbl1d.len_"|"_dbtbl1d.dec
+		}
+		
+	set TYP=DBTBL1D(TABLE,COLUMN).piece("|",1)
+	set DES=DBTBL1D(TABLE,COLUMN).piece("|",2)
+	set LEN=DBTBL1D(TABLE,COLUMN).piece("|",3)
+	set DEC=DBTBL1D(TABLE,COLUMN).piece("|",4)
+	
+	// Check for data item protection
+	set VP(COLUMN)=""
+	do EXT^UPID(TABLE, .REC)
+	if VP(COLUMN)=2 do {		// If protected, fill with *'s
+		set BEFORVAL=""
+		set BEFORVAL.piece("*",LEN+1)=""
+		set AFTERVAL=BEFORVAL
+		set TYP="T"
+		set DEC=""
+		}
+		
+	// Format the data - only show first 15 characters, left justified
+	if 'BEFORVAL.isNull(),"LD$".isLike("%"_TYP_"%") set BEFORVAL=$$EXT^%ZM(BEFORVAL,TYP,DEC)
+	set BEFORVAL=BEFORVAL.extract(1,15).justify(15)
+	if 'AFTERVAL.isNull(),"LD$".isLike("%"_TYP_"%") set AFTERVAL=$$EXT^%ZM(AFTERVAL,TYP,DEC)
+	set AFTERVAL=AFTERVAL.extract(1,15).justify(15)	
+
+	set N=MRPC012("DA",CID,"").order(-1)+1
+	set MRPC012("DA",CID,N)=COLUMN_"|"_DES_"|"_BEFORVAL_"|"_AFTERVAL
+
+	quit
+	
+
+LNINFO(Number CID,			// Account number
+	String CIDLIST(),		// Account list			/REF:R
+	String MRPC012(,,))		// Transaction analysis data	/REF:RW
+	
+	// Build data for payment path and loan bills
+
+	type Number CNT,ELEMNO,HISTSEQ,XSEQ
+	type String HIORDER(),INFO(),PMTPATH()
+	
+	// Get lower levels of HIST
+	set (HISTSEQ,XSEQ)=""
+	for  set XSEQ=CIDLIST(CID,XSEQ).order() quit:XSEQ.isNull()  do {
+		set HISTSEQ=CIDLIST(CID,XSEQ)
+		type DbSet ds=Db.selectDbSet("HISTSB","CID=:CID AND SLN=:HISTSEQ AND SLSEQ<2")
+		while ds.next() do {
+			type RecordHISTSB histsb=ds.getRecord("HISTSB")
+			
+			do PPSET(.PMTPATH,CID,HISTSEQ,1,histsb.pe01bseq,histsb.pe01ea,histsb.pe01amt)
+			do PPSET(.PMTPATH,CID,HISTSEQ,2,histsb.pe02bseq,histsb.pe02ea,histsb.pe02amt)
+			do PPSET(.PMTPATH,CID,HISTSEQ,3,histsb.pe03bseq,histsb.pe03ea,histsb.pe03amt)
+			do PPSET(.PMTPATH,CID,HISTSEQ,4,histsb.pe04bseq,histsb.pe04ea,histsb.pe04amt)
+			do PPSET(.PMTPATH,CID,HISTSEQ,5,histsb.pe05bseq,histsb.pe05ea,histsb.pe05amt)
+			}
+		}
+
+	set CNT=0
+	set (HISTSEQ,ELEMNO)=""
+	for  set HISTSEQ=PMTPATH(HISTSEQ).order() quit:HISTSEQ.isNull()  do {
+		for  set ELEMNO=PMTPATH(HISTSEQ,ELEMNO).order() quit:ELEMNO.isNull()  do {
+			type Number BSEQ,EAAB
+			type String DATA,EA,FEETYP
+			
+			set CNT=CNT+1
+			set DATA=PMTPATH(HISTSEQ,ELEMNO)
+			set EA=DATA.piece("|",2)
+			set INFO(CNT).piece("|",3)=EA
+			set INFO(CNT).piece("|",5)=DATA.piece("|",3)
+			set BSEQ=+DATA.piece("|",1)
+			quit:'BSEQ
+			
+			type RecordLNBIL1 lnbil1=Db.getRecord("LNBIL1","CID=:CID,SCHSEQ=:BSEQ")
+
+			set INFO(CNT).piece("|",1)=lnbil1.cdpd
+			
+			// Find matching element acroynm and use its amount billed
+			if lnbil1.pe01ea=EA set EAAB=lnbil1.pe01ab
+			else  if lnbil1.pe02ea=EA set EAAB=lnbil1.pe02ab
+			else  if lnbil1.pe03ea=EA set EAAB=lnbil1.pe03ab
+			else  if lnbil1.pe04ea=EA set EAAB=lnbil1.pe04ab
+			else  if lnbil1.pe05ea=EA set EAAB=lnbil1.pe05ab
+			else  if lnbil1.pe06ea=EA set EAAB=lnbil1.pe06ab
+			else  if lnbil1.pe07ea=EA set EAAB=lnbil1.pe07ab
+			else  if lnbil1.pe08ea=EA set EAAB=lnbil1.pe08ab
+			else  if lnbil1.pe09ea=EA set EAAB=lnbil1.pe09ab
+			else  if lnbil1.pe10ea=EA set EAAB=lnbil1.pe10ab
+			else  if lnbil1.pe11ea=EA set EAAB=lnbil1.pe11ab
+			else  if lnbil1.pe12ea=EA set EAAB=lnbil1.pe12ab
+			else  if lnbil1.pe13ea=EA set EAAB=lnbil1.pe13ab
+			else  if lnbil1.pe14ea=EA set EAAB=lnbil1.pe14ab
+			else  if lnbil1.pe15ea=EA set EAAB=lnbil1.pe15ab
+			else  if lnbil1.pe16ea=EA set EAAB=lnbil1.pe16ab
+			else  if lnbil1.pe17ea=EA set EAAB=lnbil1.pe17ab
+			else  if lnbil1.pe18ea=EA set EAAB=lnbil1.pe18ab
+			else  if lnbil1.pe19ea=EA set EAAB=lnbil1.pe19ab
+			else  if lnbil1.pe20ea=EA set EAAB=lnbil1.pe20ab
+			else  set EAAB=""
+
+			set INFO(CNT).piece("|",4)=EAAB
+			
+			set FEETYP=DATA.piece("|",2)
+			type RecordLNBIL5 lnbil5=Db.getRecord("LNBIL5","CID=:CID,SCHSEQ=:BSEQ,DUEAMT=1,FEETYP=:FEETYP",1)
+			if lnbil5.getMode() set INFO(CNT).piece("|",4)=lnbil5.bfamt
+
+			set INFO(CNT).piece("|",2)=BSEQ
+			set INFO(CNT).piece("|",6)=lnbil1.ctab
+			}
+		}
+		
+		// Sort data and set up MRPC012 array
+		set CNT=""
+		for  set CNT=INFO(CNT).order() quit:CNT.isNull()  do {
+			type Date DATE
+			type Number FLAG,SEQ
+			type String ELEMENT,X
+			
+			set SEQ=INFO(CNT).piece("|",2)
+			quit:SEQ.isNull()
+			set DATE=INFO(CNT).piece("|",1)
+			set ELEMENT=INFO(CNT).piece("|",3)
+			
+			// Get element description - search tables in order
+			// and take first hit
+			if 'ELEMENT.isNull() do {
+				if ELEMENT.isNumber() do { quit:('ELEMENT.isNull())
+					type RecordSTBLGLDESCL gldescl=Db.getRecord("STBLGLDESCL","KEY=:ELEMENT",1)
+					if 'gldescl.desc.isNull() set ELEMENT=gldescl.desc quit
+					}
+				type RecordLNFEEP lnfeep=Db.getRecord("LNFEEP","FEETYP=:ELEMENT",1)
+				if 'lnfeep.desc.isNull() set ELEMENT=lnfeep.desc quit
+				type RecordLNTRS lntrs=Db.getRecord("LNTRS","TRTYPE=:ELEMENT",1)
+				if 'lntrs.trdes.isNull() set ELEMENT=lntrs.trdes
+				}
+				
+			// Loan billing
+			set FLAG=MRPC012("BI",SEQ,DATE).exists()
+			set MRPC012("BI",SEQ,DATE,CNT,ELEMENT)=INFO(CNT).piece("|",4,6)
+			if FLAG set MRPC012("BI",SEQ,DATE,CNT,ELEMENT).piece("|",3)=""
+			
+			set X=HIORDER(DATE,ELEMENT).get()
+			if X.isNull() do {
+				set X=HIORDER(DATE).get()+1
+				set HIORDER(DATE)=X
+				}
+			if X.piece($char(9),2).isNull() set X.piece($char(9),2)=1
+			else  set X.piece($char(9),2)=X.piece($char(9),2)+1
+			set HIORDER(DATE,ELEMENT)=X
+			
+			// Loan payment path
+			set MRPC012("HI",SEQ,DATE_$char(9)_X.piece($char(9),1)_$char(9)_ELEMENT_$char(9)_X.piece($char(9),2))=INFO(CNT).piece("|",4,5)
+			}
+
+	quit
+	
+			
+PPSET(String PMTPATH(),		// Payment paths		/REF:W
+	Number CID,		// Account number
+	Number HISTSEQ,		// History sequence
+	Number ELEMNO,		// Element number
+	Number BSEQ,		// Billing sequence
+	String EA,		// Element acronymn
+	Number AMT)		// Amount
+	
+	// Get valid payment path info from history
+	
+	quit:EA.isNull()
+			
+	if 'Db.isDefined("LNBIL5","CID=:CID,SCHSEQ=:BSEQ,DUEAMT=0,FEETYP=:EA") do {
+		set PMTPATH(HISTSEQ,ELEMNO)=BSEQ_"|"_EA_"|"_AMT
+		set PMTPATH(HISTSEQ,ELEMNO).piece("|",7)=HISTSEQ
+		}
+	
+	quit
+	
+	
+HLD(Boolean AFTER,			// After posting indicator
+	RecordTTX ttx(),		// Transactions
+	String CIDLIST(),		// Account list
+	String MRPC012(,,))		// Transaction analysis		/REF:RW
+	
+	// Setup HLD information for a account
+
+	type Number CHECKS,CID,HOLDS,SEQ
+	
+	// First, see if any checks or check hold allocations
+	set (CHECKS,HOLDS)=0
+	set SEQ=""
+	for  set SEQ=ttx(SEQ).order() quit:SEQ.isNull()  do {
+		quit:ttx(SEQ).itc6!ttx(SEQ).itc12	// Error correct/reversal
+		
+		type RecordTRN trn=Db.getRecord("TRN","ETC=:ttx(SEQ).etc",1)
+		if trn.trntyp=2 set CHECKS=CHECKS+ttx(SEQ).tamt
+		else  if trn.trntyp=3 set HOLDS=HOLDS+ttx(SEQ).tamt
+		}
+		
+	if '(CHECKS!(HOLDS)) quit 0
+	
+	/* Create MRPC012 data for each account
+	   MRPC012("HO",CID,DATE)=float old amt | float new amt | check old amt | check new amt
+	   MRPC012("HO",CID) = same, rolled up
+	 */
+	
+	set CID=""
+	for  set CID=CIDLIST(CID).order() quit:CID.isNull()  do {
+	
+		// Float holds
+		type ResultSet hld7rs=Db.select("EXPDT,AMT","HLD7","CID=:CID AND EXPDT >= :%SystemDate AND AMT <> 0")
+		while hld7rs.next() do HLDADD(CID,hld7rs.getCol("EXPDT"),hld7rs.getCol("AMT"),7,AFTER,.MRPC012(,,))
+		
+		// Check holds
+		type ResultSet hld8rs=Db.select("EXPDT,AMT","HLD8","CID=:CID AND EXPDT >= :%SystemDate AND AMT <> 0")
+		while hld8rs.next() do HLDADD(CID,hld8rs.getCol("EXPDT"),hld8rs.getCol("AMT"),8,AFTER,.MRPC012(,,))
+		}
+
+	quit 1
+		
+
+HLDADD(Number CID,		// Account number
+	Date DATE,		// Hold expiration date
+	Number AMT,		// Hold Amount
+	Number HLDTYP,		// Hold type
+	Number NEW,		// New hold
+	String MRPC012(,,))	// Transaction analysis data	/REF:RW
+	
+	// Add hold info to MRPC012 array
+	
+	type Number PIECE
+	
+	set PIECE=((HLDTYP-7)*2)+NEW	// HLDTYP = 7 or 8, NEW = 0 or 1
+
+	set MRPC012("HO",CID).piece("|",PIECE)=MRPC012("HO",CID).get().piece("|",PIECE)+AMT
+	set MRPC012("HO",CID,DATE).piece("|",PIECE)=MRPC012("HO",CID,DATE).get().piece("|",PIECE)+AMT
+
+	quit
+
+
+GL(String MRPC012(,,))		// Transaction analysis data	/REF:RW
+
+	/*
+	Setup GL information to be used for BUILDGL
+
+	Output will be MRPC012(2,seq)
+	
+	The data at this level of the array will be the information related
+	to the T-accounts.  Further processing/formatting is performed in
+	the BUILDGL.
+	*/
+	
+	type Number LINE,SEQ
+	type String CC,CRCD,DATA,GL
+
+	set (GL,CC,CRCD,SEQ)=""
+	set LINE=1
+
+	for  set GL=MRPC012("T",GL).order() quit:GL.isNull()  do {
+		for  set CC=MRPC012("T",GL,CC).order() quit:CC.isNull()  do {
+			for  set CRCD=MRPC012("T",GL,CC,CRCD).order() quit:CRCD.isNull()  do {
+				for  set SEQ=MRPC012("T",GL,CC,CRCD,SEQ).order() quit:SEQ.isNull()  do {
+					set DATA=MRPC012("T",GL,CC,CRCD,SEQ)
+					set MRPC012(2,LINE)=GL_"|"_CC_"|"_CRCD_"|"_DATA.piece("|",3,6)
+					set LINE=LINE+1
+					}
+				}
+			}
+		}
+	quit
+	
+	
+TAMT(String MRPC012(,,),	// Transaction analysis data	/REF:RW
+	Number SEQ,		// Sequence number
+	Number CID,		// Account number
+	String ITC,		// Internal transaction code
+	String ETC,		// External transaction code
+	String TAMT,		// Transaction amount
+	String CRCD,		// Currency code
+	String CLS,		// Account class
+	Number CC,		// Cost center
+	String GLSC,		// General ldger set code
+	String TSO,		// Transaction source
+	Number %EffectiveDate)	// Effective date
+	
+	// Break down transaction components
+	
+	type public String %SystemCurrency,GLSCLST(,)
+	
+	type Number AMT,DC,POS
+	type String T()
+
+
+	if CRCD.isNull() set CRCD=%SystemCurrency
+	if '%EffectiveDate.isNull() set %EffectiveDate=%EffectiveDate.toString()
+
+	set DC=ITC.extract(1)
+	set AMT=$$FN^SCARND(TAMT,",","",CRCD)_$select(DC:" CR",1:" DR")
+	
+	type RecordTRN trn=Db.getRecord("TRN","ETC=:ETC",1)
+
+	// Transaction Description
+	set MRPC012(1,SEQ)=SEQ_"||"_ETC_"|"_trn.des_"|"_CID_"|"_(+TAMT)_"||"_%EffectiveDate_"|"_CRCD_"|"_CC_"|"_DC_"||"_CLS
+
+	if 'TAMT.isLike("%#%") set TAMT.piece("#",2)=TAMT
+	for POS=2:1:TAMT.length("#") if TAMT.piece("#",POS) do {
+		type Number AMT
+		
+		set AMT=TAMT.piece("#",POS)
+		
+		// For each TAMT component, find correct GL account
+		
+		if CLS="M" do {
+			do TAMTDTL(.MRPC012,"",CID,AMT,CC,CLS,CRCD,ITC,POS,SEQ)
+			}
+		
+		// Find G/L account #'s for Loan Fees by looking in the fee plan
+		else  if CLS="L",POS=6!(POS=13) do {
+		
+			type Number ACN,AMT,PCE
+			type String FEEP,FEETYP,FIELD,UTSO
+
+			set UTSO=$$FIELD^UTSO(TSO,"LNFEE")
+			for PCE=1:1 set FIELD=UTSO.piece(",",PCE) quit:FIELD.isNull()  do {
+				set FEETYP=FIELD.piece(":",1)
+				set FEEP=$$FEEPLN^LNU(FEETYP)
+
+				if POS=6 do {	// Loan Fee (Receivable)
+					set ACN=FEEP.piece("|",22)
+					if ACN.isNull() do {
+						type RecordUTBLGLSC glsc=Db.getRecord("UTBLGLSC","GLSC=:GLSC")
+						set ACN=glsc.lgl5
+						}
+					}
+					
+				else  set ACN=FEEP.piece("|",24)	// Loan Fee (Deferred)
+
+				set AMT=FIELD.piece(":",2)
+				do TAMTDTL(.MRPC012,CID,ACN,AMT,CC,CLS,CRCD,ITC,POS,SEQ)
+				}
+			}
+			
+		else  do {
+			type Number ACN
+			type String GLDI
+		
+			if CLS="D" do {
+				type RecordSTBLGLDESCD gldescd=Db.getRecord("STBLGLDESCD","KEY=:POS")
+				set GLDI=gldescd.gldi
+				}
+			else  do {
+				type RecordSTBLGLDESCL gldescl=Db.getRecord("STBLGLDESCL","KEY=:POS")
+				set GLDI=gldescl.gldi
+				}
+			
+			// Maintain G/L set code cache
+			if 'GLSCLST(GLSC,GLDI).exists() do {
+				type RecordUTBLGLSC utblglsc=Db.getRecord("UTBLGLSC","GLSC=:GLSC")
+				set GLSCLST(GLSC,GLDI)=utblglsc.@GLDI
+				}
+		
+			set ACN=GLSCLST(GLSC,GLDI)
+				
+			do TAMTDTL(.MRPC012(,,),CID,ACN,AMT,CC,CLS,CRCD,ITC,POS,SEQ)
+			}
+		}
+		
+	quit
+
+
+TAMTDTL(String MRPC012(,,),		// Transaction analysis data	/REF:RW
+	Number CID,			// Account number
+	Number ACN,			// Customer number
+	Number AMT,			// Amount
+	Number CC,			// Cost center
+	String CLS,			// Class
+	String CRCD,			// Currency code
+	String ITC,			// Internal transaction code
+	Number POS,			// Transaction amount position
+	Number SEQ)			// Sequence
+	
+	// Add info to MRPC012("T"
+	
+	type public String T(,,)
+	
+	type Number DC
+
+	if 'T(ACN,CC,CRCD).exists() do {
+		type Number COL
+
+		type RecordGLAD glad=Db.getRecord("GLAD","ACN=:ACN")
+	
+		if "AE".isLike("%"_glad.type_"%") set COL=1
+		else  set COL=1
+	
+		set T(ACN,CC,CRCD)=COL_"|||"_glad.desc1
+		}
+
+	set DC=$$DC^RGLSUM(CLS,ITC,POS,CID)
+	
+	set T(ACN,CC,CRCD).piece("|",5)=DC_"|"_SEQ
+
+	set T(ACN,CC,CRCD).piece("|",3)=T(ACN,CC,CRCD).piece("|",3)+$select(DC:-AMT,1:AMT)
+	
+	// Save primary and secondary gl raw data information.
+	set MRPC012("T",ACN,CC,CRCD,SEQ)=T(ACN,CC,CRCD)
+	set MRPC012("T",ACN,CC,CRCD,SEQ).piece("|",3)=$select(DC:-AMT,1:AMT)
+
+	quit
+
+vSIG()	quit "60513^63213^Pat Kelly^36389"	// Signature - LTD^TIME^USER^SIZE

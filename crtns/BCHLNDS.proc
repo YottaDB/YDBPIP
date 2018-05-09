@@ -1,0 +1,356 @@
+BCHLNDS //Batch BCHLNDSDE - Post Scheduled Loan Disbursements
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 01/31/2007 12:46 - shetyes
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHLNDSDE Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ set vBCHSTS=$$STATUS^BCHUTL("BCHLNDSDE")
+ if vBCHSTS=1 set ER=1,RM=$$^MSG(3410) quit
+ if vBCHSTS=2 set ER=1,RM=$$^MSG(3414) quit
+ if vBCHSTS=0 set %BatchRestart=1
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit do EXIT^BCHUTL("BCHLNDSDE") quit
+ do JOBMGR^BCHUTL(%FN,"BCHLNDSDE",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ do EXIT^BCHUTL("BCHLNDSDE")
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(CID,SDD) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHLNDSDE","*","",CID.get()_","_SDD.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ if %BatchRestart,$$CHKLOG^BCHUTL(%SystemDate,%FN,"BCHLNDSDE",CID.get()_","_SDD.get()) do { quit
+ do LOG^BCHUTL(%SystemDate,%FN,"BCHLNDSDE",CID.get()_","_SDD.get(),"Record already processed")
+ }
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,CID,SDD)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHLNDSDE","*","",CID.get()_","_SDD.get(),"",et)
+ }
+ do UPDLOG^BCHUTL(%SystemDate,%FN,"BCHLNDSDE",CID.get()_","_SDD.get(),vCONTEXT)
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,CID,SDD) //
+	type Boolean ER
+	set ER=0
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+	do EXEC(.ln) 
+	if ER.get() do EXC
+	quit
+	
+
+public	EXEC(RecordLN ln)
+
+	/*
+	Process one account
+
+	ARGUMENTS:
+	
+		. CID	Account Number		/TYPE=N/REQ/MECH=VAL
+	
+			Profile/IBS Account Number
+	 
+	*/
+	
+ 	type Number BAL,CC,cls,SDA,SDGL,SDM,SDS,SDTA,SDTYP,SEQ,TYPE
+ 	type String CMT,CRCD,CRTRGP,CRTRMI,DRTRGP,fee,LNFEE,SLDGLTC
+ 	type RecordTTX ttx()
+	type public Boolean ER
+	type public Number CID
+		
+	set SEQ=1
+	set BAL=ln.bal
+	type RecordLNDS1 lnds1=Db.getRecord("LNDS1","CID=:CID,SDD=:%SystemDate")
+	
+	set SDM=lnds1.sdm quit:SDM=2		  	// Sched disb method
+	set SDS=+lnds1.sds quit:SDS'=0       	      	// Sched disb status
+	set SDA=lnds1.sda				// Sched disb amount
+	set CMT=lnds1.cmt				// Sched disb comment
+	set CRCD=ln.crcd	  			// Currency code
+	set CC=ln.cc					// Cost center
+	set TYPE=ln.type
+	set SDTA=ln.sdta				// Disb target account
+	
+	set SLDGLTC=CUVAR.sldgltc
+	
+	if 'SLDGLTC.get().isNull() do {
+
+		type RecordTRN trn=Db.getRecord("TRN","ETC=:SLDGLTC")
+		
+		set SDGL=trn.acn  			// Disb G/L account	
+		}
+		
+	if SDGL.get().isNull() set SDGL=CUVAR.glts 		// G/L Suspense
+	
+	/* 
+	If disbursement target account exists, use debit B/off transactions.
+	Otherwise, use scheduled loan disbursement transactions. 
+	*/
+	
+	type RecordPRODCTL prodtype=Db.getRecord("PRODCTL","TYPE=:TYPE")
+	
+	set DRTRGP=prodtype.drtrgp		   	// Debit B/Off
+	
+	// Initialize disbursement schedule info
+	
+	if SDTA do { quit:ER				// Target account exists
+
+		type RecordACN acn=Db.getRecord("ACN","CID=:SDTA")
+		
+		set cls=acn.cls
+		
+		set SDTYP=acn.type		// Disb target acct type
+		
+		// Currency code of target account not consistent with source account
+		if acn.crcd'=CRCD do Runtime.setErrMSG("ACN","655") quit
+		
+		type RecordPRODCTL sdtatype=Db.getRecord("PRODCTL","TYPE=:SDTYP")
+		
+		set CRTRGP=sdtatype.crtrgp
+		
+		// Auto disb to ~p1 
+		do SETTR(DRTRGP,0,CID,SDA,$$^MSG("4045",SDTA),.ttx())
+		
+		/*
+	       	Calculate fees assessed at loan disbursement.  Total 
+		disbursement fees stored at the top level of the LNFEE 
+		array. 
+		FEEDUE^LNFEEU will be called twice, once for fees just based 
+		upon principle and then for fees not based principle.
+		*/
+		
+		do FEEDUE^LNFEEU(.acn,.ttx(SEQ),CID,2,0,%SystemDate,"",SDA,"P",DRTRGP,.LNFEE)
+		
+		do FEEDUE^LNFEEU(.acn,.ttx(SEQ),CID,2,0,%SystemDate,"",SDA,"",DRTRGP,.LNFEE)
+		
+		// Loan Fees with CFWA(Collect Fee With Assessment) will be
+		// collected later in the process
+		set fee = ""
+		for  set fee = LNFEE(fee).order() quit:fee.isNull()  do {
+
+			type RecordLNFEEP lnfeep = Db.getRecord("LNFEEP", "FEETYP = :fee", 1)
+			
+			if (lnfeep.cfwa = 1) set LNFEE = LNFEE - LNFEE(fee) kill LNFEE(fee)
+			}
+			
+		set LNFEE = +LNFEE.get()
+
+                type RecordPRODCTL mytype=Db.getRecord("PRODCTL", "TYPE = :TYPE")
+		
+		set CRTRMI=mytype.crtrmi
+                
+		if LNFEE'=0 do SETTR(CRTRMI,1,CID,LNFEE,"",.ttx())  // Collect LNFEEs
+		
+		// Auto disb from ~p1 
+		do SETTR(CRTRGP,1,SDTA,SDA-LNFEE,$$^MSG("4044",CID),.ttx())
+		
+		do POST(.ttx())
+		
+		}
+	else  do {
+
+		set CRTRGP=prodtype.crtrgp 		     // Credit B/Off
+		type RecordPRODCTL ltype=Db.getRecord("PRODCTL","TYPE=:TYPE")  // not in PRODTYPE
+		set CRTRMI=ltype.crtrmi		  	     // Misc income 
+		
+		/* 
+		Calculate fees assessed at loan disbursement.  Total 
+		disbursement fees stored at the top level of the LNFEE array. 
+	 
+		FEEDUE^LNFEEU will be called twice, once for fees just based 
+		upon principle and then for fees not based principle. 
+		*/
+	
+		// Auto disb to G/L
+		do SETTR(DRTRGP,0,CID,SDA,$$^MSG("4046",SDGL),.ttx())
+		
+		do FEEDUE^LNFEEU(.ln,.ttx(SEQ),CID,2,0,%SystemDate,"",SDA,"P",DRTRGP,.LNFEE)
+		
+		do FEEDUE^LNFEEU(.ln,.ttx(SEQ),CID,2,0,%SystemDate,"",SDA,"",DRTRGP,.LNFEE)
+
+		// Loan Fees with CFWA(Collect Fee With Assessment) will be
+		// collected later in the process
+		set fee = ""
+		for  set fee = LNFEE(fee).order() quit:fee.isNull()  do {
+
+			type RecordLNFEEP lnfeep = Db.getRecord("LNFEEP", "FEETYP = :fee", 1)
+			
+			if (lnfeep.cfwa = 1) set LNFEE = LNFEE - LNFEE(fee) kill LNFEE(fee)
+			}
+			
+		set LNFEE = +LNFEE.get()
+		
+		if LNFEE'=0 do SETTR(CRTRMI,1,CID,LNFEE,"",.ttx())   //Collect LNFEEs
+		
+		// Auto disb from ~p1 
+		do SETTR(SLDGLTC,1,SDGL,SDA-LNFEE,$$^MSG("4044",CID),.ttx())
+		
+		do POST(.ttx())
+		
+		}
+	quit	
+	
+SETTR(String ETC,		// External transaction code
+      String ITC,		// Internal transaction code
+      Number CID,		// Account number
+      Number TAMT,		// Transaction amount
+      String TCMT,		// Transaction comment		/NOREQ/REF:R
+      RecordTTX ttx())		// Private  Create Transaction Set
+	 
+	// Create disbursement transactions Build Transaction object 
+	
+	type public Number CC,SEQ
+	type public String CRCD
+	
+	set SEQ=""
+	set SEQ=ttx(SEQ).order(-1)+1
+	set ttx(SEQ)=Class.new("RecordTTX")
+	set ttx(SEQ).cid=CID
+	set ttx(SEQ).itc=ITC
+	set ttx(SEQ).etc=ETC
+	set ttx(SEQ).tamt=TAMT
+	set ttx(SEQ).tlo=%UserStation
+	set ttx(SEQ).tcmt=TCMT
+	set ttx(SEQ).cc=CC
+	#if CUVAR.%MCP set ttx(SEQ).crcd=CRCD	
+	quit
+	
+POST(RecordTTX ttx())
+
+	type public String BRCD
+	type public Boolean ER
+	type String RJ()
+
+	do TRNSET^TRNDRV(.ttx(),%SystemDate,BRCD,4,,.RJ())
+	if RJ.data()>1 set ER=1
+	quit
+	
+EXC	// Log error to DAYEND
+
+	type public String ET,RM,%ZTSEQ
+	type public Number BAL,CID
+
+	if ET.get().isNull() set ET=RM.get()
+	set CID=CID.get()
+	if CID.isNull() set BAL=0
+	// Process loan disbursement schedule
+	do LOG^UTLEXC($T(+0),"*",$$^MSG(8633),CID,%ZTSEQ.get(),ET.get(),BAL.get())
+	kill ET,%ZTSEQ
+	quit
+	
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,CID,SDD
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set CID=vRECORD.piece($C(9),1)
+ set SDD=vRECORD.piece($C(9),2)
+ do vPROC(CID,SDD)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,CID,SDD
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>32767 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+24>32767 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+	
+	type public Boolean ER
+	type public Number BRCD
+	
+	set ER=0
+	do SOURCE^BCHSOURC("BOFF","LNDS",.%UserID,.BRCD,.%UserClass)
+
+	// Loan disbursement schedule teller not defined   
+	if ER set %BatchExit=1 do EXC quit
+
+
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("CID,SDD","LNDS1","LNDS1.SDD=:%SystemDate")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	type public Number BRCD
+	do SOURCE^BCHSOURC("BOFF","LNDS",.%UserID,.BRCD,.%UserClass)
+	
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

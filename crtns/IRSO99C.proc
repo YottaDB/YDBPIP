@@ -1,0 +1,216 @@
+IRSO99C		/*
+	ORIG: Laura Hillanbrand
+	DESC: IRS Processing - Form 1099-C Original
+	I18N=QUIT: Excluded from I18N standards.
+
+	---- Comments --------------------------------------------------------
+	======================================================================
+		*** THIS ROUTINE IS TO BE COMPILED WITH IRSTPMTR ***
+		     *** DO NOT RUN THIS ROUTINE STANDALONE ***
+	======================================================================
+	
+	---- Revision History ------------------------------------------------
+	
+	09/23/05 - HAILEYM - CR17143
+		Converted to PSL.
+		
+	*/
+	
+	// Accept "Dead code" warning during runtime of @IRSTAPE.
+	#ACCEPT Date=10/14/2005;PGM=Marie Hailey
+	quit
+	
+	
+MTRCNTRL	// Master control
+	
+	type public Boolean ER
+	type public Number FAMT(),FCNT
+	
+	type Number I
+	
+	set FCNT=""
+	for I=1:1:8 set FAMT(I)=""
+	
+	do Db.fastDelete("B1099C")
+
+	do ARECBLD quit:ER	// Build and write the "A" record
+	do BRECBLD quit:ER	// Build and write the "B" records Debt Cancelled
+	do CRECBLD quit:ER	// Build and write the "C" record
+	do STORETOT		// Store the TTR report totals
+	quit
+	
+ARECBLD	// "A" record builder
+
+	type public String TAMT()
+	
+	type String AMTIND,FORMCODE
+	
+	set FORMCODE=5	// IRS form code
+	set AMTIND=237	// IRS amount type indicator
+	set TAMT(2).piece("|",2)="Amount of Debt Cancelled"
+	set TAMT(3).piece("|",2)="Charge-off Interest Amount"
+	set TAMT(7).piece("|",2)="Fair market value of property"
+	do ARECWRT	// Write the record to tape
+	quit
+	
+	
+BRECBLD	// "B" record builder
+	// Cancellation of Debt Transactions
+	
+	type public Date BEGYR,ENDYR
+	type public Number AMT(),CUTOFF,FAMT(),FCNT
+	
+	type Date DATE
+	type Number AMT2,AMT3,AMT7,CID,I
+	type String ADDR,BIND,CITY,CNTRY,CORRTN,COTOT,DOCCODE,FORCNTY,FULLADDR
+	type String LNAME,NAME,SPECIAL,STATE,TIN,TINTYPE,X,XTIN,ZIP
+	
+	type RecordB1099C b1099c
+	type RecordM1099 m1099
+	type ResultSet rs
+	
+	set DOCCODE="  "	// Document specific code
+	set CORRTN=" "		// Corrected return indicator
+	
+	set b1099c=Class.new("RecordB1099C")
+	set b1099c.pdate=CUVAR.TJD
+	
+	set rs=Db.select("DISTINCT TAXID","M1099","FORMTYP=5")
+	while rs.next() do {
+		set TIN=rs.getCol(1)
+
+		if $$ACNFRTID^XALPHA(TIN)="" quit
+		
+		for I=1:1:9,"A","B","C" set AMT(I)=0
+	
+		set TINTYPE=$S(TIN?2N1"-"7N:1,TIN?3N1"-"2N1"-"4N:2,1:" ")
+		set XTIN=TIN.piece("|",1).translate(" ","-")
+		
+		set b1099c.btaxid=XTIN
+		set b1099c.btintype=TINTYPE
+		set b1099c.btin=XTIN
+		
+		type DbSet ds=Db.selectDbSet("M1099","TAXID=:TIN AND FORMTYP=5")
+		while ds.next() do {
+			set m1099=ds.getRecord("M1099")
+	
+			if m1099.td<BEGYR!(m1099.td>ENDYR) quit	// Wrong year
+		
+			// Amount is less than cutoff amount
+			set COTOT=m1099.cotot
+			if COTOT<CUTOFF quit
+		
+			set CID=m1099.cid		// Account number
+			set AMT(2)=COTOT*100		// Total Debt Cancellation
+			set AMT(3)=m1099.coint*100	// Charge-off amount Interest
+			set AMT(7)=m1099.fmktv*100	// Fair market value of property
+			set NAME=m1099.nam
+			set LNAME=m1099.lnam
+			set FULLADDR=m1099.ad1_"|"_m1099.ad2_"|"_m1099.ad3_"|"_m1099.city_"|"_m1099.state_"|"_m1099.mzip
+			set ADDR=m1099.ad1_" "_m1099.ad2_" "_m1099.ad3
+			set CITY=m1099.city
+			set STATE=m1099.state
+			set ZIP=m1099.mzip.piece("-",1)_m1099.mzip.piece("-",2)
+			set CNTRY=m1099.cntry
+			set FORCNTY=$S(CNTRY="US":" ",1:1)	// Foreign country indicator
+			set BIND=(m1099.bankrup_" ").extract(1)
+			set DATE=m1099.td
+		
+			// ---------  Special Data Entry Section  --------
+			//; Blank|544|546
+			set SPECIAL="".justify(3)
+			//;Bankruptcy Indicator |547
+			set SPECIAL=SPECIAL_BIND
+			//; Date Cancelled|548|555
+			set SPECIAL=SPECIAL_DATE.toString("YEARMMDD")
+			//; Debt Description|556|594
+			set X=m1099.desc_" "_m1099.desc2_" "_m1099.desc3
+			set SPECIAL=SPECIAL_X.justify(39,-1,,1)
+			//; Blank|595|662
+			set SPECIAL=SPECIAL_"".justify(68)
+			//; Special Data Entries|663|722
+			set SPECIAL=SPECIAL_"".justify(60)
+			//; Blank|723|750
+			set SPECIAL=SPECIAL_"".justify(28)
+			
+			do BRECWRT	// Write the record to tape
+			
+			if TINTYPE=2 set X=LNAME
+			else  set X=NAME
+			do NAMCNTRL^IRSTPMTR set b1099c.bnamcon=X
+			
+			set AMT2=AMT(2)/100
+			set AMT3=AMT(3)/100
+			set AMT7=AMT(7)/100
+			
+			// Inserting "B" Records into B1099C File.
+			/*
+			B1099C.BDC date will be in MM/DD/YY format because 1099PRO 
+			accept only xx/xx/xx date format.
+			*/
+			if b1099c.getMode() do b1099c.setMode(0)
+			set b1099c.bseq=m1099.seq
+			set b1099c.bcid=CID
+			set b1099c.bamt2=AMT2
+			set b1099c.bamt3=AMT3
+			set b1099c.bamt7=AMT7
+			set b1099c.bname=NAME
+			set b1099c.baddr1=m1099.ad1
+			set b1099c.baddr2=m1099.ad2
+			set b1099c.baddr3=m1099.ad3
+			set b1099c.bcity=CITY
+			set b1099c.bstate=STATE
+			set b1099c.bzip=m1099.mzip
+			set b1099c.bbi=BIND
+			set b1099c.bdc=DATE.toString("MM/DD/YY")
+			set b1099c.bdd1=m1099.desc
+			set b1099c.bdd2=m1099.desc2
+			set b1099c.bdd3=m1099.desc3
+			do b1099c.bypassSave()
+			
+			// Calculate number of records and tax form report totals.
+			set FCNT=FCNT+1
+			set FAMT(1)=FAMT(1)+AMT2	// Total Debt Cancellation
+			set FAMT(2)=FAMT(2)+AMT3	// Charge-off amount Interest
+			set FAMT(3)=FAMT(3)+AMT7	// Fair market value of property
+			}
+		}
+	quit
+	
+	
+CRECBLD	// "C" record builder
+
+	do CRECWRT	// Write the record to tape
+	quit
+	
+
+%STOPLOD	// Stop %ZRTNLOD from this point on down
+
+	quit
+	
+	
+TRECWRT		// Dummy line reference for GT.M
+
+	quit
+	
+
+ARECWRT		// Dummy line reference for GT.M
+
+	quit
+	
+	
+BRECWRT		// Dummy line reference for GT.M
+
+	quit
+	
+	
+CRECWRT		// Dummy line reference for GT.M
+
+	quit
+	
+	
+STORETOT	// Dummy line reference for GT.M
+
+	quit
+
+vSIG()	quit "60215^50576^Marie Hailey^5327"	// Signature - LTD^TIME^USER^SIZE

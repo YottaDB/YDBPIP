@@ -1,0 +1,401 @@
+AWTIEFD	  /*
+	ORIG: SCHWARTZA - 09/19/2001
+	DESC: Accrued withholding tax index driver
+
+	---- Comments --------------------------------------------------------
+
+	This procedure provides the means to create, modify, and delete 
+	Accrued Withholding Tax Rate tiers and rates.  If an entry is picked 
+	to be anticipated it will be saved for future use.  This function files
+	to UTBLAWTIEFD, UTBLAWTIR for real changes, and to DAYENDTAX and 
+	DAYENDTAXTR for anticipated.  
+
+	---- Revision History ------------------------------------------------
+	
+	12/20/06 - SANTHUMS- 24533
+		   Modified the section INIT to delete the calls to VPG and
+		   VPG0 sections and incorporated the necessary code in the
+		   FOR loop. Modified entire procedure to pass the 
+		   RecordUTBLAWTI and RecordUTBLAWTIR objects to the required 
+		   sections since this was loosing scope. Fixed the error that 
+		   were encountered due to the undefined variable Y,fUTBLAWTI,
+		   fUTBLAWR. Removed the global ^UTBL("AWTI" referenced in prompts
+		   of EFDATE. Deleted the sections ERR since it is not called 
+		   anywhere.
+		   
+	11/16/05 - Sreeram Panyaram 
+		   Initialized Unscoped Variables for DBI3.
+		   	
+	1/09/02 - Schwartza - 46105:03
+		  Using F11 to quit at the 'use default' screen would cause
+		  an undefined error (DFT) because of a missing quit. 
+
+	9/19/01 - Schwartza - 46105
+		  Screen Driver for functions @IND011-@IND013 created.
+
+ */
+
+NEW	set %ProcessMode=0 do INIT quit
+UPD	set %ProcessMode=1 do INIT quit
+INQ	set %ProcessMode=2 do INIT quit
+DEL	set %ProcessMode=3 do INIT quit
+
+INIT
+	type Boolean FINISH
+	type String AWTI,AWTR,DES,IRT,VFMQ
+	type Number ANT,CNT,DFT,INDEXSEQ,MAX,NEXTSEQ,OPT,%PG,%PAGE
+	type Date EFDATE
+
+	type RecordUTBLAWTI fUTBLAWT 
+	type RecordUTBLAWTIR fUTBLAWR
+	
+	set FINISH=0
+	set %PG=0
+	set %PAGE=1
+	set OPT=%ProcessMode	// copy of %ProcessMode for call to DATE
+	kill VFMQ
+	
+	set (ANT,DFT)=0
+	set (CNT,INDEXSEQ,NEXTSEQ)=1
+	set MAX=12	// Number of entries per index
+
+	for  do { quit:FINISH
+                if %PG=0 do VPG00 if ER set FINISH=1 quit
+               
+                if %PG>0 do VPG01(.fUTBLAWT,.fUTBLAWR)
+
+                if "DFQ"[VFMQ!$G(ER) do VER(.fUTBLAWT,.fUTBLAWR) set FINISH=1 quit
+
+                set %PG=%PG+1
+                }
+	
+	quit
+	
+
+VPG00	/*Sets up prompts for ^UTLREAD.  After the call to UTLREAD
+	  it will check to see if their is a previous anticipated run
+	  for efdate and prompt the user to use the anticipated default
+	  or the index's actual values.
+	*/
+	
+	type public String AWTI,DES,VFMQ
+	type public Number ANT,CNT,DFT,MAX,%NOPRMT,%PAGE
+	type public Date EFDATE
+	type String %TAB(),%READ
+	
+	set %TAB("AWTI")="/DES=Index Name/LEN=6/HLP=[UTBLAWTI]AWTI/TBL=[UTBLAWTI]/DES=Index"
+	set %TAB("EFDATE")="[UTBLAWTIEFD]EFDATE/HLP=[UTBLAWTIEFD]EFDATE"
+	set %TAB("EFDATE")=%TAB("EFDATE")_"/TBL=[UTBLAWTIEFD]EFDATE/XPP=D DATE^AWTIEFD"
+	set %TAB("ANT")=".ANT1",ANT=1
+	
+	set %READ="@@%FN,,,AWTI/REQ,EFDATE/REQ,ANT/REQ" set %NOPRMT="F"
+	if %ProcessMode=2 set %READ="@@%FN,,,AWTI/REQ,EFDATE"
+
+	do ^UTLREAD if VFMQ="Q" set ER=1 quit
+	do CHECKDE if VFMQ="Q" set ER=1 quit	// ABS 1/9/02
+
+	type RecordUTBLAWTI utblawti = Db.getRecord("UTBLAWTI","AWTI=:AWTI")
+	set DES = utblawti.des
+		
+	if DFT do LOADD		// Default values will be used
+	else  do LOADI(EFDATE)	// Load from User Table
+	
+	if (%ProcessMode=2)!(%ProcessMode=3) set %PAGE=CNT\MAX+1
+
+        quit
+
+FILLTIER // Fills out the TIER array with blank entries after defined ones.
+	
+	type public String TIER()
+	type Number I
+	
+	for I=TIER("").order(-1)+1:1:12 set TIER(I)=I_"||"
+
+	quit
+
+
+CHECKDE	/*Check for existing anticipated runs for the current day/index
+	and prompt user to choose if one is found.
+	*/
+	
+	type public String AWTI,TXT(),%TAB(),%READ
+	type public Number DFT,INDEXSEQ,NEXTSEQ
+	type public Date EFD,EFDATE
+	
+	if %ProcessMode=3 quit
+	type ResultSet rs2=Db.select("INDEX,INDEXSEQ,EFDATE","DAYENDTAX","INDEX=:AWTI AND EFDATE=:EFDATE")
+	set NEXTSEQ=Db.nextVal("DAYENDTAX","%SystemDate,AWTI,100")
+
+	if rs2.isEmpty() set DFT=0 quit
+
+	while rs2.next() do {
+		set EFD=rs2.getCol(3)
+		if EFD=EFDATE set INDEXSEQ=rs2.getCol(2)
+		}
+
+	// Default values exist from a previous anticipated run
+        set TXT(6)=$$^MSG(6768)
+        set %TAB("DFT")=".DFT3"
+        set %READ="@@%FN,,,@TXT(6),,DFT"
+	do ^UTLREAD
+	
+	quit
+
+
+VPG01(RecordUTBLAWTI fUTBLAWT,
+      RecordUTBLAWTIR fUTBLAWR)
+	/*Call the screen with %REPEAT set to the number of 
+	  rows needed (12). */
+
+	
+	type public Number CNT,MAX,%PG,%PAGE,%MAX
+	type public String AWTI
+	type Number %MODS,%REPEAT
+	type String SID
+	
+	if %ProcessMode>1 set %MAX=CNT-1 // Inquire or Delete, don't show empty tiers
+	if %ProcessMode<2 set %MAX=12 // New or Modify, allow 12 spots for new tiers
+	set %REPEAT=%MAX
+	set %MODS=(MAX*(%PG-1))+1	
+
+	if %ProcessMode>0 set fUTBLAWT=Db.getRecord("UTBLAWTI","AWTI")		
+	else  set fUTBLAWT=Class.new("RecordUTBLAWTI")
+	
+	set fUTBLAWR=Class.new("RecordUTBLAWTIR")
+	
+	set SID="UTBLAWTIR"
+	set fUTBLAWT.awti=AWTI
+	set fUTBLAWR.awti=AWTI
+	set fUTBLAWR.efdate=EFDATE
+	
+	do DRV^USID(%ProcessMode,SID,.fUTBLAWT,.fUTBLAWR)
+	
+	quit
+
+
+LOADD	// Place the Dayend entry into TIER(CNT)
+
+	type public Date EFDATE,MODDT
+	type Number CNT
+	type String AWTR,IRT,TIER()
+	
+	if %ProcessMode=3 quit
+	set CNT=1
+	
+	type ResultSet rs=Db.select("IRTA,AWTRA","DAYENDTAXTR","INDEX=:AWTI AND INDEXSEQ=:INDEXSEQ")
+
+	set MODDT=EFDATE      // This date will be used by AWTIMC
+
+	// Set up the TIER array to be passed to the screen
+        while rs.next() do {
+		set IRT=rs.getCol(1)
+		set AWTR=rs.getCol(2)
+		set TIER(CNT)=CNT_"|"_IRT_"|"_AWTR
+		set CNT=CNT+1
+		}
+	do FILLTIER
+	set IRT=-1	
+
+	quit
+
+
+LOADI(EFDATE)	// Place the entry from the user table into TIER(CNT)
+
+	type public String AWTI,TIER()
+	type public Date MODDT
+	type Number CNT
+	type String AWTR,IRT,Y
+	
+	set CNT=1
+
+	type ResultSet rs=Db.select("IRT,AWTR,EFDATE","UTBLAWTIR","AWTI=:AWTI AND EFDATE=:EFDATE")
+
+	set MODDT=EFDATE      // This date will be sent to AWTIMC
+	
+	// Set up the TIER array to be passed to the screen
+	while rs.next() do {	
+	 	set IRT=rs.getCol(1)
+		set AWTR=rs.getCol(2)
+		set TIER(CNT)=CNT_"|"_IRT_"|"_AWTR
+		set CNT=CNT+1
+		}
+	
+	/* EFDATE is not valid, load last valid date. This will be called when
+	a user is loading a new date, if there is a previous entry it will
+	be brought up as the default tiers and rates
+	*/
+
+	if 'Db.isDefined("UTBLAWTIEFD","AWTI,EFDATE"),%ProcessMode<3 do {
+			
+		type ResultSet rs1=Db.select("EFDATE","UTBLAWTIEFD","AWTI=:AWTI AND EFDATE<:EFDATE","EFDATE DESC")
+		if rs1.next() set Y=rs1.getCol("EFDATE")
+		if Y.get() do {
+			type ResultSet rs2=Db.select("IRT,AWTR","UTBLAWTIR","AWTI=:AWTI AND EFDATE=:Y")
+			if rs2.isEmpty() quit
+			while rs2.next() do {
+				set IRT=rs2.getCol(1)
+				set AWTR=rs2.getCol(2)
+				set TIER(CNT)=CNT_"|"_IRT_"|"_AWTR
+				set CNT=CNT+1
+				}
+				
+			}
+		}	
+
+	do FILLTIER
+
+	quit
+
+
+VER(RecordUTBLAWTI fUTBLAWT,
+    RecordUTBLAWTI fUTBLAWR)	// If modifying or creating, run FILE. Otherwise stop here
+	
+	type Public String VFMQ
+	type Public Boolean ER
+	
+	if (%ProcessMode=2)!(%ProcessMode=4)!(VFMQ="Q") do END quit
+	do FILE quit:ER
+
+	quit
+
+
+DATE	/*	If the user is creating a new tier check to see if the 
+		date entered is already used.  This function also allows
+		any date to be entered when using display, even one with no 
+		associated tiers. */
+	
+	type public Boolean ER
+	type public String AWTI,X,RM
+	type public Number I(),OPT,%MSKD
+	type public Date EFD
+	type String TABLE
+	
+	quit:X=""
+	quit:OPT=1	// Modify Mode
+	quit:OPT=3	// Delete Mode
+	set TABLE=I(3)
+	set I(3)=""             // Clear table value
+	if OPT=2 quit	// Once table is clear, quit if in inquire 
+
+        
+        type ResultSet rs=Db.select("AWTI,EFDATE","UTBLAWTIEFD","AWTI=:AWTI AND EFDATE=:X")
+        if rs.isEmpty() quit
+
+	// ~p1 already exists for ~p2
+	set EFD=$$DAT^%ZM(X,$G(%MSKD))
+        set ER=1,RM=$$^MSG(1219,AWTI,EFD)   
+        set I(3)=TABLE
+
+	quit
+ 
+FILE	/*	Save the modified or created tiers to 
+		^UTBL("AWTI",INDEX,EFDATE,IRT).  Call ANTFILE if running
+		anticipated. */
+		
+	type public Boolean ER
+	type public String AWTI,AWTR,IRT,TIER()
+	type public Number ANT,CNT
+	type public Date EFDATE
+
+	if ANT=1 do ANTFILE quit	// File to DAYEND global then quit
+
+	// Insert the UTLBAWTIEFD field if it is not defined for EFDATE
+	type RecordUTBLAWTIEFD utblawtiefd1=Db.getRecord("UTBLAWTIEFD","AWTI=:AWTI,EFDATE=:EFDATE",1)
+	if %ProcessMode=0,('Db.isDefined("UTBLAWTIEFD","AWTI,EFDATE")) do utblawtiefd1.save()
+	
+
+	// Delete the UTBLAWTIEFD field if in delete mode
+	if %ProcessMode=3,(Db.isDefined("UTBLAWTIEFD","AWTI,EFDATE")) do Db.delete("UTBLAWTIEFD","AWTI=:AWTI AND EFDATE=:EFDATE")
+
+
+	// Delete all the old tiers and rates
+	if %ProcessMode'=0 do { quit:ER
+		type ResultSet rs=Db.select("AWTI,EFDATE","UTBLAWTIR","AWTI=:AWTI AND EFDATE=:EFDATE")
+
+		for  quit:'rs.next()  do { quit:ER
+			set AWTI=rs.getCol(1)
+			do Db.delete("UTBLAWTIR","AWTI=:AWTI AND EFDATE=:EFDATE")
+			}
+		}
+
+	// Save modified Tiers and Rates unless in delete mode
+	if %ProcessMode'=3 do {
+		set CNT=0
+		for  quit:CNT>11  do { 		
+			set CNT=CNT+1
+			set IRT=TIER(CNT).piece("|",2)
+			set AWTR=TIER(CNT).piece("|",3)
+			if IRT="" quit
+			if AWTR="" quit
+						
+			type RecordUTBLAWTIR utblawtir = Db.getRecord("UTBLAWTIR","AWTI=:AWTI,EFDATE=:EFDATE,IRT=:IRT",1)
+			set utblawtir.awtr=AWTR
+			do utblawtir.save()
+			}
+	        }
+	do INIT^AWTIMC		// Call Mass Change Function
+	do END
+
+	quit
+
+ANTFILE	/*	File Anticipated information to DAYEND global. 
+		^DAYEND(PROCDT,"AWTI",INDEX,INDEXSEQ) */
+	
+	type public String AWTI,AWTRA,IRTA,TIER()
+	type public Number CNT,NEXTSEQ
+	type public Date EFDATE
+	
+	quit:%ProcessMode=3
+	
+	type RecordDAYENDTAX dayendtax = Db.getRecord("DAYENDTAX","PROCDT=:%SystemDate,INDEX=:AWTI,INDEXSEQ=:NEXTSEQ",1)
+	
+	set dayendtax.status="*"
+	set dayendtax.ant=%ProcessMode
+	set dayendtax.uid=%UserID
+	set dayendtax.efdate=EFDATE
+	
+	do dayendtax.save()
+	
+	set CNT=0
+	for  quit:CNT>11  do {
+		set CNT=CNT+1
+		quit:TIER(CNT).piece("|",2)=""
+		quit:TIER(CNT).piece("|",3)=""
+		set IRTA=TIER(CNT).piece("|",2)
+		set AWTRA=TIER(CNT).piece("|",3)
+			
+		type RecordDAYENDTAXTR dayendtaxtr = Db.getRecord("DAYENDTAXTR","PROCDT=:%SystemDate,INDEX=:AWTI,INDEXSEQ=:NEXTSEQ,TRSEQ=:CNT",1)
+		set dayendtaxtr.irta=IRTA
+		set dayendtaxtr.awtra=AWTRA
+		do dayendtaxtr.save()
+		}
+
+	quit
+		
+END	//	Display appropriate ending messages and quit.	
+
+	type Public String AWTI,VFMQ,RM
+
+	if AWTI.get()="" quit	// quit if AWTI has not been defined.
+
+	if VFMQ="Q" do {
+			// Rates for index ~p1 not created
+		if %ProcessMode=0 set RM=$$^MSG(2315,AWTI) quit
+			// Rates for index ~p1 not modified
+		if %ProcessMode=1 set RM=$$^MSG(2317,AWTI) quit
+			//Rates for index ~p1 not deleted
+		if %ProcessMode=3 set RM=$$^MSG(2316,AWTI) quit
+		}
+
+	if VFMQ="F" do {
+			// Rates for index ~p1 created
+		if %ProcessMode=0 set RM=$$^MSG(2312,AWTI) quit
+			// Rates for index ~p1 modified
+		if %ProcessMode=1 set RM=$$^MSG(2314,AWTI) quit
+			// Rates for index ~p1 deleted
+	        if %ProcessMode=3 set RM=$$^MSG(2313,AWTI) quit
+		}
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60620^9788^Sunitha Santhumayor^10652"	// Signature - LTD^TIME^USER^SIZE

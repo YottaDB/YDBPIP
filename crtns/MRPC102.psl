@@ -1,0 +1,381 @@
+MRPC102(return,versn,reqopt,TYPE,intrface,ACN,BOO,CRCD)
+
+	/* Copyright(c)2000 Sanchez Computer Associates, Inc.  All Rights Reserved
+	   Procedure ID: 102
+	   ORIG: CHOK 04/05/00
+
+	   DESC:
+	   Account Presentation.  
+	   This procedure will provide account information in XML based on product type. 
+	   It will return rate, term, and minimum balance.  If there is a fixed interest
+	   rate found on the product, rate from the product type will be used and APY will
+	   be provided.  When rate schedule exists, it will return rate, term, and minimum
+	   balance.  When index exists, it will return rate, minimum balance and tier
+	   sequence.  If no rate, no rate schedule, and no index from the product type,
+	   rate will be 0.
+
+	   When using Market Segmentation, arguments ACN, BOO, and CRCD are required.
+           If ACN, BOO, and CRCD are not defined the product information will default
+	   from PRODDFTD or PRODDFTL.
+
+	   If any customization is needed, copy MRPC102 to ZMRPC102.  Add custom code to
+	   ZMRPC102 and compile ZMRPC102 followed by MRPC102.  ZMRPC102 will be called
+	   directly from MRPC102 if it exists.  There is no need to modify the entries in
+	   the M Remote Procedures Call Table (SCATBL5).
+
+	   KEYWORDS: RPC
+	
+	   ARGUMENTS:
+		. return  desc    		/TYP=T/REQ/MECH=REFNAM:W
+	
+		. versn   version number    	/TYP=N/REQ/MECH=VAL
+	     		  current version=1
+		
+		. reqopt  bitmap of requested 	/TYP=T/REQ/MECH=VAL
+			  options  		
+
+			byte 1	- code to indicate delimiters to use 
+				0 - build DTD only
+				1 - build data
+				2 - build DTD and data
+
+		. TYPE  product type		/TYPE=N/REQ
+
+		. intrface Calling Interface	/TYPE=N/NOREQ/MECH=VAL
+
+		. ACN	Customer Number		/TYPE=N/NOREQ
+
+		. BOO	Branch Code		/TYPE=N/NOREQ
+
+		. CRCD	Currency Code		/TYPE=T/NOREQ/DFT=%SystemCurrency
+
+	   RETURNS:
+		. $$     Error Message     	/TYP=T
+	     		  Null= No Error
+
+		. return  requested information /TYP=N
+	
+	   RELATED:
+		. $$^PBSMRPC - MRPC Service Class Driver
+	
+	   EXAMPLE:
+		S RM=$$^MRPC102(.return,1,"1",20)
+		s RM=$$SPODBC^MRPC102(1,"1",20)
+	
+	 ------------------  Revision History  -------------------------
+	
+	11/10/03 - CARROLLJ - 51630
+		   Added #ACCEPT around STFHOST check to stop compile errors.
+
+	11/04/02 - JERUCHIMC - 51283
+	           Added TYPE parameter to the call to ^MRPC045.  
+
+	12/05/2001 - YURKOVICG - 48607
+		     Changed misspelled 'AGRUMENT' to 'ARGUMENT' in DTD section.
+
+	07/10/2000 - SIGDAE - 41042
+		     o Modified section RCALC to return APY for Rate Schedule
+		       and Index records.
+		     o Add new elements under MRPC102, TYPE, TERMINT, and EFD.
+		       TERMINT, term interval, will be returned when a Rate 
+		       Schedule is returned and EFD will return the effective
+		       date of the Rate or Index table.
+
+	06/27/2000 - SIGDAE - 40730
+		     Modify code in the Market Segmentation section of 
+		     getdata to make the quit conditional.
+
+	06/26/2000 - SIGDAE - 40730
+		     Added arguments ACN, BOO, and CRCD to support Market
+		     Segmentation logic.  If any of these arguments have values
+		     the product defaults will use the Market Segmentation
+		     logic instead of just using the PRODDFTD or PRODDFTL
+		     tables.
+
+	05/04/2000 - CHOK - 37290
+		     Remove TERM>0 from SQL statement.
+
+
+	*/
+
+	#if $$VALID^%ZRTNS("ZMRPC102")
+	do getdata^ZMRPC102
+	#else
+	do getdata
+	#endif
+
+	// Wrap in LV format
+	set return=$$V2LV^MSG(return)
+
+	quit ""
+
+getdata
+
+	new EFD,TINT
+
+	set return=""
+	set ACN=$G(ACN)
+	set BOO=$G(BOO)
+	set CRCD=$G(CRCD)
+
+	type HTML xx=Class.new("HTML")
+
+	/*
+	  Version number of client message is not compatible with server
+	  The test must be applied after the call to the custom program
+	  since it may have its own version number.
+	*/ 
+
+	if $G(versn)'=1 set return=$$ERRXML^ECOMMERC(2951,$E(reqopt,1),"MRPC102") quit
+
+	// Missing parameter
+	if +$E(reqopt,1)=1,$G(TYPE)="" set return=$$ERRXML^ECOMMERC(8607,$E(reqopt,1),"MRPC102") quit
+
+	if +$E(reqopt,1)=0 do DTD quit
+
+	// Invalid reqopt byte 1 option
+	if +$E(reqopt,1)>2 set return=$$ERRXML^ECOMMERC(1411,$E(reqopt,1),"MRPC102") quit
+
+	// Market Segmentation fields in use
+	if (ACN'="")!(BOO'="")!(CRCD'="") do {  quit:return'=""
+		// Invalid Customer Account
+		if ACN="" set return=$$ERRXML^ECOMMERC(1295,$E(reqopt,1),"MRPC102") quit
+		// Invalid Branch of Ownership
+		if BOO="" set return=$$ERRXML^ECOMMERC(6654,$E(reqopt,1),"MRPC102") quit
+		}
+
+	// If creating account during critical path, set %SystemDate to tomorrow
+	#ACCEPT DATE=03/10/00;PGM=Erik Scheetez
+	if $G(%STFHOST) new %SystemDate set %SystemDate=$$TTL^RCHK()+1
+
+	if +$E(reqopt,1)=2 do DTD
+
+	new CLS
+	set CLS=Db.getOneRow("CLS","PRODCTL","TYPE")
+
+	// Invalid product type
+	if CLS'="D",CLS'="L" set return=$$ERRXML^ECOMMERC(1503,$E(reqopt,1),"MRPC102") quit
+
+	set return=xx.addString("MRPC102",0)
+
+	do RCALC
+
+	if $G(ER) do {  quit
+		new Q,msgid,fld
+		set return=""
+		set msgid=$P($G(%MSGID),"|",1)
+		set Q=$$LV2V^MSG($P(%MSGID,"|",2),.fld)
+		set return=$$ERRXML^ECOMMERC(msgid,$E(reqopt,1),"MRPC102",$G(fld(1)),$G(fld(2)),$G(fld(3)),$G(fld(4)),$G(fld(5))) quit
+		}
+
+	set return=xx.addProp("TYPE",TYPE)
+	if $G(TINT)'="" set return=xx.addProp("TERMINT",TINT)
+	if $G(EFD)'="" set return=xx.addProp("EFD",EFD)
+
+	set return=xx.addString("MRPC102",1)
+
+	quit
+
+
+DTD	// Build DTD header
+	type HTML xx=Class.new("HTML")
+	set return=xx.addTitle("MRPC102")
+	set return=xx.addElement("MRPC102","ERROR?,DEP?,LOAN?,TYPE,TERMINT?,EFD?")
+	set return=xx.addAttrib("MRPC102","TYPE=,TERMINT=,EFD=DATE")
+	set return=xx.addElement("ERROR","CODE,ARGUMENT?,DESCRIPTION")
+	set return=xx.addAttrib("ERROR","CODE=,ARGUMENT=,DESCRIPTION=")
+	set return=xx.addElement("DEP","RATE,MINBAL,TERM?,TIER?,APY?")
+	set return=xx.addAttrib("DEP","RATE=,MINBAL=CURRENCY,TERM=,TIER=,APY=")
+	set return=xx.addElement("LOAN","RATE,MINBAL,TERM?,TIER?")
+	quit
+
+
+RCALC
+
+	new ret,DATA,IACM,ICF,INDEX,IRN,MINBAL,MAXBAL,SCH,TIER,TRM,XIRN,XTJD
+
+	do GETDFTS	// Load product defaults
+
+	if $G(ER) do {  quit
+		set x=""
+		}
+
+	set XTJD=%SystemDate
+	set ret=""
+
+	new rs
+	if SCH'="" do { quit
+		type ResultSet rs=Db.select("EFD","RATE1","SCH=:SCH AND EFD NOT>:XTJD","EFD DESC")
+		if 'rs.isEmpty() set EFD=rs.next()
+		else  quit
+
+		// Determine Term Interval
+		set TINT=Db.getOneRow("TINT","UTBLRATE","SCH")
+	
+		set EFD=rs.getCol(1)
+		new rs
+		type ResultSet rs=Db.select("TERM,MBALTERM,RATEXBAL","RATE1","SCH=:SCH AND EFD=:EFD")
+		if 'rs.isEmpty() while rs.next() do {
+			set TRM=rs.getCol(1)
+			set MINBAL=rs.getCol(2)
+			set IRN=rs.getCol(3)
+			if CLS="D" do XMLBUILD("D",0,$$APY(IACM,ICF,IRN,TRM_TINT))
+			if CLS="L" do XMLBUILD("L",0)
+			}
+		}
+
+	new rs
+	if INDEX'="" do { quit
+		type ResultSet rs=Db.select("EFD","INDEX1","INDEX=:INDEX AND EFD NOT>:XTJD","EFD DESC")
+		if 'rs.isEmpty() set EFD=rs.next()
+		else  quit
+		set EFD=rs.getCol(1)
+		new rs
+		type ResultSet rs=Db.select("RMIN,RATE,SEQ","INDEX1","INDEX=:INDEX AND EFD=:EFD")
+		if 'rs.isEmpty() while rs.next() do {
+			set MINBAL=rs.getCol(1)
+			set IRN=rs.getCol(2)
+			set TIER=rs.getCol(3)
+			if CLS="D" do XMLBUILD("D",1,$$APY(IACM,ICF,IRN,TRM))
+			if CLS="L" do XMLBUILD("L",1)
+			}
+		}
+
+	if +IRN=0 set IRN=0
+	if $G(MINBAL)="" set MINBAL=0
+
+	if CLS="D" do XMLBUILD("D",0,$$APY(IACM,ICF,IRN,TRM))
+	if CLS="L" do XMLBUILD("L",0)
+	quit
+
+
+APY(iacm,icf,irn,trm)	// Calculate APY
+
+	// Inputs:  TYPE
+
+	new EFD,ER,IRN,ret
+	set (EFD,ER)=""
+	if +irn=0 quit 0
+	if trm="" set trm="1Y"
+	set ER=$$^MRPC045(.ret,1,%SystemDate,iacm,icf,"",0,1000,,irn,trm,,,TYPE)
+	if ER'="" quit ""
+	set ER=$$LV2V^MSG(ret,.ret)
+	quit $G(ret(6))
+
+
+GETDFTS	// Load Product Defaults
+
+	/*
+	  RETURNS:
+		. IRN		Nominal Int/Div Rate
+		. INDEX		Int/Div Index
+		. SCH		Rate Schedule
+		. TRM		Term
+		. MINBAL	Minimum Balance (DEP only)
+		. ICF		Int/Div Compounding Frequency (DEP only)
+		. IACM		Int/Div Accrual Calc Method (DEP only)
+	*/
+
+	// Not using Market Segmentation rules
+	if ACN="",BOO="",CRCD="" do DFT1 quit
+
+	// Use System Currency if currency code not defined
+	if CRCD="" set CRCD=%SystemCurrency
+
+	// Define array needed for market segmentation product extract
+	set ARR("TYPE")=TYPE
+	set ARR("ACN")=ACN
+	set ARR("BOO")=BOO
+	set ARR("CRCD")=CRCD
+
+	do ^UPRODDFT(.ARR,.DATA) quit:$G(ER)
+
+	// Set local variables needed from defaults
+
+	if $D(DATA("LN.CLS")) do {  quit
+		set IRN=$G(DATA("LN.IRN"))
+		set SCH=$G(DATA("LN.SCH"))
+		set INDEX=$G(DATA("LN.INDEX"))
+		set TRM=$G(DATA("LN.TRM"))
+		}
+
+	set IRN=$G(DATA("DEP.IRN"))
+	set SCH=$G(DATA("DEP.SCH"))
+	set INDEX=$G(DATA("DEP.INDEX"))
+	set TRM=$G(DATA("DEP.TRM"))
+	set MINBAL=$G(DATA("DEP.MINBAL"))
+	set IACM=$G(DATA("DEP.IACM"))
+	set ICF=$G(DATA("DEP.ICF"))
+	quit
+
+
+DFT1	// Not using Market Segmentation
+
+	/*
+	  RETURNS:
+		. IRN		Nominal Int/Div Rate
+		. INDEX		Int/Div Index
+		. SCH		Rate Schedule
+		. TRM		Term
+		. MINBAL	Minimum Balance (DEP only)
+		. ICF		Int/Div Compounding Frequency (DEP only)
+		. IACM		Int/Div Accrual Calc Method (DEP only)
+	*/
+
+	if CLS="D" do {
+		set DATA=Db.getOneRow("IRN,INDEX,SCH,TRM,MINBAL,ICF,IACM","PRODDFTD","TYPE")
+		set MINBAL=$P(DATA,$C(9),5)
+		set ICF=$S($P(DATA,$C(9),6)="":"1YA",1:$P(DATA,$C(9),6))
+		set IACM=$P(DATA,$C(9),7)
+		}
+
+	if CLS="L" set DATA=Db.getOneRow("IRN,INDEX,SCH,TRM","PRODDFTL","TYPE")
+	
+	set IRN=$P(DATA,$C(9),1)
+	set INDEX=$P(DATA,$C(9),2)
+	set SCH=$P(DATA,$C(9),3)
+	set TRM=$P(DATA,$C(9),4)
+	quit
+
+
+XMLBUILD(cls,option,apy)
+
+	type HTML xx=Class.new("HTML")
+	if cls="D" set return=xx.addString("DEP",0)
+	else  set return=xx.addString("LOAN",0)  
+
+	set return=xx.addProp("RATE",IRN)
+	set return=xx.addProp("MINBAL",MINBAL)
+
+	// Build for RATE SCHEDULE 
+	if option=0,TRM'="" set return=xx.addProp("TERM",TRM)
+
+	// Build for INDEX
+	if option=1 set return=xx.addProp("TIER",TIER)
+
+	if $G(apy)'="" set return=xx.addProp("APY",apy)
+
+	if cls="D" set return=xx.addString("DEP",1)
+	else  set return=xx.addString("LOAN",1)
+
+	quit
+
+
+SPODBC(versn,reqopt,TYPE,intrface)	// Stored Procedure/ODBC entry point
+
+	/*
+	  This function is intended to provide a capability to invoke a
+	  true MRPC from the EXECUTE procedure facility within the PROFILE
+	  ODBC driver.  This is needed in order to get the normal response
+	  argument that is part of the MRPC structure returned to the calling
+	  ODBC client.
+	*/
+
+	#if $$VALID^%ZRTNS("ZMRPC102")
+	do getdata^ZMRPC102
+	#else
+	do getdata
+	#endif
+	quit return
+ #OPTION ResultClass ON
+Public String vSIG()	quit "59948^54957^Laura Hillanbrand^9853"	// Signature - LTD^TIME^USER^SIZE

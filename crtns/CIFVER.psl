@@ -1,0 +1,396 @@
+CIFVER	/*
+	PROCEDURE:  CIFVER
+	ORIG: Dan S. Russell - 4/6/87
+	DESC: CIF Integrity Check
+
+	---- Comments --------------------------------------------------------
+	RETURNS:
+		. ER		Error flag	/TYP=L
+
+		. RM		Error message	/TYP=T
+
+ 	---- Revision History ------------------------------------------------
+ 	
+ 	10/26/05 - RussellDS - CR17834
+ 		   Replaced calls to EXT^DBSFILER with direct calls to the
+ 		   filers.
+ 	
+ 	11/02/04 - RussellDS - CR13011
+ 		   Fixed various errors:
+ 		   
+ 		   - VFMQ undefined after calls to GETDATE and ^QRYTYPE
+ 		   - Eliminated use of two dynamic Db.selectDbSet()s -- can
+ 		     only have one per procedure.  Collapsed to use a single,
+ 		     common Db.select().
+ 		   - Invalid construction of WHERE in DTJNA
+ 		   - For CIFD, changed to use select DISTINCT to avoid 
+ 		     duplicate records
+ 		   - Cleaned up some whitespace and data typing issues.
+ 		   - Changed QUIT data type to Boolean
+ 		   - Added call to XBAD^DBSEXECU to log errors
+ 	
+	12/04/03 - CARROLLJ - CR7239
+		   Correct precedence error in RAN section.
+
+ 	03/10/03 - Dan Russell - 51351
+ 		   Replaced call to ^CIFEXEC with embedded verification code
+ 		   at VERIFY.
+
+	01/08/03 - Dan Russell - 51349
+		   Correct error in CIFD section. Invalid reference to database
+		   record type.
+
+	12/09/02 - Dan Russell - 51349
+		   Correct undefined error.
+
+	08/12/02 - Dan Russell
+		   Rewrote from M to PSL.
+
+		   Removed old change history.
+	*/
+
+	quit						// Do not call from top
+
+
+XCLS(String TYPELIST)	/* Class/group/type    (Called by function CIFVER1)
+
+	ARGUMENTS:
+		. TYPELIST	List of types	/NOREQ/MECH=REFARR:R
+				to check.
+
+	If called externally (%EXT=1), and no TYPELIST, do all types.
+	If not called externally, prompt for types.
+	*/
+
+	type Public Number ER,%EXT
+	
+	type String VFMQ,WHERE
+
+	if '$D(%EXT) do ^QRYTYPE("*","",.TYPELIST) quit:ER!(VFMQ="Q")
+
+	// Delete old entries
+	do Db.delete("XBAD","TDATE=:%SystemDate AND TABLE='CIF'")
+	do Db.delete("XBAD","TDATE=:%SystemDate AND TABLE='CIFHH'")
+	do Db.delete("XBAD","TDATE=:%SystemDate AND TABLE='CMBGRP'")
+	do Db.delete("XBAD","TDATE=:%SystemDate AND TABLE='IRABEN'")
+	do Db.delete("XBAD","TDATE=:%SystemDate AND TABLE='IRATYPE'")
+	do Db.delete("XBAD","TDATE=:%SystemDate AND TABLE='RELCIF'")
+
+	// Build select list for types in TYPELIST
+	set WHERE=""
+	if $D(TYPELIST) do {
+		type String IN,N
+		set IN="(",N=""
+		for  set N=$O(TYPELIST(N)) quit:N=""  set IN=IN_N_","
+		set WHERE="TYPE IN "_$E(IN,1,$L(IN)-1)_")"
+	}
+	
+	do PROCLIST("ACN", "CIF", WHERE)
+
+	quit
+
+
+CIFD	// Daily transactions    (Called by function CIFVER2)
+
+	type Public Number %EXT
+	
+	type Boolean QUIT
+	type Date XJD
+	type String VFMQ
+	
+	set XJD=%SystemDate
+	if '$D(%EXT) do GETDATE(.XJD,0) quit:VFMQ="Q"!'$G(XJD)
+	
+	type ResultSet rs = Db.select("DISTINCT ACN", "CIFD", "TJD=:XJD")
+
+	set QUIT=0
+	while rs.next() do { quit:QUIT
+		type RecordCIF cif=Db.getRecord("CIF","rs.getCol(""ACN"")",1)
+		
+		if cif.getMode() do EXEC(.cif)
+	}
+
+	quit
+
+
+DTJNA(String TYPELIST)	/* New accounts    (Called by function CIFVER3)
+
+	ARGUMENTS:
+		. TYPELIST	List of types	/NOREQ/MECH=REFARR:R
+				to check.
+
+	If called externally (%EXT=1), and no TYPELIST, do all types.
+	If not called externally, prompt for types.
+	*/
+
+	type Public Number %EXT
+
+	type Date XJD
+	type String VFMQ,WHERE
+
+	set XJD=%SystemDate
+	if '$D(%EXT) do GETDATE(.XJD,1) quit:VFMQ="Q"!'$G(XJD)
+
+	// Build select list for types in TYPELIST
+	set WHERE="TJD=:XJD AND CLS='*' AND GRP='CIF'"
+	if $D(TYPELIST) do {
+		type String IN,N
+		set IN="(",N=""
+		for  set N=$O(TYPELIST(N)) quit:N=""  set IN=IN_N_","
+		set WHERE=WHERE_" AND TYP IN "_$E(IN,1,$L(IN)-1)_")"
+	}
+	
+	do PROCLIST("CID", "DTJNA", WHERE)
+
+	quit
+
+
+RAN	// Random accounts    (Called by function CIFVER4)
+
+	type Boolean QUIT
+	type Number ACN,MAX,TOT,X,Y
+
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+
+	set MAX=cuvar.cifver
+	if 'MAX set MAX=10
+
+	set ACN=""
+
+	set X=Db.nextKey("CIF","ACN") if X="" quit
+	set Y=Db.prevKey("CIF","ACN")
+
+	/* If the range of accounts are greater than 2**31 reset the
+	   first accont number so the difference is less than 2**31
+	   - this is the limit for $R.
+	*/
+	if (Y-X)>((2**31)-1) for  set X=Db.nextKey("CIF","X") quit:((Y-X)<(2**31))
+	if X=Y do { quit
+		type RecordCIF cif=Db.getRecord("CIF","ACN=:X")
+		do EXEC(.cif)
+	}
+
+	set (QUIT,TOT)=0
+
+	for  do { quit:QUIT
+		set ACN=X+$R(Y-X)-1
+		set ACN=Db.nextKey("CIF","ACN")
+		type RecordCIF cif=Db.getRecord("CIF","ACN=:ACN")
+		do EXEC(.cif)
+		set TOT=TOT+1
+		if TOT>MAX set QUIT=1
+	}
+
+	quit
+
+
+ACN	// Single account    (Called by function CIFVER5)
+
+	type Public Number ER
+
+	type Number ACN,%NOPRMT,OLNTB
+	type String %READ(),%TAB(),VFMQ
+
+	set %TAB("ACN")=".ACN1/XPP=S %EXT=1 D ^UCIF"
+	set %READ="ACN/REQ",%NOPRMT="F"
+
+	do ^UTLREAD quit:VFMQ="Q"
+
+	// Delete old entries with key matching ACN
+	do Db.delete("XBAD","AKEYS=:ACN AND TDATE=:%SystemDate AND TABLE='CIF'")
+	do Db.delete("XBAD","PKEY=:ACN AND TDATE=:%SystemDate AND TABLE='CIFHH'")
+	do Db.delete("XBAD","PKEY=:ACN AND TDATE=:%SystemDate AND TABLE='CMBGRP'")
+	do Db.delete("XBAD","PKEY=:ACN AND TDATE=:%SystemDate AND TABLE='IRABEN'")
+	do Db.delete("XBAD","PKEY=:ACN AND TDATE=:%SystemDate AND TABLE='IRATYPE'")
+	do Db.delete("XBAD","PKEY=:ACN AND TDATE=:%SystemDate AND TABLE='RELCIF'")
+
+	type RecordCIF cif=Db.getRecord("CIF","ACN=:ACN")
+	do EXEC(.cif) quit:ER
+
+	do DSPERR^DBSEXECU(ACN)
+	quit
+	
+	
+PROCLIST(String ACNCOL,		// Column that is CIF.ACN in TABLE
+	 String TABLE,		// Table for dynamic select
+	 String WHERE)		// Where clause fo dynamic select
+	 
+	 /*
+	 Process CIF's based on TABLE and WHERE clause.
+	 
+	 It is necessary to do this in one place, versus in each of the calling
+	 sections since PSL currently limits a procedure to a single dynamic
+	 select or selectDbSet().
+	 */
+	 
+	type Boolean QUIT = 0
+	
+	#ACCEPT DATE=11/02/04; PGM=Dan Russell
+	type ResultSet rs = Db.select(ACNCOL, TABLE, WHERE)
+
+	while rs.next() do { quit:QUIT
+		
+		type RecordCIF cif = Db.getRecord("CIF", "ACN=:rs.getCol(1)",1)
+		
+		if cif.getMode() do EXEC(.cif)
+	}
+		
+	quit
+
+
+EXEC(RecordCIF cif)	// Execute the integrity check for one CIF record
+
+	type Public Number ER=0
+	type Public String RM
+	
+	type String verrors(),vfkey
+
+	do VERIFY(cif.acn)
+	
+	if $D(verrors) do XBAD^DBSEXECU(.verrors)
+	
+	quit
+	
+	
+VERIFY(Number ACN)	/* Public - run integity check on one CIF record
+
+	ARGUMENTS:
+		. ACN		CIF Number	/REQ/NONULL/MECH=VAL
+		
+	RETURNS:
+		. ER		Error flag	/TYP=L
+
+		. RM		Error message	/TYP=T
+		
+		. verrors()	Error array	/TYP=T
+	*/
+	
+	type Public Number ER=0
+	type Public String RM,verrors()
+	
+	type RecordCIF cif = Db.getRecord("CIF", "ACN=:ACN")
+	
+	do cif.setMode(2)
+	do ^CIFFILE(.cif)		// Validate a single CIF record
+	
+	// Validate IRATYPE table
+	do { quit:ER
+		type ResultSet rs=Db.select("RPASEQ","IRATYPE","ACN=:ACN")
+		
+		while rs.next() do { quit:ER
+			type Number RPASEQ
+
+			set RPASEQ=rs.getCol("RPASEQ")
+			
+			type RecordIRATYPE iratype = Db.getRecord("IRATYPE", "ACN=:ACN,RPASEQ=:RPASEQ")
+			
+			do iratype.setMode(2)
+			do ^IRATYPFL(.iratype)
+			}
+		}
+		
+	// Validate IRABEN table
+	do { quit:ER
+		type ResultSet rs=Db.select("RPASEQ,BENSEQ","IRABEN","ACN=:ACN")
+		
+		while rs.next() do { quit:ER
+			type Number BENSEQ,RPASEQ
+			
+			set BENSEQ=rs.getCol("BENSEQ")
+			set RPASEQ=rs.getCol("RPASEQ")
+			
+			type RecordIRABEN iraben = Db.getRecord("IRABEN", "ACN=:ACN,RPASEQ=:RPASEQ,BENSEQ=:BENSEQ")
+			
+			do iraben.setMode(2)
+			do ^IRABENFL(.iraben)
+			}
+		}
+		
+	// Validate RELCIF table
+	do { quit:ER
+		type ResultSet rs=Db.select("CID","RELCIF","ACN=:ACN")
+		
+		while rs.next() do { quit:ER
+			type Number CID
+
+			set CID=rs.getCol("CID")
+			
+			type RecordRELCIF relcif = Db.getRecord("RELCIF", "ACN=:ACN,CID=:CID")
+			
+			do relcif.setMode(2)
+			do ^RCIFFILE(.relcif)
+			}
+		}
+		
+	// Validate CIFHH table
+	do { quit:ER
+		type ResultSet rs=Db.select("HEADACN,HHTYP","CIFHH","ACN=:ACN")
+		
+		while rs.next() do { quit:ER
+			type Number HEADACN
+			type String HHTYP
+
+			set HEADACN=rs.getCol("HHTYP")
+			set HHTYP=rs.getCol("HHTYP")
+			
+			type RecordCIFHH cifhh = Db.getRecord("CIFHH", "ACN=:ACN,HHTYP=:HHTYP,HEADACN=:HEADACN")
+			
+			do cifhh.setMode(2)
+			do ^CIFHHFIL(.cifhh)
+			}
+		}
+			
+	// Validate CMBGRP table
+	do { quit:ER
+		type ResultSet rs=Db.select("STMGRP","CMBGRP","ACN=:ACN")
+		
+		while rs.next() do { quit:ER
+			type Number STMGRP
+
+			set STMGRP=rs.getCol("STMGRP")
+			
+			type RecordCMBGRP cmbgrp = Db.getRecord("CMBGRP", "ACN=:ACN,STMGRP=:STMGRP")
+			
+			do cmbgrp.setMode(2)
+			do ^CMBGRPF(.cmbgrp)
+			}
+		}	
+		
+	// Validate CIFEXT table
+	do { quit:ER
+		type ResultSet rs=Db.select("SEQ","CIFEXT","ACN=:ACN")
+		
+		while rs.next() do { quit:ER
+			type Number SEQ
+
+			set SEQ=rs.getCol("SEQ")
+			
+			type RecordCIFEXT cifext = Db.getRecord("CIFEXT", "ACN=:ACN,SEQ=:SEQ")
+			
+			do cifext.setMode(2)
+			do ^CIFEXTFI(.cifext)
+			}
+		}
+
+	quit
+	
+
+GETDATE(Date XJD,Number ASKTYPE,String TYPELIST)	//Private - Get date and TYPELIST
+
+	type Public String VFMQ
+
+	type Number OLNTB,%PAGE,%PG
+	type String %NOPRMT,%READ(),%TAB()
+
+	set %TAB("XJD")=".XJD1"
+	set %READ="XJD/REQ"
+	set %NOPRMT="F",%PG=1
+
+	do ^UTLREAD quit:VFMQ="Q"
+
+	// Ask for types
+	if $G(ASKTYPE) do ^QRYTYPE("*","",.TYPELIST)
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60205^54818^Dan Russell^8781"	// Signature - LTD^TIME^USER^SIZE

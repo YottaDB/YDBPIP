@@ -1,0 +1,440 @@
+PROCLN		
+	/*
+	  ---- Revision History ------------------------------------------------
+	  
+	   03/13/06 - KUMARB - CR 19875
+	   	      Modified section PSREGF1, to pass "/NOVALDD" in 
+	   	      lnps1.save
+
+	   04/01/05 - KinI - 14385
+	   	      Modified DFP and MDT sections to quit with some value 
+	   	      in the case of an error.
+	   	      Corrected PSREGF1 section logic.
+	   	      Cleaned up the code to comply with DBI standards.
+
+	   09/04/02 - ALBINK - 51101
+		      Modified the calculation of LPD in section AMODT.  The
+		      value of LPD must be one full period before the actual
+		      date of first payment using the "A" business date
+		      clarifier.
+
+		      Added section ADJ to determine the number of days
+		      adjustment to the maturity date with a monthly frequency.
+		      Added calls to section ADJ from section MDT for both the
+		      payment and account term maturity dates.
+	
+	   05/15/00 - LAMY - 40466
+		      Modified section BDOCK to correct an undefined error
+		      with a * frequency.
+
+	   05/09/00 - LAMY - 36828
+		      Added code in the MDT section to define busopt to dist1nd
+		      if busopt equal null.  Also added section BDOCK for this.
+
+	   08/10/99 - CARROLLJ - 33890
+		      Converted to PSL.		
+
+	   02/16/99 - HALPINJ - 31600
+	              Added code to section to set trm to ptrm if trm is null.
+	
+	  ----------------------------------------------------------------------
+	*/
+
+	quit
+
+
+public PSREGF1(String PMTFRE,	// Payment Frequency 
+	       Date NXTDAT,	// Next Payment Date 
+	       Date MDT,	// Maturity Date  
+	       Number DIST,	// LNPS1 Pmt Distribution 
+	       RecordLN ln)	// Loan Record	      
+		
+	/*
+	Payment Schedule Regular Frequency Function.
+		 	
+	Subroutine is called by LN before insert and update triggers to
+	establish payment schedule dates when the primary payment frequency
+	is equal to "*" and a secondary frequency is a regular PROFILE
+	frequency.
+	*/
+	
+	type public Boolean ER
+	type Boolean QUITFLG
+
+	// Determine value of first payment date
+	if NXTDAT="" set NXTDAT=ln.dfp if NXTDAT="" quit 
+	
+	// Maturity date required for payment schedule processing
+	if MDT="" do Runtime.setErrSTBLER("LN","PFRE*2") quit:ER 
+	
+	// Address each payment date beginning with first date 'NXTDAT'
+	set QUITFLG=0 for  quit:QUITFLG!(ER)  do {
+	
+		// Stop when payment date exceeds maturity date
+		if NXTDAT>MDT set QUITFLG=1 quit 
+	
+		type RecordLNPS1 lnps1=Db.getRecord("LNPS1","CID=:ln.cid,PDD=:NXTDAT",1)
+				
+		if DIST=2 set lnps1.d2f=1
+		if DIST=3 set lnps1.d3f=1
+		if DIST=4 set lnps1.d4f=1
+		
+		do lnps1.save("/NOVALDD")
+	
+		set NXTDAT=$$NJD^UFRE(NXTDAT,PMTFRE)
+		}
+	quit 	
+
+
+public DFP(Number XTYPE,	// Product Type
+	   String XCRCD,	// Currency Code  
+	   Date ODD,		// Open Date
+	   String DIST1FRE,	// Payment Frequency	
+	   Date DIST1ND,	// Next Payment Date
+	   Date DFP,		// Date of First Payment 
+	   Number BLOFF)	// Billing Offset 
+	
+	/*	
+	This function is used to calculate the value of DFP, however it
+	could also be used for DIST1ND in the future.
+	Examples of calls into this function may be found in the
+	LN BEFORE_INSERT trigger and routine LNNEW10.M
+	*/
+
+	type public Boolean ER
+	
+	if '(DIST1FRE.isNull()) , (DFP.isNull()) do { quit:ER ""
+	
+			if '(DIST1ND.isNull()) set DFP=DIST1ND quit
+			
+			type String CTL
+	
+			// full period to 1st payment flag
+			type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:XTYPE")
+			if prodctl.fpf set CTL="00001"           // bump by full cycle
+	
+			set DFP=$$NJD^UFRE(ODD,DIST1FRE,,CTL.get())
+	
+			/* 
+			Ensure that the billing offset date is not greater
+			than the opening date.  If so, amount could never
+			be billed.  If equal, then OK, because bill would
+			be created in beginning-of-day on the next system
+			date.
+			*/
+
+			// ~p1
+			if DFP < (ODD + BLOFF) set DFP=$$NJD^UFRE(DFP,DIST1FRE,,CTL.get()) if ER.get() do Runtime.setErrMSG("LN",3333,"RM")
+			}
+	
+	quit DFP.get()
+
+	
+public AMODT(Number XTYPE,	// Product Type 
+	     String XCRCD,	// Currency Code
+	     Date ODD,		// Open Date
+	     String DIST1FRE,	// Payment Frequency 
+	     Date DFP,		// Date of First Payment 
+	     Date LPD)		// Variable returned to LNNEW10
+
+	/*
+	This function is used to calculate the value of AMODT, examples
+	of calls into this function may be found in the LN BEFORE_INSERT
+	trigger and LNNEW10.M
+
+	LPD, variable returned to LNNEW10 is the date corresponding to one 
+	full period before the actual first payment date.  
+	Should use "A" business date option regardless of what is found 
+	in frequency.
+	
+	***** Do not modify the value of LPD without careful consideration
+	      of the maturity date calculations.  Maturity and payment
+	      calculations are made based on the value of LPD.
+	*/
+	
+	type public Boolean ER
+	type Date amodt,NJD
+	type Number FTYPE=0
+	
+	// Prepaid Int Flag is used to determine if amodt should be opening date
+	// or calculated to be the start of the first full period.
+	
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:XTYPE")
+
+	set (amodt,LPD)=ODD
+	
+	if '(DIST1FRE.isNull()) do {
+		type RecordUSRFRE usrfre=Db.getRecord("USRFRE","UFRE=:DIST1FRE",1)
+		set FTYPE=usrfre.fretyp
+		}
+		
+	// ~p1	
+	if '(DIST1FRE.isNull()) , (DIST1FRE'="*") , '(DFP.isNull()) , (FTYPE.isNull()) do { if ER do Runtime.setErrMSG("LN",3333,"RM") quit ""
+	
+		type String busopt
+		
+		// Use reverse frequency to determine AMODT from DFP
+		set NJD=$$NJD^UFRE(DFP,DIST1FRE,,1) quit:ER
+
+		if (NJD '< LPD) , (prodctl.ppif) set amodt=NJD
+
+		/* 
+		LPD should not consider non-business days because of maturity
+		date calculations.  LPD must be adjusted based on the
+		clarifier on the payment frequency.   
+		*/
+		set busopt=$$BDOCK(DIST1FRE)
+
+		if busopt="P" set LPD=$$NJD^UFRE(DFP,DIST1FRE,,101) quit:ER
+		else  set LPD=$$NJD^UFRE(DFP,DIST1FRE,,10101)
+	}
+	
+	quit amodt.get()
+
+
+public MDT(Date dtnt,		// Date of Note
+	   Date odd,		// Openning date 
+	   String ptrm,		// Payment Term 
+	   String trm,		// Account Term  
+	   String busopt,	// Business Date Option 
+	   String nbdc,		// Non-Business Date Calendar
+	   Date lpd,		// Date corresponding to one full period before the first payment date returned by call to $$AMODT^PROCLN
+	   String pcmval,	// PCM Value   
+	   String dist1fre,	// Payment frequency    
+	   Date amdt,		// Maturity Date based on the Account Term 
+	   Date mdt)		// Maturity date     
+
+	/*
+	This function is used to calculate the maturity date LN.MDT. 
+	If it happens that the MDT is already specified then it will not be
+	recalculated.  The function also tests to see whether the calculated
+	maturity falls on a payment date and, under some conditions, adjusts
+	the calculated date.
+	
+	An example of its use can be found in BEFORE_INSERT trigger for LN.
+	
+	If MDT date is defined then it remaines unchanged. 
+	Also, if ptrm and trm are equal then both get the values of mdt.
+	*/	
+	
+	type public Boolean ER
+	type Date MDT,stdt
+	type Number adj
+	
+	set MDT=mdt.get()
+	set amdt=amdt.get()
+	
+	/* 
+	If mdt has already been defined and both terms are equal then amdt 
+	should also be consistent with mdt and there is no need to
+	recalculate mdt nor amdt.
+	*/
+	if '(MDT.isNull()) , (ptrm=trm) set amdt=mdt quit MDT
+	
+	// If neither trm nor ptrm are defined then there is no need to
+	// calculate the maturity date.
+	if (ptrm.get().isNull()) , (trm.get().isNull()) quit MDT
+	
+	// Payment term is always derived from account term.
+	if ptrm.get().isNull() set ptrm=trm
+	
+	// If account term is null set it to ptrm
+	if trm.get().isNull() set trm=ptrm
+	
+        // If busopt is null set to Frequency
+        if busopt.get().isNull() set busopt=$$BDOCK(dist1fre) if ER quit MDT
+
+	/* 
+	If a fixed P&I loan, the maturity date should fall on a payment date.
+	This is accomplished by basing the maturity date calculation on the
+	the date equal to one payment frequency before the loan's first
+	expected payment (variable lpd).
+	Otherwise start date is equal ODD or DTNT if ODD is not defined.
+	*/
+	if pcmval.extract()=1 set stdt=lpd
+	else  set stdt=$S(odd'="":odd,1:dtnt)
+	
+	/*
+        An adjustment to the maturity date may be needed if the start date
+        is set in a month that has less days than the maturity month.
+        This adjustment should not consider non-business days.
+	*/
+        set adj=0
+        if pcmval.extract()=1 set adj=$$ADJ(dist1fre,ptrm,stdt)
+
+	// "mdt" is the maturity date derived by using the payment term.
+	// It is stored in account field LN.MDT.
+	
+	// ~p1
+	set mdt=$$EXT^UMDT(ptrm,stdt,adj,busopt,nbdc) if ER do Runtime.setErrMSG("LN",3333,"RM") quit:ER MDT
+
+        set adj=0
+        if pcmval.extract()=1 set adj=$$ADJ(dist1fre,trm,stdt)
+
+	// Conversely, "amdt" is the maturity date derived by using the account 
+	// term. It's used to determine value of ln.ambas in later calculations.
+	
+	// ~p1
+	set amdt=$$EXT^UMDT(trm,stdt,adj,busopt,nbdc) if ER do Runtime.setErrMSG("LN",3333,"RM") quit:ER $S(MDT'="":MDT,1:mdt.get())
+	
+	/* 
+	If the terms are not equal and MDT is already defined then it
+	will not be replaced by calculated mdt and may differ from amdt,
+	otherwise return the calculated maturity date.
+	*/
+	if MDT'="" quit MDT
+	
+	quit mdt	
+
+
+public NBROPMT(Date mdt,	// Maturity Date  
+	       Date odd,	// Original Disbursement Date
+	       String dist1fre,	// Distribution 1 Frequency 
+	       Date lstpmtdt,	// One Frequency Before 1st Pmt
+	       Number dist1af)	// Distribution 1 Annual Factor
+
+	/*	
+	This function returns calculated AMBAS (Amortization Base - Number of
+	Payments) or ONP (Original Number of Payments).
+	AMBAS is calculated based on the AMDT and TRM.
+	ONP is based on PTRM and PMDT.
+	AMBAS and ONP will equal if TRM and PTRM are the same.
+	*/	
+	
+	// No maturity?  No fixed number of payments.
+	if 'mdt quit ""
+	
+	type public Boolean ER
+	type Boolean stop
+	type Number nbrpmts=""
+	type Date njdt
+	
+	// Loans with no payment frequency
+	if dist1fre.isNull() do { quit nbrpmts
+		set nbrpmts=1
+		set dist1af=$$^SCARND(1/((mdt-odd)/365),0,,,5)
+		}
+	
+	if dist1af.get().isNull() set dist1af=1
+
+	type RecordUSRFRE usrfre=Db.getRecord("USRFRE","UFRE=:dist1fre",1) if ER quit ""
+	
+	/* 
+	Calculate the number of payments regardless of the frequency type.
+	Frequency may be a user-defined or standard PROFILE frequency.
+	Bump by frequency until payment date exceeds maturity date.
+	*/
+	
+	set njdt=lstpmtdt
+	set stop=""
+	set nbrpmts=0
+	
+	if (njdt '> mdt) for  set njdt=$$NJD^UFRE(njdt,dist1fre) quit:ER!stop  do {
+		if (njdt > mdt) set stop=1 quit 
+		set nbrpmts=nbrpmts+1
+		}
+	
+	quit nbrpmts
+
+
+public BDOCK(String FRE)   // Frequency
+
+	// Verify that Business day option within Frequency matches the ACN
+
+	type public Boolean ER
+	type String %C,%L,%M,%P
+	
+	type RecordUSRFRE usrfre=Db.getRecord("USRFRE","UFRE=:FRE",1) quit:ER ""
+
+	if usrfre.fretyp quit ""
+
+        if '(usrfre.fre.isNull()) set FRE=usrfre.fre			
+
+	if FRE="*" quit ""
+
+        set %M=+FRE
+        set %L=$S(%M:%M.length(),1:0)
+        set %C=FRE.extract(%L+1)
+
+        if (%C.isNull()) ! ("SDMWYQ"'[%C) quit ""
+
+        if (%M.isNull()) set %M=1 set FRE=1_FRE set %L=1
+        set %P=FRE.extract(%L+2)
+
+        quit %P
+
+
+public ADJ(String fre, 	// Distribution 1 Frequency
+	   String trm,	// Account/Payment Term
+	   Date stdt)	// One Frequency Before 1st Pmt     	  
+
+	/*
+	Maturity adjustment for monthly calculation function is used to 
+	determine the number of days to adjust an account's maturity date 
+	when the payment frequency time period is monthly.  
+	A call to this function will return an adjustment number of days 
+	when the start date for calculations is less than the number of days 
+	in the month of maturity and less than the offset days in the 
+	frequency.  Only business dates will be used to determine if an 
+	adjustment is needed.  
+	Non-business dates and calendars are used in the actual maturity date 
+	calculation.
+	
+	"stdt" is the date corresponding to one full period before the first
+	payment date.  Should use "A" business date option regardless of what 
+	is found in frequency.
+	*/
+
+	type public Boolean ER
+	type String mult,offset,period,position
+	type Number adj
+
+        if (fre.isNull()) ! (trm.isNull()) ! (stdt.isNull()) quit 0
+
+	type RecordUSRFRE usrfre=Db.getRecord("USRFRE","UFRE=:fre",1) quit:ER ""
+	
+        if usrfre.fretyp quit 0
+
+        if '(usrfre.fre.isNull()) set fre=usrfre.fre
+        set fre=fre.piece("/",1)
+        if fre="*" quit 0
+
+        set mult=+fre
+        set position=$S(mult:mult.length(),1:0)
+        set period=fre.extract(position+1) 
+        
+        quit:period'="M" 0
+
+        if "ANP"'[fre.extract(position+2) quit 0
+
+        set offset=fre.extract(position+3,fre.length())
+
+        if '(offset.isNull()) , offset'="E" quit 0
+
+        if (offset["+") ! (offset["-") quit 0
+
+        set adj=0
+
+        do { quit:ER 0
+
+		type Date mdt
+		type String date
+		type Number day,matdays,month,year
+
+		set mdt=$$EXT^UMDT(trm,stdt,0) quit:ER
+		set date=mdt.toString("MM/DD/YEAR") quit:ER
+		set month=+date.piece("/",1)
+		set day=+date.piece("/",2)
+		set year=+date.piece("/",3)
+		set matdays=$$DIP^UMDT(month,year) quit:ER
+
+		if offset="E" set offset=matdays
+		if (offset > matdays) set offset=matdays
+		if (day < offset) set adj=offset-day
+		}
+
+	quit adj
+	
+	
+
+vSIG()	quit "60337^594^Balasubramonian Sankar^12742"	// Signature - LTD^TIME^USER^SIZE

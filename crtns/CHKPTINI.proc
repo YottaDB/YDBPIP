@@ -1,0 +1,356 @@
+CHKPTINI	// Back office check print initialization ; 19 Apr 88  4:29 PM
+	/*
+	       ORIG:  Tom Locke (2424) - 11/18/86
+
+	  ---- Revision History ------------------------------------------------
+
+	   08/14/06 - KinI - 22447
+	   	      Modified TEST section to remove SS variable from the 
+	   	      processing.
+
+	   04/19/06 - PUTTASWH - CR19981
+	   	      Modified in order to change the input variable TJD
+	   	      to PJD, since the same was considered as the System 
+	   	      Date in CHKBPNT procedure.
+	   	      
+	   10/20/05 - PUTTASWH - CR17011
+	   	      Modified INIT section to avoid compiler errors and 
+	   	      SET section to delete the references to XCHKREG 
+	   	      table.
+	
+	The check print flow is as follows:
+
+	1) After running @CHKBPNT function proving generic input info, the 
+	system then prompts a user: “Are checks lined up?” with “Yes/No/Quit” 
+	options (via TEST^CHKPTINI).
+
+	2) If a user selects “No”, the system invokes the test check print 
+	logic printing out the TEST check first (via indirect call to @CHKFMT
+	in TEST^CHKPTINI).
+
+	Here the values for the check are dummy and set in TEST^CHKPTINI 
+	section. 
+
+	3) After the test print, a user is prompted with “Are checks lined up?” 
+	again and if selecting “Yes” this time, the actual check print is 
+	executed (via PRINT^CHKBPNT logic). 
+	
+	Here the values for the check are set in CHKBPNT procedure.	   	     	      
+	   
+	*/
+
+	type public Date PJD
+	
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+	set %CHKFMT=cuvar.chkpnt
+	set CO=cuvar.gls
+
+	if $E(%CHKFMT)'="^" set %CHKFMT="^"_%CHKFMT
+
+	type ResultSet rs=Db.select("TJD","XPDO",,"TJD DESC")	
+	if rs.isEmpty() set PJD=""
+		
+	if rs.next() set PJD=rs.getCol(1)
+
+	set (ER,STS)=0
+	kill OLNTB
+
+	set %TAB("PJD")=".TJD5/TBL=TJDTBL(/XPR=do TBLTJD^CHKPTINI/XPP=do POSTJD^CHKPTINI"
+	set %TAB("CKTYP")=".CHKTYP1/TBL=TBL(""CHKS"",/XPP=do PPTYP^CHKPTINI"
+	set %TAB("CID")=".RCID1"
+	set %TAB("CKNO")=".CKNO3/XPP=do PPCKNO^CHKPTINI"
+	set %TAB("IO")=$$IO^SCATAB
+	set IOI3="TBL(""IO""," set %TAB("IO")=%TAB("IO")_"/TBL="_IOI3
+	set %TAB("IO")=%TAB("IO")_"/XPP=do PPIO^CHKPTINI"
+
+	set %READ="@@%FN,,,PJD/REQ,CKTYP/REQ,IO/REQ,CID,CKNO/REQ"
+
+	do ^UTLREAD if VFMQ="Q" quit
+	
+	do INIT
+	
+	quit	
+	
+INIT	//
+		
+	// Third party PDOs
+	set PDO=0
+
+	type ResultSet rs=Db.select("CID","PDO")
+	if rs.next() set PDO=1
+
+	set %EffectiveDate=PJD
+	set RF=0	
+
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+	
+	for I=2:1:5 set BKAD(I)=""
+
+	set CSZ=cuvar.ccity_", "_cuvar.cstate_" "_cuvar.czip_"  "_cuvar.ccntry
+	set BKAD(1)=cuvar.cname
+	set BKAD(2)=cuvar.cad1
+	set BKAD(3)=cuvar.cad2
+	set BKAD(4)=cuvar.cad3	
+
+	// Compress bank address
+	for I=2:1:5 if BKAD(I)="" set BKAD(I)=CSZ quit
+
+	set TOTWHD=0 
+	set TOT=0 
+	set CKNO=CKNO-1
+
+	do OPEN^SCAIO use IO
+
+        catch vERROR {
+                new ET,RM
+                set ET=vERROR.type
+ 
+                if ET["%GTM-" do { quit
+                        do ZE^UTLERR
+                       }
+ 
+                set ET=ET_"-"_vERROR.thrownAt
+                set RM=vERROR.description
+                do ^UTLERR
+                }
+	
+	do TEST
+
+	set STS=1 
+	set CKSTS=0
+	
+	quit
+
+POSTJD	// Transaction date post-processor
+
+	quit:'X
+	
+	set %JD=$$^SCAJD(X) 
+
+	// Invalid date
+	if %JD<0 set ER=1 set RM=$$^MSG(1308) quit
+
+	kill TBL
+
+	type ResultSet rs=Db.select("CKTYP","XPDO","TJD=:%JD","CKTYP")
+	while rs.next() do {
+		set N=rs.getCol(1)
+		type RecordXPDO1 xpdo1=Db.getRecord("XPDO1","TJD=:%JD,CKTYP=:N",1)
+		if 'xpdo1.getMode() do {
+			set xpdo1.skey=0
+			set xpdo1.ckey=""
+			set xpdo1.pntflg=""
+			set xpdo1.cid=""
+			do xpdo1.bypassSave()
+			}
+	
+		// Printing complete
+		if xpdo1.pntflg="***" set Z=$$^MSG(2232)
+
+		// Partially printed
+		else  if xpdo1.pntflg set Z=$$^MSG(6676)
+
+		// Not printed
+		else  set Z=$$^MSG(6675)
+		set TBL("CHKS",N)=Z
+		}
+	quit
+
+PPCKNO	//	
+	type public Number GL
+	
+	quit:'X 
+
+	if Db.isDefined("CHKREG1","CO=:CO,GL=:GL,CKNO=:X") do { quit
+		// Check ~p1 exists in check register
+		set ER=1 set RM($O(RM(""),-1)+1)=$$^MSG(544,X)
+		}
+
+	type RecordCHKDEVP chkdevp=Db.getRecord("CHKDEVP","DEVICE=:IO")
+
+	if X<chkdevp.begnum!(X>chkdevp.endnum) do {
+		set ER=1
+		// Use check number between ~p1 and ~p2
+		set RM=$$^MSG(2824,chkdevp.begnum,chkdevp.endnum)
+		}
+	
+	set CKNUM=CKNO
+	quit
+
+PPIO	// Post processor for IO device
+
+	if $G(I(3))="" set I(3)=IOI3
+	set ER=0 
+	quit:X=""  
+	quit:'$D(TBL("IO",X))
+
+	set %EXT=1 
+
+	do ^SCAIO 
+	quit:ER
+
+	if IO'[".",IOTYP'="PTR" set ER=1
+
+	if X'[".",'ER do {
+		type ResultSet rs=Db.select("IONAME,DEVNAME","CRADENIO",,"IONAME")
+		while rs.next() do { quit:ER=1
+			if rs.getCol(2)=X set ER=1
+			}
+		}
+
+	// Must be continuous-form printer
+	if ER set RM=$$^MSG(1805) quit
+
+	type RecordCHKDEVP chkdevp=Db.getRecord("CHKDEVP","DEVICE=:IO")
+
+	// No checks loaded on ~p1
+	if chkdevp.ctype="" set ER=1 set RM=$$^MSG(1914,IO) quit	
+
+	// Wrong check type for device ~p1
+	if CKTYP'=chkdevp.ctype set ER=1 set RM=$$^MSG(2982,IO) quit
+	
+	set BEGN=chkdevp.begnum 
+	set ENDN=chkdevp.endnum
+	set DEF=chkdevp.def
+
+	// No checks loaded on printer
+	if +BEGN=+ENDN set ER=1 set RM=$$^MSG(1913) quit
+
+	// Less than ten checks are loaded
+	if ENDN-BEGN<9 set ER=1 set RM=$$^MSG(1603) quit
+
+	// Suppress defaulting of check number
+	if DEF quit
+
+	type RecordCHKDEVP chkdevp=Db.getRecord("CHKDEVP","DEVICE=:X")
+	set CKNO=chkdevp.begnum
+
+	set RM($O(RM(""),-1)+1)=CKNO_"|"_(NI+2)
+	quit
+	
+public DEFIO
+	type ResultSet rs=Db.select("DEVICE","CHKDEVP","CTYPE=:X","DEVICE")
+	if rs.next() set IO=rs.getCol(1)
+	
+	quit
+
+PPTYP	//
+
+	type public Number GL
+	
+	quit:X="" 
+	new ZCTYPE
+	quit:'$D(TBL("CHKS",X))
+	
+	type RecordUTBLCHKS utblchks=Db.getRecord("UTBLCHKS","CHKS=:X",1)
+	if 'utblchks.getMode() quit
+
+	// Currently printing
+	lock +XPDO(PJD,X):2 else  set ER=1 set RM=$$^MSG(686) quit
+
+	kill TBL("IO")
+
+	type ResultSet rs=Db.select("DEVICE","CHKDEVP",,"DEVICE")
+	while rs.next() do {
+		set N=rs.getCol(1)
+		type RecordCHKDEVP chkdevp=Db.getRecord("CHKDEVP","DEVICE=:N")
+		if chkdevp.ctype=X set TBL("IO",N)=""
+		}
+
+	set:'$D(IO) IO="" 	
+	
+	if IO="" do DEFIO
+
+	set FMT=utblchks.format
+	set CMT=utblchks.comm
+	set GL=utblchks.cid
+	set AP=utblchks.ap
+	set AEC=utblchks.aec
+	set IRA=utblchks.ira
+	set CONCHK=utblchks.conchk
+	set SRTOPT=utblchks.srtopt
+	set CHKFMT=FMT_%CHKFMT
+
+	type RecordXPDO1 xpdo1=Db.getRecord("XPDO1","TJD=:PJD,CKTYP=:X",1)
+	set CID=xpdo1.cid
+
+	if +CID set RM($O(RM(""),-1)+1)=CID_"|"_(NI+2)
+	set RM($O(RM(""),-1)+1)=IO_"|"_(NI+1)
+	if 'CID quit
+
+	// Last print job for check type ~p1 incomplete, last account processed ~p2
+	set TBL("CHKS",X)=$$^MSG(6674,X,CID)
+	quit
+
+TBLTJD	// Create lookup table for valid TJD for this XPDO account
+	
+	kill TJDTBL
+	new TJD	
+
+	type ResultSet rs=Db.select("DISTINCT TJD","XPDO")
+	while rs.next() do {		
+		set TJD=rs.getCol(1)
+		set TJDTBL(TJD)=""
+		}
+
+	do CHANGE^DBSMACRO("TBL","TJDTBL(")
+	
+	quit
+
+TEST	// Write test pattern
+
+	type public Number GL
+	type Number CID=""
+		
+	// I18N=OFF: Excluded from I18N Standards
+
+	for I=1:1:7 set NM(I)="Test name/address ***VOID***"
+
+	// I18N=ON: Included to I18N Standards
+	
+	set (CKAMT1,IYTD,X)=0 
+	for I=1:1:5 set AMT(I)=X
+	
+	for  do {  quit:(YN=3)!(YN=2)
+		
+		//Are checks lined up?
+		set YN=$$^DBSMBAR(4) 
+	
+		//Quit or F11
+		if YN=3 set ER=1 quit
+
+		//Yes - aligned
+		if YN=2 quit
+
+		// I18N=OFF
+	
+		use IO if AUXPTR.exists(),AUXPTR write $C(27)_"[5i"
+
+		// I18N=ON		
+		
+		set CKNO=CKNO+1 
+		do @CHKFMT	
+		
+		type RecordCHKREG1 chkreg1=Db.getRecord("CHKREG1","CO=:CO,GL=:GL,CKNO=:CKNO",1)
+		if chkreg1.getMode() quit
+		set chkreg1.co=CO
+		set chkreg1.gl=GL
+		set chkreg1.ckno=CKNO
+		set chkreg1.tjd=PJD
+		set chkreg1.efd=%EffectiveDate
+		set chkreg1.tamt=CKAMT1
+		set chkreg1.payee="VOID"
+		set chkreg1.ctype=CKTYP
+		set chkreg1.status=2
+		do chkreg1.bypassSave()			
+
+		// I18N=OFF
+		if AUXPTR.exists(),AUXPTR write $C(27)_"[4i"_$C(17)
+		// I18N=ON
+		}	
+
+	quit
+
+	
+
+vSIG()	quit "60492^53068^Irina Kin^7396"	// Signature - LTD^TIME^USER^SIZE

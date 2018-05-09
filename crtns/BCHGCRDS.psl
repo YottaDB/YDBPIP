@@ -1,0 +1,376 @@
+BCHGCRDS //Batch BCHGCRDS - GCR Daily Scoring
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 08/30/2007 15:07 - joynerd
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHGCRDS Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ set vBCHSTS=$$STATUS^BCHUTL("BCHGCRDS")
+ if vBCHSTS=1 set ER=1,RM=$$^MSG(3410) quit
+ if vBCHSTS=2 set ER=1,RM=$$^MSG(3414) quit
+ if vBCHSTS=0 set %BatchRestart=1
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit do EXIT^BCHUTL("BCHGCRDS") quit
+ do JOBMGR^BCHUTL(%FN,"BCHGCRDS",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ do EXIT^BCHUTL("BCHGCRDS")
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(CID) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHGCRDS","*","",CID.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ if %BatchRestart,$$CHKLOG^BCHUTL(%SystemDate,%FN,"BCHGCRDS",CID.get()) do { quit
+ do LOG^BCHUTL(%SystemDate,%FN,"BCHGCRDS",CID.get(),"Record already processed")
+ }
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,CID)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHGCRDS","*","",CID.get(),"",et)
+ }
+ do UPDLOG^BCHUTL(%SystemDate,%FN,"BCHGCRDS",CID.get(),vCONTEXT)
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,CID) //
+ 
+	// Initialize account
+	type Public Boolean ER
+	type Number BDBAL
+
+	type RecordDEP dep
+	set dep=Db.getRecord("DEP","CID")
+
+	// Verify account still qualifies for daily scoring
+	if dep.stat'=0!(dep.gcrs'=1) quit
+
+	if dep.dscrtbl="" quit
+	type RecordUTBLGCRDS ugcrds=Db.getRecord("UTBLGCRDS",dep.dscrtbl)
+
+	do PROC(.dep,.ugcrds)
+	
+	if ER quit	// Batch files to exception if ER
+
+	do FILE(.dep)
+	
+	quit
+
+
+PROC(RecordDEP dep,RecordUTBLGCRDS ugcrds)	// Process daily scoring for account
+
+	type Public Date PDT
+	type Public Number BDBAL,CID
+	type Public Boolean ER
+	type Public String UAVB
+	type Number obal
+
+	do dep.setAuditFlag(1)
+
+	// Set variable obal to absolute value of balance
+	set obal=$$FN^SCARND(dep.bal,"-",dep.cid)
+
+	/* If balance is above the overdraft limit and
+	   the rescore flag indicates rescoring occured,
+	   turn the rescore flag off for next rescoring occurence
+	   and do return item daily scoring.
+	*/
+	if dep.bal>0!(dep.bal<0&(obal<dep.nsflim)) do { quit
+		if dep.bal>0 set dep.gcrdod=0
+		if dep.rnamtdt=PDT,dep.rnamt do RETURN(.dep,.ugcrds)
+		}
+
+	
+	/* BAL less than overdraft Do overdraft scoring
+	
+	   Option 1 does not rescore again until
+	   the account end of day balance is above the 
+	   overdraft limit.  Rescore the account when the
+	   end of day balance is below the overdraft limit and the
+	   beginning of day balance was above the overdraft limit
+	   and there was a customer initiated transaction withdrawal
+	   durinng the day.
+	*/
+	if dep.dsopt=1,dep.gcrdod=1 do { quit
+		if dep.rnamtdt=PDT,dep.rnamt do RETURN(.dep,.ugcrds)
+		}
+	
+
+	// Find beginning of day balance
+	set ER=""
+	do INIT^UAVB(.dep,CID,PDT,PDT,"0000001")
+	if ER quit
+
+	/* Option 2 - Also rescore the account when it goes further below the 
+	   overdraft limit when there is a greater negative balance 
+	   at the end of the business day than the account had at the 
+	   beginning of the day and there was a customer initiated
+	   transaction.
+	*/
+	set BDBAL=$P(UAVB(1),"|",19)
+	if dep.dsopt=2,dep.gcrdod=1,(dep.bal'<BDBAL) do { quit
+		if dep.rnamtdt=PDT,dep.rnamt do RETURN(.dep,.ugcrds)
+		}
+	
+	do ODRFT(.dep,.ugcrds)
+	
+	quit
+
+
+ODRFT(RecordDEP dep,RecordUTBLGCRDS ugcrds)	// Overdraft Daily Scoring
+
+	type Public Date PDT
+	type Number odscr,ENDBAL,TRB
+	type String DC,ETC
+
+	set odscr=0
+	set TRB=dep.trb
+
+	type ResultSet hist=Db.select("ETC,ITC,ENDBAL","HIST","CID=:CID and TJD=:PDT","TSEQ DESC")
+	while hist.next() quit:odscr  do {
+		set ETC=hist.getCol(1)
+		set DC=hist.getCol(2)
+		set ENDBAL=hist.getCol(3)
+
+		// Only continue if the transaction is a withdrawal
+		set DC=$$DC^UTRB($E(DC),TRB) if DC'=0 quit
+
+		/* Withdrawal transaction during the day, must indicate a
+		   customer initiated transaction where there is an
+		   update to customer contact
+		*/
+		type RecordTRN trn
+		set trn=Db.getRecord("TRN","ETC")
+		if 'trn.pcfd2 quit
+
+		if ENDBAL<dep.nsflim do ODSCR(.dep,.ugcrds)
+		}
+
+	// If account did not do overdraft score check to see return amount
+
+	if 'odscr,dep.rnamtdt=PDT,dep.rnamt do RETURN(.dep,.ugcrds)
+	
+	quit
+
+
+ODSCR(RecordDEP dep,RecordUTBLGCRDS ugcrds)	// Overdraft Daily Scoring
+
+	type Public Date PDT
+	type Public Number obal,odscr
+	type String TBL
+	type Number OPCT
+	set odscr=1
+
+	do dep.setAuditFlag(1)
+	
+
+	/* If the amount of the overdraft in the account is less than the 
+	   Minimum Overdraft Threshold, do not adjust the GCR Code.
+	*/
+	if obal<ugcrds.minod quit
+
+	/* A GCR account is not considered to be overdrawn if the amount of 
+           the overdraft is less than the overdraft threshold.   Update GCR 
+	   Overdraft counter when negative position is equal to or greater
+	   then the minimum overdraft threshold.
+	*/
+	set dep.odcnt=dep.odcnt+1
+
+	/* If monthly next scoring date is equal to daily scoring date,
+	   do not use daily rescoring table.  Monthly scoring will
+	   rescore the account.
+	*/
+	if dep.nsdate=PDT quit
+
+	/* Update GCR daily overdraft flag - Account has GCR overdraft
+	   for today. This flag is used with the daily scoring option.
+	*/
+	set dep.gcrdod=1
+
+	// daily rescore change reason due to overdraft - DTJFMDS and report
+	set dep.cngrs=1		
+
+	/* If the amount of the overdraft in the account is greater than the 
+	   Maximum Overdraft Threshold, review the Maximum Overdraft Threshold
+	   Option to either drop the GCR Code to zero or revoke the score.
+	*/
+	if obal>ugcrds.maxod do { quit
+		if ugcrds.maxodopt=1 set dep.gcrcd=0 
+		if ugcrds.maxodopt=2 set dep.gcrcd="",dep.gcrs=3 
+		}
+	// Compute Total Overdraft Percentage
+	if 'dep.gcrldbal set OPCT=0
+	else  set OPCT=obal/dep.gcrldbal*100
+
+	// Get GCR Overdarft Decrements and Rescore
+	set TBL=dep.dscrtbl
+
+	/* Find the most recent percentage that is lesser than or equal to
+	   computed liability percentage.
+	*/
+	type ResultSet rs1=Db.select("PERCENT","UTBLGCRDD","TBLNM=:TBL AND PERCENT<=:OPCT","PERCENT DESC")	
+	if rs1.next() set OPCT=rs1.getCol("PERCENT") quit:OPCT=""
+	type RecordUTBLGCRDD ugcrdd=Db.getRecord("UTBLGCRDD","TBLNM=:TBL,PERCENT=:OPCT")
+	
+	// Update GCR code base on decrement option
+	if ugcrdd.odscropt=1 set dep.gcrcd=0 
+	else  if ugcrdd.odscropt=2 set dep.gcrcd="",dep.gcrs=3 
+	else  if ugcrdd.odscropt=3 set dep.gcrcd=dep.gcrcd-ugcrdd.gcrodd 
+
+ 	quit
+
+
+RETURN(RecordDEP dep,RecordUTBLGCRDS ugcrds)	// Return Item
+	
+	do dep.setAuditFlag(1)
+
+	type Number RPCT
+	type String TBL
+
+	/* If the daily Total GCR Returned Deposit Amount is less than the 
+	   Minimum Returned Deposit Threshold, do not adjust the GCR Code.
+	*/
+	if dep.rnamt<ugcrds.minrd quit
+
+	/* If the Total GCR Returned Deposit Amount is greater than the 
+	   Maximum Returned Deposit Threshold, review the Maximum Returned 
+	   Deposit Threshold Option to either drop the GCR Code 
+	   to zero or revoke the score.
+	*/
+	if dep.rnamt>ugcrds.maxrd do { quit
+		if ugcrds.maxrdopt=1 set dep.gcrcd=0 
+		if ugcrds.maxrdopt=2 set dep.gcrcd="",dep.gcrs=3 
+		}
+
+	// Compute Total Returned Deposit Percentage
+	if 'dep.gcrldbal set RPCT=0
+	else  set RPCT=dep.rnamt/dep.gcrldbal*100
+
+	// Get GCR Return Decrements and Rescore
+	set TBL=dep.dscrtbl
+
+	/* Find the most recent percentage that is lesser than or equal to
+	   computed percentage.
+	*/
+	type ResultSet rs2=Db.select("PERCENT","UTBLGCRDD","TBLNM=:TBL AND PERCENT<=:RPCT","PERCENT DESC")
+	if rs2.next() set RPCT=rs2.getCol("PERCENT") quit:RPCT=""
+	type RecordUTBLGCRDD ugcrdd=Db.getRecord("UTBLGCRDD","TBLNM=:TBL,PERCENT=:RPCT")
+
+	if ugcrdd.rnscropt=1 set dep.gcrcd=0 
+	else  if ugcrdd.rnscropt=2 set dep.gcrcd="",dep.gcrs=3 
+	else  if ugcrdd.rnscropt=3 set dep.gcrcd=dep.gcrcd-ugcrdd.gcrrtd 
+
+	set dep.cngrs=2		// daily rescore returned amount
+
+ 	quit
+
+
+FILE(RecordDEP dep)	// Save dep changes using filer
+	
+	do dep.save()                          // call DEP filer
+	quit
+
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,CID
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set CID=vRECORD.piece($C(9),1)
+ do vPROC(CID)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,CID
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>32767 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+13>32767 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("CID","DEP","DEP.GCRS>0")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	type Public Date PDT
+	set PDT=%SystemDate-1
+	set %UserID="BATCH"
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

@@ -1,0 +1,1427 @@
+private	RECALC1(RecordDEP dep,		// Deposit account		/REF:RW
+		RecordTTX ttx)		// Current transaction		/REF:R
+
+	/*
+ 	 PROCEDURE ID: RECALC1
+ 	     Original:
+		 Date:
+ 	         Desc: Reconstruction of history for RECALC
+
+ 	---- Comments --------------------------------------------------------
+
+	INPUTS:
+		. BASE		Interest rate calc base
+		. BJD		Beginning Date
+		. CONVDT	Conversion Delinq Date
+		. DELDT		Delinquency Date
+		. NEGBJD	Negative interest calculation start date
+		. NNT()		Interest amounts array
+		. POSBJD	Positive interest calculation start date
+		. INDEX		Interst Index (format: "indname spread rndmtd)
+		. IRCB		Int/Div Rate Calculation Base
+		. X()		Account activity array
+
+
+	RETURNS:
+		. AWTROLD	Oldest Accrued Withholding Tax Rate value with 
+				forwards calculations
+		. IRNOLD	Oldest Interest Rate value with forwards 
+				calculations
+		. PHOLD		Permanent holds array
+		. HOLD		Holds array
+
+	----- Revision History -------------------------------------------------
+
+	05/25/06 - DESHPANDE S K - CR 20748
+		   Replaced public variable %TRNHSEQ with call to 
+		   ttx.getStoredValue("HistSeq").
+
+	05/11/06 - Dhanalakshmi R - CR 21138
+		   Modified to remove %SPLTDY and the conditional call to   
+		   GETHOLD^UHLDSCA as the Split Day functionality is not 
+		   available.
+
+	05/03/06 - SmithCD - CR 21007
+		   . Corrected parameters in call to UPD^CRTHLD in SETHLD 
+		     section
+		   . Cleaned up code
+	
+	03/23/06 - ALAGARSS - CR 20052
+		   Modified the section NOTRVSD to prevent 'Reverse Closeout 
+		   Transaction' errors.
+		   
+	03/02/06 - SANTHUMS - CR 19710
+		   Added If condition on ttx.copy() from last change to avoid 
+		   Undefined Local variable %TRNHSEQ error when there is no 
+		   applicable effective Dated transaction (as is the case when 
+		   with some external line tags In RECALC).
+
+ 	02/27/05 - DHANALAKSHMI R - CR 19437
+	           Added a setting to HIST object with ttx.copy() and followed 
+	           by a call to DTL section, before the call to HIST section. 
+	           This change is to make sure that current transaction is 
+	           included in the X (history) array.
+
+	01/17/06 - Hillanbrand - CR19028
+	           Modified HLD subsection to correct ORDER by from DES 
+	           to "EXPDT DESC" which was preventing a successful
+	           compile of the changes released in CR16724.
+	
+	09/19/05 - S.Krishnan - CR16724
+		   . Removed all the 'ORDER BY' clause used in the
+		     Db.Select statements.
+		   . Modified the FM & READHIST sections to set the value of 
+		     INDEX, SPREAD, ROUNDING METHOD from DEP when DEPCHG() 
+		     array doesn't exist.
+		     		     	     
+	02/01/05 - SmithCD - CR13661
+		   . Removed references to the IPD global scope variable - 
+		     this variable has been replaced by a local scope 
+		     variable in RECALC, and renamed to ORIGINTP (original 
+		     interest posted) to avoid confusion with CUVAR.IPD 
+		     (Include Interest Posting Date)
+		   . Corrected HIST table selection in READHIST section 
+		     (previously no records would ever be selected).
+		   . Changed '> to < when comparing %EffectiveDate and BJD to 
+		     quit from DTL section (fixes a problem with ARQ 50864 not 
+		     being retrofitted correctly, causing history records on 
+		     the beginning date to be ignored)
+		     Corrected NOTRVSD section to quit if hist.etc is null 
+		     instead of when it is not null (prevents null subscript 
+		     error)
+		   . Changed FLG variable to EOP for greater clarity
+		   . Made RECALC1 public
+
+	*/
+
+	type public Date BJD,CONVDT,DELDT,NEGBJD,POSBJD	
+	type public Number AWTROLD,BASE,IRCB,IRNOLD
+	type public String INDEX,NNT(),PHOLD(),HOLD(),X()
+
+	type Number BASEINI,HLDSET=0,IRN
+	type String EFDTMP(),IX(,,)
+	type Date ODTERMBD
+
+	/*
+	If the beg date is less than the hist cutoff date - error
+	History cannot support transaction
+	*/
+	if BJD<dep.hisctf do Runtime.setErrMSG("HIST",1177) quit
+
+	if 'POSBJD.exists() set POSBJD=BJD
+	if 'NEGBJD.exists() set NEGBJD=BJD
+
+	/*
+	If beginning date is prior to delinquency date, clear delinquency
+	and let RECALC reset it. Otherwise, set DELDT to it's value as of
+	the conversion date.
+	*/
+	if BJD<DELDT set DELDT=""
+
+	// Conversion Delinq Date
+	else  if BJD=dep.convdt set DELDT=dep.convdd
+
+	// Overdraft process
+	set BASEINI=BASE
+
+	// Load index data to IX() array
+	if 'INDEX.isNull() do {
+		type RecordINDEX index=Db.getRecord("INDEX","INDEX=:INDEX",1)
+		if index.getMode() set IX(INDEX)=$$IND2STR^UINDX(.index)
+		}
+
+	If ttx.exists() do {
+	
+		type Number LTRNHSEQ = ttx.getStoredValue("HistSeq")
+		
+		if LTRNHSEQ.get() do {
+			
+			// Make sure that current transaction is included in the X 
+			// (history) array
+			type RecordHIST hist=ttx.copy("TIME=TIM,BRCD=BRCDE,UID=UIDT,XHS16=LNERC,BEN=CC,TJD=:%SystemDate,TSEQ=:LTRNHSEQ")
+	
+			do DTL(.dep,.hist,.ttx)
+		}
+	}	
+
+	do HIST(.dep,.ttx)
+
+	/*
+	If Uncollected Funds Interest Index has a value, set up HOLD array 
+	to allow calculation of available balance
+	*/
+	if 'dep.ufindex.isNull() do {
+		type Date XJD=""
+
+		// Load Permanent Hold to PHLD() array
+		do GETPHOLD^UHLDSCA(3,dep.cid,BJD,%SystemDate,.PHOLD)
+
+		// Load ATM Permanent Hold to PHLD() array
+		do GETPHOLD^UHLDSCA(9,dep.cid,BJD,%SystemDate,.PHOLD)
+
+		// Load Float/Value Holds to HOLD() array
+		if IRCB=3!(IRCB=6) do GETHOLD^UHLDSCA(7,dep.cid,BJD,%SystemDate,.HOLD)
+
+		// Load Check Holds to HOLD() array
+		do GETHOLD^UHLDSCA(8,dep.cid,BJD,%SystemDate,.HOLD)
+
+		// Set up X() array entry for every check hold change date
+		for  set XJD=HOLD(8,dep.cid,XJD).order() quit:XJD.isNull()  set:'X(XJD).exists() X(XJD)=""
+
+		}
+
+	// If Collected Balance or Low Balance Based on Collected Balance
+	if IRCB=3!(IRCB=6) do HLD(.dep,.ttx)
+
+	quit
+
+
+HIST(RecordDEP dep,		// Deposit account			/REF:R
+     RecordTTX ttx)		// Current transaction			/REF:R
+
+	/*
+	Collate through history, setting up the X array with ledger 
+	balance changes, accrual balance changes, and interest posts.
+
+	Inputs:
+		. BASE		Interest rate calc base
+		. BASEINI	The beginning balance on BJD date.
+		. BJD		Calculation beginning date
+		. EFDTMP()	Effective date transactions array
+		. ODEXP		Overdraft term expiration date
+		. ODLIM		Overdraft limit
+		. ODSTART	Authorized overdraft limit start date
+		. ODTERM	Overdraft term
+		. ODTERMBD	Overdraft term beginning date
+		. X()		Account activity array
+	*/
+
+	type public Date BJD,ODEXP,ODSTART,ODTERMBD
+	type public String EFDTMP(),ODTERM,X()
+	type public Number BASE,BASEINI,ODLIM
+
+	type Number BASEEND,EOP
+	type Date DTEND,DTINI,EXPDT
+
+	// Overdraft Process
+	set EOP=-1
+	set (ODEXP,ODSTART)=""
+	set (DTINI,DTEND)=BJD
+
+	do READHIST(.dep,.ttx)
+
+	// Define initial values
+	if EOP=(-1) do DEFEXP
+
+	/*
+	Verify the first period if needed. When EOP=1 we don't need
+	to see this period because we already have ODEXP define or
+	the BJD beginning balance is positive.
+	*/
+
+	// Section PERIOD can set EOP
+	if EOP'=1,DTINI'=DTEND do PERIOD
+
+	if EOP'=1,'EFDTMP(DTEND).order(-1).isNull() do {
+		type Date DATE
+	
+		set DATE=DTEND
+		
+		// Verify existing EFD transactions in period
+		for  set DATE=EFDTMP(DATE).order(-1) quit:DATE.isNull()  do { quit:EOP=1
+			set BASEINI=BASEINI-EFDTMP(DATE)
+			set DTINI=DATE
+			do PERIOD
+			}
+		}
+
+	// Set ODTERM with value before BJD.
+	if ODTERMBD.get() do {
+		// Set ODTERM and ODEXP using pre-beginning date ODTERM value
+		set ODTERM=ODTERMBD
+		set:ODSTART ODEXP=$$EXT^UMDT(ODTERM,ODSTART)-1
+		}
+
+	if BASE<0,((ODEXP.isNull())!(ODSTART.isNull())),'ODLIM.isNull() do {
+		/*
+		Base as of BJD is negative, and we are going back to the
+		conversion date, use conversion overdraft dates.
+		*/
+		
+		// Conversion O/D Start Date
+		set ODSTART=dep.convodst
+		// Conversion O/D Expiration Date
+		set ODEXP=dep.convodex
+		}
+
+	set EXPDT=ODEXP+1
+
+	if 'ODTERM.isNull(),EXPDT'<BJD,EXPDT'>%SystemDate set X(EXPDT).piece("|",5)=1
+
+	quit
+
+
+READHIST(RecordDEP dep,			// Deposit account		/REF:R
+	 RecordTTX ttx)			// Current transaction		/REF:R
+
+	/*
+	Read history records
+
+	Inputs:
+		. BJD		Calculation beginning date
+		. DEPCHG()	Account changes array
+		. INDX()	Index by effective date array
+		. X()		Account activity array
+
+	*/
+	
+	type public String DEPCHG(),INDX(),X()
+	type public Date BJD
+	type public Number EOP,ER
+
+	type Number CID
+	type String OLDINDX
+
+	set CID=dep.cid
+
+	// Loop through all history records until end-of-process indicator 
+	// is set
+	type DbSet dbs=Db.selectDbSet("HIST","CID=:CID","TSEQ DESC")
+	while dbs.next() do { quit:ER!(EOP=1)
+		type RecordHIST hist=dbs.getRecord("HIST")
+		// If history trn is in the calculation period build X() 
+		if hist.tjd'<BJD do DTL(.dep,.hist,.ttx) quit
+
+		// Skip history records reserved for placing primary transaction
+		if hist.tjd.isNull() quit
+
+		// Accumulate transactions for one day
+		do FNDEXP(.dep,.hist)
+		}
+		
+	/*
+	If the index has been filed maintained on the account OLDINDX will
+	be set to the first value of INDEX (set in FM).  This value will
+	need to be placed in piece 24 of X(BJD) to assure that the correct
+	index and rate are used.
+	*/
+	if 'OLDINDX.get().isNull(),X(BJD).get().piece("|",24).isNull() do {
+		type String INDDATA,INDEX,INTSPR,RNDMTD
+		
+		if DEPCHG("INDEX").exists() set INDEX=DEPCHG("INDEX")
+                else  set INDEX=dep.index
+
+                if DEPCHG("INTSPR").exists() set INTSPR=DEPCHG("INTSPR")
+                else  set INTSPR=dep.intspr
+
+                if DEPCHG("RNDMTD").exists() set RNDMTD=DEPCHG("RNDMTD")
+                else  set RNDMTD=dep.rndmtd
+
+		// Construct index data
+		set INDDATA=$$INDFILE^LNU(INDEX,INTSPR,RNDMTD)
+		if 'INDDATA.isNull() set OLDINDX=INDDATA
+		set X(BJD).piece("|",24)=OLDINDX
+		set INDX(BJD)=OLDINDX
+		}
+
+	quit
+
+
+DTL(RecordDEP dep,		// Deposit account			/REF:R
+    RecordHIST hist,		// History transaction			/REF:RW
+    RecordTTX ttx)		// Current transaction			/REF:R
+
+	/*
+	Build X and BASE based upon history
+
+	Inputs:
+		. BASE 		Interest rate calc base
+		. BASEINI	The beginning balance on BJD date
+		. BJD		Calculation beginning date
+		. EFDTMP()	Effective date transactions array
+		. IRCB		Interest Rate Calculation Base
+		. IPF		Interest posting frequency
+		. X()		Account activity array
+	*/
+
+	type public Number BASE,BASEINI,ER,IRCB
+	type public Date BJD
+	type public String EFDTMP(),IPF,X()
+	type public Boolean EXIT
+
+	type Number BWA,IADJ,INTNC,PRIN,RESINT 
+
+	set %EffectiveDate=hist.efd
+	quit:%EffectiveDate>%SystemDate
+	if %EffectiveDate.isNull() set %EffectiveDate=hist.tjd
+
+	// Check if current history trn is a closeout and was not reversed
+	do NOTRVSD(.ttx,.hist) quit:ER!(EXIT=1)
+	
+	if (hist.tamt.isNull())!(hist.itc.isNull()) do FM(.dep,hist.tcmt,hist.tso) quit:ER  do FMSET(.dep,.hist) quit
+
+	set PRIN=hist.prin
+	set RESINT=hist.coa
+	if dep.trb-hist.itc1=0 set PRIN=-PRIN,RESINT=-RESINT
+
+	if X(%EffectiveDate).get().piece("|",3)=1!(X(%EffectiveDate).get().piece("|",21)) do OLDDIS(.dep,PRIN,hist.tcmt)
+ 
+	/*
+	Interest transfer from/to IPD accounts occurs after accrual and
+	posting process. Only affect the accrual balance one day after.
+	*/
+	#IF CUVAR.IPD
+		type String TMP()
+		do OUT^UTSO(.TMP,hist.tso)
+		if TMP("INTTRF").exists()!(TMP("INTTRFADJ").exists()) set %EffectiveDate=%EffectiveDate+1
+	#ENDIF
+
+	if %EffectiveDate<BJD set EFDTMP(%EffectiveDate)=EFDTMP(%EffectiveDate).get()+PRIN
+	else  do {
+		if %EffectiveDate=BJD,'hist.tamt do ODEXPFM(.dep,.hist)
+		set BASEINI=BASEINI-PRIN
+		}
+
+	// Ignore transaction effective prior to beginning date
+	if %EffectiveDate<BJD quit
+
+	// Residual interest
+	if RESINT do RESDTL(.hist,RESINT)
+
+	/*
+	Don't include any secondary transactions.  These are accrual
+	adjustments that were generated to "correct" the accrual based
+	on the primary transaction.  Any primary accrual adjustment
+	must be considered because it's purpose is to adjust the accrual
+	"off-schedule" per the client's intent.  There is an inherent
+	problem with escrow accounts, as ALL escrow transactions are
+	secondary.  This has yet to be addressed.
+	*/
+
+	/*
+	Add/subtract accrual (piece 3) and neg acr (piece 6) adjustments.
+	Consider all interest transactions since last interest posting.
+	This might have been in beginning-of-day with interest transactions
+	following on the same day.
+	*/
+
+	/*
+	Always include interest transactions if EFD>BJD.
+
+	If EFD=BJD, then only include interest transactions if:
+		- BJD is last interest posting date and INTPOS=1
+		- BJD is set from ODT (Consider interest transactions for that day)
+
+	Do not include interest transactions if:
+		- BJD is set from HISCTF (There is no history for HISCTF)
+		- BJD is set from DLR (accrual adjustments from ^ROLL are
+			primary transactions, but should be ignored)
+	*/
+
+	/*
+	Determine if there is a positive, negative, negative unauthorized 
+	or uncollected interest adjustment
+	*/
+	if hist.int!(hist.misc)!(hist.rec)!(hist.uncint) set IADJ=1
+	else  set IADJ=0
+	
+	if IADJ,'hist.prn do {
+		type Number PCE
+
+		if hist.itc7!(hist.tso.isLike("%RECALC#0%")) quit
+	
+		for PCE=3,6,11,18 do {
+			type Number ADJAMT,EXACR,XPIECE
+			
+			set ADJAMT=hist.tamt.piece("#",PCE)
+			if ADJAMT.isNull() quit
+
+			// Always use EXACTACR amount, if defined
+			set EXACR=$$FIELD^UTSO(hist.tso,"EXACTACR")
+			if EXACR set ADJAMT=EXACR
+
+			// Positive Accrued
+			set:PCE=3 XPIECE=6
+			// Negative Accrued
+			set:PCE=6 XPIECE=18
+			// Negative Accrued Unauthorized
+			set:PCE=11 XPIECE=29
+			// Uncollected Accrued
+			set:PCE=18 XPIECE=30
+			if %EffectiveDate>BJD do ADDACR(.dep,XPIECE,ADJAMT,hist.tso,hist.itc) quit
+
+			// Skip accrual adjustments on Date Last Renewed.
+			if BJD=dep.dlr quit
+			// These are interest posting transactions.
+			if ('IPF.isNull()&(CUVAR.INTPOS=1))!(BJD=dep.odt)!(BJD=dep.convdt) do ADDACR(.dep,XPIECE,ADJAMT,hist.tso,hist.itc) quit
+			}
+		}
+
+	/*
+	Any other activity (such as file-maintenance, balance changes, etc.)
+	must be ignored if it occured on the interest posting day or [DEP]DLR.
+	This "other" activity affects end-of-day criteria, as opposed to
+	interest transactions.
+	*/
+
+	// Do not include interest posting transactions and the interest is
+	// post at begining of day
+	#IF CUVAR.INTPOS=2 if %EffectiveDate=BJD,hist.itc4 quit
+
+	if hist.tamt.isLike("%#%") do {
+		// Backup withholding
+		set BWA=hist.whld
+		// Int available not credited
+		set INTNC=+hist.tamt.piece("#",8)
+		// Principal
+		set hist.tamt=hist.prn
+		}
+	else  set (BWA,INTNC)=0
+
+	// Determine direction
+	if dep.trb-hist.itc1=0 set hist.tamt=-hist.tamt set INTNC=-INTNC
+
+	if X(%EffectiveDate).get().piece("|",3)=1!(X(%EffectiveDate).get().piece("|",21)) do INT(.hist,BWA,INTNC)
+	set X(%EffectiveDate).piece("|",1)=X(%EffectiveDate).get()+hist.tamt
+	set BASE=BASE-hist.tamt
+
+	quit
+
+
+NOTRVSD(RecordTTX ttx,		// Primary transaction			/REF:R
+	RecordHIST hist)	// History transaction			/REF:R
+
+	/*
+	Check if this history transaction is a closeout transaction which 
+	was not reversed. Also if current teller transaction is not a reversal 
+	for this closeout, then generate an error 
+
+	Inputs:
+		. BJD		Calculation beginning date
+	*/
+
+	type public Cache %CACHE()
+
+	type public Date BJD,DTINI,DTEND,NEGBJD,POSBJD,SEFD
+	type public Number ER
+	type public Boolean EXIT
+	
+	set EXIT=0
+	if hist.etc.isNull() quit
+
+	type RecordTRN trn=%CACHE("TRN").getRecord("TRN","ETC=:hist.etc")
+	
+	if trn.pcfd5,'hist.revtrn do { quit:ER
+		type Number REV
+
+		// Reversal of closeout indicator
+		set REV=0 
+
+		// Quit if history transaction is a reversal
+		if hist.itc6!hist.itc12 quit
+
+		/*
+		Check if currently processed/entered transaction is a 
+		reversal of the history closeout trn
+		*/
+		if ttx.itc6!ttx.itc12 do { quit:ER
+			type Number HSEQ
+			
+			// Get sequence of reversed transaction
+			set HSEQ=$$FIELD^UTSO(ttx.tso,"REV") quit:ER
+			// Reverse closeout transaction - history sequence ~p1
+			if HSEQ'=hist.tseq do Runtime.setErrMSG("TTX",5094,hist.tseq) quit
+			else  set REV=1
+			}
+
+		if REV quit 
+
+		/*
+		Also this closout  must fall after the beginning date 
+		for calculations
+		*/
+		
+		// Reverse closeout transaction - history sequence ~p1
+		if SEFD<%EffectiveDate do Runtime.setErrMSG("TTX",5094,hist.tseq) quit
+		
+		// Otherwise only accrue from the closeout
+                set BJD=%EffectiveDate
+                if POSBJD.get() set POSBJD=BJD
+                if NEGBJD.get() set NEGBJD=BJD
+                if DTEND.get() set DTEND=BJD
+                if DTINI.get() set DTINI=BJD
+
+                set EXIT=1
+		}
+
+	quit
+
+
+ADDACR(RecordDEP dep,		// Deposit account			/REF:R
+       Number PIECE,		// Piece in X()
+       Number ADJAMT,		// Adjustment amount
+       String TSO,		// Transaction source
+       String ITC)		// Internal transaction code
+
+	/*
+	Recording amounts for manual adjustments to accruals
+
+	Inputs:
+		. POSBJD	Positive interest calculation start date
+		. NEGBJD	Negative interest calculation start date
+		. X()		Account activity array
+	*/
+
+	type public Date NEGBJD,POSBJD
+	type public String X()
+
+	if TSO.isLike("%INT#%") quit
+	
+	// Don't update if prior to beginning date for pos/neg
+	if ((PIECE=6)!(PIECE=33)),%EffectiveDate<POSBJD quit
+	if ((PIECE=18)!(PIECE=29)!(PIECE=30)),%EffectiveDate<NEGBJD quit
+
+	// Update existing or add a new record to X()
+	set X(%EffectiveDate)=X(%EffectiveDate).get()
+	if ITC.extract(1)-dep.trb=0 set ADJAMT=-ADJAMT
+	set X(%EffectiveDate).piece("|",PIECE)=X(%EffectiveDate).piece("|",PIECE)+ADJAMT
+
+	quit
+
+
+INT(RecordHIST hist,		// History transaction			/REF:R
+    Number BWA,			// Backup withholding
+    Number INTNC)		// In available not credited
+
+	/*
+	Increment IPD (interest paid) and piece 7 of the X array by the
+	amount of system generated interest plus withholding
+		X()|19-negative interest paid, 
+		X()|20-neg withholding,
+		X()|31 - uncollected interest paid
+
+	Inputs:
+		. POSBJD	Positive interest calculation start date
+		. X()		Account activity array	
+	*/
+	
+	type public Date POSBJD
+	type public String X()
+
+	type public Cache %CACHE()
+
+	// Not an interest posting
+	if 'hist.itc4 quit
+
+	if %EffectiveDate<POSBJD quit
+
+	type RecordTRN trn=%CACHE("TRN").getRecord("TRN","ETC=:hist.etc")
+
+	if 'trn.pcfd23 do {
+		// Update original positive deferred interest posted instead
+		if hist.tso.isLike("%DEFINT#%") set X(%EffectiveDate).piece("|",27)=X(%EffectiveDate).piece("|",27)+hist.tamt+BWA quit
+
+		/*
+		Tran code does not use negative interest fields
+		Update amount of interest withheld
+		*/
+		set X(%EffectiveDate).piece("|",9)=X(%EffectiveDate).piece("|",9)+BWA
+
+		// Update original positive interest posted
+		if 'INTNC set X(%EffectiveDate).piece("|",7)=X(%EffectiveDate).piece("|",7)+hist.tamt+BWA
+		else  set X(%EffectiveDate).piece("|",7)=X(%EffectiveDate).piece("|",7)+INTNC+BWA
+		}
+
+	else  do {
+		type Number UNCPOST
+
+		/*
+		Tran code uses negative interest fields
+		Update backup withholding given back on interest collected
+		*/
+		set X(%EffectiveDate).piece("|",20)=X(%EffectiveDate).piece("|",20)-BWA
+
+		// Update original negative deferred interest posted instead
+		if hist.tso.isLike("%DEFINT#%") set X(%EffectiveDate).piece("|",28)=X(%EffectiveDate).piece("|",28)-hist.tamt+BWA quit
+
+		// Update uncollected interest posted
+		set UNCPOST=+hist.tcmt.piece("UNCACR:",2)
+		if UNCPOST do {
+			set hist.tamt=-UNCPOST
+			quit:hist.tcmt.isLike("%NEGACRUN:%")
+			quit:hist.tcmt.isLike("%NEGACR:%")
+			set X(%EffectiveDate).piece("|",31)=X(%EffectiveDate).piece("|",31)-(hist.tamt+BWA)
+			}
+		// Update original negative interest posted
+		else  set X(%EffectiveDate).piece("|",19)=X(%EffectiveDate).piece("|",19)-(hist.tamt+BWA)
+		}
+	quit
+
+
+FM(RecordDEP dep,		// Deposit account			/REF:R
+   String TCMT,			// Transaction comment
+   String TSO)			// Teller source
+
+	/*
+	Validate file maintenance and find rate changes
+
+	Input:
+		. AWTR		Accrued Withholding Tax Rate
+		. AWTROLD	Oldest Accrued Withholding Tax Rate value with 
+				forwards calculations
+		. BJD		Calculation beginning date
+		. DEPCHG()	Account changes array
+		. INDX()	Index by effective date array
+		. IRN		Interest Rate
+		. IRNOLD	Oldest Interest Rate value with forwards 
+				calculations
+		. OLDINDX	Oldest Interest Index
+		. X()		Account activity array
+	*/	
+
+	type public Number AWTR,AWTROLD,IRN,IRNOLD
+	type public String DEPCHG(),INDX(),OLDINDX,X()
+	type public Date BJD
+
+	type String DI,FID,OLDVAL,NEWVAL
+
+	// Determine the table name in which maintenance was done   
+	set FID=TCMT.piece("[",2).piece("]",1) 
+
+	if '((FID="DEP")!(FID="LN")) quit
+	// Determine changed column name
+	set DI=TCMT.piece("]",2).piece(":",1) 
+
+	// Future-dated maintenance
+	if %EffectiveDate>%SystemDate quit
+
+	// Effective-dated maintenance
+	if 'TCMT.piece(":",4).isNull() quit
+
+	// Not in the calculation period
+	if %EffectiveDate<BJD quit
+
+	// Cannot effective-date.  ~p1 has been file-maintained.
+	if $$FMRESTR(DI) do Runtime.setErrMSG("DEP",451,DI) quit
+	
+	set OLDVAL=TCMT.piece(":",2)
+	set NEWVAL=TCMT.piece(":",3)
+	
+	/*
+	If old value is null set index to 1, if new value is null set index
+	to 2;  RECALC will use this to know when an INDEX is added or removed
+	Array INDX will hold the index value which is used starting on EFD.
+	This array will be used by RECALC to set up the interest change date
+	x array entries.
+	*/
+
+	if DI="INDEX" do {
+		type String INDSET,INDEX,INTSPR,RNDMTD
+
+		if DEPCHG("INDEX").exists() set INDEX=DEPCHG("INDEX")
+                else  set INDEX=dep.index
+
+                if DEPCHG("INTSPR").exists() set INTSPR=DEPCHG("INTSPR")
+                else  set INTSPR=dep.intspr
+
+                if DEPCHG("RNDMTD").exists() set RNDMTD=DEPCHG("RNDMTD")
+                else  set RNDMTD=dep.rndmtd
+
+		set INDSET=$$INDFILE^LNU(INDEX,INTSPR,RNDMTD)
+				
+		// Old value
+		set OLDINDX=$select(OLDVAL.isNull():1,1:OLDVAL)
+
+		// Begin date
+		if X(%EffectiveDate).get().piece("|",24).isNull() set X(%EffectiveDate).piece("|",24)=INDSET set INDX(%EffectiveDate)=INDSET
+		}
+
+	/*
+	Create or update an entry into the X array on the date when Accrued 
+	Withholding Tax was file maintained.
+	*/
+	if DI="AWT" do ADDACR(.dep,33,(OLDVAL-NEWVAL),TSO)
+
+	// Nominal Int/Div Rate
+	if DI="IRN" do {
+		set IRN=OLDVAL
+		/*
+		IRNOLD should be equal to the rate used on BJD, not prior
+		to BJD
+		*/
+		if %EffectiveDate'<BJD do { if 'X(%EffectiveDate).get().piece("|",2).isNull() quit
+			// IRNOLD - global var is used by RECALC
+			set IRNOLD=IRN
+			set X(%EffectiveDate).piece("|",10)=IRNOLD
+			}
+
+		// Get the new interest rate from file maintenance
+		set X(%EffectiveDate).piece("|",2)=+NEWVAL
+		}
+
+	// Accrued Withholding Tax Rate
+	if DI="AWTR" do {
+		set AWTR=+OLDVAL
+		/*
+		AWTROLD should be equal to the rate used on BJD, not prior
+		to BJD
+		*/
+		if %EffectiveDate'<BJD do { if 'X(%EffectiveDate).get().piece("|",12).isNull() quit
+			set AWTROLD=AWTR
+			set X(%EffectiveDate).piece("|",11)=AWTROLD
+			}
+
+		// Get the new withholding tax rate from file maintenance
+		set X(%EffectiveDate).piece("|",12)=+NEWVAL
+		}
+	quit
+
+
+FMRESTR(String DI)		// Column name
+
+	/*
+	Check for file maintenance on restricted data items that would 
+	adversely affect results
+
+	Inputs:
+		. SEFD	Saved effective date (comes from RECALC)
+
+	Returns:
+		. $$	Restriction flag	TYP=L
+			1 - restricted
+			0 - not restricted
+	*/
+	
+	type public Date SEFD
+
+	// Date Last Renewed
+	if %EffectiveDate=SEFD,DI="DLR" quit 0
+
+	// Interest Compounding Frequency
+	if DI="ICF" quit 1
+	// Interest Change Frequency
+	if DI="INTFRE" quit 1
+	// Negative Accrued Processing Option
+	if DI="NEGACRPO" quit 1
+	// Negative Interest Posting Option
+	if DI="NEGIPO" quit 1
+	// Negative Account Balance Option
+	if DI="NEGBALOP" quit 1
+	// Interest Rate Calculation Base
+	if DI="IRCB" quit 1
+	// Date Account Opened
+	if DI="ODT" quit 1
+	// Teaser Rate
+	if DI="TRATE" quit 1
+
+	quit 0
+
+
+FMSET(RecordDEP dep,		// Deposit account			/REF:R
+      RecordHIST hist)		// History transaction			/REF:R
+
+	/*
+	Load file maintenance entries into FM array by date.  These values
+	will be loaded as needed into the account array when UINDX is called.
+
+	Inputs:
+		. DEPCHG()	Account changes array
+		. FM()		File maintenance array by date	
+		. X()		Account activity array
+		 
+	*/
+	type public String DEPCHG(),FM(,),X()
+
+	type String DI,OV,NV
+
+	// Skip future EFD maintenance
+	if hist.tjd<hist.efd quit
+
+	// Get column name. Applies to deposit entries only
+	if 'hist.tcmt.isLike("%[DEP]%") quit
+	
+	set DI=hist.tcmt.piece(":",1).piece("]",2)
+
+	// Ignore if lacking sufficient data
+	if DI.isNull() quit
+
+	// Ignore changes to Currency Code
+	if DI="CRCD" quit
+
+	set OV=hist.tcmt.piece(":",2)
+	set NV=hist.tcmt.piece(":",3)
+
+	// Set data items with file maintenance changes
+	do SETDI(.dep,DI,OV,hist.tjd)
+
+	// Add/update record in file maintenance array 
+	if FM(%EffectiveDate,DI).get().isNull() set FM(%EffectiveDate,DI)=OV_"|"_NV
+	else  set FM(%EffectiveDate,DI).piece("|",1)=OV
+
+	// Save changed column and value in account change array
+	set DEPCHG(DI)=OV
+
+	// Dates of all file maintenance are potentially a significant date
+	set X(%EffectiveDate)=X(%EffectiveDate).get()
+
+	quit
+
+
+SETDI(RecordDEP dep,		// Deposit account			/REF:W
+      String DI,		// Column changed
+      String OV,		// Old value
+      Date HTJD)		// System processing date		/NOREQ
+
+	/*
+	Set data items with file maintenance changes
+
+	Inputs:
+		. BJD		Calculation beginning date
+		. ODTERMBD	Overdraft term beginning date	
+	*/
+
+	type public Date BJD,ODTERMBD
+
+	if DI="ODTERM" do {
+		// Set ODTERM with correct value before BJD.
+		if HTJD.get()'>BJD,'ODTERMBD.exists() set ODTERMBD=dep.odterm
+
+		// Set ODTERM with the old value.
+		set dep.odterm=OV
+		}
+
+	if DI="ODLIM" set dep.odlim=OV
+	if DI="IOPT" set dep.iopt=OV
+	if DI="AWTP" set dep.awtp=OV
+
+	quit
+
+
+FNDEXP(RecordDEP dep,			// Deposit account		/REF:R
+       RecordHIST hist)			// History transaction		/REF:R
+
+	/*
+	Accumulate transactions for one day
+
+	Set ODSTART, ODEXP with correct values before BJD.
+	(ODTERM is defined in RECALC)
+
+	Input:
+		. BASEINI	The beginning balance on BJD date
+		. DTEND		Period end date
+		. DTINI		Period start date
+		. EFDTMP()	Effective date transactions array
+		. EOP		End of process indicator
+	*/
+	
+	type public Number BASEINI,EOP
+	type public Date DTEND,DTINI
+	type public String EFDTMP()
+
+	type Date DATE
+	type String PRIN
+
+	// Define initial values
+	if EOP=(-1) do DEFEXP quit:EOP=1
+
+	set PRIN=hist.prin
+
+	// File maintenace
+	if 'PRIN do ODEXPFM(.dep,.hist) quit
+
+	// Determine direction
+	if dep.trb-hist.itc1=0 set PRIN=-PRIN
+
+	// Keep efective date transactions in EFDTMP array
+	if hist.efd,hist.tjd>hist.efd do {
+		set EFDTMP(hist.efd)=EFDTMP(hist.efd).get()+PRIN
+		set PRIN=0
+		}
+
+	/*
+	Verify existing EFD transactions in period from hist.tjd+1 to DTEND-1.
+	In this period the account doesn't have transactions.
+	*/
+	set DATE=DTEND
+	for  set DATE=EFDTMP(DATE).order(-1) quit:DATE.isNull()!(DATE'>hist.tjd)  do { quit:EOP=1
+		set BASEINI=BASEINI-EFDTMP(DATE)
+		set DTINI=DATE
+		do PERIOD
+		}
+
+	if (hist.tjd'=DTINI),EFDTMP(hist.tjd).get() do {
+		// Include future transactions with hist.tjd effective date
+		set PRIN=PRIN+EFDTMP(hist.tjd)
+		// Avoid possible double-inclusion
+		kill EFDTMP(hist.tjd)
+		}
+
+	/* Only verify one period DTINI to DTEND when all the transactions for
+	DTINI are excluded from BASEINI (hist.tjd'=DTINI). DTINI'=DTEND test the
+	first transaction before BJD when both variables are equal to BJD,
+	also test the situation when the account have effective date
+	transactions after this transaction date. */
+	if (hist.tjd'=DTINI),(DTINI'=DTEND) do PERIOD
+
+	// Beginning balance in DTINI date
+	set BASEINI=BASEINI-PRIN
+	// Transaction date
+	set DTINI=hist.tjd
+
+	quit
+
+
+DEFEXP
+ 	/*
+ 	Define initial values
+
+	Inputs:
+		. BASEEND	The ending balance on ending date
+		. BASEINI	The beginning balance on BJD date
+		. BASEOLD 	is used in RECALC routine
+		. EOP		End of process indicator
+
+	*/
+	type public Number BASEEND,BASEINI,BASEOLD,EOP
+
+	set (BASEEND,BASEOLD)=BASEINI
+
+	// Positive Balance resets ODEXP and ODSTART. No need to continue.
+	if BASEINI'<0 set EOP=1 quit
+
+	set EOP=0
+
+	quit
+
+
+PERIOD	
+	/*
+	Verify period from DTINI to DTEND
+
+	Inputs:
+		. BASEINI	The beginning balance on BJD date
+		. BASEEND	The ending balance on ending date
+		. DELDT		Delinquency date
+		. DTINI		Period start date
+		. DTEND		Period end date
+		. EOP		End of process indicator
+		. ODTERM	Overdraft term
+		. ODEXP		Overdraft term expiration date
+		. ODSTART	Authorized overdraft limit start date
+	*/
+
+	type public Number BASEEND,BASEINI,EOP
+	type public Date DELDT,DTINI,DTEND,ODEXP,ODSTART
+	type public String ODTERM
+
+	// Went negative
+	if BASEINI'<0,BASEEND<0 do {
+		set ODSTART=DTINI
+		
+		if ODTERM set ODEXP=$$EXT^UMDT(ODTERM,DTINI)-1
+		else  set ODEXP="",DELDT=DTINI
+		
+		// End of process
+		set EOP=1
+		}
+
+	// Ending balance for next period
+	set BASEEND=BASEINI
+	
+	// Ending date for next period
+	set DTEND=DTINI
+
+	quit
+
+
+ODEXPFM(RecordDEP dep,		// Deposit account			/REF:R
+	RecordHIST hist)	// History transaction			/REF:R
+
+	// File maintenance for Overdraft process
+
+	type String DI,FID,OV
+
+	if hist.efd>%SystemDate quit
+
+	if 'hist.tcmt.piece(":",4).isNull() quit
+
+	set FID=hist.tcmt.piece("[",2) 
+	set FID=FID.piece("]",1)
+
+	if FID.isLike("%,%") set FID=FID.piece(",",2)
+	if FID'="DEP" quit
+
+	set DI=hist.tcmt.piece("]",2)
+	set DI=DI.piece(":",1)
+
+	set OV=hist.tcmt.piece(":",2)
+
+	do SETDI(.dep,DI,OV,hist.tjd)
+
+	quit
+
+
+RESDTL(RecordHIST hist,		// History transaction			/REF:R
+       Number RESAMT)		// Residual amount
+
+	/*
+	Include the Residual Interest from the transaction
+
+	Inputs:
+		. RESIDUAL	Residual interest
+		. NNT()		Interest amounts array
+		. X()		Account activity array
+	*/
+
+	type public Number RESIDUAL
+	type public String NNT(),X()
+
+	// Store system-generated Residual Interest adjustments in NNT
+	if hist.itc7 do {
+		// Interest posting flag
+		if hist.itc4 do {
+			// Residual interest posting (no principal)
+			if X(%EffectiveDate).get().piece("|",21)=1 do {
+				set NNT(%EffectiveDate).piece("|",8)=NNT(%EffectiveDate).get().piece("|",8)-RESAMT
+				}
+			}
+		else  do {
+			// Residual interest payment (hit principal)
+			set NNT(%EffectiveDate).piece("|",10)=NNT(%EffectiveDate).get().piece("|",10)-RESAMT
+			set X(%EffectiveDate).piece("|",1)=+X(%EffectiveDate).get()+RESAMT
+			}
+		}
+	set RESIDUAL=RESIDUAL+RESAMT
+
+	/*
+	If this is a manual adjustment - put the actual adjustment to 
+	residual in the X() array, not the "unwinding" adjustment.
+	*/
+	if 'hist.itc7,'hist.tso.isLike("%RECALC#0%") set X(%EffectiveDate).piece("|",25)=X(%EffectiveDate).get().piece("|",25)-RESAMT
+
+	quit
+
+
+OLDDIS(RecordDEP dep,		// Deposit account			/REF:R
+       Number AMT,		// Transaction amount
+       String TCMT)		// Transaction comment
+
+	/*
+	Determine old interest disbursement amounts
+
+	Inputs:
+		. NEGBJD	Negative interest calculation start date
+		. NNT()		Interest amounts array
+		. POSBJD	Positive interest calculation start date
+		. X()		Account activity array
+
+	TCMT in combination with DR/CR indicator determines whether the
+	transaction is a transfer or a backing out of a transfer.
+	*/
+	
+	type public Date POSBJD,NEGBJD
+	type public String NNT(),X()
+
+	type Date ITD
+
+	// Int/Div Disbursement Option. 2 - Transfer to Another Account
+	if dep.iopt=2 quit
+	
+	// Not a transfer
+	if 'TCMT.isLike("%TFR-%") quit
+	
+	// Deferring interest
+	if dep.definadj quit
+	
+	#IF CUVAR.IPD
+		// Transferred after accruals
+		set ITD=%EffectiveDate+1
+	#ELSE
+		// Transferred before accruals
+		set ITD=%EffectiveDate
+	#ENDIF
+
+	// Store old positive (net) interest transfer amount
+	if TCMT.isLike("%POSINT-%"),%EffectiveDate'<POSBJD do {
+		set X(ITD).piece("|",26)=X(ITD).get().piece("|",26)-AMT
+		set NNT(%EffectiveDate).piece("|",12)=NNT(%EffectiveDate).get().piece("|",12)-AMT
+		}
+
+	// Store old negative (net) interest transfer amount
+	if TCMT.isLike("%NEGINT-%"),%EffectiveDate'<NEGBJD do {
+		set X(ITD).piece("|",26)=X(ITD).get().piece("|",26)+AMT
+		set NNT(%EffectiveDate).piece("|",14)=NNT(%EffectiveDate).get().piece("|",14)+AMT
+		}
+
+	quit
+
+
+HLD(RecordDEP dep,		// Deposit account			/REF:R
+    RecordTTX ttx)		// Current transaction			/REF:R
+
+	/*
+	Decrement the balance by float holds
+
+	Inputs:
+		. BASE 		Interest rate calc base
+		. BJD		Calculation beginning date
+ 		. %TRNCK	Check transaction flag 
+				(determined in TRNDRV procedure)
+				1 - transaction set contains check transaction
+				0 - no check transaction in transaction set
+		. X()		Account activity array
+
+	Logic flow for reversals and error corrections:
+	1) Regular reversal (ttx.itc12 is set) - call HLDREV section which
+	   will reconstruct the original ttx() (with negative amounts) that
+	   will include the check transaction(s), then call into SETHLD to
+	   set up H array and an updated version of HLD. At the end it will
+	   set the REVFLG flag to prevent executing SETHLD the second time.
+	2) Same-day reversal (ttx.itc6 is set, but we do not have original
+	   ttx()) - just like in case of regular reversal we will need to
+	   call into HLDREV section to rebuild original ttx().
+	3) Error corrections (ttx.itc6 is set and we have the original ttx()) -
+	   no need to re-construct ttx(), we call directly to SETHLD that
+	   will set up H array and an updated version of HLD.
+	*/
+ 
+	type public Number BASE,HLDSET,TRNCK
+	type public Date BJD
+	type public String X()
+
+	type Date HLDDT=""
+	type Number CID,EFDAMT,EXPAMT,PTOTAMT,REVFLG,SDREV,TMPSEQ
+	type String HLDALL(,),TTXHLD(,,,)
+	
+	set (PTOTAMT,REVFLG,SDREV)=0
+
+	set CID=dep.cid
+
+	// Possible same-day reversal - set the flag
+	if 'ttx.itc12,ttx.itc6,'TRNCK set SDREV=1
+
+	// Set up TTXHLD(,,,) and then HLDALL(,)
+	if ttx.itc12!(SDREV) do HLDREV(.dep,.ttx)
+
+	// If HLDALL(,) not already set up...
+	if 'HLDSET,'REVFLG do SETHLD(.dep,.ttx)
+	
+	/*
+	Calculate total amount of holds placed and not expired in the
+	previous posting period. Then decrement BASE by it.
+	*/
+	type ResultSet rshld7=Db.select("EXPDT,TOTAMT","HLD7","CID=:CID AND EXPDT<:BJD","EXPDT DESC")
+        if rshld7.next() do {
+        	set HLDDT=rshld7.getCol("EXPDT")
+        	set PTOTAMT=rshld7.getCol("TOTAMT")
+ 	        set BASE=BASE-PTOTAMT
+	        }
+        		
+	set TMPSEQ=""
+	for  set TMPSEQ=TTXHLD(TMPSEQ).order() quit:TMPSEQ.isNull()  do {
+		for  set HLDDT=TTXHLD(TMPSEQ,7,CID,HLDDT).order() quit:HLDDT.isNull()!(HLDDT'<%SystemDate)  do {
+			type Number TOTAMT
+
+			// Total Amount
+			set TOTAMT=TTXHLD(TMPSEQ,7,CID,HLDDT).piece("|",2)
+			set EXPAMT=TTXHLD(TMPSEQ,7,CID,HLDDT).piece("|",1)
+			set EFDAMT=TOTAMT-PTOTAMT+EXPAMT
+
+			// Subtract hold amount in effect (placed) from 
+			// principal amount
+			set X(HLDDT).piece("|",1)=X(HLDDT).get().piece("|",1)-EFDAMT
+			set X(HLDDT).piece("|",1)=X(HLDDT).get().piece("|",1)+EXPAMT
+
+			// Previous Total Amount
+			set PTOTAMT=TOTAMT
+			}
+		}
+
+	quit
+
+
+HLDREV(RecordDEP dep,		// Deposit account			/REF:R
+       RecordTTX ttx)		// Current transaction			/REF:R
+
+	/*
+	Set up HLD array for reversals
+
+	NOTE: This procedure assumes that transaction record exists in TTX 
+	      file. Reversals of split-hold transactions (multiple CH) are 
+	      not supported.
+	*/
+
+	type public Number ER,HLDSET,REVFLG
+
+	type Number CRT,FOUND=0,HISTSEQ,TSEQ
+	type String HLDALL(,),TRID,TTXHLD(,,,),UTSO
+
+	// Creating a new transaction array which will contain rebuilt trns 	
+	type RecordTTX rebttx()
+
+	// Get reversal transaction history sequence
+	set HISTSEQ=+$$FIELD^UTSO(ttx.tso,"REV")
+
+	// Get transaction record from history
+	type RecordHIST hist=Db.getRecord("HIST","CID=:dep.cid,TSEQ=:HISTSEQ",1)
+	if 'hist.getMode() quit
+
+	// Transaction trace number
+	set TSEQ=hist.trc
+
+	// Get the identifier for the record in HLDD file
+	set TRID=0
+	do REV^HLDREV(.ttx,.dep)
+	quit:'TRID.piece("|",2)
+
+	type DbSet dbs=Db.selectDbSet("HLDDTL","SPD=:hist.tjd AND CID=:dep.cid")
+	while dbs.next() do { quit:ER!(FOUND=1)
+		type Number BRCD,CKSEQ,WTR=0
+		type Date TTXJD
+		type String UID
+
+		type RecordHLDDTL hlddtl=dbs.getRecord("HLDDTL")
+
+		// Transaction is already reversed
+		if hlddtl.revflg quit
+		
+		// Transaction does not match with identifier
+		if hlddtl.brcd_"|"_hlddtl.trc_"|"_hlddtl.uid'=TRID quit
+
+		// Transaction in TTX does not match with transaction in HIST
+		set TTXJD=hlddtl.tpd
+		set BRCD=hlddtl.brcd
+		set UID=hlddtl.uid
+		if TSEQ.isNull() set TSEQ=hlddtl.trc
+	
+		type RecordTTX ttxhist=Db.getRecord("TTX","TJD=:TTXJD,BRCD=:BRCD,UID=:UID,TSEQ=:TSEQ",1)
+		if 'ttxhist.getMode() quit
+
+		if +ttxhist.tamt'=(-ttx.tamt) quit
+
+		// Otherwise, re-build the original transaction
+		set FOUND=1
+
+		// Get CK (check) transaction sequence
+		type RecordHLDD hldd=Db.getRecord("HLDD","TJD=:hist.tjd,CID=:dep.cid,HLDSEQ=:hlddtl.hldseq,CHKSEQ=1",1)
+		if 'hldd.getMode() quit
+
+		if hldd.trc.isNull() quit
+		else  set CKSEQ=hldd.trc
+
+		// Check for TSEQ/TRC mismatch, reset CKSEQ
+		if (TSEQ\1000)'=(CKSEQ\1000) do {
+			type Number SCREEN,SEQ
+			// Screen indicator part of TSEQ
+			set SCREEN=TSEQ\1000
+			// Sequence indicator part of CKSEQ
+			set SEQ=(CKSEQ#1000)
+
+			/*
+			Combine screen indicator from TSEQ and seq indicator
+			from CKSEQ to determine hybrid check sequence number
+			*/
+			set CKSEQ=(SCREEN*1000)+SEQ
+			}
+
+		// Build new ttx record for deposit transaction (DD,SD,CD,etc.)
+		set rebttx(TSEQ#((TSEQ\1000)*1000))=ttx.copy()
+
+		type DbSet dbsttx=Db.selectDbSet("TTX","TJD=:TTXJD AND BRCD=:BRCD AND UID=:UID AND TSEQ>=:CKSEQ")
+		while dbsttx.next() do { quit:WTR=1
+
+			type RecordTTX ttxtmp=dbsttx.getRecord("TTX")
+			
+			// Transaction screens do not match
+			if (TSEQ\1000)'=(ttxtmp.tseq\1000) set WTR=1 quit
+
+			// Only rebuild TR for CK and CH transactions
+			if ttxtmp.trntype'=2,ttxtmp.trntype'=3 set WTR=1 quit
+
+			// Re-build CK or CH transaction
+			do TRUPD(.ttxtmp,ttx.efd)
+			// Add this transaction to rebuilt transaction array
+			type Number ptr=ttxtmp.tseq#((ttxtmp.tseq\1000)*1000)
+			set rebttx(ptr)=ttxtmp.copy()
+
+			// CH transaction found, do not proceed any further
+			if ttxtmp.trntype=3 set WTR=1 quit
+			}
+		}
+
+	if 'rebttx.data() quit
+
+	// Build HLDALL(,) and TTXHLD(,,,)
+	set HLDSET=1
+	type RecordDEP deptmp=dep.copy()
+	do INIT^CRTHLD(.rebttx(),.HLDALL(,))
+
+	// Process rebuilt transaction screen
+	set CRT=1
+	if HLDALL.data()>1 do {
+		type Number RCALL=1
+		do UPD^CRTHLD(.rebttx(),.dep,.HLDALL(,))
+		}
+
+	/*
+	Set REVFLG flag to prevent executing SETHLD twice (for value-dated 
+	cash transactions we exit this section early)
+	*/
+	set REVFLG=1
+
+	quit
+
+
+SETHLD(RecordDEP dep,		// Deposit account			/REF:R
+       RecordTTX ttx())		// Transaction set			/REF:R
+
+	// Set up ttxhld array with current transaction information
+
+	type public Number HLDSET
+	type public String HLDALL(,)
+
+	type Number CRT,RCALL
+
+	type RecordDEP deptmp=dep.copy()
+
+	set HLDSET=1
+	set CRT=1
+
+	if HLDALL.data()>1 do {
+		set RCALL=1
+		do UPD^CRTHLD(.ttx(),.dep,.HLDALL())
+		}
+
+	quit
+
+
+TRUPD(RecordTTX ttx,		// Transaction				/REF:R
+      Date TREFD)		// Transaction effective date
+
+	/*
+	Update ttx with reversal information
+
+	Inputs:
+		. HISTSEQ	Transaction history sequence
+	*/
+
+	type public Number HISTSEQ
+
+	// Set ITC with reversal indicator (only for CK transaction)
+	if ttx.trntype'=3 set ttx.itc=$$ITC^TTXEXT(ttx.itc,12,1)
+
+	// Reverse check amount
+	set ttx.tamt=-ttx.tamt
+
+	// Reverse screen base amount
+	set ttx.bseamt=-ttx.bseamt
+
+	// Set transaction effective date
+	set ttx.efd=TREFD
+
+	// Set the REV# in TSO of TTXREC
+	set ttx.tso=$$FIELDIN^UTSO(ttx.tso,"REV",HISTSEQ)
+
+	quit
+
+vSIG()	quit "60460^58021^Shriram Deshpande^37637"	// Signature - LTD^TIME^USER^SIZE

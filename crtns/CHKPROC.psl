@@ -1,0 +1,545 @@
+CHKPROC		/*
+	  ORIG: GRAY - 01/04/2000
+	  DESC: European Check processing procedures
+
+	---- Comments --------------------------------------------------------
+
+	---- Revision History ------------------------------------------------
+	06/28/07 - VARGAJ - CR27885
+		   Modified the VALTR section to exclude the current 
+		   transaction from the search for duplicate checks in the 
+		   batch of transactions. Modified the VALCID section to 
+		   perform different searches based on whether the check type 
+		   format is unique per account or unique per institution.
+		   
+	04/17/07 - VARGAJ - CR24940
+		   Modified the STPFIL and STPVER sections to support
+		   the changing of the checknumber to being unique within
+		   an account level and no longer globally unique.
+
+	01/30/07 - VARGAJ - CR 25139
+		   Modified CHKVER to bring in line with programming 
+		   standards. Modified VALTR to change legacy logic
+		   pertaining to TR array.
+	
+	11/04/05 - PUTTASWH - CR17011
+		   Added section VEROUT in order to check whether the 
+		   number of outstanding checks exceeds the parameter 
+		   CHKOUT defined at the account.  Modified section 
+		   EUROCHK to reference ACN table instead of DEP table. 
+		   Deleted CHKFOR section.
+											   
+	12/02/03 - CARROLLJ - CR7239
+		   Added #ACCEPT to CHKACT linetag to correct compile errors.
+
+	06/16/03 - CARROLLJ - 51349
+		   Removed the use of the TR array.
+
+	06/30/02 - Erik Scheetz - 43583
+		   Remove GetOneRow methods from procedure.
+
+	06/26/02 - ZWITKOWITSM - 43583
+		   Modified for PSL transaction processing testing.
+
+	06/13/02 - SELVANATHANS - 49709
+		   In section VALTR modified code to check the CID and
+		   CHKNUM before the error message is executed.
+
+	*/
+
+	quit	//  must call at a specific linetag
+
+
+Public EUROCHK(Number CID)	// Account Number	
+	// verify that CID is using new european check functionality
+
+	/*  
+	  returns: 0 - CID is not using this functionality
+	 	   1 - CID is using it and CHKTYP=check type on account
+
+	  Communication failure. Network off-line.
+	  if off-line, cannot determine if account uses european check
+	  processing.
+	*/
+
+	if '$G(%NET) quit 0
+
+	type RecordACN acn=Db.getRecord("ACN","CID",1)
+	if 'acn.getMode() quit 0 
+
+	// no check type defined on account
+	if acn.chks="" quit 0
+
+	new CHKTYP
+
+	set CHKTYP=acn.chks
+
+	// does not use European check processing
+	if 'Db.isDefined("XCHKPRD","CID,CHKTYP"),'acn.chkeuro quit 0
+
+	quit 1
+
+	
+Public CSHLIM(RecordTTX ttx,	// Record TTX
+	String INST,		// Institution Number
+	Number AMT,		// Amount
+	Boolean CTL)		// CTL
+	// verify institution's check cashing limit (foreign check)
+
+	new BASEAMT,FOUND,SYSCRCD,TMPAMT,TRCRCD
+
+	type RecordUTBLEFTINST ueftinst=Db.getRecord("UTBLEFTINST","KEY=:INST",1)
+	if 'ueftinst.getMode() set ER=1 quit 0
+
+	// null means there is no limit
+	if ueftinst.chklim="" quit 0
+
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+
+	set FOUND=0
+	set TMPAMT=AMT
+	set SYSCRCD=cuvar.%crcd			// system currency
+	set TRCRCD=ttx.crcd			// transaction currency
+	if TRCRCD="" set TRCRCD=ttx.bcrcd	// get base currency
+
+	// convert TAMT to system base...
+	if TRCRCD'=SYSCRCD do CAMT^CRCDUTL(TRCRCD,SYSCRCD,.TMPAMT)
+
+	// Maximum transaction amount ~pl
+	if TMPAMT>ueftinst.chklim do {
+		set FOUND=1
+		if CTL set OVR("*","OVR","CSHLIM")=ueftinst.chklim
+		}
+
+	quit FOUND
+
+
+Public CHKACT(String CHKACT,	// Check Action
+	String CHKNUM,		// Check Number
+	Number CHKCID,		// Account Number
+	String CHKTYP,		// Check Type 
+	Number CHKSTS,		// Check Status				
+	Number STSNEW,		// New status resulting from this action
+	String VARLST)		// The customer variables to send to HOST "abc,f"	
+	// Check Action
+	
+	/*	
+	CHKSTS: If status= "*" the check is at ^CHKALLOC, not
+		in ^CHECK and is converted to status 10-Unissued 
+	*/	
+	
+	set CHKACT=$G(CHKACT),CHKNUM=$G(CHKNUM)
+	set CHKCID=$G(CHKCID),CHKTYP=$G(CHKTYP),CHKSTS=$G(CHKSTS)
+
+	// Invalid parameter
+	// Convert to PSL
+	if CHKACT="" do Runtime.setErrMSG("CHECK",8602) set STSNEW="" quit
+	if CHKTYP="",(CHKCID="") do Runtime.setErrMSG("DEP",8602) set STSNEW="" quit
+	if CHKNUM="",(CHKSTS="") do Runtime.setErrMSG("CHECK",8602) set STSNEW="" quit
+
+	if CHKTYP="" do {
+
+		type ResultSet rs=Db.select("CHKS","DEP","CID=:CHKCID")
+
+		if rs.isEmpty() quit
+
+		if rs.next() set CHKTYP=rs.getCol(1)
+		}
+
+	// account's check type not defined
+	if CHKTYP="" do Runtime.setErrMSG("DEP",8687) set STSNEW="" quit
+										
+	/* 
+	Can be an action without status. Example PRTTST - Printing test
+	This action occurs when the check is allocated to the
+	branch, is not defined in ^CHECK global and doesn't have
+	check status. In this case we test for status "*"
+	*/
+	if CHKNUM'="",CHKSTS'="*" do { quit:$G(ER)
+		if 'Db.isDefined("CHECK","CHKS=:CHKTYP AND CID=:CHKCID AND CHKNUM=:CHKNUM") do Runtime.setErrMSG("CHECK",1277) set STSNEW=""
+		}
+
+	if CHKSTS="" do {
+
+		type ResultSet rs=Db.select("CHKSTS","CHECK","CHKS=:CHKTYP AND CID=:CHKCID AND CHKNUM=:CHKNUM")
+
+		if rs.isEmpty() quit
+
+		if rs.next() set CHKSTS=rs.getCol(1)
+		}
+
+	// Status is ~p1
+	if CHKSTS="" do Runtime.setErrMSG("CHKSTS",8413,"''") set STSNEW="" quit
+
+	new CHKLVL,CHKSEQ,CHKFLG,STSRET,STSRTN
+
+	set CHKLVL=""
+	new X set X="SCA"
+	if Db.isDefined("UTBLCHKACT2","CHKTYP,CHKACT") set CHKLVL=CHKTYP
+	else  if Db.isDefined("UTBLCHKACT2","X,CHKACT") set CHKLVL="SCA"
+
+	// invalid check action
+	if CHKLVL="" do Runtime.setErrMSG("UTBLCHKACT2",8706) set STSNEW="" quit
+										
+	/* 
+	The status 10 must be hard-coded here to try validate an action
+	like print a check and determine the new status for the check.
+	The check is in ^CHKALLOC not at ^CHECK and it doesn't have a status.
+	*/
+	if CHKSTS="*" set CHKSTS=10		// Unissued
+
+	// RM is defined here for allow new messages in routine STSRTN
+
+	// Action ~p1 not allowed for status ~p2
+	new des
+
+	type RecordSTBLCHKSTS schksts=Db.getRecord("STBLCHKSTS","CHKSTS")
+
+	set des=schksts.desc
+	do Runtime.setErrMSG("STBLCHKSTS",8688,"CHKACT~des")
+
+	// Runtime Method above should not have ER set. The intent is to set RM.
+	set ER=0			
+
+	new rs
+	set STSRET=""
+	type ResultSet rs=Db.select("CHKSEQ","UTBLCHKACT3","CHKS=:CHKLVL AND CHKACT=:CHKACT AND CHKSTS=:CHKSTS")
+	if 'rs.isEmpty() while rs.next() do { quit:STSRET'=""
+		set CHKSEQ=rs.getCol(1)
+		new utblchkact3
+		type RecordUTBLCHKACT3 utblchkact3=Db.getRecord("UTBLCHKACT3","CHKLVL,CHKACT,CHKSTS,CHKSEQ")
+
+		set STSNEW=utblchkact3.stsnew
+		set STSRTN=utblchkact3.stsrtn
+		if STSRTN="" set STSRET=STSNEW quit
+
+		new X
+		set X="set CHKFLG="_STSRTN
+		#ACCEPT DATE=12/02/03;PGM=John Carroll
+		xecute X
+		if CHKFLG set STSRET=STSNEW
+		}
+
+	if STSRET="" set ER=1
+	else  kill RM
+
+	set STSNEW=STSRET
+
+	quit
+
+
+public CHKVER(RecordTTX ttx,	// Record TTX		/REF:R
+	String CHKNUM,		// Check Number		/REF:R
+	Number CID,		// Account Number	/NOREQ/REF:R
+	Number PTRC)		// Primary Trace Number /NOREQ/REF:R
+	
+	/*
+	
+	CHKVER	Section used to validate various European Check
+		information. It validates that the check belongs to the
+		account, that it hasnt appeared twice in a teller screen
+		and that the check is valid to be paid.
+		
+	ARGUMENTS:
+
+	ttx	The transaction object that has a check as the 
+		teller source of funds
+		
+	CHKNUM	Check number as determined by the calling routine
+	
+	CID	Account number of transaction
+		
+	PTRC	The primary number for this teller screen
+				  
+	RETURNS:
+	
+		ER - Logical status indicating success or failure of 
+		     transaction set
+		
+	*/
+
+	
+	type public Boolean ER
+	type public Number BRCD
+	
+	/* 
+	  This is called as a post processor on STBL(MFVARP("TSO(""CK"")")
+	  (used to prompt for check number on teller screen.
+	  NOTE: This should also be BATCH-PROCESSOR on the trancode.  This
+	        is necessary so the validations also get done if we are not
+	        checking after entering the check number (e.g., when offline
+	        we can't verify upon entering check number so validation
+	        still needs to be done before posting the ^STF entry on the
+	        server.)
+	*/
+
+	if CID.get()="" quit
+	if PTRC.get()="" quit
+
+	/*
+	ARQ 48321 - NK
+	Before this fix, CHKNUM was defined from the teller screen and
+	contained the check number of a primary transaction.  If there were
+	multiple transaction with other check numbers, these other check
+	numbers were not verified.  When processing a secondary transaction 
+	that did not contain a check number, this section created a runtime 
+	error.  Processing will now re-define CHKNUM for each transaction 
+	(primary and secondary) being processed.  If CHKNUM is not defined 
+	processing will quit, otherwise processing verifies that the check 
+	number is not used in any other transaction sequence.
+	*/
+	
+
+	set CHKNUM=$$FIELD^UTSO(ttx.tso,"CK")
+	if CHKNUM.get()="" quit
+
+	do VALCID(CHKNUM,CID) quit:ER
+	do VALTR(.ttx,CHKNUM,PTRC,CID,BRCD.get()) quit:ER
+
+	if $$EUROCHK(CID) do { quit:ER
+		type String TMP,X
+		
+		set X="PAY" 
+		
+		do CHKACT(X,CHKNUM,CID,,,.TMP)
+	}
+	quit
+
+
+VALCID(String CHKNUM,		// Check Number
+	Number CID)		// Account Number
+	
+	type RecordUTBLCHKS utblchks
+	type public String CHKTYP
+	type Boolean VALID = 1
+	type public String %NET
+
+	
+	// Verify if the check belongs to the account
+
+	if '$G(%NET) quit	// can't verify if we are offline
+
+	if '$$EUROCHK(CID) quit
+
+	// Account's check type not defined
+	if $G(CHKTYP)="" do Runtime.setErrMSG("DEP",8687) quit
+
+	set utblchks = Db.getRecord("UTBLCHKS","chks=:CHKTYP")
+	
+	// if the check type is unique check number per instiution
+	// do this validation
+	if utblchks.accntnum = 0 do { 
+		// Invalid Check Number
+		type Number tmpcid
+			
+		type ResultSet rs=Db.select("CID","CHECK","CHKS=:CHKTYP AND CHKNUM=:CHKNUM")
+	
+		if rs.isEmpty() set tmpcid=0
+	
+		else  if rs.next() set tmpcid=rs.getCol("CID")
+	
+		if tmpcid'=CID set VALID = 0
+	}
+	
+	// if the check type is unique check number per account
+	// do a validation to make sure that the check does belong to the 
+	// account. 
+	if utblchks.accntnum = 1 do { 
+		if 'Db.isDefined("CHECK","CHKS=:CHKTYP and CID=:CID and CHKNUM=:CHKNUM") set VALID = 0
+	}
+
+	if VALID = 0 do Runtime.setErrMSG("CHECK",1277)
+	
+	quit
+
+
+VALTR(RecordTTX ttx,		// Record TTX		/REF:R
+	String CHKNUM,		// Check Number	 	   /REF:R			
+		Number PTRC,	// Primary Sequence Number /REF:R
+		Number RCID,	// Account Number	   /REF:R
+		Number BRCD)	// Branch Code		   /NOREQ/REF:R
+	/*
+	 VALTR verifies this check is not used previously in the current 
+	 teller screen for any transaction on this account.  
+	*/
+	
+	type Number NEXTPTRC = PTRC + 1000
+		
+	if BRCD.get() = "" quit
+	
+	type ResultSet rs=Db.select("TSO,CID,TSEQ","TTX","TJD=:%SystemDate AND BRCD=:BRCD AND UID=:%UserID AND TSEQ>:PTRC AND CID=:RCID AND TSEQ<>:ttx.tseq AND TSEQ<:NEXTPTRC")
+	
+	while rs.next() do {
+		// Check range already in use by this process
+		if ($$FIELD^UTSO(rs.getCol(1),"CK")=CHKNUM) do Runtime.setErrMSG("CHECK",8692)
+		}
+
+	quit
+	
+Public STPFIL(Number CID,	// Account Number
+	String CHKTYP,		// Check Type 
+	String START,		// Starting Check Number
+	String END,		// End Check Number
+	Number %O,		// Process Mode
+	String OLDSTART)	// Old Start Check Number
+	// Update check status in stop payments 
+	type Public String %NET
+	
+	quit:'$G(%NET)
+
+	type String ACTION,NEWSTAT
+	type public Number ER
+	
+	/* 
+	In modify mode if the low check number is changed, we must 
+	delete the stop in range OLDSTART to START-1
+	*/
+	if ((%ProcessMode=1) &(OLDSTART.get()'="")) do { quit:ER
+		type DbSet dsOld = Db.selectDbSet("CHECK","CHKS=:CHKTYP AND CID=:CID and CHKNUM>=:OLDSTART and CHKNUM<:START")
+		
+		set ACTION="STOPD"
+		
+		while dsOld.next() do {
+			type RecordCHECK check = dsOld.getRecord("CHECK")	
+			
+			do CHKACT(ACTION,check.chknum, check.cid,,,.NEWSTAT)
+			if 'ER.get() do {
+				do check.setAuditFlag(1)
+				
+				set check.chksts = NEWSTAT
+				
+				do check.save("FRMFILER")
+			}
+		}
+	}
+	
+	type DbSet dsNew = Db.selectDbSet("CHECK","CHKS=:CHKTYP AND CID=:CID and CHKNUM>=:START and CHKNUM<:END")
+
+	while dsNew.next() do { quit:ER.get()
+		type RecordCHECK check = dsNew.getRecord("CHECK")
+		
+		if %ProcessMode = 0 set ACTION="STOPC"
+		if %ProcessMode = 1 set ACTION="STOPM"
+		if %ProcessMode = 3 set ACTION="STOPD"
+		
+		set NEWSTAT=""
+		
+		do CHKACT(ACTION, check.chknum, check.cid,,,.NEWSTAT)
+		
+		if NEWSTAT.get()'="" do {
+			do check.setAuditFlag(1)
+			
+			set check.chksts = NEWSTAT
+			
+			do check.save("FRMFILER")
+		}
+	}	
+
+	quit
+
+
+Public STPVER(Number CID,	// Account Number
+	String START,		// Starting Check Number
+	String END,		// End Check Number
+	Number %O,		// Process Mode
+	Date TJD,		// System Processing Date
+	String OLDSTART,	// Old Starting Check Number
+	Date OLDEXP)		// Old expiration date
+	/* 
+	Validate European Check Statuses for Range
+	of checks this is used as a post-processor for check numbers when
+	creating, modifying, and deleting stops.  If the account uses
+	european checks, we must verify the check statuses based upon %O.
+	*/
+
+	set OLDSTART=$G(OLDSTART)		// Old starting check number
+	set OLDEXP=$G(OLDEXP)			// Old expiration date
+
+	if '$$EUROCHK(CID) quit
+
+	if START]]END do Runtime.setErrMSG("DEP",530) quit
+
+	new CHKCNT,CHKARR,I,CHKNUM,NEWSTAT,CKDATA
+
+	set CHKCNT=$$CHKCNT^CHKNUTL(START,END)-1
+
+	do CHKRNG^CHKNUTL(START,CHKCNT)
+
+	set CHKARR(0)=START
+	for I=0:1:CHKCNT do { quit:$G(ER)
+		set CHKNUM=CHKARR(I)
+
+		// Test if the check belongs to account
+		do VALCID(CHKNUM,CID) quit:$G(ER)
+
+		// If %ProcessMode=1 (Modify) test if we already have a 
+		// stop in this check
+
+		if %ProcessMode=1 do { quit:$G(ER)
+			if OLDSTART="" set OLDSTART=END
+			if ((OLDEXP'="")&(OLDEXP'>TJD))
+			else  quit:OLDSTART']]CHKNUM
+			if $$STPEXP1^STPPROC(CID,CHKNUM,TJD) do Runtime.setErrMSG("CHECK",6016,CHKNUM) quit
+			}
+		if %ProcessMode=0 new X set X="STOPC" do CHKACT(X,CHKNUM,CID,,,.NEWSTAT)
+		if %ProcessMode=1 new X set X="STOPM" do CHKACT(X,CHKNUM,CID,,,.NEWSTAT)
+		if %ProcessMode=3 new X set X="STOPD" do CHKACT(X,CHKNUM,CID,,,.NEWSTAT)
+		}
+
+	quit
+
+ERR	// error handler
+	set ER=1
+	do ^UTLERR
+	set VFMQ="Q"
+
+	quit
+
+Public VEROUT(Number CID)	// Account Number
+	// verify number of outstanding checks to allow new request
+
+	type public Boolean ER	
+	type public String CHKARR(),RM
+	type Number CHKCNT,CHKOUT,CHKS,HIGH,I,LOW,NUMOUT,STSNEW
+	type String CHKNUM
+	
+	set (CHKOUT,CHKS)=""
+	
+	type RecordACN acn=Db.getRecord("ACN","CID",1)
+	if acn.getMode() do {  
+	
+		set CHKOUT=acn.chkout
+		set CHKS=acn.chks
+	
+	}
+	
+	quit:(CHKOUT="")!(CHKS="") // Can have any number of outstanding checks
+				   // Check type is not defined at the account
+	
+	set NUMOUT=0,HIGH=""
+		
+	type ResultSet rs=Db.select("HIGH,LOW","XCHECK","CID=:CID AND CHKS=:CHKS")	
+	
+	while rs.next() do {		
+		set HIGH=rs.getCol("HIGH")
+		set LOW=rs.getCol("LOW")
+		set CHKCNT=$$CHKCNT^CHKNUTL(LOW,HIGH)-1
+		do CHKRNG^CHKNUTL(LOW,CHKCNT)
+		set CHKARR(0)=LOW
+		
+		for I=0:1:CHKCNT do {  quit:NUMOUT>CHKOUT
+			set CHKNUM=CHKARR(I)
+			do CHKACT("CHKOUT",CHKNUM,CID,CHKS,,.STSNEW)
+			if STSNEW="" set NUMOUT=NUMOUT+1
+			if $G(ER)=1 set ER=0,RM=""
+			}
+			
+		}
+	
+	// Number of outstanding checks exceeds ~p1
+	if NUMOUT>CHKOUT do Runtime.setErrMSG("XCHECK",8714,CHKOUT) quit:ER
+	
+	quit	
+	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60814^38516^John Varga^14453"	// Signature - LTD^TIME^USER^SIZE

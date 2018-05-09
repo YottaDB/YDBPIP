@@ -1,0 +1,138 @@
+PATFEE	  /*	Revision History 
+  
+  	12/27/06 - MBUIM - CR 24545
+		   Retrofit CR 3110 from Profile01
+		   Modified section FEE1 to call an extrinsic for the
+		   DR transaction code. 
+	
+	12/14/05 - PUTTASWH - CR 18157
+		   Modified according to DBI Standards.
+		   
+	10/03/03 - CARROLLJ - 51630
+		  Removed fromArray method and code around it in FEE1 section
+		  SRVD is being saved in BCHFEEUT procedure.
+
+	03/13/02  Dan Russell - 49577
+		  Modified call to fee program to include dep object. 
+
+	02/08/99  JARVISG - 29134
+		  Modified FEE1 section to change service fee program calls to
+		  new line tag in UFID. Changed error message. 
+
+	10/20/98  GRAY - ARQ#29448
+	          Converted from M to PSL.
+  */
+
+	quit
+	
+  /*  
+	This utility is used to calculate and assess PAT fees.  It is called by
+	Pre-Authorized Transfer Processing and Retry Processing.
+  */
+	
+	// Init fields needed for fee transactions
+Public FEE(String FEETYP,	// Fee Type
+	Number CID)		// Account Number
+	
+	type public Boolean ER
+	type public String RM
+	type Boolean PLTP
+	type Date SCND,TPD,UPNDT	
+	type String FEEPLN,USPL
+	
+	set ER=0
+	type TranSet ts=Class.new("TranSet")
+	
+	set par("IPMODE")=3  // System generated
+	set par("OPTION")=2  // Process transactions; update database
+
+	set TPD=%SystemDate
+	
+	// Invalid service charge fee account
+	if CID.get().isNull() do Runtime.setErrMSG("DEP",836) quit:ER
+		
+	type RecordDEP dep=Db.getRecord("DEP","CID=:CID",1)		
+	
+	if dep.feepln'="" set PLTP=0 do FEE1(FEETYP,.ts,.dep)
+	if dep.uspl'="" set PLTP=1 do FEE1(FEETYP,.ts,.dep)
+	
+	do ts.postTSet(TPD,BRCD,.par)
+
+	quit
+
+	// Find correct posting program and get fee amount (FEEAMT)	
+FEE1(String FEETYP,	// Fee Type	
+	TranSet ts,	// Transaction set
+	RecordDEP dep)	// Deposit Record		
+	
+	type public Boolean CHGOPT,ER	
+	type Date EFD,SRVDT
+	type Number CID,FEEAMT
+	type String ETC,FEEPLN,OCC,PGM
+	
+	if dep.feepln'="" set FEEPLN=dep.feepln
+	if dep.uspl'="" set FEEPLN=dep.uspl
+	
+	set FEEAMT=0
+	if %EffectiveDate.get().isNull() set EFD=%SystemDate	
+	else  set EFD=%EffectiveDate	
+	
+	type ResultSet rs=Db.select("FEEDT","FEEPLN","PLAN=:FEEPLN AND FEEDT<:EFD+1","FEEDT DESC")
+	if rs.next() set SRVDT=rs.getCol("FEEDT")
+	
+	set PGM=$$FEEPGM^UFID(FEEPLN,SRVDT.get())
+        // Service fee program not compiled
+	if PGM="" do Runtime.setErrMSG("FEEPLN",2481,FEEPLN) quit:ER
+	set PGM="^"_PGM_"(.dep,2,"""_FEETYP_""",1,0)"
+	do @PGM if ER quit
+	
+	if FEEAMT=0 quit
+	if CHGOPT'=1 quit
+	
+	// Debit the Charge Account		
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:dep.type",1)
+	
+	set ETC=$$FINDETC^BCHFEEUT(.prodctl,FEETYP) 
+	set OCC=""
+	do FEETR(.ts,dep.cid,ETC,FEETYP,EFD,FEEAMT,OCC)
+
+	// Credit the GLSET Account associated with the Charge Account	
+	
+	set ETC=prodctl.crtrpf
+	if ETC="" set ETC="MCR"
+	set OCC=dep.cc		
+	type RecordUTBLGLSC utblglsc=Db.getRecord("UTBLGLSC","GLSC=:dep.glsc",1)	
+	do FEETR(.ts,utblglsc.dglf,ETC,FEETYP,EFD,FEEAMT,OCC)
+	
+	quit
+	
+        // Set up transaction set
+FEETR(TranSet ts,	// Transaction Record
+	Number CID,	// Account Number 
+	String ETC,	// External Transaction Code
+	String FEETYP,	// Fee Type
+	Date EFD,	// Transaction Effective Date
+	Number FEEAMT,	// Fee Amount
+	Number OCC) 	// Cost Center
+	
+	type public String CRCDBASE,PBK
+	type Number x
+	
+	type RecordTTX ttx=Class.new("RecordTTX")
+	set ttx.cid=CID
+	type RecordTRN trn=Db.getRecord("TRN","ETC=:ETC",1)
+	set ttx.itc=trn.itc
+	set ttx.etc=ETC
+	set ttx.tso=""
+	set ttx.tcmt="FEE-"_FEETYP
+	set %EffectiveDate=%EffectiveDate.get()
+	set EFD=%SystemDate
+	set CRCDBASE=CRCDBASE.get()
+	set PBK=PBK.get()
+	set ttx.efd=EFD
+	set ttx.tamt=FEEAMT
+	set ttx.cc=OCC
+	set x=ts.copyTran(ttx)
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60627^46722^Marie Mbui^3478"	// Signature - LTD^TIME^USER^SIZE

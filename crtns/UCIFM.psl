@@ -1,0 +1,841 @@
+UCIFM	//Private;CIF/Account Relationship Change Utility
+	/*
+	   ORIG:  PARDOE - 14 MAY 1991
+
+	  ---- Revision History ------------------------------------------------
+
+	04/20/06 - Hillanbrand - CR20770
+		   Modified the EXEC98 to correct issue with undefined. 	
+	           Modified EXEC9 to create IRATYPE if it does not exist.
+	           Removed logic for planid as this will be done in the 
+	           IRATYPE before insert trigger.  Also added NOFKCHK in the 
+	           EXEC1 section since IRATYPE is creted after the relcif.
+
+	04/01/06 - rahth- CR20130
+	           Removed the commented for loop line in EXC9MOV section
+	           
+	03/31/06 - ratht- CR20130
+	           Modifed the Section EXEC9 by adding while condition for while 
+		   getting records from IRABEN table
+		   Modifed the for loops in section EXC9MOV as per the columns 
+		   in Table IRA
+		   
+        03/28/06 - SkariahV- CR19599
+		   Modified EXEC1 and EXEC2A sections to successfully transfer
+		   the account between the primary and secondary owners.
+	  
+        09/06/05 - SkariahV- CR16680
+		   Modified the typecasting of acn in the INIT,EXEC7,EXEC9,
+		   EXEC9A sections.Modified the FOR loop in the section EXEC4
+		   to accept data item names correctly.
+		      		
+        07/27/05 - SkariahV- CR16679
+	           Removed #WARN and #OPTIMIZE directives.
+	
+	01/20/04 - Erik Scheetz - CR7798
+		   Modified EXEC2A section and removed the instantiating
+		   and saving of DAYENDSTM record (table is being obsoleted).  
+		   Code is redundant with the index on CBMGRP.
+	
+	12/30/03 - CARROLLJ - CR7658
+		   Modified call to BILFUNCS.
+
+	05/06/03 - GRAY - 51351
+		   Converted to PSL.
+
+	11/26/02 - BECKERJ - 49968:01
+	           Modified code in INIT section to set ER=8.
+	           Also added parameter "/NOFKCHKS" to SQL update calls
+	           to ACN in EXEC1, EXEC3 and EXEC5.  The foreign key checks
+	           the IRATYPE and if this is a new IRA for this CIF the IRA
+	           information will not be set up yet.
+	           Remove Pre-2000 Revision History.
+
+	07/09/02 - BECKERJ - 49968
+	           Modified INIT section to set RPASEQ to prevent undefined
+	           error.
+
+	05/24/02 - BECKERJ - 49968
+	           Modified sections EXEC9A and EXEC9E and added sections
+	           EX9C1, EX9E2, EX9E3, EXEC9F, EX9F1, EX9F2, EX9F3 and EXEC9G
+	           to properly handle the transferring of IRA beneficiary
+	           information from one customer to another.  Also modified
+	           sections EXEC9A, EXEC9B, EXEC9E AND EX9E1 to include
+	           state withholding level of ^IRA.
+
+	02/11/02 - BECKERJ - 49073
+	           Modified a line of code in section EXEC9E to pass NACN
+	           instead of OACN into section EXEC9B.  Added a few comments
+	           to easily determine what the section is doing.
+
+	*/
+		
+
+	// This procedure is called only by procedure CIFTA.
+
+
+	type public Number ER
+
+	catch vERROR {
+		type String ET,RM
+		set ET=vERROR.type
+		set RM=vERROR.description
+		do ZE^UTLERR
+		}
+
+	do EXEC quit:ER
+
+	// change linked escrows
+	do EXEC99
+
+	quit
+
+
+EXEC	// Process single account
+
+	type public Number ER,CID
+
+	type RecordACN acn=Db.getRecord("ACN","CID=:CID")
+
+	// initialize variables
+	do INIT(.acn) quit:ER
+
+	// Customer Stops
+	do EXEC10
+
+	// CIF/account pointers (level 99's)
+	do EXEC1(.acn)
+
+	// statement group information
+	do EXEC2
+
+	// reset LNM
+	do EXEC3(.acn)
+
+	// address change
+	do EXEC4
+
+	// title change
+	do EXEC5(.acn)
+
+	// xref("mcom"
+	do EXEC7(.acn)
+
+	// on-line collection
+	do EXEC8
+
+	// IRA files
+	do EXEC9(.acn)
+
+	// set history entries
+	do EXEC95
+	
+	do acn.save()
+
+	quit
+
+
+INIT(RecordACN acn)	// Initialize variables
+
+	type public Boolean PRIM
+	type Date DOD
+	type Number RPASEQ
+	type String RM
+	type public Number CID,ER,NACN,OACN
+
+	set PRIM=acn.acn
+
+	// primary account change
+	set PRIM=$select(PRIM=OACN:1,1:0)
+	
+	if acn.cls'="D" quit
+
+	type RecordDEP dep={RecordDEP}acn
+	
+	// Restrict transfering information if current customer has date of
+	// death and new customer does not.
+
+	// Retirement Pln
+
+	set RPASEQ=+dep.rpaseq
+
+	type RecordCIF ocif=Db.getRecord("CIF","ACN=:OACN")
+	set DOD=ocif.dod
+
+	if DOD,Db.isDefined("IRABEN2","ACN=:OACN,RPASEQ=:RPASEQ") do { quit:ER
+		type RecordCIF ncif=Db.getRecord("CIF","ACN=:NACN")
+
+		// Customer DOD required to transfer acct
+		if ncif.dod="" set ER=8 set RM=$$^MSG(5157)
+		}
+
+	quit
+
+
+EXEC1(RecordACN acn)	// CIF/Account Pointers (level 99's)
+
+	type public Boolean PRIM
+	type public Number CID,NACN,OACN
+
+
+       /* If transferring from primary to joint account's owner, both 
+          ACNs reside in RELCIF already. To avoid RDB unique constrains 
+          violation, delete new ACN before calling the filer.
+       */
+
+	type RecordRELCIF nrelcif=Db.getRecord("RELCIF","ACN=:NACN,CID=:CID",1)
+	if nrelcif.getMode() do Db.delete("RELCIF","ACN=:NACN AND CID=:CID")
+
+	type RecordRELCIF relcif=Db.getRecord("RELCIF","ACN=:OACN,CID=:CID")
+	do relcif.setAuditFlag(1)
+	set relcif.acn=NACN
+	do relcif.save()
+	if PRIM.get() set acn.acn=NACN 
+	quit
+
+
+EXEC2	// Statement Group Information
+
+	type Date %EffectiveDate
+	type Number OSG,XSG
+	type String STMGRP()
+	type public Number CID,NACN,OACN
+
+	type RecordCMBCID cmbcid=Db.getRecord("CMBCID","CID=:CID,ACN=:OACN",1)
+	set OSG=cmbcid.stmgrp
+	if 'OSG quit
+
+	set STMGRP(OSG)=""
+	
+	type RecordCMBGRP cmbgrp=Db.getRecord("CMBGRP","ACN=:OACN,STMGRP=:OSG")
+
+	do EXEC2A(.cmbgrp,OSG,.STMGRP)
+
+	// Transfer of summary statement groups
+
+	type DbSet ds=Db.selectDbSet("CMBGRP","ACN=:OACN AND STMGRP NOT=:OSG")
+	while ds.next() do {
+		type RecordCMBGRP xcmbgrp=ds.getRecord("CMBGRP")
+		type Number XSG
+		set XSG=xcmbgrp.stmgrp
+		set STMGRP(XSG)=""
+
+		type RecordCMBSTM xcmbstm=Db.getRecord("CMBSTM","ACN=:OACN,STMGRP=:XSG,CID=:CID",1)
+		if xcmbstm.getMode()=0,xcmbgrp.addr=CID do {
+			set xcmbgrp.addr="CIF"
+			do xcmbgrp.save()
+			}
+
+		else  do EXEC2A(.xcmbgrp,XSG,.STMGRP)
+		}		
+		
+	quit
+
+
+EXEC2A(RecordCMBGRP cmbgrp,Number OSG,String STMGRP())	//
+
+	// old VERSTGRP section:
+	type String SFRE
+	type public Number CID,NACN,OACN
+
+	set SFRE=cmbgrp.sfre
+
+	type ResultSet rs=Db.select("STMGRP","CMBGRP","ACN=:NACN AND SFRE=:SFRE","STMGRP")
+	if rs.next() set STMGRP(OSG)=rs.getCol("STMGRP")
+		
+	if STMGRP(OSG)="" do {
+              do cmbgrp.setAuditFlag(1)
+              set cmbgrp.acn=NACN
+              set cmbgrp.stmgrp=Db.nextVal("CMBGRP","ACN=:NACN")
+              set STMGRP(OSG)=cmbgrp.stmgrp
+              do cmbgrp.save()
+              }
+	
+	type RecordCMBSTM cmbstm=Db.getRecord("CMBSTM","ACN=:OACN,STMGRP=:OSG,CID=:CID",1)
+	if cmbstm.getMode() do {
+		do Db.fastDelete("CMBSTM","ACN=:OACN,STMGRP=:OSG,CID=:CID")
+		type RecordCMBSTM cmbstm1=Class.new("RecordCMBSTM")
+		set cmbstm1.acn=NACN
+		set cmbstm1.cid=CID
+		set cmbstm1.stmgrp=STMGRP(OSG)
+		
+		/* In case of revert account transfer (e.g., first, transfer
+               from cust A to cust B, then transfer from cust B back to 
+               cust A) entry can exists already in CMBCID from the original 
+               transfer.
+               Delete it before saving CMBSTM that will trigger cascade update 
+               logic on CMBCID.
+               */
+
+              type RecordCMBCID cmbcid=Db.getRecord("CMBCID","CID=:CID,ACN=:NACN",1)
+              if cmbcid.getMode()=1 do Db.delete("CMBCID","CID=:CID AND ACN=:NACN")
+	
+		do cmbstm1.save()
+		}
+		
+	set %EffectiveDate=cmbgrp.sndt
+
+	if cmbgrp.addr=CID set cmbgrp.addr="CIF"	// Default value
+	
+	do cmbgrp.save()
+	
+	quit
+
+
+EXEC3(RecordACN acn)	// Find LNM if the replaced customer was primary CIF
+
+	type String SLN
+	type public Boolean PRIM
+	type public Number NACN
+
+	quit:'PRIM.get()
+
+	type RecordCIF cif=Db.getRecord("CIF","ACN=:NACN")
+
+	set SLN=cif.lnm
+	
+	if SLN.length()<18 set SLN=(SLN_","_cif.nam).extract(1,20)
+	
+	set acn.lnm=SLN
+	
+	quit
+
+
+EXEC4	// Address change
+
+	type public Boolean PRIM
+	type public Number CID,MAIL,NACN
+	type String cifcol,col,typ
+
+	quit:'PRIM.get()
+
+	set MAIL=MAIL.get()
+
+	/*
+	Reset CID mailing address according to MAIL
+		if mail=1 no change to mailing address
+		if mail=2 use NACN legal
+		if mail=3 use NACN mailing
+	*/
+
+	if MAIL=1 quit
+
+	type RecordCIF cif=Db.getRecord("CIF","ACN=:NACN")
+	type RecordACNADDR acnaddr=Db.getRecord("ACNADDR","CID=:CID")
+	
+	if MAIL=2 set typ="P" set acnaddr.mzip=cif.pzip
+	if MAIL=3 set typ="M" set acnaddr.mzip=cif.mzip
+	
+	for col="AD1","AD2","AD3","AD4","LOC","CITY","STATE","CNTRY" do {
+		set cifcol=typ_col
+		set acnaddr.@col=cif.@cifcol
+		}
+	
+	do acnaddr.save()
+
+	quit
+
+
+EXEC5(RecordACN acn)	// Account Title
+
+	type Number COUNTER,RELCNT,XACN
+	type String col,N,R,REL(),TITLE,X
+
+	set RELCNT=2
+
+	// set REL array in order of roles
+
+	type DbSet ds=Db.selectDbSet("RELCIF","CID=:CID")
+	while ds.next() do {
+		type RecordRELCIF relcif=ds.getRecord("RELCIF")
+		if relcif.role=1 set REL(1)=relcif.acn
+		else  do {
+			set REL(RELCNT)=relcif.acn
+			set RELCNT=RELCNT+1
+			}
+		}
+
+	set N="" 
+	set COUNTER=1
+
+	set R=acn.acnrelc		// relationship
+
+	// create NAM with all CIF names in role order
+	for  set N=REL(N).order() quit:N=""!(COUNTER>4)  do {
+		set XACN=REL(N)
+		type RecordCIF cif=Db.getRecord("CIF","ACN=:XACN")
+
+		set TITLE=cif.pref if TITLE.length() set TITLE=TITLE_" "
+		set TITLE=TITLE_cif.nam
+		type RecordRELCODE relcode=Db.getRecord("RELCODE","REL=:R,ROLE=:N")
+		set X=relcode.sfx if X.length() set X=" "_X
+		set TITLE=TITLE_X
+		
+		set col="TITLE"_COUNTER
+		set acn.@col=TITLE
+		set COUNTER=COUNTER+1
+		}
+
+	// Correct trailing Or or And for last Title
+	if COUNTER>2 do {
+		if acn.title4'="" set acn.title4=$$ANDORCHK(acn.title4)
+		else  set acn.title3=$$ANDORCHK(acn.title3)
+		}
+	quit
+
+
+ANDORCHK(String NAM)	//
+		
+	type Number NAML
+	type String ANDORCHK
+
+	// I18N=ON
+	set NAML=NAM.length() 
+	set ANDORCHK=NAM.extract(NAML-5,NAML)
+	set ANDORCHK=ANDORCHK.upperCase()
+	if ANDORCHK[" AND" set NAM=NAM.extract(1,NAML-5)
+	if ANDORCHK[" OR" set NAM=NAM.extract(1,NAML-4)
+	// I18N=OFF
+
+	quit NAM
+
+
+EXEC7(RecordACN acn)	//
+
+	type public Number CID,NACN,OACN
+
+	if acn.cls'="L" quit
+
+	type RecordLN ln={RecordLN}acn
+	
+	// commitment link
+	if ln.ccl quit
+	
+	// commit process flag
+	if 'ln.cpf quit
+
+	type RecordLNMCOM1 lnmcom1=Db.getRecord("LNMCOM1","ACN=:OACN,CID=:CID",1)
+	do lnmcom1.setAuditFlag(1)
+	set lnmcom1.acn=NACN
+	set lnmcom1.cid=CID
+	do lnmcom1.bypassSave()
+
+	quit
+
+
+EXEC8	// on-line collection
+
+	type Number LSEQ,OSEQ
+	type String UID
+	type public Boolean PRIM
+	type public Number NACN
+
+	quit:'PRIM.get()
+
+       type DbSet ds=Db.selectDbSet("LNOLC2","ACN=:OACN")
+       while ds.next() do {
+              type RecordLNOLC2 lnolc2=ds.getRecord("LNOLC2")
+              do lnolc2.setAuditFlag(1)
+              set UID=lnolc2.uid
+              set OSEQ=lnolc2.lseq
+              set LSEQ=Db.nextVal("LNOLC2","ACN=:NACN,UID=:UID")
+              set lnolc2.acn=NACN
+              set lnolc2.uid=UID
+              set lnolc2.lseq=LSEQ
+              do lnolc2.save()
+              }
+	quit
+
+
+EXEC9(RecordACN acn)	// IRA amounts
+
+	type Number RPA, RPASEQ
+	type public Boolean ER, PRIM
+	type public Number OACN, NACN
+
+	quit:'PRIM.get()
+
+	if acn.cls'="D" quit
+
+	type RecordDEP dep={RecordDEP}acn
+	// Not a Retirement Accnt
+	if 'dep.rpaseq quit
+	
+	// Retirement Pln
+	set RPASEQ=+dep.rpaseq
+
+	// Retirement Type
+	set RPA=+dep.ira
+
+	// Set upper level of ^IRA and check for auto distribution
+	type RecordIRATYPE iratype=Db.getRecord("IRATYPE","ACN=:NACN,RPASEQ=:RPASEQ",1)
+	if iratype.getMode()=0 do {
+		type RecordIRATYPE iratype1=Db.getRecord("IRATYPE","ACN=:OACN,RPASEQ=:RPASEQ",1)	
+		
+		// Before Insert on IRATYPE will calculate planid
+		
+		type RecordIRATYPE iratype=iratype1.copy()
+		set iratype.planid=""
+		set iratype.acn=NACN
+		do iratype.setMode(0)
+		do iratype.save()
+		}
+
+	type DbSet bends=Db.selectDbSet("IRABEN","ACN=:OACN AND RPASEQ=:RPASEQ")
+	if bends.next() do {
+		type RecordIRABEN iraben=bends.getRecord("IRABEN")
+                do iraben.setAuditFlag(1)
+                set iraben.acn=NACN
+                do iraben.save()
+	}
+	do EXEC9A
+
+	quit
+
+
+EXEC9A	//
+	
+	type Number CNT,I,XCID,YR
+	type String ETC,ITC,K,LOAD(,),TAMT,U(),TSO,UTSO,Z
+	type public Number CID,NACN,OACN,RPASEQ
+	type public Cache %CACHE()
+
+	type ResultSet rs=Db.select("CID","RELCIF","ACN=:OACN AND CID NOT=:CID")
+	if rs.isEmpty() do EXEC9E quit
+	set CNT=0
+	while rs.next() do { quit:CNT
+		set XCID=rs.getCol("CID")
+		type RecordACN acn=Db.getRecord("ACN","CID=:XCID")
+		if acn.cls'="D" quit
+		type RecordDEP dep={RecordDEP}acn
+		if +dep.acn'=OACN quit
+		if +dep.rpaseq'=RPASEQ quit
+		set CNT=CNT+1
+		}
+
+	if 'CNT do EXEC9E quit
+
+	/*
+	U(0) - distributions
+	U(1) - contributions
+	*/
+		
+	type ResultSet rsdis=Db.select("KEY,RSN","UTBLIRADIS")
+	while rsdis.next() set U(0,rsdis.getCol("KEY"))=rsdis.getCol("RSN")
+
+	type ResultSet rscon=Db.select("KEY,RSN","UTBLIRACON")
+	while rscon.next() set U(1,rscon.getCol("KEY"))=rscon.getCol("RSN")
+	
+	type DbSet dshist=Db.selectDbSet("HIST","CID=:CID")
+	while dshist.next() do {
+		type RecordHIST hist=dshist.getRecord("HIST")
+		set ITC=hist.itc1
+		if ITC="" quit			
+		set TAMT=+hist.tamt
+		// No transaction amount
+		if 'TAMT quit
+		set TSO=hist.tso
+		// No cont/dist code
+		if TSO="" quit
+		// Acr adj
+		if TAMT-(hist.tamt.curVal.piece("#",3))=0 quit
+	
+		do OUT^UTSO(.UTSO,.TSO)
+	
+		if ITC set TSO=UTSO("IRAC")
+		else  set TSO=UTSO("IRAD")
+	
+		if 'U(ITC,TSO).data() quit
+
+		// Find year of trans
+		set YR=+$$YEAR^SCADAT(hist.tjd,1)
+		if 'LOAD(YR).data() for I=0,1,2,4 set LOAD(YR,I)=""
+		set K=U(ITC,TSO)
+
+		set ETC=hist.etc
+		type RecordTRN trn=%CACHE("TRN").getRecord("TRN","ETC=:ETC")
+		
+		// Check 4th processing control flag (Withholding adjustment) - MRR
+		if trn.pcfd4 set ITC=2
+
+		set Z=ITC set LOAD(YR,Z).piece("|",K)=LOAD(YR,Z).piece("|",K)+TAMT
+	
+		// Death Distribution
+		if K=6 set Z=1 do EX9C1
+		
+		// Not a complex transaction
+		if hist.tamt'["#" quit
+
+		// Interest amount
+		set TAMT=hist.tamt.curVal.piece("#",3)
+
+		if TAMT do {
+			type Number X
+			set X=CUVAR.iraint 
+			set K=U(1,X) 
+			set Z=1
+			set LOAD(YR,Z).piece("|",K)=LOAD(YR,Z).piece("|",K)+TAMT 
+			}
+
+		// Penalty amount
+		set TAMT=hist.tamt.curVal.piece("#",4)
+
+		if TAMT do {
+			type Number X
+			set X=CUVAR.irapen 
+			set K=U(0,X) 
+			set Z=0 
+			set LOAD(YR,Z).piece("|",K)=LOAD(YR,Z).piece("|",K)+TAMT
+			}
+
+		// Federal Withholding
+		set TAMT=hist.tamt.curVal.piece("#",5)
+
+		if TAMT do {
+			set K=U(ITC,TSO) 
+			set Z=2 
+			set LOAD(YR,Z).piece("|",K)=LOAD(YR,Z).piece("|",K)+TAMT
+			}
+
+		// Death Distribution
+		if K=6 set Z=2 do EX9C1
+
+		// State Withholding
+		set TAMT=hist.tamt.curVal.piece("#",15)
+
+		if TAMT do {
+			set K=U(ITC,TSO) 
+			set Z=4 
+			set LOAD(YR,Z).piece("|",K)=LOAD(YR,Z).piece("|",K)+TAMT
+			}
+
+		// Death Distribution
+		if K=6 set Z=5 do EX9C1
+		}
+
+	// add to new ACN
+	do EXEC9B(NACN,RPASEQ,"+",.LOAD)
+
+	// subtract from old ACN
+	do EXEC9B(OACN,RPASEQ,"-",.LOAD)
+
+	quit
+
+
+EXEC9B(Number ACN,Number RPASEQ,String SIGN,String ARRAY)
+
+	// Add/Subtract amounts in IRA depending on SIGN
+
+	type Number NODE, TAXYR
+	type String col, K
+
+	set TAXYR=""
+	for  set TAXYR=ARRAY(TAXYR).order() quit:TAXYR=""  do {
+		type RecordIRA ira=Db.getRecord("IRA","ACN=:ACN,RPASEQ=:RPASEQ,TAXYR=:TAXYR",1)
+		// 0-D, 1-C, 2-W, 4-SW
+		set NODE=""
+		for  set NODE=ARRAY(TAXYR,NODE).order() quit:NODE=""  do {
+				for K=1:1:ARRAY(TAXYR,NODE).length("|") do {
+					set col=$select(NODE=0:"D",NODE=1:"C",NODE=2:"W",NODE=4:"SW")_K
+					if SIGN="+" set ira.@col=ira.@col+ARRAY(TAXYR,NODE).piece("|",K)
+					if SIGN="-" set ira.@col=ira.@col-ARRAY(TAXYR,NODE).piece("|",K)
+					}
+			}
+		
+		do ira.save()
+		
+		}
+
+	
+	quit
+
+
+EX9C1	// Summarize Beneficiary information to be transferred
+	
+	type String BEN
+	type public Number BENSEQ,NACN,OACN,RPASEQ,TAMT,YR,Z
+	type public String UTSO
+
+	if 'UTSO("BEN").data() quit
+
+	type RecordIRABEN1 oiraben
+	type RecordIRABEN1 niraben
+
+	set BEN=UTSO("BEN")
+	
+	set oiraben=Db.getRecord("IRABEN1","ACN=:OACN,RPASEQ=:RPASEQ,BENSEQ=:BEN,CYR=:YR")
+	set niraben=Db.getRecord("IRABEN1","ACN=:NACN,RPASEQ=:RPASEQ,BENSEQ=:BEN,CYR=:YR",1)
+
+	if Z=1 do {
+		set oiraben.tamt=oiraben.tamt-TAMT
+		set niraben.tamt=niraben.tamt+TAMT
+		}
+	if Z=2 do {
+		set oiraben.wth=oiraben.wth-TAMT
+		set niraben.wth=niraben.wth+TAMT
+		}
+	if Z=5 do {
+		set oiraben.totstwh=oiraben.totstwh-TAMT
+		set niraben.totstwh=niraben.totstwh+TAMT
+		}
+
+	do oiraben.save()
+	do niraben.save()
+
+	quit
+
+
+EXEC9E	//  Transfer all information (Only 1 account on IRA plan)
+
+	type Number BENSEQ,CYR,TAXYR
+	type public Number CID,NACN,OACN,RPASEQ
+
+	// Load info from old IRA into new IRA
+
+	type DbSet ods=Db.selectDbSet("IRA","ACN=:OACN AND RPASEQ=:RPASEQ")
+	while ods.next() do {
+		type RecordIRA oira=ods.getRecord("IRA")
+		set TAXYR=oira.taxyr
+
+		type RecordIRA nira=Db.getRecord("IRA","ACN=:NACN,RPASEQ=:RPASEQ,TAXYR=:TAXYR",1)
+		if nira.getMode()=0 set nira=oira.copy()
+		else  do EXC9MOV(.oira,.nira)
+
+		do nira.save()
+
+		do Db.delete("IRA","ACN=:OACN AND RPASEQ=:RPASEQ AND TAXYR=:TAXYR")
+		}
+
+	do Db.delete("IRATYPE","ACN=:OACN AND RPASEQ=:RPASEQ")
+
+	type DbSet ben1ds=Db.selectDbSet("IRABEN1","ACN=:OACN AND RPASEQ=:RPASEQ")
+	while ben1ds.next() do {
+		type RecordIRABEN1 oben=ben1ds.getRecord("IRABEN1")
+		set BENSEQ=oben.benseq
+		set CYR=oben.cyr
+
+		type RecordIRABEN1 nben=Db.getRecord("IRABEN1","ACN=:NACN,RPASEQ=:RPASEQ,BENSEQ=:BENSEQ,CYR=:CYR",1)
+		if nben.getMode()=0 set nben=oben.copy() 
+		else  do {
+			set nben.tamt=nben.tamt+oben.tamt
+			set nben.wth=nben.wth+oben.wth
+			set nben.benfair=nben.benfair+oben.benfair
+			set nben.totstwh=nben.totstwh+oben.totstwh
+			}
+
+		do nben.save()
+		
+		do Db.delete("IRABEN1","ACN=:OACN AND RPASEQ=:RPASEQ AND BENSEQ=:BENSEQ AND CYR=:CYR")
+		}
+
+	quit
+
+
+EXC9MOV(RecordIRA oira,RecordIRA nira)	// Add old amounts to new customer's existing plan
+
+	type Number I
+	type String col
+
+	// Distribution information - '0'
+		
+	for I=1:1:8,10:1:29,34:1:39,43:1:89,94:1:99 set col="D"_I set nira.@col=nira.@col+oira.@col
+
+	set nira.pvmad=nira.pvmad+oira.pvmad
+	set nira.maxlif=nira.maxlif+oira.maxlif
+	set nira.madamt=nira.madamt+oira.madamt
+	set nira.madcy=nira.madcy+oira.madcy
+	set nira.neildte=nira.neildte+oira.neildte
+	set nira.rnei=nira.rnei+oira.rnei
+	set nira.unei=nira.unei+oira.unei
+	
+	// Contribution information - '1'
+
+	for I=1:1:17 set col="C"_I set nira.@col=nira.@col+oira.@col
+
+	// Withholding information - '2'
+
+	for I=1:1:29,34:1:39,43:1:45,47:1:89,94:1:99 set col="W"_I set nira.@col=nira.@col+oira.@col
+
+	// State withholding information - '4'
+
+	for I=1:1:8,10:1:29,34:1:39,43:1:45,47:1:89,94:1:99 set col="SW"_I set nira.@col=nira.@col+oira.@col
+
+	// Non-resident Distribution information - '13'
+	
+	for I=1:1:8,10,12:1:27,45 set col="NRD"_I set nira.@col=nira.@col+oira.@col
+	set nira.nrmadcy=nira.nrmadcy+oira.nrmadcy
+
+	// Non-resident Withholding information - '14'
+
+	for I=1:1:6,8,9,10,12:1:27,45 set col="NRW"_I set nira.@col=nira.@col+oira.@col
+
+	// Non-resident Withholding Against information - '15'
+
+	for I=1:1:6,8,9,10,12:1:27,45 set col="NRWA"_I set nira.@col=nira.@col+oira.@col
+
+	quit
+	
+
+EXEC10	// Add and delete customer stops
+
+	type Number NEWSEQ,OLDSEQ,XCID
+	type String SRC,NEWSRC
+	type public Number NACN,OACN
+
+	set NEWSEQ=Db.currVal("STOP1","ACN=:NACN")
+	type DbSet ods=Db.selectDbSet("STOP1","ACN=:OACN")
+        while ods.next() do {
+              type RecordSTOP1 stop1=ods.getRecord("STOP1")
+              do stop1.setAuditFlag(1)
+              set OLDSEQ=stop1.seq
+              set NEWSEQ=NEWSEQ+1
+              set stop1.acn=NACN
+              set stop1.seq=NEWSEQ
+              do stop1.save()
+              set SRC="1,"_OACN_","_OLDSEQ
+              set NEWSRC="1,"_NACN_","_NEWSEQ
+
+              type ResultSet rs=Db.select("CID","RELCIF","ACN=:OACN")
+              while rs.next() do {
+                     set XCID=rs.getCol("CID")
+                     type DbSet ds=Db.selectDbSet("STOP2","CID=:XCID AND SRC=:SRC")
+                     while ds.next() do {
+                           type RecordSTOP2 stop2=ds.getRecord("STOP2")
+                           set stop2.src=NEWSRC
+                           do stop2.save()
+                           }
+                     }
+              }
+
+	quit
+	
+
+EXEC95	// Set history entries 
+
+	type public Number NACN,OACN
+
+	// Customer ~p1 deleted
+	do HISTBLD^ACNFUNCS($$^MSG(704,OACN),"","","")
+
+	// Customer ~p1 created
+
+	do HISTBLD^ACNFUNCS($$^MSG(703,NACN),"","","")
+	quit
+
+
+EXEC99	// Change linked escrows
+
+	type Number I
+	type String X
+	type public Number CID
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID",1)
+	if ln.getMode()=0 quit
+	
+	type RecordLNBIL0 lnbil0=Db.getRecord("LNBIL0","CID=:CID",1)
+
+	for I=1:1:20 set CID=+$$ESCACT^BILFUNCS(.lnbil0,I) if CID do EXEC
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60376^44112^Shriram Deshpande^19697"	// Signature - LTD^TIME^USER^SIZE

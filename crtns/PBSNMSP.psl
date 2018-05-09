@@ -1,0 +1,564 @@
+public PBSNMSP(reply,stfflg,record,rectyp,contxt)	//NMSP Service Class Driver
+	/*
+	   ORIG: MATTSON - 11/08/93
+
+	   Network Services And Stored Procedures Driver
+
+	   ARGUMENTS:
+		. reply	  Reply message		/TYP=T/MECH=REFNAM:W
+		. stfflg  STF flag		/TYP=T/REQ/MECH=VAL
+		. record  Input Message		/TYP=T/REQ/MECH=VAL
+		. rectyp  Record type		/TYP=N/REQ/MECH=VAL
+		. contxt  Context		/TYP=T/NOREQ/MECH=VAL
+
+	   RETURNS:
+		. $$  Message reply status	/TYP=N/LEN=1
+
+	   EXAMPLE:
+	   S ER=$$^PBSNMSP(.reply,0,MSG,0,"")
+
+	  ------Revision History------------------------------------------------
+
+	  06/29/06 - KELLYP - CR 21972
+	  	     Modified NMSP1 section to eliminate unnecessary updates
+	  	     to SCAU.  Previously, if the user had already signed on 
+	  	     once today without any password failures, the system would
+	  	     generate a LOG record w/ no corresponding LOG1 record during
+	  	     the scau.save.  This then caused the ddpserver to issue an
+	  	     unnecessary FEP.  Also modified top-level label to be public,
+	  	     eliminated precedence warnings in TOKEN section, and removed
+	  	     pre-2003 revision history.
+	  
+	  02/23/05 - RussellDS - CR 14553
+	  	     Modified section trust to make contxt lower case, versus
+	  	     upper case, to correspond with input parameter.
+	
+	  12/17/03 - CARROLLJ - CR 7239
+		     Added #ACCEPT prior to xecute command.
+
+	  06/23/03 - Erik Scheetz - 51349
+		     Modified code to use lower case stfflg and rectyp to avoid
+		     undefined error.  Also modified call to SCAUCDI to pass in
+		     the correct parameters.
+
+	  01/27/03 - Spier - 51423
+		     Converted db.isdefined to getRecord with 3rd parameter
+		     Old code had syntax error, new is more efficient
+	*/
+	new field,ptr
+
+	set ptr=$$LV2V^MSG(record,.field)
+	if $G(field(1))=0 quit $$NMSP0(.reply,.field)
+	if $G(field(1))=1 quit $$NMSP1(.reply,.field)
+	if $G(field(1))=2 quit $$NMSP2(.reply,.field)
+	if $G(field(1))=3 quit $$NMSP3(.reply,.field)
+	if $G(field(1))=4 quit $$NMSP4(.reply,.field)
+	if $G(field(1))=5 quit $$NMSP5(.reply,.field)
+	if $G(field(1))=99 quit $$NMSP99(.reply,.field)
+
+	// Invalid service procedure
+	set reply=$$CSERR^PBSUTL("SV_INVLDNMP")
+	quit 1
+
+
+NMSP0(reply,field)	//Private;Sign-off
+
+	/*
+
+	   ARGUMENTS:
+		. reply Reply message			/TYP=T/MECH=REFNAM:W
+		. field Input record field array	/TYP=T/MECH=REFARR:R
+
+	   RETURNS:
+		. $$ Message status			/TYP=N/LEN=1
+
+
+	*/
+	new TOKEN
+
+	set TOKEN=$G(field(2))
+	if TOKEN="" set reply=$$CSERR^PBSUTL("SV_TOKENREQ") quit 1
+
+	type RecordTOKEN token=Db.getRecord("TOKEN","TOKEN",1)
+	if token.getMode()=0 set reply=$$CSERR^PBSUTL("SV_INVLDTKN") quit 1
+	set token.stat=0
+	do token.bypassSave()
+	set reply=$$V2LV^MSG("")
+	quit 0
+
+
+NMSP1(reply,field)	//Private;Sign-on
+
+	/*
+
+	   ARGUMENTS:
+		. reply Reply message			/TYP=T/MECH=REFNAM:W
+		. field Input record field array	/TYP=T/MECH=REFARR:R
+
+	   RETURNS:
+		. $$ Message status			/TYP=N/LEN=1
+
+
+	*/
+	new CLTYP,CTXT,CLVER,er,FAP,FAPS,FLD,GBLDIR
+	new INST,LANG,list,NPWD,PSWD,PSWDAUT,PWD,PWDFAIL,STN,TOKEN,UCLS,UID
+
+	set er=0
+	set GBLDIR=""
+	set UID=$G(field(2))
+	set STN=$G(field(3))
+	set PWD=$G(field(4))
+	set INST=$G(field(5))
+	set FAPS=$G(field(6))
+	set CTXT=$G(field(7))
+	set NPWD=$G(field(8))
+	set CLTYP=$G(field(9))
+	set CLVER=$G(field(10))
+
+	if UID="" set reply=$$CSERR^PBSUTL("SV_USRIDREQ") quit 1
+	if STN="" set reply=$$CSERR^PBSUTL("SV_STNIDREQ") quit 1
+	if '$$chkver(CLTYP,CLVER,.%ClientVersionID) set reply=$$CSERR^PBSUTL("SV_MISMATCH") quit 1
+	if INST'="" do { if er quit 1
+		if 'Db.isDefined("CTBLINST","INST") set er=1,reply=$$CSERR^PBSUTL("SV_INVLDINS") quit
+		type RecordCTBLINST ctblinst=Db.getRecord("CTBLINST","INST") 
+		set GBLDIR=ctblinst.log if GBLDIR'="" set $ZGBLDIR=GBLDIR
+		}
+
+	set %UserID=UID
+	if 'Db.isDefined("SCAU","%UserID") set reply=$$CSERR^PBSUTL("SV_INVLDUID") quit 1
+	if rectyp,%UserID'?1N.N set reply=$$CSERR^PBSUTL("SV_USRIDFMT") quit 1
+
+	type RecordSCAU scau=Db.getRecord("SCAU","%UserID")
+
+	if $$STATUS^SCAUCDI(scau.%ucls,scau.lsgn,scau.mrstat,scau.pwdfail)=3 set reply=$$CSERR^PBSUTL("SV_USRIDREV") quit 1
+
+	do scau.setAuditFlag(1)
+	set LANG=scau.lang
+	set UCLS=scau.%ucls
+	set PWDFAIL=scau.pwdfail
+
+	// Check password expiration
+	if scau.pexpr<%CurrentDate do { if er quit 1
+		// Allow native STF
+		if stfflg,'rectyp quit
+		set er=1 set reply=$$CSERR^PBSUTL("SV_PSWRDEXP")
+		}
+
+	do chkpwd(.scau,field(1)) if er do { quit 1
+		set PWDFAIL=PWDFAIL+1
+		set scau.pwdfail=PWDFAIL
+		do scau.save()
+		}
+
+	if LANG'="" do { if er quit 1
+		if 'Db.isDefined("UTBLLANG","LANG") do { if er quit
+			// Allow native STF
+			if stfflg,'rectyp quit
+			set er=1 set reply=$$CSERR^PBSUTL("SV_INVLDLNG") quit
+			}
+		else  do {
+			type RecordUTBLLANG lang=Db.getRecord("UTBLLANG","LANG")
+			set GBLDIR=lang.gbldir
+			}
+		if $G(GBLDIR)'="" set $ZGBLDIR=GBLDIR
+		}
+
+	do { if er quit 1
+		if FAPS=$C(0) quit
+		new I,PTR,SRV,SUB
+
+		set PTR=$$LV2V^MSG(FAPS,.SUB)
+		for I=1:2 quit:'$D(sub(i))  do { quit:er
+			set SRV=SUB(I) if SRV="" quit
+			set FAP=$G(SUB(I+1)) if FAP="" quit
+			if Db.isDefined("CTBLFAP","FAP") set FAP(SRV)=FAP quit
+			set er=1 set reply=$$CSERR^PBSUTL("SV_INVLDFAP")
+			}
+
+		set FAPS=""
+		type ResultSet rs=Db.select("SRVCLS","STBLSRVCLS","SRVCLS>0")
+		if 'rs.isEmpty() while rs.next() do { 
+			set SRV=rs.getCol(1)
+			I $D(FAP(SRV)) S $P(FAPS,"~",SRV)=FAP(SRV)
+			}
+		}
+
+	type RecordTOKEN token=Class.new("RecordTOKEN")
+	set token.stat=1
+	set token.uid=UID
+	set token.stn=STN
+	set token.%vnc=%ClientVersionID
+	set token.fap=FAPS
+	set token.ucls=UCLS
+	set token.lang=LANG
+	set token.inst=INST
+	set token.gbldir=GBLDIR
+	set token.ctxt=$$ctxt(CTXT)
+	set token.tjd=%SystemDate
+	set token.key=""
+	set token.%svchnid=%ServerChannelID
+
+	if field(1)=1!($G(%SessionID)="") do {
+		set TOKEN=$$TOKEN
+		set token.token=TOKEN
+		do Db.fastDelete("MSGLOG","TOKEN")
+		do Db.fastDelete("SQLCUR","TOKEN")
+		}
+
+	else  do { if er quit
+		if 'Db.isDefined("TOKEN","%SessionID") set token.token=%SessionID quit
+		type RecordTOKEN token2=Db.getRecord("TOKEN","%SessionID")
+		if 'token2.stat set token.token=%SessionID quit
+		set er=1 set reply=$$CSERR^PBSUTL("SV_TOKINUSE")
+		}
+
+	// Only need to update these two fields if they're actually going to change
+	if scau.lsgn'=%CurrentDate set scau.lsgn=%CurrentDate
+	if scau.pwdfail'=0 set scau.pwdfail=0
+	
+	if NPWD="" do { if er quit 1
+		if scau.newpwdreq set er=1 set reply=$$CSERR^PBSUTL("SV_NEWPWREQ") quit
+
+		// If password is already encrypted quit
+		if $E(PWD)=$C(1) quit
+		if scau.pswdaut'="" quit
+		do pswdaut(PWD,.PSWDAUT) if er quit
+		set scau.pswdaut=PSWDAUT
+		}
+
+	if NPWD'="" do { if er quit 1
+		set PSWD=$$ENC^SCAENC(NPWD)
+		do pswdaut(NPWD,.PSWDAUT) if er quit
+		set scau.pswd=PSWD
+		set scau.pswdaut=PSWDAUT
+		set scau.newpwdreq=0
+		}
+
+	if scau.isChanged() do { if er quit 1
+		do scau.save()
+		if ER set er=1 set reply=$$ERRMSG^PBSUTL($G(RM),$G(ET)) quit
+		}
+
+	do token.bypassSave()
+	set FLD(1)=token.token
+	set FLD(2)=%SystemDate
+	set FLD(3)=LANG
+	set reply=$$V2LV^MSG(.FLD)
+	quit 0
+
+
+chkver(CLTYP,CLVER,%ClientVersionID)	//Private;Check client for compatibility w/ server
+
+	/*
+	   ARGUMENTS:
+		. CLTYP Client type			/TYP=T/NOREQ/MECH=VAL
+		. CLTYP Client version ID		/TYP=T/NOREQ/MECH=VAL
+		. %VNC Client type/version ID		/TYP=T/NOREQ/MECH=REF:W
+
+	   RETURNS:
+		. $$ Status
+				0 = Client version is not compatible with the serve
+				1 = Client version is compatible with the server
+
+
+	   If both the client type and version number are not specified, then
+	   all client versions are allowed for this client type (for backward
+	   compatibility).
+
+	*/
+	#ACCEPT DATE=12/17/03;PGM=John Carroll;CR=7239
+	set %ClientVersionID=""
+	if $G(CLTYP)="" quit 1
+	if $G(CLVER)="" quit 1
+
+	new PAR,PARAM,PGM,STS,X
+
+
+	if 'Db.isDefined("VERSION","CLTYP") quit 1
+	type RecordVERSION version=Db.getRecord("VERSION","CLTYP")
+	set PGM=version.pgm
+	if PGM="" quit 1
+
+	// Execute the validation routine to determine if the client version
+	// is supported by the server.
+
+	set PAR(1)=CLTYP
+	set PAR(2)=CLVER
+	set PARAM=$$param^PBSUTL(.PAR)
+
+	#ACCEPT DATE=12/17/03;PGM=John Carroll;CR=7239
+	set X="S STS="_PGM_"("_PARAM_")" xecute X
+	#ACCEPT DATE=12/17/03;PGM=John Carroll;CR=7239
+	if STS set %ClientVersionID=CLTYP_"-"_CLVER
+	quit STS
+
+
+CHKVER(CLTYP,CLVER)	//Standard version compatibility validation routine
+
+	/*
+
+	   ARGUMENTS:
+		. CLTYP 	CLIENT TYPE   		/TYP=T/NOREQ/MECH=VAL
+		. CLVER 	Client version ID  	/TYP=T/NOREQ/MECH=VAL
+
+	   RETURNS:
+		. $$ Status
+			0 = Client version is not compatible with the server
+			1 = Client version is compatible with the server
+
+
+	*/
+	new X
+	
+	if $G(%VersionID)="" new %VersionID do {
+		type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+		#ACCEPT DATE=12/17/03;PGM=John Carroll;CR=7239
+		set %VersionID=cuvar.%vn
+		}
+	if 'Db.isDefined("VERSIONCL","CLTYP,%VersionID") quit 1
+	type RecordVERSIONCL version=Db.getRecord("VERSIONCL","CLTYP,%VersionID")
+
+	if version.newversionid="" set newversionid=99999
+	if CLVER<version.oldversion quit 0
+	if CLVER>version.newversionid quit 0
+	quit 1
+
+
+chkpwd(RecordSCAU scau,SRVPRC)	//Private;Check password
+
+
+	// Allow null password if trusted
+	if PWD="",$$trust quit
+
+	if SRVPRC=1 do {
+		if $$ENC^SCAENC(PWD)=scau.pswd quit
+		// Allow native STF
+		if stfflg,'rectyp quit
+		set er=1 set reply=$$CSERR^PBSUTL("SV_INVLDPWD")
+		}
+
+	if SRVPRC=5 do {
+		new AUT,X
+		type RecordTOKEN token=Db.getRecord("TOKEN","%SessionID")
+		if token.key="" set er=1 set reply=$$CSERR^PBSUTL("SV_INVLDTKN") quit
+
+		set X=$$AUT^%ENCRYPT(token.key,scau.pswdaut,.AUT)
+		if X set er=1 set reply=$$CSERR^PBSUTL("SV_INVLDENC") quit
+		if AUT'=PWD set er=1 set reply=$$CSERR^PBSUTL("SV_INVLDPWD") quit
+		}
+	quit
+
+
+pswdaut(PWD,PSWDAUT)	//Private;32 character encryption
+
+
+	set er=$$ENC^%ENCRYPT(PWD,.PSWDAUT)
+	if er set reply=$$CSERR^PBSUTL("SV_INVLDENC")
+	quit
+
+
+trust()	//Private;Trusted mode?
+
+	type public String contxt
+
+
+	if $G(contxt)="" quit ""
+	quit $E(contxt,$F(contxt,"/TRUST="))
+
+
+NMSP2(reply,field)	//Private;Heartbeat
+
+	/*
+
+	   ARGUMENTS:
+		. reply	Reply message			/TYP=T/MECH=REFNAM:W
+		. field	Input record field array	/TYP=T/MECH=REFARR:R
+
+	   RETURNS:
+		. $$ Message status			/TYP=N/LEN=1
+
+
+	*/
+	set reply=$$V2LV^MSG("")
+	quit 0
+
+
+NMSP3(reply,field)	//Private;Client context
+
+	/*
+
+	   ARGUMENTS:
+		. reply Reply message			/TYP=T/MECH=REFNAM:W
+		. field Input record field array	/TYP=T/MECH=REFARR:R
+
+	   RETURNS:
+		. $$ Message status			/TYP=N/LEN=1
+
+
+	*/
+	new TOKEN
+
+	set TOKEN=$G(field(2))
+	if TOKEN="" set reply=$$CSERR^PBSUTL("SV_TOKENREQ") quit 1
+	if 'Db.isDefined("TOKEN","TOKEN") set reply=$$CSERR^PBSUTL("SV_INVLDTKN") quit 1
+	type RecordTOKEN token=Db.getRecord("TOKEN","TOKEN")
+	set token.ctxt=$$ctxt($G(field(3)))
+	do token.bypassSave()
+	set reply=$$V2LV^MSG("")
+	quit 0
+
+
+NMSP4(reply,field)	//Private;Sign-on request
+
+	/*
+
+	   ARGUMENTS:
+		. reply Reply message			/TYP=T/MECH=REFNAM:W
+		. field Input record field array	/TYP=T/MECH=REFARR:R
+
+	   RETURNS:
+		. $$ Message status			/TYP=N/LEN=1
+
+
+	*/
+	new KEY,TOKEN,UID
+
+	set UID=$G(field(2))
+	if UID="" set reply=$$CSERR^PBSUTL("SV_USRIDREQ") quit 1
+	if 'Db.isDefined("SCAU","UID") set reply=$$CSERR^PBSUTL("SV_INVLDUID") quit 1
+
+	// Generate SignOnKey
+	set KEY=$$KEY^%ENCRYPT
+	type RecordSCAU scau=Db.getRecord("SCAU","UID")
+	if scau.pswdaut="" set TOKEN=""
+	else  do {
+		type RecordTOKEN token=Class.new("RecordTOKEN")
+		set token.stat=0
+		set TOKEN=$$TOKEN
+		set token.token=TOKEN
+		set token.key=KEY
+		do token.bypassSave()
+		}
+
+	set FLD(1)=TOKEN
+	set FLD(2)=KEY
+	set reply=$$V2LV^MSG(.FLD)
+	quit 0
+
+
+NMSP5(reply,field)	//Private;Sign-on authentication
+
+	/*
+
+	   ARGUMENTS:
+		. reply Reply message			/TYP=T/MECH=REFNAM:W
+		. field Input record field array	/TYP=T/MECH=REFARR:R
+
+	   RETURNS:
+		. $$ Message status			/TYP=N/LEN=1
+
+
+	*/
+	quit $$NMSP1(.reply,.field)
+
+
+NMSP99(reply,field)	//Private;Function calls (non-IBS specific)
+
+	/*
+
+	   Note:  This NMSP message is for internal use only.  It is NOT a
+		   public NMSP message.  No documentation will be found in
+		   the PROFILE Open Banking Server Specification.
+
+	   ARGUMENTS:
+		. reply Reply message			/TYP=T/MECH=REFNAM:W
+		. field Input record field array	/TYP=T/MECH=REFARR:R
+
+	   RETURNS:
+		. $$ Message status   /TYP=N/LEN=1
+
+
+	*/
+	new FUNC,PAR,PTR,X
+
+	set PTR=$$LV2V^MSG($G(field(3)),.PAR)
+	set FUNC="$$"_$G(field(2))_"^%ZFUNC("
+	set FUNC=FUNC_$$param^PBSUTL(.PAR)_")"
+	#ACCEPT DATE=12/17/03;PGM=John Carroll;CR=7239
+	xecute "S X="_FUNC
+
+	set reply=$$V2LV^MSG(X)
+	quit 0
+
+
+TOKEN()	//Private;Generate client token
+
+	/*
+
+	   RETURNS:
+		. $$ Client token			/TYP=T
+
+
+	*/
+	new STR,X,Y
+	/*
+	 Increment pointer, reset if value exceeds 15,018,570 (a larger value
+	 results in a token with a length greater than 4 characters) and
+	 generate a unique alpha-numeric token.
+	*/
+	set STR="0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+
+	type RecordTOKENLAST tok=Db.getRecord("TOKENLAST",,1)
+	set X=tok.lasttoken+1 
+	if X>15018570 set X=1 
+	set tok.lasttoken=X
+	do tok.bypassSave()
+	set Y="" for  quit:'X  set Y=$E(STR,((X-1)#62)+1)_Y set X=(X-1)\62
+	quit Y
+
+
+ctxt(CONTXT)	//Private;Parse client context data
+
+	/*
+
+	   This subroutine returns client context data (LV complex field)
+	   as a string which is delimited by a field separator (ASCII 28).
+	   This data will be stored in the sign-on file on the server and
+	   passed to the service class driver when subsequent client messages
+	   are received by the server.
+
+	   ARGUMENTS:
+		. contxt Client context (LV complex field)
+
+	   RETURNS:
+		. $$ Client context (string)
+
+
+	*/
+	if CONTXT="" quit ""
+
+	new DATA,I,J,NAM,PTR,SRVCLS,STRING,SUB,VAL,X
+
+	set PTR=$$LV2V^MSG(CONTXT,.SUB)
+	set STRING=""
+
+	for I=1:1 quit:'$D(SUB(I))  kill DATA do {
+		set PTR=$$LV2V^MSG(SUB(I),.DATA)
+		set SRVCLS=$G(DATA(1)) quit:'SRVCLS
+		set X=""
+
+		// Qualifier^value
+		for J=2:2 quit:$G(DATA(J))=""  do {
+			set NAM=DATA(J)
+			set X=X_"/"_NAM
+			set VAL=$G(DATA(J+1))
+			if VAL'="" set X=X_"="_VAL
+
+			}
+		set $P(STRING,$C(28),SRVCLS)=X
+		}
+
+	quit STRING
+
+vSIG()	quit "60445^58847^Pat Kelly^13314"	// Signature - LTD^TIME^USER^SIZE

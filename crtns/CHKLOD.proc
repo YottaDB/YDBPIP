@@ -1,0 +1,267 @@
+CHKLOD	
+  /*
+DESC: Sets up file with check load information
+
+---- Comments --------------------------------------------------------
+
+---- Revision History ------------------------------------------------
+
+	11/15/06 - PUTTASWH - CR22360
+		   Modified FILE section to set the 3rd parameter of
+		   Db.getRecord to 1.
+	
+	10/17/05 - PUTTASWH - CR17011
+	 	   Converted to PSL and replaced references to XCHKREG
+	 	   table with CHKREG1 table.
+
+ */
+	
+	do CREATE 
+  	quit
+ 	
+CREATE	//---------------
+
+	type public Boolean DEF,ER	
+	type public Number BGN,END
+	type public String CKTYPE,DEVICE
+	type Boolean FINISH
+	type Number BRCD,%PG,%PAGE
+	type String ET,NODNAM,OLNTB,VFMQ
+	type RecordCHKDEVP chkdevp
+	
+	set (DEF,FINISH)=0
+	set (BGN,END,%ProcessMode)=0
+	set (CKTYPE,DEVICE)=""
+	
+	set NODNAM=$$NODENAM^%ZFUNC				
+	
+	if NODNAM="" set ER=1,ET="INVLDNODE" do DSPBP^UTLERR quit
+	
+	set %PG=0,%PAGE=1	
+	
+        for  do {  quit:FINISH
+                if %PG=0 do VPG00(.chkdevp,.BRCD,.VFMQ,NODNAM) if ER!(VFMQ="Q") set FINISH=1 quit
+                
+                if %PG>0 do VPG01(.BRCD,.VFMQ)
+
+                if ("DFQ"[VFMQ)!$G(ER) do VER(.chkdevp,VFMQ) set FINISH=1 quit
+
+                set %PG=%PG+1
+                }	
+	quit	
+
+VPG00(RecordCHKDEVP chkdevp,	// CHKDEVP record
+	Number BRCD,		// Branch Code
+	String VFMQ,		// VFMQ
+	String NODNAM)		// NODNAM
+	
+	type public Boolean ER	
+	type public String DEVICE
+	type String %NOPRMT,%READ,%TAB
+
+	set %TAB("DEVICE")=".IO4/XPP=D VPOST1^CHKLOD(.chkdevp,.BRCD,NODNAM)/TBL=[UTBLDEVICE]:QU ""[UTBLDEVICE]NODE=<<NODNAM>>"""  
+	set %READ="@@%FN,,,DEVICE/REQ",%NOPRMT="N"
+	
+	do ^UTLREAD if VFMQ="Q" set ER=1 quit
+	
+	quit	
+	
+VPG01(Number BRCD,	// Branch code 
+	String VFMQ)	// VFMQ	
+	// Input screen	
+	
+	type public Boolean DEF,ER
+	type public Number BGN,END
+	type public String CKTYPE,DEVICE
+	type Number OLNTB	
+	type String %READ,%TAB
+	
+	set %TAB("CKTYPE")=".CHKTYP1/TBL=[UTBLCHKS]"
+	set %TAB("BGN")=".BGN1"
+	set %TAB("END")=".CHKE1/XPP=D VPOST2^CHKLOD(BRCD,.VFMQ)"
+	set %TAB("DEF")=".DEF1/HLP=[CHKDEVP]DEF"
+	set %TAB("BRCD")=".BRCD1/TBL=[UTBLBRCD]"
+	set OLNTB=6000
+	set %READ="CKTYPE/REQ,BGN/REQ,END/REQ,DEF/REQ"
+	
+	if DEVICE.find(".") set %READ="BRCD/REQ,"_%READ
+	
+	do ^UTLREAD if VFMQ="Q" set ER=1 quit
+	
+	quit	
+	
+VPOST1(RecordCHKDEVP chkdevp,	// CHKDEVP Record
+	Number BRCD,		// Branch code 
+	String NODNAM)		// NODNAM	
+	// Post-processor for DEVICE	
+	
+	type public Boolean DEF,ER
+	type public Number BGN,END
+	type public String CKTYPE,X
+	type String Z
+
+	quit:X="" 
+	
+	if 'X.find(".") do {  quit:ER
+				
+		type RecordDEVICE device=Db.getRecord("DEVICE","DEVNAME=:X",1)
+		if (X=$I)!'device.getMode() do Runtime.setErrMSG("DEVICE",2021) quit	// Not a printer device
+		
+		set X=device.device if X.find(".") quit
+		
+		// Not a printer device
+		if ((device.TYPE '="PTR") & (device.TYPE '="PNTQ")) do Runtime.setErrMSG("DEVICE",2021) quit
+		
+		type RecordUTBLDEVICE utbldevice=Db.getRecord("UTBLDEVICE","NODE=:NODNAM,KEY=:X",1)
+		if 'utbldevice.getMode() do Runtime.setErrMSG("UTBLDEVICE",7879) quit	// Invalid device	
+		
+		set BRCD=utbldevice.BRCD
+		}
+	
+	if X.find(".") do { 
+		
+        	// Check validity of directory			
+        	set Z=$$FILE^%ZOPEN(X,"WRITE/NEWV",5)        	        	
+        	
+        	// Invalid directory
+        	if 'Z do Runtime.setErrMSG("DEVICE",1315) quit
+        	do CLOSE^SCAIO
+        	set Z=$$DELETE^%OSSCRPT(X)
+        	
+        	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+		set BRCD=cuvar.bobr
+		}
+	
+	// Default existing data if defined in device table
+	set chkdevp=Db.getRecord("CHKDEVP","DEVICE=:X",1)
+	set CKTYPE=chkdevp.ctype
+	set BGN=chkdevp.begnum
+	set END=chkdevp.endnum
+	set DEF=chkdevp.def
+		
+	quit	
+	
+VPOST2(Number BRCD,	// Branch code 	
+	String VFMQ)	// VFMQ
+	// Post-processor for low/high numbers
+	
+	type public Boolean DEF,ER
+	type public Number BGN,END
+	type public String CKTYPE,X
+	type Number L1
+	type String DEV,HC,LC,NNUM,RANG()	
+	
+	// Ending number must be greater than beginning number
+	if X<BGN do Runtime.setErrMSG("CHKALLOC",898) quit
+	if X+BGN=0 quit  // trying to unload
+	set END=X
+	
+	set ER=1 
+	
+	type ResultSet rs=Db.select("HIGH,LOW","CHKALLOC","BRCD=:BRCD AND TYPE=:CKTYPE")
+	while rs.next() do {
+		set HC=rs.getCol("HIGH")	 
+                set LC=rs.getCol("LOW")
+		do VSETRNG(HC,LC,.RANG())
+		}
+	
+	set L1=""
+	for  set L1=RANG(L1).order() quit:L1.isNull()!('ER)  do	{		
+		set HC=RANG(L1).piece("|",2).extract(3,10)
+		if END'>HC set LC=RANG(L1).piece("|",1).extract(3,10) if BGN'<LC set ER=0
+		}
+	// Out of allocated range
+	if ER do Runtime.setErrMSG("CHKALLOC",2115) quit	
+	
+	type DbSet ds=Db.selectDbSet("CHKDEVP")
+	while ds.next() do {
+  	type RecordCHKDEVP chkdevp=ds.getRecord("CHKDEVP")
+  		set DEV=chkdevp.device
+  		if chkdevp.ctype'=CKTYPE quit
+  		  		
+  		if END>chkdevp.endnum,BGN'>chkdevp.endnum set ER=1 quit
+		if END<chkdevp.endnum,END'<chkdevp.begnum set ER=1 quit
+		if END=chkdevp.endnum set ER=1 quit
+		}	
+	
+	// Checks already loaded on device N.	
+	if ER do Runtime.setErrMSG("CHKDEVP",8458,DEV) quit	
+	
+	type ResultSet rsckreg=Db.select("CKNO","CHKREG1","CKNO=:BGN AND CTYPE=:CKTYPE")
+	if rsckreg.next() set NNUM=rsckreg.getCol("CKNO")
+	if NNUM.get().isNull() quit
+	
+	// Check number already exists
+	if NNUM'>END set VFMQ=1 do Runtime.setErrMSG("CHKREG1",529) quit
+	
+	quit	
+	
+VSETRNG(String HC,	// High Check Number
+	String LC,	// Low check Number
+	String RANG1()) // Array for ranges
+	// Set ranges		
+	
+	type Number DN,J
+	type String RH	
+	
+	if 'RANG1.data() set RANG1(1)=LC_"|"_HC quit
+	
+	set DN=0
+	
+	for J=1:1 quit:'RANG1(J).data()!DN  do {
+		set RH=RANG1(J).piece("|",2)
+		if LC=(RH+1) set RANG1(J).piece("|",2)=HC,DN=1
+		}
+	
+	I 'DN S RANG1(J)=LC_"|"_HC
+	
+	quit		
+	
+VER(RecordCHKDEVP chkdevp,	// CHKDEVP Record	
+	String VFMQ)		// VFMQ	
+	// verify and process	
+	
+	type public Boolean ER	
+	
+	if (VFMQ="Q")!(ER) do VEXIT(VFMQ) quit
+	
+	do FILE(.chkdevp)
+	
+	quit
+	
+		
+VEXIT(String VFMQ)		// VFMQ		
+	
+	type public Boolean ER		
+	
+	if (%ProcessMode=2)!(%ProcessMode=4)!(ER) quit
+	
+	// Printer device not loaded
+	if (VFMQ="Q") do Runtime.setErrMSG("DEVICE",2229)
+	// Printer device loaded
+	else  do Runtime.setErrMSG("DEVICE",2228)
+	
+	set ER="W"
+	
+	quit
+	
+	
+FILE(RecordCHKDEVP chkdevp)	// CHKDEVP Record	
+	// File data	
+
+	type public Boolean DEF
+	type public Number BGN,END
+	type public String CKTYPE,DEVICE
+	
+	set chkdevp=Db.getRecord("CHKDEVP","DEVICE=:DEVICE",1)
+	set chkdevp.ctype=CKTYPE
+	set chkdevp.begnum=BGN
+	set chkdevp.endnum=END
+	set chkdevp.def=DEF
+	do chkdevp.bypassSave()
+	
+	quit
+ 
+ 
+
+vSIG()	quit "60584^18971^Hema Puttaswamy^6238"	// Signature - LTD^TIME^USER^SIZE

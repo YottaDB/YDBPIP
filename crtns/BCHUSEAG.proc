@@ -1,0 +1,239 @@
+BCHUSEAG //Batch BCHUSEAGE_CR - Useage Credit processing
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 01/31/2007 12:47 - shetyes
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHUSEAGE_CR Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit quit
+ do JOBMGR^BCHUTL(%FN,"BCHUSEAGE_CR",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(CID) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHUSEAGE_CR","*","",CID.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,CID)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHUSEAGE_CR","*","",CID.get(),"",et)
+ }
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,CID) //
+	type RecordDEP dep=Db.getRecord("DEP","CID=:CID")
+
+	do START(.dep, PLTP)
+
+	quit
+	
+
+public	START(RecordDEP dep, Boolean PLTP)
+
+	/*
+	  Though this section is a public section, it should not be called
+	  with out first setting the variable PLTP to 1. This idenifies the 
+	  processing to be performed as USAGE fees and not service fees.
+	  First clean up SRV global if it has been set up already. Need to
+	  remove balance information (category 0) and service fees (fee
+	  category 4 - only a fee count of 1) as they will be recalculated.
+	  Need to leave fee categories 1, 2, and 3 alone because they contain
+	  counter information needed to process those fees. If they were
+	  previously set, fee counters will be used to recalculate fee amounts.
+	*/
+
+ 
+	kill %TRN
+	set SCND=%SystemDate
+	set FEECAT=0
+	do Db.delete("SRVD","CID=:CID AND PLTP=:PLTP AND SCND=:SCND AND FEECAT=:FEECAT")
+	set FEECAT=4
+	do Db.delete("SRVD","CID=:CID AND PLTP=:PLTP AND SCND=:SCND AND FEECAT=:FEECAT")
+	
+	new ts,ttxset
+	type TranSet ts
+ 	set ts=Class.new("TranSet")
+ 	set ttxset=0
+	
+	/*
+	  Already processed today, this must be restart processing
+	  This replaces the RESTART processing flag on the batch control
+	  page.
+	*/
+
+	if dep.upndt'=%SystemDate quit		// Usage Credit Plan Next Date	
+
+	set CID=dep.cid				// Original Account
+	
+	do PROC^BCHFEEUT(CID,1,%SystemDate,.ts,.dep) if ER quit
+
+	set TPD=%SystemDate
+	// ttxset will be set to 1 if a transaction was created
+	if ttxset do { 
+		new par
+		set par("IPMODE")=3
+		set par("OPTION")=2
+		do ts.postTSet(TPD,BRCD,.par)
+	}
+	
+	
+	do BUMPU^BCHFEEUT(.dep)
+
+	
+	quit
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,CID
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set CID=vRECORD.piece($C(9),1)
+ do vPROC(CID)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,CID
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>32767 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+13>32767 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+	set XTJD=%SystemDate
+
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("CID","DEP","DEP.UPNDT=:XTJD")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	set TPD=%SystemDate
+	set PLTP=1
+	// setup teller variables
+	do %UID^BCHFEEUT(PLTP)
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+	// Update ^SRVH global
+ 
+	new feepln,srvh
+ 
+        set feepln=""
+ 
+        for  set feepln=$O(USPL(feepln)) q:feepln=""  do {
+
+		set FEEPLN=feepln
+                set SCND=%SystemDate
+                if Db.isDefined("SRVH","FEEPLN,SCND") quit
+ 
+                type RecordSRVH srvh=Class.new("RecordSRVH")
+                set srvh.feepln=feepln
+                set srvh.scnd=%SystemDate
+                set srvh.base=$P(USPL(feepln),"|",2)
+                set srvh.feemin=$P(USPL(feepln),"|",3)
+                set srvh.feemax=$P(USPL(feepln),"|",4)
+                set srvh.feebal=$P(USPL(feepln),"|",5)
+                set srvh.curflag=$P(USPL(feepln),"|",9)
+                set srvh.plancur=$P(USPL(feepln),"|",10)
+                set srvh.planexc=$P(USPL(feepln),"|",11)
+ 
+                do srvh.bypassSave()
+                }
+ 
+	quit
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+	set TPD=%SystemDate
+	set PLTP=1
+	
+	// Retrieve batch teller information
+	do %UID^BCHFEEUT(PLTP)
+	if ER quit     
+
+	/*
+	 Set up entries in ^TTX(TPD,BRCD,%UID) by calling TTXLOK,
+	 then release the lock on ^TTX(TPD,BRCD,%UID)
+	*/
+
+	set STATUS=0 do ^TTXLOK if ER quit
+	 
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+	do OFFSET^TTXBLD(TPD,BRCD,%UserID,"BCHSRVFEE")
+
+ 
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

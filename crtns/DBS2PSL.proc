@@ -1,0 +1,587 @@
+DBS2PSL(String SID,String NOLINK)	// V 7.0 - PSL Screen Compiler
+	/*
+	       ORIG: Frank R. Sanchez (2497)
+
+	   DESC:  Compile screen into run-time routine
+
+	   KEYWORDS: SCREEN,COMPILER
+
+	   ARGUMENTS:
+	   . SID   Screen Name   /TYP=T/REQ/MECH=VAL
+	   . NOLINK  Don't link run-time image /TYP/L/DEF=0/NOREQ
+	                                                 /MECH=MECH=VAL
+	
+	   I18N=QUIT: Exculded from I18N standards.
+	  ---------- Revision History -------------------------------------------
+	  12/06/05 - Pete Chenard - 19036
+	  	     modified RPTDA section to build Class.new code to not pass
+	  	     in bottom-most key, since that will be defined by the
+	  	     user inside the repeat region.
+	  	     
+	  11/29/05 - Pete Chenard - 18351
+	  	     Added code to correctly set the primary file on the screen.
+	  	     
+	  03/23/05   Pete Chenard - CR14146
+		      Added code to clean up unused objects from repeat
+		      regions.
+		      
+	  11/04/04 - Pete Chenard - CR 13058
+		     Modified RPTPR section to correct operator precedence
+		     warnings that occurred while compiling screens.
+	
+
+	   10/02/02   CHENARDP - 45497
+		      converted to PSL
+	  -----------------------------------------------------------------------
+	  
+	*/
+	
+
+	#WARN FUNCTIONS OFF
+
+
+	type String %FLGPROT,%MOD,%NAMCUR,%OFF,bkey,BLKSIZ,cmd,cmdDel,codPtr,code,CX,CY,DBOPT,DES,DFID,di,dinam
+	type String DINAM,ditab,DLIB,DILIST,DT(),DXESEQ,EXTSID,FA,FB,FID,file,FIND,FLGPROT,fsn,gbl,HEADER,L,len,LIB
+	type String LOOP,MARGIN,MPLCT,NODE,NS,OLNTB,P,PF,pfid,POPT,PP,PRMBL,PRO,rectyp,REF,RPTCNT,RPTPR
+	type String secret,sn,src,STS,SYS,TAB,TMP,TMPC,TMPD,TMPZ,TYP
+	type String USERVLOD,VDACX,VDAGI,VDAOBJ,VDAV1,VDAV2,vdd,VFSN,vobject,vobjlst,vobjref,VPB,VPRGI,VPROBJ,VPRPRO
+	type String VPRTYP,VPRV1,VPRV2,VPT,VSAV,VZSEQ,X,X1,X41,XLT,XV0,Z,Z1,zt
+	type Number SEQ,seq
+	type Public String io,%DB,%UID,%LIBS,%TO,FILES,MSKC,PGM,TEMP,ZSID
+	
+	set NOLINK=$G(NOLINK)
+
+	// Which compiler to use - Original or extra crispy (PSL)
+	type RecordDBTBL2 dbtbl2=Db.getRecord("DBTBL2","LIBS=:%Library,SID=:SID")
+	if 'dbtbl2.CSCMP do ^DBSSCR(SID) quit  //Non-PSL compiler	
+	if dbtbl2.lnk1'="" do ^DBSLINK(.dbtbl2) quit	// linked screen
+	
+	do ^DBS2PSL0(.dbtbl2,.VPT,.VPB)
+	set LOOP="NOLOOP"
+	if dbtbl2.scrclr=1 set X=""
+	else  if dbtbl2.scrclr=0 set X=VPT			// first line number
+	else  if dbtbl2.scrclr=2 set X=VPT_":"_VPB	// top : last
+	do TMPC(" set VO(0)="""_X_"|"_dbtbl2.scrmod_"""")
+	set %FLGPROT = dbtbl2.resflg
+
+	set SEQ=""
+	for  set SEQ=$O(DT(SEQ))  quit:SEQ=""  do SEQ(SEQ,.dbtbl2)
+	do END(.dbtbl2)
+	quit
+
+
+SEQ(Number SEQ,RecordDBTBL2 dbtbl2)	//
+	type String vobjref,X,Z
+	type Public String CX,CY,DINAM,ER,KVAR,MARGIN,NODE,NS,OLNTB,P(),PRO,RM,secret,VARLIST,VDAV1,VPRGI,VPRV1
+	type Public String DT()
+	
+	set X=DT(SEQ) set secret=0
+	set PRO=0 if $P(X,"|",1)["*"!($P(X,"|",2)?1N1"*") set PRO=1 // Protect flag
+	if 'PRO,$P(X,"|",17)'="" set PRO=2		// Computed operation
+	set P(1)=$P(X,"|",1)					// Y*1000+X & Protect_flag & (# or {) & Video_display
+	set P(2)=$P(X,"|",18)					// Print edit
+	if P(2)="" set P(2)=$P(X,"|",10)
+	set P(3)=$P(X,"|",3)					// Field Length
+	set P(4)=$P(X,"|",4)					// Default
+	set P(5)=$P(X,"|",5)					// [LIB,FID]DI or VAR
+	set P(6)=$P(X,"|",6)					// Table lookup
+	set P(7)=$P(X,"|",7)					// Pattern match
+	set P(10)=$P(X,"|",10)					// Data type
+	set P(11)=$P(X,"|",11)					// Prompt
+	if P(11)["""",P(11)'?.E1"<<"1E.E1">>".E set P(11)=$$DBLQ(P(11))
+	set P(12)=$P(X,"|",12)					// Required flag
+	set P(13)=$P(X,"|",13)					// Minimum value
+	set P(14)=$P(X,"|",14)					// Maximum value
+	set P(15)=$P(X,"|",15)					// Decimal precision
+	set P(18)=""							// Subfield Logic
+	set P(19)=""
+
+	if P(5)["[" do {
+		set P(19)=$$LEN^DBSDD(P(5))				// Internal Length
+		set $P(X,"|",22)=$$POS^DBSDD(P(5))		// delimeter
+		if $P(X,"|",22) set $P(X,"|",21)=124	// position
+		}
+
+	if P(19)="" set P(19)=P(3)
+	set P(21)=$P(X,"|",21)					// Field delimeter
+	set P(22)=$P(X,"|",22)					// Column Position
+	set P(30)=$P(X,"|",30)					// Orig DINAM	
+	if P(30)?1"@["1A.AN1"]"1A.AN do {		// Help file syntax @[fid]di
+		set Z=$$LEN^DBSDD($E(P(30),2,99))	// Use DD internal field length
+		if $G(ER) set ER=0 set RM=""		// If invalid, reset error flag
+		else  if Z>P(19) set P(19)=Z		// Internal length (overflow)
+		}
+
+	if P(10)="T",P(2)'=P(10),P(11)'?1"["1A.AN1"]"1E.E set P(10)=P(2)
+	if 'Db.isDefined("DBTBL2PP","LIBS=:%Library,SID=:SID,SEQ=:SEQ,PSEQ=21") set P(8)=0	// Post processor
+	else  set P(8)=21
+	if 'Db.isDefined("DBTBL2PP","LIBS=:%Library,SID=:SID,SEQ=:SEQ,PSEQ=1") set P(9)=0	// Pre Processor
+	else  set P(9)=1
+
+	set DINAM=P(5)
+	if DINAM="",((P(11)?1"<<"1A.AN1">>")!(P(11)?1"<<%"1A.AN1">>")) set DINAM=P(11)
+
+	// Data field defaults to HIGHLIGHT mode
+	if P(1)'["{" set VPRGI=0 set VPRV1=$$VIDEO($P(P(1),"#",2)) set VDAV1=2
+	else  set VPRV1=$$VIDEO($P(P(1),"{",2)) set VDAV1=VPRV1 set VPRGI=1
+	if dbtbl2.ooe set VDAV1=VPRV1			// OOE option
+	set OLNTB=+P(1) set CY=P(1)\1000 set CX=P(1)#1000
+
+	// ---------- Calculate maximum right margin for this field
+	set MARGIN=$G(DT(SEQ+1))
+	if MARGIN\1000'=CY set MARGIN=$S(dbtbl2.scrmod:132,1:80)	// last object
+	else  set MARGIN=MARGIN#1000			// Up to the next object on the same line
+
+	set NODE=""
+	if $E(DINAM)?1A!($E(DINAM)="%") do {
+		set NODE="*"_DINAM 
+		set NS=$$NS(DINAM) 
+		set KVAR=$$KVAR(KVAR,DINAM,.VARLIST)
+		}
+	
+	set vobject=""
+	if DINAM'="" do VDA(.dbtbl2)
+	if P(11)'="" do VPR(.dbtbl2)
+	if dbtbl2.repeat,CY'<dbtbl2.repeat,$E(NODE)="*" set NODE=NODE_"(1)"
+	if DINAM'="" do VTAB(.dbtbl2)
+	quit
+
+
+VDA(RecordDBTBL2 dbtbl2)	// Build the data section (VDA) of the program
+	type Public String CX,CY,DI,DINAM,FID,NS,P(),PF,VDACX,VDAV1,vobject
+	type String L
+	// Cursor position for data
+	set PF="" set L=$L(P(11)) set VDACX=CX+L
+	for L=L:-1:0 quit:$E(P(11),L)'=" "  set P(11)=$E(P(11),1,L-1)
+	set DI=$P(DINAM,"]",2) if DI="" set DI=DINAM set FID=""
+	else  do COMPILE(DINAM,.dbtbl2) set vobject=1
+	// Invalid data item name ~ p1
+	if $G(NS)="" write $$^MSG(1300,DINAM) quit
+
+	// Build repeat field logic
+	if dbtbl2.repeat,CY'<dbtbl2.repeat set NS=$$RPTFLD(NS,.dbtbl2)
+	// Find variables
+	set NS=$$DGET^DBS2PSL1(NS,.dbtbl2)
+	if 'P(3) do VDA2(.dbtbl2) quit    // No length check
+	do EDIT(.dbtbl2)
+
+	// ---------- Pad field with blanks (reverse image mode)
+	if VDAV1#2 set PF="$$VRV("_$S(PF="":NS,1:PF)_","_+P(3)_")"
+	do VDA2(.dbtbl2)
+	quit
+
+VDA2(RecordDBTBL2 dbtbl2)
+	type Public String CY,DI,DINAM,FID,HEADER,len,MARGIN,NS,P(),PF,PRO,REF,RPTCNT,RPTDA,secret,VDACX,VDAGI,VDAV1,VDAV2,vobject,vobjref,XVO
+	type String X,zDFT,zt
+	set REF=NS
+	if PF="" set PF=REF
+	if $P(PF,REF,2,99)[REF,REF["," set PF=$$REPLACE(PF,REF,"V") set REF=" set V="_$S(vobject:vobjref,1:REF)
+	else  set REF=""
+	if secret set REF=" set V=""""" set PF=$C(34,34)
+	set len=+P(3)
+
+	// ---------- Check field screen margin overflow condition
+	if len,(len+VDACX-1>MARGIN) set len=MARGIN-VDACX+1
+
+	// ========== .DEFAULT. macro command on this data item 
+	set VDAV2=0 set zDFT=0
+
+	// display format
+	set zt=P(10) if PRO,P(2)'="",P(2)'=P(10) set zt="T"
+	set HEADER=$$HEADER(CY,VDACX,len,VDAV1,VDAV2,PRO,VDAGI,zt,zDFT,.dbtbl2)
+
+	if '(FID=""!'dbtbl2.resflg) do PROTECT	// Build data item protection if necessary
+	// Repeating data subroutine
+	if dbtbl2.repeat,CY<dbtbl2.repeat=0,'$D(RPTDA) do RPTDA(.dbtbl2)
+	if '$D(RPTCNT) set RPTCNT=0
+	if dbtbl2.repeat set RPTCNT=RPTCNT+1 if CY'<dbtbl2.repeat set X=" set VO(VX+"_(RPTCNT-1)_")="
+	else  set X=" set VO(@)="
+	set XVO=$E($P(X,"=",1),4,99)
+	if $G(vobject)="" do {
+		do TMPD(REF_X_HEADER_"""_"_PF)
+		}
+	else  do TMPD(REF_X_HEADER_"""_"_$G(vobjref))
+
+	// Check data item maintenance restrict flag
+	if '$D(DI) quit
+	if DINAM="" quit
+	if $E($P(DINAM,"]",1),2,99)="" quit
+	do PROT^DBS2PSL0
+	quit
+
+
+TMPT(String X)	
+	type Public String P()
+	do ERROR("Unimplemented-W-Index function not implemented "_P(16))
+	quit 
+
+
+TMPC(String X)	
+	type Public String C,TMPC()
+	set C=C+1 
+	set TMPC(C)=X 
+	quit 
+
+
+private TMPD(String X)	
+	type Public String D,TMPD()
+	set D=D+1 
+	set TMPD(D)=X 
+	quit 
+
+
+private EDIT(RecordDBTBL2 dbtbl2)	// Build Display Format P(2)=FMT P(3)=SIZE P(15)=PRECISION
+	type Public String NS,P(),PF,vobjref
+	quit:'P(3)
+	type String fmt
+	// *** to E format if display
+	set fmt=P(2)
+	// *** option defined
+	if dbtbl2.curdsp,fmt="$" set fmt="E"
+	set PF=$$fmt^DBSEXEP(fmt,NS,P(3),P(15))
+	if $G(vobjref)'="" set vobjref=$$fmt^DBSEXEP(fmt,vobjref,P(3),P(15))
+	if $E(PF,1,3)="$E(" set PF=$E($P(PF,",",1,$L(PF,",")-2),4,999)
+	quit
+
+
+private PROTECT	// Build display protection logic
+	type Public String DI,FID,P(),SAVT,vobjlst(),VP
+	do ^DBSPROT4(FID,DI,.VP,P(10),SAVT+1,.vobjlst())
+	quit
+
+
+private VPR(RecordDBTBL2 dbtbl2)	// Build the prompt (VPR) section of the program
+	type Public String CX,CY,HEADER,NS,P(),P11,VPRGI,VPRPRO,VPROBJ,VPRV1,VPRV2
+	type String X
+	
+	if P(11)[$C(128) set P(11)=$TR(P(11),$C(128),$C(124))
+	if P(11)?.E1"<<"1E.E1">>".E set P11=P(11) do VARSUB^DBS2PSL1(.dbtbl2) set NS=$$NS(NS) do VPR1(.dbtbl2) do EDIT(.dbtbl2) do VDA2(.dbtbl2) quit
+	set HEADER=$$HEADER(CY,CX,$L(P(11)),VPRV1,VPRV2,VPRPRO,VPRGI,"T",,.dbtbl2)
+	if dbtbl2.repeat,(CY'<dbtbl2.repeat) do RPTPR(.dbtbl2) quit
+	set VPROBJ=VPROBJ+1
+	set X=" set VO("_VPROBJ_")="_HEADER_P(11)_""""
+	do TMPC(X) quit
+
+
+private VPR1(RecordDBTBL2 dbtbl2)	//
+	type Public String CY,NS,P11
+	type String Z
+	if 'dbtbl2.repeat quit
+	if CY<dbtbl2.repeat quit
+
+	// Repeat Region
+	set Z=$P(P11,"<<",2) set Z=$P(Z,">>",1)
+	if '((Z?1A.AN)!(Z?1"%".AN)) quit
+	set NS=$P(NS,Z,1)_Z_"(I)"_$P(NS,Z,2,99)
+	quit
+
+
+private HEADER(String DY,	// Column NUmber	/REQ/MECH=VAL
+	String DX,		// Row Number		/REQ/MECH=VAL
+	String LEN,		// Length		/REQ/MECH=VAL
+	String VID1,		// Video Attributes	/REQ/MECH=VAL
+	String VID2,		// Video Attributes	/REQ/MECH=VAL
+	String PRO,		// Protection Flag	/REQ/MECH=VAL
+	String GI,		// Highlight Mode	/REQ/MECH=VAL
+	String TYP,		// Data Type		/REQ/MECH=VAL
+	String zDFT,		// Default Value	/REQ/MECH=VAL
+	RecordDBTBL2 dbtbl2)	// Screen Object	/REQ/MECH=REF
+
+	type String X
+	
+	set zDFT=$G(zDFT)
+	if dbtbl2.repeat,DY'<dbtbl2.repeat set DY=$S(DY=dbtbl2.repeat:"DY",1:"DY+"_(DY-dbtbl2.repeat))
+	if $P(VID2,",",6)="" set VID2="0,0,0,0,0,0"
+	set X="$C("_DY_","_+DX_","_+LEN_","_VID1_","_VID2_")_"
+	if $L(TYP)>1 set TYP="T"
+	if zDFT set X=X_""""_GI_9_TYP
+	else  set X=X_""""_GI_PRO_TYP
+	quit X
+
+
+private VTAB(RecordDBTBL2 dbtbl2)	// Build the table section VTAB of the program
+	type Public String %NAMCUR,%MOD,%OFF,BLKSIZ,CY,DFID,di,DI,DINAM,DX,FID,FLGPROT,fsn,L,len
+	type Public String LIB,NODE,P(),POPT,PP,PRMBL,PRO,RPTDA,SAVT,secret,TAB(),VDACX,vdd
+	type String bkey,gbl,rectyp,X,z
+	
+	if $G(LIB)'="",$G(FID)'="" set P(16)=$$REQ^DBSDD(FID_"."_DI,"",.vdd)
+	if PRO set secret=2
+	// Not required for logical data types
+	if P(12)=1,P(10)="L" set P(12)=0
+	if P(6)'="",P(6)?1A.AN set P(6)="^DBCTL(%LIBS,"""_P(6)_""","
+	if P(7)'="" set P(7)="if "_P(7)
+
+	set VDACX=VDACX-1 set SAVT=SAVT+1
+	if CY'<dbtbl2.repeat set %MOD=%MOD+1
+	else  set %OFF=%OFF+1
+	set DX=VDACX
+
+	// @[FID]DI syntax  ... COPY FILE ID FROM [...]
+	if FID="" do {
+		if $G(P(30))?1"@["1E.E1"]"1E.E set DINAM="["_$E($P(P(30),"]",1),3,99)_"]"_DINAM
+		// Variable name syntax for I(1)
+		else  set DINAM="[*]"_DINAM
+		if $G(P(30))?1"@"1E.E set DINAM="[*]"_P(30)
+		}
+	else  set DINAM="["_FID_"]"_DI
+	set PRMBL="$C("_(CY-1)_","_DX_","_len_")_"""_secret_+P(12)_P(10)
+	set BLKSIZ=BLKSIZ+P(3)
+	if P(21) set PRMBL=PRMBL_$E(1000+P(21),2,4)_$E(100+P(22),2,3)
+	set X=$S(P(30)'="":P(30),1:P(5))
+	if X?1"[".E1",".E1"]".E set X="["_$P(X,",",2)
+
+	// %TAB SEQUENCE
+	set %NAMCUR(X)=%NAMCUR(X)_"|"_SAVT
+
+	if FID'="" do {
+		set z=fsn(FID) set gbl=$P(z,"|",2) set rectyp=$P(z,"|",4)
+		set bkey=$P($P(gbl,"(",2),",",$L(gbl,","))
+		if rectyp=1,$P(z,"|",1)[")" set NODE="" set bkey=""
+		if NODE?1N1"*" set NODE=1
+		if CY'<dbtbl2.repeat set NODE=1
+		}
+
+	else  if "*"[FID set bkey=""
+
+	if 'P(8) set P(8)=""
+	if 'P(9) set P(9)=""
+	if P(8) set POPT="PO" set PP=21 do PP^DBS2PSL1 set P(8)=PP	// Post processor
+	if P(9) set POPT="PR" set PP=1 do PP^DBS2PSL1 set P(9)=PP	// Pre processor
+
+	// CYXXRLLTDELPP
+	set $P(P,"|",1)=PRMBL
+	set $P(P,"|",2)=$S(NODE?1A.E&(NODE=bkey):"",1:NODE)
+	if FID'="",DI'="",$$CMP^DBSDD(FID_"."_DI,"",.vdd)'="" set $P(P,"|",2)="*"_DI
+
+	if NODE="",$$CMP^DBSDD(FID_"."_DI)="" set $P(P,"|",2)="*"_DI
+	set $P(P,"|",3)=DINAM				//    [FID]DI
+	set $P(P,"|",4)=$$DBLQ(P(6))		//    Table lookup
+	set $P(P,"|",5)=$$DBLQ(P(7))		//    Pattern match
+	set $P(P,"|",6)=$$DBLQ(P(8))		//    Post processor
+	set $P(P,"|",7)=$$DBLQ(P(9))		//    Pre processor
+	set $P(P,"|",8)=P(13)				//    Minimum value
+	set $P(P,"|",9)=P(14)				//    Maximum value
+	set $P(P,"|",10)=P(15)				//    Decimal precision
+	set $P(P,"|",11)=P(18)				//    Sub-Field Definition
+	if len<P(19) set $P(P,"|",12)=P(19)	//    Maximum field length
+
+	for L=$L(P):-1:0 quit:$E(P,L)'="|"	//    Strip trailing blanks
+	set TAB(SAVT)=" set %TAB("_SAVT_")="_$E(P,1,L)_""""
+	set P=""
+	set DFID=$E($P(DINAM,"]",1),2,99)
+	if $G(DFID)="" quit
+
+	do STATUS^UPID(DFID,DI,.FLGPROT)
+	quit
+
+
+private RPTFLD(String NS,RecordDBTBL2 dbtbl2)	// Fix NS for repeating fields
+	type String I,X
+	type Public String NODE,P(),RPTDA
+	if '$D(RPTDA) do RPTDA(.dbtbl2)
+	if $E(NODE)="*" set NS=$P(NODE,"*",2)_"(I)" set:P(21) NS="$P("_NS_","""_$C(P(21))_""","_P(22)_")"
+	else  set NS=$$ADDSUB(NS,"I")
+	quit NS
+
+
+private ADDSUB(String expr,String var)	// Add subscript var to expr
+	type String I
+	if $G(var)="" set var="I"
+	if expr'["(" quit expr_"("_var_")"
+	if expr["(1)" quit $P(expr,"(1)",1)_"("_var_")"_$P(expr,"(1)",2,99)
+	if expr[(var_")") quit expr
+	for I=1:1:$L(expr) quit:"),"[$E(expr,I)
+	if $E(expr,I)=")" quit $E(expr,1,I-1)_","_var_$E(expr,I,$L(expr))
+	if $E(expr,I-1)=")" quit $E(expr,1,I-2)_","_var_$E(expr,I,$L(expr))
+	quit $E(expr,1,I-1)_"("_var_")"_$E(expr,I,$L(expr))
+
+
+private RPTDA(RecordDBTBL2 dbtbl2)	// Repeating data subroutine
+
+	type Public String KEYS(),PFID,RPTBLK,RPTCNT,RPTDA,RPTPR,BLKSIZ,D,vFID,vobjlst
+	type String acckeys,fid,keys,pfid,sn
+	type Number count,I,quit
+	
+	set count = 0
+	set quit=0
+	/* We need to instantiate %REPEAT new objects.  When 
+	   instantiating each object, pass in the access key values for the 
+	   primary file on the screen.  The values of the keys will be stored
+	   in an array called KEYS(i).  There will be one entry in the array
+	   for each access key defined on the primary file.  Build variable 'keys',
+	   which will be a comma separated list of the key values:
+	   keys = KEYS(1),KEYS(2),KEYS(3)
+	   This variable will be passed into the Class.new method to populate the keys
+	   in the object when it is newly instantiated. */
+	   
+	set keys=""
+	set pfid = $$Primary^DBS2PSL4(PFID)	//.piece(",",1)	// primary file on screen
+	if 'pfid.isNull() do {
+		type RecordDBTBL1 dbtbl1 = Db.getRecord("DBTBL1","%LIBS='SYSDEV',FID=:pfid")
+		set acckeys = dbtbl1.acckeys
+		for I=1:1:acckeys.length(",") do { quit:quit
+			if acckeys.piece(",",I).isLiteral() quit	//ignore literals
+			if PFID.length(",")=1,(I=acckeys.length(",")) set quit=1 quit
+			set count = count + 1
+			set keys = keys_",$G(KEYS("_count_"))"
+		}
+	}
+	set keys = keys.extract(2,keys.length())
+	
+	set RPTBLK=BLKSIZ
+	do TMPD("  ")
+	if '$D(RPTCNT) set RPTCNT=0
+	do TMPD(" set:'$D(%MODS) %MODS=1 set VX=$P(VO,""|"",2)+"_(RPTCNT-1)_",DY="_dbtbl2.repeat_" for I=%MODS:1:%REPEAT+%MODS-1 do VRDA("_vobjlst("actual")_")")
+	do TMPD(" set $piece(VO,""|"",1)=VX quit  // EOD pointer")
+	do TMPD(" ")
+	do TMPD("VRDA("_vobjlst("formal")_")  // Display data %REPEAT times")
+	do TMPD(" //instantiate new object if necessary")
+
+	set fid=""
+	for  set fid=$O(vFID(fid)) quit:fid=""  do {
+		set sn=vFID(fid)_"(I)"
+		do TMPD("  if '"_sn_".getPointer() do {")
+		do TMPD("     set "_sn_"=Class.new(""Record"_fid_""","""_keys_""")")
+		do TMPD("     }")
+		}
+	set RPTDA=D+1 set RPTCNT=1
+	quit
+
+
+private RPTPR(RecordDBTBL2 dbtbl2)	// Repeating prompt subroutine
+	type Public String HEADER,P(),RPTPR
+	type String X
+	if '$D(RPTPR) do {
+		do TMPC(" if '$D(%MODS) set %MODS=1")
+		do TMPC(" set DY="_dbtbl2.repeat_" for I=%MODS:1:%REPEAT+%MODS-1 do VRPR("_vobjlst("actual")_")")
+		if dbtbl2.curdsp do TMPC(" set VO=(+VO)_""|""_(VO+1)_""|13|1"" quit  // BOD pointer")
+		else  do TMPC(" set VO=(+VO)_""|""_(VO+1)_""|13"" quit  // BOD pointer")
+		do TMPC(" ")
+		do TMPC("VRPR("_vobjlst("formal")_")  // Display prompts %REPEAT times")
+		do TMPC(" ")
+		set RPTPR=1
+		}
+
+	set X=" set VO(VO+"_RPTPR_")="_HEADER_P(11)_""""
+	do TMPC(X)
+	// next repeating PR counter
+	set RPTPR=RPTPR+1
+	quit
+
+
+private VIDEO(String X)	// Build video attribute string (New structure)
+	type Public String secret,VPRGI,VPRV2
+	type Number Z1
+	
+	set VPRGI=0 set VPRV2=0 set secret=0
+	if X>63 set VPRV2=$P(X,",",2,99)
+	// Graphic Mode
+	if X>128 set VPRGI=1 set X=X-128
+	// Secret Mode
+	if X>79 set secret=1 quit X-80
+	if X>63 quit X-64
+	set Z1=0
+	if $F(X,2) set Z1=Z1+1
+	if $F(X,1) set Z1=Z1+2
+	if $F(X,3) set Z1=Z1+4
+	if $F(X,4) set Z1=Z1+8
+	quit Z1
+
+
+private VARCHK(String X)	// 1 if expression is a local variable, 0 if not
+
+	if X?1AN.AN quit 1
+	if X?1"%".AN quit 1
+	if X?1AN.AN1"(".E1")" quit 1
+	if X?1"%".AN1"(".E1")" quit 1
+	quit 0
+
+
+private DBLQ(String X)	// Replace " with "" and | with $C(124)
+	if X[(""""_$C(128)_"""") set X=$$REPLACE(X,""""_$C(128)_"""","$C(124)")
+	if X["""" set X=$$REPLACE(X,"""","""""")
+	if X["|" set X=$$REPLACE(X,"|","""_$C(124)_""")
+	quit X
+
+
+private REPLACE(String X,String OS,String NS)	// Change all occurrances of OS to NS
+	type Number I
+	type String L
+	
+	if $G(X)="" quit ""
+	set L=0
+	for I=1:1 set L=$F(X,OS,L) quit:'L  set X=$E(X,1,L-$L(OS)-1)_NS_$E(X,L,9999) set L=L+$L(NS)-$L(OS)
+	quit X
+
+
+private NS(String X)	// Build record access string for variables
+	type Public String P(),POS
+	
+	if $G(X)="" quit ""
+	if $E(X)=$C(34) quit X
+
+	if X?1A.AN!(X?1"%".AN)!(X?1A.AN1"("1E.E1")") set X="$G("_X_")"
+	if $G(P(21))="" quit X
+	// Default to 1st position
+	if '$G(P(22)) set POS=1
+	quit "$P("_X_","""_$C(P(21))_""","_P(22)_")"
+
+
+private KVAR(String KVAR,String X,String LIST())	// Build KVAR string for variables and save it in LIST()
+	type Public String PRO
+	
+	set KVAR=$G(KVAR)
+	set LIST(X)=""
+	if ","_KVAR_","[(","_X_",")!PRO quit KVAR
+	quit KVAR_","_X
+
+
+private COMPILE(String DINAM,
+	RecordDBTBL2 dbtbl2)	// Substitute actual DINAM for explicit image
+
+	type Public String comp,DI,ER,FID,fsn,FILES,LIB,NODE,NS,P(),PRO,sn,vdd,vFID,vobjref
+	type Number I
+	type String X,z
+
+	do PARSE^DBSDD(.DINAM,.X,.comp,.fsn,"",.vdd) quit:ER 
+	//   Patch NODE,DEL,POS,TABLE,PATTERN,MIN,MAX,DEC
+	set LIB=$P(DINAM,".",1) set FID=$P(DINAM,".",2) set DI=$P(DINAM,".",3)
+	if (","_FILES_",")'[(","_FID_",") set NS="" quit
+	set sn=$P(fsn(FID),"|",1)
+	if $E(sn,$L(sn))="(" set sn=$E(sn,1,$L(sn)-1)
+	if 'dbtbl2.repeat set vobjref=sn_"."_DI					// this DI not in a repeat region
+	else  if P(1)/1000<dbtbl2.repeat,$D(vFID(FID)) set vobjref=sn_"(1)."_DI	// Repeating file, but this col not in repeat region.  Use 1.
+	else  if P(1)/1000<dbtbl2.repeat set vobjref=sn_"."_DI	// this DI not in a repeat region
+	else  set vobjref=sn_"(I)."_DI					// this DI is in a repeat region
+	set NODE=$P(X,"|",1) set P(18)=$P(X,"|",18)
+	if NODE="",$P(X,"|",16)="" set NS=DI
+	if $P(X,"|",21),$P(X,"|",20)="" do {
+		set $P(X,"|",20)=$P(fsn(FID),"|",10)
+		set P(21)=$P(X,"|",20)			// Update screen attribute
+		}
+
+	// logic to also check protected data items)
+	for I=6,7,10,13,14,15,21,22 if P(I)'=$P(X,"|",I-1) do {
+		set z=$P("\\\\\TABLE\PATTERN\\\TYPE\\\MIN\MAX\DECIMAL\\\\\\DEL\POS","\",I)
+		if PRO do { quit
+			if '((I=10)!(I=15)) quit
+			write !,"Warning - [",$P(P(5),",",2)," mismatch on attribute ",z," screen=",P(I)," file=",$P(X,"|",I-1) quit
+			}
+		set P(I)=$P(X,"|",I-1)
+		write !,"Change ",P(5)," attribute ("_z_"="_P(I)_") to match file definition",!
+		}
+	quit
+
+
+private ERROR(String X)	// Print errors
+	type Public String CX,CY,DINAM,ESEQ,SEQ
+	
+	if ESEQ'=SEQ set ESEQ=SEQ write !,SEQ," - Col: ",CY," Row: ",CX,"  ",DINAM,!
+	write X,! 
+	quit
+
+private END(RecordDBTBL2 dbtbl2)	// Go to build program
+	do ^DBS2PSL1(.dbtbl2)
+	quit
+
+vSIG()	quit "60291^34513^Pete Chenard^19316"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,563 @@
+LNSRTL	
+	/*
+	       ORIG:  Neal E. Gorman (5053) - 03/27/89
+
+	  ---- Revision History ------------------------------------------------
+	  
+	   02/15/07 - RussellDS - CR25382
+		      Eliminated use of obsoleted routine DBSQRYA and modified
+		      logic to use the queries correctly.
+		      
+		      NOTE:  This routine does not appear to run correcly and
+		      still needs work by someone with knowledge of how it
+		      should work.
+	  
+	   02/24/06 - KELLYP - CR 19777
+	   	      Changed label from LNSTRL to LNSRTL (typo) to prevent a
+	   	      compilation error.
+	  
+ 	   08/02/05 - KUMARB - CR16684
+		      Modified sections COM and COM1, changed the table name LNLCOM 
+		      to LN in Db.select. Modified TBL=[LNLCOM] references in the 
+		      VPG01 section to TBL=[LN].
+		
+	   12/10/03 - CARROLLJ - CR7239
+		      Added #ACCEPT prior to execute command to correct compile
+		      errors.
+
+	   10/12/02 - GRAY - 49794
+		      Rewrote most of converted procedure.	
+
+	   05/15/02 - VETSENM - 49794
+		      Converted to PSL.
+
+	   04/03/00 - TANY - 37915
+	              Optimized performance by modifying ^SCADAT1 calls
+	              to ^SCAJD. Also remove revision history older than
+	              one year.
+
+
+	*/
+
+
+	set SING=1
+	do INIT 
+	quit
+
+ALL	//
+	set SING=0
+	do INIT
+	quit
+
+INIT	//
+	set (%PG,%PAGE)=1
+	kill VFMQ,OLNTB
+	do RINIT
+	do VPG
+	quit
+
+VPG	// Page control
+	do VPG01
+	do VPG0
+	quit
+
+VPG0 	//
+	if "DFQ"[VFMQ do VER quit
+	set %PG=%PG+1
+	do VPG 
+	quit
+
+VPG01	// Set up
+	set %TAB("IO")=$$IO^SCATAB($I)
+	set %TAB("CCID")=".CCL3/TBL=[LN]:QU ""[LN]CPF=1"" set CCID="
+	set %TAB("QI(1)")=".QI7/HLP=[SYSDEV,LN]TYPE/XPP=do EXT^DBSQRY"
+	set %TAB("QI(2)")=".QI8/HLP=[SYSDEV,LN]TYPE/XPP=do EXT^DBSQRY"
+	set %TAB("QI(3)")=".QI20/HLP=[SYSDEV,PRODDFTL]TYPE/XPP=do EXT^DBSQRY"
+	set %TAB("QI(4)")=".QI10/HLP=[SYSDEV,LN]CID/TBL=[LN]:QU ""[LN]CPF=1""/XPP=do EXT^DBSQRY"
+	set %TAB("EFD")=".%LD1/XPP=I X'="""" do PPEF^LNSRTL"
+	set %TAB("ED")=".ND1/XPP=I X'="""" do PPED^LNSRTL"
+
+	set (QI(1),QI(2),QI(3))="" do DEF
+
+	set %READ="@@%FN,,,IO/REQ,,CCID/REQ,,QI(1)/REQ,QI(2)/REQ,,EFD,ED"
+
+	if 'SING do {
+		set QI(4)="ALL" 
+		set %READ="@@%FN,,,IO/REQ,,QI(4)/REQ,,QI(3)/REQ,QI(1)/REQ,QI(2)/REQ,,EFD,ED"
+		}
+
+	do ^UTLREAD 
+	if VFMQ="Q" quit
+
+	if ED="" set ED=99999
+
+	quit
+
+ERR	//
+	set ER=1 
+	do ^UTLERR
+	set VFMQ="Q"
+	quit
+
+VER 	//
+	if VFMQ="Q" do END 
+	quit
+
+FILE	// File data
+
+	new JOB
+	set JOB=%ProcessID
+	do Db.delete("LNRTL","JOB=:JOB")
+
+	if CCID'="" do { do REP quit
+		do COM0
+		if ER do END
+		}
+
+	do COM
+
+	quit	
+
+REP	//  Report call
+
+	set %BLK="/,"_IO 
+	set VFMQ=0 
+	kill POP
+	set RID="SCA357" 
+	do ^URID
+	if PGM'="" do ^@PGM
+	do Db.delete("LNRTL","JOB=:JOB")
+	
+	quit
+
+END	//
+	kill %TAB
+	quit
+
+COM	// Collate through commitment file
+
+	type public String QI()
+	
+	type Number QRYSEQ
+	type String DQQRY(), WHERE
+	
+	set QRYSEQ = 0
+	if QI(4).exists(), (QI(4) '= "ALL") do {
+	
+		set QRYSEQ = QRYSEQ + 1
+		set DQQRY(QRYSEQ) = "[LN]TYPE "_QI(4)
+	}
+	if QI(3).exists(), (QI(3) '= "ALL") do {
+	
+		set QRYSEQ = QRYSEQ + 1
+		set DQQRY(QRYSEQ) = "[LN]CID "_QI(3)
+	}
+	
+	if (QRYSEQ > 0) set WHERE = $$WHERE^SQLCONV(.DQQRY(), "LN")
+	else  set WHERE = ""
+	
+	#ACCEPT Date=02/16/07; Pgm=RussellDS; CR=25356; Group=Dynamic
+	type ResultSet rs=Db.select("DISTINCT CCL", "LN", WHERE)
+	
+	while rs.next() do {
+		
+		type Number TYPE
+		
+		set CCID=rs.getCol("CCL")
+
+		type RecordACN acn=Db.getRecord("ACN","CID=:CCID")
+		
+		set TYPE=acn.type
+	
+		do COM0
+	}
+	
+	quit
+
+COM0	// Processing for one commitment account
+
+	kill A,FIX,VCID
+
+	do COM1
+
+	// No variable rate control loan found
+	if '$G(VCID) set ER=1 set RM=$$^MSG(2001) quit
+
+	// Variable rate loan processing
+	do VAR
+
+	// Fixed rate loans processing
+	do FIX1
+
+	// File ^TMP
+	set (D,N,I,B)="" do FTMP
+
+	quit
+
+COM1	// Look at each account underneath commitment - find fixed and variable
+
+	/* Logic is such that either there can only be one variable rate loan,
+	   or only the last one matters, OR the logic is wrong ... but see
+	   earlier versions (V6.4, e.g.)
+	*/
+	
+	type public String QI()
+	
+	type Number CID, QRYSEQ, TYPE
+	type String VARLNS(), WHERE
+	
+	// Get variable rate loans first, based on QI(I) TYPE query
+	set WHERE = "CCL=:CCID"
+	if QI(1).exists(), (QI(1) '= "ALL") do {
+	
+		type String DQQRY()
+	
+		set DQQRY(1) = "[LN]TYPE "_QI(1)
+		set WHERE = WHERE_" AND "_$$WHERE^SQLCONV(.DQQRY(), "LN")
+	}
+	
+	#ACCEPT Date=02/16/07; Pgm=RussellDS; CR=25356; Group=Dynamic
+	type ResultSet rs=Db.select("CID", "LN", WHERE)
+
+	while rs.next() set VARLNS(rs.getCol("CID")) = ""
+	
+	do COM2
+	
+	// Get "last" variable rate loan
+	set VCID = VARLNS("").order(-1)
+	
+	quit
+	
+	
+COM2	// Get fixed bullet loans (meet QI(2) query and aren't in VARLNS()
+
+	type public String FIX(), QI(), VARLNS()
+	
+	type String WHERE
+
+	set WHERE = "CCL=:CCID"
+	if QI(2).exists(), (QI(2) '= "ALL") do {
+	
+		type String DQQRY()
+	
+		set DQQRY(1) = "[LN]TYPE "_QI(2)
+		set WHERE = WHERE_" AND "_$$WHERE^SQLCONV(.DQQRY(), "LN")
+	}
+	
+	#ACCEPT Date=02/16/07; Pgm=RussellDS; CR=25356; Group=Dynamic
+	type ResultSet rs=Db.select("CID", "LN", WHERE)
+
+	while rs.next() if 'VARLNS(rs.getCol("CID")) set FIX(rs.getCol("CID")) = ""
+	
+	quit	
+
+
+VAR	// Variable rate control loan
+	
+	set CID=VCID
+       	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+
+	// Currency Code
+	set CRCD=ln.crcd
+
+	set BAL=ln.bal
+
+	// Advances to Reduce Undisbursed Flag
+	set ARUF=ln.aruf
+
+	// Transaction to Reduce Balance
+	set TRB=ln.trb
+
+	set TSEQ=Db.nextVal("HIST","CID=:CID")
+
+	set FPA=ln.fpa
+
+	// Create array of transactions to skip
+	new TYPE
+	set TYPE=ln.type
+	
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:TYPE")
+	set DRTRGP=prodctl.drtrgp
+	set CRTRGP=prodctl.crtrgp
+	set CLS=prodctl.cls
+	
+	if DRTRGP'=""!(CRTRGP'="") do {
+		if CLS="D",prodctl.drtrir'="" set SKIP(prodctl.drtrir)=""
+		if CLS="L",prodctl.drtraf'="" set SKIP(prodctl.drtraf)=""
+		if prodctl.drtrdf'="" set SKIP(prodctl.drtrdf)=""
+		}
+
+	// Original Disbursement Date
+	if %EffectiveDate<ln.odd set (%TSEQ,%BAL)=0
+	else  do EXEC^LNUEFD1
+
+	if %BAL set A(%EffectiveDate,1)=VCID_"|"_TYPE_"|1|"_%BAL
+	
+	// Determine which distribution contains "P"rincipal
+	set DST=$$DST(CID)
+	
+	if DST set DST=DST-1
+	
+	// Collate through history of variable rate loan
+	type ResultSet rs=Db.select("TSEQ","HIST","CID=:VCID")  
+        if rs.isEmpty() quit	   
+	while rs.next() do {
+		new TSEQ
+		set TSEQ=rs.getCol(1)
+		             
+		type RecordHIST hist=Db.getRecord("HIST","CID=:VCID,TSEQ=:TSEQ")
+		if hist.etc'="",$D(SKIP(hist.etc)) quit
+
+		set EJD=hist.tjd     
+		if EJD>ED quit
+           	
+		set X=hist.tcmt
+		
+		if X["]BAL:" do {
+			set X=$P(X,":",3)-$P(X,":",2)
+		
+			set A(EJD,$O(A(EJD,""),-1)+1)=VCID_"|"_TYPE_"|"_7_"|"_X
+			}
+
+		set TAMT=hist.tamt
+		set P=TAMT 
+		if TAMT["#" set P=$P(TAMT,"#",2) 
+		if ARUF set P=P+$P(TAMT,"#",5)
+
+		set DC=$E(hist.itc) 
+		if '(TRB-DC) set P=-P 
+		if P do {
+			set A(EJD,$O(A(EJD,""),-1)+1)=VCID_"|"_TYPE_"|"_$S(DC:4,1:2)_"|"_P                    
+			}
+		}
+
+	do VAR2(.ln)
+
+	// Last Bill - Loan Due Date Billed
+	set PDD=ln.lbdd 
+
+	/*
+	Create entries from variable rate payment schedule file for A(3)
+	Only look at those dates after LBDD
+	*/
+
+	type ResultSet rspdd=Db.select("PDD","LNPS1","CID=:CID")
+	if rspdd.isEmpty() quit
+	while rspdd.next() do {
+		set PDD=rspdd.getCol(1)
+		if PDD>ED quit
+
+		type RecordLNPS1 pdd=Db.getRecord("LNPS1","CID=:CID,PDD=:PDD")
+		if DST=1 set VAR=d2f
+		if DST=2 set VAR=d3f
+		if DST=3 set VAR=d4f
+		
+		if 'pdd.@VAR quit
+	
+		if pdd.fpc'="" set FPC=pdd.fpc
+	
+		set B=$S(PDD<%EffectiveDate:%EffectiveDate,1:PDD)
+
+		set A(B,$O(A(B,""),-1)+1)=VCID_"|"_TYPE_"|3|"_-FPA
+		}
+
+	quit
+
+VAR2(RecordLN ln)	// Find value of A(6) [ UNPAID ] from current and
+	// uncollected Principal
+	
+	set P=ln.cupr+ln.unpr
+	if P set A(%SystemDate,$O(A(%SystemDate,""),-1)+1)=VCID_"|"_TYPE_"|6|"_-P
+
+	// Find due amount for future due dates from bill file
+
+	// Scheduled Internal Bill Sequence Number
+	set N=ln.schseq 
+	set P=0
+	
+	type ResultSet rs=Db.select("SCHSEQ","LNBIL1","SCHSEQ>:N")
+	if rs.isEmpty() quit
+
+	// Collate through bill file - find prin that is not in UNPR or CUPR
+	while rs.next() do {
+		set N=rs.getCol(1)
+		type RecordLNBIL1 lnbil1=Db.getRecord("LNBIL1","CID=:CID,SCHSEQ=:N")
+		// Unpaid princpal
+		set P=P+$$AMTDUE^BILFUNCS(.lnbil1,"P")
+		}
+
+	// Scheduled Payment - Next Date
+	if 'P quit 
+	set S=ln.schnd
+	set A(S,$O(A(S,""),-1)+1)=VCID_"|"_TYPE_"|3|"_-P
+	quit
+
+
+FIX1	// Fixed rate bullets - add entry to A array if mature after TJD
+	set CID=""
+	for  set CID=$O(FIX(CID)) quit:CID=""  do {
+		type RecordLN ln=Db.getRecord("LN","CID=:CID")
+		set MDT=ln.mdt 
+		if MDT="" quit
+
+		// Maturity option
+		if $E(ln.rencd,2)'="C" quit
+
+		// Transfer acct must be var cntl ln
+		if ln.tracn'=VCID quit
+
+		set B=$S(MDT<%EffectiveDate:%EffectiveDate,1:MDT)
+
+		if MDT>ED quit
+
+		set BAL=ln.bal 
+		if ln.aruf set BAL=BAL-ln.udbal
+
+		// Reduce balance by CUPR and UNPR
+		set BAL=BAL-ln.cupr-ln.unpr
+
+		set DST=0
+
+		// Determine which distribution contains principal
+		set DST=$$DST(CID)
+
+		if DST do {
+			set DST=DST-1 
+			set PDD="" 
+			set FPC=ln.fpa 
+			do FIX2
+			}
+
+		if BAL set A(B,$O(A(B,""),-1)+1)=CID_"|"_ln.type_"|5|"_BAL
+		}
+
+	quit
+
+
+FIX2	// Reduce balance by any scheduled principal payment due after TJD
+
+	type ResultSet rs=Db.select("PDD","LNPS1","CID=:CID")
+	if rs.isEmpty() quit
+	while rs.next() do {
+		set PDD=rs.getCol(1)
+		type RecordLNPS1 pdd=Db.getRecord("LNPS1","CID=:CID,PDD=:PDD")
+		if pdd.fpc'="" set FPC=pdd.fpc
+		if PDD'>%SystemDate quit
+		if DST=1 set VAR=d2f
+		if DST=2 set VAR=d3f
+		if DST=3 set VAR=d4f
+	
+		if 'pdd.@VAR quit
+
+		set BAL=BAL-FPC
+		}
+	quit
+	
+
+FTMP	// File ^TMP Global
+
+	new ACN
+
+	for  set D=$O(A(D)) quit:D=""  do {
+		for  set N=$O(A(D,N)) quit:N=""  do {
+			set I=I+1 
+			set B=B+$P(A(D,N),"|",4)
+
+			type RecordACN acn=Db.getRecord("ACN","CID=:CCID")
+			set ACN=acn.acn
+	
+			type RecordLNRTL lnrtl=Class.new("RecordLNRTL")
+			set lnrtl.job=%ProcessID
+			set lnrtl.acn=ACN
+			set lnrtl.com=CCID
+			set lnrtl.seq=I
+
+			set lnrtl.date=D
+			set lnrtl.acct=$P(A(D,N),"|",1)
+			set lnrtl.type=$P(A(D,N),"|",2)
+			set lnrtl.act=$P(A(D,N),"|",3)
+			set lnrtl.amt=$P(A(D,N),"|",4)
+			set lnrtl.bal=B
+			do lnrtl.bypassSave()		
+			}
+		}
+	quit
+
+
+PPEF	// Post processor - effective date prompt
+
+	set X=$$^SCAJD(X)
+	if X'>%SystemDate quit
+
+	// Start date must be the same as or prior to the system date
+	set ER=1 set RM=$$^MSG(2533)
+
+	quit
+
+PPED	// Post processor - ending date prompt
+
+	set X=$$^SCAJD(X)
+
+	// Ending date must be after beginning date
+	if X'>%EffectiveDate set ER=1 set RM=$$^MSG(896) quit
+
+	if X'<%SystemDate quit
+
+	// Ending date must be the same as or after the system date
+	set ER=1 set RM=$$^MSG(897)
+
+	quit
+
+RINIT	// Create action ATN array (used by report)
+
+	set JOB=%ProcessID
+
+	// Beginning balance on date EFD
+	set ATN(1)=$$^MSG(5697)			// Balance
+
+	// Debit transaction posted to account
+	set ATN(2)=$$^MSG(7124)			// Advance
+
+	// Scheduled principal payments due
+	set ATN(3)=$$^MSG(3884)			// Payment(s) Due
+
+	// Principal reduction from control loan history
+	set ATN(4)=$$^MSG(7125)			// Credit
+
+	// Fixed rate loan principal transfer at maturity
+	set ATN(5)=$$^MSG(7126)			// Maturity
+
+	// Principal amounts from bill file
+	set ATN(6)=$$^MSG(7127)			// Unpaid
+
+	// [LN]BAL modified			// Maintenance
+	set ATN(7)=$$^MSG(7128)
+
+	quit
+
+DEF	// Set up VRP and FBP and commitment defaults
+
+	set CLS="L"
+
+	type ResultSet rs=Db.select("TYPE","PRODCTL","CLS=:CLS")
+	if rs.isEmpty() quit
+	while rs.next() do {
+		set A=rs.getCol(1)
+		type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:A")
+ 		if prodctl.fbp set QI(1)=$S($L(QI(1)):QI(1)_","_A,1:A)
+		if prodctl.rlp set QI(2)=$S($L(QI(2)):QI(2)_","_A,1:A)
+		if prodctl.vrp set QI(3)=$S($L(QI(3)):QI(3)_","_A,1:A)
+		}
+	quit
+
+
+DST(CID)	// Determine which distribution contains "P"rincipal
+
+	new XDST
+	type RecordLNBIL0 lnbil0=Db.getRecord("LNBIL0","CID=:CID")
+	set DST=0
+	set XDST=$$BIL0^BILFUNCS(.lnbil0,"P")
+	set DST=$P(XDST,"#",4)
+	quit DST
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60712^46297^Dan Russell^11347"	// Signature - LTD^TIME^USER^SIZE

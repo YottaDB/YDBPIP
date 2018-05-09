@@ -1,0 +1,331 @@
+SW900GEN	 
+ /*
+  ORIG: KELLYP - 10/21/1999
+  DESC: Testing SWIFT MT900/910 Generation Procedure
+  
+  ---- Comments --------------------------------------------------------
+  This procedure generates a SWIFT MT900 Confirmation of Debit message or
+   a SWIFT MT910 Confirmation of Credit Message.  The different fields of
+   these messages are built depending upon how the DR or CR instructions
+   were received.
+  When the message has been completed, it is filed to the ^SWIFT global
+   as well as the ^SWIFTQ("RTT" global (SWIFT Ready-To-Transmit Queue).
+ 
+  PROC Arguments:
+  	CID - Account number that the DR or CR was applied to
+     TSEQ - History Transaction Sequence number of transaction for CID
+    DEBIT - Indicates whether the tran was a debit (1) or a credit (0)
+ 
+  ---- Revision History ------------------------------------------------
+  
+  	04/17/07 - RussellDS - CR26387
+  		   Eliminate use of UHFETCH
+
+	09/07/05 - KELLYP - CR 17118
+		   Modified entire procedure to remove references to the 
+		   MT100 message which has been obsoleted by SWIFT. Also
+		   removed CUVAR DB retrieval in PROC section and 
+		   replaced with direct CUVAR reference.
+
+	01/27/03 - Spier - 51423
+		   Corrected isDefined error in syntax, quotes were not around 
+		   the keys
+ 
+ */ 
+	quit // Dummy quit for the compiler
+ 	
+public PROC(CID,TSEQ,DEBIT)
+
+ if (CID="")!(TSEQ="")!(DEBIT="") quit
+
+ new acn,amt,debit,jd,oldrefno,refno,tso,tsosub
+
+ // Create new SWIFT record
+ type RecordSWIFT swift=Class.new("RecordSWIFT")
+
+ // Get HIST record for this transaction
+ type RecordHIST fHIST = Db.getRecord("HIST", "CID=:CID,TSEQ=:TSEQ")
+  
+ // Get account record
+ type RecordACN acct=Db.getRecord("ACN","CID")
+ set acn=acct.acn		// Customer Account Number
+ 
+
+ // Retrieve the customer's record
+ type RecordCIF cust=Db.getRecord("CIF","acn")
+  
+ 
+ // Sender field
+ set swift.sndr=CUVAR.swiftadd
+
+ // Set up miscallaneous SWIFT variables
+ set swift.date=%SystemDate
+ set swift.time=%CurrentTime
+ set swift.swftdt=%SystemDate
+ set swift.swdirect="OUT"
+ set swift.status=0
+
+
+ // Message Type field
+ if DEBIT set swift.msg="900"
+ else  set swift.msg="910"
+
+
+ // Receiver field
+ if DEBIT do {
+        if acct.mt900a'="" set swift.rcvr=acct.mt900a
+        else  if cust.mt900a'="" set swift.rcvr=cust.mt900a
+        else  set swift.rcvr=cust.swiftadd
+ }
+ if 'DEBIT do {
+        if acct.mt910a'="" set swift.rcvr=acct.mt910a
+        else  if cust.mt910a'="" set swift.rcvr=cust.mt910a
+        else  set swift.rcvr=cust.swiftadd
+ } 
+
+
+ // Transaction Reference Number (field 20)
+ set refno=$$950^TRREFNO
+ set swift.trrefno=refno
+ set swift.trnofmt=refno
+
+ // Related Reference Number (field 21)
+ //  searchTSO will determine if the DR or CR transaction was originated by an
+ //   NDPO, NDPOIN, or other EFT-type payment.
+
+ new okRETR,oldrefno
+ set tso = fHIST.tso
+ if ((tso["EFT#")!(tso["#SWIFT")) set okRETR=$$searchTSO(.swift)
+ if $G(okRETR)'=1 set swift.relref=TSEQ
+
+
+ // Account Identification (field 25)
+ set swift.acctid=CID
+
+
+ // Value Date, Currency Code, Amount (field 32A)
+ set jd = fHIST.tjd
+ set jd=$$DAT^%ZM(jd,"YYMMDD")		  // Convert date to SWIFT format
+ set amt = fHIST.tamt
+ set crcd = fHIST.crcd
+ set amt=$$AMTCONV^SWIFTGEN(amt,1,crcd)   // Convert amount to SWIFT format
+ set swift.vcas2=jd_crcd_amt
+
+ 
+ // Ordering Institution (field 52)
+ //  May have been populated by a previous call to getEFT or to getSWIFT 
+
+ if ('DEBIT)&(swift.ordtype="") do {        // Field 52 required for MT910s
+        set swift.ordtype="A"
+        set swift.ordinst=swift.sndr
+ }
+
+ // Intermediary (field 56) *** for MT910 messages only *** 
+ //  Populated, if necessary, by a previous call to getSWIFT
+
+ // Sender to Receiver Information (field 72)
+ //  Populated, if necessary, by a previous call to getSWIFT
+
+ // ***** File new entry to SWIFT global *****
+ do swift.save()
+
+
+ // ***** File new entry to SWIFTQ("RTT" *****
+ set TRREFNO=refno	       // QUEUE^SWIFTGEN implicitly requires var TRREFNO
+ set MSG=swift.msg	       // and var MSG
+ do QUEUE^SWIFTGEN("RTT",TJD)
+     
+ quit
+
+ //---------------------------------------------------------------------
+searchTSO(RecordSWIFT swift)
+ //---------------------------------------------------------------------
+ // This section searches the TSO array of the tran's corresponding ^HIST
+ //  entry to determine if the transaction originated from a SWIFT MT103 
+ //  message or via the Domestic Payment System.  TSO may contain either an
+ //  ^EFTPAY sequence number for the account, a transaction reference number,
+ //  or both.
+
+ new i,fld,found,okEFT,okRET,okSWIFT
+ set (found,i)=0
+ for  quit:found  do {
+    	set i=i+1
+    	set fld=$P(tso,"~",i)
+    	if fld="" set found=1 quit 
+    	if $E(fld,1,4)="SEQ#" do {
+	// EFTPAY sequence number was found, call getEFT to get field info
+		new oldseq
+       		set oldseq=$E(fld,5,$L(fld))	// Extract eft sequence num.
+		set okEFT=$$getEFT(.swift,oldseq)  // Get old EFT record info
+		if okEFT				// Preserves $T
+    	}	
+	else  if $E(fld,1,5)="SPEC#" do {
+	// Transaction reference number found, call getSWIFT to get field info
+		new oldref
+		set oldref=$E(fld,6,$L(fld))	// Extract tr ref num.
+		set okSWIFT=$$getSWIFT(.swift,oldref) // Get old SWIFT rec info
+	}
+	if $G(okEFT)!$G(okSWIFT) set found=1
+ }
+ if $G(okEFT)!$G(okSWIFT) set okRET=1		// EFT/SWIFT retrieval was ok
+ else  set okRET=0				// EFT retrieval was not ok
+
+ quit okRET
+
+ //---------------------------------------------------------------------
+getEFT(RecordSWIFT swift,oldeftseq)
+ //---------------------------------------------------------------------
+ // This section determines if the tran might have originated from SWIFT, 
+ //  and if not, possible via the DPS.  If it did originate via SWIFT, 
+ //  getSWIFT is called to retrieve field info necessary on the MT900/910.
+ //  If it originated via DPS, a test is performed to see if field 52 on 
+ //  the MT900/MT910 should be populated with information from UTBLEFTINST. 
+
+ new okDPS,okRET,okSW
+
+ if oldeftseq="" quit 0
+
+ if Db.isDefined("EFTPAY","CID,oldeftseq") do {
+ 	new oldref
+	type RecordEFTPAY eftrec=Db.getRecord("EFTPAY","CID,oldeftseq")
+	if eftrec.efttype["NDPO" do {   // Could be NDPO or NDPOIN
+		set oldref=eftrec.refno 
+		set okSW=$$getSWIFT(.swift,oldref)
+		if okSW 			// Preserves $T
+	}
+	else  if (DEBIT)&(eftrec.ordinst'=swift.rcvr)!('DEBIT) do {
+	// If tran was a DR and the PO sender isn't the same as the 900/910 rcvr
+        // or if tran was a CR, do the following...
+    		set eftinst=eftrec.ordinst
+		if eftinst="" quit
+    		if Db.isDefined("UTBLEFTINST","eftinst") do {
+			// Populate field 52 on MT900/910
+        		new instrec
+        		type RecordUTBLEFTINST instrec=Db.getRecord("UTBLEFTINST","eftinst")
+        		set swift.ordtype="D"
+        		set swift.ordinst1=instrec.nam
+        		set swift.ordinst2=instrec.addr
+			set okDPS=1
+    		}
+ 	}		
+ }
+
+ if $G(okDPS)!$G(okSW) set okRET=1	// Fields were populated properly
+ else  set okRET=0			// Fields were not populated properly
+
+ quit okRET
+
+ //---------------------------------------------------------------------
+getSWIFT(RecordSWIFT swift,oldrefno)
+ //---------------------------------------------------------------------
+ // If the DR or CR originated from an outgoing (DR) or incoming (CR) SWIFT
+ //  MT103 message, then fields 21, 52, 56 (MT910 only), and 72 on the MT900
+ //  or MT910 need to be populated with certain info from the original MT103.
+
+ if oldrefno="" quit 0
+
+ new swdirect,noswift,okRETURN,oldmsg,oldswift
+
+ set oldmsg="103"
+ if DEBIT set swdirect="OUT"
+ else  set swdirect="IN"
+ if 'Db.isDefined("SWIFT","swdirect,oldrefno,oldmsg") do {
+ 	set noswift=1		// No SWIFT record exists for this NDPO/NDPOIN
+
+   	// If record doesn't exist in ^SWIFT, might be able to retrieve ORDINST
+   	//  from ^EFTPAY via ^EFTREF
+
+ 	if Db.isDefined("EFTREF","oldrefno") do {
+		type RecordEFTREF eftref=Db.getRecord("EFTREF","oldrefno")
+		set eftseq=eftref.seq
+ 		if Db.isDefined("EFTPAY","CID,eftseq") do {
+			new efttmp,tmpref
+			type RecordEFTPAY efttmp=Db.getRecord("EFTPAY","CID,eftseq")
+			if 'DEBIT set tmpref=oldrefno,oldrefno=efttmp.relrefno
+
+			// If tran is a CR, actual SWIFT refno may be stored in
+			//  the relref field of the EFTPAY record
+
+			if Db.isDefined("SWIFT","swdirect,oldrefno,oldmsg") set noswift=0 quit
+			else  set oldrefno=tmpref
+			set swift.relref=oldrefno
+			// Don't use field 52 on MT900 if 900 rcvr = orderer
+			if (DEBIT)&(efttmp.ordinst=swift.rcvr) quit
+			if efttmp.ordinst'="" do {
+				set swift.ordtype="A"
+				set swift.ordinst=efttmp.ordinst
+			}
+			else  do {
+				set swift.ordtype="D"
+				set swift.ordinst1=efttmp.ordinst1
+				set swift.ordinst2=efttmp.ordinst2
+				set swift.ordinst3=efttmp.ordinst3
+				set swift.ordinst4=efttmp.ordinst4
+			}
+			// MT910 requires field 52, default to sender
+			if ('DEBIT)&(swift.ordtype="D")&(swift.ordinst1="") do {
+				set swift.ordtype="A"
+				set swift.ordinst=efttmp.sndr
+			}
+		}	
+	}
+ 	if swift.relref'="" set okRETURN=1
+ }
+ if $G(noswift)&$G(okRETURN) quit 1  	    // Retrieved all the info we can get
+ else  if $G(noswift)&'$G(okRETURN) quit 0  // Unable to retrieve prior MT103
+
+ // If processing executes to here, there should be an MT103 entry in ^SWIFT
+ //  which caused the DR or CR on the account.
+
+ type RecordSWIFT oldswift=Db.getRecord("SWIFT","swdirect,oldrefno,oldmsg")
+	
+ // Related Reference Number - Field 21
+ set swift.relref=oldswift.trnofmt
+
+ // Ordering Institution - Field 52
+ if (DEBIT)&(oldswift.ordinst'=swift.rcvr)!('DEBIT) do {
+ // If a DR and the MT103 sender '= MT900 receiver or if tran was a CR...
+ 	set swift.ordtype=oldswift.ordtype
+        if swift.ordtype="A" set swift.ordinst=oldswift.ordinst quit
+        else  if swift.ordtype="D" do {
+        	set swift.ordinacc=oldswift.ordinacc
+                set swift.ordinst1=oldswift.ordinst1
+                set swift.ordinst2=oldswift.ordinst2
+                set swift.ordinst3=oldswift.ordinst3
+                set swift.ordinst4=oldswift.ordinst4
+        }
+	// MT910 requirements state that field 52 should contain the sndr addr
+        //  from the original MT103 if no ordinst was defined.
+	if ('DEBIT)&(swift.ordtype="") do {
+		set swift.ordtype="A"
+		set swift.ordinst=oldswift.sndr
+	}
+ } 
+
+ // Intermediary - Field 56 - Only for MT910s
+ if ('DEBIT)&(oldswift.sndr'=oldswift.ordinst)&(oldswift.ordinst'="") do {
+ // if tran was a CR and the MT103 sender '= the MT103 ordering institution... 
+ 	set swift.intstype=oldswift.intstype
+ 	if swift.intstype="A" set swift.ints=oldswift.ints quit
+ 	else  if swift.intstype="D" do {
+        	set swift.intsacc=oldswift.intsacc
+        	set swift.ints1=oldswift.ints1
+        	set swift.ints2=oldswift.ints2
+        	set swift.ints3=oldswift.ints3
+        	set swift.ints4=oldswift.ints4
+        	set swift.ints5=oldswift.ints5
+	}
+ }
+
+ // Sender to Receiver Info- Field 72
+ // If tran was originated by an MT103, copy over whatever field 72 info existed
+ set swift.by1=oldswift.by1
+ set swift.by2=oldswift.by2
+ set swift.by3=oldswift.by3
+ set swift.by4=oldswift.by4
+ set swift.by5=oldswift.by5
+ set swift.by6=oldswift.by6
+ 
+ quit 1		// If processing executes to here, oldswift retrieval was ok
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60739^53916^Dan Russell^10846"	// Signature - LTD^TIME^USER^SIZE

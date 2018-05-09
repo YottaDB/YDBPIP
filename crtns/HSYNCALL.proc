@@ -1,0 +1,360 @@
+HSYNCALL		/*
+	
+	This procedure contains utility labels call from other elements of the Host sync
+	utility.  Labels ALLFID,ALLCTBL,ALLUTBL,ALLSTBL,ALLMISC,ALLTRN are used to send 
+	all tables for that particular type.  
+	
+	The label ALL is called from the DDPXFRGU function to prompt for any of the 6 possible 
+	types of elements to send to the client.
+	The Label %EXT is called from a OS script to automate the transfer of all tables to
+	a new client.
+
+	---- Revision History ------------------------------------------------
+
+	05/11/05 - KELLYP - CR 13664
+		   Modified SETUP section to determine if front ends are
+		   connected to host by selecting from DDPHOST instead of
+		   using a Db.isDefined on DDPFEP.
+
+	09/16/04 - RussellDS - CR8102
+		   Modified call to ^DBSTBLM from LOADFILE to LOOKUP.
+		   
+		   Cleaned up scope errors (did not attempt to properly
+		   type (Number vs. String) all variables.
+		   
+		   Removed old revision history.
+
+	12/12/03 - spier 7403
+		   psl compiler warning message cleanup
+	*/
+
+	quit
+
+		
+ALL	//SEND all and tables to a GUI client
+	
+	/*
+
+	   DESC: Rebuild all tables on a client
+	   INPUTS: None
+
+	   RETURNS:None
+
+	   Rms files are created and a entry in DDPTQUE for each file.
+	   For each GUI client a entry is created in DDPTQUE1.
+	   RELATED:
+
+
+	*/
+
+	type Public Number ER
+
+	type Number %HELP,%InputTimeout,JOB,%PAGE,%PG
+	type String CLIENT,DDPDIR,DDPLOG,DIR,HOSTDIR,FEP,FLG(),%LIBS,USERNAME,VFMQ
+
+	do SETUP(0)
+	if ER!(VFMQ="Q") quit
+
+
+	/*
+	 if sending all files then data will be sent also, do not
+	 duplicate that by executing the other labels.
+	*/
+	if FLG(2) do ALLFID quit 
+	if FLG(14) do ALLTBLS("UTBL")
+	if FLG(15) do ALLTBLS("STBL")
+	if FLG(16) do ALLTBLS("CTBL")
+	if FLG(18) do ALLMISC set FLG(18)=0
+	if FLG(10) do ALLTRN
+
+	quit 
+	
+SETUP(INTER)	// Define required variables and prompt for data
+
+	/*
+	Arguments:
+	. INTER		Interactive PROCESS		/TYP=L/REQ/MECH=VAL
+
+	*/
+	
+	type Public Date DATE
+	type Public Number ER,%HELP,JOB,%PAGE,%PG,TIME
+	type Public String DDPDIR,DDPLOG,DIR,FEP,FLG(),HOSTDIR,%LIBS,RM,USERNAME,VFMQ
+	
+	type Number I
+	type String %READ,%TAB()
+
+	set %PG=0 
+	set %PAGE=99 
+	#ACCEPT PGM=SPIER;DATE=12/08/03
+	set %InputTimeOut=99 
+	set %HELP=2
+
+	set %LIBS="SYSDEV"
+	set USERNAME=%UserName
+	set JOB=%ProcessID
+
+	//GT.M Environment not defined.
+	// I18N=OFF:
+	
+	set DIR=$$DIR^DDPUTL 
+	if DIR="" write !,$$^MSG("3434") quit
+
+	// I18N=ON:
+	set DDPDIR=$$DDPDIR^DDPUTL(DIR)
+	if DDPDIR="" set DDPDIR=$$SCAU^%TRNLNM("DDP")
+
+	// logical name of HOST directory
+	set HOSTDIR=DIR                        
+
+	// I18N=ON:
+
+	set DDPLOG=$$SCAU^%TRNLNM("DDPLOG")
+	
+	// Quits with an error message if no front ends exist.
+	if DDPLOG="" set ER=1 set RM=$$^MSG("7326") quit
+	
+	type ResultSet rs=Db.select("FEPDIR","DDPHOST","HOSTDIR=:DDPLOG")
+	
+	// No front ends are connected to this host.
+	if rs.isEmpty() do Runtime.setErrMSG("DDPHOST","7326") quit:ER
+
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+	
+	if '$G(INTER),$$INTRACT^%ZFUNC() do { quit:VFMQ="Q" 
+		//Prompt for the types to send to the client
+		for I=2,10,14,15,16,18 set FLG(I)=0
+		set %TAB("FLG(2)")=".FLG2"
+		set %TAB("FLG(10)")=".FLG10"
+		set %TAB("FLG(14)")=".FLG14"
+		set %TAB("FLG(15)")=".FLG15"
+		set %TAB("FLG(16)")=".FLG16"
+		set %TAB("FLG(18)")=".FLG18"
+		set %READ="@@%FN,,,FLG(2)/REQ,FLG(10)/REQ,FLG(14)/REQ,FLG(15)/REQ,FLG(16)/REQ,FLG(18)/REQ"
+		do ^UTLREAD if VFMQ="Q" quit 
+		do QUE^DDPXFR(.cuvar) if VFMQ="Q" quit 
+		//No front ends are connected to this host.
+		if $D(FEP)'>1 set ER=1 set RM=$$^MSG(7326) quit
+		}
+	set DATE=%CurrentDate 
+	set TIME=%CurrentTime
+
+	quit
+
+		
+ALLFID	//Private; Send all schema definitions to a client
+	
+	type Public String FEP()
+	
+	type String CTBL1,DATAFILE,DFEP,FID1,FID,GLOBAL,MISCT,NOINT,STBL1,TRAN1,UTBL1
+
+	set DFEP=""
+	// remove all previous transfer files since we will be sending complete sets
+	// of every table and data
+	for  set DFEP=$O(FEP(DFEP)) quit:DFEP=""  do Db.delete("DDPTQUE1","FEPDIR=:DFEP") 
+
+	set NOINT=1
+
+	// Irina's patch
+	type Number CNT=0
+	type ResultSet rsfid=Db.select("FID","DBTBL1","%LIBS='SYSDEV' and FILETYP NOT =5 and FILETYP NOT =7")
+	while rsfid.next() do SETENTRY^DDPXFR1(rsfid.getCol(1),.FID1) set CNT=CNT+1
+
+	// Remove duplication caused by foreign keys
+	do RESETTAB^DDPXFR1(.FID1)
+
+	do SENDIT(.FID1)
+	quit
+
+
+SENDIT(SAVEFID)
+
+	for  quit:'$D(SAVEFID)  do {
+		type Number COUNTER
+		type String FID,FID1()
+		
+		set FID=""
+		set COUNTER=0
+		for  set FID=$O(SAVEFID(FID)) quit:FID=""  set FID1(FID)=SAVEFID(FID) kill SAVEFID(FID) set COUNTER=COUNTER+1 Q:COUNTER=300
+		do SNDFILE
+		}
+
+	quit 
+
+
+ALLTBLS(TBLTYPE)	//Private; Send all tables of a particular option to a client
+
+	// TBLTYPE has three options, CTBL,STBL and UTBL
+	
+	type Public String FLG()	
+	
+	type String CTBL1,DES,FID,IOLIST,NOINT,STBL1,UTBL1,vtblutbl
+	
+	set NOINT=1
+	do LOOKUP^DBSTBLM(TBLTYPE, .vtblutbl)
+	if TBLTYPE="STBL" do {
+		do GETTABLE(.STBL1)
+		set FLG(15)=1
+		}
+	if TBLTYPE="UTBL" do {
+		do GETTABLE(.UTBL1)
+		set FLG(14)=1
+		}
+	if TBLTYPE="CTBL" do {
+		do GETTABLE(.CTBL1)
+		set FLG(16)=1
+		}
+	do BUILD^HSYNCFBD
+	do FILE^DDPXFR1
+	
+	quit 
+	
+	
+ALLMISC	//Private; Send all misc tables toa client
+	
+	type Public String FLG()
+	
+	type String FID,FILETYP,IOLIST,MISCT,NOINT,TABLE
+	
+	set NOINT=1
+	set TABLE="" 
+	set FID=""
+
+	type ResultSet misc=Db.select("FILETYP,UDFILE,FID,NETLOC,LOG","DBTBL1","%LIBS='SYSDEV' AND FILETYP NOT =5 AND FILETYP IS NOT NULL AND FILETYP NOT =4 AND FILETYP NOT =7 AND NETLOC>0 AND LOG>0 AND GLOBAL NOT IN ('UTBL','CTBL','STBL','DBTBL')")
+	if misc.isEmpty() quit
+	while misc.next() do {
+		set FID=misc.getCol(3)
+		do SETENTRY^DDPXFR1(FID,.MISCT)
+		}
+
+	do RESETTAB^DDPXFR1(.MISCT)
+	set FLG(18)=1
+	do BUILD^HSYNCFBD
+	do FILE^DDPXFR1
+	
+	quit
+	
+
+GETTABLE(ARRAY)	// Build an array of tables to be processed based on data stored in vtblutbl array
+
+	type Public String vtblutbl()
+	
+	type String DES,FID
+	
+	do BUILDVTBL^DDPXFR1
+	set DES=""
+	for  set DES=$O(vtblutbl(DES)) quit:DES=""  do {
+		set FID=$P(vtblutbl(DES),"|",2)
+		if FID="" quit
+		type RecordDBTBL1 dbtbl=Db.getRecord("DBTBL1","%LIBS='SYSDEV',FID=:FID")
+		if dbtbl.filetyp=5!(dbtbl.filetyp=4) quit
+		if +dbtbl.netloc=0 quit
+		if +dbtbl.log=0 quit
+		do SETENTRY^DDPXFR1(FID,.ARRAY)
+		}
+	do RESETTAB^DDPXFR1(.ARRAY)
+
+	quit
+
+	 
+ALLTRN	//  Send all transaction codes and authorizations to a client
+
+	type Public String FLG()
+
+	type String IOLIST,NOINT,TRAN1
+
+	set NOINT=1
+	set FLG(10)=1
+	set TRAN1("*")=""
+	do BUILD^HSYNCFBD
+	do FILE^DDPXFR1
+	quit 
+	
+
+
+SNDFILE	//  Build files for schema definitions
+
+	type Public String CTBL1,FID1,FLG(),MISCT,KEEPIO,STBL1,UTBL1
+
+	type String IOLIST
+	
+	set FLG(2)=1
+	do BUILD^HSYNCFBD
+	if '$G(KEEPIO) do FILE^DDPXFR1
+	kill CTBL1,FID1,MISCT,STBL1,UTBL1
+	
+	quit 
+	
+	
+EXT(BRANCH,FID,TRN,UTBL,STBL,CTBL,MISC)	//Public; Build full load of data via script call
+	
+	/*
+	   NOTE: This functionality is intended to be used in the initialization
+	   of new branches, not for general upkeep with each release.
+
+	   See notes to ALL line tag for further details.
+
+	   Arguements:
+	   	BRANCH		FEP Branch to transfer to		TYP=T/NOREQ
+			     		Default is all branches.
+		FID		Transfer Files transfer			TYP=L/NOREQ
+		TRN		Transaction Codes transfer		TYP=L/NOREQ
+		UTBL		User Tables transfer			TYP=L/NOREQ
+		STBL		System Tables transfer			TYP=L/NOREQ
+		CTBL		Common Tables transfer			TYP=L/NOREQ
+		MISC		Miscellaneous Tables transfer		TYP=L/NOREQ
+
+	         "Y" to Transfer above categories.  Default is no transfer.
+
+
+	*/
+
+	type Public Number ER
+	type Public String FLG(),HOSTDIR,RM
+	
+	type Number I
+	
+	set ER=0
+	do SYSVAR^SCADRV0()
+	new CLIENT,CURRDATA,DATE,DIR,DDPDIR,DDPLOG,FEP,TIME,USERNAME
+	
+	do SETUP(1)
+	if ER quit
+
+	if $D(BRANCH) do {
+		if $G(BRANCH)="*"!($G(BRANCH)="") do FEPALL^DDPXFR
+		else  do {
+			if Db.isDefined("DDPHOST","HOSTDIR,BRANCH") do {
+				set FEP(BRANCH)=BRANCH
+				type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+				set CLIENT=cuvar.%vn
+				if $P(CLIENT,"-",2)="" set $P(CLIENT,"-",2)="0"
+				type RecordDDPHOST ddphost=Db.getRecord("DDPHOST","HOSTDIR=:HOSTDIR,FEPDIR=:BRANCH")
+				set CURRDATA=ddphost.rid
+				if CURRDATA="" set CLIENT(CLIENT,BRANCH)=""
+				else  do {
+					if $P(CURRDATA,"-",2)="" set $P(CURRDATA,"-",2)="0"
+					set CLIENT(CURRDATA,BRANCH)=""
+					}
+				}
+			else  set ER=1 set RM=$$^MSG("1330") quit 
+			}
+		}
+	else  do FEPALL^DDPXFR
+	if ER quit
+
+	//No front ends are connected to this host.
+	if $D(FEP)'>1 set ER=1 set RM=$$^MSG(7326) quit
+
+
+	for I=2,10,14,15,16,18 set FLG(I)=0
+	if $G(FID)="Y" set FLG(2)=1 do ALLFID quit 
+	if $G(UTBL)="Y" set FLG(14)=1 do ALLTBLS("UTBL")
+	if $G(STBL)="Y" set FLG(15)=1 do ALLTBLS("STBL")
+	if $G(CTBL)="Y" set FLG(16)=1 do ALLTBLS("CTBL")
+	if $G(MISC)="Y" set FLG(18)=1 do ALLMISC
+	if $G(TRN)="Y" set FLG(10)=1 do ALLTRN
+	
+	quit
+
+vSIG()	quit "60507^69351^kini^8394"	// Signature - LTD^TIME^USER^SIZE

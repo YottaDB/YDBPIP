@@ -1,0 +1,216 @@
+RCCAP(RecordLN ln,RecordTTX ttx,RecordTRN trn)
+
+	/*
+		Procedure ID: RCCAP
+		DESC: Capitalize Interest at Close-out
+
+	  ------- Revision History ----------------------------------------------------------------------
+	
+	01/05/07 - KUMARB - CR24680
+		Modified to quit from the DEF section if the Revolving Account
+		Flag (LN.REVF) is not selected, instead of if the Product Group
+		(LN.GRP) not equal to "RC" (Revolving Credit).
+	
+	09/5/02	- YENDAPALLIS - 43583
+		PSL conversion clean up.
+
+	5/16/02 - YENDAPALLIS - 43583
+		Converted the routine to PSL
+
+	DESC: Capitalize Interest at Close-out
+		Custom project for CUCM to allow the user to capitalize the
+		interest on an RC account.  This routine will be called by
+		new transaction code RCCAP.  RCCAP will be a primary zero dollar
+	   	transaction that will create 2 system generated transactions.
+	   	The following will occur when RCCAP is applied against a RC
+	  	account:  1) Any accrual amount that has not been deferred
+	   	will be added to DIU, 2) The amount in DIU will be capitalized
+	    	using the "Capitalize Deferred Interest" transaction codes from
+	   	the product.
+	---------------------------------------------------------------------
+		
+	*/
+
+	
+	new DIU,EC,TR16
+	
+	// Error-Correct Data
+	set TR16=ttx.lnerc 
+	set $P(TR16,"#",1)=ln.baola
+
+	// Deferred Interest - Uncapitalized
+	set DIU=ln.diu
+	
+	do DEF(.ln)
+	
+	if DIU>0 do CAP(.ln,.ttx)
+	set ttx.lnerc=TR16
+
+	quit
+
+
+DEF(RecordLN ln)	// If there is an accrual amount that has not been placed in the
+	
+	/*
+	   defered interest bucket ([LN]DIU) then update DIU and DIAA with
+	   this amount.  Also place this amount into piece 16 of the primary
+	   transaction to be used during an error correct or reversal.
+
+
+	*/
+	
+	new TRNC,TRND
+
+	// Set up account array
+	
+	if 'ln.revf quit
+
+	// nothing to cap
+	if +ln.acr'>0 quit
+
+	// not set to defer/cap
+	if ln.intcap'=1 quit
+
+	new ACR
+
+	set ACR=$$^SCARND(+ln.acr,0,CID)
+	if ACR'>DIU quit
+	set ACR=ACR-DIU
+
+	// Move the amount being capitalized into [LN]DIU and [LN]DIAA
+	set ln.diu=ln.diu+ACR 
+	set DIU=DIU+ACR
+
+	// Deferred Int - Annual Accumulation
+	set ln.diaa=ln.diaa+ACR
+
+	// save for ECs and reversals
+	set $P(TR16,"#",2)=ACR
+
+	quit
+
+
+CAP(RecordLN ln,RecordTTX ttx)	// If an amount exists in [LN]DIU then capitalize this amount.
+
+	/*
+	   Save this amount into piece 16 of the primary transaction
+	   which will be used in case of an error correct or reversal.
+
+	*/
+	
+	new TYPE
+	
+	// Product Type
+	set TYPE=ln.type
+	
+	// Deferred Interest Target Account Number
+	set DITGACN=ln.ditgacn
+
+	if '$D(TRND(TYPE)) do TRANSET^BCHLNDIC(TYPE)
+
+	// save for ECs and reversals
+	if '$G(EC) set $P(TR16,"#",3)=DIU
+
+	do SETTR(.ln,$S(DITGACN:DITGACN,1:CID),$P(TRND(TYPE),"|",1),$P(TRND(TYPE),"|",2),DIU)
+
+	quit:ER
+
+	do SETTR(.ln,CID,$P(TRNC(TYPE),"|",1),$P(TRNC(TYPE),"|",2),DIU)
+	
+	quit
+
+
+SETTR(RecordLN ln,CID,ETC,ITC,AMT)	
+	
+	//Build the ttx record		
+	if %EffectiveDate=%SystemDate set %EffectiveDate=""
+	set ITC=$E(ITC,1,6)_$E("000000000000000",1,7-$L(ITC)-1)_1_$E(ITC,8,99)
+
+	type RecordTTX ttx=Class.new("RecordTTX")
+	
+	set ttx.tjd=%SystemDate
+	set ttx.uid=%UserID
+	set ttx.cid=CID
+	set ttx.itc=ITC
+	set ttx.etc=ETC
+	set ttx.tamt=AMT
+	set ttx.efd=%EffectiveDate
+	set ttx.tlo=%UserStation
+	set ttx.tcmt="Def Int Cap"	
+
+	// Currency Code
+	if %MCP do {
+		set CRCD=ln.crcd 
+		set ttx.crcd=$S(CRCD=%SystemCurrency:"",1:CRCD)
+		}
+
+	do TRNSINGL^TRNDRV(.ttx,.ln,%SystemDate,ln.boo,5)
+
+	quit
+
+Public EC(RecordLN ln,RecordTTX ttx)	// error corrects and reversals
+	
+	/*
+	Use piece 16 of the transaction record to get the following amounts:
+		piece 1 - the Balance Last Advance Date prior to this transaction
+		piece 2 - the amount of accrual that was added to [LN]DIU & [LN]DIAA
+		piece 3 - the amount that was capitalized from [LN]DIU to [LN]DIC
+		
+	The Balance Last Advance Date (BAOLA) needs to be restored by the
+	amount in piece 16, otherwise [LN]BAOLA will be set to a negative
+	amount.  This is because the RCCAP transaction code will be followed
+	by a deposit to the DDA account linked to the RC account which will
+	satisfy the outstanding balance.  This makes [LN]BALINT = 0.  When
+	the screen of transactions is error corrected BAOLA is set to
+	BALINT-the amount that was capitilized, resulting in a negative
+	amount.
+	*/
+
+	new AMT,DIU,DIC,DIAA,DAMT,EC,TR16
+
+	set EC=1
+
+	// Error-Correct Data
+	set TR16=ttx.lnerc
+	quit:TR16=""
+	set DIU=$P(TR16,"#",3)
+
+	/*
+	the transactions updated BAL and ACR, now update DIU, DIC and DIAA
+	DIC must be reduced by the amount capped, DIU must be increased by
+	the amount capped - the amount of ACR that was deffered.
+	*/
+
+	set DAMT=$P(TR16,"#",3)
+
+	// Deferred Interest - Uncapitalized
+	set DIU=ln.diu
+
+	// Deferred Interest - Capitalized
+	set DIC=ln.dic
+
+	// Deferred Int - Annual Accumulation
+	set DIAA=ln.diaa
+
+	// Deferred Interest - Capitalized
+	if DIC'<DAMT do {
+		set ln.dic=DIC-DAMT 
+		set DIU=DIU+DAMT
+		}
+
+	// Deferred Interest - Uncapitalized
+	if   set ln.diu=DIU
+	set AMT=$P(TR16,"#",2)
+
+	// Deferred Int - Annual Accumulation
+	if DIU'<AMT do {
+		set ln.diu=DIU-AMT 
+		set ln.diaa=DIAA-AMT
+		}
+
+	// BAOLA
+	set ln.baola=+TR16
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60670^61826^Balasubramonian Sankar^4864"	// Signature - LTD^TIME^USER^SIZE

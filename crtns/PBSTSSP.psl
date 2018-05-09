@@ -1,0 +1,2354 @@
+public	PBSTSSP(String vzreply,Number vzstfflg,String vzrec,Boolean vzfrn,String context)	//TSSP Service Class Driver
+	
+	/*
+	   ORIG: CHENARD - November 8, 1993
+	
+	   This driver is called by the PROFILE Open Banking Server, 
+	   procedure PBSSRV.
+	
+	   Transaction Services & Stored Procedures is the service
+	   class that processes financial transactions in PROFILE
+	   that have been generated at a client.  The client may be
+	   a native PROFILE front-end or any foreign processor that
+	   adheres to the PROFILE Open Banking Architecture formats
+	   and structures.
+	
+	   This driver is called by the PROFILE Open Banking System
+	   server, which is responsible for exchanging messages between
+	   the host and client.  This driver only processes
+	   transactions that are client TSSP requests.
+	
+	   The TSSP driver translates a client message into individual
+	   transaction sub-records, validates each record to ensure all required
+	   fields are present, translates each record into the expected PROFILE
+	   structures, and validates the transaction screen before processing.
+	   After all above checking is complete, the transactions are processed
+	   and a reply message generated.
+	
+	   The data in the messages received are in a Length/Value format.
+	   Each primary field of a sub-record is preceded by a byte that
+	   reveals the length of the ensuing data field.
+	
+
+	
+	   KEYWORDS: Client/Server
+
+
+	   ARGUMENTS:
+	   . vzreply  - Passed by reference, will be defined as the	  /MECH=REFNAM:W
+	                return message from the service class driver
+	
+	   . vzstfflg - Off-line store and forward flag, indicates	  /REQ/MECH=VAL
+			that this message was originally processed
+			off-line and should therefore be processed
+				0 - On-line
+				1 - Off-line, uncertain
+				2 - Off-line, never sent to host
+				3 - Batch; treat as off-line to force post
+	
+	   .vzrec     - TSSP transaction message, excluding the header,	  /REQ/MECH=VAL
+			contains multiple transactions sub-records.  This
+			parameter is broken down into multiple PROFILE
+			transactions by calling in to the $$LV2V function.
+	                                         	
+	
+	   .vzfrn     - Foreign client flag.  If turned on, validation	  /NOREQ/MECH=VAL
+			of the transaction arrays will be performed prior
+			to calling ^TTXP2.
+
+	
+	   .context   - Default context; is used when the data for any	  /NOREQ/MECH=VAL
+	         	simple field is empty and a value exists in the
+	         	context.
+
+
+	   INPUTS:
+
+	   . %STFHOST - Determines if HOST Store and forward is
+	         	enabled and what is current level.
+			1= Msgs to be Inserted into STFHOST
+			2= Msgs being posted but should still
+			   be added to STFHOST
+			3= STFHOST is being closed, hang until
+			   STFHOST1'=3 then process normally.
+
+	   . %STFPID  - Process ID that is authorized to post to
+			the STFHOST file. This process will work as if
+			%STFHOST="".
+
+
+	   RETURNS:
+
+	   . $$       - Logical status indicating success or failure
+			relating to the processing of the TSSP transaction
+                                         		
+	
+	   EXAMPLE:
+	
+	     S ER=$$^PBSTSSP(.REPLY,0,REC(1),0)    issues request for TSSP and
+	                                           indicates it is not off-line
+
+
+	------- Revision History -----------------------------------------------
+
+	05/14/07 - KinI - CR 27057
+		   Moved the fix for ttx.rate rounding in MAIN section 
+		   previously released under CR 20009 to be executed 
+		   unconditionally.
+	
+	04/23/07 - GIRIDHAL CR 26692
+		   Modified top of REV section to set ttx.brcd to BRCD if ttx.brcd
+		   is NULL. This will prevent ttx.brcd from not being defined for 
+		   reversals of a payoff transaction prior to TJD which causes the 
+		   RDBSAVEFAIL reported by this CR.
+		   
+	01/23/07 - MbuiM - CR 24994
+		   This is a retrofit from profile04
+		   01/17/07 - MbuiM - CR 24852
+		   Modified CRCD section to check for RATE=0 instead of 'RATE 
+		   as this was sending in a valid rate of null and causing an 
+		   error during error correct. 
+	
+	12/19/06 - Shriram - CR 24547
+		   Modified section SPV to make use of new automatic authorization
+		   option defined by CUVAR.AUTOAUTH.  	
+	
+	07/25/06 - Pete Chenard - CR 22385
+		   Replaced call to .next() method with .getCol("SYSCEQ") in
+		   CRCD section.  The code incorrectly referenced .next() twice
+		   rather than what it should have done - that is, 1 call to
+		   .next() followed by a call to getCol().
+
+	04/24/06 - TITOVE - CR 20881
+		   Modified FMTTR section, added setting of CRT flag to ensure
+		   we do not check for function restrictions while executing
+		   PROT^UACN call initiated by Teller processing. Removed
+		   "new rs" from MATCH section.
+
+	03/29/06 - KinI - CR 20009
+		   Modified MAIN section to make sure TTX.RATE contains not 
+		   more then 5 decimals per column's definition.
+	
+	03/27/06 - DHANALAKSHMI R - CR 20350
+		   Modified the section CHKDD to correcting the parameter list 
+		   in the call to INT^%ZM.
+
+	03/20/06 - KELLYP - CR 20228
+		   Modified FMTTR section to reject transactions where TRN.SGT
+		   is equal to "Y".  These types of transactions should be
+		   system-generated, not generated by foreign clients.
+
+	02/02/06 - TITOVE - CR 19182
+		   The IF/ELSE condition in REV section for regular and 
+		   same-day reversals caused all reversals to be processed
+		   as same-day. Restored original Profile01 logic.
+
+	12/22/05 - RussellDS - CR18400
+		   Eliminate call to DD^DBSVER, which has been removed.  This
+		   procedure was the only called.  Added new section CHKDD here
+		   to replace the call.  This also eliminates the use of public
+		   arrays fsn and vdd.
+		   
+		   Eliminated PSL warnings on deprecated features.
+
+	12/08/05 - TITOVE - CR 18481
+		   Modified REV section to set TPD equal to TTX.TJD, instead 
+		   of TTX.CID.
+
+	11/14/05 - DHANALAKSHMI R - 16851
+		   Modified the section TAMTTBL by adding State Withholding 
+		   amount.
+
+	11/07/05 - KELLYP - CR 18128
+		   Modified ECSCAN and ECFDSCAN sections to plus (+) ttx.tamt
+		   when comparing it to +TAMT.  This prevents the "Unable to
+		   locate transaction on host" message from being returned
+		   when error correcting a transaction that passes in the TRC.
+	
+	09/30/05 - KELLYP - CR 17366
+		   Modified CRCD section not to new the SYSCEQ variable as it
+		   references the SYSCEQ array after the new and was causing
+		   undefined errors (it's properly newed in the MAIN section).
+	
+	09/23/05 - KELLYP - CR 17273
+		   Modified MAIN section to set cmax(crcd) and cmax(crcd,trn.grp) 
+		   equal to null if there are no entries in the UTBLMXUCLS1 and
+		   UTBLMXUCLS2 tables.  Code was previously causing undefined 
+		   errors under these conditions.  Also removed pre-2003 revision
+		   history.
+	
+	08/23/05 - KELLYP - CR 16972
+		   Modified OVRDESC section to return appropriate OVR text. Loan
+		   OVR descriptions were not being returned properly to PFW.
+	
+	05/12/05 - KELLYP - CR 15872
+		   Modified OVRDESC section to prevent a RECNOFL error that
+		   occurs when a miscellaneous-class restriction has been
+		   encountered.  The code was previously trying to use CID
+		   from the SPV array in retrieving an ACN object (which
+		   failed because CID="*" in this case).	
+
+	03/18/05 - TITOVE - CR 13733
+		   Modified ECSCAN and ECFDSCAN to correct the errors in record
+		   retrieval and record matching.
+
+	03/05/05 - TITOVE - CR 13291
+		   Modified SPV section, removed second instantiation of SCAU.
+
+	08/24/04 - RussellDS - CR11678
+		   Fixed error in section FMTTR where test against fld(7) for
+		   currency info was not check if null.  Otherwise was not
+		   calling CRCD.
+
+	07/16/04 - Erik Scheetz - 11023
+		   Modified code in MAIN to correctly pass the parameters to
+		   TRNSET^TRNDRV.  Also modified code to correctly create 
+		   TSPV() for supervisory overrides.
+		   
+		   Modified code in OVRDESC to remove using indirection when
+		   reading local variables.
+		   
+	06/30/04 - Erik Scheetz - 7590
+		   Modified code to correct a number of errors found during unit 
+		   testing and to improve performance in specific sections. 
+
+	02/24/03 - Erik Scheetz - 51349
+		   Modified code in OUTMAIN to corrrectly pass the ttx()
+		   object to OVROUT.  Also made overall cleanup changes
+		   in order to bring routine up to PSL standards.
+	*/
+
+	type public Number %STFHOST
+	
+	type Boolean RETVAL=0
+	
+	set %STFHOST = +%STFHOST.get()
+	
+	do MAIN(.RETVAL,.vzreply)
+
+	// Return Value: 0 = success, 1 = processing error
+	quit RETVAL
+
+
+MAIN(RETVAL,vzreply)	// Main processing for TSSP service class driver
+	/*
+
+	   ARGUMENTS:
+	
+	      . RETVAL 	- Return value from Main section
+				0 - Success
+				1 - Processing error
+							/TYP=L/REQ/MECH=REFNAM:W
+	
+	      . vzreply - The response built in this function
+	      		  if there is a validation error.
+							/TYP=T/MECH=REFNAM:W
+	*/
+
+	type Public String %STFHOST,REJMET,context,vzfrn,vzrec,vzstfflg
+
+	catch error {
+		do ZE^UTLERR
+
+		type Public String ET,vzfldps,vzptr
+		type Public Number %ZTSEQ
+		type String RM
+		type Number ER
+		
+		if 'ET.exists() set ET=$$ETLOC^%ZT
+
+		// System error # ~p1 , contact system manager
+		set RM = $$^MSG(6747,%ZTSEQ)
+		set vzreply = $$ERRMSG^PBSUTL(RM,ET,vzptr.get(),vzfldps.get())
+		set RETVAL=1
+		}
+
+	type Public Cache %CACHE()
+
+	type Number vzptr,vzpstd
+	type String dftfld(),mxtrlm,rec(),valbase,valbr,valtpd
+
+	type Date EFD,TPD
+	type Number BRCD,ER,TRNMODE,TTXRECS
+	type String BALFLG,BCRCD,BSEAMT,BSTOT,CRCD,CRCDBASE,CTR,CTRFLG,CRCDTHR
+	type String EXCHD,HISTN(),NET,OM(),OVR(),POBS,RJ(),RM,SPV(),SYSCEQ
+	type String TCK,TCH,TOT,TREF,TSPV(),TRESREF,X,XCRCD()
+
+	type String %IPMODE
+	
+	set (ER,EXCHD) = 0
+	
+	set vzfrn=vzfrn.get()
+	set context=context.get()
+	set vzreply=""
+	
+	//Build array of transaction sub-records (rec)
+	set X = $$LV2V^MSG(vzrec,.rec)
+
+	if 'rec.data() do {  quit
+		set RETVAL = 1
+		
+		// TSSP records not present
+		do Runtime.setErrMSG("TTX",2761)
+		set vzreply = $$ERRMSG^PBSUTL(RM,"",1,1)
+		}
+
+	// Parsing context into default sub fields
+	if context '= "" do CONTEXT(context,.dftfld)
+
+	if vzstfflg set TRNMODE=3       // Store and Forward mode
+	else  set TRNMODE=1		// Online mode
+	
+	// Create Tranasctions from rec()
+	set vzptr="",TTXRECS=0
+
+	type RecordTTX ttx()
+	for  set vzptr=rec(vzptr).order() quit:vzptr=""  do { quit:ER
+		set ttx(vzptr)=Class.new("RecordTTX") 
+		set ER=$$FMTTR(vzptr,rec(vzptr),.ttx(vzptr))
+		if 'ER set TTXRECS=TTXRECS+1
+		
+		if 'ttx(vzptr).rate.isNull() set ttx(vzptr).rate=ttx(vzptr).rate.roundDec(5)
+		}
+		
+	if ER set vzreply=$$ERRMSG^PBSUTL(RM.get(),"",1,1),RETVAL=1 quit
+
+	// Respond with error if no transaction records defined
+	if TTXRECS=0 do { quit
+		set RETVAL=1
+		quit:vzreply'=""
+		
+		//Transaction array not defined 
+		do Runtime.setErrMSG("TTX",2680)
+		set vzreply=$$ERRMSG^PBSUTL(RM,"",1,1)
+		}
+
+	if vzstfflg do { if vzpstd quit
+		set vzpstd=0
+		
+		// Under store and forward, check to see if transaction posted in TTX.
+		if vzstfflg=1 set vzpstd=$$STFCK(.ttx(),TPD,BRCD)
+		
+		if vzpstd set RETVAL=$$OUT(.ttx(),0,.vzreply,vzstfflg) quit 
+		set REJMET=CUVAR.STFREJ
+
+		// Set up supervisory authorization and offline byte in ITC
+		do STF(.ttx())
+		}
+
+	
+	// Accumulate check and check holds
+	do CHECK(.ttx(),.TCK,.TCH)
+	
+	/*
+	 If posting date is in the past, this transaction is from a store and
+	 forward file.  In order to properly process, it should be effective
+	 dated and the posting date changed to today's date.
+	*/
+	
+	if TPD<%SystemDate do { 
+		type Number SEQ=""
+		set (TPD,%EffectiveDate)=%SystemDate
+		for  set SEQ=$order(ttx(SEQ)) quit:SEQ=""  do {
+			if ttx(SEQ).efd	quit
+			set ttx(SEQ).efd=%EffectiveDate	
+			}
+		}
+
+	// Validate transaction set from foriegn client	
+	if vzfrn,$$VALIDATE(.ttx(),.vzreply) set RETVAL=1 quit
+	
+	//Process transactions
+	set %IPMODE="NOINT"
+	
+	// maximum userclass limit array (needed for transaction driver)
+
+	#IF CUVAR.MXTRLM
+	type String cmax(),crcd,ETC,MXUGRP,SEQ,tmp
+
+	for SEQ=1:1 do { quit:'ttx(SEQ+1).exists() 
+		
+		set crcd=ttx(SEQ).crcd
+		if crcd="" set crcd=ttx(SEQ).bcrcd 
+		if crcd="" set crcd=%SystemCurrency
+		
+		set CRCD=crcd
+		set ETC=ttx(SEQ).etc       
+
+		type RecordTRN trn=%CACHE("TRN").getRecord("TRN","ETC=:ETC")
+
+		/*
+		 The next few lines cache UTBLMXUCLS1 & UTBLMXUCLS2
+		 The data is only 2 pieces long, but we force
+		 in a dummy 3rd piece so we don't keep trying to load non-existant
+		 table data (we cache both misses and hits).
+		*/
+
+		if '(cmax(crcd).data()#10) do {
+			type ResultSet rs
+			set rs=Db.select("MAXDR,MAXCR","UTBLMXUCLS1","CRCD=:CRCD and UCLS=:%UCLS")
+			if rs.isEmpty() set cmax(crcd)="" quit
+			
+			set X=rs.next()
+			if rs.getCol("MAXDR")="",rs.getCol("MAXCR")="" set cmax(crcd)="" quit
+			set cmax(crcd)=rs.getCol("MAXDR")
+			set cmax(crcd).piece("|",2)=rs.getCol("MAXCR")
+			}
+		
+		if 'cmax(crcd,trn.grp).exists() do {
+			set MXUGRP=$$MXUGRP^CRTOVR(crcd,%UserClass,trn.grp)
+			type ResultSet rs
+			set rs=Db.select("MAXDR,MAXCR","UTBLMXUCLS2","CRCD=:CRCD and UCLS=:%UCLS and GRP=:MXUGRP")
+			if rs.isEmpty() set cmax(crcd,trn.grp)="" quit
+			
+			set X=rs.next()
+			if rs.getCol("MAXDR")="",rs.getCol("MAXCR")="" set cmax(crcd,trn.grp)="" quit
+			set cmax(crcd,trn.grp)=rs.getCol("MAXDR")
+			set cmax(crcd,trn.grp).piece("|",2)=rs.getCol("MAXCR")
+			}
+
+		// no limits, no need to check
+		if (cmax(crcd,trn.grp)=""),(cmax(crcd)="") quit
+
+		// determine if userclass transaction limits are exceeded
+		set tmp=$$MAXTR^MAXTRUTL(.ttx(SEQ),%UserClass,.cmax) 
+		if tmp set mxtrlm(SEQ)=tmp
+		}
+
+	#ENDIF
+		
+	// 24x7 Mode
+	if %STFHOST do STFHNDL^STFUTL(.ttx(),%STFHOST,1,,,,1) if 1
+	
+	// normal processing flow (not 24x7 mode)	
+	else  do {
+
+		// Currency Trans Threshold
+		set CRCDTHR=CUVAR.CRCDTHR
+		do TRNSET^TRNDRV(.ttx(),TPD,BRCD,TRNMODE,,.RJ,.SPV,.OVR,.OM)
+
+		//Ensure TPRF is set
+		if 'ER do SETPRF^TTXLOK               
+		}
+	
+	// set context for Two-Phase Commit transactions	
+	if dftfld("TSSPPREPARE").get() do PREPARE(.ttx(),.context)
+	
+	// Exit TSSP service class with reply to server.
+	set RETVAL=$$OUT(.ttx(),ER,.vzreply,vzstfflg)
+	
+	quit
+
+
+VALIDATE(RecordTTX ttx(),vzreply)
+	/*
+	   Function call to validate the ttx object array built from incoming 
+	   record.
+	
+	   ARGUMENTS:
+	
+	      . ttx() 	- The transaction object array, built by FMTTR,
+			  is expected by the PROFILE TP driver.
+								/TYP=O/REQ/MECH=REFNAM:RW
+	
+	      . vzreply - The response built in this function
+	      		  if there is a validation error.
+								/TYP=T/MECH=REFNAM:W
+	
+	   RETURNS:
+	
+	   . $$ 	- Validation error			/TYP=L
+					0 - no error
+					1 - error (builds a reply message)
+
+	   This function is called to ensure that the transaction array built
+	   from the foreign client message is in balance before trying to post
+	   it.  In the case where there is an exchange, make sure that the
+	   base amount is in the exchanged transaction.
+	*/
+
+	type Public String ER,EXCHD,RM,XCRCD()
+	type Number CAMT=0,CRVAL,DAMT=0,SEQ
+	type String REC,X
+	
+
+	// Exchange transaction
+	if EXCHD do { if ER quit 1
+
+		//At least one transaction must be in screen base currency
+		if XCRCD.data()'>1 do Runtime.setErrMSG("TTX",6158)
+		if ER set vzreply=$$ERRMSG^PBSUTL(RM,"",1,7) quit
+		
+		do EXCHOFF^TTXEXT(.ttx())
+		if ER set vzreply=$$ERRMSG^PBSUTL(RM,"",1,7)
+		}
+		
+	set SEQ="" 
+	for  set SEQ=$order(ttx(SEQ)) quit:SEQ=""  do {
+
+		if ttx(SEQ).itc'="" do {
+			set CRVAL=ttx(SEQ).itc1
+			if CRVAL set CAMT=CAMT+ttx(SEQ).tamt
+			else  set DAMT=DAMT+ttx(SEQ).tamt
+			}
+		// Remove secondary exchange tansactions
+		if SEQ#1 kill ttx(SEQ)
+		}
+
+	
+	if CAMT'=DAMT do { quit 1
+	
+		//Transactions do not balance
+		do Runtime.setErrMSG("TTX",2743)		         
+		set vzreply=$$ERRMSG^PBSUTL(RM,"",1,7)
+		}
+
+	quit 0
+	
+
+
+FMTTR(vzptr,vzsubrec,RecordTTX ttx)  // Format TTX records
+
+	/*
+	   This subroutine will build a TR record for the sequence number passed.
+	   The primary fields of the TSSP message are interpretted and placed in
+	   the transaction array.
+	
+	   ARGUMENTS:
+	
+	   . vzptr	  - The sequence number within the TSSP message.
+	                      Each record contained in the message will
+	                      translate into a TR sequence.
+							/TYP=N/REQ/MECH=VAL
+	
+	   . vzsubrec - The contents of the record in the TSSP message.
+	                      It will be parsed by this sub-routine.
+							/TYP=T/REQ/MECH=VAL
+	                                                  
+	   . ttx      - Transaction record, in the format expected
+	                      by PROFILE transaction processing module.
+							/TYP=RecordTTX/MECH=REF:W
+	
+	   RETURNS:
+	
+	   . $$ - Error indicator
+					0 - No error
+					1 - Error returned
+	
+	   .TSPV      - Supervisory override array
+	
+
+	
+	    PROFILE Financial Transaction Record
+	
+	    Pos  Name Req Description             Type      Max Len
+	
+	     1   BRCD    Y   Branch code             N         6
+	     2   TPD     N   Teller Posting date     D         5
+	     3   ACN     Y   Account number  (CID)   N         12
+	     4   ETC     Y   Transaction code        T         12
+	     5   TAMT    Y   Transaction amount      $         14
+	     6   TRC     Y   Client transaction #    N         12
+	    *7   CRCD    N   Currency code info      T
+	     8   EFD     N   Effective date          D         5
+	     9   VDT     N   Value date              D         5
+	   *10   SPV     N   Supervisor auth.        T
+	   *11   QLF     N   Transaction qualifiers  T
+	   *12   PSI     N   Payment system instr.   T
+	   *13   MSC     N   Miscellaneous info.     T
+	    14   TCMT    N   Transaction comment     T         40
+	    15   HISTN   N   Transaction notes       T
+	   *16   CKREG   N   Check Register Info     T
+	    17   SYSBASE N   System Base Equiv. Amt. N         12
+	
+	   * indicates complex fields containing one or more sub-fields
+	
+	*/
+	
+	type Public Cache %CACHE()
+	type Public Date TPD
+	type Public String %MSKD,%NET,%STFHOST,BRCD,CRCD,ETC,HISTN(),OVR(,,),RM
+	type Public String dftfld(),valbr,valtpd,vzfrn,vzreply,vzstfflg
+	type Date EFD
+	type Number CID,ER=0,TAMT
+	type String CKREG,MSC,MSD,OCC,PSI,QLF,SPV,SRC,SYSBASE,TCMT
+	type String TRC,TSO,VDT,X	
+	type String fld,tso,vzfldps,vzrev
+	
+	set X=$$LV2V^MSG(vzsubrec,.fld)
+
+	// Check for Required Fields
+	for vzfldps=1,3,4,5,6 if fld(vzfldps).get()="" do { quit:ER 
+	
+		if vzfldps=1 do { quit:fld(1)'="" 
+			if BRCD.get()'="" set fld(1)=BRCD quit 
+			if dftfld("BRCD").get()'="" set fld(1)=dftfld("BRCD") quit 
+			}
+			
+		if vzfldps=3,dftfld("ACN").get()'="" set fld(3)=dftfld("ACN") quit 
+		if vzfldps=4,dftfld("ETC").get()'="" set fld(4)=dftfld("ETC") quit 
+		if vzfldps=5,dftfld("TAMT").get()'="" set fld(5)=dftfld("TAMT") quit 
+		if vzfldps=6,dftfld("TRC").get()'="" set fld(6)=dftfld("TRC") quit 
+		
+		// Enter all required information to process transaction
+		do Runtime.setErrMSG("TTX",1759)
+		set vzreply=$$ERRMSG^PBSUTL(RM,"",vzptr,vzfldps)
+		}
+
+	if ER quit 1
+
+	// Load other fields from default context or memory if not defined
+	for vzfldps=2,8,9,14 if fld(vzfldps).get()="" do {
+	
+		if vzfldps=2 do { quit 
+			if TPD.get() set fld(2)=TPD quit 
+			if dftfld("TPD").get()'="" set fld(2)=dftfld("TPD")
+			}
+			
+		if vzfldps=8,dftfld("EFD").get()'="" set fld(8)=dftfld("EFD") quit 
+		if vzfldps=9,dftfld("VDT").get()'="" set fld(9)=dftfld("VDT") quit 
+		if vzfldps=14,dftfld("TCMT").get()'="" set fld(14)=dftfld("TCMT") quit 
+		}
+	
+	// Field 1 - Branch Code
+	if 'BRCD.exists() set BRCD=fld(1)
+	if BRCD'=fld(1) do { quit ER
+	
+		// Inconsistent posting branch code
+		do Runtime.setErrMSG("TTX",5929)
+		set vzreply=$$ERRMSG^PBSUTL(RM,"",vzptr,1)
+		}
+			
+	// Validate for foreign clients
+	if vzfrn,'valbr.get() do { if ER quit 1 
+		set ER = $$CHKDD(BRCD, "PBSTSSP.BRCD", .RM)
+		if ER set vzreply=$$ERRMSG^PBSUTL(RM,"",vzptr,1) quit
+		set valbr=1
+		}
+	
+	// Field 2 - Teller Posting Date
+	if 'TPD.exists() set TPD=fld(2).get()
+	if TPD="" set TPD=%SystemDate
+	
+	if %STFHOST.get(),'vzstfflg do {
+
+		// TPD must be > TTLPA
+		type Date SPD
+		type String tfstat=""
+
+		type RecordTTLPA ttlpa=Db.getRecord("TTLPA","PA=""PA""")
+		type RecordTTXTJD ttxtjd=Db.getRecord("TTXTJD","TPD=:TPD",1)
+
+		set tfstat=ttxtjd.tfstat
+
+		if tfstat'="*",TPD>ttlpa.cdate quit          
+		
+		// Allow 1 day difference
+		if TPD'=%SystemDate,(%SystemDate-TPD'=1) quit
+
+		set SPD=%SystemDate
+		
+		type RecordTTXTJD ttxtjd2=Db.getRecord("TTXTJD","TPD=:SPD",1)
+		set tfstat=ttxtjd2.tfstat
+
+		if TPD<%SystemDate,tfstat'="*" set TPD=%SystemDate
+		if TPD=%SystemDate,tfstat="*" set TPD=$$NBD^UNBD(TPD+1,1)
+		if TPD'=fld(2) set fld(2)=""
+		}
+	
+	if TPD<%SystemDate,'vzstfflg do { quit ER
+
+		type Date DATE=$$DAT^%ZM(TPD,%MSKD)
+
+		//System has already balanced on ~p1
+		do Runtime.setErrMSG("TTX",2573,DATE)
+		set vzreply=$$ERRMSG^PBSUTL(RM,"",vzptr,2)
+		}
+	
+	if fld(2).get()'="",fld(2)'=TPD,'vzstfflg do { quit ER
+		// Inconsistent posting date
+		do Runtime.setErrMSG("TTX",1210)
+		set vzreply=$$ERRMSG^PBSUTL(RM,"",vzptr,2)
+		}
+
+	// Validate for foreign clients
+	if vzfrn,'valtpd.get() do { if ER quit 1         
+		type String UID,X
+		set X=TPD,UID=%UserID,%NET=1
+		
+		if TPD<%SystemDate,vzstfflg set X=%SystemDate
+		
+		do TPD^SIGNON
+		if 'ER set valtpd=1 quit
+		
+		//Off-lines must post 
+		if vzstfflg set ER=0 quit             
+		set vzreply=$$ERRMSG^PBSUTL(RM,"",vzptr,2)
+	
+		}
+
+	// Field 3 - Account Number
+	set CID=fld(3)
+	
+	
+	// Field 4 - External Transaction Code
+	set ETC=fld(4)
+
+	type RecordTRN trn
+	do {
+		catch error {
+	
+			// Invalid transaction code ~p1
+			do Runtime.setErrMSG("TRN",1498,ETC)
+			set vzreply=$$ERRMSG^PBSUTL(RM,"",vzptr,4)
+			}
+
+		set trn=%CACHE("TRN").getRecord("TRN","ETC=:ETC")
+		
+		if trn.sgt do {
+			// Transaction code is system-generated
+			do Runtime.setErrSTBLER("TRN","PAT006")
+			set vzreply=$$ERRMSG^PBSUTL(RM,"",vzptr,4)			
+			}
+		}
+
+	if ER quit 1
+	
+	do ETC^TTXEXT(.trn,1) if ER,'vzstfflg quit 1	
+	
+	if vzstfflg, (trn.cls '= "M") do {
+
+		// Need to reset for UACN, but protect original values		
+		type Number %ProcessMode, CRT, ER
+		
+		set %ProcessMode = 1
+		
+		// Teller processing call flag
+		set CRT = 1
+		
+		set ER = 0
+		
+		// Check for record protection
+		do PROT^UACN
+		
+		if ER set OVR(CID,"OVR","RECPROT")=""
+		}
+
+	// Field 5 - Transaction Amount
+	set TAMT=fld(5)
+	if TAMT<0 do { if ER quit 1
+
+		// Non financial transaction
+		if trn.itc="" quit
+		if trn.cls="M" quit
+
+		//Process as Off-line
+		if vzstfflg quit
+
+		// Cannot be a negative amount
+		do Runtime.setErrMSG("TTX",415)
+		set vzreply=$$ERRMSG^PBSUTL(RM,"",vzptr,5)
+		}
+	
+	// Field 6 - Transaction Trace Number
+	set TRC=fld(6)
+
+	// Field 7 (complex field) - Currency Code 
+	set CRCD=%SystemCurrency
+	if 'fld(7).get().isNull() do CRCD(fld(7))
+	if ER,'vzstfflg quit 1
+
+	// Field 8 - EffectiveDate
+	set %EffectiveDate=fld(8).get()
+
+	/*
+	 Check Maximum Days Allowed set for back-dated and
+	 furture-dated transactions in Userclass.
+	*/
+	if %EffectiveDate do { if ER quit 1
+		if %EffectiveDate=%SystemDate set %EffectiveDate="" quit
+
+		type String MAXWO
+		type RecordSCAU0 scau0=Db.getRecord("SCAU0","%UserClass")
+
+		//Maximum Days Allowed for Back-Dated Transactions
+		if %EffectiveDate+scau0.maxefd<TPD do { quit
+			type Date DATE=$$DAT^%ZM(%SystemDate-scau0.maxefd,%MSKD)
+			type String UCLS=%UserClass
+
+			//Userclass ~p1 not authorized to effective-date prior to ~p2
+			do Runtime.setErrMSG("TTX",2899,"UCLS~DATE")		
+			set vzreply=$$ERRMSG^PBSUTL(RM)
+			}
+
+		//Maximum Days Allowed for Future-Dated Transactions
+		if %EffectiveDate-TPD>scau0.maxft do { quit
+			type Date DATE=$$DAT^%ZM(%SystemDate+scau0.maxft,.%MSKD)
+			type String UCLS=%UserClass
+			
+			//Userclass ~p1 not authorized to effective date after ~p2 
+			do Runtime.setErrMSG("TTX",8169,"UCLS~DATE")
+			set vzreply=$$ERRMSG^PBSUTL(RM)
+			}
+
+		//Exceeds maximum days for future dated transactions
+		if scau0.ovrft'="",%EffectiveDate-TPD>scau0.ovrft set OVR("*","OVR","MAXFT")=""
+
+		//Exceeds maximum days allowed for EFD transactions
+		if scau0.maxwo'="",TPD-%EffectiveDate>scau0.maxwo set OVR("*","OVR","MAXEFD")=""
+		  
+		}
+	
+	// Field 9 - Value Date
+	set VDT=fld(9).get()
+	if VDT=%SystemDate set VDT=""
+
+	// Field 10 - Supervisory authorization information
+	if fld(10).get() '= "" do SPV(fld(10)) 
+	if ER,'vzstfflg quit 1
+
+	// Field 11 - Transaction Qualifiers
+	set vzrev=""
+	if fld(11).get()'="" set vzrev=$$QLF(fld(11))           
+	if ER,'vzstfflg quit 1
+
+	//payment system instructions
+	if fld(12).get()'="" do PSI(fld(12))
+	if ER,'vzstfflg quit 1
+	
+	//miscellaneous information
+	if fld(13).get()'="" do MSC(fld(13))
+	if ER,'vzstfflg quit 1     
+
+	// Field 14 - Transaction Comment
+	set TCMT=fld(14).get()
+	
+	// Field 15 - History notes
+	if fld(15).get()'="" set HISTN(vzptr)=fld(15)
+
+	// Field 16 - Check registration information
+	if fld(16).get()'="" do CKREG(fld(16))
+
+	// Build TSO
+	do IN^UTSO(.tso,.TSO)	
+			
+	// Build ttx record
+	do TTX^TTXEXT(.ttx)  
+	if $$TRNTYP^TTXEXT(ttx.etc)=3 set ttx.itc=""
+	
+	// Client reference number           	
+	set ttx.trc=fld(6)       		
+	
+	if vzrev'="" do { if ER quit 1
+		set ER=$$REV(.ttx,vzptr,TPD,BRCD,CID,vzrev)
+		
+		// Reset trace number
+		set ttx.trc=fld(6)
+		}
+		
+	set ttx.sysbase=fld(17).get()   
+	
+	quit 0
+	
+
+
+CRCD(crcdfld) 
+	/*
+	   Sub-routine call to decipher currency information and define pertinent
+	   variables to be used in processing this transaction
+	
+	   ARGUMENTS:
+	   . crcdfld  - Currency field from incoming message.
+	   						/TYP=T/REQ/MECH=VAL
+	   RETURNS:
+	   . BCRCD  - Base currency code for the screen of transactions
+	       						/TYP=T/MECH=VAL
+
+	     Currency Information
+	          Max
+	    Pos Name     Req Description             Type  Len
+	
+	      1 CRCD     N   Currency code of the    T     3
+	                     transaction
+	      2 RATE     N   Exchange rate           N     14
+	      3 CRCDBASE N   Base currency code      T     3
+	      4 MULTIPLY N   Multiply/divide         N     1
+	                     indicator
+	      5 CUSTCD   N   Customer Code           N     3
+	      6 BSEAMT   N   Base amount             $     14
+	      7 OPER     N   Base amount operand     N     1
+	                     indicator
+	
+
+	*/
+	
+	type Public String BAMT,BASE,BCRCD,BSEAMT,CRCD,CRCDBASE,CUSTCD
+	type Public String ER,EXCHD,MULTIPLY,RATE,RM,SYSCEQ(),TAMT,XCRCD()
+	type Public String valbase,vzfrn,vzptr,vzreply
+	type String crcd(),x
+
+	set CRCD=%SystemCurrency,RATE=""
+	
+	set x=$$LV2V^MSG(crcdfld,.crcd)
+	if crcd.data()'>1 quit 
+
+	// Currency field 1 - Currency Code
+	if crcd(1).get()'="" set CRCD=crcd(1)
+
+ 	if 'SYSCEQ(CRCD).exists() do { quit:ER
+		type ResultSet rs
+		set rs=Db.select("SYSCEQ","CRCD","CO=:%CompanyName and CRCD=:CRCD")
+		if rs.isEmpty() do { quit
+			// Invalid currency code
+	 		do Runtime.setErrMSG("CRCD",1293)
+	 		set vzreply=$$ERRMSG^PBSUTL(RM,"",vzptr,7)
+			}
+		if rs.next() set SYSCEQ(CRCD)=rs.getCol("SYSCEQ")
+ 		}
+ 
+	// Currency field 2 - Exchange Rate
+	if crcd(2).get()'="" set RATE=crcd(2)
+	if RATE=0,vzfrn do { quit
+
+		//Input is invalid.  Read documentation for detail. 
+		do Runtime.setErrMSG("CRCD",1234)
+		set vzreply=$$ERRMSG^PBSUTL(RM,"",vzptr,7)
+		}
+
+	// Currency field 3 - Base Currency
+	if CRCDBASE.get()="" set CRCDBASE=crcd(3).get()
+	if CRCDBASE'="",crcd(3).get()'="" do { quit:ER 
+		if CRCDBASE=crcd(3) quit 
+
+		// ~p1 is the base currency
+		do Runtime.setErrMSG("CRCD",3048,CRCDBASE)
+		set vzreply=$$ERRMSG^PBSUTL(RM,"",1,7)
+		}
+
+	if CRCDBASE'="",'valbase.get() do { quit:ER 
+		type ResultSet rs
+		set rs=Db.select("SYSCEQ","CRCD","CO=:%CompanyName and CRCD=:CRCDBASE")
+		if rs.isEmpty() do { quit:ER
+		
+			//Invalid currency code
+			do Runtime.setErrMSG("CRCD",1293)
+			set vzreply=$$ERRMSG^PBSUTL(RM,"",vzptr,7)
+			}
+
+		set valbase=1
+		if CRCDBASE=CRCD quit
+		set EXCHD=1
+		if rs.next() set SYSCEQ(CRCDBASE)=rs.getCol("SYSCEQ")
+		}
+
+	if CRCDBASE="" set CRCDBASE=CRCD
+
+	// Currency field 4 - mulitiply(1)/divide(0)
+	set MULTIPLY=crcd(4).get(1)
+
+	// Currency field 5 - Customer Code	
+	if crcd(5).get()'="" set CUSTCD=crcd(5)
+
+	// Currency field 6 - Base amount
+	if crcd(6).get()'="" set BSEAMT=crcd(6)
+	set BCRCD=$select(CRCDBASE'="":CRCDBASE,CRCD'="":CRCD,1:%SystemCurrency)
+	set BASE=CRCD=BCRCD
+	if CRCD=BCRCD set BSEAMT=TAMT,XCRCD(CRCD)="" quit
+
+
+	//Validate that the rate is within acceptable range
+	type Boolean CROSS=0
+	type String CRCDREL,MAXRATE,MINRATE,REL
+	
+	if BCRCD=%SystemCurrency set CRCDREL=CRCD
+	else  if CRCD=%SystemCurrency set CRCDREL=BCRCD
+	else  if SYSCEQ(BCRCD) set CRCDREL=CRCD
+	else  if SYSCEQ(CRCD) set CRCDREL=BCRCD
+	else  set CRCDREL=CRCD,CROSS=1
+
+	type RecordCRCD0 crcd0=Db.getRecord("CRCD0","CO=%CompanyName,CRCD=:BCRCD,RELCRCD=:CRCD",1)
+	if crcd0.dircrcd'="" set CRCDREL=crcd0.dircrcd
+	
+	if 'CROSS do { quit:ER
+
+		// Determine maximum and minimum
+		do MINMAX^CRCDUTL(CRCDREL)           
+		
+		// Value below minimum range ~p1
+		if RATE<MINRATE do { quit
+			do Runtime.setErrMSG("CRCD",2920,MINRATE)
+			set vzreply=$$ERRMSG^PBSUTL(RM,"",vzptr,7)
+			}
+
+		// Value above maximum range ~p1
+		if RATE>MAXRATE do {
+			do Runtime.setErrMSG("CRCD",2919,MAXRATE) 
+			set vzreply=$$ERRMSG^PBSUTL(RM,"",vzptr,7)
+			}
+		}
+
+	//Process,validate the base equivalency provided in message
+	type Number AMT=TAMT 
+
+	set EXCHD=1
+	if crcd(6).get()'="" do { 
+		Type String BSECMP,OPER
+		set BAMT=+crcd(6)
+		quit:'vzfrn
+		
+		//OPER=0 use AMT, OPER=1 use BAMT
+		set OPER=+crcd(7).get()
+		if OPER do { quit
+			/* 
+			Use the base equiv. provided to compare with 
+			transaction amount
+			*/
+			set AMT=$$^SCARND(AMT,0,"",CRCD)
+			if MULTIPLY set BSECMP=BAMT*RATE,CRCDREL=CRCD
+			else  set BSECMP=BAMT/RATE,CRCDREL=CRCD
+			if $$^SCARND(BSECMP,0,"",CRCDREL)'=AMT set ER=1
+			set BSEAMT=BAMT
+			}
+
+		/*
+		Use the transaction amount to compare with
+		the provided base equivalent
+		*/
+
+		set BAMT=$$^SCARND(BAMT,0,"",BCRCD)
+		if MULTIPLY set BSECMP=AMT*RATE,CRCDREL=BCRCD
+		else  set BSECMP=AMT/RATE,CRCDREL=BCRCD
+		if $$^SCARND(BSECMP,0,"",CRCDREL)'=BAMT set ER=1
+		set BSEAMT=BAMT
+		}
+
+	if ER do { quit
+
+		//Base amount presented does not match calculation
+		do Runtime.setErrMSG("CRCD",8408)   
+		set vzreply=$$ERRMSG^PBSUTL(RM,"",vzptr,7)
+		}
+
+	//Calculate base amount - only done when not included in msg
+	if crcd(6).get()="" do {
+		do EXCAMT^CRT3MC(BCRCD,CRCD,RATE,BASE)
+		set BSEAMT=$$^SCARND(BAMT,0,"",CRCD)
+		}
+
+	quit 
+
+
+
+SPV(spvfld)	// Supervisory Authorization
+	/*
+	   ARGUMENTS:
+	
+	   . spvfld - Supervisory authorization information
+	       						/TYP=T/REQ/MECH=VAL
+	   RETURNS:
+
+	   . TSPV  - Transaction Supervisory Authorizations
+	       						/TYP=T
+	
+
+	
+	     Supervisory Information
+	          					
+	    Pos  Name    Req Description             Type  MaxLen
+	
+	     1   SPVREST Y   Restriction code        T     20
+	     2   SPVUID  Y   Supervisor ID           N     12
+	     3   SPVPWD  Y   Supervisor's password   T     12
+	     4   SPVCID  N   Account number assoc.   N     12
+	                     with the restriction
+	
+
+	*/
+
+	type public String ER, RM, TSPV, TSPV(), vzfrn, vzptr, vzreply, vzstfflg, %UserID
+
+	// Authorization already set
+	if vzstfflg,TSPV.data() quit              
+	
+	#IF (CUVAR.AUTOAUTH = 1) set TSPV(vzptr) = %UserID_"|"_%UserClass quit
+	
+	type String GRP, OVR, PWD, SPVARR(), SPVREST, TYP, UCLS, UID
+	type Number I, X
+	
+	set X = $$LV2V^MSG(spvfld,.SPVARR)
+	if SPVARR.data() '> 1 quit 
+
+	set ER = 0
+	for I = 1:1 quit:'SPVARR(I).exists()  do { quit:ER 
+	
+		type String SPVREC()
+		
+		set X = $$LV2V^MSG(SPVARR(I),.SPVREC)
+		if 'SPVREC.data() quit 
+		set SPVREST = SPVREC(1).get()
+
+		set OVR = SPVREST.piece("_",1)
+		set GRP = SPVREST.piece("_",2)
+		set TYP = SPVREST.piece("_",3)
+		set UID = SPVREC(2).get()
+		set PWD = SPVREC(3).get()                   
+
+		if 'SPVREC(4).get().isNull() new CID set CID = SPVREC(4)
+		
+		type RecordSCAU scau = Db.getRecord("SCAU", "UID = :UID", 1)
+		
+		if UID.isNull()  do { quit:ER
+			#IF (CUVAR.AUTOAUTH = 2) 
+				set UID = %UserID
+			#ELSE 
+				// Invalid User ID
+				do Runtime.setErrMSG("CUVAR",1504)
+				set vzreply = $$ERRMSG^PBSUTL(RM,"",vzptr,10)
+			#ENDIF
+		}
+		else  if scau.getMode() = 0 do { quit:ER
+				// Invalid User ID
+				do Runtime.setErrMSG("SCAU",1504)
+				set vzreply = $$ERRMSG^PBSUTL(RM,"",vzptr,10)	
+		}
+		
+		set UCLS = scau.%ucls
+						
+		if vzfrn, CUVAR.AUTOAUTH' = 2 do { quit:ER
+			
+			// Validate password
+			if $$VALIDATE^SCADRV1(PWD,UID) quit 
+
+			// Invalid password
+			do Runtime.setErrMSG("SCAU",1419)
+			set vzreply = $$ERRMSG^PBSUTL(RM,"",vzptr,10)
+		}
+		
+		if SPVREST = "*" set TSPV(vzptr) = UID_"|"_UCLS quit
+		
+		set TSPV(vzptr,CID,OVR,TYP) = UID_"|"_UCLS
+	}
+	
+	quit
+
+
+QLF(qlffld)	//Transaction qualifiers (non-positional)
+	/*
+	   Determine transaction qualifiers
+	
+	   ARGUMENTS:
+	
+	   . qlffld   - Transaction qualifier field		/TYP=T/REQ/MECH=VAL
+	       					
+	   RETURNS:
+	   . $$vz  - Reversal Flag; indicates that 	/TYP=N/MECH=VAL
+	                this record is a reversal/error 
+	       	        correct			
+
+	*/
+	
+	type Public String ER,RM,tso(),vzfrn,vzptr,vzreply,vzstfflg
+	type String CODE,QLF,REV,SEQ,X,ZQLF()
+	type String qlf,ref,val
+
+	set X=$$LV2V^MSG(qlffld,.ZQLF)
+	if ZQLF.data()'>1 quit ""
+
+	set (REV,SEQ)=""
+	for  set SEQ=ZQLF(SEQ).order() quit:SEQ=""  do { quit:ER 
+		set qlf=ZQLF(SEQ) quit:qlf="" 
+		set QLF=qlf.piece("#",1) 
+		set val=qlf.piece("#",2) 
+		set ref="PBSTSSP."_QLF
+		if vzfrn,"Zz"'[QLF.extract() set ER = $$CHKDD(val, ref, .RM) if ER,'vzstfflg set vzreply=$$ERRMSG^PBSUTL(RM,"",vzptr,11) quit 
+
+		if QLF'="TCK",QLF'="%LOCK",QLF'="PBKBAL" set tso(QLF)=val
+		if "-EC-REV"[QLF set REV=qlf quit
+		if QLF="EC"!(QLF="REV") set REV=qlf quit
+
+		set CODE="set @QLF=val"
+		
+		#ACCEPT PGM=Erik Scheetz;DATE=12/20/2002
+		xecute CODE
+		}
+	
+	quit REV
+	
+
+
+PSI(psifld)	// Payment system info (non-positional)
+	/*
+	   Payment system instructions
+	
+	   ARGUMENTS:
+	
+	   . psifld - Payment system field 		/TYP=T/REQ/MECH=VAL
+	
+	*/
+	
+	type Public String ER,ref,RM,tso(),val,vzfrn,vzptr,vzreply,vzstfflg
+	type String CODE,SEQ,PSI,psi,X,ZPSI()
+	set X=$$LV2V^MSG(psifld,.ZPSI)
+	
+	if ZPSI.data()'>1 quit 
+
+	set SEQ="" 
+	for  set SEQ=ZPSI(SEQ).order() quit:SEQ=""  do { quit:ER 
+	
+		set psi=ZPSI(SEQ) quit:psi="" 
+		set PSI=psi.piece("#",1) 
+		set val=psi.piece("#",2) 
+		set ref="PBSTSSP."_PSI
+		if vzfrn,"Zz"'[PSI.extract() set ER = $$CHKDD(val, ref, .RM) if ER,'vzstfflg set vzreply=$$ERRMSG^PBSUTL(RM,"",vzptr,12) quit 
+
+		set tso(PSI)=val
+		set CODE="set @PSI=val"
+
+		#ACCEPT PGM=Erik Scheetz;DATE=12/20/2002
+		xecute CODE
+		}
+	
+	quit 
+
+
+
+
+MSC(mscfld)	// Misc. information (non-positional)
+	/*
+	   Miscellaneous transaction information
+	
+	   ARGUMENTS:
+	
+	   . mscfld - Miscellaneous information field
+	       					/TYP=T/REQ/MECH=VAL
+	
+	   RETURNS:
+	   . tso - TSO values  			/TYP=T
+	
+	   . MSD - Misc screen data 		/TYP=T
+	      If defined
+
+	*/
+	
+	type Public String ER,MSD,RM,TRESREF
+	type Public String ref,tso(),val,vzfrn,vzptr,vzreply,vzstfflg,zmsc
+	type String CODE,MSC,msc,SEQ,ZMSC()
+	
+	set zmsc=$$LV2V^MSG(mscfld,.ZMSC)
+	if ZMSC.data()'>1 quit 
+
+	set SEQ="" 
+	for  set SEQ=ZMSC(SEQ).order() quit:SEQ=""  do { quit:ER 
+
+		set msc=ZMSC(SEQ)
+		quit:msc="" 
+		
+		set MSC=msc.piece("#",1) 
+		set val=msc.piece("#",2,999) 
+		set ref="PBSTSSP."_MSC
+		if vzfrn,"Zz"'[MSC.extract() set ER = $$CHKDD(val, ref, .RM) if ER,'vzstfflg set vzreply=$$ERRMSG^PBSUTL(RM,"",vzptr,14) quit 
+		
+		//Misc. field info
+		if MSC="MSD" set MSD=val quit
+		
+		//Treasury reference         
+		if MSC="TREF" set TRESREF=val quit    
+		set tso(MSC)=msc.piece("#",2)
+		set CODE="set @MSC=tso(MSC)"
+
+		#ACCEPT PGM=Erik Scheetz;DATE=12/20/2002
+		xecute CODE
+		}
+	quit 
+	
+
+CKREG(ckregfld)	// Check register information
+	/*
+	   Check register information is used when filing to the check register
+	   and possibly dayend file for PDO check processing.
+	
+	   ARGUMENTS:
+	
+	   . ckregfld   - Check register info  	/TYP=ARRAY/REQ/MECH=REFARRAY
+	
+	*/
+	
+	type Public String CK(),FSN(),tso(),vzptr
+	if ckregfld="" quit 
+
+	type String ckreg(),i,x
+	set x=$$LV2V^MSG(ckregfld,.ckreg)
+	if ckreg.data()'>1 quit 
+	
+	// Build the pieces of CK array and set up FSN
+	for i=1:1:11 set CK(vzptr).piece("^",i)=ckreg(i).get()
+	set tso("CKREG")=CK(vzptr).piece("^",1,4)
+	if ckreg(11).get()'=1 set FSN("CK")="CK||FILE^CRTCK"
+	quit 
+	
+
+
+STF(RecordTTX ttx())
+	/*
+	   Set up supervisory override array, TSPV, that will have authorization
+	   over all transactions in the TR.  Also, turn on bit 10 of ITC for
+	   each transaction, indicating off-line.
+	
+	   ARGUMENTS:
+	   . ttx()  - Transaction object array. 	/TYP=T/REQ/MECH=ARRAY
+	
+	*/
+	
+	type Public String TSPV(),dftfld(),vzstfflg
+	
+	if vzstfflg=3 quit
+	
+	type Number SEQ
+	type String SPVCLS()
+
+	set SPVCLS=CUVAR.DFTSTFUCLS
+	if SPVCLS="" set SPVCLS="MGR"
+	set TSPV("*")=%UserID_"|"_SPVCLS
+	
+	if dftfld("TSSPCOMMIT").get() quit 
+	
+	set SEQ=""
+	for  set SEQ=$order(ttx(SEQ)) quit:SEQ=""  do {
+		if ttx(SEQ).itc="" quit
+		set ttx(SEQ).itc=$$ITC^TTXEXT(ttx(SEQ).itc,10)
+		}
+		
+	quit 
+
+	
+
+
+STFCK(RecordTTX ttx(),TPD,BRCD)
+	/*
+	   Scan the TTX file to determine if transaction already posted.
+	
+	   ARGUMENTS:
+	   . ttx() - Transaction array from the STF message
+	       					/TYP=O/REQ/MECH=REFARRAY
+	
+	   . TPD - Current teller posting date, defined in the
+	      	   transaction message.
+	       					/TYP=N/REQ/MECH=VAL
+	
+	   . BRCD  - Branch code  		/TYP=N/REQ/MECH=VAL
+
+	
+	   RETURNS:
+	   . $$ - Status of scan.
+	      	0 - no match
+	      	1 - match found
+	
+	*/
+	type Public String dftfld()
+	
+	if dftfld("TSSPCOMMIT").get() quit 0
+	
+	type Boolean MATCH=0
+	type Number SEQ
+
+	type ResultSet rs
+	set rs=Db.select("CID,ETC,TAMT,TRC","TTX","TJD=:TPD and BRCD=:BRCD and UID=:%UserID","TSEQ DESC")
+	if rs.isEmpty() quit 0
+	while rs.next() do { quit:MATCH
+		set SEQ=""
+		for  set SEQ=$order(ttx(SEQ)) quit:SEQ=""  do { quit:MATCH
+
+				if ttx(SEQ).cid'=rs.getCol("CID") quit
+				if ttx(SEQ).etc'=rs.getCol("ETC") quit
+				if +ttx(SEQ).tamt'=+rs.getCol("TAMT") quit
+				if ttx(SEQ).trc'=rs.getCol("TRC") quit
+				set MATCH=1
+				}
+		}
+	quit MATCH
+	
+
+
+
+REV(RecordTTX ttx,vzptr,TPD,BRCD,CID,vzrev)
+
+	/*
+	   Based on the account number, posting date, branch code, load the
+	   original transaction from TTX or HIST for the error correct/reversal
+	
+	   When this function is called, the following occurs:
+	   First, it is either called as a Error-Correct, "EC", or a
+	   Reversal, "REV".  If "EC" is used, it is a same-day, same teller,
+	   same branch, same posting date transaction.  The match utility
+	   is $$ECSCAN.  If "EC" is used AND the transaction actually occurred
+	   on a prior day (an off-line error correct that did not make it to the
+	   server until after the system date change), the EC is effectively
+	   turned into a REV.
+	
+	   If "REV" is used, it may be EITHER same day or prior
+	   day reversal.  A "match list" may be included with the "REV" code,
+	   used to match up a transaction processed on a prior day, by a
+	   different teller, or branch, etc.  The possible keys in the match
+	   list are TLO, BRCD, UID, TRC, or TPD.  The match utility called is
+	   $$GETREC.  If a history sequence is included in the code, then the
+	   history record is simply fetched and used.
+	
+	   ARGUMENTS:
+	   . ttx    - Transaction object, updated with error correct or
+	      	      reversal flag turned on
+	       						/TYP=T/MECH=REFNAM:RW
+	
+	   . vzptr  - Sequence number from transaction array
+	       						/TYP=N/REQ/MECH=VAL
+	
+	   . TPD    - Transaction posting date		/TYP=N/REQ/MECH=VAL
+	
+	   . BRCD   - Branch code  			/TYP=N/REQ/MECH=VAL
+	
+	   . CID    - Account number 			/TYP=N/REQ/MECH=VAL
+	
+	   . vzrev  - Reversal information/ match list; error
+		      corrects will contain simply the "EC#trc"
+		      while Reversals can contain a match list
+		      of items, delimited by "#", where the first
+		      field is always the history sequence number
+							/TYP=T/MECH=VAL
+
+	   RETURNS:
+	   . $$      - Error status
+	
+	   . vzreply - Reply message for error status
+	
+	*/
+	
+	type public String RM, vzreply
+	type Date %EffectiveDate
+	type Number ER = 0, HOST, HSEQ = "", ORGSEQ, SEQ
+	type String ITC, ITCBIT, REVLST(), TYP, X
+	
+	// "EC" or "REV"
+	set TYP = vzrev.piece("#",1)
+	set SEQ = vzrev.piece("#",2)
+	set ORGSEQ = SEQ
+	
+	// Define ITC based on reversing				
+	set ITC = ttx.itc
+	
+	// Set ttx.brcd to BRCD if ttx.brcd is NULL
+	if ttx.brcd.isNull() set ttx.brcd = BRCD
+	
+	set %EffectiveDate = ttx.tso.getSub("FDT","~","#")
+
+	type RecordTTX tran = ttx.copy()
+		
+	// Get the host sequence number and redefine TRAN based on original information
+	if (TYP = "EC") do { if ER quit ER         
+
+		set ITCBIT = 6
+		              
+		set HOST = '%SessionID.exists()
+
+		// Search TTXFDT table for future dated transaction ECs
+		// otherwise, search TTX table
+		if (%EffectiveDate > %SystemDate) set SEQ = $$ECFDSCAN(.tran,ORGSEQ,%EffectiveDate) quit:ER 
+		else  set SEQ = $$ECSCAN(.tran,ORGSEQ,$select(TPD<%SystemDate:%SystemDate,1:TPD),HOST) quit:ER 
+
+		if SEQ set HSEQ = SEQ quit
+		
+		// Off-line from a prior day 
+		if (TPD < %SystemDate) do { quit
+			    
+			// Build match list
+			set vzrev.piece("#",3) = "TRC="_ORGSEQ
+			set vzrev.piece("#",4) = "TPD="_TPD
+			
+			// Reset to use reversal flag
+			set TYP = "REV"
+			set SEQ = ""                           
+			}
+		}
+	
+	// Could be using keyword list or HSEQ
+	if (TYP = "REV") do { if ER quit ER
+		      
+		type Number MSEQ = ""
+		
+		set ITCBIT = 12		   
+		
+		// Builds match list
+		do REVLST(.REVLST(),vzrev.piece("#",3,99))
+		
+		if REVLST.exists() set MSEQ = $$GETREC(CID,.ttx,.tran,.REVLST)
+		
+		if SEQ,'REVLST.exists() do {
+
+			type RecordHIST hist = Db.getRecord("HIST", "CID = :CID, TSEQ = :SEQ", 1)
+			
+			if 'hist.getMode() quit
+			
+			set HSEQ = SEQ
+			
+			// Replace transaction with history transaction 
+			set tran = hist.copy("TIM=TIME,BRCDE=BRCD,UIDT=UID,LNERC=XHS16,CC=BEN")
+			set tran.brcd = ttx.brcd
+			set tran.uid = ttx.uid
+			set tran.tseq = ttx.tseq
+			}
+
+		if SEQ,MSEQ,(SEQ '= MSEQ) do { quit
+		
+			// Inconsistent match criteria 
+			do Runtime.setErrMSG("HIST",7809)
+						   
+			set vzreply = $$ERRMSG^PBSUTL(RM,"",vzptr,11)
+			}
+			
+		if 'SEQ,MSEQ set SEQ = MSEQ
+
+		// No match found
+		if 'MSEQ,'HSEQ quit
+
+		set TPD = tran.tjd
+		set tran.cid = CID
+
+		// Same-day reversal
+		if (tran.tjd = %SystemDate) do {
+		
+			if (tran.uidt '= %UserID) quit
+
+			type Number TRC = tran.trc
+			
+			set TPD = TPD + tran.itc8
+			
+			// System Generated
+			if TRC.isNull() quit
+
+			type RecordTTX ttx = Db.getRecord("TTX", "TJD = :TPD, BRCD = :BRCD, UID = :%UserID, TSEQ = :TRC", 1)
+			
+			if 'ttx.getMode() quit
+			
+			if ttx.trc.isNull() quit
+			
+			// Set E/C flag instead of REV
+			set tran.tso = tran.tso.putSub(ttx.trc,"EC","~","#")
+			
+			set ITCBIT = 6
+			}
+			
+		// For regular reversals, reset effective date if not already set
+		if (tran.tjd '= %SystemDate),'tran.efd set tran.efd = TPD    
+		}
+
+	// No matching sequence found
+	if SEQ.isNull() do { quit ER
+		
+		// Unable to locate transaction on Host
+		do Runtime.setErrMSG("HIST",2794)
+		
+		set vzreply = $$ERRMSG^PBSUTL(RM,"",vzptr,11)
+		}
+
+	// No matching record found
+	if 'HSEQ do { quit ER
+	
+		// Unable to match error-corrected transaction for history sequence ~p1
+		do Runtime.setErrMSG("HIST",2795,SEQ)
+		
+		set vzreply = $$ERRMSG^PBSUTL(RM,"",vzptr,11)
+		}
+	
+	set tran.itc = $$ITC^TTXEXT(ITC,ITCBIT,1)
+	
+	set tran.tso = tran.tso.putSub(SEQ,TYP,"~","#")
+	
+	set tran.tcmt = ttx.tcmt
+	
+	// Negate amounts
+	set tran.tamt = $$REVTAMT(tran.tamt)
+	if tran.bseamt set tran.bseamt = $$REVTAMT(tran.bseamt)
+
+	set ttx = tran.copy()
+	
+	quit 0
+	
+
+REVTAMT(TAMT)	//Reverse component transaction amounts
+        type Number PC 
+        
+        for PC=1:1:TAMT.length("#") if TAMT.piece("#",PC) set TAMT.piece("#",PC)=-TAMT.piece("#",PC)
+
+        quit TAMT
+
+
+ECSCAN(RecordTTX ttx,		// Transaction Object		/MECH=REFNAM:RW
+       Number TRC,		// Trace Number
+       Date TPD,		// Transaction Posting Date
+       Boolean HOST)		// Host Sequence Indicator	/NOREQ
+
+	/*
+	   This function attempts to match up a current transaction entry with
+	   an existing TTX record for the purposes of error correcting that
+	   original transaction.  This function, when finding a match, will
+	   redefine the transaction record to equal the original.
+
+	   Additional information on arguments:
+	   
+	   . ttx  - Transaction object built by TSSP based
+	      	    on information sent in the current message.
+	
+	   . TRC  - Client sequence number, contained in the
+		    error correct/reversal field.
+	
+	   . HOST - Host sequence indicator.  If on, then return
+		    the host sequence number and not client
+		    sequence.
+
+	*/
+	
+	type public Number BRCD, ER, vzptr
+	type public String RM, vzreply
+
+	type Boolean MATCH = 0
+	type Number CID, TSEQ
+	type String ETC, TAMT
+
+	set HOST = HOST.get()
+	set CID = ttx.cid
+	set ETC = ttx.etc
+	
+	type ResultSet rs = Db.select("ITC6,TAMT,TRC,TSEQ", "TTX", "TJD = :TPD and BRCD = :BRCD and UID = :%UserID and CID = :CID and ETC = :ETC","TSEQ DESC")
+
+	if rs.isEmpty() quit ""
+
+	while rs.next() do { quit:MATCH ! ER
+		
+		set TSEQ = rs.getCol("TSEQ")
+		set TAMT = rs.getCol("TAMT")
+		
+		if 'HOST, (TRC '= rs.getCol("TRC")) quit
+		
+		if HOST, (TRC '= TSEQ) quit
+		
+		if (+ttx.tamt '= +TAMT) quit
+		
+		if rs.getCol("ITC6") do { quit
+
+			// Transaction already error-corrected
+			do Runtime.setErrMSG("TTX",2676)
+			set vzreply = $$ERRMSG^PBSUTL(RM,"",vzptr,11)
+			}
+
+		set MATCH = 1
+		
+		set ttx = Db.getRecord("TTX", "TJD = :TPD, BRCD = :BRCD, UID = :%UserID, TSEQ = :TSEQ")
+		}
+	
+	if ER quit ""
+
+	// Return client trace number if not HOST number
+	if MATCH, 'HOST quit TRC
+	
+	// Return HOST transaction sequence number	
+	quit TSEQ
+
+
+ECFDSCAN(RecordTTX ttx,		// Transaction Object		/MECH=REFNAM:RW
+	    Number TRC,		// Trace Number
+	      Date TPD)		// Transaction Posting Date
+
+	/*
+	   This function attempts to match up a current transaction entry with
+	   an existing TTXFDT record for the purposes of error correcting that
+	   original transaction.  This function, when finding a match, will
+	   redefine the transaction record to equal the original.
+	
+	   This section mimics section ECSCAN above, but only applies for error
+	   corrects of future dated transactions.
+	
+	   Additional information on arguments:
+	   
+	   . ttx  - Transaction object built by TSSP based
+	      	    on information sent in the current message.
+	
+	   . TRC  - Client sequence number, contained in the
+		    error correct/reversal field.
+	
+	*/
+	
+	type public Number BRCD, vzptr
+	
+	type Boolean MATCH = 0
+	type Number CID, TSEQ
+	type String ETC, TAMT
+	
+	set CID = ttx.cid
+	set ETC = ttx.etc
+	
+	type ResultSet rs = Db.select("TAMT,TRC,TSEQ", "TTXFDT", "TJD = :TPD and BRCD = :BRCD and UID = :%UserID and CID = :CID and ETC = :ETC","TSEQ DESC")
+	if rs.isEmpty() quit ""
+
+	while rs.next() do { quit:MATCH
+		
+		set TAMT = rs.getCol("TAMT")
+		set TSEQ = rs.getCol("TSEQ")
+		
+		if (TRC '= rs.getCol("TRC")) quit
+		
+		if (+ttx.tamt '= +TAMT) quit
+
+		set MATCH = 1
+
+		type RecordTTXFDT ttxfdt = Db.getRecord("TTXFDT", "TJD = :TPD, BRCD = :BRCD, UID = :%UserID, TSEQ = :TSEQ")
+
+		set ttx = ttxfdt.copy()
+		set ttx.tjd = %SystemDate
+		set ttx.brcd = BRCD
+		set ttx.uid = %UserID
+		set ttx.tseq = vzptr
+		
+		set ttx.tso = $$FIELDIN^UTSO(ttx.tso,"FDTSEQ",TSEQ)
+		}
+
+	quit TRC
+
+
+REVLST(revlst,string)	// Build a match list array for reversals
+
+	if string.get()="" quit 
+	
+	type Number i
+	type String fld
+	
+	for i=1:1:string.length("#") set fld=string.piece("#",i) do {
+		if fld="" quit 
+		if fld.piece("=",1)="" quit
+		set revlst(fld.piece("=",1))=fld.piece("=",2)
+		}
+	quit 
+	
+
+
+GETREC(CID,RecordTTX ttx,RecordTTX ttxr,MLST)
+
+	/*
+	   Based on an account number, either customer or general ledger, and,
+	   potentially a list of matching keywords, this utility attempts to
+	   find the original transaction, either in the customer history or
+	   the DMJ file for G/L accounts.
+	
+
+	   ARGUMENTS:
+	   . CID  - Account number  			/TYP=N/REQ/MECH=VAL
+	
+	   . ttx  - Transaction object built by the current message
+	      	    in TSSP, used as the basis for finding a match. 
+	      	    	  				/TYP=RecordTTX/REQ/MECH=VAL
+	
+	   . ttxr - Returned transaction
+	 	    Upon finding a match in the host journal file,
+	            the transaction is rebuilt, based on the matched
+		    record.   				/TYP=RecordTTX/NOREQ/MECH=REFNAM
+	
+	   . MLST  - An array of matching keywords and values to be used
+		     to support the search for the original transaction
+	        					/TYP=ARRAY/MECH=REFARRAY
+	*/
+
+	type Public String BRCD,ETC,TPD,typ
+	type Boolean MATCH=0
+	type Number HSEQ="",PMDYS,SEQ="",TRC="",UID=%UserID
+
+	//replace values in ttx object from MLST keywords
+	if MLST("TLO").exists() set ttx.tlo=MLST("TLO")
+	if MLST("BRCD").exists() set ttx.brcd=MLST("BRCD")
+	if MLST("TRC").exists() set ttx.trc=MLST("TRC")
+	if MLST("UID").exists() set ttx.uidt=MLST("UID")
+
+	type RecordTRN trn=Db.getRecord("TRN","ETC=:ETC")
+
+	// Miscellaneous transaction class - scan TTX table
+	if "DL"'[trn.cls do { quit TRC
+		new TTJD,TBRCD,TUID,TSEQ
+		set TTJD=$select(MLST("TPD").exists():MLST("TPD"),1:TPD)
+		set TBRCD=$select(MLST("BRCD").exists():MLST("BRCD"),1:BRCD)
+		set TUID=$select(MLST("UID").exists():MLST("UID"),1:UID)
+		set TSEQ=""
+		
+		type DbSet ds
+		set ds=Db.selectDbSet("TTX","TJD=:TTJD and BRCD=:TBRCD and UID=:TUID","TSEQ DESC")
+		if ds.isEmpty() quit
+		
+		while ds.next() do { quit:MATCH
+
+			type RecordTTX tran	 
+			set tran=ds.getRecord("TTX")
+			if tran.itc6 quit
+			if tran.itc12 quit
+			if tran.etc'=ttx.etc quit
+			if +tran.tamt'=+ttx.tamt quit
+			if MLST("TRC").exists(),tran.trc'=MLST("TRC") quit
+
+			set MATCH=1
+			set TRC=tran.trc
+			set ttxr=tran.copy()
+
+			/*
+			 Place processing date into account field in ttxr.  The account
+			 number will be repaced outside this function
+			*/
+			set ttxr.cid=TTJD
+			set typ="EC"
+			}
+		}
+
+	// Transaction is to an account: scan HIST table
+
+	if MLST("TLO").exists() set HSEQ=$$MATCH(.ttx,CID)
+
+	quit HSEQ
+
+
+MATCH(RecordTTX ttx,CID)	// Search HIST and match MLST values
+
+	/*
+	ARGUMENTS:
+	   . ttx   - Transaction record object		/TYP=RecordTTX/REQ/MECH=REF
+	   . CID   - Account Number			/TYP=N/REQ/MECH=VAL
+
+	RETURNS:
+	   . $$ (HSEQ) - Matching History Sequence Number	/TYP=N
+	*/
+
+	type Public Date TPD
+	type Public String BRCD,MLST(),TR
+	type String ETC,HSEQ,MATCH,TAMT,UID
+
+	set ETC=ttx.etc
+	set TAMT=ttx.tamt
+	if MLST("BRCD").exists() set BRCD=MLST("BRCD")
+	set UID=$select(MLST("UID").exists():MLST("UID"),1:%UserID)
+
+	//Need to make sure TRC is a host sequence
+	if MLST("TRC").exists() do {
+		if MLST("TPD").exists() do {
+			set MLST("TRC")=$$ECSCAN(.ttx,MLST("TRC"),MLST("TPD"),1)
+			}
+		else  set MLST("TRC")=$$ECSCAN(.ttx,MLST("TRC"),TPD,1)
+		}
+
+	type ResultSet rs=Db.select("TSEQ","HIST","CID=:CID and ETC=:ETC and TAMT=:TAMT and BRCD=:BRCD and UID=:UID","TSEQ DESC")
+	
+	if rs.isEmpty() quit ""
+
+	while rs.next() do { quit:MATCH
+
+		type RecordHIST hist=Db.getRecord("HIST","CID,HSEQ")
+
+		if hist.itc6!(hist.itc7)!(hist.itc12) quit
+		if MLST("TRC").exists(),hist.trc'=MLST("TRC") quit		
+		if MLST("TPD").exists(),hist.tjd'=(MLST("TPD")-hist.itc8) quit
+		if MLST("TLO").exists(),hist.tlo'=ttx.tlo quit
+	
+		set MATCH=1
+		set HSEQ=hist.tseq
+		}
+
+
+	quit HSEQ	
+
+
+
+CHECK(RecordTTX ttx(),TCK,TCH) 
+
+	/*
+	   Pass through primary transaction array and total up the checks and
+	   check holds.
+	
+	   ARGUMENTS:
+	   . ttx - Transaction object array 		/TYP=RecordTTX/REQ/MECH=ARRAY:R
+	
+	   . TCK - Total check amount 			/TYP=N/MECH=REFNAM:W
+	
+	   . TCH - Total hold amount 			/TYP=N/MECH=REFNAM:W
+	
+	*/
+	new etc,hldamt,rec,seq,trntyp
+	set seq="" set (TCK,TCH)=""
+	for  set seq=$order(ttx(seq)) quit:seq=""  do {
+		// Error correct
+		if ttx(seq).itc6 quit
+		
+		// Reversal			
+		if ttx(seq).itc12 quit			
+		set trntyp=$$TRNTYP^TTXEXT(ttx(seq).etc)
+
+		// Base Amount (Currency Exchange)
+		if trntyp=2 set TCK=TCK+$select(ttx(seq).bseamt:ttx(seq).bseamt,1:ttx(seq).tamt) quit
+		if trntyp=3 do {
+			// Base Amount (Currency Exchange)
+			set hldamt=$select(ttx(seq).bseamt:ttx(seq).bseamt,1:ttx(seq).tamt)
+			if hldamt<0 set TCH=TCH-hldamt quit 
+			set TCH=TCH+hldamt
+			}
+		}
+	quit 
+	
+
+CONTEXT(context,dftfld)	// Build default values based on stored context
+
+	type Number i
+	type String val,var,x
+	
+	for i=1:1:context.length("/") set x=context.piece("/",i) do {
+		set var=x.piece("=",1) 
+		set val=x.piece("=",2) quit:val="" 
+		set dftfld(var)=val
+		}
+	quit 
+	
+
+OUT(RecordTTX ttx(),vzerr,vzreply,vzstfflg)
+
+	/*
+	
+	ARGUMENTS:
+
+	   . ttx()    - Transaction object array	/TYP=RecordTTX/REQ/MECH=REFARRAY
+	
+	   . vzerr    - Error flag, indicating success or failure
+	                of client request.
+							/TYP=N/REQ/MECH=VAL
+	
+	   . vzreply  - The reply to the TSSP transaction,
+	                passed by reference to this function.
+							/TYP=T/REQ/MECH=REFNAM
+	
+	   . vzstfflg - Store and forward flag, determines whether
+			transaction was originally off-line.
+							/TYP=N/NOREQ/MECH=VAL
+	
+	INPUTS:
+	
+	   . OM    - The outgoing message array, built by the
+		     application, is parsed and interpretted
+		     in order to build the server reply packet.
+	       							/TYP=ARRAY
+	
+	   . SPV   - Override array - contains sequences which
+		     identify why a financial transaction failed.
+								/TYP=ARRAY
+	
+	
+	RETURNS:
+	
+	   . $$       - General message status, success(0) or failure(1)
+	
+	   . vzreply  - The message body of the server reply packet to
+			be sent back to the client /TYP=T/REQ
+	
+
+	
+	                      TSSP Standard Reply Format
+	
+	    Pos   Name   Req Description                 Type  Max Len
+	
+	      1   TRC    Y   PROFILE transaction
+	                     reference number            T     14
+	     *2   TAMT   Y   Transaction amount          T
+	      3   EBAL   N   Ledger balance after	 $     14
+	                     transaction
+	      4   HSEQ   N   Account history sequence    N     6
+	      5   MSC1   N   User defined misc. field 1  T     254
+	      6   MSC2   N   User defined misc. field 2  T     254
+	      7   CRTFLG N   Currency Transaction flag   L     1
+	      8   CIFLST N   Currency Transaction CIF    T     254
+			     list (NN,NNN,NNNN)
+	
+	   * indicates complex field containing one or more sub-field
+	
+	*/
+
+	type Boolean RETVAL=0
+
+	do OUTMAIN(.ttx(),.RETVAL,.vzreply)
+
+	// General message status, success(0) or failure(1)
+	quit RETVAL
+
+
+OUTMAIN(RecordTTX ttx(),RETVAL,vzreply)
+
+	type Public Cache %CACHE()
+	type Public String %ZTSEQ,CTR(),ET,OM,OM(),REC(),RJ(),RM,SPV,SPV()
+	type Public String vzerr,vzfldps,vzptr,vzstfflg
+
+	catch error {
+		do ZE^UTLERR
+
+		// System error # ~p1 , contact system manager
+		set RM=$$^MSG(6747,%ZTSEQ)
+		set RETVAL=$$ERRMSG^PBSUTL(RM,ET.get(),vzptr.get(),vzfldps.get())
+		}
+	
+	set vzstfflg=+vzstfflg.get()
+	
+
+	// Transaction failed due to authorizations, build "AU" reply
+
+	if vzerr,SPV.data()>1 do { if SPV.data()>1 set RETVAL=1 quit
+	
+		type Number SEQ=""
+		for  set SEQ=SPV(SEQ).order() quit:SEQ=""  if 'RJ(SEQ).exists() kill SPV(SEQ)
+		if 'SPV.data() quit 
+		set vzreply=$$OVROUT(.ttx(),.SPV)
+		}
+	
+	// Transaction failed due to a reject reason generated in the application
+	if vzerr,RJ.data()>1 do { quit
+		type Number SEQ
+		type String RM
+		
+		set SEQ=RJ("").order()
+		set RM=RJ(SEQ).piece("|",2)
+		set ET=RJ(SEQ).piece("|",4)
+		set vzreply=$$ERRMSG^PBSUTL(RM,ET.get(),SEQ,3)
+		set RETVAL=1
+		}
+	
+	// Transaction failed due to reject reason, build "ER" reply
+	if vzerr do { set RETVAL=1 quit
+		if vzreply'="" quit
+		
+		//Error posting transactions 
+		if 'RM.exists() set RM=$$^MSG(3764)
+		if 'vzptr.get() set vzptr=1
+		set vzreply=$$ERRMSG^PBSUTL(RM,ET.get(),vzptr,"")
+		}
+	
+	// Off-line Transaction was already processed
+	if vzstfflg=1,'OM.data() set vzreply="" quit
+	
+	// Format financial transaction reply messages
+	type Number tamt,vzseq=""
+	type String vzrec
+
+	//build tamt table for "D" and "L" class
+	do TAMTTBL(.tamt)
+
+	for  set vzseq=OM(vzseq).order() quit:vzseq=""  do {
+		
+		type Number CID
+		type String ETC
+
+		set CID=ttx(vzseq).cid
+		set ETC=ttx(vzseq).etc
+
+		type RecordTRN trn
+		set trn=%CACHE("TRN").getRecord("TRN","ETC=:ETC")
+
+		set REC(1)=OM(vzseq).piece("|",3)		// TRC number
+		set REC(2)=OM(vzseq).piece("|",4)      		// Transaction amount
+		set REC(2)=$$TAMT(trn.cls,REC(2),.tamt)
+		set REC(3)=OM(vzseq).piece("|",5)		// Ending balance
+		set REC(4)=OM(vzseq).piece("|",6)		// History sequence number
+		set REC(5)=$$MSCRPLY(.ttx(vzseq),.trn,vzseq,1)	// Misc. field 1        	
+		set REC(6)=$$MSCRPLY(.ttx(vzseq),.trn,vzseq,2)	// Misc. field 2  
+		set REC(7)=+CTR(vzseq).get()			// Currency transaction flag  
+		set REC(8)=CTR(vzseq).get().piece("|",2)	// Currency transaction CIF's
+		set vzrec(vzseq)=$$V2LV^MSG(.REC)
+		}
+
+	set vzreply=$$V2LV^MSG(.vzrec)
+	quit
+	
+
+OVROUT(RecordTTX ttx,SPV)
+
+	// Return override information per sequence.
+	
+	type Number CID="",CNT=0,SEQ
+	type String GRP,OVR,OVRCAT,SPVREST,SPVST,vzspv(),X,ZOVR()
+	type String zovr,zspv()
+	
+	set SEQ=""
+	for  set SEQ=SPV(SEQ).order() quit:SEQ=""  do {
+		for  set CID=SPV(SEQ,CID).order() quit:CID=""  do {
+			set OVRCAT=""
+			for  set OVRCAT=SPV(SEQ,CID,OVRCAT).order() quit:OVRCAT=""  do {
+				set OVR=""
+				for  set OVR=SPV(SEQ,CID,OVRCAT,OVR).order() quit:OVR=""  do {
+					type String R()
+					
+					set CNT=CNT+1
+					set X=SPV(SEQ,CID,OVRCAT,OVR)
+					set GRP=X.piece("|",4)
+					set SPVST=X.piece("|",5)
+					set R(1)=OVRCAT_"_"_GRP_"_"_OVR
+					set R(2)=$select(OVRCAT="OVR":X.piece("|",2),1:"")
+					set R(3)=$$OVRDESC(OVRCAT,GRP,OVR,CID,X.piece("|",2))
+					set R(4)=CID
+					set R(5)=SPVST
+					set ZOVR(CNT)=$$V2LV^MSG(.R)
+					}
+				}
+			}
+
+		set zspv(SEQ)=$$V2LV^MSG(.ZOVR) kill ZOVR
+		}
+	
+	for  set SEQ=$order(ttx(SEQ)) quit:SEQ=""  do {
+		if SEQ#1 quit 
+		if 'SPV(SEQ).data() set zspv(SEQ)=""
+		}
+
+	set vzspv(3)=$$V2LV^MSG(.zspv)
+	set vzspv(1)="AU" set vzspv(2)=""
+	set zovr=$$V2LV^MSG(.vzspv)
+	quit zovr
+	
+
+OVRDESC(CAT,GRP,OVR,CID,DESC)	//Build description for reply message
+
+	type Public String vzfrn
+	type Number B,E
+	type String OVRDESC = DESC
+	type String CLS
+	
+	if CAT="RFLG" do { quit OVRDESC
+
+		//Use comment on the violation
+		quit:OVRDESC.get()'=""   
+
+		//Native client, reply with null                  
+		if 'vzfrn set OVRDESC="" quit
+
+		type RecordUTBLRFLG utblrflg=Db.getRecord("UTBLRFLG","GRP=:GRP,RFLG=:OVR")
+		set OVRDESC=utblrflg.desc
+		}
+
+	if 'vzfrn quit ""                      
+
+	if CID="*" set CLS="M"
+	else  do {
+		type RecordACN acn=Db.getRecord("ACN","CID=:CID")
+		set CLS=acn.cls
+		}
+
+	set OVRDESC = ""
+
+	if Db.isDefined("OVRLIT","OVR") do {
+		type RecordOVRLIT ovrlit=Db.getRecord("OVRLIT","OVR=:OVR")
+		if CLS="D" set OVRDESC=ovrlit.desc quit
+		if CLS="L" set OVRDESC=ovrlit.desc1 quit
+		set OVRDESC=ovrlit.desc2
+		if OVRDESC="" set OVRDESC=ovrlit.desc
+		}
+
+	set B=OVRDESC.find("<")-2 
+	set E=OVRDESC.find(">")
+	if B<0 set OVRDESC=OVRDESC.extract(E,OVRDESC.length())
+	else  set OVRDESC=OVRDESC.extract(1,B)_DESC_OVRDESC.extract(E,OVRDESC.length())
+	quit OVRDESC
+	
+
+TAMT(String cls, String amt, String tamt())	//Put transaction amount into LV format
+
+	type Number I
+	type String X,ztamt()
+	
+	if amt.get()="" quit $$V2LV^MSG("")
+	if amt'["#" set amt="T#"_amt quit $$V2LV^MSG(amt)
+	for I=1:1:$select(cls="D":9,1:13) set ztamt(I)=amt.piece("#",I)
+	if tamt.data()'>1 do TAMTTBL(.tamt)
+	
+	set X=""
+	if cls="D" for  set X=ztamt(X).order() quit:X=""  do {
+		if ztamt(X)="" kill ztamt(X) quit 
+		set ztamt(X)=tamt("D",X)_ztamt(X)
+		}
+
+	if cls="L" for  set X=ztamt(X).order() quit:X=""  do {
+		if ztamt(X)="" kill ztamt(X) quit 
+		set ztamt(X)=tamt("L",X)_ztamt(X)
+		}
+
+	quit $$V2LV^MSG(.ztamt)
+	
+
+TAMTTBL(tamt)	// Build tamt array for both deposit and loan class
+
+	set tamt("D",1)="T#"		// Net amount
+	set tamt("D",2)="P#"		// Principal amount
+	set tamt("D",3)="I#"		// Interest credited
+	set tamt("D",4)="PEN#"		// Penalty
+	set tamt("D",5)="BW#"		// Backup withholding/IRA withholding
+	set tamt("D",6)="NACR#"		// Negative accrual
+	set tamt("D",7)="ESC#"		// Escrow suspense
+	set tamt("D",8)="INTNC#"	// Interest available, not credited
+	set tamt("D",9)="TNI#"		// Tax on negative interest
+	set tamt("D",15)="SW#"		// State withholding
+	set tamt("L",1)="T#"		// Net amount
+	set tamt("L",2)="P#"		// Principal
+	set tamt("L",3)="I#"		// Interest
+	set tamt("L",4)="LC#"		// Late charge
+	set tamt("L",5)="UNDP#"		// Undispersed principal
+	set tamt("L",6)="MSC#"		// Miscellaneous amount
+	set tamt("L",7)="ESC#"		// Escrow amount
+	set tamt("L",8)="UCI#"		// Uncollected interest
+	set tamt("L",9)="UF#"		// Undisbursed funds
+	set tamt("L",10)="PCO#"		// Principal charge-off
+	set tamt("L",11)="PRA#"		// Principal recovery amount
+	set tamt("L",12)="LRR#"		// Loan loss reserve
+	set tamt("L",13)="DLF#"		// Deferred loan fees
+	
+	quit 
+	
+
+MSCRPLY(RecordTTX ttx,RecordTRN trn,SEQ,FLD)
+
+	/*
+	   This private function is used to build user-defined miscellaneous
+	   reply information for a transaction sequence.  Two miscellaneous,
+	   free-form fields are provided for this information.
+	
+
+	  ARGUMENTS:
+	
+
+	   . ttx - The transaction object array, in its state
+		   after all transactions have been processed.
+	       						/TYP=RecordTTX/REQ/MECH=REFARR:R
+
+	   . trn - transaction code object.		/TYP=N/REQ/MECH=REF:R
+
+	   . SEQ - Transaction sequence number, used
+	           for primary transactions, corresponding
+		   to the sequence in ttx().
+	       `					/TYP=N/REQ/MECH=VAL
+	
+	   . FLD - Indicates which miscellaneous field to
+		   build.  This argument determines which
+		   user-defined function call to make.
+			1 - executes code for MSC1
+			2 - executes code for MSC2
+	       						/TYP=N/REQ/MECH=VAL
+	*/
+	
+	type String PGM,RETVAL
+	
+	if FLD=2 set PGM=trn.svmsc2
+	else  set PGM=trn.svmsc1
+	if PGM="" quit ""	
+	if PGM'["$$" quit ""
+	set PGM="S RETVAL="_PGM
+	
+	#ACCEPT PGM=Erik Scheetz;DATE=2/24/2003
+	xecute PGM
+	
+	quit RETVAL
+	
+
+
+BLDER(ERCAT,ERPTR,ERCODE,PARAM,DESC,FLDPS)	// Build Error message in LV format
+
+	type String ERMSG()
+	set ERMSG(1)=ERCAT
+	set ERMSG(2)=ERPTR
+	set ERMSG(3)=ERCODE
+	set ERMSG(4)=PARAM
+	set ERMSG(5)=DESC
+	set ERMSG(6)=FLDPS
+	
+	quit $$V2LV^MSG(.ERMSG)
+	
+
+
+PREPARE(RecordTTX ttx(),ctxt) // Add in account listing for 2 Phase Commits
+
+	type Public Cache %CACHE()
+	type Number SEQ=""
+	type String ETC
+	
+	set ctxt=ctxt.get()_"/CIDLIST="
+	set SEQ=""
+	for  set SEQ=$order(ttx(SEQ)) quit:SEQ=""  do {
+		set ETC=ttx(SEQ).etc
+		type RecordTRN trn=%CACHE("TRN").getRecord("TRN","ETC=:ETC")
+		if trn.cls'="D",trn.cls'="L" quit 
+		set ctxt=ctxt_ttx(SEQ).cid_","
+		}
+		
+	// Remove trailing , or =
+	set ctxt=ctxt.extract(1,ctxt.length()-1)         
+	quit
+	
+
+CHKDD(String X,		// Input value
+      String tabcol,	// Table.column reference
+      String RM)	// Error message, if any	/MECH=REFNAM:W
+      
+	/*
+	Validate input string X against dictionary attributes
+	
+	RETURNS:
+		. $$	Error flag			/TYP=L
+	*/
+	
+	type public Cache %CACHE()
+	
+	type Boolean ER = 0
+	type String column, table
+	
+	type RecordDBTBL1D dbtbl1d
+	
+	set RM = ""
+	
+	set table = tabcol.piece(".", 1)
+	set column = tabcol.piece(".", 2)
+	
+	// Need to catch invalid column errors
+	do {
+		
+		catch error {
+			
+			// Invalid data item - ~p1
+			set RM = $$^MSG(1300, tabcol)
+		}
+	
+		set dbtbl1d = %CACHE("DBTBL1D").getRecord("DBTBL1D","%LIBS='SYSDEV',FID=:table,DI=:column")
+	}
+	
+	if 'RM.isNull() quit 1
+	
+	if 'X.isNull() do { if ER quit 1
+	
+		type String typ = dbtbl1d.typ
+
+		if (typ = "D"), (X < 1) do {
+			
+			set ER = 1
+			set RM = $$TYPERR(typ)
+		}
+		
+		// Attempt to convert external data to internal format
+		if 'ER, '((typ = "T") ! (typ = "F")) do {
+		
+			set X = $$INT^%ZM(X, typ,, dbtbl1d.dec)
+			if ER set RM = $$TYPERR(typ)
+		}
+	}
+
+	set RM = $$VAL^DBSVER(dbtbl1d.typ, dbtbl1d.len, dbtbl1d.req, "", dbtbl1d.ptn, dbtbl1d.min, dbtbl1d.max, dbtbl1d.dec, "|", "["_table_"]"_column, 0)
+	
+	if 'RM.isNull() quit 1
+
+	quit 0			// No Error
+
+	
+TYPERR(String typ)	// Data type is defined as ~p1
+
+	type RecordDBCTLDVFM dvfm = Db.getRecord("DBCTLDVFM", "TYP=:typ", 1)
+	
+	quit $$^MSG(742, dvfm.des)	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60764^59670^Irina Kin^61222"	// Signature - LTD^TIME^USER^SIZE

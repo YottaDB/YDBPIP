@@ -1,0 +1,239 @@
+PCSPEN	// PCS Early Payment Penalty Calculations
+	/*
+	       ORIG:  PARDOE - 16 DEC 1991
+	       DESC:
+	      INPUT:
+	     OUTPUT:
+
+	  ---- Revision History ------------------------------------------------
+	   
+           07/26/05 - SkariahV- CR16679
+	              Removed #WARN and #OPTIMIZE directives.
+	              
+	   06/05/03 - TELIV - 51351
+		      Converted to PSL
+
+	  ----------------------------------------------------------------------
+	*/
+
+	quit
+
+
+Public O1()	// Compare Penalty Period and Rate Differential calculations
+
+	type public Number AF,EPPEN,EPPEN1,FRE,IACM,MDT,SCHLD,SCHND
+	type public Number CID,ETC,ER,EPPEN,EPPN1,NOPEN=0,PCF
+	type public Date MDT
+	type public String ET,ETC
+	type public Cache %CACHE()
+
+	// Not from CRT, from billing
+	if ETC.get()="" quit 0
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID",1)
+		
+	// Record not on file
+	if ln.getMode()=0 set ER=1 set ET="RECNOF" do ^UTLERR quit
+
+	// Maturity Date
+	set MDT=ln.mdt
+
+	// Not an advance payment
+	if MDT'="",MDT'>%SystemDate quit 0
+
+	do INIT(.ln) 
+	
+	if %ProcessMode.get()=2 do INQPEN(.ln) quit EPPEN.justify(0,2)
+
+	type RecordTRN trn=%CACHE("TRN").getRecord("TRN","ETC=:ETC")
+	if 'trn.pcfl23 set NOPEN=1 quit 0
+	
+	set EPPEN1=$$PPC()
+	set EPPEN=$$RDPC()
+
+	if EPPEN1>EPPEN set EPPEN=EPPEN1
+
+	quit EPPEN.justify(0,2)
+
+
+INQPEN(RecordLN ln)	// Early Payment Penalty Inquiry
+
+	/*
+	
+	ARGUMENTS
+	. ln	Record LN Object 	/REQ/MECH=REF
+	
+	
+	*/
+
+	type public Number EPPEN,EPPEN1
+
+	set EPPEN1=$$PPC(.ln)
+	set EPPEN=$$RDPC(.ln)
+
+	if EPPEN1>EPPEN set EPPEN=EPPEN1
+
+	quit
+
+
+Public PPC(RecordLN ln)	// Penalty period calc
+
+	/*
+	
+	ARGUMENTS
+	. ln	Record LN Object 	/REQ/MECH=REF
+	
+	
+	*/
+
+
+	// EPPEN = BLAMT * interest rate * pen days / annual interest accrual days
+
+	type public Number AF,BLAMT,CID,EIRN,FRE,IRN,PD,PEN,IACM,SCHND,SCHLD
+	type public String BALAMT,METH
+	type public Date %EffectiveDate
+	
+	set IRN=ln.irn
+
+	// Penalty Days
+	type RecordUTBLLNPPN utbllnp=Db.getRecord("UTBLLNPPN","METHOD=:METH",1)
+	set PD=utbllnp.pd
+	
+	set PEN=$$^UIC(BLAMT,%EffectiveDate,%EffectiveDate,IACM,IRN,,AF,FRE,,SCHND,SCHLD)*PD
+
+	quit PEN.justify(0,2)
+
+
+Public RDPC(RecordLN ln)	// Rate differential penalty calc
+
+	/*
+	
+	ARGUMENTS
+	. ln	Record LN Object 	/REQ/MECH=REF
+	
+	
+	*/
+
+
+	// EPPEN = BLAMT * rate diff * rem term / annual interest accrual days
+
+	type public Number AF,BLAMT,CID,FRE,IACM,RATE,SCHND,SCHLD
+	type Number EIRN,PEN
+	type public Date %EffectiveDate,MDT
+
+	// New loan rate
+	do RATE(MDT)
+
+	set EIRN=ln.eirn
+	
+	// Nominal Int/Div Rate
+	if EIRN="" set EIRN=ln.irn
+
+	set EIRN=(EIRN-RATE)/100
+
+	set PEN=$$^UIC(BLAMT,%EffectiveDate,MDT,IACM,EIRN,,AF,FRE,,SCHND,SCHLD)
+
+	quit PEN.justify(0,2)
+
+
+INIT(RecordLN ln)	// Initialization section
+
+	/*
+	
+	ARGUMENTS
+	. ln	Record LN Object 	/REQ/MECH=REF
+	
+	
+	*/
+
+	type public Date %EffectiveDate
+	type public Number AF,CID,EIRN,FRE,IACM,SCHND,SCHLD
+
+	if %EffectiveDate.get()="" set %EffectiveDate=%SystemDate
+
+	// Interest Accrual Method
+	set IACM=ln.iacm
+	
+	// Distribution 1 Frequency
+	set FRE=ln.dist1fre
+	
+	// Distribution 1 Annual Factor
+	set AF=ln.dist1af
+	
+	// Scheduled Payment - Next Date
+	set SCHND=ln.schnd
+	
+	// Scheduled Payment - Last Date
+	set SCHLD=ln.schld
+	
+	quit
+
+
+Public AIAD	// Find annual interest accrual days
+
+	type public Number CID,IACM
+	type public Date AIAD,%EffectiveDate
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID",1)
+
+	// Int Accrual Method
+	set IACM=ln.iacm 
+	set IACM=IACM.extract(2)
+
+	if IACM=1 set AIAD=$select($$DAT^%ZM(%EffectiveDate,"MM/DD/YY").extract(7,8)#4:365,1:366)
+	
+	else  set AIAD=$select(IACM=3:365,1:360)
+
+	quit
+
+
+RATE(Date MDT)	// Determine new loan rate (RATE)
+
+	/*
+	
+	ARGUMENTS
+	. MDT	Date 	/REQ/MECH=VAL
+	
+	
+	*/
+
+
+	// use [ZLN]PENSCH, then [LN]SCH, then [LN]INDEX, then [LTYPE]IRN
+
+	type public Number CID,ER,INDEX,INTMAT,OVR,RSRND,RATE,SCH,SPREAD
+	type public Date %EffectiveDate
+	type String PAR()
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+
+	// Interest Rate - Nominal
+	set RATE=ln.irn
+
+	// New Account Rate Schedule
+	set SCH=ln.sch
+
+	// Rate Schedule Rounding Method
+	set SPREAD=ln.rsintspr
+	set RSRND=ln.rsrndmtd
+
+	// |Invalid penalty rate schedule 
+	// PCS does want to go further	
+
+	if SCH="" set OVR(CID,"OVR","INVSCH")=""
+	
+	else  set RATE=$$RSCH^URSCH(SCH,ln.bal,%EffectiveDate,MDT,SPREAD,RSRND) if RATE=0!ER quit
+
+	// Interest Index
+	set INDEX=$$INDDATA^LNU(.ln)
+
+	// Int/Div Matrix
+	set INTMAT=ln.intmat
+		
+	set PAR("ROUND")=1
+	set PAR("LIMIT")=1
+
+	if INDEX do CTL^UINDX(.ln,%EffectiveDate,ln.bal,.PAR)
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60107^27450^Viji Skariah^4212"	// Signature - LTD^TIME^USER^SIZE

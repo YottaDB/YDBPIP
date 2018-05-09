@@ -1,0 +1,516 @@
+ITFXV(Number %ProcessMode)	
+		 
+	/*
+	Foreign Exchange Voucher Maintenance
+	
+	This program allows the creation/maintenance/inquiry/deletion of a
+	Foreign Exchange Voucher.  A foreign exchange voucher is a group of
+	related postings where the user is buying or selling a single foreign
+	currency against the base.  The foreign currency will always occupy the
+	first transaction entry, or the implied upper transaction on the FXV
+	screen.
+	
+	NOTE:  ITFXV and ITFCV are very similar.  Changes made to one should
+	       be considered in the other as well.
+		    
+	---- Revision History -------------------------------------------------
+	01/18/06 - RussellDS - CR19164
+		   Converted to PSL.
+		   
+		   Combines old routines ITFXVC, ITFXVM, ITFXVI, and ITFXVD.
+
+	-----------------------------------------------------------------------
+	*/
+	
+	type public Boolean ER
+	type public String RM
+	
+	// Note that many of these variables are used by the screen ITFXV
+	type Date EFD, LPDATE, PDATE, TPD
+	type Number %PAGE, %PG, BRCD, CUSTID, I, OLNTB, PAYACC, SEQ, TSEQ
+	type String %READ, %TAB(), ACCTTL, ACNGL(), ACNPST(), BCURR, BCURR(), BS
+	type String CCY, CNTRY(), DEALID, DRCR(), ESTADO, ITSCODE, MD, NAM, PM
+	type String STAT(), TRID, UID, VFMQ
+	
+	set ITSCODE = "FXV"
+		
+	type RecordSCAU scau = Db.getRecord("SCAU", "UID=:%UserID")
+	
+	set ER = 0
+	set TPD = %SystemDate
+	set BRCD = scau.brcd
+	set EFD = %SystemDate
+	set UID = %UserID
+	
+	if (%ProcessMode = 0) do {
+	
+		set %TAB("EFD") = ".EFD1/XPP=D EFDPP^ITUTIL"
+		set %TAB("BRCD") = ".BRCD1/TBL=[UTBLBRCD]"
+	
+		set %READ = "@@%FN,,,EFD/REQ,BRCD/REQ"
+	}
+	else  if (%ProcessMode = 2) do {
+		
+		set %TAB("DEALID") = ".DEALID1/TBL=[ITOPID]DEALID:DISTINCT:QU ""[ITOPID]ITSCODE=<<ITSCODE>>"""
+		set %TAB("LPDATE") = ".LPDATE1/TBL=[ITOPID]EFD:DISTINCT:QU ""[ITOPID]ITSCODE=<<ITSCODE>> AND [ITOPID]DEALID=<<DEALID>>"""
+		set %TAB("BRCD") = ".BRCD1/TBL=[ITOPID]BRCD:DISTINCT:QU ""[ITOPID]ITSCODE=<<ITSCODE>> AND [ITOPID]DEALID=<<DEALID>> AND [ITOPID]EFD=<<LPDATE>>"""
+		set %TAB("UID") = ".UID1/TBL=[ITOPID]UID:DISTINCT:QU ""[ITOPID]ITSCODE=<<ITSCODE>> AND [ITOPID]DEALID=<<DEALID>> AND [ITOPID]EFD=<<LPDATE>> AND [ITOPID]BRCD=<<BRCD>>""/XPP=D UIDPP^ITUTIL"
+		set %TAB("SEQ") = ".TSEQ5/TBL=TARRAY(/XPP=D SEQPP^ITUTIL"
+
+		set %READ = "@@%FN,,,DEALID/REQ,LPDATE/REQ,BRCD/REQ,UID/REQ,SEQ/REQ"
+	}
+	else  do {		// %ProcessMode = 2 or 3
+
+		set %TAB("BRCD") = ".BRCD1/TBL=[ITOPID]BRCD:DISTINCT:QU ""[ITOPID]ITSCODE=<<ITSCODE>> AND [ITOPID]UID=<<UID>>"""
+		set %TAB("DEALID")  = ".DEALID1/TBL=[ITOPID]DEALID:DISTINCT:QU ""[ITOPID]ITSCODE=<<ITSCODE>> AND [ITOPID]UID=<<UID>> AND [ITOPID]BRCD=<<BRCD>>"""
+		set %TAB("LPDATE") = ".LPDATE1/TBL=[ITOPID]EFD:DISTINCT:QU ""[ITOPID]ITSCODE=<<ITSCODE>> AND [ITOPID]DEALID=<<DEALID>> AND [ITOPID]UID=<<UID>> AND [ITOPID]BRCD=<<BRCD>>""/XPP=D LPDATEPP^ITUTIL"
+		set %TAB("SEQ") = ".TSEQ5/TBL=TARRAY(/XPP=D SEQPP^ITUTIL"
+
+		set %READ = "@@%FN,,,BRCD/REQ,DEALID/REQ,LPDATE/REQ,SEQ/REQ"
+	}
+
+	do ^UTLREAD quit:(VFMQ = "Q")
+	
+	if (%ProcessMode = 0) do {
+	
+		if (EFD < %SystemDate) set PDATE = %SystemDate
+		else  set PDATE = EFD
+	
+		set (%PAGE, %PG) = 1
+		set MD = "M"
+	
+		set BCURR = %SystemCurrency
+		for I = 1:1:7 set BCURR(I) = BCURR
+	
+		type RecordTTX fT = Class.new("RecordTTX")
+	
+		set fT.vdt = EFD
+	
+		do DRV^USID(0, "ITFXV", .fT) quit:(VFMQ '= "F")
+		
+		do Runtime.start("CS", "", "SAVEPTR")
+	
+		do ADDFXV(.fT, EFD, TPD, PDATE, BRCD)
+		
+		if ER do Runtime.rollback("SAVEPTR")
+			
+		if 'ER do Runtime.commit()
+	}
+	else  do {
+		
+		type Boolean X
+		type Number COUNT, PFLAG
+		type String ITOPID(,,,,,)
+		
+		type RecordTTX ttx()
+		type RecordTTX fT
+		
+		set TSEQ = SEQ
+		set EFD = LPDATE
+		
+		if (%ProcessMode <> 2) do { quit:ER
+		
+			set ITOPID(ITSCODE, DEALID, EFD, BRCD, UID, SEQ) = ""
+			lock +ITOPID(ITSCODE, DEALID, EFD, BRCD, UID, SEQ):2
+		
+			else  do {
+			
+				set ER = 1
+				// File locked by another user
+				set RM = $$^MSG(1081)
+			}
+		}
+		
+		if (%ProcessMode = 2) set PDATE = LPDATE
+		else  do {
+		
+			if (LPDATE < %SystemDate) set PDATE = %SystemDate
+			else  set PDATE = LPDATE
+		}
+		
+		type RecordITOPID itopid = Db.getRecord("ITOPID", "ITSCODE=:ITSCODE,DEALID=:DEALID,EFD=:LPDATE,BRCD=:BRCD,UID=:%UserID,TSEQ=:TSEQ", 1)
+		
+		// Load data
+		set COUNT = $$LOAD^ITUTIL(itopid, LPDATE, BRCD, UID, .ttx())
+		
+		if (COUNT = 0) do { quit
+			
+			set ER = 1
+			// Error reading data
+			set RM = $$^MSG(994)
+		}
+		
+		if ttx(1).exists(), (ttx(1).efd '= EFD) set EFD = ttx(1).efd
+		
+		type RecordTTX fT
+		
+		set X = $$SCREEN(.ttx(), COUNT, .fT)
+		
+		if 'X do { quit
+		
+			set ER = 1
+			// Error generating screen data
+			set RM = $$^MSG(981)
+		}
+		
+		// Display screen
+		set (%PAGE, %PG) = 1
+		set OLNTB = 0
+		
+		do DRV^USID(%ProcessMode, "ITFXV", .fT) quit:(VFMQ = "Q")
+		
+		quit:(%ProcessMode = 2)
+		
+		// Set flag for how to delete entry (see DELETE^ITUTIL)
+		if (%SystemDate > LPDATE) set PFLAG = 2
+		else  if (%SystemDate = LPDATE) set PFLAG = 1
+		else  set PFLAG = 0
+		
+		if (%ProcessMode = 1) do {
+			
+			// Delete the old entry, create the new one
+			
+			do Runtime.start("CS", "", "SAVEPTR")
+			
+			if '$$DELETE^ITUTIL(ITSCODE, .ttx(), itopid, COUNT, PFLAG, TPD, BRCD, EFD, LPDATE) do {
+
+				set ER = 1
+				// Could not delete transactions.  Modification stopped.
+				set RM = $$^MSG(629)
+			}
+			
+			if 'ER do ADDFXV(.fT, EFD, TPD, PDATE, BRCD)
+			
+			if ER do Runtime.rollback("SAVEPTR")
+			
+			if 'ER do Runtime.commit()
+			
+		}
+		
+		if (%ProcessMode = 3) do {
+			
+			type Boolean YN
+		
+			// Are you SURE you want to DELETE this voucher?
+			set YN = $$YN^DBSMBAR("", $$^MSG(306), 0) quit:'YN
+			
+			do Runtime.start("CS", "", "SAVEPTR")
+			
+			if '$$DELETE^ITUTIL(ITSCODE, .ttx(), itopid, COUNT, PFLAG, TPD, BRCD, EFD, LPDATE) do {
+
+				set ER = 1
+				// Could not delete transactions.  Deletion stopped.
+				set RM = $$^MSG(628)
+			}
+			
+			if ER do Runtime.rollback("SAVEPTR")
+			
+			if 'ER do Runtime.commit()
+		}
+		
+		lock -ITOPID(ITSCODE, DEALID, EFD, BRCD, UID, SEQ)
+	}
+	
+	quit
+
+	
+ADDFXV(RecordTTX fT,	// Base (first) transaction
+       Date EFD,	// Effective date of deal
+       Date TPD,	// Teller posting date
+       Date PDATE,	// Deal posting date (today or future)
+       Number BRCD)	// Branch code
+
+	/*
+	Files screen data and calls TRNDRV to post
+
+	INPUTS:
+		. TRID		Trader Id
+		. CUSTID	Customer Id of the deal
+		. BS		Whether the customer is Buying or Selling the
+				  foreign currency
+		. PM     	Payment method for target currency
+		. MD		Multiply/divide indicator
+		. DEALID 	Deal id for the FXV
+		. PAYACC 	Payment account number for the target currency
+		. ESTADO 	Stat code for the first (upper) posting
+		. CTY    	Country code for the first posting
+		. BCURR  	Currency code for the base currency
+		. ACNPST 	Array containing the lower postings
+				  (The base currency postings)
+		. DRCR   	Array containing the character representation
+				  of the Debit/Credit flag for the lower postings.
+		. ACNGL  	Array containing the ACNGL indicators for the
+				  base currency postings.
+		. STAT   	Array containing the Statistical codes for the
+				  base currency postings (lower half of FXV screen)
+		. CNTRY  	Array containing the country codes for the
+				  base currency postings (lower half of FXV screen)
+	*/
+	
+	type public Boolean ER
+	type public Number CUSTID, PAYACC
+	type public String ACNGL(), ACNPST(), BCURR, BS, CNTRY(), CTY, DEALID, DRCR()
+	type public String ESTADO, ITSCODE, MD, PM, RM, STAT(), TRID
+	
+	type Boolean isBuy
+	type Number CNT, I, N
+	type String ITC, OM(), REJ()
+	
+	set ER = 0
+	
+	if (BS = "B") set isBuy = 1
+	else  set isBuy = 0
+	
+	set ITC = " "
+	
+	if (MD = "D") set fT.mult = 0
+	else  set fT.mult = 1
+	
+	set fT.cid = PAYACC
+	set fT.efd = EFD
+	set fT.trc = ""
+	
+	// Build transaction set
+	type RecordTTX ttx()
+	for I = 0:1:7 do {
+		
+		type String TSO, TSOARRAY()
+		
+		set TSOARRAY("TRID") = TRID
+		set TSOARRAY("CUSTID") = CUSTID
+		set TSOARRAY("BUYSELL") = isBuy
+		set TSOARRAY("PAYMETH") = PM
+		set TSOARRAY("DEALID") = DEALID
+		set TSOARRAY("ITSCODE") = ITSCODE
+		
+		// Build implied first record
+		if (I = 0) do {
+			
+			set ttx(1) = Class.new("RecordTTX")
+			
+			set ttx(1) = fT.copy()
+			set CNT = 1
+			
+			type RecordUTBLITPAY itpay = Db.getRecord("UTBLITPAY", "KEY=:PM", 1)
+			
+			// Gary's Rule: If the Bank buys, then DEBIT payment account
+			if (itpay.acngl = "A") do {
+				
+				type Number DC, TRB
+				
+				set TSOARRAY("ACNGL") = "A"
+				
+				set TRB = $$TRB^UTRB(PAYACC)
+				
+				if isBuy do {
+					
+					set DC = $$DC^UTRB(0, TRB)
+					set ITC = $$ITC^TTXEXT(ITC, 1, 0)
+					set ttx(1).etc = $$DTC^ITUTIL("", PAYACC, "DR")
+				}
+				else  do {
+					
+					set DC = $$DC^UTRB(1, TRB)
+					set ITC = $$ITC^TTXEXT(ITC, 1, 1)
+					set ttx(1).etc = $$DTC^ITUTIL("", PAYACC, "CR")
+				}
+			}
+			else  do {
+				
+				set TSOARRAY("ACNGL") = "G"
+				
+				if isBuy do {
+					
+					set ttx(1).etc = "MDR"
+					set ITC = 0
+				}
+				else  do {
+					
+					set ttx(1).etc = "MCR"
+					set ITC = 1
+				}
+			}
+			
+			set TSOARRAY("STAT") = ESTADO
+			set TSOARRAY("CNTRY") = CTY
+			
+			do IN^UTSO(.TSOARRAY(),.TSO)
+			
+			set ttx(1).itc = ITC
+			set ttx(1).tso = TSO
+			set ttx(1).tlo = %UserStation
+			set ttx(1).bcrcd = BCURR
+		}
+		
+		else  if ACNPST(I).exists() do {
+			
+			quit:ACNPST(I).piece("|", 1).isNull()	// Payment account
+			quit:ACNPST(I).piece("|", 2).isNull()	// DR/CR indicator
+			quit:ACNPST(I).piece("|", 4).isNull()	// Transaction amount
+			
+			set CNT = CNT + 1
+			set ttx(CNT) = Class.new("RecordTTX")
+			
+			set ttx(CNT).cid = ACNPST(I).piece("|", 1)
+			set ttx(CNT).tamt = ACNPST(I).piece("|", 4)
+			set ttx(CNT).tcmt = ACNPST(I).piece("|", 8)
+			
+			if (DRCR(I) = "CR") set ttx(CNT).itc = $$ITC^TTXEXT(ITC,1,1)
+			else  set ttx(CNT).itc = $$ITC^TTXEXT(ITC,1,0)
+			
+			set ttx(CNT).etc = $$DTC^ITUTIL(ACNGL(I), ACNPST(I).piece("|", 1), DRCR(I))
+			set ttx(CNT).efd = ttx(1).efd
+
+			set TSOARRAY("STAT") = STAT(I)
+			set TSOARRAY("CNTRY") = CNTRY(I)
+			set TSOARRAY("ACNGL") = ACNGL(I)
+			
+			do IN^UTSO(.TSOARRAY(),.TSO)
+			
+			set ttx(CNT).tso = TSO
+			set ttx(CNT).tlo = %UserStation
+			set ttx(CNT).crcd = BCURR
+			set ttx(CNT).rate = fT.rate
+			set ttx(CNT).vdt = fT.vdt
+			set ttx(CNT).cc = fT.cc
+			set ttx(CNT).mult = fT.mult
+			set ttx(CNT).bseamt = ttx(CNT).tamt
+			set ttx(CNT).bcrcd = BCURR
+		}
+	}
+	
+	do TRNSET^TRNDRV(.ttx(), TPD, BRCD, 1, , .REJ(), , , .OM())
+	
+	if REJ.data() do {
+	
+		set ER = 1
+		if 'RM.exists() do {
+		
+			if REJ(1).exists() set RM = REJ(1).piece("|", 2)
+			// Transaction rejected by transaction handler
+			if RM.get().isNull() set RM = $$^MSG(2737)
+		}
+	}
+	
+	quit:ER
+	
+	// Update support tables for primary transactions
+	do SUPTTBLS^ITUTIL(ITSCODE, DEALID, EFD, PDATE, BRCD, .ttx(), .OM())
+
+	quit
+
+
+	
+	
+	
+
+SCREEN(RecordTTX ttx(),		// Loaded transactions
+       Number CNT,		// Number of elements in ttx() array
+       RecordTTX fT)		// First transaction record		MECH=REF:W
+       
+	/*
+	Set up variables to paint screen
+
+	This function takes information that is stored in a transaction array
+	and formats it in a method in necessary to display the information
+	on screen.
+
+	RETURNS:
+		. $$		Error indicator			/TYP=L
+		. TRID		Trader Id
+		. CUSTID	Customer Id of the deal
+		. BS		Whether the customer is Buying or Selling the
+				foreign currency
+		. PM		Payment method for target currency
+		. MD		Multiply/divide indicator
+		. PAYACC	Payment account number for the target currency
+		. ESTADO	Stat code for the first (upper) posting
+		. CTY		Country code for the first posting
+		. BCURR, CCY	Currency code for the base currency
+		. ACNPST	Array containing the lower postings
+				(The base currency postings)
+		. DRCR		Array containing the character representation
+				of the Debit/Credit flag for the lower postings.
+		. ACNGL		Array containing the ACNGL indicators for the
+				base currency postings.
+		. STAT		Array containing the Statistical codes for the
+				base currency postings (lower half of FXV screen)
+		. CNTRY		Array containing the country codes for the
+				base currency postings (lower half of FXV screen)
+		. NAM		Customer name
+	*/
+	
+	type public Number CUSTID, PAYACC
+	type public String ACCTTL, ACNGL(), ACNPST(), BCURR, BS, CNTRY(), CCY, CTY
+	type public String DRCR(), ESTADO, MD, NAM, PM, STAT(), TRID
+	
+	type Number I
+	type String BUYSELL, TSO
+	
+	if 'ttx(1).exists() quit 0
+	
+	set fT = ttx(1).copy()
+	
+	set TSO = fT.tso
+	set TRID = $$FIELD^UTSO(TSO, "TRID")
+	set CUSTID = $$FIELD^UTSO(TSO, "CUSTID")
+	
+	if 'CUSTID.isNull() do {
+	
+		type RecordCIF cif = Db.getRecord("CIF", "ACN=:CUSTID", 1)
+		
+		set NAM = cif.nam
+	}
+	else  set NAM = ""
+
+	set BUYSELL = $$FIELD^UTSO(TSO,"BUYSELL")
+	if (BUYSELL = 1) set BS = "B"
+	else  if (BUYSELL = 0) set BS = "S"
+	
+	set CCY = fT.crcd
+	
+	if (fT.mult = 1) set MD = "M"
+	else  set MD = "D"
+	
+	set PM = $$FIELD^UTSO(TSO, "PAYMETH")
+	set PAYACC = fT.cid
+	
+	if 'PAYACC.isNull() do {
+	
+		type RecordACN acn = Db.getRecord("ACN", "CID=:PAYACC", 1)
+		
+		set ACCTTL = acn.title1
+	}
+
+	set ESTADO = $$FIELD^UTSO(TSO, "STAT")
+	set CTY = $$FIELD^UTSO(TSO, "CNTRY")
+	set BCURR = fT.bcrcd
+	
+	for I = 1:1:7 set BCURR(I) = fT.crcd
+	
+	// Now read in the detail items
+	for I = 2:1:CNT do {
+		
+		type String X
+		
+		set X = ""
+		
+		set X.piece("|", 1) = ttx(I).cid
+		set X.piece("|", 2) = ttx(I).itc
+		set X.piece("|", 4) = ttx(I).tamt
+		set X.piece("|", 8) = ttx(I).tcmt
+		
+		set ACNPST(I - 1) = X
+		
+		set TSO = ttx(I).tso
+		set ACNGL(I - 1) = $$FIELD^UTSO(TSO, "ACNGL")
+		set STAT(I - 1) = $$FIELD^UTSO(TSO, "STAT")
+		set CNTRY(I - 1) = $$FIELD^UTSO(TSO, "CNTRY")
+		
+		if (ttx(I).itc.extract(1) = 1) set DRCR(I - 1) = "CR"
+		else  set DRCR(I - 1) = "DR"
+	}
+		
+	quit 1
+
+vSIG()	quit "60302^36273^Dan Russell^13051"	// Signature - LTD^TIME^USER^SIZE

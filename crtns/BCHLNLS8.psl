@@ -1,0 +1,749 @@
+BCHLNLS8 //Batch BCHLNLS8C - Participation Custodial Transfer EOD
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 08/30/2007 15:08 - joynerd
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHLNLS8C Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ set vBCHSTS=$$STATUS^BCHUTL("BCHLNLS8C")
+ if vBCHSTS=1 set ER=1,RM=$$^MSG(3410) quit
+ if vBCHSTS=2 set ER=1,RM=$$^MSG(3414) quit
+ if vBCHSTS=0 set %BatchRestart=1
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit do EXIT^BCHUTL("BCHLNLS8C") quit
+ do JOBMGR^BCHUTL(%FN,"BCHLNLS8C",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ do EXIT^BCHUTL("BCHLNLS8C")
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(INCD,PL,CID) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHLNLS8C","*","",INCD.get()_","_PL.get()_","_CID.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ if %BatchRestart,$$CHKLOG^BCHUTL(%SystemDate,%FN,"BCHLNLS8C",INCD.get()_","_PL.get()_","_CID.get()) do { quit
+ do LOG^BCHUTL(%SystemDate,%FN,"BCHLNLS8C",INCD.get()_","_PL.get()_","_CID.get(),"Record already processed")
+ }
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,INCD,PL,CID)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHLNLS8C","*","",INCD.get()_","_PL.get()_","_CID.get(),"",et)
+ }
+ do UPDLOG^BCHUTL(%SystemDate,%FN,"BCHLNLS8C",INCD.get()_","_PL.get()_","_CID.get(),vCONTEXT)
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,INCD,PL,CID) //
+	
+	// Process to transfer amounts into pool custodial accounts
+
+	new A,CCDEF,E,ER,ESC,ESCPP,ETC,EWASH,FEEP,FRE,HIST,HITC,IESCWASH
+	new INT,INTCOL,IPIWASH,ISPYTD,LS,OCC,PIP,PIPF,PL1,PP,PRIN,PSEQ
+	new REVCUS,SFCM,SFPF,SVFEE,TAMT,YLD
+	
+	set ER=0
+	
+	do INITINCD if ER quit
+
+	do INITPL if ER quit
+
+	// do not process remittance method 6
+	if PICM=6 quit
+	
+	do WAMT
+	
+	quit
+
+INITINCD // Initialize investor variables
+
+	type RecordLNLS1 lnls1=Db.getRecord("LNLS1","INCD=:INCD")
+
+	set IESCWASH=lnls1.escwash
+	set PIWASH=lnls1.piwash
+	set REVCUS=lnls1.revcus
+	quit
+	
+INITPL	// Initialize variables needed at pool level
+	
+	type RecordLNLS2 lnls2=Db.getRecord("LNLS2","INCD=:INCD,PL=:PL")
+	
+	set PIPF=lnls2.pipf
+	set ESCPP=lnls2.escpp/100
+	set SFPF=lnls2.sfpf
+	set PP=lnls2.pp/100
+	set SFCM=lnls2.sfcm
+	set FEEP=lnls2.feep/100
+	set YLD=lnls2.yield/100
+	set FRE=lnls2.remfre if $L(FRE) set JD=TJD do ^UFRE set REMAF=AF
+	set PICM=lnls2.picm
+	set EWASH=lnls2.escwash
+
+	// do not process remittance method 6
+	if PICM=6 quit
+	
+	// Proceed to next pool if auto processing is not enabled
+	if 'PIPF,'ESCPP quit
+	
+	// If PIPF get wash account number
+	if PIPF do { if ER do EXC quit
+		new STAT
+		set WASH=lnls2.wash,PGL=lnls2.prgl,IGL=lnls2.intgl
+		//  Pool ~p1  P&I
+		set RM1=$$^MSG(4124,PL)
+
+		type RecordDEP wash=Db.getRecord("DEP","CID=:WASH",1)
+		if 'wash.getMode() set ER=1,RM=$$^MSG(4128,INCD,RM1) quit
+
+		if wash.stat set ER=1,RM=$$^MSG(4362,INCD,PL) quit
+		set TYPE=wash.type
+		}
+	// If ESCPP get escrow wash account number
+	if ESCPP do { if ER do EXC quit
+		new STAT
+		set EGL=lnls2.escgl
+		//  Pool ~p1  Escrow
+		set RM1=$$^MSG(4123,PL)
+
+		type RecordDEP ewash=Db.getRecord("DEP","CID=:EWASH",1)
+
+		if 'ewash.getMode() set ER=1,RM=$$^MSG(4128,INCD,RM1) quit
+
+		if ewash.stat set ER=1,RM=$$^MSG(4126,INCD,RM1) quit
+		set ETYPE=ewash.type
+		}
+	// If SFPF get service fee wash account number
+	if SFPF set SFGL=lnls2.sfgl
+	
+	if PIPF&(PGL=""!(IGL=""))!(ESCPP&(EGL=""))!(SFPF&(SFGL="")) do { quit
+		set ER=1
+		// INCD ~p1  Pool~p2  GL Account missing
+		set RM=$$^MSG(4125,INCD,PL)
+		do EXC
+		}
+	quit
+	
+WAMT	// Compute pool custodial account transaction amounts 
+	
+	type public Number CIDNO
+	
+	type RecordLN ln=Db.getRecord("LN","CID")
+	set BAL=ln.bal
+	set ESC=0
+	set TEB=ln.teb
+	set ISPYTD=ln.ispytd
+	set OCC=ln.cc if OCC="" set OCC=CCDEF
+	
+	type DbSet ds=Db.selectDbSet("LNLSDT","EFD=:EFD AND INCD=:INCD AND PL=:PL AND CID=:CID")
+	while ds.next() do {
+
+		type RecordLNLSDT lnlsdt=ds.getRecord("LNLSDT")
+		set TSEQ=lnlsdt.tseq
+		set CIDNO=lnlsdt.cid
+		
+		if lnlsdt.lnsfl quit        //check flag
+		set REVPMT=lnlsdt.revpmt
+		// Set key information for save back to [LNLSDT]
+		set lnlsdt.efd=EFD
+		set lnlsdt.incd=INCD
+		set lnlsdt.pl=PL
+		set lnlsdt.cid=CID
+		set lnlsdt.tseq=TSEQ
+		do EXEC(.ln,.lnlsdt)
+		set lnlsdt.lnsfl=1 	      // set flag
+		do lnlsdt.bypassSave()
+		}
+
+	// file to LN if ISPYTD has changed	
+	if ISPYTD'=ln.ispytd set ln.ispytd=ISPYTD do ln.bypassSave()
+
+	
+	set HITC=1 do:ESCPP WAMT2(EWASH,ESC*ESCPP,1,"Escrow",EGL,OCC)
+
+	quit
+	
+EXEC(RecordLN ln,RecordLNLSDT lnlsdt)  // Wash account update
+	
+	type Number CUSTAMT,ESCAMT,HSEQ,WASHTOT
+
+	/*
+	 If this is a reversal, the system needs to reverse out the transfer(s) 
+	 to the wash and/or custodial account(s).  TSEQ in a case like this will 
+	 be equal to the hist sequence of the original transaction being reversed, 
+	 not of the reversal itself, so the HIST record corresponding to the
+	 reversal transaction needs to be retrieved instead of the original.
+	*/
+
+	type RecordHISTR histr = Db.getRecord("HISTR","CID=:CID,TSEQ=:TSEQ",1)
+	if histr.getMode() set HSEQ = histr.rseq
+	else  set HSEQ = TSEQ
+
+	type RecordHIST hist = Db.getRecord("HIST","CID=:CID,TSEQ=:HSEQ")
+	
+	set ITC=hist.itc
+	
+	// if LNLS1.REVCUS flag is no, don't process these
+	if $E(ITC,6),REVCUS="" quit		// error correct
+	if $E(ITC,12),REVCUS="" quit		// reversal
+
+	set HITC=$E(ITC,1)
+	set ETC=hist.etc
+	set TAMT=hist.tamt
+	
+	// Find loan sale sequence number from cross reference file
+	type ResultSet lsx=Db.select("GRP","LNLS8","INCD=:INCD AND PL=:PL AND CID=:CID")
+	while lsx.next() do {
+		set GRP=lsx.getCol(1)
+		type RecordLNLS8 lnls8=Db.getRecord("LNLS8","INCD=:INCD,PL=:PL,GRP=:GRP,CID=:CID",1) 
+		if lnls8.getMode() set PSEQ=lnls8.pseq
+		else  set PSEQ=""
+		}
+	if PSEQ="" quit
+	
+	// No transaction code found.
+	if ETC="" set RM=$$^MSG(4129) do EXC quit
+	
+	type RecordTRN trn=Db.getRecord("TRN","ETC=:ETC")
+	
+	set PRIN=(TAMT.piece("#",2)+TAMT.piece("#",5))*PP
+	set INTCOL=TAMT.piece("#",3)
+	set pcf=trn.pcf
+	if $E(pcf,20) set INTCOL=0
+	set INT=INTCOL*PP
+	set E=TAMT.piece("#",7) if 'HITC set E=E*-1
+	set ESC=ESC+E     // Accumulate escrow total by account
+	
+	// Principal transaction	
+	// set CUSTAMT before getting absolute value
+	if PIPF,PRIN,PIWASH set CUSTAMT=$G(CUSTAMT)+$$^SCARND(PRIN,0,CID)
+	if PIPF,PRIN do WAMT2(WASH,PRIN,1,"Principal",PGL,OCC)
+	
+	// Interest transaction 
+ 	if PIPF,INT,PIWASH set CUSTAMT=$G(CUSTAMT)+$$^SCARND(INT,0,CID)    
+	if PIPF,INT do WAMT2(WASH,INT,1,"Interest",IGL,OCC)
+
+	// add actual interest to ytd 
+	if PIPF,INT set ISPYTD=ISPYTD+$$^SCARND(INT,0,CID)
+	
+	// Transfer and stop if no service fees
+	if 'SFPF do TRANSFER quit
+	
+	// Service fee processing
+
+	type RecordLNLS6 lnls6=Db.getRecord("LNLS6","CID=:CID,PSEQ=:PSEQ")
+	set PLRPB=lnls6.plrpb
+	set OPTR=lnls6.optr/100
+	
+	//Teaser Rate Project RES 11/21/96
+	set TREXD=ln.trexd
+	if TREXD>EFD set IRN=ln.trate
+	else  set IRN=ln.irn
+	set IRN=IRN/100
+	
+	set SRVFEE=0
+	set SEQ=TSEQ if REVPMT do {    // Reversal transaction
+		set SRVFEE=lnlsdt.srvfee
+		set tso=hist.tso
+		set SEQ=+tso.piece("REV#",2)
+		if SEQ=0 set SEQ=tso
+		}
+	if 'INTCOL,'PRIN,'E quit
+	
+	/* 
+	By setting SEQ="", LNLS8F will only calculate the fee by
+	using INTCOL, and not include any additional interest from the
+	BIL record.
+	*/
+	
+	if $E(pcf,5) set SEQ=""
+	
+	//  Calculate fee - - unless a reversal
+	if 'REVPMT do CALC^LNLS8F(.SRVFEE,SFCM,INTCOL,PP,PLRPB,REMAF,FEEP,IRN,YLD,OPTR,SEQ)
+		
+	// Service fee transction
+	if SRVFEE do {
+		if REVPMT set SRVFEE=-SRVFEE
+		if INT<0,HITC=1 set SRVFEE=-SRVFEE
+		set lnlsdt.srvfee=SRVFEE
+		do lnlsdt.bypassSave()
+		set HITC=1 D WAMT2(WASH,SRVFEE,0,"Fee",SFGL,OCC)
+		}
+ 
+	if $g(CUSTAMT) set CUSTAMT=CUSTAMT-$g(SRVFEE)
+	do TRANSFER
+
+	quit
+
+TRANSFER  // move amounts from wash accounts to custodial
+
+        if $g(CUSTAMT) do PROC1B(WASH,PIWASH,CUSTAMT)
+        if $d(WASHTOT) do PROC1C
+        kill WASHTOT
+
+	if $g(ESCAMT) do PROC1D(EWASH,IESCWASH,ESCAMT)
+	if $d(WASHTOT) do PROC1C
+	kill WASHTOT
+	
+	quit
+	
+WAMT2(WASH,TAMT,DC,TCMT,GL,OCC)	//
+		
+	quit:'TAMT
+	new SDC,EAMT
+	
+	set SDC=DC
+	if HITC,TAMT<0 set DC='DC				// Credit
+	if 'HITC,TAMT>0 set DC='DC				// Debit
+
+	set TAMT=$FN(TAMT,"-")				   // Absolute Value
+	
+	if WASH=$G(EWASH) set TAMT=$$WAMT3() quit:'TAMT  set TYPE=ETYPE
+	
+	// ~p1, Loan #~p2
+	set TCMT=$$^MSG(4131,TCMT,CID)				// Comment
+	
+	// Reverse pmt ~p1 history seq ~p2
+	if REVPMT set TCMT=$$^MSG(4370,CID,TSEQ)	// reversed payment
+	
+	set TAMT=$$^SCARND(TAMT,0,CID) quit:'TAMT
+	
+	set EAMT=TAMT
+	
+	// sign was reversed
+	if DC'=SDC set EAMT=-EAMT 
+	
+	if WASH=$G(EWASH),ESCPP set ESCAMT=$G(ESCAMT)+EAMT
+	
+	do TTX(WASH,TAMT,DC,TYPE,GL,OCC)
+	quit
+	
+WAMT3()	// Determine transfer amount for escrow balance change.
+	 
+	/* 
+	Escrow custodial account cannot reflect a negative escrow balance.
+	 
+	If the escrow balance would be reduced below zero by a debit, the
+	transfer amount will be the amount needed to reflect a zero balance.
+	 
+	If the Total Escrow Balance (TEB) was negative and a payment is
+	made which brings it positive, only the amount over zero is 
+	transferred.  It the new balance is also negative, no transfer is
+	made.
+	 
+	    Beg Wsh	 Esc		     Beg  End Wsh    End    Wash
+	 #  Balance	Tran   Credit   Debit    TEB  Balance    TEB    Tran
+	 ----------------------------------------------------------------------
+	 1      100	   5	5	    100      105    105    5 Cr
+	 2      100	  -5		5    100       95     95    5 Dr
+	 3      100	-105	      105    100	0     -5  100 Dr
+	 4	0	  10       10	     -5	5      5    5 Cr
+	 5	0	   5	5	    -10	0     -5    0
+	 6	0	-200	      200   -100	0   -300    0
+	*/
+	new TEBCHG 
+	set TEBCHG=$S(DC:TAMT,1:(TAMT*-1))   // Escrow Balance Change
+	set TEB=TEB-TEBCHG	 	     // Total Escrow Balance
+	
+	if TEB'<0,'DC,TEB<TAMT set TAMT=TEB		  // See #3
+	if TEB<0,DC set TAMT=$S(TAMT+TEB>0:TAMT+TEB,1:0)  // See #4 and #5
+	if TEB<0,'DC set TAMT=0				  // See #6
+	
+	quit TAMT
+	
+TTX(WCID,TAMT,DC,TYPE,GL,OCC)	// set tran codes
+	
+	new CRCD
+	type RecordDEP wdep=Db.getRecord("DEP","WCID")
+	set CRCD=wdep.crcd
+	
+	if '$D(ETC(TYPE,DC)) do {
+		type RecordPRODCTL prodtype=Db.getRecord("PRODCTL","TYPE")
+		if DC=0 set ETC(TYPE,0)=prodtype.drtrgp
+		else  set ETC(TYPE,1)=prodtype.crtrgp
+		
+		type RecordTRN trn=Db.getRecord("TRN","ETC(TYPE,DC)")
+		set ITC(TYPE,DC)=trn.itc
+		}
+	
+	if '$D(GETC(DC)) set GETC(DC)=$S(DC:MDR,1:MCR)
+
+	type RecordTRN trn=Db.getRecord("TRN","GETC(DC)")
+	set GITC(DC)=trn.itc
+
+	type TranSet ts=Class.new("TranSet")
+	do TTX1(WCID,ETC(TYPE,DC),ITC(TYPE,DC),TAMT,"",.ts)	
+	do TTX1(GL,GETC(DC),GITC(DC),TAMT,OCC,.ts)
+
+	// may need to redefine %UCLS when in batch mode for overrides
+	if '$d(%UCLS) do {
+		type RecordSCAU scau=Db.getRecord("SCAU","UID=:%UserID")
+		set %UCLS=scau.%ucls
+		}
+
+	do ts.postTSet(TJD,BRCD,.par)
+	
+	quit
+	
+TTX1(ACN,ETC,ITC,TAMT,OCC,TranSet ts)	// set transaction	
+
+	type RecordTTX ttx=Class.new("RecordTTX")
+	set ttx.cid=ACN
+	set ttx.etc=ETC
+	set ttx.itc=ITC
+	set ttx.tamt=TAMT
+	set ttx.efd=EFD
+	set ttx.tlo=$$TLO^UTLO
+	set ttx.tcmt=TCMT
+	set OCC=$G(OCC)			
+	if OCC'="" set ttx.cc=OCC			
+	
+	#if CUVAR.%MCP
+	type RecordDEP dep=Db.getRecord("DEP","CID=:ACN",1)
+	if dep.getMode() do {
+		set CRCD=dep.crcd
+		set ttx.crcd=$S(CRCD=%SystemCurrency:"",1:CRCD)
+		}
+	#endif
+	
+	set x=ts.copyTran(ttx)
+	quit
+	
+EXC	// Log error in exception file
+	// Loan Sale Custodial Account Update
+	
+	set DESC=$$^MSG(7120)_"|1"
+	do LOG^UTLEXC($T(+0),"*",DESC,$G(CID),$G(%ZTSEQ),$G(RM),$S($G(CID):$G(BAL),1:""))
+	kill ET,%ZTSEQ
+	quit
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,INCD,PL,CID
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set INCD=vRECORD.piece($C(9),1)
+ set PL=vRECORD.piece($C(9),2)
+ set CID=vRECORD.piece($C(9),3)
+ do vPROC(INCD,PL,CID)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,INCD,PL,CID
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>32767 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+37>32767 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+	set ER=0
+ 
+	// Initialize transaction file data
+	do SOURCE^BCHSOURC("PS","AWU",.%UserID,.BRCD)
+ 
+	// Wash account teller not defined
+	if ER set %BatchExit=1 do EXC quit
+ 
+	do ^TTXLOK if ER set:'$G(ET) ET="TTXLOK" set %BatchExit=1 do EXC quit
+
+	set (XTJD,EFD)=%SystemDate
+	set SCHPID=%ProcessID
+	
+	// Delete entire Custodial Threshold table and temp file
+	do Db.fastDelete("LNLSTHR")
+	do Db.fastDelete("TMPRPT3","PID=:SCHPID")
+
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("DISTINCT INCD,PL,CID","LNLSDT","LNLSDT.EFD=:XTJD")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	
+	new ER,ET
+	new CUST
+	set ER=0
+	set (TJD,EFD)=%SystemDate
+	set JOB=%ProcessID
+
+	// Find debit (MDR) and (MCR) codes used for miscellaneous offsets
+	set MCR=CUVAR.iwuocc if MCR="" set MCR="MCR"
+	set MDR=CUVAR.iwuodc if MDR="" set MDR="MDR"
+	
+	// Initialize transaction file data
+	do SOURCE^BCHSOURC("PS","AWU",.%UserID,.BRCD)
+	set par("IPMODE")=3 	// System generated
+	set par("OPTION")=2	// Process transactions; update database
+	
+	// Default CC from BRCD table
+	
+	type RecordUTBLBRCD utblbrcd=Db.getRecord("UTBLBRCD","BRCD=:BRCD")
+	set CCDEF=utblbrcd.ccdef
+	
+	
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+	
+	do SOURCE^BCHSOURC("PS","AWU",.%UserID,.BRCD)
+	set par("IPMODE")=3  	// System generated
+	set par("OPTION")=2  	// Process transactions; update database
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+	// Add P&I Custodial amounts to Deposit account threshold if it exists
+ 
+        // total amounts from all threads into one array RMTTHR
+	
+	new IWASH,JOB,RMTTHR,TAMT
+	 
+	type ResultSet rs=Db.select("KEY1,DATA","TMPRPT3","PID=:SCHPID")
+	while rs.next() do {
+		set IWASH=rs.getCol("KEY1")
+		set TAMT=rs.getCol("DATA")
+		set RMTTHR(IWASH)=$g(RMTTHR(IWASH))+TAMT
+		}
+
+	do Db.fastDelete("TMPRPT3")
+ 
+        // if exceeding threshold, file to LNLSTHR and reset
+        new RMTBAL,CID
+        set (RMTTHR,RMTBAL)=0
+	set CID=""
+        for  set CID=$O(RMTTHR(CID)) quit:CID=""  do {
+                type RecordDEP piwash=Db.getRecord("DEP","CID")
+                if piwash.rmtthr'="" do {
+                        set RMTTHR=piwash.rmtthr
+                        set RMTBAL=piwash.rmtbal
+            	        set RMTBAL=RMTBAL+$g(RMTTHR(CID))
+                        if (RMTBAL=RMTTHR)!(RMTBAL>RMTTHR) do {
+ 
+                                type RecordLNLSTHR lnlsthr=Class.new("RecordLNLSTHR")
+                                set lnlsthr.thract=CID
+                                set lnlsthr.thramt=RMTTHR
+                                set lnlsthr.thrbal=RMTBAL
+                                do lnlsthr.bypassSave()
+                                set RMTBAL=0
+                                }
+                        }
+                set piwash.rmtbal=RMTBAL
+                do piwash.bypassSave()
+                }
+ 
+        quit
+
+PROC1B(WASH,IPIWASH,CUSTAMT)
+	 
+        /*
+           Process to transfer amounts from pool to investor custodial account
+           and to transfer pool custodial account balances to investor.
+           It is assumed that each investor has their own PIWASH and
+           IESCWASH account.  (35504fs.doc)
+        */
+		
+	if PICM=6 quit // do not process, contra's	
+
+	if IPIWASH,WASH,CUSTAMT do {
+		new IWASH,TAMT,CID,RM1
+		new wash,iwash
+		set IWASH=IPIWASH
+		set RM1=$$^MSG(4124,PL)
+
+		type RecordDEP wash=Db.getRecord("DEP","CID=:WASH",1)
+
+		if 'wash.getMode() do { quit
+			set CID=WASH,RM=$$^MSG(4127,INCD,RM1)
+			do SCHEXC
+			}
+		
+		set TYPE=wash.type
+		set WCRCD=wash.crcd
+
+		type RecordDEP iwash=Db.getRecord("DEP","CID=:IWASH",1)
+		if 'iwash.getMode() do { quit
+			set CID=IWASH,RM=$$^MSG(4127,INCD,RM1)
+			do SCHEXC
+			}
+
+		//  Account closed LN.STAT exists
+		if iwash.stat do { quit
+			set CID=IWASH,RM=$$^MSG(4361,INCD)
+			d SCHEXC
+			}
+		set ITYPE=iwash.type
+		set ICRCD=iwash.crcd
+
+		set TAMT=CUSTAMT
+		set TAMT=$$^SCARND(TAMT,0,WASH)
+		if TAMT do TTX2
+		}
+	quit
+
+PROC1D(EWASH,IESCWASH,ESCAMT)
+
+	if PICM=6 quit // do not process, contra's
+
+	if IESCWASH,EWASH,ESCAMT do {
+		new WASH,IWASH,TAMT,CID,RM1
+		new wash,iwash
+		set IWASH=IESCWASH
+		set WASH=EWASH
+		set RM1=$$^MSG(4123,PL)
+
+		type RecordDEP wash=Db.getRecord("DEP","CID=:WASH",1)
+		if 'wash.getMode() do { quit
+			set CID=WASH,RM=$$^MSG(4127,INCD,RM1)
+			do SCHEXC
+			}
+		set TYPE=wash.type
+		set WCRCD=wash.crcd
+
+		type RecordDEP iwash=Db.getRecord("DEP","CID=:IWASH",1)
+		if 'iwash.getMode() do { quit
+			set CID=IWASH,RM=$$^MSG(4127,INCD,RM1)
+			do SCHEXC
+			}
+		set ITYPE=iwash.type
+		set ICRCD=iwash.crcd
+
+		set TAMT=ESCAMT
+		set TAMT=$$^SCARND(TAMT,0,WASH)
+		if TAMT do TTX2
+		}
+
+	quit
+	
+PROC1C	// Post investor totals to wash account
+	
+	new CID,ETC,ITC
+	set (CID,ETC,ITC,TCMT)=""
+	for  set CID=$O(WASHTOT(CID)) quit:CID=""  do {
+		for  set ETC=$O(WASHTOT(CID,ETC)) quit:ETC=""  do {
+			for  set ITC=$O(WASHTOT(CID,ETC,ITC)) quit:ITC=""  do {
+				type TranSet ts=Class.new("TranSet")
+				do TTX1(CID,ETC,ITC,WASHTOT(CID,ETC,ITC),"",.ts)
+				
+				do ts.postTSet(TJD,BRCD,.par)
+				}
+			}
+		}
+	quit
+		
+TTX2	// Create transactions for transfer
+
+	type public Number CIDNO,TSEQ
+	
+	type RecordPRODCTL prodtype=Db.getRecord("PRODCTL","TYPE=:TYPE")
+	set ETC(TYPE,0)=prodtype.drtrgp
+	set ETC(TYPE,1)=prodtype.crtrgp
+	
+	type RecordPRODCTL iprodtype=Db.getRecord("PRODCTL","TYPE=:ITYPE")
+	set ETC(ITYPE,0)=prodtype.drtrgp
+	set ETC(ITYPE,1)=prodtype.crtrgp
+	
+	set (A,I)=""
+	for  set A=$O(ETC(A)) quit:A=""  do {
+		for  set I=$O(ETC(A,I)) quit:I=""  do {
+			type RecordTRN trn=Db.getRecord("TRN","ETC=:ETC(A,I)")
+			set ITC(A,I)=trn.itc
+			}
+		}
+	
+	if TAMT>0 set DC=1
+	else  set DC=0,TAMT=TAMT*-1
+	
+	set WASHTOT(IWASH,ETC(ITYPE,DC),ITC(ITYPE,DC))=$G(WASHTOT(IWASH,ETC(ITYPE,DC),ITC(ITYPE,DC)))+TAMT
+	
+	// Build temp remittance file
+	type RecordTMPRPT3 tmprpt3=Class.new("RecordTMPRPT3")
+	set tmprpt3.pid=SCHPID
+	set tmprpt3.key1=IWASH
+	set tmprpt3.key2=TSEQ
+	set tmprpt3.key3=CIDNO
+	set tmprpt3.data=TAMT
+	do tmprpt3.bypassSave()
+
+	// Transfer to ~p1
+	set TCMT=$$^MSG(3940,IWASH)
+	type TranSet ts=Class.new("TranSet")
+	do TTX1(WASH,ETC(TYPE,'DC),ITC(TYPE,'DC),TAMT,"",.ts)
+	
+	do ts.postTSet(TJD,BRCD,.par)
+	
+	quit
+	
+SCHEXC	// Log error in exception file
+	
+	set DESC=$$^MSG(7120)_"|1"
+	do LOG^UTLEXC($T(+0),"*",DESC,$G(CID),$G(%ZTSEQ),$G(RM),$S($G(CID):$G(BAL),1:""))
+	kill ET,%ZTSEQ
+	quit
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

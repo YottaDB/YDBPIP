@@ -1,0 +1,334 @@
+HSYNCSPT	
+	/*
+
+	This procedure is used to write records into a host sync transfer file.
+	In particular it is used for data and tables that have too many columns
+	to allow Oracle7.3 to store all of the coumns of the table.  Therefore
+	this procedure splits the tables normally called wide tables into smaller
+	tables in order to transfer them the the client.
+
+	The labels in this procedure are all called from other procedure in the hostsync
+	utility when those procedures recognize the table being processed is a split table.
+	---- Revision History ------------------------------------------------
+
+	07/31/06 - KELLYP - CR 22048
+		   Modified SPLITTBL section to eliminate DYNAMIC warning.
+
+	01/06/06 - KELLYP - CR 18761
+		   Modified SPLIT section to set the FILENAME variable to prevent
+		   an undefined error from occurring in HSYNCWRT.  Also removed
+		   pre-2003 revision history.
+	  
+	05/12/05 - Pete Chenard - CR 11132
+		   * Modified SPLITTBL section to use Db.select instead of OPEN^DBSFETCH.
+		   * Modified call to FETCH^DBSTLOAD to pass the ResultSet object
+	*/
+
+	quit
+
+public SPLIT	// Handle updates to split tables
+
+	/*
+	 This label is called from the routine FEPTFILE.  It is called after
+	 that routine has reviewed the global HSTSYNC2 and processed and removed
+	 all entries that are not wide tables.  The entries remaining in this table
+	 then are the wide tables.
+	*/
+
+	new CHARMODE,COLUMN,DATA,DREC,FMTTYPEFID,FREC,INDEX,LIST,KEYS,KEYCNT
+	new KITEM,KVALUE,MODE,OKVALUE,RECTYPE
+	new SREC,SEQ,TREC,TMP1,TEMPREC,TEMPTREC,WIDEFILE
+
+	set RECTYPE="G"
+	set (KVALUE,OKVALUE,COLUMN,TEMPTREC,FID,TEMPREC)=""
+	set COLUMN="" 
+	set SEQ=""
+	type ResultSet hsync=Db.select("LOGDATE,SEQ,KEYS,KVALUE,COLUMNID,KITEM,TYP,NEWVALUE,MODE,FID","HSTSYNC2","JOB=:JOB")
+	if hsync.isEmpty() quit
+	
+	/*
+	 Build array LIST with keys stored in an order to facilitate sending all
+	 columns from one of the split tables as a group.  The array is basically 
+	 used to sort the data to be split.
+	*/
+
+	while hsync.next() do {
+		set FID=hsync.getCol(3)
+		if FID["DBTBL" quit
+		if '$D(WIDEFILE(FID)) do MAP^DBSDDMAP(FID,.WIDEFILE)
+		set DATA=hsync.getRow()
+		set SEQ=$P(DATA,$C(9),2)
+		set SEQ=$E("0000000000",1,10-$L(SEQ))_SEQ
+		set $P(DATA,$C(9),2)=SEQ
+		if hsync.getCol(5)'=" " set $P(DATA,$C(9),3)=WIDEFILE(FID,hsync.getCol(5))
+		set LIST($P(DATA,$C(9),1,5))=$P(DATA,$C(9),6,11)
+	
+		}
+	set DATA=""
+	set SEQ=""
+	set INDEX=""
+	for  set DATA=$O(LIST(DATA)) quit:DATA=""  do {
+		if $P(DATA,$C(9),2)'=SEQ!($P(DATA,$C(9),3)'=INDEX) do {
+			set FILENAME=$P(LIST(DATA),$C(9),5)
+			if SEQ'="" do wrtsplit^HSYNCWRT
+			set INDEX=$P(DATA,$C(9),3)
+			set FID=$P(LIST(DATA),$C(9),5)
+			set TREC="T"_","_(%CurrentDate)_","_%CurrentTime_","_QUOTE_"W_"_FID_"_"_INDEX_QUOTE_","_$L(KVALUE,",")_",B,N"
+			type RecordDBTBL1 dbtbl1=Db.getRecord("DBTBL1","%LIBS='SYSDEV',FID=:FID")
+			set KEYS=dbtbl1.acckeys
+			for i=1:1:$L(KEYS,",") set KEYS($P(KEYS,",",i))=""
+	 		set KEYCNT=$P(DATA,$C(9),4)
+			set KEYCNT=$L(KEYCNT,",")
+			if FID'["DBTBL" set FID="W_"_FID_"_"_INDEX
+			set $P(TREC,",",4)=QUOTE_FID_QUOTE
+			set $P(TREC,",",5)=KEYCNT
+			set $P(TREC,",",6)="B"
+			set $P(TREC,",",7)="N"
+			set KVALUE=$P(DATA,$C(9),4)
+			set FREC="F" set SREC="S" set crec="C"
+			set KITEM=$P(LIST(DATA),$C(9),1)
+			if KITEM'="" do {
+				set $P(FREC,",",1)=$P(FREC,",",1)_","_KITEM
+				set FMTTYPE=""
+				set TABLE=$P(LIST(DATA),$C(9),5)
+				for I=1:1:$L(KITEM,",") do {
+					set NV=$$TYP^DBSDD(TABLE_"."_$P(KITEM,",",I)) 
+					set FMTTYPE=FMTTYPE_","_NV
+					}
+				set SREC=SREC_FMTTYPE
+				set VER=""
+				for  set VER=$O(SREC(VER)) quit:VER=""  set SREC(VER)=SREC_","_FMTTYPE
+				for  set VER=$O(FREC(VER)) quit:VER=""  set FREC(VER)=FREC_","_KITEM
+				}
+			set MODE=$P(LIST(DATA),$C(9),4)
+			set CHARMODE=$S(MODE=3:"D",MODE=1:"U",1:"I")
+			set DREC="D"
+			set DREC=DREC_","_CHARMODE_","_$P(DATA,$C(9),4)
+			set VER=""
+			for  set VER=$O(DREC(VER)) quit:VER=""  set DREC(VER)=DREC(VER)_","_CHARMODE_","_$P(DATA,$C(9),4)
+			}
+
+		set SEQ=$P(DATA,$C(9),2)
+		set INDEX=$P(DATA,$C(9),3)
+		set COLUMN=$P(DATA,$C(9),5)
+		if COLUMN=" " quit
+
+		//only keys
+		if $D(KEYS(COLUMN)) quit               
+		
+		set SREC=SREC_","_$$TYP^DBSDD($P(LIST(DATA),$C(9),5)_"."_COLUMN)
+		set DREC=DREC_","_$P(LIST(DATA),$C(9),3)
+		set FREC=FREC_","_COLUMN
+		if $D(NEWITEM(COLUMN)) do CHECKNEW^FEPTFILE
+		do FRECNITM^FEPTFILE(COLUMN,$P(LIST(DATA),$C(9),2))
+		if '$D(NEWITEM(COLUMN)),$D(COLLIST(COLUMN)) do CHITMTYP^FEPTFILE
+		if $D(SREC)>1 do CHGDATA^FEPTFILE($P(LIST(DATA),$C(9),3))
+		}
+	if SEQ'="" do wrtsplit^HSYNCWRT
+	quit 
+
+
+	
+SPLITTBL	// Public; Process requests for full build of split tables
+
+	// This label is called from procedure HSYNCFULLBLD   
+	
+	new FOUND,LOC,RECORD,SPLITFLG
+	set RECORD=0
+	if TBLNAME'["DBTBL",'($E(SPLIT)?1.N) quit
+	 
+	set SPLITFLG=1
+	if TBLNAME'["DBTBL" do SPLITITM
+	
+	#ACCEPT DATE=07/31/06;PGM=KELLYP;CR=unknown
+	type ResultSet rs = Db.select(DILIST,FID,$G(Q))
+	if rs.isEmpty() quit
+
+	set FOUND=0
+	set LOC=$L($P(DILIST,"FID",1),",")
+	do FETCH^DBSTLOAD(.rs)
+	quit 
+
+
+SPLITDEL	// Public; Send removal for a split table
+
+	// This label is called from procedure DBSTLOAD
+
+	new ACCESS,COLUMN,FID,J,LOC,OK,RECTYPE,TRECWRT,WRTREC
+	set RECTYPE="G"
+	if TBLNAME'["DBTBL" do { quit 
+		set FID=""
+		for  set FID=$O(SORTFID(FID)) quit:FID=""  do {
+			set $P(TREC,",",4)=QUOTE_"W_"_SORTFID(FID)_"_"_FID_QUOTE
+			set $P(TREC,",",6)="B"
+			set $P(TREC,",",7)="N"
+			set TRECWRT=1
+			set SREC="S"
+			if ACKEYS'="" for I=1:1:$L(ACKEYS,",") set SREC=SREC_","_$$TYP^DBSDD(TBLNAME_"."_$P(ACKEYS,",",I))
+			set WRTREC=TREC_$C(9)_"F"
+			if ACKEYS'="" set WRTREC=WRTREC_","_$TR(ACKEYS,"%","_")
+			set WRTREC=WRTREC_$C(9)_SREC_$C(9)_"D,"_REC2_","_ACCVAL
+			do IOWRITE^HSYNCWRT(WRTREC)
+			}
+		}
+
+	set TRECWRT=0
+	set LOC=$L($P(ACKEYS,"FID",1),",")
+	set FID=""
+	for  set FID=$O(SORTFID(FID)) quit:FID=""  do {
+		set OK=1
+		set COLUMN=$TR($P(ACCVAL,",",3),"""","")
+		if TBLNAME="DBTBL1F",$G(SPLIT)'="",'$D(SORTFID(FID,COLUMN)) quit
+		 
+		if 'TRECWRT do {
+			set $P(TREC,",",6)="N"
+			set $P(TREC,",",7)="B" 
+			if TBLNAME="DBTBL1F" do {
+
+				set ACCESS=$TR($P(ACCVAL,",",3,100),"""","")
+				for J=1:1:$L(ACCESS,",") if '$D(SORTFID(SPLIT,$P(ACCESS,",",J))) set OK=0
+				}
+
+			if 'OK quit
+			 
+			set TRECWRT=1
+			set SREC="S"
+			for I=1:1:$L(ACKEYS,",") set SREC=SREC_","_$$TYP^DBSDD(TBLNAME_"."_$P(ACKEYS,",",I))
+			set WRTREC=TREC_$C(9)_"F,"_$TR(ACKEYS,"%","_")
+			if $E(REC2,1)'="T" set WRTREC=WRTREC_$C(9)_SREC
+			do IOWRITE^HSYNCWRT(WRTREC)
+			}
+
+
+		if 'OK quit 
+
+		if $G(FK) set $P(ACCVAL,",",LOC)=QUOTE_$G(QITEM)_QUOTE
+		else  set $P(ACCVAL,",",LOC)=QUOTE_"W_"_SORTFID(FID)_"_"_FID_QUOTE
+		do IOWRITE^HSYNCWRT("D,"_REC2_","_ACCVAL)
+		}
+	quit 
+
+
+SPLITDI(COLNAME,TBLNAME,DILIST,ACKEYS,SPLIT,INDEX)	// Public; Determine if column is in this split file
+
+	/*
+	 This label is called from procedure DBSTLOAD. Its goal is to identify the columns that
+	 need to be transfered to the client (as well as those which should not).
+
+	*/
+	new J,OK
+	set OK=1
+	
+	// Do not exclude non DBTBL tables, or DBTBL1 from XFR. 
+	if TBLNAME'["DBTBL" quit 1
+	if TBLNAME="DBTBL1" quit 1
+	
+	if COLNAME="" quit 0
+	
+	// DBTBL1F concern is column FKEYS only
+	if TBLNAME="DBTBL1F",$P(DILIST,",",INDEX)="FKEYS",$D(SORTFID) do { quit OK
+		for J=1:1:$L(COLNAME,",") if '$D(SORTFID(SPLIT,$P(COLNAME,",",J))),$P(COLNAME,",",J)'["""" set OK=0
+		}
+	if TBLNAME="DBTBL1F" quit 1
+
+
+
+	if TBLNAME'="DBTBL8",ACKEYS[COLNAME quit 1
+
+	// DBTBL8.ORDERBY is the only DBTBL8 entry that we care about
+	if TBLNAME="DBTBL8",$P(DILIST,",",INDEX)'="ORDERBY" quit 1
+	if TBLNAME="DBTBL8" do {
+		set COLNAME=$P(DVLIST,"|",INDEX)
+		for J=1:1:$L(COLNAME,",") if '$D(SORTFID(SPLIT,$P(COLNAME,",",J))),$P(COLNAME,",",J)'["""" set OK=0
+		}
+
+	if 'OK quit 0
+
+	if TBLNAME="DBTBL8",$P(DILIST,",",INDEX)="ORDERBY" quit 1
+
+	if '$D(SORTFID(SPLIT,COLNAME)) quit 0
+
+	quit 1
+
+	
+SPLITITM	// Private, Build list of columns in a split file
+
+
+	new DI,I,VALUE,VER,TESTVAL
+	set FREC="F"
+	set DILIST=ACKEYS
+	set DITYPE=""
+	if DILIST'="" for I=1:1:$L(DILIST,",") do {
+		
+		set DI=$P(DILIST,",",I)
+		type RecordDBTBL1D dbtbl1d=Db.getRecord("DBTBL1D","%LIBS='SYSDEV',FID=:FID,DI=:DI")
+
+		set $P(DITYPE,",",I)=dbtbl1d.typ
+		if $D(DITYPE)>1 set VER="" for  set VER=$O(DITYPE(VER)) quit:VER=""  set DITYPE(VER)=DITYPE(VER)_","_dbtbl1d.typ
+		if '$D(COLLIST(DI,"TYP")) quit 
+		set VER=""
+		for  set VER=$O(CLIENT(VER)) quit:VER=""  do {
+			set TESTVAL=$O(COLLIST(DI,"TYP",VER))
+			if TESTVAL="" quit 
+			if '$D(DITYPE(VER)) set DITYPE(VER)=DITYPE
+			set DITYPE(VER)=$P(DITYPE(VER),",",1,$L(DITYPE(VER),",")-1)_","_$P(COLLIST(DI,"TYP",TESTVAL),"|",1)
+			}
+		}
+	set DI=""
+	for  set DI=$O(SORTFID(SPLIT,DI)) quit:DI=""  do {
+
+		if (DI?1.N)!($E(DI)["""") quit
+
+		type RecordDBTBL1D dbtbl1d=Db.getRecord("DBTBL1D","%LIBS='SYSDEV',FID=:FID,DI=:DI")
+		if dbtbl1d.sfd'="" quit		
+		if dbtbl1d.nod=""!(dbtbl1d.nod["*") quit 
+		 
+		if DILIST="" set DILIST=DI,DITYPE=dbtbl1d.typ
+		else  set DILIST=DILIST_","_DI,DITYPE=DITYPE_","_dbtbl1d.typ
+		set VER=""
+		if $D(DITYPE)>1 for  set VER=$O(DITYPE(VER)) quit:VER=""  set DITYPE(VER)=DITYPE(VER)_","_dbtbl1d.typ
+		if '$D(COLLIST(DI,"TYP")) quit 		          
+		for  set VER=$O(CLIENT(VER)) quit:VER=""  do {
+			set TESTVAL=$O(COLLIST(DI,"TYP",VER))
+			if TESTVAL="" quit 
+			if '$D(DITYPE(VER)) set DITYPE(VER)=DITYPE
+			set DITYPE(VER)=$P(DITYPE(VER),",",1,$L(DITYPE(VER),",")-1)_","_$P(COLLIST(DI,"TYP",TESTVAL),"|",1)
+			}
+		}
+	set FREC=FREC_","_DILIST
+	quit
+
+
+	
+SPLITBLD(LOGGING)	// Public; Send a complete rebuild for a split file 
+
+	/*
+		Called from DBSTLOAD procedure
+		Send a rebuild to the client for DBTBL1,DBTBL1D,DBTBLF and DBTBL8.
+
+	*/
+	new NI,Q,SPLITFID,X
+	set SPLITFID=""
+	for  set SPLITFID=$O(SORTFID(SPLITFID)) quit:SPLITFID=""  do {
+
+		set Q="DBTBL1.FID=:FILENAME and %LIBS='SYSDEV'"
+		do BLDRMS^DBSTLOAD("DBTBL1",0,.Q,"",FILENAME,SPLITFID)
+
+		set Q="DBTBL1D.FID=:FILENAME and DBTBL1D.%LIBS='SYSDEV'"
+		do BLDRMS^DBSTLOAD("DBTBL1D",0,.Q,"",FILENAME,SPLITFID)
+
+		// index's anf foreign keys are not required on client 
+		// if data will not be there
+		if 'LOGGING quit
+
+		set Q="DBTBL1F.FID=:FILENAME and DBTBL1F.%LIBS='SYSDEV'"
+		do BLDRMS^DBSTLOAD("DBTBL1F",0,.Q,"",FILENAME,SPLITFID)
+		
+		set Q="DBTBL8.FID=:FILENAME and DBTBL8.%LIBS='SYSDEV' and DBTBL8.ORDERBY NOT LIKE '%.%'"
+		do BLDRMS^DBSTLOAD("DBTBL8",0,.Q,"",FILENAME,SPLITFID)
+	
+		}
+	
+	quit 
+
+vSIG()	quit "60477^65446^Pat Kelly^10010"	// Signature - LTD^TIME^USER^SIZE

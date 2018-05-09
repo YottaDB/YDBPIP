@@ -1,0 +1,529 @@
+TTXODS(RecordDEP dep,RecordTTX ttx,ODSWP)	// Transaction Overdraft Sweep
+	/*
+	       ORIG: Marty Ronky
+	       DESC:
+
+	   This program is executed for sweep processing as follows for
+	   overdraft sweep:
+	   a) Init necessary variables
+	   b) Collate through node 100 loan accounts in hierarchy order
+	   c) Check the Amount Due, pay if possible
+	   d) If all accounts have been paid, turn off [DEP]ODSI flag.
+
+	   For loan payment sweep:
+	   a) Init necessary variables
+	   b) Collate through ^LPSWP loan accounts in hierarchy order
+	   c) Check the Amount Due, pay if possible
+	   d) If all accounts have been paid, turn off [DEP]LPDUE flag.
+
+	   Since the purpose of the sweep is to pay off the loan, we
+	   don't look at incremental amounts.
+
+	      INPUT:	dep - Deposit Account object		/TYP=RecordDEP
+			ttx - Transaction object		/TYP=RecordTTX
+			ODSWP - Indicates overdraft sweep (1)	/TYP=N/MECH=VAL/REQ=Y
+				or loan payment sweep (0)
+
+	     OUTPUT:	ER - Processing error indicator
+				0 = Post , 1 = No post
+
+	     VARIABLES
+	     ---------
+	     ODAVL  -   Amount available to apply to loans from the DEP
+	                account, BAL+TAMT
+	     XFRSEQ -   OD Loan array in hierachical order
+	     ODNET  -   Amount left after payment
+	     DUEBAL -   Amount due to bring loan to zero, from the LN account
+	     			BAL+ACR+LCHG+MCHG for O/D sweep processing
+	     			TDUE+LCHG+MCND-UNAPF for LP sweep processing
+
+	---- Revision History ------------------------------------------------
+	
+	05/30/06 - DESHPANDE S K - CR 20748
+		   Replaced public variable %TRNSEQ with call to 
+		   ttx.getStoredValue("HistSeq")
+	
+	22/05/06 - SANTHUMS - CR21184
+	           Modified PROC section to initialize ODSBAL. 
+	           	
+	03/21/06 - PANYARAS - CR19928
+		   In File Section, added line of code to set ttx.efd based on 
+		   %EffectiveDate value.
+	
+	03/09/06 - NATRAJAH - CR19838
+		   . Modified logic to copy OVR to ZOVR and ZOVR to OVR, since
+		     OVR is a three dimentional array.
+		   . In XFR section, removed "set ER=0" line of code, since the
+		     ER is again resetting to 0 in the top of SWEEP section.		     
+		     
+	10/12/05 - Sahun - CR16663
+		   Modified DUEOD section to send loan account number - CID
+		   as the third parameter to MCND^LNCO3. 
+		   
+	08/08/03 - ZWITKOWITSM - 51349
+		   Corrected references to dep.crcd and dep.balavl.  Corrected
+		   passing of objects to line tags.
+
+	11/14/02 - ZWITKOWITSM - 43583
+		   PSL clean-up.
+
+	06/13/02 - ZWITKOWITSM - 43583
+		   Converted to PSL.
+
+	02/15/02 - APPLEYARDM - 48756
+		   Modified section PROC to consider scenario where the
+		   amount available for overdraft sweep is just sufficient
+		   to satisfy the loan (i.e., all due amounts are paid and
+		   there is no remainder) when determining when to turn off
+		   the DEP.ODSI flag. Currently the flag is turned off only
+		   when the amount available for the sweep is greater than
+		   the loan's due balance. Also removed commented code.
+ 
+	02/08/02 - VETSENM - 48297
+		   Section file was modified to define RATE for
+		   in the transaction array.
+
+	----------------------------------------------------------------------
+	*/
+
+	new BCRCD,BCUSTCD,TAMT
+
+	set TAMT=ttx.tamt
+
+	// Screen base currency code
+	set BCRCD=dep.crcd
+	set BCUSTCD=dep.ccode
+
+	do PROC(.dep,.ttx)
+
+	quit
+
+
+PROC(RecordDEP dep,RecordTTX ttx) // Process
+
+	new ODAVL,ODNET,XFRBAD,XFRSEQ,ODSBAL
+	
+	set ODSBAL=0
+
+	// Pay Against Ledger Balance
+	if 'dep.odsbb set ODAVL=+dep.bal
+
+	// Pay Against Collected Balance
+	if dep.odsbb=1 set ODAVL=dep.balcol
+
+	// Pay Against Available Balance
+	if dep.odsbb=2 set ODAVL=dep.balavl quit:ER
+
+	if ODSWP set ODAVL=ODAVL-dep.minbal
+
+	if ODSWP,ODAVL'<dep.odsm do ODP(dep.cid)
+	if 'ODSWP set ODAVL=ODAVL+dep.odlim do LPS(dep.cid)
+
+	set ODNET=ODAVL
+
+	do XFR(.dep,.ttx)
+
+	/*
+	  All loans should be satisfied under the following conditions if no
+	  errors are encountered:
+	  - if funds remain or
+	  - if there are no funds remaining and no balance due on the loans
+	  If true, we can turn the O/D Sweep Flag or Loan Payment Due Flag off.
+	*/
+	if (ODNET=0&(ODSBAL=0))!(ODNET>0),'$D(XFRBAD) do {
+		// O/D Sweep Flag
+		if ODSWP set dep.odsi=""
+		// Loan Payment Due Flag
+		else  set dep.lpdue=""
+		}
+
+	quit
+
+
+ODP(CID)	// Collate through ODP accounts, setting loans into XFRSEQ array.
+
+	type ResultSet rs=Db.select("ODACN,PRI","DEPODP","CID=:CID")
+
+	if rs.isEmpty() quit
+
+	new CID,PRI,I
+
+	while rs.next() do {
+
+		set CID=rs.getCol(1)
+
+		type RecordACN acn=Db.getRecord("ACN","CID")
+
+		// Not a loan
+		if acn.cls'="L" quit
+		// Closed
+		if acn.stat=4 quit
+
+		set PRI=+rs.getCol(2)
+
+		if '$D(XFRSEQ(PRI)) set XFRSEQ(PRI)=CID quit
+		// Next sequence
+		for I=PRI+.01:.01 if '$D(XFRSEQ(I)) set XFRSEQ(I)=CID quit
+		}
+
+	quit
+
+
+LPS(CID)	// Collate through ^LPSWP global, setting loans into XFRSEQ array.
+
+	type ResultSet rs=Db.select("LPCID,PRI","LPSWEEP","CID=:CID")
+
+	if rs.isEmpty() quit
+
+	new CID,I,PRI
+
+	while rs.next() do {
+
+		set CID=rs.getCol(1)
+
+		type RecordACN acn=Db.getRecord("ACN","CID")
+
+		// Not a loan
+		if acn.cls'="L" quit
+		// Closed
+		if acn.stat=4 quit
+
+		set PRI=+rs.getCol(2)
+
+		if '$D(XFRSEQ(PRI)) set XFRSEQ(PRI)=CID quit
+		// Next sequence
+		for I=PRI+.01:.01 if '$D(XFRSEQ(I)) set XFRSEQ(I)=CID quit
+		}
+
+	quit
+
+
+XFR(RecordDEP dep,RecordTTX ttx)	// Collate through sweep hierarchy to transfer funds
+
+	new CRCD,DEPCID,DUEBAL,ETC,HISTSEQ,I,LOGEXC,RATE,SAVPTR,TYPE,XODNET,ZOVR
+
+	set XFRSEQ=""
+	set XODNET=ODNET
+	set LOGEXC=0
+	set TYPE=dep.type
+	set DEPCID=dep.cid
+	set HISTSEQ = ttx.getStoredValue("HistSeq")
+
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE")
+
+	for  set XFRSEQ=$O(XFRSEQ(XFRSEQ)) quit:XFRSEQ=""  do {
+
+		if 'ODNET!(ODNET<dep.odsm) quit
+		if $D(XFRBAD(XFRSEQ)) quit
+
+		do Runtime.start("CS","","SAVPTR")
+
+		do SWEEP(.dep,.ttx,.prodctl,XFRSEQ(XFRSEQ))
+
+		if ER do { quit
+
+			do Runtime.rollback("SAVPTR")
+
+			set ODNET=XODNET
+			set XFRBAD(XFRSEQ)=""
+			if LOGEXC do LOG(XFRSEQ(XFRSEQ))			
+			}
+
+		do Runtime.commit()
+
+		set XODNET=ODNET
+		}
+
+	set I=""
+	for  set I=$O(ZOVR(I)) quit:I=""  do {
+		set J=""
+		for  set J=$O(ZOVR(I,J)) quit:J=""  do {
+			set K=""
+			for  set K=$O(ZOVR(I,J,K)) quit:K=""  do {
+				set OVR(I,J,K)=ZOVR(I,J,K)
+				}
+			}
+		}
+
+	quit
+
+
+SWEEP(RecordDEP dep,RecordTTX ttx,RecordPRODCTL prodctl,CID)
+	// Sweep available funds if there is a balance due on target account
+
+	new EC
+
+	set ER=0
+	set RATE=""
+
+	type RecordLN ln=Db.getRecord("LN","CID")
+
+	set CRCD=ln.crcd
+
+	// Balance due for O/D sweep
+	set DUEBAL=$$DUEOD(.ln)
+	set DUEBAL=$$MC^TTXODC(.ln,DUEBAL,0)
+
+	if DUEBAL'>0 quit
+
+	do TFRCR(.ttx,.ln,dep.cid)
+	if ER quit
+
+	if TAMT>0 do TFRDR(.dep,.prodctl,ln.cid) quit:ER
+
+	/*
+	 Set flag into piece 16 of the original transaction to indicate
+	 that it initiated a sweep.  This is used by error corrects.
+	*/
+
+	set EC=ttx.lnerc
+	// Loan sweep occured TTXODS
+	set $P(EC,"#",6)=1
+	set ttx.lnerc=EC
+
+	quit
+
+
+TFRDR(RecordDEP dep,RecordPRODCTL prodctl,LNCID)
+	// Debit source (sweep from) account
+
+	new CRCD,TCMT,TSO
+
+	set TSO="TFR-"_LNCID
+
+	// 5163 - Sweep payment to ~p1
+	set TCMT=$$^MSG("5163",LNCID)
+
+	// Load debit tran code
+	set ETC=$$SWPDR(.prodctl)
+	set CRCD=dep.crcd
+
+	// TAMT is already set at this point so file transaction.
+	do FILE(.dep,0)
+
+	quit
+
+
+TFRCR(RecordTTX ttx,RecordLN ln,DEPCID)	// Credit target (sweep to) account
+
+	new TCMT,TSO,TSOTCMT
+
+	// Set TLO, put TCMT from original transaction into TSO's TCMT of secondary
+
+	set TSO=""
+	set %UserStation=ttx.tlo
+	set TSOTCMT=$E(ttx.tcmt,1,80)
+	// Remove special characters
+	set TSOTCMT=$TR(TSOTCMT,"~#","  ")
+	set TSO=$$FIELDIN^UTSO(TSO,"TCMT",TSOTCMT)
+	set TSO=$$FIELDIN^UTSO(TSO,"REAPPLY",1)
+
+	// 3514 - Sweep transfer from ~p1
+	set TCMT=$$^MSG("3514")_DEPCID
+
+	// Set the transaction amt to the total it can be
+	set TAMT=ODNET
+
+	if %MCP,CRCD'=BCRCD do { quit:ER
+		// Calculate secondary currency exchange amount
+		do EXC^CRCDUTL(BCRCD,CRCD,TAMT,1,0,"00",BCUSTCD,%EffectiveDate,1,,%SystemCurrency)
+		set TAMT=$$^SCARND(EXCAMT,0,ln.cid)
+		}
+
+	// Load credit tran code
+	set ETC=$$SWPCR(ln.type)
+
+	do FILE(.ln,1)
+
+	/*
+ 	 Remainder will return from transaction processing.  Subtract the remainder
+	 from the transaction amount to get actual amount used in the sweep.  Then,
+	 convert the transaction amount back into base currency if necessary.
+	*/
+	if ODSWP set ODSBAL=ODSBAL-TAMT
+
+	if %MCP,CRCD'=BCRCD do { quit:ER
+		// now that the TAMT has been filed, convert it back to Base
+		do EXC^CRCDUTL(BCRCD,CRCD,TAMT,0,1,"00",BCUSTCD,%EffectiveDate,1,,%SystemCurrency)
+		set TAMT=$$^SCARND(EXCAMT,0,ln.cid)
+		}
+
+	set ODNET=ODNET-TAMT
+
+	if ODSWP do {
+		if ODSBAL<0 set ODSBAL=0
+		if ODNET<0 set ODNET=0
+		}
+
+	quit
+
+
+FILE(RecordACN acn,RFLAG)	// File Data
+
+	type Public Cache %CACHE()
+
+	new SAVPTR
+
+	type RecordTRN trn=%CACHE("TRN").getRecord("TRN","ETC")
+
+	set LOGEXC=0
+
+	// if from TFRCR do
+	if RFLAG do {
+		set TSO=$$FIELDIN^UTSO(TSO,"RFLAG",1)
+		set TSO=$$FIELDIN^UTSO(TSO,"REMAINDER","")
+		}
+
+	type RecordTTX ttx=Class.new("RecordTTX")
+
+	set ttx.cid=acn.cid
+	set ttx.itc=trn.itc
+	set ttx.etc=ETC
+	set ttx.tamt=TAMT
+	
+	if %EffectiveDate.isNull() set ttx.efd=%SystemDate		
+	else  set ttx.efd=%EffectiveDate
+	
+	set ttx.tlo=%UserStation
+	set ttx.tso=TSO
+	set ttx.tcmt=TCMT
+	set ttx.crcd=CRCD
+	set ttx.rate=RATE
+
+	/*
+	 An exception is logged on error even if $D(CRT) is true.  This is
+	 because there must be a log of errors that occured during attempted
+	 sweeps to linked accounts.  Linked accounts that receive an error
+	 are skipped and the teller does not see the error(s) on-screen.
+	 A better way to handle this (other than possibly use of an override)
+	 would be a development issue.
+	*/
+	do Runtime.start("CS","","SAVPTR")
+
+	if "DL"[trn.cls do {
+		do TRNSINGL^TRNDRV(.ttx,.acn,TPD,BRCD,5,,.SPV,.OVR)
+		if ER,'$G(NOEXC) set LOGEXC=1
+		}
+
+	// if from SWPCR do
+	if RFLAG do {
+
+		new REMAINDR,UTSO,ZAMT
+
+		do OUT^UTSO(.UTSO,ttx.tso)
+
+		// Get remainder
+		set REMAINDR=$G(UTSO("REMAINDER"))
+
+		// Adjust TAMT
+		set TAMT=TAMT-REMAINDR
+
+		// If no amount used, quit
+		if TAMT=0 quit
+
+		// Set TAMT in TR
+		set ZAMT=ttx.tamt
+		set $P(ZAMT,"#",1)=TAMT
+		set ttx.tamt=ZAMT
+		}
+
+	// If no amount was used, then discard the transaction
+	if TAMT=0 do { quit
+
+		do Runtime.rollback("SAVPTR")
+
+		kill OVR(ttx.cid)
+		}
+
+	do Runtime.commit()
+
+	// save OVR
+	set I=""
+	for  set I=$O(OVR(I)) quit:I=""  do {
+		set J=""
+		for  set J=$O(OVR(I,J)) quit:J=""  do {
+			set K=""
+			for  set K=$O(OVR(I,J,K)) quit:K=""  do {
+				set ZOVR(I,J,K)=OVR(I,J,K)
+				}
+			}
+		}
+		
+
+	type RecordHISTDST histdst=Class.new("RecordHISTDST")
+
+	set histdst.cid=DEPCID
+	set histdst.tseq=HISTSEQ
+	set histdst.dstseq=Db.currVal("HISTDST","DEPCID,HISTSEQ")+.01
+	set histdst.acct=ttx.cid
+	set histdst.itc=ttx.itc
+	set histdst.etc=ttx.etc
+	set histdst.tamt=ttx.tamt
+	set histdst.efd=ttx.efd
+	set histdst.tlo=ttx.tlo
+	set histdst.tso=ttx.tso
+	set histdst.tcmt=ttx.tcmt
+	set histdst.crcd=ttx.crcd
+
+	do histdst.bypassSave()
+
+	quit
+
+
+DUEOD(RecordLN ln)
+	/*
+	   The amount due to bring the loan to zero is:
+	   [LN]BALCMP+[LN]ACR+[LN]LCHG+[LN]MCHG
+	*/
+
+	type public Number CID
+	new DUEBAL
+
+	set DUEBAL=ln.bal+$$MCND^LNCO3(,.ln,CID)+$$^SCARND(ln.acr,0,ln.cid)+ln.lchg-$S(ln.aruf:ln.udbal,1:0)
+
+	/*
+	 determine the payoff amount and store in ODSBAL.  this amount will
+	 be used to determine if the ODSI flag should be turned off.
+	*/
+	set ODSBAL=DUEBAL
+
+	quit DUEBAL
+
+
+SWPDR(RecordPRODCTL prodctl)	// Load overdraft sweep debit tran code
+
+	// DR O/D Sweep tran code PRODCTL.DRTROS
+	if ODSWP,prodctl.drtros'="" quit prodctl.drtros
+
+	// DR General purpose tran code PRODCTL.DRTRGP
+	quit prodctl.drtrgp
+
+
+SWPCR(TYPE)	// Load overdraft sweep credit tran code
+
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE")
+
+	// CR O/D Sweep tran code PRODCTL.CRTROS
+	if ODSWP,prodctl.crtros'="" quit prodctl.crtros
+
+	// CR L/P Sweep tran code PRODCTL.CRTRLS
+	if 'ODSWP,prodctl.crtrls'="" quit prodctl.crtrls
+
+	// CR General purpose tran code PRODCTL.CRTRGP
+	quit prodctl.crtrgp
+
+
+LOG(CID)	// Log exceptions
+
+	new DESC
+
+	// Overdraft sweep error
+	if ODSWP set DESC=$$^MSG("5162")
+	// Loan payment sweep error
+	else  set DESC=$$^MSG("1964")
+
+	do LOG^UTLEXC($T(+0),"*",DESC,CID,"",$G(RM))
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60460^58055^Shriram Deshpande^11580"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,909 @@
+public LNMPP
+	// Mass Loan Payment Posting Utility
+	/*
+
+	       ORIG:  Neal E. Gorman (5053) - 05/25/89
+	       DESC:  Allows for single entry of CIF or commitment, and $ amount,
+		      and system applies to each account's amount due.
+
+		      If the amount received is less than the total amount due,
+		      the system will calculate the amounts to apply to each
+		      account as follows:
+
+		      1.  Amounts due by due date from most to least delinquent.
+			  If amounts from two accounts are equally delinquent,
+			  the system will first apply to the lower account #.
+
+		      2.  Total charges (late + misc) in account number order.
+
+		      Note that the actual application within the accounts
+		      may differ from the logic used to determine the amounts
+		      to apply.  Once within the account, the system may
+		      apply amounts from number 1 above to late and/or mis-
+		      cellaneous charges in accordance with the account's
+		      payment grid and string.
+
+		* Also note that a mass payment processed for a commitment
+		which has the Commitment Billing flag (LN.CBF) enabled will
+		be handled by the COMM section which applies different
+		rules than the ones indicated above.
+
+	  ---- Revision History ------------------------------------------------
+	  
+	  03/16/06 - KELLYP - CR 20177
+	  	     Modified VER0 section to exclude credit balance loans.  If 
+	  	     a customer has CBL's, the transaction set won't balance and 
+	  	     the system will erroneously try to build exchange offset 
+	  	     transactions, resulting in OOB errors.  Also modified TR 
+	  	     section not to set ttx.tseq and modified PROC to post as
+	  	     online transactions instead of batch.
+	  
+	  10/24/05 - KELLYP - CR 16684
+	  	     Modified entire procedure to correct several major logic
+	  	     errors from initial conversion (e.g., ttx records were 
+	  	     being saved, incorrect ln objects were being referenced, 
+	  	     only one transaction was being posted instead of all of 
+	  	     them, etc.) and removed pre-2003 revision history.
+	  
+	  09/10/05 - KUMARB - 16684
+	  	     Modified the call to LNCO3 to pass CID in section TMP.
+	  	     Modified the error handling of BTCHPM in section VER
+	  	     and COMMPROC.
+
+	  11/13/03 - CARROLLJ - 51630
+		     Replace call to TTXP2 with call to TRNSINGL^TRNDRV.
+
+	  04/23/03 - CARROLLJ - 51349
+		     Modified TMP section to pass ln object to MCND^LNCO3.
+
+	*/
+
+	do INIT
+	
+	quit
+	
+INIT	// Initialization
+
+	type public Boolean ER
+	type public Date TPD
+	type public Number BRCD
+
+	type Number ACN,CCL,PMT,SGP,TMP
+	type String ETC,VFMQ
+
+	do DBRCD^SIGNON if ER.get() quit    
+
+	if BRCD.get().isNull() set BRCD=CUVAR.bobr
+      	if TPD.get().isNull() set TPD=%SystemDate
+
+	do SCREEN
+	
+	if "Q"[VFMQ quit
+	
+	do PROC
+
+	quit
+
+SCREEN	// Prompt for input
+
+	type public String VFMQ
+
+	type String %READ,%TAB()
+
+	set %TAB("PMT")=".PMT1"
+	set %TAB("ETC")=".ETC1/TBL=[TRN]ETC/XPP=D PPETC^LNMPP"
+	set %TAB("EFD")=".EFD1/XPP=D PPEFD^LNMPP" 
+	set %EffectiveDate=%SystemDate
+	set %TAB("ACN")=".ACN1/XPP=D PPACN^LNMPP"
+	set %TAB("SGP")=".STMGRP1/XPP=D PPSGP^LNMPP"
+	set %TAB("CCL")=".CCL2/XPP=D PPCCL^LNMPP"
+
+	set %READ="@@%FN,,,PMT/REQ,ETC/REQ,EFD/REQ,,ACN,SGP,,CCL"
+	do ^UTLREAD 
+	
+	quit
+
+
+PPACN	// Post processor - customer number prompt
+
+	type public Boolean ER
+	type public Number X
+	type public String %TAB()
+
+	type Number %EXT
+
+	if 'X set %TAB(2)=%TAB(2)_"/HLP="""" Q"
+	set %EXT=1
+	 
+	do ^UCIF quit:ER
+	
+	set %TAB(2)=%TAB(2)_"/HLP=[CMBPRI]ACN"
+
+	quit
+
+
+PPSGP	// Post processor - statement group prompt
+
+	type public Boolean ER
+	type public Number ACN,X
+
+	// Statement group requires customer number
+	if X,'ACN do Runtime.setErrMSG("CIF","2538") quit:ER
+
+	quit
+
+PPCCL	// Post processor - commitment prompt
+
+	type public Boolean ER
+	type public Number ACN,X
+
+	type Number %EXT
+	type String CLS,ZCLS
+
+	// Customer or commitment required
+	if (ACN&X)!('ACN&'X) do Runtime.setErrMSG("CIF","702") quit:ER
+
+	if X.isNull() quit
+
+	set %EXT=1
+	set (CLS,ZCLS)="L" 
+	do ^UACN quit:ER
+
+	type RecordLN ln=Db.getRecord("LN","CID=:X")
+
+	// Not a commitment account
+	if 'ln.cpf do Runtime.setErrMSG("LN",2015) quit:ER
+
+	quit
+
+PPETC	// Post processor - offset tran code prompt
+
+	type public Boolean ER
+	type public String X
+
+	if X.isNull() quit
+
+	type RecordTRN trn=Db.getRecord("TRN","ETC=:X",1)
+	
+	// Invalid transaction code ~p1
+	if 'trn.getMode() do Runtime.setErrMSG("TRN",1498,X) quit:ER
+		
+	// Debit transactions only
+	if trn.itc.extract(1) do Runtime.setErrMSG("TRN",772) quit:ER
+
+	// Miscellaneous offset only
+	if trn.cls'="M" do Runtime.setErrMSG("TRN",1755) quit:ER
+
+	// Offset must contain default G/L account
+	if trn.acn="" do Runtime.setErrMSG("TRN",2092) quit:ER
+
+	quit
+
+PPEFD	// Post processor - effective date
+
+	type public Boolean ER
+	type public Date X
+
+	set X=$$^SCAJD(X)
+	
+	if X'>%SystemDate quit
+	
+	// Effective date must be the same as or before the system date
+	do Runtime.setErrMSG("CIF","880") quit:ER
+
+	quit
+
+
+public PROC	// Main processing section
+
+	type public Boolean ER
+	type public Number ACN,BRCD,CCL,PMT,SGP
+	type public String ETC,VFMQ
+
+	type Boolean Q
+	type Date DT,ED,TPD,XTPD
+	type Number AMT(),CID,Q,STRT,TAMT,TMP(,),TRC,XUID
+
+	type RecordTTX ttx()
+
+	set XTPD=%SystemDate
+	set XUID=%UserID
+
+	set TPD=""
+	type ResultSet rs1=Db.select("PMDATE","TPCTRL","BRCD=:BRCD AND UID=:%UserID AND TPD=:%SystemDate")
+	if rs1.next() set TPD=rs1.getCol("PMDATE")
+	if 'TPD.isNull() do Runtime.setErrSTBLER("TPCTRL","BTCHPM") quit:ER
+	
+	set TPD=%SystemDate
+
+	set ED=$S(%EffectiveDate=%SystemDate:"",1:%EffectiveDate)
+	set STRT=(((Db.prevVal("TTX","TPD,BRCD,%UserID,''")\1000)+1)*1000)+1 
+	set TRC=STRT
+	set TAMT=PMT
+	
+	type RecordTRN offtrn=Db.getRecord("TRN","ETC=:ETC")
+	
+	// Add offset transaction to ttx array
+	do TR(.ttx(),.offtrn,offtrn.acn,"")
+
+	// Customer number entered, but no statement group
+	if ACN,'SGP do {
+		type ResultSet rs2=Db.select("CID","RELCIF","ACN=:ACN")
+		while rs2.next() do VER0(rs2.getCol("CID"))
+		}
+
+	// Customer number and statement group both entered
+	if ACN,SGP do {
+		type ResultSet rs3=Db.select("CID","CMBSTM","ACN=:ACN AND STMGRP=:SGP")
+		while rs3.next() do VER0(rs3.getCol("CID"))
+		}
+
+	set Q=0
+	// Commitment number entered
+	if CCL do { quit:Q
+		type RecordLN lncomm=Db.getRecord("LN","CID=:CCL")
+		if lncomm.cbf do { quit
+			// Call COMM to perform all ttx processing
+			do COMM(.ttx(),.lncomm,CCL,0) 
+			set Q=1
+			}
+
+		type ResultSet rs4=Db.select("CID","LN","CCL=:CCL")
+		while rs4.next() do VER0(rs4.getCol("CID"))
+		}
+
+	set (Q,DT)=""
+	for  quit:Q  set DT=TMP(DT).order() quit:DT.isNull()  do VER1(DT)
+	
+	// Build account TTX records
+	do TTX(.ttx())
+
+	// Post transactions
+	if 'PMT do FILE(.ttx(),1) quit
+	
+	// Process stopped.  Payment exceeds amount due by $~p1.
+	do Runtime.setErrMSG("CIF","2239",$$^SCARND(PMT,0,CID.get())) quit:ER
+
+	quit
+
+VER0(Number CID)	// Sorts accounts by next due date
+
+	type RecordACN acn=Db.getRecord("ACN","CID=:CID")
+	
+	// Exclude deposit accounts
+	if acn.cls'="L" quit
+
+	// Exclude closed accounts
+	if acn.stat=4 quit
+	
+	// Exclude credit balance loans
+	if 'acn.trb quit
+
+	do TMP(.acn)
+
+	quit
+
+TMP(RecordLN ln)	// Create entry in TMP array
+
+	/* 
+	 First, create entry in TMP array for late + misc charges
+	 Literal "C" ensures that they will sort AFTER billed amounts
+	*/
+	
+	type public Number CID,TMP(,)
+	
+	type Number A
+	
+	set A=ln.lchg+$$MCND^LNCO3(1,.ln,CID)
+	if A set TMP("C",CID)=A
+
+	// Next, create entry for account's next due date
+	if ln.dist1nd do {
+		type RecordLNBIL1 lnbil1=Db.getRecord("LNBIL1","CID,ln.dseq",1)
+		if 'lnbil1.getMode() quit
+		if lnbil1.ctab set TMP(ln.dist1nd,CID)=lnbil1.ctab-ln.ppa
+		}
+
+	// Next, create entry for each bill after due sequence (DSEQ)
+	type ResultSet rs=Db.select("CDPD,CTAB","LNBIL1","CID=:CID AND SCHSEQ>:ln.dseq")
+
+	while rs.next() set TMP(rs.getCol("CDPD"),CID)=rs.getCol("CTAB")
+	
+	quit
+
+VER1(Date DT)	// Figure out how much can be allocated to each account
+
+	type public Boolean Q
+	type public Number AMT(),PMT,TMP(,)
+
+	type Number CID
+	
+	set CID=""
+
+	for  set CID=TMP(DT,CID).order() quit:CID.isNull()  do {
+		set PMT=PMT-TMP(DT,CID) 
+		if PMT<0 set TMP(DT,CID)=TMP(DT,CID)+PMT set PMT=0
+		set AMT(CID)=AMT(CID).get()+TMP(DT,CID)
+		if 'PMT set Q=1
+		}
+
+	quit
+
+TTX(RecordTTX ttx())	// Create teller transaction records
+	
+	type public Number AMT()
+	
+	type Number CID,TAMT
+	type String ETC,TRN()
+	
+	set CID=""
+	
+	for  set CID=AMT(CID).order() quit:CID.isNull()  do {
+		set TAMT=+AMT(CID)
+
+		type RecordLN ln=Db.getRecord("LN","CID=:CID")
+	
+		if 'TRN(ln.type).exists() do {
+			type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:ln.type")
+			set TRN(ln.type)=$S(prodctl.crtrmp:prodctl.crtrmp,1:prodctl.crtrgp)
+			}
+			
+		set ETC=TRN(ln.type)
+
+		type RecordTRN trn=Db.getRecord("TRN","ETC=:ETC")
+
+		// Add transaction to ttx array
+		do TR(.ttx(),.trn,CID,ln.crcd)
+		}
+		
+	quit
+
+FILE(RecordTTX ttx(), Number MODE)	// File data
+
+	type public Number BRCD
+	type public Date TPD
+	type public String ER,RM
+	
+	type String RJ()
+
+	// Post transactions
+	do TRNSET^TRNDRV(.ttx(),TPD,BRCD,MODE,,.RJ())
+
+	if 'ER set ER="W"
+
+	// Process complete.  Rejected transactions detailed in exception file.
+	if RJ.data() set RM=$$^MSG(3117)
+	// Process complete
+	else  set RM=$$^MSG(2237)
+
+	quit
+
+TR(RecordTTX ttxarr(), RecordTRN trn, Number CID, String CRCD)	// Build TTX Record
+
+	type public Date ED
+	type public Number BRCD,TAMT,TRC
+	type public String TCMT,TSO
+
+	type Number NOD
+
+	if CRCD.isNull() set CRCD=%SystemCurrency
+
+	type RecordTTX ttx=Class.new("RecordTTX")
+
+	set ttx.tjd=%SystemDate
+	set ttx.brcd=BRCD
+	set ttx.uid=%UserID
+	set ttx.cid=CID
+	set ttx.itc=trn.itc
+	set ttx.etc=trn.etc
+	set ttx.tamt=TAMT
+	set ttx.efd=ED
+	set ttx.tlo=%UserStation
+	set ttx.tso=TSO.get()
+	set ttx.tcmt=TCMT.get()
+	set ttx.cdt=+%CurrentDate
+	set ttx.tim=%CurrentTime
+	set ttx.brcde=BRCD
+	set ttx.trc=TRC
+	set ttx.uidt=%UserID
+	set ttx.crcd=CRCD	
+	set TRC=TRC+1
+
+	set NOD=ttxarr("").order(-1)+1
+	
+	set ttxarr(NOD)=ttx.copy()
+
+	quit
+
+
+public COMM(RecordTTX ttx(),RecordLN ln,Number XCID,Number IR)	// Builder Loan Commitment Mass Payment Processing
+	/*
+
+	   ARGUMENTS:
+
+	       . XCID    Master Commitment Number (required)
+
+	       . IR Interest Reserve Processing Flag (required)
+		1 = Called from DAYEND Interest Reserve Processing
+		0 = Not called from DAYEND Interest Reserve Processing
+
+	   There are two routines which call into this linetag: ^MRPC103 calls it
+	   to handle mass payments for any commitment where LN.CBF=1 and
+	   IRP^PROCAUTO calls it to handle interest-only payments for commitments
+	   during DAYEND Interest Reserve Processing.
+
+	   In either case, this section will look to Mass Payment Application
+	   options in CUVAR to determine how to apply the payment.  There are
+	   three (3) options for each payment type (full, partial-interest,
+	   partial-principal, and curtailment).  The three options for each
+	   payment type are:
+
+	   0 - Manual Direction
+	     The user must manually apply the funds against each
+		   of the commitment's linked loans via PFW Teller. If
+	    this option is encountered during DAYEND processing,
+	    an entry will be added to the DAYEND exception file
+	    only once for the entire commitment.
+
+	   1 - Account Number Order
+	    The payment amount is applied in order of account
+	    number sequence (loan 1 gets paid, then if there are
+	    any funds left over, loan 2 gets paid, etc.).  This
+	    is the same as the existing functionality in the VER
+	    section for commitments, except that ALL loans linked
+	    to the commitment will be included.  (VER section only
+	    applies payments to loans in the first tier, it does
+	    not include any loans linked to sub-commitments).
+
+	   2 - Proportional Distribution
+	    The payment amount will be applied proportionally to
+	    the amounts due.  In the case of an overpayment, this
+	    results in an overpayment for each loan under the
+	      commitment.
+
+	   The XCESS1 and XCESS2 sections will apply the remaining funds in
+	   case of a curtailment (overpayment).  Please see the comments in
+	   these sections for more details on how overpayments are handled.
+
+	*/
+
+	type public Boolean ER
+	type public String ET,RM
+
+	type Number AMTDUE,CUVNODE,CUVOPT,IRAMTR,IRCID
+
+	set (ER,RM,ET)=""
+	
+	// Account ~p1 closed
+	if ln.stat=4 do Runtime.setErrMSG("LN",55,XCID) quit:ER
+	
+     	// Interest Reserve Account
+	if IR set IRCID=ln.ircid
+	
+	// No I.R. Acct defined for this loan
+	if IR,IRCID.isNull() quit
+
+	// Determine payment type
+	set CUVNODE=$$PMTTYP
+
+	// No funds remaining in Interest Reserve Acct
+	if CUVNODE=0 quit
+
+	// Get payment method
+	else  do {
+		if CUVNODE=34 set CUVOPT=CUVAR.lncfp 
+		if CUVNODE=35 set CUVOPT=CUVAR.lncpp
+		if CUVNODE=36 set CUVOPT=CUVAR.lncpi
+		if CUVNODE=37 set CUVOPT=CUVAR.lncc
+		}
+
+      	// Mass Payment Processing not permitted. Payment must be manually directed.
+	if (CUVOPT=0)!(CUVOPT.isNull()) do Runtime.setErrMSG("CUVAR",4287) quit:ER
+
+	do COMMPROC(.ttx(),.ln)
+	
+	if ER="W",RM=$$^MSG(3117) quit
+
+	// Let PROCAUTO/MRPC103 handle error
+	if ER=1 do { quit
+		// Override required
+		if RM.isNull() set RM=$$^MSG(4498)
+		if RM.isNull() set RM=ET.get()
+		}
+
+	// Mass Payment Application successful
+	set ER="W" 
+	set RM=$$^MSG(4288)
+
+	// MRPC103 handles RM
+	quit
+
+PMTTYP()	// Determine Payment Type
+	/*
+	    This section determines the payment type (full, partial interest,
+	    partial principal, or curtailment) so that the corresponding payment
+	    method in CUVAR (LNCFP, LNCPP, LNCPI, or LNCC) for that type can be
+	    determined.
+	*/
+
+	type public Boolean IR
+	type public Number IRCID,PMT,XCID
+
+	type Number PMTFLG
+
+	// For Interest Reserve Processing Only
+	if IR do {
+		
+		type Number INDUE,IRAMTR
+		
+		// IR Amount Remaining
+		set IRAMTR=$$IRAMTR^LNCDI(IRCID,XCID)
+		if 'IRAMTR set PMTFLG=0 quit
+
+		// Computed Interest Due
+		set INDUE=$$COMDUE^LNCDI(XCID,"DUIN")
+		if 'INDUE set PMTFLG=0 quit
+
+		// Full Payment
+		if INDUE<IRAMTR set PMTFLG=34 set PMT=INDUE
+
+		// Partial Interest Pmt
+		else  if IRAMTR>0 set PMTFLG=36 set PMT=IRAMTR
+
+		// No funds left
+		else  set PMTFLG=0
+		}
+
+	// For all other mass payments for builder loans
+	else  do {
+		
+		type Number AMTDUE
+		
+		set AMTDUE=$$COMDUE^LNCDI(XCID,"TDUE")+$$COMDUE^LNCDI(XCID,"LCHG")
+
+		// Full Payment
+		if PMT=AMTDUE set PMTFLG=34
+
+		// Curtailment
+		else  if PMT>AMTDUE set PMTFLG=37
+		else  do {
+			new indue,prdue
+			// Computed Interest
+			set indue=$$COMDUE^LNCDI(XCID,"DUIN")
+
+			// Computed Principal
+			set prdue=$$COMDUE^LNCDI(XCID,"DUPR")
+
+			// Partial Interest Pmt
+			if prdue<indue set PMTFLG=36
+
+			// Partial Principal Pmt
+			else  set PMTFLG=35
+			}
+		}
+
+	quit PMTFLG
+
+
+public COMMPROC(RecordTTX ttx(),RecordLN ln)	// Commitment Transaction Processing when LN.CBF=1
+	/*
+	   This section processes payments for ALL loans linked to a commitment
+	   (including loans linked to a sub-commitment) regardless of whether
+	   the transaction was initiated by the PFW Teller MPP function or by
+	   batch interest reserve processing for commitments (via BCHAUTPMT).
+	   This section is only executed if LN.CBF is enabled on the master
+	   commitment passed in as XCID in the COMM section.
+	*/
+
+	type public Boolean ER,IR
+	type public Number BRCD,CUVNODE,CUVOPT,IRCID,PMT,XCID
+	type public String ETC
+
+	type Date ED,TPD
+	type Number AMT,AMTDUE,CCLTYPE,CID,DTYPE,PMTORG,STRT,TAMT,TRC,XCCL
+	type String ACCTS(,)
+	
+	set XCCL=ln.cid
+
+	type ResultSet rstst=Db.select("CID","LN","CCL=:XCCL")
+
+	// Commitment not in cross-reference
+	if rstst.isEmpty() quit
+
+	set CCLTYPE=ln.type
+
+	// Get all accts linked to this commitment
+	do GETACCTS^SCA680(.ACCTS(,),XCCL)
+
+	// Need to recalculate total amount due
+	set CID=""
+	set PMTORG=PMT 
+	set AMTDUE=0
+
+	// Interest Reserve Processing for Builder Loan Commitments
+	if IR for  set CID=ACCTS(XCCL,CID).order() quit:CID.isNull()  do {
+		
+		type Number TMPAMT
+		type String XLN06
+		
+		if PMT'>0 quit	
+
+		type RecordLN lnkln=Db.getRecord("LN","CID=:CID")
+
+		// Exclude closed accts
+		if lnkln.stat=4 quit
+
+		set XLN06=$$XLN06^LNCDI(CID)
+		set TMPAMT=XLN06.piece("|",7)
+
+		// No Amount Due
+		if (TMPAMT=0)!(TMPAMT<0) quit
+		set AMT(CID)=TMPAMT 
+		set AMTDUE=AMTDUE+TMPAMT
+		}
+
+	// Manual MPP for Builder Loan Commitments
+	if 'IR do {
+		type Date DT
+		type String TMP(,)
+		for  set CID=ACCTS(XCCL,CID).order() quit:CID.isNull()  do VER0(CID)
+		set (DT,CID)=""
+		for  set DT=TMP(DT).order() quit:DT.isNull()  do {
+			for  set CID=TMP(DT,CID).order() quit:CID.isNull()  do {
+				set AMT(CID)=AMT(CID).get()+TMP(DT,CID)
+				set AMTDUE=AMTDUE+TMP(DT,CID)
+				}
+			}
+		}
+
+	// Restore PMT amount for offset TTX
+	set PMT=PMTORG
+
+	/*
+	   At this point, AMT holds elements due for all accounts linked to
+	   the commitment, regardless of the payment amount.  In the case of
+	   account number order payments, BLDTR0 will handle the distribution
+	   of PMT among the loans.  In the case of proportional payments,
+	   PRCALC will handle the recalculation of payable elements as per the
+	   amount of funds available.
+	*/
+
+	set TPD=""
+	type ResultSet rs=Db.select("PMDATE","TPCTRL","BRCD=:BRCD AND UID=:%UserID AND TPD=:%SystemDate")
+	if rs.next() set TPD=rs.getCol("PMDATE")
+	if TPD'="" do Runtime.setErrSTBLER("TPCTRL","BTCHPM") quit:ER
+	set TPD=%SystemDate
+
+	if (%EffectiveDate.get()).isNull() set ED=""
+	else  set ED=$S(%EffectiveDate=%SystemDate:"",1:%EffectiveDate)
+	
+	set (STRT,TRC)=1
+
+	type RecordTRN trn
+
+	// Interest Reserve Processing (Batch)
+	if IR do {
+		type String TSO
+
+		type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:CCLTYPE")
+
+		type RecordDEP dep=Db.getRecord("DEP","CID=:IRCID")
+		set DTYPE=dep.type
+
+		set ETC=prodctl.drirap
+		if ETC.isNull() do {
+			type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:DTYPE")
+			set ETC=prodctl.drtrgp
+			}
+
+		set CID=IRCID 
+		set TAMT=PMT 
+		set TSO=""
+		set TSO=$$FIELDIN^UTSO(TSO,"LNIRCID",XCID)
+
+		// Set up Interest Reserve Account Debit
+		set trn=Db.getRecord("TRN","ETC=:ETC")
+
+		do TR(.ttx(),.trn,dep.cid,dep.crcd)
+
+		// Readjust pmt amts for proportional pmt
+		if CUVOPT=2 do PRCALC
+
+		// Build TTX for each entry in AMT()
+		do BLDTR0(.ttx())
+		}
+
+	// non-Interest Reserve Processing (non-batch)
+	else  do {
+
+		set TAMT=PMT
+		set trn=Db.getRecord("TRN","ETC=:ETC")
+		set CID=trn.acn
+		
+		// Build Offsetting transaction
+		do TR(.ttx(),.trn,CID,"")
+
+		// Adjust pmt amounts for proportional payments
+		if (CUVOPT=2),(CUVNODE'=37) do PRCALC
+
+		// Build TTX for each entry in AMT()
+		do BLDTR0(.ttx())
+		}
+
+	// Acct # Order overpayment
+	if (PMT>0),(CUVOPT'=2) do XCESS1(.ttx())
+
+	// Proportional overpayment
+	if (PMT>0),(CUVOPT=2) do XCESS2(.ttx())
+
+	// Process Transactions
+	do FILE(.ttx(),4)
+	
+	quit
+
+
+BLDTR0(RecordTTX ttx())		// Transaction (TTX) Generator for Builder Loans
+
+	type public Boolean IR
+	type public Number AMT(),PMT
+
+	type Number CID,TAMT
+	type String ETC
+
+	set CID="" 
+	for  set CID=AMT(CID).order() quit:CID.isNull()  do {
+
+		if (PMT=0)!(AMT(CID)=0) quit
+		set TAMT=AMT(CID)
+		if (PMT-TAMT)<0 set TAMT=PMT set PMT=0
+		else  set PMT=PMT-TAMT
+
+		type RecordLN lnkln=Db.getRecord("LN","CID=:CID")
+
+		type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:lnkln.type")
+
+		set ETC=prodctl.crirap
+		if (ETC.isNull())!('IR) set ETC=prodctl.crtrgp  
+
+		type RecordTRN trn=Db.getRecord("TRN","ETC")
+		
+		// Build TTX Record
+		do TR(.ttx(),.trn,lnkln.cid,lnkln.crcd)
+		}
+
+	quit
+
+
+PRCALC	// Proportional Payment Amount Calculator
+	/*
+
+	   This section determines the proportional payment amount required
+	   for each loan tied to the commitment by applying the following
+	   formula:
+
+	      Proportional Pmt Amt = Total Pmt Amt * (Amt Due/Commitment Amt Due)
+
+	   A sum total of the proportional payment amounts is kept in case the
+	   total payment amount does not equal that sum because of inherent
+	   difficulties in rounding.  If the total of the proportional payments
+	   does not equal the payment amount, the difference will be applied to
+	   the last loan (numerically) linked to the commitment.
+
+	*/
+	
+	type public Number AMT(),AMTDUE,PMT
+	
+	type Number CID,LASTCID,TOTAL
+
+	set TOTAL=0 
+	set CID="" 
+	set LASTCID=""
+
+	// Readjust amount due array for each entry for proportional payments
+	for  set CID=AMT(CID).order() quit:CID.isNull()  do {
+		set AMT(CID)=$$^SCARND(PMT*(AMT(CID)/AMTDUE),,,,2)
+		set TOTAL=TOTAL+AMT(CID)
+		set LASTCID=CID
+		}
+
+	if TOTAL<PMT set AMT(CID)=AMT(CID)+(PMT-TOTAL)
+	else  if TOTAL>PMT set AMT(CID)=AMT(CID)-(TOTAL-PMT)
+
+	quit
+
+XCESS1(RecordTTX ttx())	// Account Number Order - All elements due are satisfied but funds remain
+	/*
+	   This section will generate TTX record entries for each loan, starting
+	   from the first entry in ACCTS, and will apply payments against each
+	   loan's outstanding principal balance (amount remaining after elements
+	   due are satisfied is applied in account number order until the funds
+	   are all used up).  The default principal-only payment transaction code
+	   (PRODCTL.CRTRPR) will be used in making these payments.
+	*/
+
+	type public String ACCTS(,)
+	type public Number PMT,XCCL
+
+	type Number CID
+
+	set CID="" 
+	for  set CID=ACCTS(XCCL,CID).order() quit:CID.isNull()  do {
+		type Number PRBAL,TAMT
+		
+		quit:PMT=0
+
+		type RecordLN lnkln=Db.getRecord("LN","CID=:CID")
+
+		set PRBAL=lnkln.bal
+      
+		if PRBAL>PMT set TAMT=PMT set PMT=0
+		else  set TAMT=PRBAL set PMT=PMT-TAMT
+
+		if TAMT'>0 quit
+
+		type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:lnkln.type")
+
+		type RecordTRN trn=Db.getRecord("TRN","ETC=:prodctl.crtrpr")
+
+		do TR(.ttx(),.trn,lnkln.cid,lnkln.crcd)
+		}
+	quit
+
+XCESS2(RecordTTX ttx())	// Proportional Distribution - All elements due are satisfied but funds remain
+	/*
+	   This section will generate TTX record entries for each loan, and will
+	   apply payments against each loan's outstanding principal balance in
+	   a proportional manner (amount remaining after elements due are
+	   satisfied is applied proportionally to all loans).  The default
+	   principal-only payment transaction code (PRODCTL.CRTRPR) will be used
+	   in making these payments.
+	*/
+
+	type public Number PMT,XCCL
+	type public String ACCTS(,)
+
+	type Number AMT(),AMTDUE,CID,CIDTYP()
+
+	set CID=""
+
+	// AMTDUE will now be the sum of the outstanding pr bal's
+	set AMTDUE=0
+
+	for  set CID=ACCTS(XCCL,CID).order() quit:CID.isNull()  do {
+		type Number PRBAL
+
+		quit:PMT=0
+		
+		type RecordLN lnkln=Db.getRecord("LN","CID=:CID")
+		
+		set CIDTYP(CID)=lnkln.type
+		
+		set PRBAL=lnkln.bal
+		if PRBAL'>0 quit
+		set AMT(CID)=PRBAL
+		set AMTDUE=AMTDUE+PRBAL
+		}
+
+       	// Call PRCALC to proportionally divide the amount remaining
+	do PRCALC
+
+	// Build the necessary TTX entries for each overpayment
+	set CID=""
+	for  set CID=AMT(CID).order() quit:CID.isNull()  do {
+		type Number TAMT,TYPE
+
+		set TAMT=AMT(CID)
+		if TAMT=0 quit
+
+		set TYPE=CIDTYP(CID)
+
+		type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:TYPE")
+
+		type RecordTRN trn=Db.getRecord("TRN","prodctl.crtrpr")
+
+		do TR(.ttx(),.trn,CID,"")
+		}
+
+	quit
+
+vSIG()	quit "60341^52224^Pat Kelly^22047"	// Signature - LTD^TIME^USER^SIZE

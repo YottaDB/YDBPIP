@@ -1,0 +1,354 @@
+DEPAES	 /* 
+    ORIG: GRAY - 01/11/2000
+    DESC: Available Earnings Status
+    
+    ---- Comments --------------------------------------------------------
+    
+    ---- Revision History ------------------------------------------------
+
+	03/23/06 - SANTHUMS - CR20196
+		   Corrected UNDEFINED error on the variable DLR. 
+		   Modified GRACE section to use dep.dlr instead of 
+		   DLR variable.
+	
+	12/04/03 - CARROLLJ - CR7239
+		   Correct call to DEPBW to pass the correct parameters.
+
+	09/22/2003 - CARROLLJ - 51630
+		   Modified MATVAL section to remove from array.
+
+	04/17/2003 - GRAY - 51349
+		   Corrected undefined error on the variable ER.
+
+	03/26/2003 - GRAY - 51349
+		   Corrected problem in DWA section when IRADIS is not defined.
+
+	03/03/2003 - GRAY - 51349
+		   Corrected UNDEFINED,INIT+2^IRAWH error.  The call into
+		   AES^IRAWH by the sub-routine DWA needs to pass the dep
+		   object.
+	
+	01/10/2003 - Spier 51423
+		   Corrected call to PEN which needed to pass dep object
+
+	10/28/2002 - Vitaliy Antonov - 43583
+		   Changed arguments of the GRACE section to accept RecordDEP 
+		   object and ACR array. This change is part of Database 
+		   Independence Project.
+
+	02/27/02 - ANTONOVS - 46454
+		   Section DWA was modified to calculate State Withholding 
+		   amount. New section DWA1 was added in order to avoid code 
+		   duplication.
+
+	06/13/01 - PARRAS - 45659
+		   Modified the MATVAL and DTL sections to replace TJD with 
+		   STJD. The compiled code was translated as S TJD=TJD when the 
+		   statement read S TJD=%SystemDate. 
+	
+	03/20/01 - PARRAS - 44269
+		   Modified the CALC section to ignore the CUVAR.IPD flag when
+		   calculating the DEP.MATVAL Maturity Value. Roll forward ARQ
+		   43459.
+
+	12/12/00 - APPLEYARDM - 43096
+		   Roll forward ARQ 41106: Int Posting Teller OOB - Anticipated
+		   earnings are being overstated by 1 day, resulting in OOB 
+		   during interest posting. Modified section CALC.
+
+	11/09/00 - ARPAV - 42759
+		   Rolling forward changes from ARQ 42759.
+
+		   Modified DTL and NET section to consider the IAF
+		   flag before accuimulating the total values.  Also
+		   modified code in CALC section to check for inquiry
+		   mode before recomputing the accrud interest.
+
+	12/09/99 - GRAY - 32507
+		   Removed code no longer needed due to the Elimination
+		   of Teller/Branch Character Interface and placed remaining 
+		   code into PSL'd procedure definition.
+ */
+
+	quit
+	
+Public EXEC	// External entry point from ^DEPAEC via AEC^DEPAES
+
+	type RecordDEP dep=Db.getRecord("DEP","CID")
+
+	set ER=0
+	
+	do DTL(.dep)
+	if ER set VFMQ="Q"
+	quit
+	
+DTL(RecordDEP dep)	// Detail
+	
+	set IACM=dep.iacm
+	set MINOPT=dep.minopt
+	set ICF=dep.icf
+	set IRCB=dep.ircb
+	if '$D(POPT) set POPT=dep.popt
+	set MINACR=dep.minacr
+	set IAF=dep.IAF				// VCA 11/9/00
+	set TOTINTAV=$$TOTINTAV^DEPCDI(CID) 	// VCA 11/9/00
+
+	set ODT=dep.odt
+	set MDT=dep.mdt
+	set ACR=dep.posacr
+	set CMP=dep.cmp
+	set IOPT=dep.iopt
+	set IRN=dep.irn
+	set INP=dep.inp
+	set INTAF=dep.intaf
+	set INC=dep.inc
+	set ICPF=dep.icpf
+	set IPF=dep.ipf
+	
+	set (BASE,INTDSB)=0
+	if IRCB=1 set BASE=dep.bal
+	if IRCB=2 set BASE=dep.bal-dep.intavl
+	if IRCB=3 set BASE=dep.balcol
+	set SD=$S($D(STJD):STJD,1:%SystemDate),ED=EFD-1
+	
+	if IPF'="",(INP=""!(INTAF="")) do { quit:ER
+		new NJD,AF,X
+		set INTPOS=Db.getOneRow("INTPOS","CUVAR")
+		if INTPOS="" set ER=1 quit
+		set NJD=$$FRSTDATE^ACNFUNCS(ODT,IPF,INTPOS) quit:ER
+		if INP="" do {
+			set INP=NJD
+			set dep.inp=INP
+			}
+		if $G(AF)="" set NJD=$$NJD^UFRE(ODT,IPF,.AF,"00001") quit:ER
+		if INTAF="" do {
+			set INTAF=AF
+			set dep.intaf=INTAF
+			}
+		}
+	
+	do CALC(.dep)				// Calculate Accrued Interest
+	set ACR=ACR-dep.negacr			// Subtract negative accrual
+	for I=1:1:3 set WTH(I)=$G(WTH(I))	// Initialize WTH()
+	
+	// Ex. Withholding only if ACN is present.
+	if Db.isDefined("DEP","CID") do WTH(.dep)   
+	
+	// Net transaction amounts
+	
+	set NET(1)=PRIN+ACR-PEN-WTH(1)+$G(ADJ)
+	set NET(2)=PRIN+ACR-WTH(2)+$G(ADJ)
+	set NET(3)=PRIN-PEN-WTH(3)
+
+        /* If the interest/dividend accrual flag is 2, then the principal does
+        not include the total available interest, so we must add it to
+        the total separately. */
+	if IAF=2 do {
+		set NET(1)=NET(1)+TOTINTAV
+		set NET(2)=NET(2)+TOTINTAV
+		set NET(3)=NET(3)+TOTINTAV
+        	}
+	quit
+	
+WTH(RecordDEP dep)	// Withholding
+	/*
+	  Check for custom interest program.  If one exists, program will return
+	  interest.  Otherwise, get it from the accrual amount.
+	*/
+	set BWAPGM=Db.getOneRow("BWAPGM","CUVAR"),INT=ACR
+
+	if dep.ira do DWA(.dep) quit
+
+	set BWA=0
+	if dep.bwf do ^DEPBW(.dep,,INT,.BWA,.NTAX,BWAPGM) quit:ER
+	set (WTH(1),WTH(2))=BWA,WTH(3)=0
+	quit
+	
+DWA(RecordDEP dep)	// RPA distribution withholding
+	
+	new BAL,RNDACR,STTAX
+	
+	set RPA=dep.ira
+	set ACN=dep.acn
+	
+	/* If RSP Distribution Code entered use related WHCALC otherwise use
+	calculation method from the plan. */
+
+	// Calculate Fed and State W/H
+	if '$G(IRADIS) for STTAX=0:1:1 do AES^IRAWH(.dep)
+	
+	if $G(IRADIS)  do {
+		set TAMT=PRIN
+		// Withholding Option
+		set WHCALC=Db.getOneRow("WH","UTBLIRADIS","IRADIS")
+		do DWA1(.dep,0)
+		}
+
+	set BAL=dep.bal
+	set RNDACR=$$^SCARND(ACR,0,dep.cid)
+	
+	if PRIN+DWA+DSWA+PEN<(BAL+RNDACR) set (WTH(1),WTH(2),WTH(3))=DWA+DSWA quit
+	
+	set TAMT=PRIN+RNDACR-PEN
+	do DWA1(.dep,1)
+	
+	set TAMT=PRIN+RNDACR
+	do DWA1(.dep,2)
+	
+	set TAMT=PRIN-PEN
+	do DWA1(.dep,3)
+	
+	set TAMT=PRIN+RNDACR-PEN
+	do DWA1(.dep,4)
+	quit
+
+DWA1(RecordDEP dep,IND)	// Calculate Withholding Amounts
+
+	for STTAX=0:1:1 do CLOSE^IRAWH(.dep)
+
+	quit:'IND
+
+	set WTH(IND)=DWA+DSWA
+	quit
+	
+Public GRACE(RecordDEP dep,ACR)
+	/* External entry point from ^UMAT (Grace processing)
+
+	Arguments:
+		. dep	Deposit account		/TYP=RecordDEP/REQ
+		. ACR	Accrual amount		/TYP=N/REQ/MECH=REFARR
+			ACR(1)	Previous accrual amount	/NOREQ
+	*/
+
+	set (ACR,CMP,IOPT,POPT)=0
+	set BASE=PRIN,(JD,SD)=dep.dlr
+	set ED=%SystemDate-1
+
+	set ICF=dep.icf
+	set MDT=dep.mdt
+	set INTAF=dep.intaf
+	set ICPF=dep.icpf
+	set IPF=dep.ipf
+	set MINACR=""
+	
+	set INP=""
+	if IPF'="" do INT
+	set INC=""
+	if ICF'="" do CMP
+
+	do CALC(.dep)
+
+	quit
+	
+CALC(RecordDEP dep)	// Calculate accrued earnings
+	
+	if MINACR'="",'MINOPT,PRIN<MINACR set ACR=0
+
+	for JD=SD:1:ED do { quit:ER
+		if JD-INC=0 do CMP
+		if JD-INP=0 do INT
+		do ACR(.dep)
+		}
+
+	if (CUVAR.IPD),($G(%ProcessMode)'=2),(INP'=MDT) do {
+		set JD=ED+1
+		if JD-INP=0 do ACR(.dep)
+		}
+
+	set PEN=0
+	if POPT,(EFD-MDT<0)!(dep.notice) do PEN(.dep)
+
+	set NET=PRIN+ACR-PEN
+	if NET<0 set NET=0
+
+	quit
+	
+
+ACR(RecordDEP dep)	// Accrual computations
+	
+	if dep.trexd-JD=0 set IRN=+dep.iro
+	if MINACR'="",PRIN+CMP<MINACR quit
+	
+	// Effects of continuous compounding
+	if $E(IACM)=2 S CMP=ACR
+	
+	// Pass to interest calc utility - allow ^UIC to compute ILPD
+	set ACR=ACR+$$^SCARND($$^UIC(BASE+CMP,JD,JD,IACM,IRN,0,INTAF,IPF,ICPF,INP),0,"","",5)
+	quit
+	
+PEN(RecordDEP dep)	// Calculate penalty/adjustment amounts
+	
+	new SAVEACR
+	S SAVEACR=ACR
+
+	// Create empty transaction to pass to UMAT.
+	type RecordTTX ttx=Class.new("RecordTTX")
+
+	do ^UMAT(.dep,.ttx)
+
+	set ACR=SAVEACR
+	if $G(ACR(1)) set ACR=$$^SCARND(ACR(1),0,$G(CID))
+
+	quit
+	
+CMP	// Interest compounding
+	
+	if $E(ICF,1,3)="1DA" set INC=JD+1
+	else  set FRE=ICF,INC=$$NJD^UFRE(JD,FRE) quit:ER
+	
+	if MINACR'="",PRIN+CMP<MINACR quit
+	
+	set CMP=ACR
+	quit
+	
+INT	// Interest
+	
+	set CMP=ACR
+	set FRE=IPF
+	set INP=$$NJD^UFRE(JD,FRE) quit:ER
+	set IPLD=JD
+	
+	if IOPT set INTDSB=INTDSB+CMP,(ACR,CMP)=0   // Disbursed
+	quit
+	
+Public MATVAL(CID)	// Load data
+	
+	new EFD,FRE,PRINT,STJD,TYPE
+
+	type RecordDEP dep=Db.getRecord("DEP","CID")
+
+	set TYPE=dep.type
+	set EFD=dep.mdt
+	
+	// adjust STJD dependent on renewal date,open date and finally if we have accrued on the account
+	set STJD=$S(dep.dlr:dep.dlr,1:dep.odt)
+	
+	// Adjust STJD dependent on if interest was paid after open date or renewal date and no accural
+	if dep.posacr=0,dep.ipld>STJD set STJD=%SystemDate
+	if dep.posacr'=0!('STJD) set STJD=%SystemDate
+	
+	// Use Balance if the cd has been funded, otherwise use original amount.
+	set PRIN=dep.bal
+	if +PRIN=0 do {
+		set PRIN=dep.org
+		set dep.bal=dep.org
+		set dep.balcol=dep.org
+		}
+	set dep.ira=0
+	set dep.bwf=0
+	
+	set FRE=dep.ipf
+	if FRE="" set dep.intaf=1
+	
+	do DTL(.dep) if ER quit 0
+	quit $$^SCARND(PRIN+INTDSB+ACR,0,CID)
+	
+Public AEC	//
+	// If the MDT falls between today's date and the next interest
+	// posting date, the anticipated check amount is calculated to the MDT
+	
+	if MDT>TJD,MDT<EFD new EFD set EFD=MDT
+	do EXEC
+	quit
+
+vSIG()	quit "60347^14311^Sunitha Santhumayor^8073"	// Signature - LTD^TIME^USER^SIZE

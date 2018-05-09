@@ -1,0 +1,483 @@
+public LNLS8PD(String INCD,String CTL)	//;Build TMP File of Pmts Due or Ppd
+	/*
+	   ARGUMENTS:
+	   	. INCD	Investor code	/REQ/MECH=VAL
+	   	. CTL
+	   
+	   ORIG:  NEAL -  3 JUN 1992
+
+	  -------------Revision History----------------------------------------
+	  
+	   05/14/07 - SVS Kiran - CR 26751
+	              Modified FILE section to check payment element.
+	              Modified TSEQ section to set value for variable
+	              TSEQ.
+
+	   07/20/06 - KELLYP - CR 22174
+		      Modified DPSUM section to prevent UNDEFINED error on the
+		      "B" variable that occurred when running @REP415.
+
+           07/26/05 - SkariahV- CR16679
+	              Removed #WARN and #OPTIMIZE directives.
+	              
+	   06/13/03 - BHANGALEV - 51351
+	   	      Converted to PSL
+
+	  ---------------------------------------------------------------------
+	*/
+	
+	type public Boolean ER
+	type public Number CID,SEQ
+	type public String GRP,PL
+	
+	if INCD="" quit
+	
+	set CTL=CTL.get()
+
+	do Db.delete("TMPRPT0","PID=:%ProcessID")
+	do Db.delete("LNLS8PD","PID=:%ProcessID AND INCD=:INCD")
+	
+	set (PL,GRP,CID,SEQ,ER)=""
+	
+	do PL
+	
+	quit
+	
+	
+public PL	// 
+	
+	type Public String GRP,INCD,PL,PSEQ,SFCM
+	type Public Number AF,CID,FEEP,FRE,OPTR,OSEQ,PLRPB,PP,REMAF,RFRE,YLD,SCHSEQ,SEQ
+	type Public Date JD
+		
+	type DbSet rs=Db.selectDbSet("LNLS8","INCD=:INCD")
+	while rs.next()  do {
+		type RecordLNLS8 lnls8=rs.getRecord("LNLS8")
+		set PL=lnls8.PL
+		set GRP=lnls8.GRP
+		set CID=lnls8.CID
+		set PSEQ=lnls8.PSEQ
+
+		type RecordLNLS2 lnls2=Db.getRecord("LNLS2","INCD=:INCD,PL=:PL",1)
+
+		set PP=lnls2.pp/100
+		set FEEP=lnls2.feep/100
+		set RFRE=lnls2.remfre
+		set YLD=lnls2.yield/100
+		set SFCM=lnls2.sfcm
+		
+		// Find annual factor of remittance frequency
+		set FRE=RFRE
+		set JD=+%CurrentDate
+		do ^UFRE
+		set REMAF=AF
+		
+		type RecordLNLS6 lnls6=Db.getRecord("LNLS6","CID=:CID,PSEQ=:PSEQ")
+		set OPTR=lnls6.optr/100
+		set PLRPB=lnls6.plrpb
+		
+		type RecordLN ln=Db.getRecord("LN","CID=:CID")
+		set SCHSEQ=ln.schseq
+		set OSEQ=ln.oseq
+		
+		set SEQ=""
+		
+		do BIL(CID,OSEQ,SCHSEQ)
+		}
+	quit
+	
+	
+BIL(Number CID,Number OSEQ,Number SCHSEQ)	// Collate through history and store appropriate transactions
+	
+	/*
+	   ARGUMENTS:
+		. CID		Account Number		/REQ/MECH=VAL
+		. OSEQ		Internal Bill Oldest
+				Unsatisfied Seq Nbr	/REQ/MECH=VAL
+		. SCHSEQ	Scheduled Sequence	/REQ/MECH=VAL
+		
+	*/
+	
+	type public Boolean ER
+	type public Date JD
+	type public Number SEQ
+	type public String CTL,FRE
+	
+	type Date DDU,NJD
+	
+	type ResultSet rs=Db.select("SCHSEQ","LNBIL1","CID=:CID","SCHSEQ desc")
+	while rs.next() do {
+		set SEQ=rs.getCol("SCHSEQ")
+		
+		// Overdue bills	
+		if 'CTL.extract(2),SEQ<OSEQ quit
+		
+		// Prepayments
+		if CTL.extract(2),SEQ<SCHSEQ quit
+		
+		type RecordLNBIL1 lnbil1=Db.getRecord("LNBIL1","CID=:CID,SCHSEQ=:SEQ")
+		
+		// Date Due
+		set (DDU,NJD)=lnbil1.cdpd
+		
+		// Optionally modify due date based upon FNMA guidelines
+		if CTL.extract(),$$DAY^SCADAT(NJD,1)'=1 do { quit:ER
+			set FRE="1MA1"
+			set JD=NJD
+			do ^UFRE
+			}
+	
+		/*
+		 We define an OVERDUE PAYMENT as one which is due before the
+		 system date. The overdue payment report is run in the morning
+		 after the cutoff date. Therefore payments due on the now
+		 current system date are not considered overdue.
+		*/
+		if 'CTL.extract(2),NJD<%SystemDate do FILE(.lnbil1)
+	
+		/*
+		 We define a PREPAID PAYMENT as paid amounts due on or after the
+		 system date. The overdue payment report is run in the morning
+		 after the cutoff date. Therefore the system date is the first
+		 prepaid payment date.
+		*/
+		if CTL.extract(2),NJD'<%SystemDate do FILE(.lnbil1)
+		
+		}
+	quit
+		
+
+FILE(RecordLNBIL1 lnbil1) // File Data
+	
+	/*
+	
+	   ARGUMENTS:
+		. lnbil1	LNBIL1 object	/REQ/MECH=REF
+	*/
+	type Public String INCD,PL,SFCM
+	type Public Number CID,DDU,FEEP,FEE,IRN,INT,OPTR,PLRPB,PP,PRL,PSEQ,REMAF,YLD,SEQ,%ProcessID
+	
+	// Find either paid or due principal and interest component of bill
+	set (INT,PRL)=0
+	
+	if 'lnbil1.pe01ea.isNull() do BILFUNC1(lnbil1.pe01ea,lnbil1.pe01ab,lnbil1.pe01ad,.INT,.PRL)
+	if 'lnbil1.pe02ea.isNull() do BILFUNC1(lnbil1.pe02ea,lnbil1.pe02ab,lnbil1.pe02ad,.INT,.PRL)
+	if 'lnbil1.pe03ea.isNull() do BILFUNC1(lnbil1.pe03ea,lnbil1.pe03ab,lnbil1.pe03ad,.INT,.PRL)
+	if 'lnbil1.pe04ea.isNull() do BILFUNC1(lnbil1.pe04ea,lnbil1.pe04ab,lnbil1.pe04ad,.INT,.PRL)
+	if 'lnbil1.pe05ea.isNull() do BILFUNC1(lnbil1.pe05ea,lnbil1.pe05ab,lnbil1.pe05ad,.INT,.PRL)
+	if 'lnbil1.pe06ea.isNull() do BILFUNC1(lnbil1.pe06ea,lnbil1.pe06ab,lnbil1.pe06ad,.INT,.PRL)
+	if 'lnbil1.pe07ea.isNull() do BILFUNC1(lnbil1.pe07ea,lnbil1.pe07ab,lnbil1.pe07ad,.INT,.PRL)
+	if 'lnbil1.pe08ea.isNull() do BILFUNC1(lnbil1.pe08ea,lnbil1.pe08ab,lnbil1.pe08ad,.INT,.PRL)
+	if 'lnbil1.pe09ea.isNull() do BILFUNC1(lnbil1.pe09ea,lnbil1.pe09ab,lnbil1.pe09ad,.INT,.PRL)
+	if 'lnbil1.pe10ea.isNull() do BILFUNC1(lnbil1.pe10ea,lnbil1.pe10ab,lnbil1.pe10ad,.INT,.PRL)
+	if 'lnbil1.pe11ea.isNull() do BILFUNC1(lnbil1.pe11ea,lnbil1.pe11ab,lnbil1.pe11ad,.INT,.PRL)
+	if 'lnbil1.pe12ea.isNull() do BILFUNC1(lnbil1.pe12ea,lnbil1.pe12ab,lnbil1.pe12ad,.INT,.PRL)
+	if 'lnbil1.pe13ea.isNull() do BILFUNC1(lnbil1.pe13ea,lnbil1.pe13ab,lnbil1.pe13ad,.INT,.PRL)
+	if 'lnbil1.pe14ea.isNull() do BILFUNC1(lnbil1.pe14ea,lnbil1.pe14ab,lnbil1.pe14ad,.INT,.PRL)
+	if 'lnbil1.pe15ea.isNull() do BILFUNC1(lnbil1.pe15ea,lnbil1.pe15ab,lnbil1.pe15ad,.INT,.PRL)
+	if 'lnbil1.pe16ea.isNull() do BILFUNC1(lnbil1.pe16ea,lnbil1.pe16ab,lnbil1.pe16ad,.INT,.PRL)
+	if 'lnbil1.pe17ea.isNull() do BILFUNC1(lnbil1.pe17ea,lnbil1.pe17ab,lnbil1.pe17ad,.INT,.PRL)
+	if 'lnbil1.pe18ea.isNull() do BILFUNC1(lnbil1.pe18ea,lnbil1.pe18ab,lnbil1.pe18ad,.INT,.PRL)
+	if 'lnbil1.pe19ea.isNull() do BILFUNC1(lnbil1.pe19ea,lnbil1.pe19ab,lnbil1.pe19ad,.INT,.PRL)
+	if 'lnbil1.pe20ea.isNull() do BILFUNC1(lnbil1.pe20ea,lnbil1.pe20ab,lnbil1.pe20ad,.INT,.PRL)
+	
+	if INT+PRL=0 quit
+	
+	// Interest Rate
+	set IRN=lnbil1.cirn
+	if IRN="" do {
+		type RecordLN ln=Db.getRecord("LN","CID=:CID")
+		set IRN=ln.irn
+		}
+	set IRN=IRN/100
+	
+	// Calculate service fee
+	do CALC^LNLS8F(.FEE,SFCM,INT,PP,PLRPB,REMAF,FEEP,IRN,YLD,OPTR,"")
+
+	if PP<1 do {
+		if INT set INT=$$^SCARND(INT*PP,0,CID)
+		if PRL set PRL=$$^SCARND(PRL*PP,0,CID)
+		}
+	
+	type RecordLNLS8PD lnls8pd=Db.getRecord("LNLS8PD","PID=:%ProcessID,INCD=:INCD,PL=:PL,CID=:CID,SEQ=:SEQ",1)
+	
+	set lnls8pd.pseq=PSEQ
+	set lnls8pd.PMTDUE=DDU
+	set lnls8pd.TOTDUE=INT+PRL
+	set lnls8pd.PRNDUE=PRL
+	set lnls8pd.INTDUE=INT
+	set lnls8pd.SRVFEE=FEE
+	
+	do lnls8pd.bypassSave()
+	
+	quit
+	
+	
+BILFUNC1(Number P1,
+	 Number P2,
+	 Number P3,
+	 Number INT,
+	 Number PRL)	// function to manipulate LNBIL1 data
+	
+	/*
+	
+	   ARGUMENTS:
+		. P1	Element Acronym		/REQ/MECH=REF
+		. P2	Total Amount Billed	/REQ/MECH=REF
+		. P3	Amount Still Due	/REQ/MECH=REF
+		. INT	Interest Due		/REQ/MECH=REF
+		. PRL	Principal Due		/REQ/MECH=REF
+	*/
+	type Number AMTVAL
+	type Public Number CTL
+	
+	if 'CTL.extract(2) set AMTVAL=P3
+	else  set AMTVAL=P2-P3
+	
+	// Interest Due or Paid
+	if P1="I" set INT=AMTVAL
+	
+	// Principal Due or Paid
+	if P1="P" set PRL=AMTVAL
+	
+	quit
+
+
+public DPSUM(RecordLNBIL1 lnbil1,Number CID,Date FD,Date TD)	// Delinquency/Prepaid Summary Report
+	/*
+	   ARGUMENTS:
+	   . lnbil1	LNBIL1 Object	/REQ/MECH=REF
+	   . CID	Account Number	/REQ/MECH=VAL
+	   . FD		Date		/REQ/MECH=VAL
+	   . TD		Date		/REQ/MECH=VAL
+	   
+	   Sample call - Called once for each account by report SCA415
+
+	   Extrinsic returns pieced variable with following values
+
+	   Piece 1 - Current Principal Due
+	   Piece 2 - Current Interest Due
+	   Piece 3 - Service Fee on Current Interest Due
+	   Piece 4 - Principal Prepaid
+	   Piece 5 - Interest Prepaid
+	   Piece 6 - Service Fee on Current Interest Due
+	   Piece 7 - Prior Principal Delinquency Recovered
+	   Piece 8 - Prior Interest Delinquency Recovered
+	   Piece 9 - Service Fee on Prior Interest Delinquency Recovered
+
+	   NOTE:  Amounts returned in DPSUM are at 100%.  Logic in report
+	          SCA415 multiplied the interest and principal amounts by
+	          the participation percentage.
+
+	*/
+	
+	type public Number DPSUM,FEEP,FEE,IRN,INT,OPTR,PLRPB,PP,REMAF,SCHSEQ,TSEQ
+	type public String Q,SFCM
+	
+	type Date SCHND
+	type Number B = 0
+
+	set (TSEQ,DPSUM)=""
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+	set SCHSEQ=ln.schseq
+	set SCHND=ln.schnd
+
+	/*
+	 Subtract 1 from SCHSEQ if frequency is other than 1MA1 to accomodate
+	 odd due date requirements of FNMA
+	*/
+	if SCHND,$$DAY^SCADAT(SCHND,1)'=1,SCHSEQ>1 set SCHSEQ=SCHSEQ-1
+
+	// Find principal and interest currently due (new delinquency)
+	if 'lnbil1.exists() set lnbil1=Db.getRecord("LNBIL1","CID=:CID,SCHSEQ=:SCHSEQ",1)
+	
+	do BILFUNC2(.lnbil1,"P",.DPSUM,.B,1)
+	do BILFUNC2(.lnbil1,"I",.DPSUM,.B,2)
+	
+	if B do FEE(.ln,.lnbil1,SCHSEQ,B,3)
+
+	// Find delinquency recovered and prepaid amounts by passing history
+	do TSEQ(.lnbil1,.ln,SCHSEQ)
+
+	quit DPSUM
+
+
+BILFUNC2(RecordLNBIL1 lnbil1,
+	 String PMTVAL,
+	 String DPSUM,
+	 String B,
+	 Number PNUM)	//
+	
+	/*
+	   ARGUMENTS:
+	   	. lnbil1	LNBIL1 Object	/REQ/MECH=REF
+	   	. PMTVAL	Account Number	/REQ/MECH=VAL
+	   	. DPSUM				/REQ/MECH=REF
+	   	. B		Variable	/REQ/MECH=REF
+	   	. PNUM		Piece number	/REQ/MECH=VAL
+	*/
+	
+	if (lnbil1.pe01ea=PMTVAL),(lnbil1.pe01da="") set B=lnbil1.pe01ad set DPSUM.piece("|",PNUM)=B quit
+	if (lnbil1.pe02ea=PMTVAL),(lnbil1.pe02da="") set B=lnbil1.pe02ad set DPSUM.piece("|",PNUM)=B quit
+	if (lnbil1.pe03ea=PMTVAL),(lnbil1.pe03da="") set B=lnbil1.pe03ad set DPSUM.piece("|",PNUM)=B quit
+	if (lnbil1.pe04ea=PMTVAL),(lnbil1.pe04da="") set B=lnbil1.pe04ad set DPSUM.piece("|",PNUM)=B quit 
+	if (lnbil1.pe05ea=PMTVAL),(lnbil1.pe05da="") set B=lnbil1.pe05ad set DPSUM.piece("|",PNUM)=B quit 
+	if (lnbil1.pe06ea=PMTVAL),(lnbil1.pe06da="") set B=lnbil1.pe06ad set DPSUM.piece("|",PNUM)=B quit 
+	if (lnbil1.pe07ea=PMTVAL),(lnbil1.pe07da="") set B=lnbil1.pe07ad set DPSUM.piece("|",PNUM)=B quit 
+	if (lnbil1.pe08ea=PMTVAL),(lnbil1.pe08da="") set B=lnbil1.pe08ad set DPSUM.piece("|",PNUM)=B quit 
+	if (lnbil1.pe09ea=PMTVAL),(lnbil1.pe09da="") set B=lnbil1.pe09ad set DPSUM.piece("|",PNUM)=B quit
+	if (lnbil1.pe10ea=PMTVAL),(lnbil1.pe10da="") set B=lnbil1.pe10ad set DPSUM.piece("|",PNUM)=B quit
+	if (lnbil1.pe11ea=PMTVAL),(lnbil1.pe11da="") set B=lnbil1.pe11ad set DPSUM.piece("|",PNUM)=B quit 
+	if (lnbil1.pe12ea=PMTVAL),(lnbil1.pe12da="") set B=lnbil1.pe12ad set DPSUM.piece("|",PNUM)=B quit 
+	if (lnbil1.pe13ea=PMTVAL),(lnbil1.pe13da="") set B=lnbil1.pe13ad set DPSUM.piece("|",PNUM)=B quit
+	if (lnbil1.pe14ea=PMTVAL),(lnbil1.pe14da="") set B=lnbil1.pe14ad set DPSUM.piece("|",PNUM)=B quit 
+	if (lnbil1.pe15ea=PMTVAL),(lnbil1.pe15da="") set B=lnbil1.pe15ad set DPSUM.piece("|",PNUM)=B quit
+	if (lnbil1.pe16ea=PMTVAL),(lnbil1.pe16da="") set B=lnbil1.pe16ad set DPSUM.piece("|",PNUM)=B quit 
+	if (lnbil1.pe17ea=PMTVAL),(lnbil1.pe17da="") set B=lnbil1.pe17ad set DPSUM.piece("|",PNUM)=B quit
+	if (lnbil1.pe18ea=PMTVAL),(lnbil1.pe18da="") set B=lnbil1.pe18ad set DPSUM.piece("|",PNUM)=B quit 
+	if (lnbil1.pe19ea=PMTVAL),(lnbil1.pe19da="") set B=lnbil1.pe19ad set DPSUM.piece("|",PNUM)=B quit
+	if (lnbil1.pe20ea=PMTVAL),(lnbil1.pe20da="") set B=lnbil1.pe20ad set DPSUM.piece("|",PNUM)=B quit
+
+	quit
+	
+
+TSEQ(RecordLNBIL1 lnbil1,RecordLN ln,Number SCHSEQ)	//
+	
+	/*
+	   ARGUMENTS:
+	   	. lnbil1	LNBIL1 Object		/REQ/MECH=REF
+	   	. ln		LN Object		/REQ/MECH=REF
+	   	. SCHSEQ	Scheduled Sequence	/REQ/MECH=VAL
+	*/
+
+	type public Boolean ER
+	type public Date FD,TD
+	type public Number CID,ITC,PCE,TSEQ
+	type public String HIST,LVL,REC(),RECVAR
+
+	type Number I
+
+	set ER=0
+	
+	type DbSet ds=Db.selectDbSet("HIST","CID=:CID","TSEQ DESC")
+	while ds.next() do { quit:ER
+
+		type RecordHIST hist=ds.getRecord()
+
+		// Outside of date range
+		if hist.tjd<FD set ER=1 quit
+
+		set ITC=hist.itc
+		set TSEQ=hist.tseq
+		
+		// Credit transactions only
+		if 'ITC.extract() set ER=1 quit
+
+		// No error corrects
+		if ITC.extract(6) set ER=1 quit
+
+
+		do HISTL(CID,TSEQ,.REC)
+	
+		set LVL=""
+		for  set LVL=REC(LVL).order() quit:LVL=""  do {
+
+			/*
+			 Examine each bill satisfied by payment.  Bills satisfied
+			 less than SCHSEQ are delinquencies recovered.  Bills
+			 satisfied greater than SCHSEQ (and principal only payments)
+			 are prepayments.
+			*/
+
+			set RECVAR=REC(LVL)
+			for I=1:1 quit:RECVAR.piece("|",I)=""  do {
+				set PCE=RECVAR.piece("|",I)
+				if PCE>SCHSEQ!(PCE.piece("#",1,2)="*#P") do { quit
+					if PCE.piece("#",2)="P" do SET(4) quit
+					if PCE.piece("#",2)="I" do SET(5) do FEE(.ln,.lnbil1,+PCE,PCE.piece("#",3),6)
+					}
+				if PCE,PCE<SCHSEQ do {
+					if PCE.piece("#",2)="P" do SET(7) quit
+					if PCE.piece("#",2)="I" do SET(8) do FEE(.ln,.lnbil1,+PCE,PCE.piece("#",3),9)
+					}
+				}
+			}
+
+		}
+	quit
+	
+	
+SET(Number P)	//
+	
+	/*
+	   ARGUMENTS
+	   	P	Piece number	/REQ/MECH=VAL
+	*/
+	
+	type public String DPSUM,PCE
+	
+	set DPSUM.piece("|",P)=DPSUM.piece("|",P)+PCE.piece("#",3)
+	quit
+
+
+FEE(RecordLN ln,RecordLNBIL1 lnbil1,Number SEQ,Number INT,Number POS)	//
+
+	/*
+	   ARGUMENTS:
+	   	. ln		LN object		/REQ/MECH=REF
+	   	. lnbil1	LNBIL1 Object		/REQ/MECH=REF
+	   	. SEQ		Billing Sequency	/REQ/MECH=VAL
+	   	. INT		Interest Amount		/REQ/MECH=VAL
+	   	. POS		Position (Piece) to
+	   			Set Into DPSUM String	/REQ/MECH=VAL
+	*/
+
+	type Public String SFCM
+	type Public Number DPSUM,FEEP,FEE,IRN,INT,OPTR,PLRPB,PP,REMAF,YLD
+	
+	// Interest Rate
+	set IRN=lnbil1.cirn
+
+	if IRN="" set IRN=ln.irn
+
+	set IRN=IRN/100
+
+	// Calculate service fee
+	do CALC^LNLS8F(.FEE,SFCM,INT,PP,PLRPB,REMAF,FEEP,IRN,YLD,OPTR,"")
+
+	set DPSUM.piece("|",POS)=DPSUM.piece("|",POS)+FEE
+	
+	quit
+
+	
+HISTL(Number CID,Number TSEQ,String REC)	// Retrive Lower level HIST records
+	
+	/*
+	   ARGUMENTS:
+	   	. CID	Account number			/REQ/MECH=VAL
+	   	. TSEQ	Transaction Sequence Number	/REQ/MECH=VAL
+	   	. REC	Variable Array			/REQ/MECH=REF
+	*/
+	
+	type Number CNT
+	
+	set CNT=0
+
+	type DbSet ds=Db.selectDbSet("HISTSB","CID=:CID AND SLN=:TSEQ")
+	while ds.next() do {
+		type RecordHISTSB histsb=ds.getRecord()
+		
+		set CNT=CNT+1
+		
+		set REC(CNT)=histsb.pe01bseq_"#"_histsb.pe01ea_"#"_histsb.pe01amt_"|"
+		set REC(CNT)=REC(CNT)_histsb.pe02bseq_"#"_histsb.pe02ea_"#"_histsb.pe02amt_"|"
+		set REC(CNT)=REC(CNT)_histsb.pe03bseq_"#"_histsb.pe03ea_"#"_histsb.pe03amt_"|"
+		set REC(CNT)=REC(CNT)_histsb.pe04bseq_"#"_histsb.pe04ea_"#"_histsb.pe04amt_"|"
+		set REC(CNT)=REC(CNT)_histsb.pe05bseq_"#"_histsb.pe05ea_"#"_histsb.pe05amt
+
+		}
+	
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60764^23742^VenkataSaiKiran Sanapala^13726"	// Signature - LTD^TIME^USER^SIZE

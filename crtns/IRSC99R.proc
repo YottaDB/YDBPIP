@@ -1,0 +1,1208 @@
+IRSC99R		/*
+	ORIG: titove - 11/01/2005
+	DESC: IRS Processing - Form 1099-R Correction
+
+	---- Comments --------------------------------------------------------
+			  THIS PROCEDURE IS TO BE COMPILED
+			      DO NOT RUN STANDALONE
+
+	I18N=QUIT: Excluded from I18N standards.
+
+	---- Revision History ------------------------------------------------
+	
+	11/07/06 - SWARNALP - CR 23635
+ 		   Modified IRA section to set Payment Amount #1 to 
+ 		   Payment Amount #2 irrespective of the Taxable Amount 
+ 		   not Determined IRATYPE.TAXIND flag when reporting a 
+ 		   Normal distribution from a traditional IRA or SEP 
+ 		   retirement plan.  This is done as part of the Year 2006 
+ 		   programming changes for magnetic media reporting of IRS 
+ 		   1098, 1099 & 5498 forms supported by Profile.
+ 		   
+	09/20/06 - SWARNALP - CR 23178
+		   Modified section IRA to pass "5" as the parameter to the 
+		   extrinsic function call CD^UTL1099R for the two combined 
+		   Profile distribution codes 72 and 95. This modification is 
+		   done as part of the Year 2006 programming changes for 
+		   magnetic media reporting of IRS 1098, 1099 & 5498 forms 
+		   supported by Profile.
+		   
+	05/15/06 - DESHPANDE S K - CR 21167
+		   Modified section ARECBLD - Initialize STATTOT array based on 
+		   StateIds from UTBLSTATID table and also set STATFLG if 
+		   UTBLSTATID has data. Modified section BRECBLD to exclude 
+		   Nonresident Aliens that have had their Form W-8BEN received
+		   by the institutions. Modified section MTRCNTRL - If STATFLG is
+		   set make a call to KRECBLD.
+
+	05/01/06 - TITOVE - CR 21024
+		   Modified BRECBLD and DEATH sections to append RPASEQ when
+		   building a value for CID, instead of IRATYP. Also added
+		   code to ensure we have pieces in IRA() arrays that 
+		   directly correspond to columns in IRA table. Modified
+		   IRA by adding missing calls to BRECWRT. Restored original
+		   comparison logic in CALCAMT (compiler now handles a large
+		   number of OR expressions on the same line).
+
+	04/22/06 - TITOVE - CR 20798
+		   Replaced calls to DOCCODE^IRSO99R function with calls to
+		   CD^UTL1099R function. Corrected code value for IRA.D95.
+
+	11/02/05 - TITOVE - CR 17287
+		   Converted into PSL. Replaced calls to local functions 
+		   DOCCODE, IRAIND and SPECIAL with calls to same functions
+		   in IRSO99R and deleted local functions. Added ACN as 
+		   argument when calling B1099R section, to make consistent
+		   with IRSO99R. Removed tags JD, ACN, RPASEQ and pre-2005
+		   revision history.
+
+	07/12/05 - HILLANBRAND - 16576
+		   Corrected issue with SW84 not reporting
+		   State Income Tax Withheld amount in Field Position 723-734
+		   for Multiple Distribution Code 84. Also fixed issue with the 
+		   STATETX reporting for all IRATYPEs instead of just the
+		   record being reported.  Moved logic to special subsection.
+
+	06/27/05 - HILLANRAND - 16219
+		   Corrected issued with SW49 not reporting.  Modified the state
+		   withholding for loop to loop through all reportable columns
+		   that are reporting distributions.
+
+	*/
+
+        // Accept "Dead code" warning during runtime of @IRSTAPE
+        #ACCEPT Date=11/01/2005;PGM=Eugene Titov;CR=17287
+        quit
+
+
+MTRCNTRL	// Master control
+
+	type public Number ER, PASSFLG
+	type public Boolean STATFLG
+	
+	do Db.delete("B1099R")
+	
+	set PASSFLG=1
+	
+	do ARECBLD quit:ER	// Build and write the "A" record - First pass
+	do BRECBLD quit:ER	// Build and write the "B" records - First pass
+	do CRECBLD quit:ER	// Build and write the "C" record - First pass
+
+	set PASSFLG=2
+	
+	do ARECBLD quit:ER	// Build and write the "A" record - Second pass
+	do BRECBLD quit:ER	// Build and write the "B" records - Second pass
+	do CRECBLD quit:ER	// Build and write the "C" record - Second pass
+	
+	if (STATFLG=1) do KRECBLD quit:ER	// Build and write the "K" record
+	
+	do STORETOT		// Store the TTR report totals
+	
+	quit
+	
+
+ARECBLD	// "A" record builder
+
+	type public String TAMT(,)
+	type public Number STATTOT(,)
+	type public Boolean STATFLG
+
+	type Number FORMCODE, I
+	type String AMTIND
+
+	set FORMCODE=9		// IRS form code
+	set AMTIND="124A"	// IRS amount type indicator
+	
+	set TAMT(1).piece("|",2)="Gross Distribution"
+	set TAMT(2).piece("|",2)="Taxable Amount"
+	set TAMT(4).piece("|",2)="Federal Income Tax Withheld"
+	set TAMT("A").piece("|",2)="Traditional IRA/SEP/SIMPLE distributions or Roth conversions"
+
+	type DbSet ds=Db.selectDbSet("UTBLSTATID")
+		
+	while ds.next() do {
+		
+		type RecordUTBLSTATID utblstid=ds.getRecord("UTBLSTATID")
+		
+		set STATFLG = 1
+		set STATTOT(utblstid.statid) = 0
+		for I = 1:1:9,13,"A","B","C","D","E" set STATTOT(utblstid.statid,I) = 0
+	}
+	do ARECWRT		// Write the record to tape
+	
+	quit
+	
+
+BRECBLD	// "B" record builder
+
+	type public Number AMT(), BRAMT(), IRATYP, PASSFLG, YEAR
+	type public String FORM, FORMS()
+
+	type Date JD
+	type Number ACN, CID, FMV, I, IBAL, RPASEQ, STATEID, TAXYR, ZACN
+	type String ADDR, CITY, CNTRY, CORRTN, DISFLG, DOCCODE, FORCNTY, FULLADDR
+	type String IRA(), IRAIND, LNAME, NAME, SPECIAL, STATE, TAXIND, TIN, TINTYPE, VAR, ZIP
+	type Boolean NODUPFLG
+	
+	set JD=FORMS(FORM)-1
+	
+	type DbSet ds=Db.selectDbSet("IRSUPD", "TJD>:JD AND FTYPE=3")
+
+	while ds.next() do {
+	
+		type RecordIRSUPD irsupd=ds.getRecord("IRSUPD")
+		
+		set ZACN=irsupd.miscseq
+		set RPASEQ=irsupd.bseq
+	
+		type RecordCIF cif1 = Db.getRecord("CIF", "ACN = :ZACN", 1)
+		// Exclude Nonresident Aliens that have had their Form W-8BEN 
+		// received by the institutions 
+		if ('cif1.w8date.isNull()) quit	
+	
+		// Skip duplicates when writting to tape
+		if (irsupd.ccode=1),(PASSFLG=1) quit
+		// Skip "New Entry" for first pass
+		if (irsupd.ccode=4),(PASSFLG=1) quit
+		// Skip "change amount" for second pass
+		if (irsupd.ccode=3),(PASSFLG=2) quit
+
+		// Original/New CIF number
+		set ACN=$select(PASSFLG=1:irsupd.ocif,PASSFLG=2:ZACN)
+		
+		type RecordIRA ira=Db.getRecord("IRA", "ACN=:ACN, RPASEQ = :RPASEQ, TAXYR = :YEAR", 1)
+
+		// Initialize IRA() arrays up to a total number of IRA columns
+		for I = 1:1:99 do {
+			
+			set IRA(0).piece("|",I) = ""
+			set IRA(2).piece("|",I) = ""
+			set IRA(4).piece("|",I) = ""
+			}
+
+		// Insert values corresponding to eligible columns in IRA table
+		for I = 1:1:10,12:1:29,34:1:39,43:1:89,94:1:99 do {
+			
+			set VAR = "D"_I
+			set IRA(0).piece("|",I) = ira.@VAR
+			}		
+		
+		for I = 1:1:10,12:1:29,34:1:39,43,44,45,47:1:89,94:1:99 do {
+			
+			set VAR = "W"_I
+			set IRA(2).piece("|",I) = ira.@VAR
+			}
+		
+		for I = 1:1:8,10,13:1:29,34:1:39,43,44,45,47:1:89,94:1:99 do {
+			
+			set VAR = "SW"_I
+			set IRA(4).piece("|",I) = ira.@VAR
+			}
+			
+		// Calculate IRA Balance at Year-End
+		set TAXYR = YEAR		
+		do ^IRAYEBAL
+		
+		set DISFLG=$select('IBAL:"1",1:" ")
+		
+		type RecordIRATYPE iratype=Db.getRecord("IRATYPE", "ACN = :ACN, RPASEQ = :RPASEQ", 1)
+
+		set IRATYP=iratype.iratyp
+		set TAXIND=$select(iratype.taxind:"1",1:" ")
+		set STATEID=iratype.stplnid
+
+		type RecordCIF cif = Db.getRecord("CIF", "ACN = :ACN", 1)
+		
+		set CID=ACN_"-"_RPASEQ		// Account number (sequence number)
+		
+		set TIN=$select(PASSFLG=1:irsupd.otin,PASSFLG=2:cif.taxid) // Tax ID number
+		
+		set TINTYPE=$select(TIN?2N1"-"7N:1,TIN?3N1"-"2N1"-"4N:2,1:" ") // Type of TIN
+		
+		// The rest of AMT() entries are initialized at the top of template routine
+		set AMT(13)=0	// State Tax W/H amount, needed for IRSFTR1.AMT13 column
+			
+		set BRAMT(2)=0
+		set DOCCODE="  "
+		set CORRTN=$select(PASSFLG=1:"G",PASSFLG=2:"C")
+		set NAME=$select(PASSFLG=1:irsupd.oname,PASSFLG=2:cif.nam)
+		set LNAME=$select(PASSFLG=1:irsupd.olnam,PASSFLG=2:cif.lnm)
+
+		set FULLADDR=$$FULLADDR^RSPADD(ACN,RPASEQ)
+		
+		set ADDR=FULLADDR.piece("|",1)_" "_FULLADDR.piece("|",2)_" "_FULLADDR.piece("|",3)
+		set CITY=FULLADDR.piece("|",4)	// Payee City
+		set STATE=FULLADDR.piece("|",5)	// Payee State
+		set ZIP=FULLADDR.piece("|",6).piece("-",1)_FULLADDR.piece("|",6).piece("-",2)  // Payee
+		set CNTRY=FULLADDR.piece("|",7)	// Foreign country
+		set FORCNTY=$select(FULLADDR.piece("|",7)="US":" ",1:1) // Foreign country indicator		
+
+		if (irsupd.ccode '= 1) set NODUPFLG = 1
+		else  set NODUPFLG = 0
+		
+		do IRAIND^IRSO99R(IRATYP,.IRAIND)
+		
+		// Zero amount fields
+		if (PASSFLG=1),irsupd.ccode=2 do SPECIAL^IRSO99R,BRECWRT,B1099R(.irsupd,ACN) quit
+
+		/*
+		  The following values of I represent the different columns in the IRA
+		  table that are reportable codes.
+		  Note: Number 6 must be last because death changes various CIF values.
+		*/
+		for I=1,4,5,7,10,15,17,18,19,24,26,28,29,34,36,37,38,39,43,44,48,49,51,53,57,59,61,63,64,65,67,68,69,70,72,73,74,75,76,77,78,80,85,86,89,94,95,96,98,6 do CALCAMT(.irsupd)
+		}
+
+	quit
+
+	
+CALCAMT(RecordIRSUPD irsupd)
+	/*
+	  This function determines which distribution codes to generate the 1099-R
+	  form based on the value of Form Cutoff Amount(UTBLIRS.FCTOFF). 
+	  Only reportable codes are considered.
+	*/
+	
+	type public Number AMT(), BRAMT(), CUTOFF, I 
+	type public String IRA(), IRAIND
+	
+	type Boolean QT=0
+	type Number J
+
+	for J=1:1:9,"A","B","C","D","E" set AMT(J)=0	// Clear amount registers
+	
+	set BRAMT(2)=0
+	
+	// Check for any reportable amounts
+	if ((I=4)!(I=5)!(I=6)!(I=7)!(I=15)!(I=17)!(I=24)!(I=26)!(I=28)!(I=29)!(I=36)!(I=37)!(I=38)!(I=39)!(I=43)!(I=44)!(I=48)!(I=63)!(I=64)!(I=67)!(I=68)!(I=69)!(I=72)!(I=73)!(I=74)!(I=75)!(I=76)!(I=89)!(I=94)!(I=95))&(IRA(0).piece("|",I)<CUTOFF) quit
+	
+	if (I=1),(IRA(0).piece("|",1)+IRA(0).piece("|",9)+IRA(0).piece("|",10)+$select(IRAIND=1:IRA(0).piece("|",12),1:0)<CUTOFF) quit
+	if (I=18),(IRA(0).piece("|",18)+IRA(0).piece("|",22)<CUTOFF) quit
+	if (I=19),(IRA(0).piece("|",19)+IRA(0).piece("|",23)<CUTOFF) quit
+	if (I=34),(IRA(0).piece("|",34)+IRA(0).piece("|",35)<CUTOFF) quit
+	if (I=49),(IRA(0).piece("|",49)+IRA(0).piece("|",50)<CUTOFF) quit
+	if (I=51),(IRA(0).piece("|",51)+IRA(0).piece("|",52)<CUTOFF) quit
+	if (I=53),(IRA(0).piece("|",53)+IRA(0).piece("|",54)+IRA(0).piece("|",55)+IRA(0).piece("|",56)<CUTOFF) quit
+	if (I=57),(IRA(0).piece("|",57)+IRA(0).piece("|",58)<CUTOFF) quit
+	if (I=59),(IRA(0).piece("|",59)+IRA(0).piece("|",60)<CUTOFF) quit
+	if (I=61),(IRA(0).piece("|",61)+IRA(0).piece("|",62)<CUTOFF) quit
+	if (I=65),(IRA(0).piece("|",65)+IRA(0).piece("|",66)<CUTOFF) quit
+	if (I=70),(IRA(0).piece("|",70)+IRA(0).piece("|",71)<CUTOFF) quit
+	if (I=77),(IRA(0).piece("|",77)+IRA(0).piece("|",81)<CUTOFF) quit
+	if (I=78),(IRA(0).piece("|",78)+IRA(0).piece("|",79)+IRA(0).piece("|",82)+IRA(0).piece("|",83)<CUTOFF) quit
+	if (I=80),(IRA(0).piece("|",80)+IRA(0).piece("|",84)<CUTOFF) quit
+	if (I=85),(IRA(0).piece("|",85)+IRA(0).piece("|",87)<CUTOFF) quit
+	if (I=86),(IRA(0).piece("|",86)+IRA(0).piece("|",88)<CUTOFF) quit
+	if (I=96),(IRA(0).piece("|",I)+IRA(0).piece("|",97)<CUTOFF) quit
+	if (I=98),(IRA(0).piece("|",I)+IRA(0).piece("|",99)<CUTOFF) quit
+
+	do IRA(.irsupd)
+
+	quit
+	
+	
+IRA(RecordIRSUPD irsupd)
+	/*
+		AMT(1)		Gross Distribution Amount 
+				IRA(0) node 	
+				B1099R.BAMT1 - Payment Amount #1
+	
+		AMT(4)		Federal Income Tax Withheld amount 
+				IRA(2) node
+				B1099R.BAMT4 - Payment Amount #4
+	
+		AMT(13)		Total Reportable State Withholding 
+				IRA(4) node
+				B1099R.BTOTSTWH -Total Reportable State Withholding
+	
+		AMT(“A”)	Traditional IRA/SEP/SIMPLE distribution amount 
+				IRATYP=1,4,11, or 16 use AMT(1), else 0
+				B1099R.BAMTA - Payment Amount #A
+	
+		BRAMT(2)	Taxable amount
+	
+		AMT(2)		IRATYP=13 or 15 use 0,  else use AMT(1)  
+				B1099R.BAMT2 - Payment Amount #2
+	*/
+	
+	type public Number ACN, AMT(), BRAMT(), I, IRATYP, TAXIND
+	type public String DOCCODE, IRA(), IRAIND
+
+	if I=1 do { quit
+		set AMT(4)=IRA(2).piece("|",1)+IRA(2).piece("|",9)+IRA(2).piece("|",10)
+		set AMT(4)=AMT(4)*100
+		set AMT(13)=IRA(4).piece("|",1)+IRA(4).piece("|",9)+IRA(4).piece("|",10)
+		set AMT(13)=AMT(13)*100
+		set AMT(1)=IRA(0).piece("|",1)+IRA(0).piece("|",9)+IRA(0).piece("|",10)
+		set AMT(1)=AMT(1)*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("7 ")
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=AMT(1)
+		if (IRATYP=1)!(IRATYP=4) set AMT(2)=AMT(1)
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=AMT(1)
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}	
+	if I=4 do { quit
+		set AMT(4)=IRA(2).piece("|",I)*100
+		set AMT(13)=IRA(4).piece("|",I)*100
+		set AMT(1)=IRA(0).piece("|",I)*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("1 ")
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=AMT(1)
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=AMT(1)
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}
+	if I=5 do { quit
+		set AMT(4)=IRA(2).piece("|",I)*100
+		set AMT(13)=IRA(4).piece("|",I)*100
+		set AMT(1)=IRA(0).piece("|",I)*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("3 ")
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=AMT(1)
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=AMT(1)
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}	
+	if I=6 do { quit
+		set AMT(4)=IRA(2).piece("|",I)*100
+		set AMT(13)=IRA(4).piece("|",I)*100
+		set AMT(1)=IRA(0).piece("|",I)*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("4 ")
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=AMT(1)
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=AMT(1)
+		do DEATH(.irsupd)
+		}	
+	if I=7 do { quit
+		set AMT(4)=IRA(2).piece("|",I)*100
+		set AMT(13)=IRA(4).piece("|",I)*100
+		set AMT(1)=IRA(0).piece("|",I)*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("5 ")
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=AMT(1)
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=AMT(1)
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}	
+	if I=15 do { quit
+		set AMT(4)=IRA(2).piece("|",I)*100
+		set AMT(13)=IRA(4).piece("|",I)*100
+		set AMT(1)=IRA(0).piece("|",I)*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("6 ")
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=AMT(1)
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=AMT(1)
+		set IRAIND=" "
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}	
+	if I=17 do { quit
+		set AMT(4)=IRA(2).piece("|",I)*100
+		set AMT(13)=IRA(4).piece("|",I)*100
+		set AMT(1)=IRA(0).piece("|",I)*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("2 ")
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=AMT(1)
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=AMT(1)
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}
+	if I=18 do { quit
+		set AMT(4)=(IRA(2).piece("|",18)+IRA(2).piece("|",22))*100
+		set AMT(13)=(IRA(4).piece("|",18)+IRA(4).piece("|",22))*100
+		set AMT(1)=(IRA(0).piece("|",18)+IRA(0).piece("|",22))*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("8 ")
+		set AMT(2)=IRA(0).piece("|",22)*100
+		set BRAMT(2)=IRA(0).piece("|",22)*100 //insert into B1099R
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}
+	if I=19 do { quit
+		set AMT(4)=(IRA(2).piece("|",19)+IRA(2).piece("|",23))*100
+		set AMT(13)=(IRA(4).piece("|",19)+IRA(4).piece("|",23))*100
+		set AMT(1)=(IRA(0).piece("|",19)+IRA(0).piece("|",23))*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("P ")
+		set AMT(2)=IRA(0).piece("|",23)*100
+		set BRAMT(2)=IRA(0).piece("|",23)*100 //insert into B1099R
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}	
+	if I=24 do { quit
+		set AMT(4)=IRA(2).piece("|",I)*100
+		set AMT(13)=IRA(4).piece("|",I)*100
+		set AMT(1)=IRA(0).piece("|",I)*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("D ")
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=AMT(1)
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=AMT(1)
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}
+	if I=26 do { quit
+		set AMT(4)=IRA(2).piece("|",I)*100
+		set AMT(13)=IRA(4).piece("|",I)*100
+		set AMT(1)=IRA(0).piece("|",I)*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("4G")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}
+	if I=28 do { quit
+		set AMT(4)=IRA(2).piece("|",I)*100
+		set AMT(13)=IRA(4).piece("|",I)*100
+		set AMT(1)=IRA(0).piece("|",I)*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("G ")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}
+	if I=29 do { quit
+		set AMT(4)=IRA(2).piece("|",I)*100
+		set AMT(13)=IRA(4).piece("|",I)*100
+		set AMT(1)=IRA(0).piece("|",I)*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("G ")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}	
+	if I=34 do { quit
+		set AMT(4)=(IRA(2).piece("|",34)+IRA(2).piece("|",35))*100
+		set AMT(13)=IRA(4).piece("|",I)*100
+		set AMT(1)=(IRA(0).piece("|",34)+IRA(0).piece("|",35))*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("2 ")
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=AMT(1)
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=AMT(1)
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}	
+	if I=36 do { quit
+		set AMT(4)=IRA(2).piece("|",I)*100
+		set AMT(13)=IRA(4).piece("|",I)*100
+		set AMT(1)=IRA(0).piece("|",I)*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("S ")
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=AMT(1)
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=AMT(1)
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}	
+	if I=37 do { quit
+		set AMT(4)=IRA(2).piece("|",I)*100
+		set AMT(13)=IRA(4).piece("|",I)*100
+		set AMT(1)=IRA(0).piece("|",I)*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("L ")
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=AMT(1)
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=AMT(1)
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}	
+	if I=38 do { quit
+		set AMT(4)=IRA(2).piece("|",I)*100
+		set AMT(13)=IRA(4).piece("|",I)*100
+		set AMT(1)=IRA(0).piece("|",I)*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("2 ")
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=AMT(1)
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=AMT(1)
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}	
+	if I=39 do { quit
+		set AMT(4)=IRA(2).piece("|",I)*100
+		set AMT(13)=IRA(4).piece("|",I)*100
+		set AMT(1)=IRA(0).piece("|",I)*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("2 ")
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=AMT(1)
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=AMT(1)
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}	
+	if I=43 do { quit
+		set AMT(4)=IRA(2).piece("|",I)*100
+		set AMT(13)=IRA(4).piece("|",I)*100
+		set AMT(1)=IRA(0).piece("|",I)*100
+		set AMT(2)=0,BRAMT(2)=0   // Taxable amount is 0 for rechars
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("N ")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}	
+	if I=44 do { quit
+		set AMT(4)=IRA(2).piece("|",I)*100
+		set AMT(13)=IRA(4).piece("|",I)*100
+		set AMT(1)=IRA(0).piece("|",I)*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("4 ")
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=AMT(1)
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=AMT(1)
+		do DEATH(.irsupd)
+		}	
+	if I=48 do { quit
+		set AMT(4)=IRA(2).piece("|",I)*100
+		set AMT(13)=IRA(4).piece("|",I)*100
+		set AMT(1)=IRA(0).piece("|",I)*100
+		set AMT(2)=0,BRAMT(2)=0   // Taxable amount is 0 for rechars
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("R ")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}	
+	if I=49 do { quit
+		set AMT(4)=(IRA(2).piece("|",I)+IRA(2).piece("|",50))*100
+		set AMT(13)=(IRA(4).piece("|",I)+IRA(4).piece("|",50))*100
+		set AMT(1)=(IRA(0).piece("|",I)+IRA(0).piece("|",50))*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=IRA(0).piece("|",50)*100
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=IRA(0).piece("|",50)*100
+		set DOCCODE=$$CD^UTL1099R("18")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}	
+	if I=51 do { quit
+		set AMT(4)=(IRA(2).piece("|",I)+IRA(2).piece("|",52))*100
+		set AMT(13)=(IRA(4).piece("|",I)+IRA(4).piece("|",52))*100
+		set AMT(1)=(IRA(0).piece("|",I)+IRA(0).piece("|",52))*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=IRA(0).piece("|",52)*100
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=IRA(0).piece("|",52)*100
+		set DOCCODE=$$CD^UTL1099R("28")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}	
+	if I=53 do { quit
+		set AMT(4)=(IRA(2).piece("|",I)+IRA(2).piece("|",54)+IRA(2).piece("|",55)+IRA(2).piece("|",56))*100
+		set AMT(13)=(IRA(4).piece("|",I)+IRA(4).piece("|",54)+IRA(4).piece("|",55)+IRA(4).piece("|",56))*100
+		set AMT(1)=(IRA(0).piece("|",I)+IRA(0).piece("|",54)+IRA(0).piece("|",55)+IRA(0).piece("|",56))*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=(IRA(0).piece("|",54)+IRA(0).piece("|",55)+IRA(0).piece("|",56))*100
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=(IRA(0).piece("|",54)+IRA(0).piece("|",55)+IRA(0).piece("|",56))*100
+		set DOCCODE=$$CD^UTL1099R("28")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}	
+	if I=57 do { quit
+		set AMT(4)=(IRA(2).piece("|",I)+IRA(2).piece("|",58))*100
+		set AMT(13)=(IRA(4).piece("|",I)+IRA(4).piece("|",58))*100
+		set AMT(1)=(IRA(0).piece("|",I)+IRA(0).piece("|",58))*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=IRA(0).piece("|",58)*100
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=IRA(0).piece("|",58)*100
+		set DOCCODE=$$CD^UTL1099R("28")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}	
+	if I=59 do { quit
+		set AMT(4)=(IRA(2).piece("|",I)+IRA(2).piece("|",60))*100
+		set AMT(13)=(IRA(4).piece("|",I)+IRA(4).piece("|",60))*100
+		set AMT(1)=(IRA(0).piece("|",I)+IRA(0).piece("|",60))*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=IRA(0).piece("|",60)*100
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=IRA(0).piece("|",60)*100
+		set DOCCODE=$$CD^UTL1099R("48")
+		do DEATH(.irsupd)
+		}	
+	if I=61 do { quit
+		set AMT(4)=(IRA(2).piece("|",I)+IRA(2).piece("|",62))*100
+		set AMT(13)=(IRA(4).piece("|",I)+IRA(4).piece("|",62))*100  
+		set AMT(1)=(IRA(0).piece("|",I)+IRA(0).piece("|",62))*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=IRA(0).piece("|",62)*100
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=IRA(0).piece("|",62)*100
+		set DOCCODE=$$CD^UTL1099R("48")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}	
+	if I=63 do { quit
+		set AMT(4)=(IRA(2).piece("|",63))*100
+		set AMT(13)=(IRA(4).piece("|",63))*100  
+		set AMT(1)=(IRA(0).piece("|",63))*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=AMT(1)
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("D1")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}	
+	if I=64 do { quit
+		set AMT(4)=(IRA(2).piece("|",64))*100
+		set AMT(13)=(IRA(4).piece("|",64))*100  
+		set AMT(1)=(IRA(0).piece("|",64))*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=AMT(1)
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("D2")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}	
+	if I=65 do { quit
+		set AMT(4)=(IRA(2).piece("|",I)+IRA(2).piece("|",66))*100
+		set AMT(13)=(IRA(4).piece("|",I)+IRA(4).piece("|",66))*100  
+		set AMT(1)=(IRA(0).piece("|",I)+IRA(0).piece("|",66))*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=AMT(1)
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("D2")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}	
+	if I=67 do { quit
+		set AMT(4)=(IRA(2).piece("|",67))*100
+		set AMT(13)=(IRA(4).piece("|",67))*100  
+		set AMT(1)=(IRA(0).piece("|",67))*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=AMT(1)
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("D2")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}	
+	if I=68 do { quit
+		set AMT(4)=(IRA(2).piece("|",68))*100
+		set AMT(13)=(IRA(4).piece("|",68))*100  
+		set AMT(1)=(IRA(0).piece("|",68))*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=AMT(1)
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("D4")
+		do DEATH(.irsupd)
+		}	
+	if I=69 do { quit
+		set AMT(4)=(IRA(2).piece("|",69))*100
+		set AMT(13)=(IRA(4).piece("|",69))*100  
+		set AMT(1)=(IRA(0).piece("|",69))*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=AMT(1)
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("D4")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}	
+	if I=70 do { quit
+		set AMT(4)=(IRA(2).piece("|",I)+IRA(2).piece("|",71))*100
+		set AMT(13)=(IRA(4).piece("|",I)+IRA(4).piece("|",71))*100  
+		set AMT(1)=(IRA(0).piece("|",I)+IRA(0).piece("|",71))*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=IRA(0).piece("|",71)*100
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=IRA(0).piece("|",71)*100
+		set DOCCODE=$$CD^UTL1099R("P1")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}	
+	if I=72 do { quit
+		set AMT(4)=(IRA(2).piece("|",72))*100
+		set AMT(13)=(IRA(4).piece("|",72))*100  
+		set AMT(1)=(IRA(0).piece("|",72))*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=AMT(1)
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("5 ")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}	
+	if I=73 do { quit
+		set AMT(4)=(IRA(2).piece("|",73))*100
+		set AMT(13)=(IRA(4).piece("|",73))*100  
+		set AMT(1)=(IRA(0).piece("|",73))*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=AMT(1)
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("L1")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}	
+	if I=74 do { quit
+		set AMT(4)=(IRA(2).piece("|",I))*100
+		set AMT(1)=(IRA(0).piece("|",I))*100
+		set AMT(13)=(IRA(4).piece("|",I))*100
+		set AMT(2)=0
+		set BRAMT(2)=0
+		set DOCCODE=$$CD^UTL1099R("T ")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}
+	if I=75 do { quit
+		set AMT(4)=(IRA(2).piece("|",75))*100
+		set AMT(13)=(IRA(4).piece("|",75))*100  
+		set AMT(1)=(IRA(0).piece("|",75))*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=AMT(1)
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("L4")
+		do DEATH(.irsupd)
+		}
+	if I=76 do { quit
+		set AMT(4)=(IRA(2).piece("|",76))*100
+		set AMT(13)=(IRA(4).piece("|",76))*100  
+		set AMT(1)=(IRA(0).piece("|",76))*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=AMT(1)
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("L4")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}
+	if I=77 do { quit
+		set AMT(4)=(IRA(2).piece("|",I)+IRA(2).piece("|",81))*100
+		set AMT(13)=(IRA(4).piece("|",I)+IRA(4).piece("|",81))*100  
+		set AMT(1)=(IRA(0).piece("|",I)+IRA(0).piece("|",81))*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=IRA(0).piece("|",81)*100
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=IRA(0).piece("|",81)*100
+		set DOCCODE=$$CD^UTL1099R("P2")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}
+	if I=78 do { quit
+		set AMT(4)=(IRA(2).piece("|",I)+IRA(2).piece("|",79)+IRA(2).piece("|",82)+IRA(2).piece("|",83))*100
+		set AMT(13)=(IRA(4).piece("|",I)+IRA(4).piece("|",79)+IRA(4).piece("|",82)+IRA(4).piece("|",83))*100
+		set AMT(1)=(IRA(0).piece("|",I)+IRA(0).piece("|",79)+IRA(0).piece("|",82)+IRA(0).piece("|",83))*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=(IRA(0).piece("|",82)+IRA(0).piece("|",83))*100
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=(IRA(0).piece("|",82)+IRA(0).piece("|",83))*100
+		set DOCCODE=$$CD^UTL1099R("P2")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}
+	if I=80 do { quit
+		set AMT(4)=(IRA(2).piece("|",I)+IRA(2).piece("|",84))*100
+		set AMT(13)=(IRA(4).piece("|",I)+IRA(4).piece("|",84))*100  
+		set AMT(1)=(IRA(0).piece("|",I)+IRA(0).piece("|",84))*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=IRA(0).piece("|",84)*100
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=IRA(0).piece("|",84)*100
+		set DOCCODE=$$CD^UTL1099R("P2")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}
+	if I=85 do { quit
+		set AMT(4)=(IRA(2).piece("|",I)+IRA(2).piece("|",87))*100
+		set AMT(13)=(IRA(4).piece("|",I)+IRA(4).piece("|",87))*100  
+		set AMT(1)=(IRA(0).piece("|",I)+IRA(0).piece("|",87))*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=IRA(0).piece("|",87)*100
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=IRA(0).piece("|",87)*100
+		set DOCCODE=$$CD^UTL1099R("P4")
+		do DEATH(.irsupd)
+		}
+	if I=86 do { quit
+		set AMT(4)=(IRA(2).piece("|",I)+IRA(2).piece("|",88))*100
+		set AMT(13)=(IRA(4).piece("|",I)+IRA(4).piece("|",88))*100  
+		set AMT(1)=(IRA(0).piece("|",I)+IRA(0).piece("|",88))*100
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=IRA(0).piece("|",88)*100
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=IRA(0).piece("|",88)*100
+		set DOCCODE=$$CD^UTL1099R("P4")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}
+	if I=89 do { quit
+		set AMT(4)=IRA(2).piece("|",I)*100
+		set AMT(13)=IRA(4).piece("|",I)*100
+		set AMT(1)=IRA(0).piece("|",I)*100
+		if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+		else  set AMT(2)=AMT(1)
+		if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+		else  set BRAMT(2)=AMT(1)
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		set DOCCODE=$$CD^UTL1099R("Q ")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}
+	if I=94 do { quit
+		set AMT(4)=(IRA(2).piece("|",I))*100
+		set AMT(1)=(IRA(0).piece("|",I))*100
+		set AMT(13)=(IRA(4).piece("|",I))*100
+		set AMT(2)=0
+		set BRAMT(2)=0
+		set DOCCODE=$$CD^UTL1099R("J ")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}
+	if I=95 do { quit
+		set AMT(4)=(IRA(2).piece("|",I))*100
+		set AMT(1)=(IRA(0).piece("|",I))*100
+		set AMT(13)=(IRA(4).piece("|",I))*100
+		set AMT(2)=0
+		set BRAMT(2)=0
+		set DOCCODE=$$CD^UTL1099R("5 ")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}
+	if I=96 do { quit
+		set AMT(4)=(IRA(2).piece("|",I)+IRA(2).piece("|",97))*100
+		set AMT(1)=(IRA(0).piece("|",I)+IRA(0).piece("|",97))*100
+		set AMT(13)=(IRA(4).piece("|",I)+IRA(4).piece("|",97))*100
+		set AMT(2)=0
+		set BRAMT(2)=0
+		set DOCCODE=$$CD^UTL1099R("J8")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}
+	if I=98 do { quit
+		set AMT(4)=(IRA(2).piece("|",I)+IRA(2).piece("|",99))*100
+		set AMT(1)=(IRA(0).piece("|",I)+IRA(0).piece("|",99))*100
+		set AMT(13)=(IRA(4).piece("|",I)+IRA(4).piece("|",99))*100
+		set AMT(2)=0
+		set BRAMT(2)=0
+		set DOCCODE=$$CD^UTL1099R("JP")
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		if (irsupd.ccode'=1) do BRECWRT
+		}
+	quit
+	
+
+DEATH(RecordIRSUPD irsupd)	// Death beneficiary redirection
+
+	type public Date JD
+	type public Number ACN, AMT(), BRAMT(), I, IRATYP, PASSFLG, RPASEQ, YEAR
+	type public String CID, DISFLG, IRAIND, STATEID, TAXIND
+	
+	type Number BSEQ, DISTCODE
+	type String X
+	type public String ADDR, CIDSAVE, CITY, CNTRY, DOCCODE, FORCNTY, FULLADDR
+	type public String LNAME, NAMCON, NAME, STATE, TIN, TINTYPE, ZIP
+		
+	set DISTCODE=I
+	
+	type DbSet ds1=Db.selectDbSet("IRABEN1","ACN=:ACN AND RPASEQ=:RPASEQ AND CYR=:YEAR")
+	
+	// No beneficiary
+	if ds1.isEmpty() do { quit
+		
+		do SPECIAL^IRSO99R,B1099R(.irsupd,ACN)
+		
+		if (irsupd.ccode'=1) do BRECWRT
+		}
+	
+	while ds1.next() do {
+		
+		type RecordIRABEN1 iraben1=ds1.getRecord("IRABEN1")
+		
+		if DISTCODE=6 do {
+			set AMT(4)=iraben1.wth*100
+			set AMT(13)=iraben1.totstwh*100  
+			set AMT(1)=(iraben1.tamt*100)+AMT(4)+AMT(13)
+			if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+			else  set AMT(2)=(iraben1.tamt+iraben1.wth+iraben1.totstwh)*100
+			if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+			else  set BRAMT(2)=(iraben1.tamt+iraben1.wth+iraben1.totstwh)*100
+			set DOCCODE=$$CD^UTL1099R("4 ")
+			}
+		
+		if DISTCODE=59 do {
+			set AMT(4)=(iraben1.wth59+iraben1.wth60)*100
+			set AMT(13)=(iraben1.totswh59+iraben1.totswh60)*100  
+			set AMT(1)=((iraben1.tamt59+iraben1.tamt60)*100)+AMT(4)+AMT(13)
+			if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+			else  set AMT(2)=(iraben1.tamt60+iraben1.wth60+iraben1.totswh60)*100
+			if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+			else  set BRAMT(2)=(iraben1.tamt60+iraben1.wth60+iraben1.totswh60)*100
+			set DOCCODE=$$CD^UTL1099R("48")
+			}
+		
+		if DISTCODE=68 do {
+			set AMT(4)=iraben1.wth68*100
+			set AMT(13)=iraben1.totswh68*100
+			set AMT(1)=(iraben1.tamt68*100)+AMT(4)+AMT(13)
+			if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+			else  set AMT(2)=AMT(1)
+			if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+			else  set BRAMT(2)=AMT(1)
+			set DOCCODE=$$CD^UTL1099R("D4")
+			}
+		
+		if DISTCODE=75 do {
+			set AMT(4)=iraben1.wth75*100
+			set AMT(13)=iraben1.totswh75*100
+			set AMT(1)=(iraben1.tamt75*100)+AMT(4)+AMT(13)
+			if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+			else  set AMT(2)=AMT(1)
+			if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+			else  set BRAMT(2)=AMT(1)
+			set DOCCODE=$$CD^UTL1099R("L4")
+			}
+		
+		if DISTCODE=85 do {
+			set AMT(4)=(iraben1.wth85+iraben1.wth87)*100
+			set AMT(13)=(iraben1.totswh85+iraben1.totswh87)*100  
+			set AMT(1)=((iraben1.tamt85+iraben1.tamt87)*100)+AMT(4)+AMT(13)
+			if (IRATYP=13)!(IRATYP=15)!(TAXIND=1) set AMT(2)=0
+			else  set AMT(2)=(iraben1.tamt87+iraben1.wth87+iraben1.totswh87)*100
+			if (IRATYP=13)!(IRATYP=15) set BRAMT(2)=0
+			else  set BRAMT(2)=(iraben1.tamt87+iraben1.wth87+iraben1.totswh87)*100
+	 		set DOCCODE=$$CD^UTL1099R("P4")
+			}
+		
+		if +AMT(1)=0 quit	     // No distribution
+		
+		if (IRATYP=1)!(IRATYP=4)!(IRATYP=11)!(IRATYP=16) set AMT("A")=AMT(1)
+		
+		type RecordIRABEN iraben=Db.getRecord("IRABEN","ACN=:ACN,RPASEQ=:RPASEQ,BENSEQ=:iraben1.benseq")
+		
+		// Beneficiary is a PROFILE customer and address missing in IRABEN table
+		if 'iraben.benacn.isNull(),iraben.benmad1.isNull() do {
+		
+			type RecordCIF cif = Db.getRecord("CIF", "ACN = :iraben.benacn")
+			
+			set FULLADDR=$$FULLADDR^RSPADD(iraben.benacn,RPASEQ)
+		
+			quit:FULLADDR.isNull()
+			
+			set ADDR=FULLADDR.piece("|",1)_" "_FULLADDR.piece("|",2)_" "_FULLADDR.piece("|",3)
+			set CITY=FULLADDR.piece("|",4)		// Beneficiary City
+			set STATE=FULLADDR.piece("|",5)		// Beneficiary State
+			set ZIP=FULLADDR.piece("|",6).piece("-",1)_FULLADDR.piece("|",6).piece("-",2) // Beneficiary Zip
+			set CNTRY=FULLADDR.piece("|",7)		// Foreign country
+			set FORCNTY=$select(CNTRY="US":" ",1:1)  	// Foreign country indicator
+			// Set Tax ID, Beneficiary First and Last Names
+			set TIN=$select(PASSFLG=1:irsupd.otin,PASSFLG=2:cif.taxid)
+			set NAME=$select(PASSFLG=1:irsupd.oname,PASSFLG=2:cif.nam)
+			set LNAME=$select(PASSFLG=1:irsupd.olnam,PASSFLG=2:cif.lnm)
+			}
+			
+		// Beneficiary is not a PROFILE customer
+		else  do {
+			set NAME=iraben.benname			// Beneficiary First Name
+			set LNAME=iraben.benlnm			// Beneficiary Last Name
+			set TIN=iraben.bentaxid			// Beneficiary TAXID
+			// Set line 2 and line 3 of Beneficiary address
+			set ADDR=iraben.benmad1_" "_iraben.benmad2_" "_iraben.benmad3
+			set FULLADDR.piece("|",1)=iraben.benmad1
+			set FULLADDR.piece("|",2)=iraben.benmad2
+			set FULLADDR.piece("|",3)=iraben.benmad3
+			set CITY=iraben.bencity
+			set STATE=iraben.benstate
+			set ZIP=iraben.benzip.piece("-",1)
+			set FULLADDR.piece("|",6)=ZIP
+			set CNTRY=iraben.bencntry
+			set FORCNTY=$select(CNTRY="US":" ",1:1)
+			}	
+	
+		type RecordIRATYPE iratype1=Db.getRecord("IRATYPE","ACN=:ACN,RPASEQ=:RPASEQ", 1)
+
+		set TAXIND=$select(iratype1.taxind:"1",1:" ")	
+		set CIDSAVE=CID
+		set CID=iraben1.benseq_"-"_RPASEQ // Account number (sequence number)
+
+		set TINTYPE=$select(TIN?2N1"-"7N:1,TIN?3N1"-"2N1"-"4N:2,1:" ") // Type of TIN
+		
+		if (TINTYPE=2) set X=LNAME
+		else  set X=NAME
+	
+		do NAMCNTRL^IRSTPMTR
+	
+		set NAMCON=X
+		
+		do IRAIND^IRSO99R(IRATYP,.IRAIND)
+
+		do SPECIAL^IRSO99R,BRECWRT
+
+		// Inserting B Record data into B1099R File
+
+		set BSEQ=Db.nextVal("B1099R","PDATE=:JD,BACN=:iraben1.benseq")
+		
+		type RecordB1099R b1099r=Db.getRecord("B1099R","PDATE=:JD,BACN=:iraben1.benseq,BSEQ=:BSEQ", 1)
+		
+		set b1099r.bnamcon=NAMCON
+		set b1099r.btintype=TINTYPE
+		set b1099r.btin=TIN.piece("|",1).translate(" ","-")
+		set b1099r.bcid=CID
+		set b1099r.bamt1=AMT(1)/100
+		set b1099r.bamt2=BRAMT(2)/100
+		set b1099r.bamt4=AMT(4)/100
+		set b1099r.bamta=AMT("A")/100
+		set b1099r.bname=NAME
+		set b1099r.baddr1=FULLADDR.piece("|",1)
+		set b1099r.baddr2=FULLADDR.piece("|",2)
+		set b1099r.baddr3=FULLADDR.piece("|",3)
+		set b1099r.bcity=CITY
+		set b1099r.bstate=STATE
+		set b1099r.bzip=ZIP
+		set b1099r.bdoccd=(DOCCODE_"  ").extract(1,2)
+		set b1099r.bissi=IRAIND
+		set b1099r.btotfl=DISFLG
+		set b1099r.btaxind=TAXIND
+		set b1099r.btotstwh=AMT(13)/100
+		set b1099r.bplnid=STATEID
+		
+		do b1099r.save()
+
+		set CID=CIDSAVE
+		}
+	
+	quit
+
+
+B1099R(RecordIRSUPD irsupd,
+       Number ACN)
+
+	// Inserting B Records into B1099R File
+
+	type public Date JD
+	type public Number AMT(), BRAMT(), CID, PASSFLG, STATEID, TINTYPE
+	type public String CITY, DISFLG, DOCCODE, IRAIND, FULLADDR, LNAME, NAME
+	type public String SIN, STATE, TAXIND
+
+	type Number BSEQ
+	type String NAMCON, X
+
+	if TINTYPE=2 set X=LNAME
+	else  set X=NAME
+	
+	do NAMCNTRL^IRSTPMTR
+	
+	set NAMCON=X
+	
+	type RecordCIF cif1=Db.getRecord("CIF","ACN=:ACN", 1)
+	
+	set SIN=$select(PASSFLG=1:irsupd.otin,PASSFLG=2:cif1.taxid)
+	
+	set BSEQ=Db.nextVal("B1099R","PDATE=:JD,BACN=:ACN")
+		
+	type RecordB1099R b1099r=Db.getRecord("B1099R","PDATE=:JD,BACN=:ACN,BSEQ=:BSEQ", 1)
+	
+	set b1099r.bnamcon=NAMCON
+	set b1099r.btintype=TINTYPE
+	set b1099r.btin=SIN.piece("|",1).translate(" ","-")
+	set b1099r.bcid=CID
+	set b1099r.bamt1=AMT(1)/100
+	set b1099r.bamt2=BRAMT(2)/100
+	set b1099r.bamt4=AMT(4)/100
+	set b1099r.bamta=AMT("A")/100
+	set b1099r.bname=NAME
+	set b1099r.baddr1=FULLADDR.piece("|",1)
+	set b1099r.baddr2=FULLADDR.piece("|",2)
+	set b1099r.baddr3=FULLADDR.piece("|",3)
+	set b1099r.bcity=CITY
+	set b1099r.bstate=STATE
+	set b1099r.bzip=FULLADDR.piece("|",6)
+	set b1099r.bdoccd=(DOCCODE_"  ").extract(1,2)
+	set b1099r.bissi=IRAIND
+	set b1099r.btotfl=DISFLG
+	set b1099r.btaxind=TAXIND
+	set b1099r.btotstwh=AMT(13)/100
+	set b1099r.bplnid=STATEID
+	
+	do b1099r.save()
+
+	quit
+	
+
+CRECBLD	// "C" record builder
+
+	do CRECWRT	// Write the record to tape
+	
+	quit
+
+	
+KRECBLD	// "K" record builder
+	
+	type String STID
+	type public Number STATTOT(,)
+	type public Number ER
+	 
+	set STID =  ""
+	
+	for  set STID = STATTOT(STID).order() quit:STID.isNull()  do { quit:ER
+	
+		if STATTOT(STID) > 0 do KRECWRT	// Write the record to tape
+	}
+	
+	quit
+
+
+%STOPLOD	// Stop %ZRTNLOD from this point on down
+	quit
+TRECWRT		// Dummy line reference for GT.M
+	quit
+ARECWRT		// Dummy line reference for GT.M
+	quit
+BRECWRT		// Dummy line reference for GT.M
+	quit
+CRECWRT		// Dummy line reference for GT.M
+	quit
+KRECWRT		// Dummy line reference for GT.M	
+	quit	
+STORETOT	// Dummy line reference for GT.M
+	quit
+
+vSIG()	quit "60577^25647^P.R. Swarnalatha^41680"	// Signature - LTD^TIME^USER^SIZE

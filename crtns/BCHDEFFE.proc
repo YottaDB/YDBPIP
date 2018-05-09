@@ -1,0 +1,468 @@
+BCHDEFFE //Batch BCHDEFERFEE - Loan deferred fee periodic amortization
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 01/31/2007 12:45 - shetyes
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHDEFERFEE Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ set vBCHSTS=$$STATUS^BCHUTL("BCHDEFERFEE")
+ if vBCHSTS=1 set ER=1,RM=$$^MSG(3410) quit
+ if vBCHSTS=2 set ER=1,RM=$$^MSG(3414) quit
+ if vBCHSTS=0 set %BatchRestart=1
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit do EXIT^BCHUTL("BCHDEFERFEE") quit
+ do JOBMGR^BCHUTL(%FN,"BCHDEFERFEE",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ do EXIT^BCHUTL("BCHDEFERFEE")
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(FEETYP) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHDEFERFEE","*","",FEETYP.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ if %BatchRestart,$$CHKLOG^BCHUTL(%SystemDate,%FN,"BCHDEFERFEE",FEETYP.get()) do { quit
+ do LOG^BCHUTL(%SystemDate,%FN,"BCHDEFERFEE",FEETYP.get(),"Record already processed")
+ }
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,FEETYP)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHDEFERFEE","*","",FEETYP.get(),"",et)
+ }
+ do UPDLOG^BCHUTL(%SystemDate,%FN,"BCHDEFERFEE",FEETYP.get(),vCONTEXT)
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,FEETYP) //
+	type public Number CID, FEETYP
+	type public String vRECORD
+
+	type ResultSet rs = Db.select("CID","LNFEE","FEETYP=:FEETYP")
+	while rs.next() do {
+		set CID = rs.getCol("CID")
+		do EXEC
+		}
+		
+	quit
+	
+EXEC
+	type public Date TPD
+	type public Number BRCD, CID, ER
+	
+	type Date CYCLD, JD, NJD
+	type Number AMOAMT, AMOCNT, AMOFA, AMOMAX, AMOTOT, BAL, CC, CNT, DEFORG, FEESEQ, I
+	type String CRCD, par()
+	
+	type TranSet ts = Class.new("TranSet")
+	
+	// Initialize account
+	type RecordLN ln = Db.getRecord("LN", "CID = :CID")
+	
+	set BAL = ln.bal
+	set CRCD = ln.crcd		// Currency code
+
+	// Select only those records where there are remaining amounts to amortize
+	type DbSet ds = Db.selectDbSet("LNFEED","CID=:CID and FEETYP=:FEETYP and DEFORG<>AMOFA")
+
+	while ds.next() do { quit:ER
+		
+		type RecordLNFEED lnfeed = ds.getRecord("LNFEED")
+	
+		// Process each fee sequence for this fee plan and account number
+		set FEESEQ = lnfeed.feeseq
+	
+		// Original deferred
+		set DEFORG = lnfeed.deforg
+		// Fee amortized to date
+		set AMOFA = lnfeed.amofa		
+		// Max amount this cycle
+		set AMOMAX = AMOFA		
+		// Total # of cycles
+		set AMOTOT = lnfeed.amotot
+		// Number of times cycled
+		set AMOCNT = lnfeed.amocnt		
+		// Last date cycled
+		set CYCLD = lnfeed.cycld	
+	
+		/* 
+	  	Determine number of times to cycle (CNT).  This will be
+		equal to the number of hits on the frequency between 
+		[LNFEED]CYCLD and the process effective date.
+		*/
+		set CNT = 1
+		
+		do { quit:ER
+
+			type RecordLNFEEP lnfee = Db.getRecord("LNFEEP", "FEETYP = :FEETYP")
+			
+			if lnfee.amofre.isNull() quit
+			
+			if (CYCLD > %EffectiveDate) ! CYCLD.isNull() quit
+			
+			set JD = CYCLD
+			
+			for CNT = CNT:1 set NJD = JD.nextFreqDate(lnfee.amofre) quit:ER  quit:(NJD '< %EffectiveDate)!((CNT + AMOCNT) '< AMOTOT)  set JD = NJD
+	  	   	}
+	
+		// Calculate using straight line amortization
+		do SL(DEFORG, AMOCNT, AMOFA, AMOTOT, .AMOAMT, .CNT, CRCD)
+	
+		if 'AMOAMT quit
+	
+		for I = 1:1:CNT do BUILD(.ln, .ts) quit:ER
+		}
+
+	if ER quit
+	
+	// Post the transactions for this account
+	
+	set par("IPMODE") = 3		// System generated
+	set par("OPTION") = 2		// Process transactions; Update database
+		
+	do ts.postTSet(TPD,BRCD,.par)
+	
+	quit
+	
+	
+BUILD(RecordLN ln,
+      TranSet ts)	// Build teller transactions
+	
+	/*
+	Keep totals of how much the amortization is in this cycle, and make
+	sure it does not exceed the original amount.
+	*/
+	type public Cache %CACHE()
+	type public Number AMOAMT, AMOMAX, AMOTC, CID, DEFORG, ER, FEESEQ
+	type public String CRCD, FEEICRTC, FEEIDRTC, FEETYP
+	
+	type Boolean DRCR
+	type String INCCTC, INCDTC, TSO
+	
+	set INCCTC = ""
+	set INCDTC = ""
+	
+	if ((AMOMAX + AMOAMT) > DEFORG) set AMOAMT = DEFORG - AMOMAX
+	set AMOMAX = AMOMAX + AMOAMT
+	
+	/*
+	Debit transaction to account - reduces unamortized income.	
+	Tran code as found on the product type. If amount is positive,
+	use amortization code. If amount is negative, use increase 
+	adjustment code.
+	*/
+	type RecordPRODCTL prodctl = %CACHE("PRODCTL").getRecord("PRODCTL", "TYPE = :ln.type")
+	
+	if (AMOAMT > 0) do { quit:ER
+		
+			set AMOTC = prodctl.drtrdi	// Amortization code
+			
+			// Product ~p1 missing transaction code - ~p2
+			if AMOTC.isNull() do ETCERR^TTXEXT(ln.type, "DRTRDI") quit
+			
+			set INCCTC = FEEICRTC		// Standard Credit
+			set DRCR = 1
+		     	}
+	
+	if (AMOAMT < 0) do { quit:ER
+		
+			set AMOTC = prodctl.crtrdfia	// Credit adjustment code
+			
+			// Product ~p1 missing transaction code - ~p2
+			if AMOTC.isNull() do ETCERR^TTXEXT(ln.type, "CRTRDFIA") quit
+			
+			set INCDTC = FEEIDRTC		// Standard Debit
+			set AMOAMT = $FN(AMOAMT,"-")	// Absolute value
+			set DRCR = 0
+		     	}
+	
+	// Build source field
+	set TSO = "LNFEEIN#"_FEETYP_":"_AMOAMT_"~LNFSQ#"_FEESEQ
+	
+	// Build fee transaction
+	do TTX(.ln, CID, AMOTC, AMOAMT, %EffectiveDate, CRCD, TSO, .ts)
+	
+	// Build offset transaction
+	do BLDTOT(.ln, DRCR, AMOAMT, CID, INCCTC, INCDTC, FEETYP)
+	
+	quit
+	
+	
+TTX(RecordLN ln,
+    Number CID,
+    String ETC,
+    Number TAMT,
+    Date %EffectiveDate,
+    String CRCD,
+    String TSO,
+    TranSet ts)
+	
+	// Build an array containing fields required for a transaction
+	type public Cache %CACHE()
+	
+	type Number x
+ 	
+	type RecordTRN trn = %CACHE("TRN").getRecord("TRN", "ETC = :ETC")
+	
+	type RecordTTX ttx = Class.new("RecordTTX")
+
+	set ttx.cid = CID
+	set ttx.itc = trn.itc
+	set ttx.etc = ETC
+	set ttx.tamt = TAMT
+	set ttx.efd = %EffectiveDate
+	set ttx.tlo = %UserStation
+	set ttx.tso = TSO
+	set ttx.cc = ln.cc
+	#if CUVAR.%MCP set ttx.crcd = CRCD
+	
+	set x = ts.copyTran(ttx)
+	
+	quit
+	
+	
+BLDTOT(RecordLN ln,
+       Boolean DRCR,
+       Number AMOAMT,
+       Number CID,
+       String TRNCTC,
+       String TRNDTC,
+       String FEETYP)
+
+	/*
+	Build table entry with the standard information required for posting the
+	offset, unless it already exists. After creating the entry, proceed to
+	the code which follows to update the table with the transaction amount.
+	*/
+	type Number ACN
+	type String BCHID = "BCHDEFFEE"
+
+	type RecordTMPBCHOFF tmpoff = Db.getRecord("TMPBCHOFF","TJD=:%SystemDate,BCHID=:BCHID,JOB=:%ProcessID,DESC=:FEETYP,CRCD=:ln.crcd,TYPE=:ln.type,GLSC=:ln.glsc,CC=:ln.cc", 1)
+
+	if 'tmpoff.getMode() do {
+	
+		// Income G/L account from fee plan or account's G/L set code
+		set ACN = $$FEEINC^LNFEEU(CID, FEETYP, ln.glsc)
+		
+		do BDOFFSET^BCHSOURC(BCHID, FEETYP, ln.crcd, ln.type, ln.glsc, ln.cc, ACN, ACN, TRNDTC, TRNCTC, "", "")
+		}
+
+	// Offset Record exists, update it with the amount from this transaction
+	do UPOFFSET^BCHSOURC(BCHID, FEETYP, ln.crcd, ln.type, ln.glsc, ln.cc, DRCR, AMOAMT)
+
+	quit
+	
+		
+SL(Number DEFORG,
+   Number AMOCNT,
+   Number AMOFA,
+   Number AMOTOT,
+   Number AMOAMT,	//REF:W
+   Number CNT,		//REF:W
+   String CRCD)
+   
+	// Straight line amortization
+
+	type Number AMOREM, DEFREM
+	
+	set DEFREM = DEFORG - AMOFA			// Deferral remaining
+	set AMOREM = AMOTOT - AMOCNT			// Cycles remaining
+
+	// If deferral or count remaining is negative, amortize entire amount
+	if (DEFREM '> 0) ! (AMOREM '> 0) do { quit
+		
+		set CNT = 1
+		
+		set AMOAMT = DEFREM
+		}
+
+	set AMOAMT = (DEFREM / AMOREM).roundCur(CRCD)
+	
+	quit
+	
+
+EXC	// Log error to DAYEND
+
+	type public Number BAL, CID
+	type public String %ZTSEQ, RM
+	
+	do LOG^UTLEXC($T(+0),"*", RM.get(), CID.get(), %ZTSEQ.get(), RM.get(), BAL.get())
+	
+	kill RM,%ZTSEQ
+	
+	quit
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,FEETYP
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set FEETYP=vRECORD.piece($C(9),1)
+ do vPROC(FEETYP)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,FEETYP
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>32767 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+9>32767 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+	type public Date XTJD
+		
+	// Define EFD before entering function to reprocess for specified date
+	if %EffectiveDate.get().isNull() set %EffectiveDate = %SystemDate
+
+	set XTJD = %SystemDate
+
+	// Retrieve batch user id, branch and user class from source table.
+	// If problems occur, get out before calling the scheduler code.
+	type public Number BRCD, ER
+	type public String ET, RM
+
+	do SOURCE^BCHSOURC("BOFF", "DFAMO", .%UserID, .BRCD, .%UserClass)
+	
+	if ER do { quit
+	
+		// Loan deferred income amortization teller has not been defined
+		if 'ET.get().isNull() set RM = $$^MSG(1626)
+
+		set %BatchExit = 1
+
+		do EXC
+		}
+	
+	do ^TTXLOK 
+	
+	if ER do { quit
+		
+		// TTX file locked by another user - job aborted
+		if RM.get().isNull() set RM = "TTXLOK"
+		
+		set %BatchExit = 1
+		
+		do EXC
+		}		
+
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("DISTINCT FEETYP","LNFEEP","LNFEEP.AMOND=:XTJD")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	type public Date TPD
+	type public Number BRCD
+	type public String FEEICRTC, FEEIDRTC
+
+	if %EffectiveDate.get().isNull() set %EffectiveDate = %SystemDate
+	
+	set TPD = %SystemDate
+	
+	// Define batch teller, branch, user class
+	do SOURCE^BCHSOURC("BOFF", "DFAMO", .%UserID, .BRCD, .%UserClass)
+	
+	// Define offset income tran codes
+	set FEEICRTC = CUVAR.feeicrtc				// Offset credit code
+	if FEEICRTC.isNull() set FEEICRTC = "MCR"
+	set FEEIDRTC = CUVAR.feeidrtc				// Offset debit code
+	if FEEIDRTC.isNull() set FEEIDRTC = "MDR"
+	
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+	type public Number BRCD, ER
+
+	type DbSet lnfeepds = Db.selectDbSet("LNFEEP", "AMOND=:%EffectiveDate AND AMOFRE IS NOT NULL")
+	
+	while lnfeepds.next() do {
+		
+		type RecordLNFEEP lnfeep = lnfeepds.getRecord("LNFEEP")
+		
+		type Number ER = 0
+		
+		// Reset Last/Next dates
+		set lnfeep.amond = %EffectiveDate.nextFreqDate(lnfeep.amofre) quit:ER	
+		set lnfeep.amold = %EffectiveDate
+		
+		do lnfeep.bypassSave()
+		}
+	
+	// Post the offsets
+	do OFFSET^TTXBLD(%SystemDate, BRCD, %UserID, "BCHDEFFEE")
+
+	do Db.fastDelete("BCHLOG", "TJD=:%SystemDate,FN=""BCHDEFERFEE""")
+	
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

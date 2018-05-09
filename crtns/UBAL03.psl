@@ -1,0 +1,282 @@
+public UBAL03	// Profile Balance Exception Report
+	/*
+	
+	ORIG:  Marty Ronky (3623) - 05/14/90
+	DESC:
+	
+	This utility summarizes all Profile Out-of-Balance
+	conditions from the following three main balancing
+	reports:
+	
+	    a) System Balance Report:  A System Balance Report
+	       out-of-balance occurs when yesterday's ending
+	       balance (by currency, type, cost center) + credits
+	       - debits does not equal today's ending balance,
+	       usually meaning a transaction hasn't updated an
+	       account balance properly.
+	
+	    b) G/L Summary:  A G/L Summary out-of-balance occurs
+	       when debits don't match credits within a currency.
+	       This can be the result of a screen of transactions
+	       being posted that are not in balance, or the tran
+	       amount components not footing to the total within
+	       a complex transaction.
+	
+	    c) Reconcile Daily Files Report:  A RECONDF error occurs
+	       when the totals for a transaction code taken from DTJ
+	       or DMJ don't match the totals for the transaction code
+	       in the teller proof file.  This can be the result of
+	       a transaction missing from DTJ, DMJ, or TTX.
+		
+	---- Revision History ------------------------------------------------
+	
+	10/09/06 - SmithCD - CR 23395
+		   Modified BAL2 to reset CRCD="" before looping through TMP() 
+		   to prevent some G/L summary errors from not showing on the 
+		   report.
+
+	08/01/06 - KELLYP - CR 22470
+		   Modified top level to use the TTXTJD table instead of the
+		   TTX table for the Effective Date field's lookup table. This
+		   ensures that all system dates are available so that the 
+		   UBAL03 report can be run for a system date when no teller
+		   transactions were posted but dayend ones were.
+
+	03/20/06 - KELLYP - CR 20228
+		   Modified BAL3 to call TTXGLA to force the system to rebuild
+		   SYSBAL2.  UBAL03 would show transaction reconciliation OOB 
+		   errors when it was run before RECONDF because SYSBAL2 hadn't
+		   been built yet.
+
+	01/15/05 - RussellDS - CR13817
+		   Changes to correct logic, clean-up PSL errors.
+		   
+		   Modified file used to store data from TMPRPT3 to REP367,
+		   which is the correct table for the report SCA367.
+		   
+		   Remove old revision history.
+	----------------------------------------------------------------------
+	*/
+
+	type public Number ER
+	type public String RM
+
+	type Date JD
+	type Number PID
+	type String %READ, %TAB(), IO, PGM, RID, VFMQ
+
+	set %TAB("JD")=".EFD1/TBL=[TTXTJD]TPD:DISTINCT:QU [TTXTJD]TPD<="_(%SystemDate - 1)
+	set %TAB("IO")=$$IO^SCATAB($I)
+	
+	set %READ="@@%FN,,,JD/REQ,IO/REQ"
+	do ^UTLREAD if VFMQ="Q" quit 
+
+	set PID=%ProcessID
+	do Db.fastDelete("REP367","JOB=:PID")
+
+	set ER=0
+	do BAL1(JD) if ER quit
+	do BAL2(JD) if ER quit
+	do BAL3(JD) if ER quit
+	
+	if IO'=$I do OPEN^SCAIO quit:ER
+
+	set RID="SCA367" do ^URID
+	// Invalid report linkage <<RID>>
+	if ER do { quit
+		type String ET = "INVLDRPT"
+		do ^UTLERR
+		}
+	
+	do V0^@PGM
+	
+	do Db.fastDelete("REP367","JOB=:PID")
+	
+	quit
+	
+	
+BAL1(JD)	// System Balance Report Errors
+
+	/*
+	Verify that each product type in TTL is	in balance (yesterday's
+	balance - debits + credits - transfers out + trasnfers in =
+	today's balance).
+
+	ARGUMENTS:
+		JD	Transaction date	/TYP=D/REQ/MECH=VAL
+	*/
+	
+	type public Boolean ER
+	type public String %MSKD, RM
+
+	type Number CC,ERAMT,SEQ,TYPE
+	type String CLS,CRCD,DATA,GLSC,GRP
+	type Public Cache %CACHE()
+
+	type DbSet ttlds=Db.selectDbSet("TTL","TJD=:JD")
+
+	// TTL file does not exist for ~p1
+	if ttlds.isEmpty() set ER=1 set RM=$$^MSG(2764,$$DAT^%ZM(JD,$G(%MSKD))) quit
+
+	set SEQ=0
+	while ttlds.next() do {
+		type RecordTTL ttl=ttlds.getRecord("TTL")
+
+		set CRCD=ttl.crcd
+		set CLS=ttl.cls
+		set GRP=ttl.grp
+		set TYPE=ttl.type
+		set GLSC=ttl.glsc
+		set CC=ttl.cc
+
+		type RecordTTL yes=Db.getRecord("TTL","TJD=:JD-1,CRCD=:CRCD,CLS=:CLS,GRP=:GRP,TYPE=:TYPE,GLSC=:GLSC,CC=:CC",1)
+		type RecordPRODCTL prodctl=%CACHE("PRODCTL").getRecord("PRODCTL","TYPE=:TYPE")
+
+		// Yesterday's Bal + DRs - CRs - TfrOut + TfrIn - Today's Bal
+		if prodctl.trb set ERAMT=yes.bal+ttl.dramt-ttl.cramt-ttl.trout+ttl.trin-ttl.bal
+
+		// Yesterday's Bal - DRs + CRs - TfrOut + TfrIn - Today's Bal
+		else  set ERAMT=yes.bal-ttl.dramt+ttl.cramt-ttl.trout+ttl.trin-ttl.bal
+
+		if 'ERAMT quit
+		
+		set SEQ=SEQ+1
+		set DATA=ERAMT_"|"_CRCD_"|"_CLS_"|"_GRP_"|"_TYPE_"|"_GLSC_" "_CC
+
+		do TMP(JD,1,SEQ,DATA)
+		}
+	
+	quit 
+	
+
+BAL2(JD)	// G/L Summary Errors
+	
+	/*
+	Verify that TGL is in balance (total debits = total credits).
+
+	ARGUMENTS:
+		JD	Transaction date	/TYP=D/REQ/MECH=VAL
+	*/
+
+	type Number SEQ,TMP()
+	type String CRCD,DATA
+
+	type DbSet tglds=Db.selectDbSet("TGL","TJD=:JD AND SRC<5")
+
+	while tglds.next() do {
+		type RecordTGL tgl=tglds.getRecord("TGL")
+
+		set CRCD=tgl.crcd
+		set TMP(CRCD)=$G(TMP(CRCD))-tgl.dramt+tgl.cramt
+		}
+
+	set SEQ=0
+	set CRCD=""
+	for  set CRCD=$O(TMP(CRCD)) quit:CRCD=""  do {
+
+		if 'TMP(CRCD) quit
+		set SEQ=SEQ+1,DATA=TMP(CRCD)_"|"_CRCD
+
+		do TMP(JD,2,SEQ,DATA)
+		}
+
+	quit 
+	
+	
+BAL3(JD)	// RECONDF Errors
+	
+	/*
+	Verify that SYSBAL1 (sources DTJ and DMJ) matches SYSBAL2 (source TPRF).
+
+	ARGUMENTS:
+		JD	Transaction date	/TYP=D/REQ/MECH=VAL
+	*/
+
+	type Number SEQ,TMP()
+	type String CRCD,DATA,ETC
+
+	do ^TTXGLA(JD)
+
+	type DbSet sys1ds=Db.selectDbSet("SYSBAL1","TDATE=:JD")
+
+	while sys1ds.next() do {
+		type RecordSYSBAL1 sysbal=sys1ds.getRecord("SYSBAL1")
+
+		set CRCD=sysbal.crcd
+		set ETC=sysbal.etc
+
+		set TMP(CRCD,ETC)=sysbal.ppmamt
+		}
+
+	type DbSet sys2ds=Db.selectDbSet("SYSBAL2","TDATE=:JD")
+
+	while sys2ds.next() do {
+		type RecordSYSBAL2 sysbal=sys2ds.getRecord("SYSBAL2")
+
+		set CRCD=sysbal.crcd
+		set ETC=sysbal.etc
+
+		set TMP(CRCD,ETC)=$G(TMP(CRCD,ETC))
+		set TMP(CRCD,ETC)=TMP(CRCD,ETC)-sysbal.tamt
+		set TMP(CRCD,ETC)=TMP(CRCD,ETC)+sysbal.ppmamt
+		set TMP(CRCD,ETC)=TMP(CRCD,ETC)-sysbal.tpmamt
+		}
+
+	set SEQ=0
+	set (CRCD,ETC)=""
+	for  set CRCD=$O(TMP(CRCD)) quit:CRCD=""  do {
+		for  set ETC=$O(TMP(CRCD,ETC)) quit:ETC=""  do {
+
+			if 'TMP(CRCD,ETC) quit
+			set SEQ=SEQ+1,DATA=TMP(CRCD,ETC)_"|"_CRCD_"|||||"_ETC
+
+			do TMP(JD,3,SEQ,DATA)
+			}	
+		}
+	
+	quit 
+	
+
+TMP(KEY1,KEY2,KEY3,DATA)	// Update temporary report table REP367
+
+	/*
+	ARGUMENTS:
+		KEY1	Access key 1		/TYP=T/REQ/MECH=VAL
+		KEY1	Access key 2		/TYP=T/REQ/MECH=VAL
+		KEY1	Access key 3		/TYP=T/REQ/MECH=VAL
+		KEY1	Data			/TYP=T/REQ/MECH=VAL
+	*/
+
+	type RecordREP367 rep367 = Class.new("RecordREP367", "JOB=:%ProcessID,EFD=:KEY1,REP=:KEY2,SEQ=:KEY3")
+
+	set rep367.eamt = DATA.piece("|", 1)
+	set rep367.curr = DATA.piece("|", 2)
+	set rep367.cls = DATA.piece("|", 3)
+	set rep367.grp = DATA.piece("|", 4)
+	set rep367.type = DATA.piece("|", 5)
+	set rep367.cc = DATA.piece("|", 6)
+	set rep367.etc = DATA.piece("|", 7)
+	set rep367.uid = DATA.piece("|", 8)
+	
+	do rep367.save()
+	
+	quit
+
+
+RDES(REP) // Report Description ([REP367]DESC)
+	
+	/*
+	ARGUMENTS:
+		REP	Report Number		/TYP=N/REQ/MECH=VAL
+	*/
+	
+	type String DESC
+
+	if REP=1 set DESC=$$^MSG(5214)		//System Balance Report
+	else  if REP=2 set DESC=$$^MSG(5213)	//General Ledger Summary
+	else  if REP=3 set DESC=$$^MSG(5215)	//Transaction Reconciliation Rpt
+	else  set DESC=""
+
+	quit DESC
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60547^63284^Chad Smith^6772"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,252 @@
+CHKREM  //;PBS - CHK - V2.0 - Check register maintenance
+	/*
+
+	  ORIG:  Tom Locke (2424) - 04/20/87
+
+	  ---- Revision History------------------------------------------------
+	  
+	   10/13/05 - PUTTASWH - CR17011
+	   	      Modified VPG01 section to fix the syntax error.
+	   	      Modified INIT section to fix the syntax error.   	      
+	  
+	  ---------------------------------------------------------------------
+
+	*/
+
+	do INIT
+	quit
+
+INIT    //
+	new VFMQ
+	set %PG=0
+	set %PAGE=1
+	set %ProcessMode=1
+	type RecordCHKREG1 fCKREG
+	set fCKREG=Class.new("RecordCHKREG1")
+	do VPG(.fCKREG)
+
+	quit
+
+
+VPG(RecordCHKREG1 fCKREG)     // Page Control
+
+	new FINISH
+	set FINISH=0
+	for  do { quit:FINISH
+		if %PG=0 do VPG01(.fCKREG) if ER=1 set FINISH=1 quit
+		if %PG>0 do VPG02(.fCKREG)
+		if "DFQ"[VFMQ do VER set FINISH=1 quit
+		set %PG=%PG+1
+		}
+	quit
+
+
+VPG01(RecordCHKREG1 fCKREG)   // Set up
+
+	new J,MIN1
+	set %TAB("CO")=".CO2/TBL=[CHKREG1]CO:DISTINCT/XPP=S CO=X"
+	set %TAB("GL")=".GL1/TBL=[CHKREG1]GL:DISTINCT:QU ""[CHKREG1]CO=<<CO>>""/XPP=S GL=X D PPGL^CHKVOID(CO,GL)"
+	set %TAB("MIN")=".MIN1/TBL=[CHKREG1]CKNO,PAYEE:QU ""[CHKREG1]CO=<<CO>> AND [CHKREG1]GL=<<GL>>"""
+	set %TAB("MAX")=".MAX1/TBL=[CHKREG1]CKNO,PAYEE:QU ""[CHKREG1]CO=<<CO>> AND [CHKREG1]GL=<<GL>>""/XPP=D PPMAX^CHKREM"
+	set %TAB("IO")=$$IO^SCATAB($I)
+
+	set %READ="@@%FN,,,CO/REQ,GL/REQ,MIN/REQ,MAX/REQ,IO/REQ"
+
+	do ^UTLREAD
+
+	if VFMQ="Q" set ER=1 quit
+
+	// Build local array to display the checks removed from register
+	set J=1
+	set MIN1=MIN-1
+	type DbSet rs=Db.selectDbSet("CHKREG1","CO=:CO AND GL=:GL AND CKNO>:MIN1 AND CKNO<=:MAX")
+	while rs.next() do {
+		type RecordCHKREG1 fCKREG=rs.getRecord("CHKREG1")
+		set CKS(J)=fCKREG.ckno_"|"_$$DAT^%ZM(fCKREG.tjd,$G(%MSKD))_"|"_fCKREG.brcd_"|"_fCKREG.uid
+		set J=J+1
+		}
+
+	quit
+
+
+VPG02(RecordCHKREG1 fCKREG)   //
+
+	set %OSAVE=%ProcessMode
+	set %ProcessMode=2
+	set %NOPRMT="F"
+
+	do DRV^USID(%ProcessMode,"CHKREM",.fCKREG)
+
+	set %ProcessMode=%OSAVE
+	set %TAB("VER")=".VER1"
+	set %READ=",,VER/REQ"
+	set OLNTB=16020
+	set %NOPRMT="F"
+
+	do ^UTLREAD
+
+	if VFMQ="Q" set ER=1 quit
+	if 'VER set VFMQ="Q" set ER=1
+	quit
+
+
+VER     //
+	if %ProcessMode=2!(%ProcessMode=4)!(VFMQ="Q") do END quit
+	set CKNO=MIN-1
+	do EXEC
+
+	quit
+
+
+EXEC    //
+	new FLAG
+	set FLAG=0
+	type DbSet rs=Db.selectDbSet("CHKREG1","CO=:CO AND GL=:GL AND CKNO>:CKNO")
+	while rs.next() do { quit:FLAG
+		type RecordCHKREG1 ckreg=rs.getRecord("CHKREG1")
+		set CKNO=ckreg.ckno
+		if CKNO=""!(CKNO>MAX) do { quit
+			do REP
+			set FLAG=1
+			}
+
+		if ckreg.brcd do {
+			set ET="NOTBOCHK"
+			do ERR(.ckreg)
+			}
+
+		if ckreg.status=1 do {
+			set ET="STS=1"
+			do ERR(.ckreg)
+			}
+
+		if 'ER,AEC do AEC(.ckreg)		
+
+		type RecordCHKVOID chkvoid=Db.getRecord("CHKVOID","JOB=:%ProcessID,CO=:CO,GL=:GL,CKNO=:CKNO",1)
+		if chkvoid.getMode() quit
+		
+		set chkvoid.tjd=ckreg.tjd
+		set chkvoid.efd=ckreg.efd
+		set chkvoid.uid=ckreg.uid
+		set chkvoid.brcd=ckreg.brcd
+		set chkvoid.trc=ckreg.trc
+		set chkvoid.tamt=ckreg.tamt
+		set chkvoid.cid=ckreg.cid
+		set chkvoid.payee=ckreg.payee
+		set chkvoid.ctype=ckreg.ctype
+		set chkvoid.status=ckreg.status
+		set chkvoid.clear=ckreg.clear
+		
+		do chkvoid.bypassSave()		
+		
+	        if ER set ER=0 quit
+
+		// Insert to support REPOST
+		do FILE("EXEC")
+		}
+	quit
+
+
+PPGL    // Post processor for GL account
+	type Boolean AP,FLAG
+	
+	set (AP,FLAG)=0
+	
+	if 'X quit
+	
+	type ResultSet rs=Db.select("CKNO","CHKREG1","CO=:CO AND GL=:GL")
+	if rs.isEmpty() quit
+
+	set N=""	
+	type ResultSet rschk=Db.select("CHKS,CID,AP","UTBLCHKS")
+	while rschk.next() do { quit:FLAG=1
+		set N=rschk.getCol("CHKS")		
+		if rschk.getCol("CID")=X set FLAG=1 quit
+		set AP=rschk.getCol("AP")
+		}
+
+	// G/L account ~p1 not set up in UTBLCHKS
+	if N="" set ER=1 do Runtime.setErrMSG("UTBLCHKS",1154,X) quit	
+
+	// "Cannot remove AP checks"
+	if AP set ER=1 do Runtime.setErrMSG("UTBLCHKS",473) quit
+	quit
+
+
+PPMAX   // Post processor for MAX check number
+	if X="" quit
+	
+	type RecordCHKREG1 ckreg=Db.getRecord("CHKREG1","CO=:CO,GL=:GL,CKNO=:X",1)
+	if 'ckreg.getMode() quit
+
+	type RecordCHKREG1 ckreg1=Db.getRecord("CHKREG1","CO=:CO,GL=:GL,CKNO=:MIN")	
+
+	// Dates for these checks are not the same
+	if ckreg1.tjd'=ckreg.tjd set ER=1 do Runtime.setErrMSG("CHKREG1",757) quit
+
+	// User IDs are not the same for these checks
+	if ckreg1.uid'=ckreg.uid set ER=1 do Runtime.setErrMSG("CHKREG1",2857) quit
+
+	// Branch codes for these checks are not the same
+	if ckreg1.brcd'=ckreg.brcd set ER=1 do Runtime.setErrMSG("CHKREG1",372) quit
+	quit
+
+
+AEC(RecordCHKREG1 ckreg)     //
+	set CID=ckreg.cid
+	if 'CID quit
+	do FILE("AEC")
+
+	quit
+
+
+ERR(RecordCHKREG1 ckreg)     //
+	set ER=1
+
+	do DSPBP^UTLERR
+
+	set ckreg.payee=RM
+	quit
+
+
+REP     //
+	kill %TAB lock
+	set RID="CHKREM"
+
+	set %ED=%SystemDate
+	set %OSAVE=%ProcessMode
+
+	do ^URID
+	
+	do Db.fastDelete("CHKVOID","JOB=:%ProcessID")
+	
+	set %ProcessMode=%OSAVE
+	do END
+
+	quit
+
+
+END     //
+	if ER!(%ProcessMode=2)!(%ProcessMode=4) quit
+
+	// Check register not modified
+	if VFMQ="Q" set RM=$$^MSG(537)
+
+	// Check register modified
+	else  set RM=$$^MSG(536)
+	set ER="W"
+	quit
+
+
+FILE(LINE)    // File data
+	if LINE="AEC" do {
+		type RecordDEP DEP=Db.getRecord("DEP","CID=:CID")
+		set DEP.intchk=""
+		do DEP.save("/NOJOURNAL")
+		}
+
+	if LINE="EXEC" do Db.delete("CHKREG1","CO=:CO AND GL=:GL AND CKNO=:CKNO")
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60283^21383^Hema Puttaswamy^4977"	// Signature - LTD^TIME^USER^SIZE

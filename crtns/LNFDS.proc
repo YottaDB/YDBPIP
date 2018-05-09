@@ -1,0 +1,292 @@
+LNFDS	/*	Loan Fee Due Summary
+
+		ORIG:  GORMAN - 25 MAY 1993
+
+		Lists amounts due/billed for specified fee type.
+
+	---- Revision History ------------------------------------------------
+	07/27/06 - VANITHAK - CR 22163
+		   Modified VPG00 section to call POSSTDT post processor code 	
+		   for the STDT field in the screen LNFDS. Also converted 
+		   POSSTDT section to PSL. Modified to eliminate PSL compiler
+		   warnings. Deleted call to ^UTLERR in ERR section.
+		   	
+	03/02/06 - TITOVE - CR 19733
+		   Modified PPCID section to instantiate an LNFEEP object with
+		   a "create-if-needed" qualifier.
+
+	-----------------------------------------------------------------------
+       */
+	set %ProcessMode=2
+	do INIT
+	quit
+
+
+INIT	//
+
+	type Number %PAGE, %PG
+	type String VFMQ
+	
+	set %PG=0 
+	set %PAGE = 1
+	do VPG
+	quit
+
+
+VPG	// Page control
+	type public Boolean ER, FOUND
+	type public Number %PG
+	type public String VFMQ
+	
+	set FOUND=0
+        for  do { quit:FOUND=1
+                if %PG=0 do VPG00 if ER set FOUND=1 quit
+                if %PG>0 do VPG01
+                if "DFQ"[VFMQ set FOUND=1 quit
+                set %PG=%PG+1
+                }
+        quit
+
+
+
+VPG00	// Set up
+
+	
+	new %TAB,FEEARRAY
+	type public Boolean ER
+	type public String %READ, IO, RM, VFMQ
+	type public Number ALP, CNT, FEEREM, IOSL 
+
+
+	set %TAB("IO")=$$IO^SCATAB($I)
+	set %TAB("CID")=".CID3/XPP=D PPCID^LNFDS"
+	set %TAB("FEETYP")=".FEETYP/TBL=FEEARRAY("
+	set %TAB("STDT")=".STDT1/XPP=D POSSTDT^LNFDS"
+
+	set %READ="@@%FN,,,CID/REQ,FEETYP/REQ,STDT/REQ,,IO/REQ"
+	
+	do ^UTLREAD 
+	
+ 	if VFMQ="Q" set ER=1 quit
+
+	// Define ALP - Available lines per page (many more when printed)
+	set ALP=IOSL-11
+
+	if IO'=$I do OPEN^SCAIO
+
+	// Initialize CNT, the total number of records displayed on screen
+	set CNT=0
+
+	do LOAD
+	
+	if ER quit
+
+	if FEEREM+CNT=0 do { quit
+		set VFMQ="Q"
+
+		/* No outstanding fees of this type exist for this account
+		   No fees of this type assessed for this account
+		*/
+		set RM=$$^MSG(1967) set ER=1
+		}
+
+	if IO'=$I do OPEN^SCAIO
+
+	quit
+
+
+VPG01	// Screen
+	
+	type public Number %PAGE, %PG, %ProcessMode, %REPEAT, %MODS, ALP, CID, CNT 
+	
+	set %PAGE=(CNT\ALP)+(CNT#ALP)
+
+	// Condition where no repeat field info, but want to display total due.
+	if %PAGE=0 set %PAGE=1
+
+	set %REPEAT=ALP 
+	set %MODS=%PG*ALP-ALP+1
+	if %REPEAT+%MODS>CNT set %REPEAT=CNT-%MODS+1
+
+	type RecordLN LN=Db.getRecord("LN","CID=:CID")
+
+	do DRV^USID(%ProcessMode,"LNFDS",.LN,,,,)
+
+	quit
+
+
+ERR	//
+	
+	type public Boolean ER
+	type public String VFMQ
+	
+	set ER=1 
+	
+	set VFMQ="Q"
+	quit
+
+
+PPCID	// Post Processor to ACCOUNT NUMBER prompt
+	
+	type public Date A
+	type public Boolean ER
+	type public String FEEARRAY, FEETYP
+	type public Number %EXT, CID, X
+	
+	if X="" quit
+
+	// Ensure that account is valid
+	set %EXT=1 
+
+	do ^UACN 
+
+	if ER quit
+	if CID="" quit
+
+	kill FEEARRAY
+
+	type ResultSet rs=Db.select("FEETYP","LNFEE","CID=:X")
+	while rs.next() do {
+		set FEETYP=rs.getCol("FEETYP")
+		type RecordLNFEEP lnfeep=Db.getRecord("LNFEEP","FEETYP=:FEETYP", 1)
+		set FEEARRAY(FEETYP)=lnfeep.desc
+		}
+
+	// Default start date in STDT field
+	type ResultSet rs1=Db.select("CDPD","LNBIL1","CID=:X")
+	while rs1.next() do {
+
+		// Due date of first bill
+		set A=rs1.getCol("CDPD")
+
+		// Default STDT value
+		if A'="" do DEFAULT^DBSMACRO("@STDT",A)
+		}
+	quit
+
+
+POSSTDT	// Post Processor to START DATE prompt
+
+	type public Date A, X
+	type public Number CID
+	
+	if X.isNull() quit
+
+	type RecordLN ln=Db.getRecord("LN","CID=:CID")
+
+	// Last bill due date
+	set A = ln.lbdd
+	
+	if X > A  do { quit	
+		if '(A.isNull()) set A = $$DAT^%ZM(A)
+		
+		// Invalid. Date entered exceeds due date of last internal bill on file.
+		do Runtime.setErrMSG("LN",1518,A)  quit
+		}
+	quit
+
+LOAD	// Load repeating field array with fee due amounts
+	
+	type public Number CID, CNT, FEEREM
+	type public String FEETYP, LOC
+	type public Date STDT
+	
+	type Number NOTBIL
+	type String LNFDS()
+	
+	
+	// Define FEEREM, the total fee amount due
+	type RecordLNFEE lnfee=Db.getRecord("LNFEE","CID=:CID,FEETYP=:FEETYP")
+	set FEEREM=lnfee.feerem
+
+	// Initialize NOTBIL, the amount due but not included in any bill
+	set NOTBIL=FEEREM
+
+	// Determine where FEETYP is found in payment file
+	set LOC=$$FEELOC(CID,FEETYP) 
+	if LOC="" quit
+
+	// Collate through payment file and populate LNFDS array
+	type DbSet rs=Db.selectDbSet("LNBIL1","CID=:CID","SCHSEQ DESC")
+	while rs.next() do {
+
+		type RecordLNBIL1 lnbil1=rs.getRecord("LNBIL1")
+
+		// Ensure that payment due date is after start date.
+		if lnbil1.cdpd<STDT quit
+
+		// Increment repeating field record counter.
+		set CNT=CNT+1
+
+		// Payment cutoff date
+		set LNFDS(CNT).piece("|",1) = lnbil1.cbcd
+		
+		// Payment due date
+		set LNFDS(CNT).piece("|",2) = lnbil1.cdpd
+		
+
+		if LOC<2 do { quit
+		
+			type RecordLNBIL5 lnbil5=Db.getRecord("LNBIL5","CID=:CID,SCHSEQ=:lnbil1.schseq,DUEAMT=:LOC,FEETYP=:FEETYP")
+
+			// Total amount billed
+			set $P(LNFDS(CNT),"|",3)=lnbil5.bfamt
+
+			// Amount due
+			set $P(LNFDS(CNT),"|",4)=lnbil5.brfamt
+			set NOTBIL=NOTBIL-lnbil5.brfamt
+
+			}
+
+		// Total amount billed
+		set $P(LNFDS(CNT),"|",3)=lnbil1.cdpd
+
+		// Total amount due
+		set $P(LNFDS(CNT),"|",4)=lnbil1.ctab
+		set NOTBIL=NOTBIL-lnbil1.ctab
+
+		}
+
+	quit
+
+
+FEELOC(CID,FEETYP)	//
+
+	// Determines where specified fee FEETYP is found in the payment file.
+
+	type Number N, PCE
+	type public Date LBDUEDT
+	
+	set PCE = ""
+	type DbSet rs=Db.selectDbSet("LNBIL1","CID=:CID","SCHSEQ DESC")
+	if rs.next() do { quit PCE
+		type RecordLNBIL1 lnbil1=rs.getRecord("LNBIL1")
+		set N=lnbil1.schseq
+
+		if Db.isDefined("LNBIL5","CID=:CID,SCHSEQ=:N,DUEAMT=0,FEETYP=:FEETYP") set PCE=0 quit
+		if Db.isDefined("LNBIL5","CID=:CID,SCHSEQ=:N,DUEAMT=1,FEETYP=:FEETYP") set PCE=1 quit 
+	
+		if lnbil1.pe02ea=FEETYP set PCE=2 quit
+		if lnbil1.pe03ea=FEETYP set PCE=3 quit 
+		if lnbil1.pe04ea=FEETYP set PCE=4 quit 
+		if lnbil1.pe05ea=FEETYP set PCE=5 quit 
+		if lnbil1.pe06ea=FEETYP set PCE=6 quit 
+		if lnbil1.pe07ea=FEETYP set PCE=7 quit 
+		if lnbil1.pe08ea=FEETYP set PCE=8 quit 
+		if lnbil1.pe09ea=FEETYP set PCE=9 quit 
+		if lnbil1.pe10ea=FEETYP set PCE=10 quit
+		if lnbil1.pe11ea=FEETYP set PCE=11 quit 
+		if lnbil1.pe12ea=FEETYP set PCE=12 quit 
+		if lnbil1.pe13ea=FEETYP set PCE=13 quit 
+		if lnbil1.pe14ea=FEETYP set PCE=14 quit 	
+		if lnbil1.pe15ea=FEETYP set PCE=15 quit 
+		if lnbil1.pe16ea=FEETYP set PCE=16 quit 
+		if lnbil1.pe17ea=FEETYP set PCE=17 quit 
+		if lnbil1.pe18ea=FEETYP set PCE=18 quit 
+		if lnbil1.pe19ea=FEETYP set PCE=19 quit 
+		if lnbil1.pe20ea=FEETYP set PCE=20 quit 
+		}
+
+	quit
+
+vSIG()	quit "60495^59380^Vanitha Krishnasamy^6198"	// Signature - LTD^TIME^USER^SIZE

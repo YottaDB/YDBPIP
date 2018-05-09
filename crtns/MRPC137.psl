@@ -1,0 +1,321 @@
+MRPC137( String RETURN, Number VERSN, Number ACN, Number IRATYPE, String INPUT)
+	/*
+	   Procedure ID: MRPC137
+	   DESC: IRA Processing
+	   ORIG: Kevin Hailey
+	   DATE: 10/17/2005
+	
+	   KEYWORDS: RPC
+	
+	   ARGUMENTS:
+	   . RETURN		RPA Sequence		/TYP=T/REQ/MECH=REFNAM:W
+	
+	   . VERSN		version number		/TYP=N/REQ/MECH=VAL
+	     current version=1
+	
+	   . ACN		Customer Number		/TYP=N/REQ/MECH=VAL
+
+	   . IRATYPE		Plan Type		/TYP=N/REQ/MECH=VAL
+	
+	   . INPUT		Input String		/TYP=T/REQ/MECH=VAL
+	     See details below
+
+	   RETURNS:
+	   . $$     Error Message			/TYP=T
+	     Null= No Error
+	
+	   . RETURN 
+	   	RPA Sequence_$C(9)_Plan Id		/TYP=T
+	
+	   RELATED:
+	   . $$^PBSMRPC - MRPC Service Class Driver
+	
+	   EXAMPLE:
+	   set RM=$$^MRPC137(.RETURN,1,ACN,1,INPUT)
+	
+	   IRA Processing
+	
+	   This RPC is a public RPC for IRA plan and beneficiary creation.
+	
+	   This MRPC will accept the customer number, the plan type and a comma
+	   separated string in the form FID.DI=VAL, FID.DI=VAL,... which will
+	   be used to create the IRA plan and beneficiaries.
+
+	   This form of input is used vs. individual parameters to provide
+	   the flexibility of changes to the input data without changes
+	   to this routine.
+	   
+	   In order to handle multiple records for a single table, an
+	   exception to the FID.DI=VAL format must be used.  For these
+	   records, add a sequential number to the FID field.  For example,
+	   if there are 3 beneficiaries that should be attached to an IRA plan,
+	   this should be set up as IRABEN1.BENNAME="Jane Doe",
+	   IRABEN2.BENNAME="John Doe"...
+	   
+	   Special Character Considerations:
+
+		o Place single quotes around input strings that may return
+		  data to the host containing a comma. For example, 
+		  IRABEN2.BENNAME='Some Company, Inc.'.
+		o Use two single quotes when including a quote in a name-value
+		  pair. For example, to pass 'O'Neal' you will need to send
+		  'O''Neal'. Use this logic for any input strings or any user
+		  input text fields that may return data to the host containing
+		  a single-quote
+	   
+
+	 ---- Revision History ------------------------------------------------
+	
+	 08/22/06 - NATRAJAH - 22506
+	 	 Retrofited new procedure from P01DEV1 view as per the below
+	 	 mentioned CR.
+	 
+	 03/27/06 - Ed Sigda - CR 20276
+		Create in Profile01 view.
+		
+	 10/17/05 - Kevin Hailey
+		Create Procedure.
+	
+	 ----------------------------------------------------------------------
+	*/
+
+	// Begin processing
+	type String ERRMSG
+	type Boolean ERV
+	type public Boolean ER
+	type public String RM
+	
+	set ERV=0
+	set ERRMSG=""
+
+	// Version number of client message is not compatible with server
+	if VERSN.get()'=1 quit $$ERRMSG^PBSUTL($$^MSG(2951))
+	
+	// Invalid Record
+	if INPUT.get().isNull() quit $$ERRMSG^PBSUTL($$^MSG(8097))
+		
+	do PROC(ACN,IRATYPE,.RETURN)
+
+	if ERV set ER=1,RM=ERRMSG
+
+	quit:ER $$ERRMSG^PBSUTL(RM.get())
+
+	// Build return value
+	set RETURN=$$V2LV^MSG(.RETURN) 
+	
+	quit ""
+
+		
+PROC( Number ACN, Number IRATYPE, Number RETURN)
+
+	/*
+	   Private
+	
+	   ARGUMENTS:
+	
+	   . ACN	Customer Number		/TYP=N/REQ/MECH=VAL
+	   . IRATYPE	Plan Type		/TYP=N/REQ/MECH=VAL
+
+
+	   RETURNS
+
+	   . RETURN	Return value		/TYP=T/REQ/MECH=REFNAM:W
+	
+	
+	   This subroutine is responsible for:
+	
+	   1) Determining the RPASEQ and creating the IRATYPE record.
+	
+	   2) Creating the beneficiaries in table IRABEN.
+
+	*/
+	type public Boolean ER,ERV
+	type public String ERRMSG,ET,FROM,INPUT,RM
+	
+	catch error {
+		set ET=error.type
+		set RM=error.description
+		set FROM=error.thrownAt
+		if error.type["%GTM-" do ZE^UTLERR
+
+		do Runtime.rollback()
+		
+		// Set error flag
+		set ERV=1
+		set ERRMSG=RM
+	}
+	
+	type String DATA,EXT,TMPDATA
+	type Boolean QUIT
+	type Number count1,ecount1,%NET
+	
+	set %NET=1
+
+	// Invalid Customer Number
+	if (ACN.get().isNull())!('Db.isDefined("CIF","ACN=:ACN")) throw Class.new("Error",","_$$^MSG(1295))
+
+	// Missing required data item IRATYPE.IRATYP
+	if IRATYPE.get().isNull() throw Class.new("Error",","_$$^MSG(1767,"IRATYPE.IRATYP")) quit
+
+	quit:ER
+
+	// Convert input string to data array
+	do STR2ARR^UTLMRPC(INPUT,.DATA)
+
+	type RecordIRATYPE iratype
+	type RecordIRABEN iraben()
+	
+	// Create new IRATYPE record. 
+	set iratype=Class.new("RecordIRATYPE")
+	set iratype.acn=ACN
+	set iratype.rpaseq=Db.nextVal("IRATYPE","ACN=:ACN")
+
+	// Populate iratype object with default values
+	do DEFAULT(.iratype,IRATYPE)
+	
+	// Overlay iratype object with INPUT data
+	do MOVEARR^UTLMRPC("IRATYPE","IRATYPE",.DATA,.TMPDATA)
+	do iratype.overlay("TMPDATA")
+
+	// IRA Beneficiary section
+	set QUIT=0
+	for ecount1=1:1 do { quit:ER.get()!(QUIT) 
+		set ACN=DATA("IRABEN"_ecount1_".ACN").get()
+		if ACN.isNull() set QUIT=1,ecount1=ecount1-1 quit 
+
+		// Create new IRABEN object from DATA array
+		set iraben(ecount1)=Class.new("RecordIRABEN")
+		set iraben(ecount1).rpaseq=iratype.rpaseq
+		set iraben(ecount1).benseq=ecount1
+		do MOVEARR^UTLMRPC("IRABEN"_ecount1,"IRABEN",.DATA,.TMPDATA)
+		do iraben(ecount1).overlay("TMPDATA")
+	}
+	
+	quit:ER
+
+	// Create IRATYP entry
+	do iratype.save()
+	quit:ER
+
+	// Create IRABEN entries
+	set count1=ecount1
+	for ecount1=1:1:count1 do:iraben(ecount1).exists() iraben(ecount1).save()
+	quit:ER
+
+	set RETURN=iratype.rpaseq_$C(9)_iratype.planid
+
+	quit
+
+
+DEFAULT(RecordIRATYPE iratype, Number IRATYPE)
+	/*
+	   Private
+	
+	   ARGUMENTS:
+	
+	   . iratype		IRATYPE object		
+	   . IRATYPE		RPA type		/TYP=N/REQ/MECH=VAL
+
+	   RETURNS
+
+	   . iratype		IRATYPE object
+	
+	
+	   This subroutine is responsible for defaulting from UTBLRSPDEF into
+	   the iratype object.  These defaults may later be overlayed with
+	   data from the INPUT string.
+
+	*/
+
+	type RecordUTBLRSPDEF rspdef
+
+	if 'Db.isDefined("UTBLRSPDEF","KEY=:IRATYPE") throw Class.new("Error",","_$$^MSG(1485,IRATYPE)) quit
+	
+	set rspdef=Db.getRecord("UTBLRSPDEF","KEY=:IRATYPE")
+
+	set iratype.iradis=rspdef.iradis
+	set iratype.wthpct=rspdef.wthpct
+	set iratype.wthamt=rspdef.wthamt
+	set iratype.rspwind=rspdef.rspwind
+	set iratype.rspwsch=rspdef.rspwsch
+	set iratype.rspmado=rspdef.rspmado
+	set iratype.rspmadb=rspdef.rspmadb
+	set iratype.madage=rspdef.madage
+	set iratype.autupd=rspdef.autupd
+	set iratype.yeflg=rspdef.yeflg
+	set iratype.rspwcalc=rspdef.rspwcalc
+	set iratype.iraipo=rspdef.iraipo
+	set iratype.madpct=rspdef.madpct
+	set iratype.lifpct=rspdef.lifpct
+	set iratype.pldte=%CurrentDate
+	
+	quit
+	
+
+TEST( String %UserID)
+
+	type Number ACN,BENPCT,CNT,ER,I,IRATYPE
+	type String BENCITY,BENCNTRY,BENMAD1,BENNAME,BENREL,BENSTATE
+	type String BENTAXID,BENTYP,BENZIP,FLD,INPUT,PTR,RETURN,RM,TLO,X
+	type public String %IPMODE,%LOGID
+
+	// User ID required
+	if %UserID.get().isNull() set ER=1 write !,$$^MSG(2849) quit
+
+	// Initialization
+	set TLO="_ELWOOD$NTA209:"
+	do SYSVAR^SCADRV0()
+	set %LOGID=$$LOGID^SCADRV
+	set %IPMODE="NOINT"
+
+	set ER=0
+	set RM=""
+	set INPUT=""
+
+	// Read input
+	read !,"Customer Number: ",ACN
+	read !,"IRA Type: ",IRATYPE
+	read !,"Number of Beneficiaries: ",CNT
+	
+	for I=1:1:CNT do {
+		read !,"Beneficiary Type: ",BENTYP
+		read !,"Beneficiary Relationship: ",BENREL
+		read !,"Beneficiary Name: ",BENNAME
+		read !,"Beneficiary Taxid: ",BENTAXID
+		read !,"Beneficiary Address Line 1: ",BENMAD1
+		read !,"Beneficiary City: ",BENCITY
+		read !,"Beneficiary State: ",BENSTATE
+		read !,"Befeficiary Zip: ",BENZIP
+		read !,"Befeficiary Country: ",BENCNTRY
+		read !,"Beneficiary Percent: ",BENPCT
+		
+		set INPUT="IRABEN"_I_".ACN="_ACN_","
+		set INPUT=INPUT_"IRABEN"_I_".BENTYP="_BENTYP_","
+		set INPUT=INPUT_"IRABEN"_I_".BENREL="_BENREL_","
+		set INPUT=INPUT_"IRABEN"_I_".BENNAME="_BENNAME_","
+		set INPUT=INPUT_"IRABEN"_I_".BENTAXID="_BENTAXID_","
+		set INPUT=INPUT_"IRABEN"_I_".BENMAD1="_BENMAD1_","
+		set INPUT=INPUT_"IRABEN"_I_".BENCITY="_BENCITY_","
+		set INPUT=INPUT_"IRABEN"_I_".BENSTATE="_BENSTATE_","
+		set INPUT=INPUT_"IRABEN"_I_".BENZIP="_BENZIP_","
+		set INPUT=INPUT_"IRABEN"_I_".BENCNTRY="_BENCNTRY_","
+		set INPUT=INPUT_"IRABEN"_I_".BENPCT="_BENPCT
+	}
+
+	set INPUT=INPUT_",IRATYPE.ACN="_ACN_",IRATYPE.IRATYP="_IRATYPE
+	
+	// Execute RPC
+	set X=$$^MRPC137(.RETURN,1,ACN,INPUT)
+	if X'="" do {
+		set PTR=$$LV2V^MSG(X,.FLD)
+		set ER=1
+		if RM="" set RM=FLD(5)
+	}
+
+	// Display return values
+	write !!,"Error Flag: ",ER.get(),"   ",RM.get()
+	write !,"Return: ",RETURN.get()
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60505^29378^Hari Natrajan^7816"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,348 @@
+COMDEF //Batch BCHCOMDEF - Deferred Commission Dayend Process
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 01/31/2007 12:44 - shetyes
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHCOMDEF Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit quit
+ do JOBMGR^BCHUTL(%FN,"BCHCOMDEF",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(CPLAN,CID,SEQ) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHCOMDEF","*","",CPLAN.get()_","_CID.get()_","_SEQ.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,CPLAN,CID,SEQ)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHCOMDEF","*","",CPLAN.get()_","_CID.get()_","_SEQ.get(),"",et)
+ }
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,CPLAN,CID,SEQ) //
+	
+	type public Date NCD
+	type Number AMREM,AMT,BRCD,DEFCYC,DEFORG,DEFTOT,AMTOT,EXPGL,DEFEXPGL
+	type String AMFRE,CRCD
+	
+	// Get the branch for transactions
+
+        type ResultSet rs2=Db.select("BOO","ACN","CID=:CID")
+        If 'rs2.next() Quit
+        set BRCD=rs2.getCol(1)
+
+        // Get deferred commission detail
+
+        type RecordCOMDEF comdef
+        set comdef=Db.getRecord("COMDEF","CPLAN=:CPLAN,CID=:CID,SEQ=:SEQ")
+         
+	set DEFORG=comdef.deforg
+	set DEFTOT=comdef.deftot
+	set AMTOT=comdef.amtot
+	set AMREM=comdef.amrem
+	set CRCD=comdef.crcd
+	
+	// get the commission plan detail
+	type RecordUTBLCOMPLN compln=Db.getRecord("UTBLCOMPLN","CPLAN=:CPLAN")
+	
+	set EXPGL=compln.expgl
+	set DEFEXPGL=compln.deferexpgl
+	set AMFRE=compln.amfre
+	set NCD=$$NJD^UFRE(%SystemDate,AMFRE)
+
+        // Calculate the deferred amount
+	set AMT=(DEFORG-DEFTOT)/AMREM
+	set AMT=$$^SCARND(AMT,0,,CRCD)
+	
+	// debit the commission deferred expense G/L account
+	do FILE(AMT,BRCD,DEFEXPGL,EXPGL,CRCD)
+
+	// update and store the new totals into the comdef file
+
+	set AMREM=AMREM-1
+	set DEFTOT=DEFTOT+AMT
+
+	If AMREM=0 set DEFCYC=DEFORG-DEFTOT
+	Else  set DEFCYC=(DEFORG-DEFTOT)/AMREM
+
+	set DEFCYC=$$^SCARND(DEFCYC,0,,CRCD)
+
+	set comdef.deftot=DEFTOT
+	set comdef.defcyc=DEFCYC
+	set comdef.amrem=AMREM
+	set comdef.amond=NCD 
+	
+	// now store the new values into utblcompln and comdef
+	do comdef.bypassSave() 
+	
+	quit
+
+
+	//---------------------------------------------------------------------
+FILE(Number AMT,    // Debit the deferred expense G/L and credit the expense G/L
+     Number BRCD,
+     Number DEFEXPGL,
+     Number EXPGL,
+     String CRCD)
+	//---------------------------------------------------------------------
+
+	type public Number par()
+	type public String ETCCR,ETCDR,ITC,ITCCR,ITCDR,TCMT,TSO,ttx1
+	
+        type RecordTTX ttx
+        type TranSet ts
+    
+        set ts=Class.new("TranSet")
+        set ttx=Class.new("RecordTTX")
+      
+	// Debit the deferred expense G/L
+ 
+        set ttx.cid=DEFEXPGL             // Account Number
+        set ttx.itc=ITCDR                // Internal Transaction
+        set ttx.etc=ETCDR                // External Transaction
+        set ttx.tamt=AMT                 // Transaction Amount
+        set ttx.efd=%SystemDate          // Effective Date
+        set ttx.tlo=%UserStation         // Transaction Location
+        set ttx.tcmt=TCMT                // Transaction Comment
+        set ttx.tso=TSO                  // Source of Funds
+        set ttx.crcd=CRCD                // Currency Code
+        set ttx1=ts.copyTran(ttx)
+
+	// credit the expense G/L
+
+        set ttx.cid=EXPGL             // Account Number
+        set ttx.itc=ITCCR                // Internal Transaction
+        set ttx.etc=ETCCR                // External Transaction
+        set ttx.tamt=AMT                 // Transaction Amount
+        set ttx.efd=%SystemDate          // Effective Date
+        set ttx.tlo=%UserStation         // Transaction Location
+        set ttx.tcmt=TCMT                // Transaction Comment
+        set ttx.tso=TSO                  // Source of Funds
+        set ttx.crcd=CRCD                // Currency Code
+        set ttx1=ts.copyTran(ttx)
+	
+	// Post the transactions
+
+        set par("IPMODE")=3
+        set par("OPTION")=2
+
+        do ts.postTSet(%SystemDate,BRCD,.par)
+ 
+	quit
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+	
+	type String CPLAN
+	type Number CID,SEQ
+	
+	set CPLAN=vINPUT.piece("~",1)
+	set CID=vINPUT.piece("~",2) if CID="" quit
+	set SEQ=vINPUT.piece("~",3) if SEQ="" quit
+
+	do vPROC(CPLAN,CID,SEQ)
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+	// For each commission plan with today's effective date in
+	// DAYENDCOMDEF, get the COMDEF record.
+	
+	type Number CID,SEQ
+	type String CPLAN
+
+	set CPLAN=vINPUT.piece("~",1)
+	set CID=vINPUT.piece("~",2)
+	set SEQ=vINPUT.piece("~",3)
+
+	if CID="" set CPLAN=$$nxtpln(CPLAN) if CPLAN="" set vINPUT="" quit
+	if SEQ="" 
+	
+	type ResultSet rscomdef=Db.select("CPLAN,CID,SEQ","COMDEF","CPLAN=:CPLAN AND CID=:CID AND SEQ=:SEQ")
+	
+	while rscomdef.next() do {
+		
+		set CID=rscomdef.getCol("CID")
+		
+		}
+
+	if CID="" set vINPUT=CPLAN quit
+	
+	set SEQ=$$nxtseq(CPLAN,CID,SEQ)
+	
+	set vINPUT=CPLAN_"~"_CID_"~"_SEQ
+	
+	quit
+
+nxtpln(String CPLAN)    //
+	
+	type Date NCD
+	type String AMFRE,cplan
+	
+	set cplan=CPLAN
+
+	type ResultSet rscompln=Db.select("CPLAN","UTBLCOMPLN","CPLAN=:CPLAN")
+
+	while rscompln.next() do {
+		
+		set cplan=rscompln.getCol("CPLAN")
+		
+		}
+
+	// for every plan that has been processed, update the next calc date
+	if CPLAN'="" do {
+		type RecordUTBLCOMPLN compln=Db.getRecord("UTBLCOMPLN","CPLAN=:CPLAN")
+		
+		set AMFRE=compln.amfre
+		set NCD=$$NJD^UFRE(%SystemDate,AMFRE)
+		set compln.ncd=NCD
+
+		do compln.save()
+		}
+
+	quit cplan
+
+
+nxtseq(String CPLAN,		// Get the next account sequence
+       Number CID,
+       Number SEQ)
+
+	type Number AMREM
+	type Boolean done
+
+	set done=0
+	for  quit:done  do {
+		
+		type ResultSet rscompln=Db.select("CPLAN,CID,SEQ","COMDEF","CPLAN=:CPLAN AND CID=:CID AND SEQ=:SEQ")
+
+		while rscompln.next() do {
+		
+			set SEQ=rscompln.getCol("SEQ")
+			}
+		
+		if SEQ="" set done=1 quit
+
+		type RecordCOMDEF comdef=Db.getRecord("COMDEF","CPLAN=:CPLAN,CID=:CID,SEQ=:SEQ")
+
+		set AMREM=comdef.amrem
+
+		if AMREM>0 set done=1
+		}
+
+	quit SEQ
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+	
+	type public Boolean ER
+	type public Number BRCD
+	type Date EFD,TPD
+	
+        set ER=0
+        set TPD=%SystemDate,EFD=TPD
+        do SOURCE^BCHSOURC("BOFF","COMM",.%UserID,.BRCD,.%UserClass)
+ 
+        // Set batch exit flag if error returned from above call
+        if ER s vEXIT=1
+
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("CPLAN,CID,SEQ","COMDEF","")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	type public Date TPD
+	type public String ETCDR,ETCCR,ITCDR,ITCCR,TSO,TCMT
+	type public Number BRCD
+	
+        set TPD=%SystemDate
+	do SOURCE^BCHSOURC("BOFF","COMM",.%UserID,.BRCD,.%UserClass) 
+
+	set TSO=""
+	set TSO=$$FIELDIN^UTSO(TSO,"COMDEF")
+	// Commission Deferral
+	set TCMT=$$^MSG(3608)
+	set ETCDR="MDR"
+	set ETCCR="MCR"
+
+	type RecordTRN trndr=Db.getRecord("TRN","ETC=:ETCDR")
+	type RecordTRN trncr=Db.getRecord("TRN","ETC=:ETCCR")
+
+	set ITCDR=trndr.itc
+	set ITCCR=trncr.itc
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+	set vINPUT=""
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

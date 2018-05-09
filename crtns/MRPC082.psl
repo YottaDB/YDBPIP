@@ -1,0 +1,373 @@
+MRPC082(RETURN,VERSN,TYPE,CRCD,INPUT,INTRFACE)	
+
+	/*
+	   Procedure ID: MRPC082
+	   DESC: Customer Account Create
+	   ORIG: SIGDAE  2/22/1999
+	
+	   KEYWORDS: RPC
+	
+	   ARGUMENTS:
+	         . RETURN Master/Float    	/TYP=T/REQ/MECH=REFNAM:W
+	     Account Numbers
+	
+	         . VERSN  version number    	/TYP=N/REQ/MECH=VAL
+	     current version=1
+	
+	   . TYPE  Account Type  		/TYP=N/REQ/MECH=VAL
+	
+	   . CRCD  Currency Code  		/TYP=T/REQ/MECH=VAL
+	     (for master and float)
+	
+	   . INPUT  Input String    		/TYP=T/REQ/MECH=VAL
+	     See details below
+	
+	   . INTRFACE  Calling Interface	/TYP=T/NOREQ/MECH=VAL
+	     Acknowledges different type of application
+	     requesting data
+
+	   RETURNS:
+	         . $$     Error Message     	/TYP=T
+	     Null= No Error
+	
+	   . RETURN Account Number   		/TYP=N
+	
+	   RELATED:
+	         . $$^PBSMRPC - MRPC Service Class Driver
+	
+	   EXAMPLE:
+	         S RM=$$^MRPC082(.VAL,1,300,"USD",INPUT)
+	
+	  ------------------------------------------------------------------
+	
+	   ACCOUNT CREATE
+	
+	   This RPC is a public RPC for customer account creation.
+	
+	   This MRPC will accept the product type and the currency code,
+	   and a comma separated string in the form FID.DI=VAL,
+	   FID.DI=VAL,... which will be used to create the account.
+	
+	   This form of input is used vs. individual parameters to provide
+	   the flexibility of changes on the input data without changes
+	   to this routine.
+
+	   This MRPC currently supports the following tables:
+		CIF (Customer Information)
+		CIFAUTH (Customer Authorization Table)
+		CIFEXT (CIF External Institution Accounts)
+		CMBGRP (Combined Statement Group)
+		CUSTATTINFO (Customer Attorney Information)
+		
+	   Note:  This routine does not currently support Head-of-household
+	
+
+	 ------------------  Revision History  -------------------------
+	 
+	   03/01/07 - MbuiM - CR25106
+	   	      Modified section MAIN to support CUSTATTINFO table.
+	   	      Removed old revision history from 03
+	 
+	   08/22/06 - chhabris - CR22510
+	   	      Retrofit the below mentioned details from P01DEV1
+	   	      view.
+
+		      04/04/06 Ed Sigda - CR 20575
+		      Retrofit changes into Profile01 view.
+		      o Removed incorrect change made on 03/17/04.  This
+		        change was added in an attempt to fix client 
+		        applications (e.g., Xpress) that did not conform to
+		        the special character rules associated with the INPUT
+		        string.  When client applications do conform to the 
+		        standards, the result is that the process causes 
+		        single quotes to be doubled in the database.  In the 
+		        event that a comma is contained in an INPUT string a
+		        GT.M error is received.
+		      o Modified section MAIN to place a $G() around server
+		        variable vzrstflg, as this MRPC may be called outside
+		        of the server process.
+		      o Moved %STFHOST date logic to be in section MAIN as
+		        the top section should only be for handling the
+		        RPC message formatting logic.
+	
+
+	   02/18/05 - Hillanbrand - 13400
+	   	      Modified non-existing sub routine call to TTL^RCHK
+	   	      to set %SystmDate=ttlpa.cdate. Pulled in subsection
+	   	      GETNEW and ONLINE from CIFNEW since CIFNEW is being 
+	   	      obsoleted as this section was only called by this MRPC.  
+	   	      Modifications per code review on standards. Also added
+	   	      CIF unlock.
+
+	   
+        */
+	
+
+	new STR,TCMT,%EXT,sqlcif,sqlstm,sqlauth
+
+	set ER=0 
+	set RM=""
+	set ERRORMSG=""
+
+	// Version number of client message is not compatible with server
+	if $G(VERSN)'=1 quit $$ERRMSG^PBSUTL($$^MSG(2951))     
+	
+	//  Invalid Record
+	if $G(INPUT)="" quit $$ERRMSG^PBSUTL($$^MSG(8097))     
+	
+	// Invalid Currency
+	if $G(CRCD)="" quit $$ERRMSG^PBSUTL($$^MSG(1293))      
+	
+	set CO=%CompanyName
+	set CRCD=Db.getOneRow("CRCD","CRCD","CO,CRCD")
+	
+	// Invalid currency code
+ 	if ER!(CRCD="") quit $$ERRMSG^PBSUTL($$^MSG(1293))     
+	
+	//  Invalid product type
+	if $G(TYPE)="" quit $$ERRMSG^PBSUTL($$^MSG(1503))      
+	
+	// Get acct nos, build accounts.
+	do MAIN(TYPE,CRCD)
+
+	if ER,$TLevel do Runtime.rollback()
+
+	if $G(ERRORMSG)'="" set ER=1 quit $$ERRMSG^PBSUTL(ERRORMSG)
+	if $G(ER) quit $$ERRMSG^PBSUTL($G(RM))	
+
+	set STR=$G(ACN)_$C(13)_$C(10)
+
+	#if $$VALID^%ZRTNS("ZMRPC082") do FAPOUT^ZMRPC082
+
+	// Return the account number
+	set RETURN=$$V2LV^MSG(STR)
+
+	quit ""
+	
+
+MAIN(TYPE,CRCD)	// Main Processing Section
+
+	/*
+	   Private
+	
+	   ARGUMENTS:
+	
+	   . TYPE  Product Type  /TYP=N/REQ/MECH=VAL
+	
+	   . CRCD  Currency Code  /TYP=T/REQ/MECH=VAL
+	     (for master and float)
+	
+	
+           This subroutine is responsible for:
+	
+	   1) Determining the account number and locking the record.
+	
+	   2) Creating CIF and CMBGRP records which will
+	      be used for the customer create.
+	
+	   3) Building the account in the product type and
+	      currency specified.  Product type defaults will be used,
+	      by setting up an array to be used for SQL statements for
+	      all non-blank elements in the product type from node 49 on
+	      down.
+	 
+	*/
+	
+	new i,DATA,ENCMTHD,RET,QUIT
+
+	// If creating CIF during critical path set TJD to tomorrow
+	#ACCEPT DATE=03/10/00;PGM=Erik Scheetez
+	if $G(%STFHOST) new %SystemDate do {
+		type RecordTTLPA ttlpa=Db.getRecord("TTLPA","PA='PA'",1)
+		set %SystemDate=ttlpa.cdate+1
+		}
+	
+	do STR2ARR^UTLMRPC(INPUT,.DATA,",") if ER quit
+	if $G(BOO)="" set BOO=$G(DATA("CIF.BOO"))
+
+	#if $$VALID^%ZRTNS("ZMRPC082") do FAPINP^ZMRPC082
+
+	// Validate product types for currency, expiration, etc...
+	set %EXT=1
+	do AVL^NEW(TYPE)
+
+	if $G(ER) quit
+
+	new cif
+        type RecordCIF cif
+        set cif=Class.new("RecordCIF")
+
+	// Determine the account number if one is not passed in.
+	set ACN=+$G(DATA("CIF.ACN"))
+        if ACN=0 set ACN=$$GETACN() if $G(ER) quit
+	else  if Db.isDefined("CIF","ACN") set RM=$$^MSG(53)
+		
+        set DATA("CIF.ACN")=ACN
+	set cif.acn=ACN
+	set DATA("CIF.TYPE")=TYPE
+	set DATA("CIF.CRCD")=CRCD
+
+	// Encrypt password data
+	if $G(INTRFACE)'="" set ENCMTHD=Db.getOneRow("ENCMTHD","UTBLEXTINT","INTRFACE")
+	else  set ENCMTHD=""
+	if ENCMTHD="MD5" set RET=$$ENCMD5^ECOMMERC(.DATA)
+ 
+	do cif.default("TYPE") if ER quit
+	do cif.overlay("DATA") if ER quit	
+
+	// Determine default Statement Group values if not defined
+	
+	set DATA("CMBGRP.ACN")=ACN
+
+	if $G(DATA("CMBGRP.ADDR"))="" set DATA("CMBGRP.ADDR")="CIF"
+	if $G(DATA("CMBGRP.SFRE"))="" set DATA("CMBGRP.SFRE")="1MA"_$$DAY^SCADAT(TJD,1)
+	if $G(DATA("CMBGRP.STMGRP"))="" set DATA("CMBGRP.STMGRP")=1
+
+	new cmbgrp
+	type RecordCMBGRP cmbgrp
+	set cmbgrp=Class.new("RecordCMBGRP")	
+	set cmbgrp.acn=ACN
+	set cmbgrp.stmgrp=DATA("CMBGRP.STMGRP")
+        do cmbgrp.overlay("DATA") if ER quit
+
+
+	// set error trap 
+	catch vERROR {
+		new ET
+		set ET=vERROR.type
+		set ERRORMSG=vERROR.description
+ 
+		if ET["%GTM-" do ZE^UTLERR quit
+		if $TLevel do Runtime.rollback()
+		set ET=ET_"-"_vERROR.thrownAt
+		}         
+
+	new vfkey
+	do cif.save("/NOFKCHK=1/VALDD/VALRI/VALREQ/KEEPVFKEY") if ER quit
+	lock -CIF(cif.acn)
+	
+	do cmbgrp.save("/NOFKCHK=1/VALDD/VALRI/VALREQ/KEEPVFKEY") if ER quit
+
+	if INPUT["CIFAUTH." do { quit:ER
+		new cifauth
+		type RecordCIFAUTH cifauth
+		set cifauth=Class.new("RecordCIFAUTH")
+		set cifauth.acn=ACN
+		do cifauth.overlay("DATA") if ER quit
+		do cifauth.save("/NOFKCHK=1/VALDD/VALRI/VALREQ/KEEPVFKEY") if ER quit
+		}
+
+	type RecordCIFEXT cifext()
+
+	set QUIT=0
+	for i=1:1 do {  quit:$G(ER)!(QUIT)
+		new EXTINST,X,Y
+		set EXTINST=$G(DATA("CIFEXT"_i_".EXTINST"))
+		if EXTINST="" set QUIT=1 quit
+
+		set (X,Y)="CIFEXT"_i
+		for  set X=$O(DATA(X)) quit:$P(X,".",1)'=Y  set DATA("CIFEXT."_$P(X,".",2))=DATA("CIFEXT"_i_"."_$P(X,".",2)) 
+		set cifext(i)=Class.new("RecordCIFEXT")
+		set cifext(i).acn=ACN
+		set cifext(i).seq=Db.nextVal("CIFEXT","ACN")
+		do cifext(i).overlay("DATA")
+		do cifext(i).save("VALDD/VALREQ/VALRI/NOFKCHK=1/KEEPVFKEY") if ER quit
+		}
+	if ER quit
+	
+	// Customer Attorney Information
+	if $$EXIST^MRPC044("CUSTATTINFO") do { quit:ER
+		type RecordCUSTATTINFO attinfo
+		set attinfo=Class.new("RecordCUSTATTINFO")
+		set attinfo.acn=ACN
+		do attinfo.overlay("DATA") if ER quit
+		do attinfo.save("/NOFKCHK/VALDD/VALRI/VALREQ/KEEPVFKEY")
+	}
+	
+	do vfkey^SQLBUF	
+	if ER quit
+
+	// Log the restriction
+	if 'vzrstflg.get(),verrors.data() do XBAD^DBSEXECU(.verrors)	
+
+
+
+	quit 
+
+FAPINP	// Reformat input
+	/*
+	   This section can be used by creating ZMRPC082.  Any custom or
+	   additional input DATA array can be processing here.  Compile
+	   ZMRPC082 followed by MRPC082.  FAPINP in ZMRPC082
+	   will be called directly from MRPC082 if it exists.
+
+	   Example:
+	   set DATA("DEP.VALUE1")=Db.getOneRow("VALUE1","TEST","TYPE=:TYPE")
+	*/
+
+	quit
+
+FAPOUT	// Reformat output
+	/*
+	   This section can be used by creating ZMRPC082.  Output can be
+	   reformatted by adding custom code.
+
+	   Example:
+	   if TYPE=1 do {
+		new DATA
+		set DATA=Db.getOneRow("BPH,BPHEXT,EMAIL","CIF","TYPE=:TYPE")
+		set STR=DATA_$C(9)_STR
+		}
+	*/
+
+	quit
+
+
+SPODBC(VERSN,TYPE,CRCD,INPUT)	// Stored Procedure/ODBC entry point
+
+	/*
+	  This function is intended to provide a capability to invoke a
+	  true MRPC from the EXECUTE procedure facility within the PROFILE
+	  ODBC driver.  This is needed in order to get the normal response
+	  argument that is part of the MRPC structure returned to the calling
+	  ODBC client.
+	*/
+
+	new PTR,RETURN
+
+	set RM=$$^MRPC082(.RETURN,$G(VERSN),$G(TYPE),$G(CRCD),$G(INPUT))
+
+	if RM="" set PTR=$$LV2V^MSG(RETURN,.RETURN) quit $G(RETURN(1))
+
+	set PTR=$$LV2V^MSG(RM,.RM) 
+	set ER=1 
+	set RM=$G(RM(5))
+
+
+	quit ""
+	
+Public GETACN()	//  get next available CIF number
+	
+	if $$ALLOC^UCIDSCA("CIF") quit $$NXTCID^UCIDSCA("CIF")
+	
+	new ACN,HIT,X
+	
+	// HOST is down. Try this function later.
+	if '$$ONLINE($G(%LOGID),%NET),'$$STFENABL^UFETCH("CIF") set ER=1,RM=$$^MSG(1193) quit ""
+
+	set HIT=0
+	set ACN=Db.nextVal("CIF") set:'ACN ACN=1
+
+	for ACN=ACN:1 lock +CIF(ACN) do { quit:HIT
+		if Db.isDefined("CIF","ACN")!(Db.isDefined("PURGDCIF","ACN")) lock -CIF(ACN)
+		else  set HIT=1
+		}
+	quit ACN
+	
+ONLINE(logid,net)	//  Check %NET and %LOGID
+	
+	if logid>1 quit 0
+	quit net	
+	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60690^63626^Marie Mbui^9655"	// Signature - LTD^TIME^USER^SIZE

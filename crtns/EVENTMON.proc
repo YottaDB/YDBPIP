@@ -1,0 +1,837 @@
+EVENTMON
+	/*
+	ORIG: MATTSON - 05/15/2000
+	DESC: EVENTMON - Event Monitor
+
+	---- Comments --------------------------------------------------------
+
+	Event Notification Monitor
+
+	---- Revision History ------------------------------------------------
+	
+	01/03/07 - NATRAJAH - 24542
+		   Modified sections ACTIONQ and AQMSG to replace
+		   references to table EVENTAQMSG with EVENTAQ.MESSAGE.
+
+	05/22/05 - Erik Scheetz - 15677
+		   Modified MAIN section to register/unregister the monitor
+		   process in the PROCESSID table.  
+		   
+		   Modified PRMT section to issue a STOP interrupt when 
+		   stopping the event monitor.
+		   
+        	   Modified EVENTSTP section to use interrupt mechanism when
+        	   checking to stop rather than polling the QUECTRL table.
+        	   When monitor process is interrupted %INTRPT will be set with
+        	   the neccessary action to be taken.
+        	   
+        	   Modified Runtime.start methods to pass the "CS" qualifier.
+	
+	01/09/05 - RussellDS - CR13817
+		   Correct problems from PSL conversion and do PSL clean-up.
+		   
+		   Remove old revision history.
+
+	01/13/04 - CARROLLJ - CR7901
+		   PSL compiler cleanup.
+	*/
+
+	quit
+
+
+MAIN	//Main routine
+
+	type String ACTIONQ, CACHE, ET, EVENTMON()
+
+	catch error {
+		type String ET,RM
+		set ET=error.type
+
+		if ET["%GTM-" do ZE^UTLERR quit
+		set ET=ET_"-"_error.thrownAt
+		set RM=error.description
+		do ^UTLERR
+	}
+
+	// Quit if an event monitor is currently running
+	lock +EVENTMON("PA"):2  else  quit
+
+	do SYSVAR^SCADRV0()
+
+	type RecordEVENTMON eventmon = Db.getRecord("EVENTMON", "PROCESSOR=""PA""", 1)
+
+	set eventmon.pid=$$DECHEX^%ZHEX(%ProcessID)
+	set eventmon.sysdate=%CurrentDate
+	set eventmon.systime=%CurrentTime
+	set eventmon.processor="PA"
+	set eventmon.stop=0
+
+	do eventmon.save()
+	
+	// Register EVENT Monitir Process
+	do REGISTER^IPCMGR("MONITOR","EVENTMON")
+	
+	do EVENTQUE
+
+	set ACTIONQ=""
+	for  set ACTIONQ=$O(CACHE("ACTIONQUE",ACTIONQ)) quit:ACTIONQ=""  set ET=$$MQCLDSCT(ACTIONQ)
+	
+	// Un-register process
+	do CLOSE^IPCMGR()
+	
+	lock -EVENTMON("PA")
+	
+	quit
+
+
+EVENTQUE	//Process records in event queue
+
+	type Number time
+	
+	set time=%CurrentTime
+
+	for  do { quit:$$EVENTSTP
+		
+		type Number SEQUENCE, TSEQ
+		type String ENTITY, ENTITYID
+
+		//Check fequency based events every minute
+		if ((time\60)-(%CurrentTime\60) '= 0) do {
+			do EVENTFRE
+			do ACTIONQU
+			set time=%CurrentTime
+		}
+		
+		type DbSet ds = Db.selectDbSet("EVENTTQ", "", "SEQUENCE ASC")
+		
+		if ds.isEmpty() hang 2 quit
+		
+		type RecordEVENTTQ eventtq = ds.getRecord("EVENTTQ")
+		set SEQUENCE = eventtq.sequence
+		set ENTITY = eventtq.entity
+		set ENTITYID = eventtq.entityid
+		set TSEQ = eventtq.tseq
+		
+		do Runtime.start("CS")
+
+		do Db.delete("EVENTTQ","SEQUENCE=:SEQUENCE")
+		
+		do Runtime.commit()
+
+		do ACTIONQU
+	}
+	quit
+
+
+EVENTTR(String ENTITY, String ENTITYID, Number TSEQ)	// Transactional events driver
+	/*
+	ARGUMENTS:
+	     . ENTITY	Entity				/REQ/MECH=VAL
+			"A" if from ACN
+			"C" if from CIF
+
+	     . ENTITYID	Entity ID			/REQ/MECH=VAL
+			CID if ENTITY="A"
+			ACN if ENTITY="C"
+
+	     . TSEQ	History sequence		/REQ/MECH=VAL
+			From HIST if ENTITY="A"
+			From CIFH if ENTITY="C"
+
+	This subroutine creates a results set of all transaction events that
+	are registered for a specified entityID and instantiates the history
+	object that will be evaluated by the applicable entity tests.  Each
+	transaction event will be evaluated (via a call to TEVENT) in order
+	to determine whether of not the transaction should trigger one or
+	more actions.
+
+	*/
+	
+	type Number EVENTSEQ
+
+	catch error {
+		type String ET,RM
+		set ET=error.type
+
+		if ET["%GTM-" do ZE^UTLERR quit
+		set ET=ET_"-"_error.thrownAt
+		set RM=error.description
+		do ^UTLERR
+	}
+
+	if ENTITY="A" do {
+
+		type ResultSet rs=Db.select("EVENTSEQ","ACCTTOEVENTS","CID=:ENTITYID")
+
+		while rs.next() do {
+			set EVENTSEQ=rs.getCol("EVENTSEQ")
+			
+			type RecordEVENTS events = Db.getRecord("EVENTS", "EVENTSEQ=:EVENTSEQ", 1)
+			quit:(events.eventtype '= "T")
+
+			type RecordHIST hist = Db.getRecord("HIST","ENTITYID,TSEQ")
+ 			do EVENTS(ENTITY,ENTITYID,EVENTSEQ,.hist)
+		}
+	}
+
+	else  if ENTITY="C" do {
+
+		type ResultSet rs = Db.select("EVENTSEQ","CUSTTOEVENTS","ACN=:ENTITYID")
+
+		while rs.next() do {
+			set EVENTSEQ=rs.getCol("EVENTSEQ")
+
+			type RecordEVENTS events = Db.getRecord("EVENTS", "EVENTSEQ=:EVENTSEQ", 1)
+			quit:(events.eventtype '= "T")
+
+			type RecordCIFH cifh = Db.getRecord("CIFH","ENTITYID,TSEQ")
+ 			do EVENTS(ENTITY,ENTITYID,EVENTSEQ,"",.cifh)
+		}
+	}
+
+	quit
+
+
+EVENTS(String ENTITY, String ENTITYID, Number EVENTSEQ, RecordHIST hist, RecordCIFH cifh) //Process event
+	/*
+	ARGUMENTS:
+	     . ENTITY	Entity				/REQ/MECH=VAL
+			"A" if from ACN
+			"C" if from CIF
+
+	     . ENTITYID	Entity ID			/REQ/MECH=VAL
+			CID if ENTITY="A"
+			ACN if ENTITY="C"
+
+	     . EVENTSEQ	Event sequence			/REQ/MECH=VAL
+
+	     . hist	Account history object		/REQ/MECH=REFARR:R
+
+	     . cifh	Customer history object		/REQ/MECH=REFARR:R
+
+	This subroutine is responsible for instantiating the transaction
+	event specified by EVENTSEQ for the specified entity_id and 
+	determining if an action(s) should be triggered.
+
+	*/
+
+	type public String CACHE(,)
+
+	type Boolean IS2HIST, true
+	type String arg(), DESCRIP, EVENTID, function, PROCDEF, PROCESS, TESTID
+
+	catch error {
+		type String ET,RM
+		set ET=error.type
+
+		if ET["%GTM-" do ZE^UTLERR quit
+		set ET=ET_"-"_error.thrownAt
+		set RM=error.description
+		do ^UTLERR
+	}
+
+	type RecordEVENTS event = Db.getRecord("EVENTS","EVENTSEQ")
+	if 'event.expiredate.isNull(), (event.expiredate '> %CurrentDate) do PURGE(.event) quit
+
+	if event.nextdate>%CurrentDate quit
+	if event.isonlyonce,event.lasttrigdate'="" quit
+	if event.isonceperday,event.lasttrigdate=%CurrentDate quit
+
+	set EVENTID=event.eventid
+
+	// Load properties from EVENTSAVAIL if not in cache
+	if '$D(CACHE("EVENTINF",EVENTID)) do {
+
+		type RecordEVENTSAVAIL eventavl = Db.getRecord("EVENTSAVAIL","EVENTID")
+
+		set PROCESS=eventavl.processor
+		set DESCRIP=eventavl.description
+		set IS2HIST=eventavl.istohistory
+		set TESTID=eventavl.entitytestid
+
+		type RecordEVENTTESTS eventtst = Db.getRecord("EVENTTESTS","TESTID")
+
+		set PROCDEF=eventtst.procedure
+		set CACHE("EVENTINF",EVENTID)=PROCESS_"|"_DESCRIP_"|"_PROCDEF_"|"_IS2HIST
+	}
+
+	else  do {
+		set PROCESS=$P(CACHE("EVENTINF",EVENTID),"|",1)
+		set DESCRIP=$P(CACHE("EVENTINF",EVENTID),"|",2)
+		set PROCDEF=$P(CACHE("EVENTINF",EVENTID),"|",3)
+		set IS2HIST=$P(CACHE("EVENTINF",EVENTID),"|",4)
+	}
+
+	// Quit, processor is not PROFILE/Anyware
+	quit:PROCESS'="PA"
+
+	/*
+	Load values from EVENTARGVALS for this entity/entityid/eventseq.
+	These values will be passed by reference into the entity_test in
+	the first argument.
+	*/
+
+	type ResultSet rs = Db.select("ARGUMENTNUM,EXPRESSION","EVENTARGVALS","EVENTSEQ=:EVENTSEQ")
+
+	while rs.next() set arg(rs.getCol("ARGUMENTNUM")) = rs.getCol("EXPRESSION")
+
+	/*
+	Execute the entity test, passing in the event and history
+	objects and the argument values.
+	*/
+
+	set function="set true="_PROCDEF_"(.event,.hist,.cifh,.arg)"
+	#ACCEPT DATE=01/12/04;PGM=John Carroll
+	xecute function
+
+	// Update frequency related fields.
+	if event.eventtype="F" do UPDFREQ(.event)
+
+	/*
+	If entity test is true, execute event action(s)	and update
+	the event (last triggered date/time).  Otherwise, quit.
+	*/
+
+	if 'true quit
+
+	// Trigger action(s) defined for this event
+	do ACTIONS(.event,.hist,.cifh,.arg)
+
+	// Update and save event information (last trig date/time, etc.)
+	if event.isonlyonce set event.expiredate=%CurrentDate+7
+	set event.lasttrigdate=%CurrentDate
+	set event.lasttrigtime=%CurrentTime
+	do event.bypassSave()
+
+	// Update history, if applicable
+	if IS2HIST do UPDHIST(.event,1)
+
+	quit
+
+
+ACTIONS(RecordEVENTS event, RecordHIST hist, RecordCIFH cifh,arg)	//Event Actions
+	/*
+	ARGUMENTS:
+	     . event	Event object			/REQ/MECH=REFARR:R
+
+	     . hist	Account history object		/REQ/MECH=REFARR:R
+
+	     . cifh	Customer history object		/REQ/MECH=REFARR:R
+
+	     . arg	Event argument values		/NOREQ/MECH=REFARR:R
+
+	This subroutine is responsible for executing the event action(s)
+	triggered by the event specified by ENTITY and EVENTID.
+
+	*/
+	
+	type public String CACHE(,)
+
+	type Number EVENTSEQ, SEQUENCE
+	type String ACTION, ACTIONQ, CORRESP, EVENTID, function, msg, PROCDEF, PROCESS, TYPE
+
+	set EVENTID=event.eventid
+	set EVENTSEQ=event.eventseq
+
+	if '$D(CACHE("EVENTINF",EVENTID,"ACTIONS")) do {
+
+		type ResultSet rs = Db.select("SEQUENCE","EVENTACTIONS","EVENTID=:EVENTID")
+
+		while rs.next() do {
+			set SEQUENCE=rs.getCol(1)
+
+			type RecordEVENTACTIONS eventact = Db.getRecord("EVENTACTIONS","EVENTID,SEQUENCE")
+
+			set ACTION=eventact.procedure
+			set ACTION=ACTION_"|"_eventact.actionqueue
+			set ACTION=ACTION_"|"_eventact.correspondid
+			set ACTION=ACTION_"|"_eventact.processor
+			set CACHE("EVENTSAVAIL",EVENTID,"ACTIONS",SEQUENCE)=ACTION
+		}
+	}
+
+	set SEQUENCE=""
+	for  set SEQUENCE=$O(CACHE("EVENTSAVAIL",EVENTID,"ACTIONS",SEQUENCE)) quit:SEQUENCE=""  do {
+		set ACTION=CACHE("EVENTSAVAIL",EVENTID,"ACTIONS",SEQUENCE)
+
+		set PROCDEF=$P(ACTION,"|",1)
+		set ACTIONQ=$P(ACTION,"|",2)
+		set CORRESP=$P(ACTION,"|",3)
+		set PROCESS=$P(ACTION,"|",4)
+
+		quit:PROCESS'="PA"
+
+		set function="do "_PROCDEF_"(.event,.hist,.cifh,.arg,.msg)"
+		#ACCEPT DATE=01/12/04;PGM=John Carroll
+		xecute function
+
+		if 'ACTIONQ.isNull() D ACTIONQ(ACTIONQ,.msg)
+	}
+
+	quit
+
+
+ACTIONQ(String ACTIONQ, String msg)	//Record event in the action queue
+
+	type public Number EVENTSEQ, SEQUENCE
+	type public String ENTITY, ENTITYID, EVENTID
+
+	type RecordEVENTAQ eventaq = Class.new("RecordEVENTAQ")
+	set eventaq.actionq=ACTIONQ
+	set eventaq.queuedat=%CurrentDate
+	
+	type ResultSet rs = Db.select("QUEUESEQ", "EVENTAQ", "ACTIONQ=:ACTIONQ AND QUEUEDAT=:%CurrentDate", "QUEUESEQ DESC")
+	
+	if rs.next() set eventaq.queueseq = rs.getCol("QUEUESEQ") + 1
+	else  set eventaq.queueseq = 1
+
+	set eventaq.entity=ENTITY
+	set eventaq.eventid=EVENTID
+	set eventaq.sequence=SEQUENCE
+	set eventaq.entityid=ENTITYID
+	set eventaq.eventseq=EVENTSEQ
+
+	set eventaq.queuetime=%CurrentTime
+	set eventaq.message=msg
+	
+	do eventaq.save()
+	
+	quit
+
+
+EVENTTQ(String ENTITY, String ENTITYID, Number TSEQ)	//Record transaction in transaction queue
+	/*
+	ARGUMENTS:
+	     . ENTITY	Entity				/REQ/MECH=VAL
+			"A" if from ACN
+			"C" if from CIF
+
+	     . ENTITYID	Entity ID			/REQ/MECH=VAL
+			CID if ENTITY="A"
+			ACN if ENTITY="C"
+
+	     . TSEQ	History sequence		/REQ/MECH=VAL
+			From HIST if ENTITY="A"
+			From CIFH if ENTITY="C"
+	*/
+
+	type RecordEVENTTQ eventtq = Class.new("RecordEVENTTQ")
+	
+	type ResultSet rs = Db.select("SEQUENCE", "EVENTTQ", "", "SEQUENCE DESC")
+	
+	if rs.next() set eventtq.sequence = rs.getCol("SEQUENCE") + 1
+	else  set eventtq.sequence = 1
+
+	set eventtq.entity=ENTITY
+	set eventtq.entityid=ENTITYID
+	set eventtq.tseq=TSEQ
+
+	do eventtq.save()
+
+	quit
+
+
+PURGE(RecordEVENTS event)	//Purge event
+	/*
+	ARGUMENTS:
+	     . event	Event object			/REQ/MECH=REFARR:R
+	*/
+
+	type Number EVENTSEQ = event.eventseq
+
+	do Db.delete("EVENTS","EVENTSEQ=:EVENTSEQ")
+
+	do UPDHIST(.event,2)
+
+	quit
+
+
+UPDHIST(RecordEVENTS event, Number actflg)	//Update history to record event
+	/*
+	ARGUMENTS:
+	     . event	Event object			/REQ/MECH=REFARR:R
+
+	     . actflg	Action flag			/REQ/MECH=VAL
+
+			1 = Event triggered
+			2 = Event purged
+	*/
+	
+	type public String DESCRIP, ENTITY, ENTITYID
+	
+	type Number EVENTSEQ
+	type String EVENTID, src(), tcmt, tso
+
+	set EVENTSEQ=event.eventseq
+	set EVENTID=event.eventid
+
+	set src("EVENTSEQ")=EVENTSEQ
+	set src("EVENTID")=EVENTID
+	do IN^UTSO(.src,.tso)
+
+	//Event ~p1 sequence ~p2 triggered
+	if actflg=1 set tcmt=$$^MSG(4380,EVENTID,EVENTSEQ)
+
+	//Event ~p1 sequence ~p2 purged
+	if actflg=2 set tcmt=$$^MSG(4381,EVENTID,EVENTSEQ)
+
+	if ENTITY="A" do {
+
+		type RecordHIST hist = Class.new("RecordHIST")
+
+		set hist.cid=ENTITYID
+		
+		type ResultSet rs = Db.select("TSEQ", "HIST", "CID=:ENTITYID", "TSEQ DESC")
+		
+		if rs.next() set hist.tseq = rs.getCol("TSEQ") + 1
+		else  set hist.tseq = 1
+
+		set hist.tso=tso
+		set hist.tcmt=tcmt
+		set hist.tjd=%SystemDate
+		set hist.cdt=%CurrentDate
+		set hist.time=%CurrentTime
+
+		do hist.save()
+	}
+
+	if ENTITY="C" do {
+
+		type RecordCIFH cifh = Class.new("RecordCIFH")
+
+		set cifh.acn=ENTITYID
+		
+		type ResultSet rs = Db.select("SEQ", "CIFH", "ACN=:ENTITYID", "SEQ DESC")
+		
+		if rs.next() set cifh.seq = rs.getCol("SEQ") + 1
+		else  set cifh.seq = 1
+
+		set cifh.tso=tso
+		set cifh.tcmt=DESCRIP
+		set cifh.tjd=%SystemDate
+		set cifh.hdate=%CurrentDate
+		set cifh.htime=%CurrentTime
+
+		do cifh.save()
+	}
+
+	quit
+
+
+MQCLCNCT(String ACTIONQ)	// Client connect to MQ Series
+	/*
+	ARGUMENTS:
+	     . ACTIONQ	Action Queue		/REQ/MECH=VAL
+
+			Environmental variable that points to
+			the MQSeries initialization file.
+	*/
+
+	type public String CACHE(,)
+
+	type String ET, id
+
+	set ET=$$CLCNCT^%MTAPI(.id,ACTIONQ,"MQ")
+	if ET="" set CACHE("ACTIONQUE",ACTIONQ)=id.get()
+	
+	quit ET
+
+
+MQCLDSCT(String ACTIONQ)	// Client disconnect to MQ Series
+	/*
+	ARGUMENTS:
+	     . ACTIONQ	Action Queue		/REQ/MECH=VAL
+
+			Environmental variable that points to
+			the MQSeries initialization file.
+	*/
+	
+	type public String CACHE(,)
+
+	type String ET, id
+
+	set id=CACHE("ACTIONQUE",ACTIONQ)
+	set ET=$$CLDSCNCT^%MTAPI(id)
+
+	quit ET
+
+
+MQCLSEND(String ACTIONQ, String msg)	// Client Send Message
+	/*
+	ARGUMENTS:
+	     . ACTIONQ	Action Queue		/REQ/MECH=VAL
+
+			Environmental variable that points to
+			the MQSeries initialization file.
+
+	     . msg	Message			/REQ/MECH=VAL
+	*/
+	
+	type public String CACHE(,)
+
+	type String ET, id
+
+	set id=CACHE("ACTIONQUE",ACTIONQ)
+	set ET=$$CLSEND^%MTAPI(msg,"",id)
+
+	quit ET
+
+
+START	// Start Event Monitor
+
+	type String VFMQ
+
+	do PRMT(1) quit:VFMQ="Q"
+	do JOB
+	
+	quit
+
+
+STOP	// Issue a stop message to PROFILE/IBS server(s)
+
+	type public String ER
+
+	type String VFMQ
+
+	do PRMT(0) quit:VFMQ="Q"
+	set ER="W"
+	
+	quit
+
+
+JOB	//Private/External entry point to spawn monitor
+
+	type public String ER, RM()
+
+	type Boolean x
+	type String pgmnam, prcnam
+
+	set pgmnam="MAIN^EVENTMON"
+	set prcnam="EVENTMON_"_CUVAR.PTMDIRID
+
+	set x=$$^%ZJOB(pgmnam,"PRO="_prcnam,1)
+
+	if x set RM($O(RM(""),-1)+1)=$$^MSG(6800,prcnam)
+	else  set RM($O(RM(""),-1)+1)=$$^MSG(6799,prcnam)
+	set ER="W"
+	quit
+
+
+PRMT(Boolean OPT)	//Private;Prompts for startup/shutdown
+	/*
+
+	ARGUMENTS:
+	     . OPT	Option (0=Stop, 1=Start)	/LEN=1/REQ
+	*/
+
+	type public String ER, RM, VFMQ
+
+	type Boolean CONT
+	type Number %PAGE, %PG, OLNTB, pid
+	type String %READ, %TAB()
+
+	set %PG=1,%PAGE=1
+	set %TAB("CONT")=".CONT2"
+
+	set %READ="@@%FN,,,CONT/REQ"
+	do ^UTLREAD if VFMQ="Q" quit
+	if 'CONT set VFMQ="Q" quit
+
+	set pid=""
+
+	type RecordEVENTMON eventmon = Db.getRecord("EVENTMON", "PROCESSOR=""PA""", 1)
+	if (eventmon.getMode() > 0) do {
+		set pid=eventmon.pid
+		set pid=$$HEXDEC^%ZHEX(eventmon.pid)
+		if '$$VALID^%ZPID(pid) set pid=""
+	}
+
+	if OPT do {
+		if pid'="" set ER=1,RM=$$^MSG(8364) quit
+	}
+
+	else  do {
+		if pid="" set ER=1,RM=$$^MSG(8366) quit
+
+		// Signal monitor to stop
+		set eventmon.stop=1
+		do eventmon.save()
+
+		type String sel()
+		
+		set sel("PRCTYP")="MONITOR"
+		set sel("SUBTYP")="EVENTMON"
+		do ISSUE^IPCMGR("STOP",,.sel)		
+
+
+	}
+	
+	quit
+
+
+EVENTSTP()	// Return event stop flag
+
+	type Public String %INTRPT
+	type Boolean STOP = 0
+	
+	if %INTRPT.data() > 1 do INTRPT^IPCMGR
+	
+	if '%INTRPT.get().isNull() do {
+	
+		if %INTRPT = "STOP" set STOP = 1
+		else  if %INTRPT = "CTRL" do {
+			type RecordEVENTMON event = Db.getRecord("EVENTMON","PROCESSOR='PA'",1)
+			if (event.getMode() = 0) ! (event.stop = 1) set STOP = 1
+			}
+		
+		set %INTRPT = ""
+		}
+		
+	quit STOP
+	
+
+ACTIONQU	//Process entries in the ACTIONQUE
+
+	type public String CACHE(,), ER, ET
+
+	set ER=0
+	
+	type ResultSet rs = Db.select("DISTINCT ACTIONQ", "EVENTAQ", "", "ACTIONQ ASC")
+	
+	while rs.next() do { quit:ER
+		
+		type Date AQDATE
+		type Number AQSEQ
+		type String ACTIONQ, id
+		
+		set ACTIONQ = rs.getCol("ACTIONQ")
+	
+		set id=$G(CACHE("ACTIONQUE",ACTIONQ))
+		if id="" set ET=$$MQCLCNCT(ACTIONQ) if ET'="" set ER=1 quit
+
+		type RecordEVENTAQHDR eventaqh = Db.getRecord("EVENTAQHDR","ACTIONQ")
+		
+		new AQDATE,AQSEQ
+		set AQDATE=eventaqh.queuedat-1
+		set AQSEQ=eventaqh.sequence
+		
+		type ResultSet rs2 = Db.select("QUEUEDAT,QUEUESEQ", "EVENTAQ", "ACTIONQ=:ACTIONQ", "QUEUEDAT,QUEUESEQ ASC")
+		
+		while rs2.next() do AQMSG(ACTIONQ, rs2.getCol("QUEUEDAT"), rs2.getCol("QUEUESEQ"), .eventaqh)
+	}
+	
+	quit
+
+
+AQMSG(String ACTIONQ, Date AQDATE, Number AQSEQ, RecordEVENTAQHDR eventaqh)	// Process Action Message
+
+	type public String CACHE(,), ER, ET
+
+	type RecordEVENTAQ eventaq = Db.getRecord("EVENTAQ","ACTIONQ=:ACTIONQ,QUEUEDAT=:AQDATE,QUEUESEQ=:AQSEQ")
+
+	set ET=$$MQCLSEND(ACTIONQ,eventaq.message) if ET'="" do {
+		type String ETX
+		set ETX=$$MQCLDSCT(ACTIONQ)
+		kill CACHE("ACTIONQUE",ACTIONQ)
+		set ER=1
+	}
+
+	do eventaq.setAuditFlag(1)
+	set eventaq.senddate=%CurrentDate
+	set eventaq.sendtime=%CurrentTime
+	do eventaq.save()
+
+	do eventaqh.setAuditFlag(1)
+	set eventaqh.queuedat=AQDATE
+	set eventaqh.sequence=AQSEQ
+	do eventaqh.save()
+
+	quit
+
+
+EVENTFRE	//Process freqeuncy based events
+
+	type Number EVENTSEQ
+	type String ENTITY, ENTITYID, EVENTTYPE
+
+	type ResultSet rs = Db.select("EVENTSEQ","EVENTS","EVENTTYPE='F' AND (NEXTDATE<:%CurrentDate OR (NEXTDATE=:%CurrentDate AND NEXTTIME NOT >:%CurrentTime))")
+	
+	while rs.next() do {
+		
+		set EVENTSEQ = rs.getCol("EVENTSEQ")
+
+		quit:'$$GETENTTY(EVENTSEQ,.ENTITY,.ENTITYID)
+		
+		do Runtime.start("CS")
+
+		do EVENTS(ENTITY,ENTITYID,EVENTSEQ)
+		
+		do Runtime.commit()
+	}
+
+	quit
+
+
+UPDFREQ(RecordEVENTS event)	// Update frequency related fields
+
+	type public String ER
+
+	type Date JD
+	type Number TIME, TOTIME
+	type String FRE
+
+	if (+event.interval = 0) do { quit
+ 		set FRE=event.frequency
+		set JD=%CurrentDate
+		set event.nextdate=$$NJD^UFRE(JD,FRE) quit:$G(ER)
+		if event.attime.isNull() set event.nexttime=0
+		else  set event.nexttime=event.attime
+
+		do event.save()
+	}
+
+	set TIME=event.nexttime+(event.interval*60)
+
+	set TOTIME=event.totime
+	if (+TOTIME = 0) set TOTIME=86339		// 23:59
+
+	// Bump next date if after interval to time cycle.
+	if TIME>TOTIME do { quit
+		if event.attime.isNull() set event.nexttime=0
+		else  set event.nexttime=event.attime
+ 		set FRE=event.frequency
+		set JD=%CurrentDate
+		set event.nextdate=$$NJD^UFRE(JD,FRE) quit:$G(ER)
+
+		do event.save()
+		}
+
+	set event.nexttime=TIME
+	do event.save()
+	
+	quit
+
+
+GETENTTY(Number EVENTSEQ, String entity, String entityid)	// Return Entity and EntityID Based on Event Sequence Number.
+
+	type Boolean RETURN = 0
+
+	type ResultSet rs = Db.select("CID","ACCTTOEVENTS","EVENTSEQ=:EVENTSEQ")
+	if rs.next() do {
+		set entity="A"
+		set entityid=rs.getCol("CID")
+		set RETURN = 1
+		}
+
+	else  do {
+		type ResultSet rs2 = Db.select("ACN","CUSTTOEVENTS","EVENTSEQ=:EVENTSEQ")
+		if rs2.next() do {
+			set entity="C"
+			set entityid=rs2.getCol("ACN")
+			set RETURN = 1
+		}
+	}
+
+	quit RETURN
+
+vSIG()	quit "60633^55384^Hari Natrajan^17991"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,514 @@
+BCHTTXFD //Batch BCHTTXFDPOS - Future Dated Transaction Posting
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 01/31/2007 12:47 - shetyes
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHTTXFDPOS Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit quit
+ do JOBMGR^BCHUTL(%FN,"BCHTTXFDPOS",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(TJD,BRCD,UID) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHTTXFDPOS","*","",TJD.get()_","_BRCD.get()_","_UID.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,TJD,BRCD,UID)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHTTXFDPOS","*","",TJD.get()_","_BRCD.get()_","_UID.get(),"",et)
+ }
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,TJD,BRCD,UID) //
+	type public Boolean %MCP, ER
+	type public String RM
+	
+	type Number ENDSEQ, LASTSEQ, SCR, TSEQ
+	
+	// Rollback batch level TP, manage it here around each screen
+	if ($TLevel > 0) do Runtime.rollback()
+
+	type RecordTTXFDTUID ttxuid
+
+	set %UserID = UID
+
+	// Start at next transaction - handles restart as well
+	type ResultSet rs = Db.select("UID", "TTXFDTUID", "TJD=:TJD AND BRCD=:BRCD AND UID=:%UserID")
+	if rs.isEmpty() do {
+		set ttxuid = Class.new("RecordTTXFDTUID", "TJD=:TJD,BRCD=:BRCD,UID=:%UserID"))
+		set SCR = 0
+	}		
+	else  do {
+		set ttxuid = Db.getRecord("TTXFDTUID", "TJD=:TJD,BRCD=:BRCD,UID=:%UserID")
+		set SCR = ttxuid.lpseq		// Last Posted Sequence Number
+	}
+
+	set TSEQ = (SCR + 1) * 1000			// Transaction Sequence Number
+	
+	// Get last TSEQ
+	type ResultSet rs2 = Db.select("TSEQ", "TTXFDT", "TJD=:TJD AND BRCD=:BRCD AND UID=:%UserID AND TSEQ>:TSEQ", "TSEQ DESC")
+	quit:rs2.isEmpty()				// No more to post
+	if rs2.next() set LASTSEQ = rs2.getCol("TSEQ")
+	
+	do SRC(.ttxuid)
+	
+	for  do { quit:(TSEQ > LASTSEQ)
+
+		set ENDSEQ = ((TSEQ \ 1000) + 1) * 1000
+		set TSEQ = (TSEQ \ 1000) * 1000
+		quit:(TSEQ > LASTSEQ)
+		
+		do Runtime.start("BA")
+		do POSTSCRN(TSEQ, ENDSEQ, .ttxuid)
+		if ER do Runtime.rollback()
+		if 'ER do Runtime.commit()
+		
+		// Get next screen
+		set TSEQ = (((TSEQ \ 1000) + 1) * 1000)
+	}
+	
+	quit
+	
+	
+POSTSCRN(Number TSEQ,			// Starting sequence
+	 Number ENDSEQ,			// Ending sequence
+	 RecordTTXFDTUID ttxuid)	// User record
+	 
+	type public Boolean %MCP, ER
+	type public Date TJD
+	type public Number BRCD
+	type public String RM
+
+	type Boolean CRT, ERR
+	type Number ERRMSG, seqno, tsseq
+	type String EFT, par(), x
+
+	type RecordTTX ttx()
+	type TranSet ts = Class.new("TranSet")
+	
+	set (ER, ERR) = 0
+	set (EFT, ERRMSG) = ""
+	
+  	set seqno=1
+
+	type DbSet ds = Db.selectDbSet("TTXFDT", "TJD=:TJD AND BRCD=:BRCD AND UID=:%UserID AND TSEQ>:TSEQ AND TSEQ<:ENDSEQ")
+
+	quit:ds.isEmpty()
+	
+	while ds.next() do {
+
+		type RecordTTXFDT ttxfdt = ds.getRecord("TTXFDT")
+
+		set ttx(seqno) = Class.new("RecordTTX")
+ 		set ttx(seqno).tjd=ttxfdt.tjd
+		set ttx(seqno).custcd  =  ttxfdt.custcd		// rate code
+		set ttx(seqno).cid = ttxfdt.cid			// Account Number
+		set ttx(seqno).itc = ttxfdt.itc			// Internal Transaction Code
+		set ttx(seqno).etc = ttxfdt.etc			// External Transaction Code
+		set ttx(seqno).tamt = ttxfdt.tamt		// Transaction Amount
+		set ttx(seqno).efd = ttxfdt.efd			// Effective Date
+		set ttx(seqno).tlo = %UserStation		// Transaction Location
+		set ttx(seqno).tcmt = ttxfdt.tcmt		// Transaction Comment
+		set ttx(seqno).tso = ttxfdt.tso			// Source of Funds
+		set ttx(seqno).trc = TSEQ			// Transaction Trace Number
+		set ttx(seqno).spr = ttxfdt.spr			// Spray Number
+		set ttx(seqno).tsb = ttxfdt.tsb			// Total Secondary Balance
+		set ttx(seqno).lnerc = ttxfdt.lnerc		// Loan Error Correct Data
+		set ttx(seqno).rate = ttxfdt.rate		// Exchange Rate
+		set ttx(seqno).vdt = ttxfdt.vdt			// Value Date
+		set ttx(seqno).cc = ttxfdt.cc	      		// Cost Center
+		set ttx(seqno).chktyp = ttxfdt.chktyp		// REGCC Check Type
+		set ttx(seqno).mult = ttxfdt.mult		// Multiply/Divide
+		set ttx(seqno).bseamt = ttxfdt.bseamt		// Base Amount (Exchange)
+		set ttx(seqno).custcd = ttxfdt.custcd		// Customer Code
+		set ttx(seqno).tresref = ttxfdt.tresref		// Treasury Reference
+		set ttx(seqno).bcrcd = ttxfdt.bcrcd		// Base Currency
+
+		#if CUVAR.%MCP set ttx(seqno).crcd = ttxfdt.crcd	// Currency Code
+
+		set ttxfdt.brcde = ""				// Branch Code
+		set ttxfdt.trc = TSEQ				// Transaction Trace Number
+		set ttxfdt.uidt = ""				// User ID Description
+		
+		do ttxfdt.bypassSave()				// Update Record
+
+		// Build supervisor override array
+
+		if Db.isDefined("TTXFDT","TJD=:TJD,BRCD=:BRCD,UID=:%UserID,TSEQ=:TSEQ") do {
+
+			type Number CID, TAMT
+			
+			type RecordTTXFDT0 ttxfdt0 = Db.getRecord("TTXFDT0", "TJD=:TJD,BRCD=:BRCD,UID=:%UserID,TSEQ=:TSEQ", 1)
+			
+			if 'ttxfdt0.spvrec.isNull() do SPVCNV(TSEQ, ttxfdt0.spvrec, ttxfdt.cid, ttx(seqno).tamt)
+		}
+
+		set seqno = seqno + 1			
+
+		// Check for foreign payment transactions
+		if EFT.isNull() set EFT = $$FIELD^UTSO(ttxfdt.tso, "EFT")
+	}
+
+	set par("OPTION") = 2				// Process transactions; update database
+	set par("IPMODE") = 4				// TR (transaction array)
+	set par("UPDTTX") = 1				// Update teller file (TTX)
+	
+	set CRT = 0
+	
+	// Foreign payment processing
+	if ((EFT = "NDPO") ! (EFT = "NDPOIN")) do NDPO(.ttx(), BRCD)
+	if ERR set ER = ERR, RM = ERRMSG
+
+	// Build exchange transactions
+	if %MCP.get() do EXCH^CRCDUTL(.ttx())
+
+	do INIT^CRTHLD(.ttx(),.HLDALL) quit:ER
+	// Build transaction set
+	set tsseq = ""
+	for  set tsseq=ttx(tsseq).order() quit:tsseq.isNull()  set x = ts.copyTran(ttx(tsseq), "", tsseq)
+
+	do ts.postTSet(TJD, BRCD, .par())
+	// Error Posting Transactions
+	if ER do LOG^UTLEXC($T(+0), "*", $$^MSG(3764), %UserID, "", (TSEQ \ 1000) * 1000)
+
+	set ttxuid.lpseq = (ENDSEQ / 1000) - 1		// Last Posted Sequence Number
+ 
+	do ttxuid.bypassSave()
+	
+	quit
+
+
+SRC(RecordTTXFDTUID ttxuid)	// Load teller source information
+
+	type public Boolean %ODP, %RET, fdovr, MARTY, REJMET, RTSN
+	type public String ETC, RTSN(,)
+	
+	type String SRC
+ 
+	kill ETC
+
+	type RecordSCAU scau = Db.getRecord("SCAU", "UID = :%UserID")
+ 	
+	set %UserClass = scau.%ucls		// Userclass
+	set REJMET = scau.batrej		// Batch Reject Handling
+	set RTSN = scau.sdrty			// Same Day Retry Flag
+	set MARTY = scau.marty			// Maximum Number of Retries
+	set fdovr = 0
+
+	set SRC = ttxuid.src			// Batch Transaction Source
+	if SRC.isNull() set %RET = 0 quit
+	
+	type RecordCTBLINC ctblinc = Db.getRecord("CTBLINC", "KEY=:SRC")
+
+	set %RET = ctblinc.ret			// Include Exceptions in Return File
+	
+	// IRA Penalty Reason Code
+	#if (CUVAR.IRAPEN > 0)
+	if %RET set %RET = CUVAR.IRAPEN
+	#else
+	if %RET set %RET = 1
+	#endif
+
+	quit:'MARTY
+	if RTSN set %ODP=0 quit
+	
+	type ResultSet rs = Db.select("GRP,REST", "UTBLRETRY", "", "GRP,REST ASC")
+	while rs.next() set RTSN(rs.getCol("GRP"), rs.getCol("REST")) = ""
+	
+	quit
+
+	
+SPVCNV(Number SEQ, String rec, Number cid, Number TAMT)	//Private, Convert a LV record into SPV 
+
+	/*
+	Convert the length-value authorization string back into the SPV 
+	structure.
+	
+	ARGUMENTS:
+		 
+		. SEQ	- Sequence number, as contained in the TR array
+	
+		. rec 	- Length-value record containing the original
+			  supervisory authorization information
+	
+		. cid	- Account number, contained in the TR sequence
+
+		. TAMT  - Transaction amount
+	*/
+	
+	type public Boolean fdovr
+	type public String mxtrlm(), SPV(,,,), TSPV(,,,)
+ 	
+	type Number %sq, tcid
+	type String GRP, L1, L2, OVR, uid, X, ZSPV()
+	
+	set X = $$LV2V^MSG(rec, .ZSPV())
+	set %sq = ""
+	for  set %sq = ZSPV(%sq).order() quit:%sq.isNull()  do {
+		
+		type String zspv()
+		
+		set X = $$LV2V^MSG(ZSPV(%sq), .zspv()) 
+		set OVR = zspv(1)
+		set uid = zspv(2)
+		
+		set tcid = zspv(3)
+		if tcid.isNull() set tcid = cid
+		
+		set L1 = OVR.piece("_", 1)
+		set GRP = OVR.piece("_", 2)
+		set L2 = OVR.piece("_", 3)
+		
+		if '(L1.isNull() ! L2.isNull()) do {
+
+			set SPV(SEQ, cid, L1, L2) = uid_"|0|"_tcid_"|"_GRP
+			
+			// Set up TSPV needed for CRTOVR
+			type RecordSCAU scau = Db.getRecord("SCAU", "UID=:uid")
+			
+			set TSPV(%sq, cid, L1, L2) = uid_"|"_scau.%ucls
+			
+			// Make sure array exist for ttxp2
+			if (L2 = "MXUCLSTR") set mxtrlm(SEQ) = TAMT, fdovr=1
+		}
+	}
+
+	quit
+
+
+NDPO(RecordTTX ttx(), String BRCD)
+
+	/*
+	Foreign payment processing
+	*/
+	
+	type public Boolean ER, ERR
+	type public String ERRMSG, RM
+	
+	type Number CID, LPSEQ, SCR, SEQ
+	type String EFTTYPE, FUTBLD, HLDREM, REFNO, TTXKEY, UTSO()
+
+	catch Error1 {
+		type String ET
+
+		set ET = Error1.type
+		set RM = ""
+
+		// Log error to the Profile error log
+		if ET["%GTM-" do ZE^UTLERR quit
+
+		set ERR = 1
+		set ERRMSG = Error1.description
+	}
+	
+	// Get information from the first transaction
+	do OUT^UTSO(.UTSO, ttx(1).tso)
+	set REFNO = UTSO("SPEC").get()
+	set FUTBLD = UTSO("FUTBLD").get()
+	set SCR = (ttx(1).trc\1000)*1000
+
+	// Determine payment
+	if REFNO.isNull() do { quit
+		set ER = 1
+		// Invalid reference(s) , ~p1
+		set RM = $$^MSG(1440)
+	}
+
+	type RecordEFTREF eftref = Db.getRecord("EFTREF", "REFNO=:REFNO", 1)
+	if (+eftref.getMode() = 0) do { quit
+		set ER = 1
+		// Invalid reference(s) , ~p1
+		set RM = $$^MSG(1440, REFNO)
+	}
+		
+	set CID = eftref.cid
+	set SEQ = eftref.seq
+
+	// Retrieve payment
+	type RecordEFTPAY eftpay = Db.getRecord("EFTPAY", "CID=:CID,SEQ=:SEQ")
+	do eftpay.setAuditFlag(1)
+
+	// Retrieve payment type defaults
+	set EFTTYPE=eftpay.efttype
+	type RecordCTBLEFTTYPE ctbleft = Db.getRecord("CTBLEFTTYPE", "KEY=:EFTTYPE")
+
+	// Determine TTX sequence
+	type RecordTTXUID ttxuid = Db.getRecord("TTXUID", "TJD=:%SystemDate,BRCD=:BRCD,UID=:%UserID", 1)
+	set LPSEQ = ttxuid.lpseq
+	
+	set TTXKEY = %SystemDate_","_BRCD_","_%UserID_","_((LPSEQ + 1) * 1000)
+
+	// Remove holds for outgoing payments from customer accounts
+	if (EFTTYPE = "NDPO") do { quit:ER
+
+		// Update process date key on the payment
+		set eftpay.prockey = TTXKEY
+	
+		// Remove hold for payments from Profile accounts only
+		if ((eftpay.ttype <2) & eftpay.hldauto) do {
+
+			// Remove hold & clear hold sequence
+			set HLDREM = $$RMHLDS^EFTFUNCS(CID, SEQ)
+			if (+HLDREM = 0) do {
+				set ER = 1
+				// Error deleting hold
+				set RM = $$^MSG(8343)
+			}
+		}
+	}
+
+	// Incoming foreign payment processing
+	if eftpay.efttype = "NDPOIN" do { quit:ER
+		
+		type Number SETAMT, TRC, trseq
+		type String SETCRCD
+
+		// Update effective date key on the payment
+		set eftpay.efdkey = TTXKEY
+
+		// Rebuild effective date transactions for FUTBLD only
+		quit:(+FUTBLD = 0)
+
+		// Clear old transactions
+		set trseq=""
+		for  set trseq=ttx(trseq).order() quit:trseq.isNull()  kill ttx(trseq)
+
+		// Determine the settlement amount and currency
+		do SETAMT^EFTNDPO(.eftpay, CUVAR.EMUCRCD, CUVAR.UDRC, .SETAMT, .SETCRCD)
+		quit:ER
+
+		// Determine current rates and amounts for the payment
+		do NEWRATE^EFTNDPO(.eftpay)
+		quit:ER
+
+		// Rebuild the account transactions
+		do TRAN^EFTNDPO(.eftpay, .ttx(), ctbleft.ccdft,CUVAR.FUTBLD, CUVAR.GLTS, %SystemDate, SETAMT, SETCRCD, ctbleft.glin, ctbleft.etc)
+		quit:ER
+
+		// Re-define the transaction trace numbers to the TTXFDT sequences
+		set trseq = ""
+		set TRC = SCR + 1
+		for  set trseq=ttx(trseq).order() quit:trseq.isNull()  set ttx(trseq).trc = TRC, TRC = TRC + 1
+	}
+
+	// Update database
+	do eftpay.save()
+
+	quit
+	
+	
+	
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,TJD,BRCD,UID
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set TJD=vRECORD.piece($C(9),1)
+ set BRCD=vRECORD.piece($C(9),2)
+ set UID=vRECORD.piece($C(9),3)
+ do vPROC(TJD,BRCD,UID)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,TJD,BRCD,UID
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>34 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+39>34 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("DISTINCT TJD,BRCD,UID","TTXFDT","TJD=:TJD")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	type public Boolean %ODP, ER
+	type public Date TPD
+
+	set ER = 0
+	set TPD = %SystemDate
+	
+	set %ODP = CUVAR.ODP
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

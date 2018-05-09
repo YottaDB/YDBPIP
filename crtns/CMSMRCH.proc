@@ -1,0 +1,1045 @@
+CMSMRCH	//
+	/*
+	       ORIG:   Claude Jeruchim - 02/01/98
+	  CALLED BY:
+	      CALLS:
+	   PROJ #'S:  25272
+	       DESC:  Custom card transaction formatting
+	              Source ID: RFSB_ACH (^CTBL("INC",src))
+
+	                    THIS ROUTINE IS TO BE COMPILED WITH TTXFMT
+	                        DO NOT RUN THIS ROUTINE STANDALONE
+	   GLOBALS -
+	       READ:
+	        SET:
+
+	      INPUT:
+	     OUTPUT:
+
+	  ---- Revision History ------------------------------------------------
+
+	   12/12/05 - SPR - 18555
+		      Card Management - General DBI3 system area cleanup.
+	
+	  ----------------------------------------------------------------------
+
+	*/
+
+	quit
+	
+	
+Public RECCALL	// Record menu section
+
+	type Public String ER,REC,RECTYPE
+
+	if ER.get()>0 quit
+
+	// Following is custom for RS/2
+	set REC=$$TRANSLATE(REC)
+
+	// Header record
+	if RECTYPE="FH" do REC1 quit
+
+	// Unknown record - Abort
+	if RECTYPE="" quit
+
+	// Trailer record
+	if RECTYPE="FT" do REC9 quit
+
+	// Must be detail record
+	do REC6
+
+	quit
+
+Public ALLREC	// All records section
+
+	type Public Number ERR,RECCNT
+	type Public String RECTYPE
+
+	if RECCNT=1,RECTYPE'="FH" set ERR=11 do RECERR(1)
+
+	quit
+
+
+Public UFILINIT	// File intialization
+
+	type Public Number CRCDTOT,EXC,FILCNT,FILCR,FILDR,KEY3,PAYOR,TOTAMT,TOTDIS,TOTNET,TOTPMNTS,TOTROUND
+	type Number TYPEPOS1,TYPEPOS2
+
+	kill CRCDTOT,EXC,PAYOR
+
+	// Record type
+	set TYPEPOS1=1
+	set TYPEPOS2=2
+
+	// Initialize values to later compare with trailer.
+	set (TOTAMT,TOTDIS,TOTPMNTS,TOTNET,TOTROUND)=0
+
+	set (FILCNT,FILDR,FILCR,KEY3)=0
+	quit
+
+
+REC1	// File header record
+
+	type public String %DIR,%INST,%UserID,FID,REC,SRC,STR
+	type public Number BRCD,ERR,LASTTTXSEQ
+	type public Date %EffectiveDate,FDATE
+
+	// Destination Directory
+	do INT^%DIR
+
+	set %INST=%DIR
+
+	/* Calculate last TTX sequence number for this %UID and BRCD.
+	   This is later used to kill out new TTX records if the batch
+	   happens to be bad.
+	*/
+	set LASTTTXSEQ=""
+
+	type RecordCTBLINC ctblinc=Db.getRecord("CTBLINC","KEY=:SRC",1)
+
+	set BRCD=ctblinc.brcd
+	set %UserID=ctblinc.teller
+	
+	type ResultSet rsttx=Db.select("TSEQ","TTX","TJD=:%SystemDate AND BRCD=:BRCD AND UID=:%UserID","TSEQ DESC")
+	if rsttx.next() set LASTTTXSEQ=rsttx.getCol("TSEQ")
+
+	// Following is custom at RS/2 and would change at other sites
+	// File ID
+	set FID=REC.extract(3,8)
+
+	// Not merchant transactions.
+	if FID'="MERPAY" set ERR=15 do RECERR(1) quit
+
+	// File Creation Date
+	set FDATE=REC.extract(9,16)
+
+	set EFD=%SystemDate
+	do BCHINIT
+
+	/* Here, we need to reset %SystemDate, because the previous call to BCHINIT
+	   would reset %SystemDate to the EFD value found in the file header.
+	   TTXFDPOS requires %SystemDate to match date index of unposted
+	   transactions in TTX.
+	*/
+	#ACCEPT DATE=01/02/04;PGM=John Carroll
+	set %SystemDate=CUVAR.TJD
+
+	quit
+
+
+Public UBCHINIT	// User batch intialization
+
+	/*
+	   Gets the general suspense account for all card sources
+	   from which the money will be taken to pay the merchant
+	*/
+
+	type Public Number BCHCNT,BCHCR,BCHDR,DROFF,GENSUSP,INCACCT,INSTNO
+	type Public String %INST,SAVINST
+	type Number CROFF
+
+	type RecordCMSOPT cmsopt=Db.getRecord("CMSOPT",,1)
+
+	// general suspense acct
+	set GENSUSP=cmsopt.cidall
+	set DROFF=GENSUSP
+
+	// income account
+	set INCACCT=cmsopt.cidincm
+
+	//BARTAP
+	set CROFF=INCACCT
+
+	// this institutions ISO code
+	set INSTNO=CUVAR.ISO
+	set (BCHCNT,BCHDR,BCHCR)=0
+	set SAVINST=%INST
+	quit
+
+
+REJECT	// Some end of batch clean up if the file rejects
+
+	type Public Number EXC,PAYOR
+
+	// kills the new TTX records
+	do KILLTTX
+
+	// kills the payment order array
+	kill PAYOR
+
+	// kills the exception errors
+	kill EXC
+
+	quit
+
+
+Public UBCHEND(RecordCTBLACHID ctblachid,RecordTRN trn)	// User batch end
+
+	/*
+
+	ARGUMENTS:
+
+	. ctblachid Object for file CTBLACHID		/REQ/NONULL/MECH=REF
+	. trn Object for file TRN			/REQ/NONULL/MECH=REF
+
+	*/
+
+	type Public Number %ProcessMode,BCHCR,BCHDR,BCHCNT,BCHTOT,BENNAM,CC,CRCD,DAMT,DIFF,ERR,ETC,GENSUSP,GLOFF,HTNATPR,HTSGA,HTSDA,HTSNA,INCACCT,INSTNO,NAMT,NUMBTR,REJBCH,REJCR,REJDR,RNDCID,ROUND,STS,TOTAMT,TOTDIS,TOTNET,TOTPMNTS,TOTROUND
+	type Public String BCHID,BRCD,ER,GLNAME,PAYOR(),PO(),RECACCT,RECINST,SAVINST,SPR,SRC,TLO,TSO
+	type Public Date EFTDAT,IDXEFD
+	type Date RECDT
+	type String EXC(),IX,RM,SEQ
+	type Number AMT,CID
+	
+	type RecordEFTPAY eftpay
+
+	// Verify Debit and Credit Totals
+	set BCHTOT=$S(BCHDR>BCHCR:BCHDR-BCHCR,1:BCHCR-BCHDR)
+
+	// if error..
+	if ER.get()>0 do { quit
+
+		do REJECT
+
+		set REJDR=REJDR+BCHDR
+		set REJCR=REJCR+BCHCR
+		set REJBCH=REJBCH+1
+		set IX=SRC_"^"_IDXEFD_"^"_BCHCNT_"^"_BCHDR_"^"_BCHCR
+		set IX=IX_"^"_BCHID.get()_"^"_SPR
+
+		// so the file can be reprocessed
+		do Db.delete("INCINDEX","INST=:SAVINST AND INDEX=:IX")
+
+		set ERR=18 do RECERR(0)
+		}
+
+	if STS.get()=1 do REJECT
+
+	// If trailer record matches batch...
+	if (TOTPMNTS=NUMBTR.get())&(TOTAMT=HTSGA.get())&(TOTDIS=HTSDA.get())&(TOTNET=HTSNA.get())&(TOTROUND=HTNATPR.get()) do {
+
+		// set up POTRIES,BRCD,%UID.
+		type Date PDT,RECDT
+		type Number POTRIES
+
+		set (RECINST,RECACCT,RECDT,CRCD)=""
+
+		type RecordCTBLEFTTYPE efttype=Db.getRecord("CTBLEFTTYPE","KEY='PO'",1)
+		set POTRIES=efttype.tries
+
+		type RecordUTBLBRCD utblbrcd=Db.getRecord("UTBLBRCD","BRCD=:BRCD",1)
+		set CC=utblbrcd.ccdef
+
+		set GLOFF=GENSUSP
+
+		set TLO=$$TLO^UTLO
+
+		type RecordGLAD glad=Db.getRecord("GLAD","ACN=:GLOFF",1)
+		set GLNAME=glad.desc1
+
+		// [EFTPAY]LNM is only twenty characters.
+		set GLNAME=GLNAME.extract(1,20)
+
+		// loop through PAYOR array.
+		for  set RECINST=PAYOR(RECINST).order() quit:RECINST=""  do {
+			for  set RECACCT=PAYOR(RECINST,RECACCT).order() quit:RECACCT=""  do {
+				for  set RECDT=PAYOR(RECINST,RECACCT,RECDT).order() quit:RECDT=""  do {
+					for  set CRCD=PAYOR(RECINST,RECACCT,RECDT,CRCD).order() quit:CRCD=""  do {
+
+						// create the payment order for this instituion and account.
+						set ROUND=PAYOR(RECINST,RECACCT,RECDT,CRCD).piece("|",1)
+						set DAMT=PAYOR(RECINST,RECACCT,RECDT,CRCD).piece("|",2)
+						set NAMT=PAYOR(RECINST,RECACCT,RECDT,CRCD).piece("|",3)
+						set BENNAM=PAYOR(RECINST,RECACCT,RECDT,CRCD).piece("|",4)
+					
+						set %ProcessMode=0
+
+						// payment order for the merchant
+						do PO(ROUND,RECINST,RECACCT,GLOFF,2,BENNAM)
+
+						if ER quit
+
+						// internal payment order for the income account
+						do PO(DAMT,INSTNO,INCACCT,GLOFF,3)
+
+						if ER quit
+						set DIFF=ROUND-NAMT
+						if 'DIFF quit
+
+						// internal payment order for the rounding difference
+						if DIFF>0 do {
+							set ETC=$$SETETC(0,2)
+							set RNDCID=trn.acn
+							do PO(DIFF,INSTNO,GLOFF,RNDCID,3)
+							}
+						else  do {
+							set ETC=$$SETETC(1,2)
+							set RNDCID=trn.acn
+							do PO(-DIFF,INSTNO,RNDCID,GLOFF,3)
+							}
+						set EFTDAT=%SystemDate
+						}
+					}
+				}
+			}
+	
+		set SEQ=""
+		for  set SEQ=EXC(SEQ).order() quit:SEQ=""  do {
+			set CID=EXC(SEQ).piece("|",1)
+			set RM=EXC(SEQ).piece("|",2)
+			set AMT=EXC(SEQ).piece("|",3)
+			do EXC(CID,RM,AMT)
+			}
+
+		kill PAYOR
+		}
+	else  do {
+		do REJECT
+
+		set REJDR=REJDR+BCHDR
+		set REJCR=REJCR+BCHCR
+		set REJBCH=REJBCH+1
+		set IX=SRC_"^"_IDXEFD_"^"_BCHCNT_"^"_BCHDR_"^"_BCHCR
+		set IX=IX_"^"_BCHID.get()_"^"_SPR
+
+		// so the file can be reprocessed
+		do Db.delete("INCINDEX","INST=:SAVINST AND INDEX=:IX")
+
+		set ER=1
+		set ERR=17
+		do RECERR(0)
+		}
+		
+	quit
+
+
+PO(Number AMT,String RECINST,Number RECACCT,Number CID,String TTYPE,String BENNAM)	// Create payment order
+
+	type public Date RECDT
+	type public String BRCD,CC,CRCD,ER,ERR,GLNAME
+	type public Number POTRIES
+	type Number SEQ
+	
+	type RecordEFTPAY eftpay=Class.new("RecordEFTPAY")
+	set eftpay.cid=CID
+
+	set eftpay.cc=CC
+	set eftpay.rempay=""
+
+	// Set recipient account.
+	set eftpay.recacct=RECACCT
+	set eftpay.recinst=RECINST
+
+	// Set amount
+	set eftpay.amount=AMT
+
+	// Set status of added.
+	set eftpay.crcd=CRCD
+	set eftpay.status="A"
+	set eftpay.efttype="PO"
+
+	// Set date
+	set eftpay.efd=RECDT
+	set eftpay.procdt=RECDT
+	set eftpay.datecre=%SystemDate
+
+	// Set retries
+	set eftpay.tries=POTRIES
+
+	// Beneficiary Branch/Institution
+	set eftpay.brcd=BRCD
+	set eftpay.uid=%UserID
+	set eftpay.timecre=""
+
+	// Set ttype - GL to customer
+	set eftpay.ttype=TTYPE
+
+	// Set name of GL account.
+	set eftpay.lnm=GLNAME
+
+	// GIRO needs the name in the address field for some reason
+	// Beneficiary Address Line 1
+	if BENNAM.get()'="" set eftpay.benad1=BENNAM
+
+	set SEQ=1
+	type ResultSet rs=Db.select("SEQ","EFTPAY","CID=:CID","SEQ DESC")
+	if rs.next() set SEQ=rs.getCol("SEQ")+1
+
+	set eftpay.seq=SEQ
+	
+	do eftpay.save()
+	
+	if ER=1 set ERR=1
+
+	quit
+
+
+RBLDOFF(String ARRAY)
+
+	/*This is where the array of offsetting transactions
+	  gets redefined for effective date.  This is code that is added to
+	  allow for for posting of accumulated offsets on different dates.
+	*/
+	type Public String AN,BRCD,ER,ERRMSG,OFF(),RM,TLO,%UserID
+	type Public Number CRCD,ITC,MULTEFD,OCC,STATUS
+	type Public Date EFD,KEY3
+	type Date %SystemDate,TPD
+
+	kill OFF
+	set CRCD=""
+	for  set CRCD=ARRAY(CRCD).order() quit:CRCD=""  do {
+		set EFD=""
+		for  set EFD=ARRAY(CRCD,EFD).order() quit:EFD=""  do {
+			set KEY3=""
+			for  set KEY3=ARRAY(CRCD,EFD,KEY3).order() quit:KEY3=""  do {
+				set OCC=""
+				for  set OCC=ARRAY(CRCD,EFD,KEY3,OCC).order() quit:OCC=""  do {
+					set OFF(CRCD,EFD,KEY3,OCC)=ARRAY(CRCD,EFD,KEY3,OCC)
+					set ITC=""
+					for  set ITC=ARRAY(CRCD,EFD,KEY3,OCC,ITC).order() quit:ITC=""  do {
+						set OFF(CRCD,EFD,KEY3,OCC,ITC)=ARRAY(CRCD,EFD,KEY3,OCC,ITC)
+						}
+					}
+				}
+		
+			set AN="OFF"
+			set TLO=""
+
+			// Lock the TTX File against intruders
+			#ACCEPT DATE=01/02/04;PGM=John Carroll
+			for  set (%SystemDate,TPD)=EFD set STATUS=0 do ^TTXLOK quit:'ER  do {
+
+				set ERRMSG=RM
+
+				do DISPLAY^TPINERR
+
+				hang 30
+				}
+
+			do OFFSET^UMSC(EFD,BRCD,%UID,.AN,0)
+
+			kill OFF
+			}
+		}
+	set MULTEFD=1
+	quit
+
+
+KILLTTX	// if batch info does not match trailer...
+	// kill ttx records.
+
+	type Public String SVEFD()
+	type Public Number %UserID,BRCD
+	type Number SEQ,STSEQ
+	type Date EFD
+
+	set EFD=""
+	for  set EFD=SVEFD(EFD).order() quit:EFD=""  do {
+		set SEQ=SVEFD(EFD)
+		type ResultSet rs=Db.select("TSEQ","TTX","TJD=:EFD AND BRCD=:BRCD AND UID=:%UserID AND TSEQ>:SEQ")
+		if rs.next() set STSEQ=rs.getCol("TSEQ")
+
+		type ResultSet rs1=Db.select("TSEQ","TTX","TJD=:EFD AND BRCD=:BRCD AND UID=:%UserID AND TSEQ=:STSEQ","TSEQ DESC")
+		if rs1.isEmpty() do Db.fastDelete("TTX","TJD=:EFD,BRCD=:BRCD,UID=:%UserID") quit
+
+		type ResultSet rs2=Db.select("TSEQ","TTX","TJD=:EFD AND BRCD=:BRCD AND UID=:%UserID AND TSEQ>:SEQ")
+		while rs2.next() do {
+			set SEQ=rs2.getCol("TSEQ")
+			do Db.delete("TTX","TJD=:EFD AND BRCD=:BRCD AND UID=:%UserID AND TSEQ=:SEQ")
+			}
+		}
+	quit
+
+
+EXTAMT(Number STRT,Number STP)	// Extracts the amount and translates it based upon exponent
+
+	type Number EXP,VALUE
+	type Public String REC
+	type Public Number AMTEXP
+	
+	set VALUE=REC.extract(STRT,STP)
+	set EXP=AMTEXP
+	if EXP>0 set VALUE=VALUE/(10**EXP)
+
+	quit VALUE
+
+
+TTXEFD(Date EFD)	// This sets up the EFD for the the TTX file
+
+	type Public String %UserID,ER,ERRMSG,RM,SVEFD()
+	type Public Number BRCD,STATUS
+	type Date %SystemDate,TPD
+	type Number TTSEQ
+	
+	type ResultSet rsttx=Db.select("TSEQ","TTX","TJD=:%SystemDate AND BRCD=:BRCD AND UID=:%UserID","TSEQ DESC")
+	if rsttx.next() set TTSEQ=rsttx.getCol("TSEQ")
+	
+	if TTSEQ set SVEFD(EFD)=TTSEQ
+
+	#ACCEPT DATE=01/02/04;PGM=John Carroll
+	for  set (%SystemDate,TPD)=EFD set STATUS=0 do ^TTXLOK quit:'ER  do {
+
+		set ERRMSG=RM
+
+		do DISPLAY^TPINERR
+
+		hang 30
+		}
+
+	quit
+
+
+Public PREOPEN	//
+
+	quit
+
+
+Public POSTREAD	// This gets executed after all records have been read.
+
+	type Public Number OFFSET
+	
+	do RBLDOFF(.OFFSET)
+
+	quit
+
+
+RSETDT(Date DATE)	// Set date in YEARMMDD format
+
+	quit DATE.toString("YEARMMDD")
+
+
+TRANSLATE(String REC)	// Translates the unwritable characters in a record.
+
+	set REC=REC.translate($C(144)," ")
+	quit REC
+
+
+TRNAMT(Number AMT,Number EXP)	// Transaction amount with decimal value
+
+	if EXP.get()>0 quit AMT/(10**EXP)
+	quit AMT.get()
+
+
+SHVZRO1(String FIELD)	// This removes the zero filler from the front of a string.
+
+	// Shave zeros from beginning of string.
+	for  quit:FIELD.extract()'=0  do {
+		if FIELD.extract()=0 set FIELD=FIELD.extract(2,(FIELD.length()))
+		}
+	quit FIELD
+
+
+SHVSP1(String FIELD)	// Shave space from beginning of account string.
+
+	for  quit:FIELD.extract()'=" "  do {
+		if FIELD.extract()=" " set FIELD=FIELD.extract(2,(FIELD.length()))
+		}
+
+	// Shave spaces from end of account string.
+	for  quit:FIELD.extract(FIELD.length())'=" "  do {
+		if FIELD.extract(FIELD.length())=" " set FIELD=FIELD.extract(1,FIELD.length()-1)
+		}
+	quit
+
+
+REC6	// Detail record
+
+	type Public Number ACCT,AMTEXP,CID,CROFF,DROFF,ETC,GENSUSP,GLOFF,INCACCT,NAMT,ROUND,TOTAMT,TOTNET,TOTPMNTS,TRID,%USerID
+	type Public String CHDR,CRCD,EXC(),FILDR,ITC,INSTNO,MTDNME,REC,RECINST,SVEFD(),TAMT,TLO,TRANTYPE,TSO
+	type Public Date EFD,%JD,BCHEFD,KEY2,PMTDATE
+	type Number BCHCR,BCHDR,FILCR,KEY3,MRCHID,POFLG,REV,TOTROUND,SEQ
+	type String MSG,RM
+	
+	set REV=0
+	set POFLG=0
+	set KEY3=0
+
+	// Increment total payments.
+	set TOTPMNTS=TOTPMNTS+1
+
+	// settle sub-account number
+	set CID=REC.extract(206,222)
+
+	// merchant account number
+	do SHVSP1(.CID)
+
+	set ACCT=CID
+
+	// summary currency exponent
+	set AMTEXP=REC.extract(99)
+
+	// summary gross amount
+	set TAMT=$$EXTAMT(100,114)
+
+	// increase/decrease gross total
+	set TOTAMT=TOTAMT+TAMT
+	set RECINST=REC.extract(190,205)
+
+	// recipient institution
+	do SHVSP1(.RECINST)
+
+	// merchant trade name
+	set MTDNME=REC.extract(11,35)
+	do SHVSP1(.MTDNME)
+	
+	if RECINST'=INSTNO do {
+		set POFLG=1
+		type RecordUTBLEFTINST eftinst= Db.getRecord("UTBLEFTINST","KEY=:RECINST",1)
+		if eftinst.getMode() do {
+			set POFLG=0
+
+			// Invalid institution # ~p1
+			set MSG=$$^MSG(3406,RECINST)
+
+			// log net amt.
+			set NAMT=$$EXTAMT(130,144)
+
+			// summary number
+			set TRID=REC.extract(83,90)
+
+			// merchant ID
+			set MRCHID=REC.extract(3,10)
+
+			// Merchant ~p1 transaction ~p2
+			set RM=$$^MSG(3407,MRCHID,TRID)_" "_MSG
+			set SEQ=EXC("").order(-1)+1
+			set EXC(SEQ)=CID_"|"_RM_"|"_NAMT
+
+			type RecordSCAU scau=Db.getRecord("SCAU","UID=:%USerID",1)
+
+			// susp. cr. G/L
+			set CID=scau.tscr
+			}
+		}
+
+	// In case of reversals RS/2 will send a negative amount
+	if TAMT<0 do {
+		set TRANTYPE="DEBIT"
+			set ITC=0
+
+		// reset to positive amt.
+		set TAMT=TAMT.extract(2,TAMT.length())
+
+		// file debit total
+		set FILDR=FILDR+TAMT
+
+		// batch debit total
+		set BCHDR=BCHDR+TAMT
+		if POFLG do {
+
+			// log net amt.
+			set NAMT=$$EXTAMT(130,144)
+
+			// summary number
+			set TRID=REC.extract(83,90)
+
+			// merchant ID
+			set MRCHID=REC.extract(3,10)
+
+			// Merchant ~p1 transction ~p2
+			set MSG=$$^MSG(3407,MRCHID,TRID)
+
+			// REVERSAL
+			set RM=MSG_" "_$$^MSG(3538)
+			set SEQ=EXC("").order(-1)+1
+			set EXC(SEQ)=CID_"|"_RM_"|"_NAMT
+			type RecordSCAU scau=Db.getRecord("SCAU","UID=:%USerID",1)
+
+			// susp. cr. G/L
+			set CID=scau.tscr
+			}
+
+		// reversal flag
+		set REV=1
+		set KEY3=1
+		}
+	else  do {
+		set TRANTYPE="CREDIT"
+		set ITC=1
+		set FILCR=FILCR+TAMT
+		set BCHCR=BCHCR+TAMT
+		}
+
+	/* If the account is outside this institution the ETC must be hard coded,
+	   because there is no place from which it can be taken - cpb 08/03/98
+	*/
+	if RECINST'=INSTNO set ETC=$S(ITC:"TSCR",1:"TSDR")
+
+	// get ETC for the gross tran.
+	else  set ETC=$$SETETC(ITC,0)
+
+	// net amount
+	set NAMT=$$EXTAMT(130,144)
+
+	set TOTNET=TOTNET+NAMT
+
+	// net amount to pay rounded
+	set ROUND=$$EXTAMT(145,159)
+
+	set TOTROUND=TOTROUND+ROUND
+
+	// summary number
+	set TRID=REC.extract(83,90)
+
+	/* Set PMTDATE to Summary Payment Date.
+	   The payment date is the date the funds should impact the account.
+	*/
+	set PMTDATE=REC.extract(75,82)
+
+	set %JD=PMTDATE.toDate("YEARMMDD")
+
+	set PMTDATE=%JD
+
+	// BCHEFD is used in TTXFMT to set the EFD of the ^TTX file
+	set BCHEFD=PMTDATE
+
+	/* Future dated transactions are created on the future date
+	   Back dated still must be posted on today's date
+	*/
+	set KEY2=$S(EFD<BCHEFD:BCHEFD,1:EFD)
+	if ((KEY2.get()'="")&'SVEFD(KEY2).exists()) do TTXEFD(KEY2)
+
+	set TLO=$$TLO^UTLO
+
+	set TSO=""
+	do SETTSO(.TSO)
+
+	set CRCD=REC.extract(94,98)
+	do SHVSP1(.CRCD)
+
+	set GLOFF=GENSUSP
+
+	/* If the institution number is not the ISO number of this bank
+	   send a payment order.
+	*/
+	if 'REV,POFLG do PAYOR quit
+
+	if REV do {
+		set DROFF=INCACCT
+		set CROFF=GENSUSP
+		}
+	else  do {
+		set DROFF=GENSUSP
+		set CROFF=INCACCT
+		}
+		
+	// file TTX record
+	do TTXFILE
+
+	do DISCOUNT
+
+	quit
+
+
+Public ACCCHECK(Number CID)	// Check if this is a valid profile account.
+
+	/*
+
+	ARGUMENTS:
+
+	. CID Account Number			 /REQ/NONULL/MECH=VAL
+
+	*/
+
+	type Public Number %NET,ERR
+	type Public String ER,ET,RM
+
+	set %NET=0
+
+	type RecordACN acn=Db.getRecord("ACN","CID=:CID",1)
+	if acn.getMode()=0 set ER=1,ET="RECNOF" do ^UTLERR
+
+	if ER.get()'=0 set ERR=1 quit
+
+	// Check if the account has an active status.
+	// Inactive account
+	if acn.stat'=0 set ER=1 set ERR=1 set RM=$$^MSG("3310")
+
+	quit
+
+
+DISCOUNT	// The discount charged on the merchant for the transaction
+
+	type Public Number BCHCR,BCHDR,CRCD,ETC,FILCR,FILDR,INCACCT,POFLG,SAMT,TOTDIS
+	type Public String ITC,REC,TAMT,TRANTYPE
+	type Number GLOFF
+
+	/* Kill this value, because it was set already by TTXFILE and will
+	   expected again to be null.
+	*/
+	kill SAMT
+
+	// summary currency
+	set CRCD=REC.extract(94,98)
+	do SHVSP1(.CRCD)
+
+	// summary discount amount
+	set TAMT=$$EXTAMT(115,129)
+	set TOTDIS=TOTDIS+TAMT
+
+	// no discount
+	if TAMT=0 quit
+
+	// In case of reversals RS/2 will send a negative amount
+	if TAMT<0 do {
+		set TRANTYPE="CREDIT" set ITC=1
+
+		// reset to positive amt.
+		set TAMT=TAMT.extract(2,TAMT.length())
+
+		// file credit total
+		set FILCR=FILCR+TAMT
+
+		// batch credit total
+		set BCHCR=BCHCR+TAMT
+		}
+	else  do {
+		set TRANTYPE="DEBIT"
+		set ITC=0
+		set FILDR=FILDR+TAMT
+		set BCHDR=BCHDR+TAMT
+		}
+
+	if POFLG set ETC=$S(ITC:"TSCR",1:"TSDR")
+
+	// ETC for discount amountdo SETETC(.cmsopt)
+	else  set ETC=$$SETETC(ITC,1)
+
+	//Income account
+	set GLOFF=INCACCT
+	do TTXFILE
+
+	quit
+
+
+PAYOR	// This updates the payment order array if the merchant belongs to
+	/*
+	   another institution
+
+	   The account to be credited is not in PROFILE, so create a payment
+	   order from the G/L to the account at the other bank.
+	*/
+
+	type Public Number BCHDR,CID,CRCD,DAMT,FILDR,MTDNME,MRCHID,NAMT,RECACCT,RECINST,ROUND,TOTDIS,TRID
+	type Public String EXC(),MSG,PAYOR(,,,),REC,RM
+	type Public Date PDT,PMTDATE
+	type Number SEQ
+	type Date NEWDT,OLDDT
+
+	// discount amount
+	set DAMT=$$EXTAMT(115,129)
+	set TOTDIS=TOTDIS+DAMT
+
+	// file total amount
+	set FILDR=FILDR+DAMT
+
+	// batch total amount
+	set BCHDR=BCHDR+DAMT
+	set RECACCT=CID
+	set PDT=$S(PMTDATE<%SystemDate:%SystemDate,1:PMTDATE)
+
+	if PMTDATE<%SystemDate do {
+		set OLDDT=$$RSETDT(PMTDATE)
+		set NEWDT=$$RSETDT(PDT)
+		set MRCHID=REC.extract(3,10)
+
+		// Merchant ~p1 transaction ~p2
+		set MSG=$$^MSG(3407,MRCHID,TRID)
+
+		// PO for ~p1 created on ~p2
+		set RM=MSG_" "_$$^MSG(3408,OLDDT,NEWDT)
+		set SEQ=EXC("").order(-1)+1
+		set EXC(SEQ)=CID.get()_"|"_RM_"|"_ROUND
+		}
+
+	// set entry in PAYOR array.
+	// track discount amounts as well
+	set PAYOR(RECINST,RECACCT,PDT,CRCD).piece("|",1)=PAYOR(RECINST,RECACCT,PDT,CRCD).get().piece("|",1)+ROUND
+	set PAYOR(RECINST,RECACCT,PDT,CRCD).piece("|",2)=PAYOR(RECINST,RECACCT,PDT,CRCD).get().piece("|",2)+DAMT
+	set PAYOR(RECINST,RECACCT,PDT,CRCD).piece("|",3)=PAYOR(RECINST,RECACCT,PDT,CRCD).get().piece("|",3)+NAMT
+	set PAYOR(RECINST,RECACCT,PDT,CRCD).piece("|",4)=MTDNME
+	quit
+
+
+SETETC(Number OPT,String TRTYP)	// Once a valid profile account number is obtained,
+	/*
+	   return the ETC (general purpose tran code) from utility SKLLOAD
+
+
+	   ARGUMENTS:
+	    . OPT  . Credit Flag
+
+	     0 - Debit
+	     1 - Credit
+
+	   . TRTYP  .Transaction Type
+
+	     0 - Merchant Transaction
+	     1 - Discount Transaction
+	     2 - Rounding Transaction
+
+	*/
+	type Number PC
+	type public String ETC
+
+	if TRTYP=0 set PC=$S('OPT:7,1:6)
+	if TRTYP=1 set PC=$S('OPT:8,1:9)
+	if TRTYP=2 set PC=$S('OPT:10,1:11)
+
+	type RecordCMSOPT cmsopt=Db.getRecord("CMSOPT",,1)
+	if PC=6 set ETC=cmsopt.mrchcr
+	if PC=7 set ETC=cmsopt.mrchdr
+	if PC=8 set ETC=cmsopt.dscdr
+	if PC=9 set ETC=cmsopt.dsccr
+	if PC=10 set ETC=cmsopt.rnddr
+	if PC=11 set ETC=cmsopt.rndcr
+
+	quit ETC
+
+
+SETTSO(String TSO)	// build TSO, (a piece in TR array, with subpieces of its own.)
+
+	type Public String REC
+	type String MCITY,MCNTRY,MTDNME,x()
+	type Number TRNID
+
+	// merchant city
+	set MCITY=REC.extract(36,48)
+	do SHVSP1(.MCITY)
+
+	set x("MCITY")=MCITY
+
+	// merchant country
+	set MCNTRY=REC.extract(49,51)
+	do SHVSP1(.MCNTRY)
+	set x("MCNTRY")=MCNTRY
+
+	// merchant trade name
+	set MTDNME=REC.extract(11,35)
+	do SHVSP1(.MTDNME)
+	set x("MTDNME")=MTDNME
+
+	// summary number
+	set TRNID=REC.extract(83,89)
+	do SHVSP1(.TRNID)
+
+	set x("TRNID")=TRNID
+
+	// construct and return TSO
+	do IN^UTSO(.x,.TSO)
+
+	quit
+
+
+REC9	// File control (trailer) record
+
+	type Public String AMTEXP,HTNATPR,HTSDA,HTSGA,HTSNA,NUMBTR,REC,SPR
+	type Public Number EOT
+
+	set NUMBTR=REC.extract(3,8)
+	set NUMBTR=$$SHVZRO1(NUMBTR)
+	set HTSGA=REC.extract(9,23)
+	set HTSGA=$$TRNAMT(HTSGA,AMTEXP)
+	set HTSDA=REC.extract(24,38)
+	set HTSDA=$$TRNAMT(HTSDA,AMTEXP)
+	set HTSNA=REC.extract(39,53)
+	set HTSNA=$$TRNAMT(HTSNA,AMTEXP)
+	set HTNATPR=REC.extract(54,68)
+	set HTNATPR=$$TRNAMT(HTNATPR,AMTEXP)
+	set SPR=REC.extract(69,72)
+	set EOT=1
+	quit
+
+
+RECERR(Number ABORT)	// Record error
+
+	type Public Number ERR,ERRIND
+	type Public String ERRM,ERRMSG
+
+	//ERRIND used in UBCHEND
+	set ABORT=ABORT.get() set ERRIND=1
+
+	// Missing file header record
+	if ERR=11 set ERRMSG=$$^MSG(3038)
+
+	// Invalid file type
+	if ERR=15 set ERRMSG=$$^MSG(3039)
+
+	// Not valid to post
+	set ERRM=$$^MSG(2054)
+
+	// ~p1. File totals do not match trailer.
+	if ERR=17 set ERRMSG=$$^MSG(3591,ERRM)
+
+	// Process error
+	if ERR=18 set ERRMSG=ERRM
+
+	if ABORT do ABORT^TPINERR quit
+
+	do DISPLAY^TPINERR
+
+	hang 30
+
+	if ABORT.get()=0 set ERR=""
+	quit
+
+
+EXC(Number CID,String RM,Number AMT)	//
+
+
+	type String DESC
+
+	// Merchant transactions
+	set DESC=$$^MSG("3405")
+
+	do LOG^UTLEXC($T(+0),"*",DESC,CID,"",RM,AMT.get())
+
+	quit
+
+
+Public TCODE	// Custom tran code translation and checking
+
+	/*
+	   Following is custom at RS/2 and would have to be changed at
+	   other sites.
+	*/
+
+	type Public String GRP
+	type Public Number CID,ETC,TCODE
+
+	type RecordACN acn=Db.getRecord("ACN","CID=:CID",1)
+
+	// needed below
+	set GRP=acn.grp
+
+	// Tran Code not predefined, check user table
+	type RecordUTBLEXTTRN1 exttrn1=Db.getRecord("UTBLEXTTRN1","INTRFACE='CMS',CODE=:TCODE",1)
+	if exttrn1.trtype="DEBIT" set ETC=exttrn1.dretc
+	if exttrn1.trtype="CREDIT" set ETC=exttrn1.cretc
+
+	quit
+
+
+%STOPLOD	// Stop %ZRTNLOD from this point on down
+	
+	quit
+	
+	
+BCHINIT	// Dummy line reference for GT.M
+	
+	quit
+	
+	
+BCHEND	// Dummy line reference for GT.M
+
+	quit
+
+
+TTXFILE	// Dummy line reference for GT.M
+
+	quit
+	
+	
+
+vSIG()	quit "60254^35501^Renga SP^21783"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,359 @@
+public LNCONLN(RecordLN ln)	//Modify LN file for conversion - Manual Entry
+	/*
+	       ORIG:  Chuck Hardy (6721) - 04/07/87
+
+	  ARGUMENTS:
+		. ln	Loan Account Object	TYP=RecordLN/REQ/MECH=REF
+
+
+	  ---- Revision History ------------------------------------------------
+	  
+	   02/21/05 - KELLYP - CR 14452
+	   	      Modified entire procedure to conform to current PSL 
+	   	      standards and removed pre-2003 revision history.
+	  
+	   12/09/03 - CARROLLJ - CR 7239
+		      Added #ACCEPT prior to xecute command to correct compile
+		      errors.
+	*/
+
+	type Public Date CEFD,STPDT
+
+	catch vError {
+		do ZT^LNCONLN
+                }
+
+	set STPDT=CEFD
+
+	// Number of Debits
+	if 'ln.cntdr set ln.cntdr=1
+	
+	// History Cut-Off Date
+	set ln.hisctf=CEFD
+	
+	// Accrual Processed Date
+	set ln.acs=%SystemDate-1
+
+	// Scheduled Internal Bill Sequence Number
+	set ln.schseq=0
+	
+	// Last Bill - Loan Due Date Billed
+	set ln.lbdd=""
+
+	// Convert loans which have undisbursed processing
+	if 'ln.revf do { quit 
+		set ln.udbal=ln.crlmt-ln.tdr
+		do BIL1(.ln)
+		}
+
+	set ln.udbal=ln.crlmt-ln.bal
+	if ln.aruf set ln.bal=ln.crlmt
+
+	do BIL1(.ln)
+	quit
+
+
+BIL1(RecordLN ln)
+	/*
+	ARGUMENTS:  
+		. ln    Loan Account Object     TYP=RecordLN/REQ/MECH=REF
+	*/
+
+	type Public Boolean ER,MANBIL
+
+	// Commercial Commitment Link account exists
+	if ln.ccl do CCL(.ln)
+	
+	// Distribution 1 Frequency is null
+	if ln.dist1fre.isNull() do END quit
+	
+	// Calculate Distribution 1 Next Due
+	set ln.dist1ld=$$NJD^UFRE(ln.dist1nd,ln.dist1fre,,1) quit:ER
+
+	// If bills are converted manually, set bill and scheduled dates current
+	if 'MANBIL do BIL2(.ln) quit
+
+	do SCHU(.ln)
+	do BIL4(.ln) 
+	quit
+
+BIL2(RecordLN ln)
+	/*
+	
+	ARGUMENTS:
+		. ln    Loan Account Object     TYP=RecordLN/REQ/MECH=REF
+	*/
+
+	type Public Date CEFD
+
+	if ln.dist1nd>CEFD do BIL3(.ln) quit
+	
+	/*
+	 For loans with next due in the past, bill and roll scheduled
+	 dates up to CEFD
+	*/
+
+	if ln.bloff="1P" do {
+		// Distribution 1 Next Due
+		set ln.bndt=ln.dist1nd
+		
+		// Distribution 1 Last Due
+		set ln.bldt=ln.dist1ld
+		}
+	else  do {
+		// Distribution 1 Next Due
+		set ln.bndt=ln.dist1nd-ln.bloff
+		
+		// Distribution 1 Last Due
+		set ln.bldt=ln.dist1ld-ln.bloff
+		}
+		
+	// Scheduled Payment - Next Date
+	set ln.schnd=ln.dist1nd
+	
+	// Scheduled Payment - Last Date
+	set ln.schld=ln.dist1ld
+	
+	// Last Bill - Loan Due Date Billed
+	set ln.lbdd=ln.schld
+	
+	do BIL4(.ln)
+	quit			
+			
+	
+BIL3(RecordLN ln)
+	/*
+	Loans with next due in the future; bill and roll schedule dates up to
+	DIST1LD if no PPA, DIST1ND if PPA.
+
+	ARGUMENTS:
+		. ln    Loan Account Object     TYP=RecordLN/REQ/MECH=REF
+	*/
+	
+	type Public Boolean ER
+	type Public Date STPDT
+	
+	// Distribution 1 Last Due
+	set STPDT=ln.dist1ld
+	
+	// Distribution 1 Next Due
+	if ln.ppa set STPDT=ln.dist1nd
+	
+	do SCHU(.ln) quit:ER
+	do BIL4(.ln)
+
+	quit
+
+
+BIL4(RecordLN ln)
+	/*
+	ARGUMENTS:
+		. ln    Loan Account Object     TYP=RecordLN/REQ/MECH=REF
+	*/
+
+	type Public Boolean ER
+
+	// Check MDF to see if loan could have multiple distributions
+	if 'ln.mdf do END quit
+	
+	type Date JD,NJD
+	type Number I,N
+	type String FRE
+	
+	// Update secondary frequencies
+	for N=2:1:4 do { quit:ER
+
+		set JD=%SystemDate
+	
+		// Distribution 2 Frequency
+		if N=2 set FRE=ln.dist2fre
+		
+		// Distribution 3 Frequency
+		else  if N=3 set FRE=ln.dist3fre
+		
+		// Distribution 4 Frequency
+		else  set FRE=ln.dist4fre
+
+		if FRE.isNull() quit
+
+		if FRE="*" set FRE="*"_N
+	
+		// Calculate Distribution Next Due date
+		for I=1:1 set NJD=$$NJD^UFRE(JD,FRE)  quit:(NJD-ln.bloff'<(%SystemDate-1))!(JD=NJD)!ER  set JD=NJD
+		
+		// Distribution 2 Next Due
+		if N=2 set ln.dist2nd=NJD
+		
+		// Distribution 3 Next Due
+                else  if N=3 set ln.dist3nd=NJD
+                
+		// Distribution 4 Next Due
+                else  set ln.dist4nd=NJD
+		}
+	do END
+	quit
+
+
+END	// End of processing
+
+	type Public Date CEFD,STPDT
+
+	if STPDT<CEFD set STPDT=CEFD
+	
+	quit
+
+
+SCHU(RecordLN ln)	// Find Billing and Schedule Dates
+	/*
+	ARGUMENTS:
+		. ln    Loan Account Object     TYP=RecordLN/REQ/MECH=REF
+	*/
+
+	type Public Boolean ER,MANBIL
+	type Public Date CEFD,STPDT
+
+	type Date BLDT,BNDT,DFP,JD,SCHLD,SCHND
+	type String FRE
+
+	if MANBIL set STPDT=%SystemDate-1
+	else  set STPDT=ln.dist1nd
+	
+	// Distribution 1 Frequency
+	set FRE=ln.dist1fre
+
+	// Find the next scheduled date based on LN.DFP (Date of First Payment)
+	set SCHND=ln.dfp
+	if CEFD'<SCHND for  set SCHND=$$NJD^UFRE(SCHND,FRE) quit:SCHND>%SystemDate  quit:ER!(SCHND<0)
+	set SCHLD=$$NJD^UFRE(SCHND,FRE,,1) quit:ER
+
+	if ln.bloff="1P" do {
+		set BNDT=SCHND 
+		set BLDT=SCHLD
+		if %SystemDate-1=BLDT set BNDT=BLDT
+		set BLDT=$$NJD^UFRE(BLDT,FRE,,1) quit:ER
+		}
+	else  do {
+		set BNDT=SCHND-ln.bloff
+		set BLDT=SCHLD-ln.bloff
+		if BNDT<%SystemDate do {
+			set JD=SCHND
+			for  set JD=$$NJD^UFRE(JD,FRE) quit:ER  set BNDT=JD-ln.bloff quit:BNDT'<%SystemDate
+			set BLDT=$$NJD^UFRE(JD,FRE,,1)-ln.bloff quit:ER
+			}
+		}
+
+	if ER quit
+
+	// Scheduled Payment - Next Date
+	set ln.schnd=SCHND
+	
+	// Scheduled Payment - Last Date
+	set ln.schld=SCHLD
+	
+	// Billing - Next Date
+	set ln.bndt=BNDT
+	
+	// Billing - Last Date
+	set ln.bldt=BLDT
+
+	if 'MANBIL quit
+
+	/*
+	 Compute late charge action date and late charge effective date for
+	 maually-billed loans using standard billing utility.
+	*/
+
+	// Late Charge Calculation Method
+	if ln.popt.isNull() quit
+	
+	type Date LCAD,LCEFD
+	type String LCBO,PGM,PMTGRC,XECUTE
+	
+	// Late Charge Business Option
+	set LCBO=ln.lcbo
+	
+	// Payment Grace Period
+	set PMTGRC=ln.pmtgrc
+	
+	// Late Charge Effective Date
+	set LCEFD=$S(ln.bloff="1P":$$NJD^UFRE(BLDT,FRE),1:BLDT+ln.bloff) quit:ER
+
+	// The final parameter (set to 1) is used by conversion utilities
+	set PGM=$$GET^UBCHID("BCHLNBLDB") if PGM.isNull() quit
+	
+	set XECUTE="do LCAD^"_PGM_"(LCEFD,LCBO,PMTGRC,FRE,1)"
+	
+	#ACCEPT DATE=12/09/03;PGM=John Carroll
+	xecute XECUTE
+
+	// Late Charge Action Date
+	set ln.lcad=LCAD
+	
+	// Late Charge Effective Date
+	set ln.lcefd=LCEFD
+	
+	quit
+
+
+CCL(RecordLN ln)	// Update loan's commitment
+	/*
+	ARGUMENTS:
+		. ln    Loan Account Object     TYP=RecordLN/REQ/MECH=REF
+	*/
+
+	type Public Date CEFD
+
+	// If the loan converted is revolving, we're done.
+	if ln.revf quit
+
+	type RecordLN lnccl=Db.getRecord("LN","CID=:ln.ccl",1)
+
+	// Validate commitment link account
+	if 'lnccl.getMode() quit
+
+	// If the commitment is not revolving, we're done
+	if 'lnccl.revf quit
+
+	/*
+	 The commitment is revolving and the underlying loan is non-revolving,
+	 add back the total principal repaid, which should be the difference 
+	 between TDR and BAL (where BAL is the amount that the borrower owes 
+	 as entered for the conversion).	
+	*/
+
+	type Number PRINRPD
+	set PRINRPD=ln.tdr-ln.bal
+	
+	set lnccl.bal=lnccl.bal+PRINRPD
+	set lnccl.udbal=lnccl.udbal+PRINRPD
+	set lnccl.hisctf=CEFD
+	
+	do lnccl.bypassSave()	
+	
+	// Set up 0 history level to justify the conversion "transaction"
+	type RecordHIST0 hist0=Class.new("RecordHIST0")
+
+	set hist0.bal=lnccl.bal
+	set hist0.seqzero=Db.currVal("HIST","lnccl.cid")
+	set hist0.baola=lnccl.baola
+	set hist0.ladt=lnccl.ladt
+	set hist0.habl1=lnccl.habl1
+	set hist0.habl2=lnccl.habl2
+	set hist0.teb=lnccl.teb
+	set hist0.udbal=lnccl.udbal
+
+	if lnccl.iam set hist0.iunt=lnccl.iun-lnccl.ipl
+	else  set hist0.iunt=lnccl.iun
+	do hist0.bypassSave()
+
+	quit
+	
+public ZT	// Set error flag	
+
+	type Public Boolean ER
+	
+	set ER=1
+	
+	quit
+
+vSIG()	quit "60003^64226^Pat Kelly^6902"	// Signature - LTD^TIME^USER^SIZE

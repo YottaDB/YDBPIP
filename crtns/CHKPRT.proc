@@ -1,0 +1,692 @@
+CHKPRT
+ /*
+    ORIG: GRAY - 01/05/2000
+    DESC: Check Print Routine
+    
+    ---- Comments --------------------------------------------------------
+    
+    ---- Revision History ------------------------------------------------
+ 	  
+ 	  07/28/06 - KELLYP - CR 22048
+ 	  	     Modified INIT and READ sections to eliminate 
+ 	  	     PRECEDENCE warnings.
+ 	  
+ 	  10/17/05 - PUTTASWH - CR17011
+ 	  	     Modified page control logic according to new standard.
+	  	     Modified INIT section to contain the code of VPG and 
+	  	     VPG0 sections. Removed VPG and VPG0 sections.
+ 	  	     Modified the section NUMFILE as, Db.update record is 
+ 	  	     no more used in the PSL standard.
+		     
+	  01/05/04 - CARROLLJ - CR7658
+		     Corrected parameter mismatch errors.
+
+	  03/01/02 - GRAY - 43583
+		     Removed global reference from lock and unlock commands.
+	
+	  12/16/99 - GRAY - 32507
+		     Removed code no longer needed due to the Elimination
+		     of Teller/Branch Character Interface and placed remaining
+		     code into PSL'd procedure definition.
+	
+ */
+	
+	quit
+	
+public PRTNUM	//
+	set %O=6			// Print Check Number
+	do INIT				
+	quit
+	
+INIT	//
+	new CHKBDT,CHKCNT,CHKEDT,CHKNUM,CHKRNG,DEFCHK,PBRCD,PCHKS,PCID,PRTNUM
+	
+	type String %LIBS = "SYSDEV"
+	
+	// PRTNUM - Tells if we ont print the check number or the customer check
+	
+	set PRTNUM=1
+	
+	set %PG=0,%PAGE=1
+	
+	do VPG00
+	
+	if "DFQ"[$G(VFMQ)!$G(ER) do VER quit
+	set %PG=%PG+1
+	
+	do VPG01
+	do VER
+	
+	quit
+	
+VPG00	// Entry for page 1
+	
+	kill OLNTB,VFMQ,%NOPRMT,TYPQRY
+	
+	set (CHKBDT,CHKEDT)=%SystemDate
+	set TYPQRY="[UTBLCHKS]CHKCLS=1"
+	
+	set %TAB("PCHKS")=".CHKTYP1/TBL=[UTBLCHKS]:QU TYPQRY/XPP=do POSCHKS^CHKPRT"
+	set %TAB("CHKCNT")=".CHKCNT1/XPP=do POSCNT^CHKPRT"
+	
+	set %READ="@@%FN,,,PCHKS,CHKCNT/REQ"
+	
+	do ^UTLREAD if $G(VFMQ)="Q" set ER=1
+	quit:$G(ER)
+	
+	quit
+	
+VPG01	// 
+	new fLADDR,fMADDR,ARR,ARRCOL,ARRLIN,BRCDOLD,CID,CNT
+	new CNTOLD,COL,CHKBOT,CHKCOL,CHKDES,CHKNCOL,CHKNLIN,CHKNUM,CHKNUMINI
+	new CHKLIN,CHKS,CHKSOLD,CHKRGT,CHKTST,DEF,I,L,LIN,NS,IO,IOOLD
+	new PAGBOT,PAGESC,PAGLFT,PAGNCOL,PAGNLIN,PAGTOP
+	new REQPOS,REQTYP,SEQ,SKIP,TJD,TMP,%ZTHANG
+	
+	kill ARR
+	
+	set (BRCDOLD,CHKSOLD)="",%ZTHANG=99
+	
+	do NUM
+	
+	quit:$G(ER)
+	
+	if $D(ARR) do ARRPRT quit:$G(ER)
+	
+	if $D(IOOLD) set IO=$G(IOOLD)
+	if $G(IO)'="",($G(IO)'=$I) do CLOSE^SCAIO
+	
+	quit
+	
+NUM	//
+	do TMPBLD1 quit:$G(ER)
+	
+	set CHKS=""
+	
+CHKS0	//
+	for  set CHKS=$O(TMP(CHKS)) quit:CHKS=""  do { quit:$G(ER)
+		do BOOKBLD
+		if $G(ER) lock -CHKINS(CHKS) quit
+		if SKIP set ER=0
+		}
+	quit
+	
+BOOKBLD	//
+	
+	set SKIP=0
+	set RM=""
+	
+	lock +CHKINS(CHKS):2 else  do ERRLOCK quit
+	set CHKNUM=Db.getOneRow("CHKSEQ","CHKINSSEQ","CHKS")    // Next sequence
+	
+	quit:SKIP		// Error in lock, skip one print request
+	
+	quit:$G(ER)
+	
+	if CHKS'=CHKSOLD do CHGCHKS
+	
+	set CHKNUMINI=CHKNUM,CNTOLD=1
+	
+	// Print CHKCNT checks, i.e. the checks on this requisition
+	
+	for CNT=1:1:CHKCNT do { quit:$G(ER)
+		
+		// Create the new check requisition if REQPOS>0
+	
+		if (REQTYP'=""),(CNT=REQPOS) do { quit:$G(ER)
+			if CNT-CNTOLD do CHKRNG("PRTCHK",BRCD,CHKS,.CHKNUM,CNT-CNTOLD,$G(CID),$G(ACN)) quit:$G(ER)
+			do CHKBLD(REQTYP,2) quit:$G(ER)
+			}
+		// Create a variable ARR(LIN) with the check data
+		
+		do CHKBLD(DEFCHK) quit:$G(ER)
+	
+		// Increment the check number
+		
+		// Get the next check number if we need print more
+		if CNT'=CHKCNT set CHKNUM=$$CHKNXT^CHKNUTL(CHKNUM)
+		
+		// Create the new check requisition if REQPOS<0
+		
+		if (REQTYP'=""),((CNT-CHKCNT-1)=REQPOS) do { quit:$G(ER)
+			do CHKRNG("PRTCHK",BRCD,CHKS,.CHKNUM,CNT-CNTOLD+1,$G(CID),$G(ACN)) quit:$G(ER)
+			do CHKBLD(REQTYP,3) quit:$G(ER)
+			}
+		}
+	quit:$G(ER)
+
+	// Create a variable with the printed check range
+	
+	do CHKRNG("PRTNUM","",CHKS,CHKNUMINI,CHKCNT) Q:$G(ER)
+	
+	lock -CHKINS(CHKS)
+	quit
+	
+ERRLOCK	// Error in lock
+	
+	set ER=1
+	set ET="RECLOC"
+	do ^UTLERR
+	set ER=0
+	set SKIP=1		// Skip one print request or one check type
+	
+	quit
+	
+CHKBLD(DEFCHK,CHKTST)	//
+	
+	/*
+	  CHKTST	= 1 - Printing the test pattern
+			= 2 - Printing the check requisition before the check
+			= 3 - Printing the check requisition after the check
+	*/
+	
+	set CHKTST=$G(CHKTST)
+	
+	if (CHKTST=2)!(CHKTST=3) do {
+		// Create the array with one check for this requisition
+	
+		do CHKRNG("PRTREQ",BRCD,CHKS,.CHKNUM,1) quit:$G(ER)
+		set CNTOLD=(CNT+(CHKTST-2))
+		}
+	
+	do ARRBLD(DEFCHK,CHKTST) quit:$G(ER)
+	
+	if ARRCOL>PAGNCOL do ARRPRT quit:$G(ER)
+	
+	quit
+	
+ARRBLD(DEFCHK,CHKTST)	// Create the ARR array with one check 
+	
+	/*
+	  DEFCHK	- Check Type Definition
+	  CHKTST	- Flag to say if we are doing the test pattern
+	*/
+	 
+	new ARRLGT,CHKBEG,DEC,L,P3,P2,TYP,VAR
+	
+	set CHKTST=$G(CHKTST)
+	
+	set (LIN,COL)=""
+	for  set LIN=$O(DEF(DEFCHK,LIN)) quit:LIN=""  do { quit:$G(ER)
+		for  set COL=$O(DEF(DEFCHK,LIN,COL)) quit:COL=""  do { quit:$G(ER)
+			set CHKBEG=PAGLFT+((ARRCOL-1)*(CHKNCOL+CHKRGT))
+			set ARRLGT=$L($G(ARR(LIN)))
+			set ARR(LIN)=$G(ARR(LIN))_$J("",CHKBEG-ARRLGT+COL-1)
+			
+			set TYP=$P(DEF(DEFCHK,LIN,COL),"|",1)
+			set L=$P(DEF(DEFCHK,LIN,COL),"|",2)
+			set DEC=$P(DEF(DEFCHK,LIN,COL),"|",3)
+			
+			set V=$P(DEF(DEFCHK,LIN,COL),"|",4)
+			#ACCEPT DATE=01/05/04;PGM=John Carroll
+			if $P(DEF(DEFCHK,LIN,COL),"|",5) X "set V="_V
+			
+			do ^DBSEXEP quit:$G(ER)
+			
+			#ACCEPT DATE=01/05/04;PGM=John Carroll
+			X "set VAR="_P3
+			
+			// In printing test 9,999,999.99 if L=9 must be 99,999.99
+			
+			if CHKTST,($L(VAR)>L) set VAR=$E(VAR,$L(VAR)-L,$L(VAR))
+			
+			set ARR(LIN)=ARR(LIN)_VAR
+			}
+		}
+	set ARRCOL=ARRCOL+1
+	
+	quit
+	
+ARRPRT	// Print a line of checks
+	
+	new AUX,LIN,LINOLD,NULL
+	
+	if ARRLIN=1 do NULLVL(PAGTOP)			// Page top margin
+	
+	set (LIN,LINOLD)=""
+	for  set LIN=$O(ARR(LIN)) quit:LIN=""  do {
+		if LIN-LINOLD'=1 do NULLVL(LIN-LINOLD-1)   // Blank lines
+		do VOM(ARR(LIN))			   // The check line
+		set LINOLD=LIN
+		}
+	
+	do NULLVL(CHKNLIN-LINOLD)			// Lines to end of check
+	if ARRLIN'=PAGNLIN do NULLVL(CHKBOT)		// Check bottom margin
+	
+	set ARRLIN=ARRLIN+1
+	if ARRLIN>PAGNLIN do {				// Page bottom margin
+		do NULLVL(PAGBOT)
+		set ARRLIN=1
+		
+		if PAGESC'="" for AUX=1:1:$L(PAGESC,",") do VOM($C($P(PAGESC,",",AUX)),0)
+		}
+	
+	kill ARR
+	set ARRCOL=1
+	
+	quit
+	
+NULLVL(NUM)	// Print NUM blank lines 
+	
+	new L
+	for L=1:1:NUM do VOM("")
+	quit
+	
+VOM(VL,LF)	// Print one line
+	
+	/*
+		VL - Line to print
+		LF - Print line feed flag (Default 1 = print)
+	*/
+	if $G(LF)="" set LF=1
+	
+	use IO
+	
+	write VL if LF write !
+	
+	use 0
+	
+	quit
+	
+NEWCHKS	// New check type
+	
+	do CHKTYP(CHKS,PRTNUM) quit:$G(ER)
+	
+	kill DEF
+	do CHKDEF(DEFCHK) quit:$G(ER)
+	
+	if REQTYP'="" do CHKDEF(REQTYP) quit:$G(ER)
+	
+	set CHKSOLD=CHKS
+	
+	quit
+	
+CHKTYP(CHKS,PRTNUM)	//
+	
+	/*
+	  CHKS		- Check type
+	  PRTNUM	- 0 = Print the check      1 = Print the number
+	*/
+	new UTBL
+	
+	set DEFCHK=Db.getOneRow("DEFNUM","UTBLCHKS","CHKS")
+	
+	// Invalid check print definition ~p1
+	if DEFCHK="" set ER=1,RM=$$^MSG(8707) quit
+ 	
+	// Invalid check print definition ~p1
+	if 'Db.isDefined("UTBLCHKDEF1","DEFCHK") set ER=1,RM=$$^MSG(8707,DEFCHK) quit
+	
+	new utblchkdef1
+	type RecordUTBLCHKDEF1 utblchkdef1=Db.getRecord("UTBLCHKDEF1","DEFCHK")
+	
+	set CHKDES=utblchkdef1.des
+	set PAGNCOL=utblchkdef1.pagncol
+	set PAGNLIN=utblchkdef1.pagnlin
+	set PAGTOP=utblchkdef1.pagtop
+	set PAGBOT=utblchkdef1.pagbot
+	set PAGLFT=utblchkdef1.paglft
+	set CHKNCOL=utblchkdef1.chkncol
+	set CHKNLIN=utblchkdef1.chknlin
+	set CHKBOT=utblchkdef1.chkbot
+	set CHKRGT=utblchkdef1.chkrgt
+	set REQTYP=utblchkdef1.reqtyp
+	set REQPOS=utblchkdef1.reqpos
+	set PAGESC=utblchkdef1.pagesc
+	
+	quit
+	
+CHKDEF(DEFCHK,CHKTST)	//
+	
+	/*
+	  DEFCHKS	- Check Type Definition
+	  CHKTST	- Flag to say if we are doing the test pattern
+	 
+	  Build one array DEF(DEFCHK,CHKLIN,CHKCOL)=Format|Lenght|Dec|Data|Flag
+	 
+	  	Flag - DI or Variable = 1
+	 					       Data
+	 					=================
+	 		1 - Data Item		$P(fCHKPRD,$C(124),1)
+	 		2 - Text		"AAABBBCCC"
+	 		3 - Variable		$P($H,",",2)
+	*/
+	new VAR
+	
+	set CHKTST=$G(CHKTST)
+	
+	// Create variable DEF with all the data to print:
+	
+	new rs
+	type ResultSet rs=Db.select("CHKLIN,CHKCOL","UTBLCHKDEF2","DEFCHK=:DEFCHK")
+	if rs.isEmpty() quit
+	while rs.next() do {
+		new dec,disp,lgth
+		
+		set CHKLIN=rs.getCol(1)
+		set CHKCOL=rs.getCol(2)
+		
+		new utblchkdef2
+		type RecordUTBLCHKDEF2 utblchkdef2=Db.getRecord("UTBLCHKDEF2","DEFCHK,CHKLIN,CHKCOL")
+		
+		/* 
+		   If we are testing then the data should be "9999999"
+	           If we are printing the check we must see the correct data to print
+		*/
+		set VAR=$$GETDATA(.utblchkdef2) quit:$G(ER)
+		
+		set disp=utblchkdef2.disp
+		set lgth=utblchkdef2.lgth
+		set dec=utblchkdef2.dec
+		
+		if CHKTST set disp="T"		// Display always as text
+		set VAR=disp_"|"_lgth_"|"_dec_"|"_VAR
+
+		set DEF(DEFCHK,CHKLIN,CHKCOL)=VAR
+		}
+	quit
+	
+GETDATA(RecordUTBLCHKDEF2 utblchkdef2)	//
+	
+	new VAR,VARLGT,VARNAM,VARTYP
+	
+	set VAR=""
+	
+	set VARLGT=utblchkdef2.lgth
+	set VARTYP=utblchkdef2.vartyp
+	set VARNAM=utblchkdef2.varnam
+	
+	if VARTYP=1 do {				// Data Item
+		if CHKTST set VAR=$TR($J("",VARLGT)," ",9) quit
+	
+		// Convert [fid]di in $P(fCHKPRD,$C(124),piece)
+		do PARSE^DBSDD(VARNAM) quit:$G(ER)
+		
+		// Replace "|" with $C(124)
+		set VAR=$$REPLACE^DBSFRM1(NS,"""|""","$C(124)")
+		
+		set VAR=VAR_"|"_1
+		}
+	
+	if VARTYP=2 set VAR=VARNAM			// Text
+	
+	if VARTYP=3 do {				// Variable
+		if CHKTST set VAR=$TR($J("",VARLGT)," ",9) quit
+		set VAR=VARNAM_"|"_1
+		}
+
+	quit:$G(ER) ""
+	
+	quit VAR
+	
+CHKTST	//
+	new DEF
+	do CHKDEF(DEFCHK,1)
+	
+	for CNT=ARRCOL:1:PAGNCOL do CHKBLD(DEFCHK,1) quit:$G(ER)
+	
+	/*
+	If we print the check and a valid check number is used (CHKINC=1)
+	then we must void some checks.
+	*/
+	
+	quit
+	
+CHKRNG(CHKACT,BRCD,CHKS,CHKNUM,CHKCNT,CID,ACN)	// Create one array with the printed checks 
+	
+	/*
+	  CHKACT	- Check Action
+	  CHKS		- Check Type
+	  CHKNUM	- Check Number
+	  CHKCNT	- Number of checks to affect
+	  CID		- Account number (Can be null in printing test)
+	  ACN		- Customer number (Can be null in printing test)
+	*/
+	new HIGH,STSNEW
+	
+	set CID=$G(CID)
+	set ACN=$G(ACN)
+	
+	set HIGH=$$CHKNXT^CHKNUTL(CHKNUM,CHKCNT-1) quit:$G(ER)
+	
+	set CHKRNG(CHKS)=CHKNUM_"|"_HIGH
+	
+	set CHKNUM=$$CHKNXT^CHKNUTL(HIGH)
+	
+	// The HIGH is ZZ9999999 and the next check is ""
+	
+	if CHKNUM="" kill ER,RM
+	
+	quit
+	
+CHKPOS(SIT)	// Ask for first check number, and position of the first check
+	
+	/*
+	  SIT =
+	 	1 - Called when the check range is to small
+	        In the case <F11> skips one print request
+	 	2 - Called when the check type/branch changes
+	        In this case <F11> skips one check type
+	*/
+	new AUX,EXT,HDR1,HDR2,HIGH,OLNTB,VFMQ,%NOPRMT
+	
+	set (ARRCOL,ARRLIN,CHKTST,CHKINC)=""
+	set IO=$G(IOOLD)
+	
+	do READ
+	
+	quit
+	
+READ	//
+	
+	set HDR2=CHKS_"-"_CHKDES
+	set HDR2=$J("",(80-$L(HDR2))/2)_HDR2
+	
+	set %TAB("ARRCOL")=".CHKCOL1/XPP=do POSCOL^CHKPRT"
+	set %TAB("ARRLIN")=".CHKLIN1/XPP=do POSLIN^CHKPRT"
+	set %TAB("CHKTST")=".PTRN1"
+	set %TAB("IO")=$$IO^SCATAB(IO)
+	
+	set %READ="@@%FN,,@HDR2,,IO/REQ,ARRCOL/REQ,ARRLIN/REQ,CHKTST/REQ"
+	
+	do ^UTLREAD if $G(VFMQ)="Q" set ER=1,SKIP=SIT quit
+	
+	quit:$G(ER)
+	
+	if $G(IOOLD)'=IO do { quit:$G(ER)
+		if IO'=$I do OPEN^SCAIO quit:$G(ER)
+		quit:$G(IOOLD)=$I!($G(IOOLD)="")
+		new IOAUX set IOAUX=IO,IO=IOOLD
+		do CLOSE^SCAIO quit:$G(ER)
+		set IO=IOAUX
+		}
+	
+	set IOOLD=IO
+	
+	if CHKTST do CHKTST quit:$G(ER)  do READ quit
+	
+	quit
+	
+TMPBLD1	// Create a variable TMP
+	
+	if PCHKS="" set CHKS=""
+	else  set CHKS=Db.currVal("CHKINSSEQ","PCHKS")
+	
+CHKS5	//
+	
+	for  set CHKS=Db.nextKey("CHKINSSEQ","CHKS") quit:CHKS=""!((PCHKS'="")&(CHKS'=PCHKS))!($G(ER))  do {
+	
+		do VALCHKS(CHKS) quit:$G(ER)
+	
+		set AUX=Db.getOneRow("CHKSEQ","CHKINSSEQ","CHKS")
+	
+		do VALRNG(CHKS,AUX,CHKCNT) quit:$G(ER)
+	
+		set TMP(CHKS)=""
+		}
+	
+	quit
+	
+POSCOL	// Pos Processor for check page column PAGNCOL
+	
+	quit:X=""
+	
+	// Value must be greater than zero
+ 	if X<1 set ER=1,RM=$$^MSG(2921) quit
+	
+	// Must be less than or equal to ~p1
+	if X>PAGNCOL set ER=1,RM=$$^MSG(8689,PAGNCOL) quit
+	
+	quit
+	
+POSLIN	// Pos Processor for check page line PAGNLIN
+	
+	quit:X=""
+	
+	// Value must be greater than zero
+	if X<1 set ER=1,RM=$$^MSG(2921) quit
+	
+	// Must be less than or equal to ~p1
+	if X>PAGNLIN set ER=1,RM=$$^MSG(8689,PAGNLIN) quit
+	
+	quit
+	
+	
+POSCNT	//
+	// Must be greater than ~p1
+	if X'>0 set ER=1,RM=$$^MSG(1810,0) quit
+	
+	quit
+	
+VALRNG(CHKS,LOW,CHKCNT)	//
+	
+	new HIGH
+	set HIGH=$$CHKNXT^CHKNUTL(LOW,CHKCNT-1)
+	
+	// Check range too small
+	if HIGH="" set ER=1,RM=$$^MSG(8710) quit
+	
+	// Check range allocated to institution
+	if $$EXTINST^CHKINS(CHKS,LOW,HIGH) set ER=1,RM=$$^MSG(8700) quit
+	if $$EXTBRCD^CHKINS(CHKS,LOW,HIGH) set ER=1 quit
+	
+	// Check range already allocated to customer ~p1
+	if $$EXTCUS^CHKINS(CHKS,LOW,HIGH) set ER=1,RM=$$^MSG(8695) quit
+	
+	quit
+	
+POSCHKS	// Pos Processor for check type
+	
+	quit:X=""
+
+	// Invalid check type
+	if 'Db.isDefined("UTBLCHKS","X") set ER=1,RM=$$^MSG(6591,X) quit
+	
+	do VALCHKS(X) quit:$G(ER)
+	
+	quit
+	
+VALCHKS(X)	// Verify if the check type is correctly defined 
+	
+	// Next check sequence number not defined
+	
+	new chkseq
+	set chkseq=Db.getOneRow("CHKSEQ","CHKINSSEQ","X")
+	if chkseq="" set ER=1,RM=$$^MSG(8691) quit
+	
+	new DEFCHK
+	set DEFCHK=Db.getOneRow("DEFNUM","UTBLCHKS","X")
+	
+	// Invalid check print definition ~p1
+	if DEFCHK="" set ER=1,RM=$$^MSG(8707) quit
+	
+	if 'Db.isDefined("UTBLCHKDEF1","DEFCHK") set ER=1,RM=$$^MSG(8707,DEFCHK) quit
+	
+	quit
+	
+CHGCHKS	// The Check Type changes
+	
+	if $D(ARR) do ARRPRT quit:$G(ER)
+	do NEWCHKS quit:$G(ER)
+	do CHKPOS(2) quit:$G(ER)
+	quit
+	
+NUMFILE	//
+	
+	new OLDSEQ
+	
+	set SID="CHKINSSEQ"
+	do ^USID if PGM="" set ER=1,ET="INVLDSCR" do ^UTLERR quit
+	
+	set PGMSEQ=PGM
+	
+	set SID="CHKINS"
+	do ^USID if PGM="" set ER=1,ET="INVLDSCR" do ^UTLERR quit
+	
+	set PGMINS=PGM
+	
+	set CHKS="",(%PG,%PAGE)=1,%O=0
+	for  set CHKS=$O(CHKRNG(CHKS)) quit:CHKS=""  do {
+		new X
+		set (X,OLDSEQ)=$$CHKNXT^CHKNUTL($P(CHKRNG(CHKS),"|",2))
+		new CHKSEQ
+		set CHKSEQ=X
+		
+		/* 
+		If we print the last sequence ZZ9999999 the next check is
+		invalid and ER=1. In this case we prompt for next sequence
+		but don't display any default value.
+		*/
+		if $G(ER) set ER=0,RM=""
+
+		set fCHKSEQ=X	// used by screen
+		do ^@PGMSEQ
+	
+		// Set the next sequence
+		
+		if $G(VFMQ)="F" do {
+			
+			type RecordCHKINSSEQ  chkinsseq=Db.getRecord("CHKINSSEQ","CHKS=:CHKS",1)
+			set chkinsseq.CHKSEQ=CHKSEQ
+			do chkinsseq.save()
+			
+			// fCHKSEQ is coming back from screen input
+			
+			if OLDSEQ'=$P(fCHKSEQ,"|",1) do {
+				set AUX=$$CHKPRV^CHKNUTL($P(fCHKSEQ,"|",1))
+				/*
+				If the next sequence is AA0000001 the previous
+				check is invalid (null) and ER=1. In this
+				case we don't change the HIGH value.
+				*/
+				if AUX'="" set $P(CHKRNG(CHKS),"|",2)=AUX
+				if $G(ER) set ER=0
+				}
+			}
+		
+		set HIGH=$P(CHKRNG(CHKS),"|",2)
+		set fCHKINS=$P(CHKRNG(CHKS),"|",1)
+		
+		do ^@PGMINS
+		
+		// Allocate the new range to Institution
+		type RecordCHKINS chkins=Db.getRecord("CHKINS","CHKS=:CHKS,HIGH=:fCHKINS")
+		// fCHKINS is coming back from screen input
+		if $G(VFMQ)="F" do INSRNG^CHKINS(.chkins)
+		}
+	
+	quit
+	
+VER	//
+	if $G(ER)!($G(VFMQ)="Q") do END quit
+	do NUMFILE
+	do END
+	quit
+	
+END	//
+	
+	quit:$G(ER)
+	set ER="W",RM=$$^MSG(2237)			// Process complete
+	quit
+
+vSIG()	quit "60477^65442^Pat Kelly^14361"	// Signature - LTD^TIME^USER^SIZE

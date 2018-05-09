@@ -1,0 +1,532 @@
+MPSRECU	  	/*
+	ORIG: GRAY - 08/11/2000
+	DESC: MPS Record and Card Creation Utility
+
+	---- Comments --------------------------------------------------------
+	This is the LRQ'd version of this utility.
+ 
+	This procedure definition supports the setting of card information 
+	and handles replacement cards for the MPS Card Extract File.
+ 
+	---- Revision History ------------------------------------------------
+	 05/17/06 - SPR - CR 21260
+	 	    Modified the section SETCARD such that if the card status 
+	 	    is 14(PIN activated),then the card status is set to 0 
+	 	    (Status is Active) otherwise the card status should be 
+	 	    the same as the card type creation status.
+	
+	 02/01/06 - TELIV - CR 19314
+	  	     Modified Coulmns to correct names for Table CRD
+
+	 01/23/06 - TELIV - CR 19186
+	  	     Replaced Table refrences of CIFCRD with CRD. 
+	  	     CIFCRD was a Index table and is no longer used.	
+	 
+	 12/12/05 -  SPR - 18555
+	       	     Card Management - General DBI3 System Area Clean up.
+	       	     
+	----------------------------------------------------------------------	       	     	
+  	*/
+
+
+	quit
+	
+	
+	//-----------------------------------------------------------------
+Public EXTDT(ORDT,CRDTYP,CRDNUM)	//	Return the proper date to file 
+					//      into MPSREC and MPSREC1
+	//-----------------------------------------------------------------
+	/*
+	ARGUMENTS:
+		.ORDT	Order Date	/TYP=D/NOREQ/MECH=VAL
+		.CRDTYP Card Type	/TYP=T/REQ/MECH=VAL
+		.CRDNUM Card Number	/TYP=N/REQ/MECH=VAL
+	
+	This subroutine is called by the journal definitions associated
+	with the CRD and CRDGRP filers.  When a card is added or modified,
+  	or if accounts are added or deleted to a card record, an entry is
+	created via the journal definitions for these filers to the MPSREC 
+	and MPSREC1 files.  Both of these files are keyed by date.  The only 
+	time ORDT is present is if a new card is being ordered.  For those
+	card records that are just being maintained, the order date will be
+	based on [CRD]ORD if the order date is equal to or greater than
+	the current system processing date.  Otherwise, the current system 
+	processing date will be returned.
+	*/
+	//-----------------------------------------------------------------
+	
+	type Date X
+
+	if ORDT.get() quit ORDT
+	
+	type RecordCRD crd=Db.getRecord("CRD","CRDTYP=:CRDTYP,CRDNUM=:CRDNUM",1)
+	if crd.getMode() set X=crd.ord
+
+	if X'<%SystemDate quit X
+	quit %SystemDate
+	
+	
+	//-----------------------------------------------------------------
+Public GETCO(CID)	//	Return the company code based on account
+	//-----------------------------------------------------------------
+	/*
+	ARGUMENTS:
+		.CID	Account Number	/TYP=N/REQ/MECH=VAL
+	
+	Will return the company code associated with an account.  If none
+	is defined, then the company short name from institution variables
+	is returned.
+	*/
+	//-----------------------------------------------------------------
+	
+	type String X
+
+	type RecordACN acn=Db.getRecord("ACN","CID=:CID")
+
+	/* 
+	Company code is not in the ACN file definition since it is stored
+	in different locations in DEP and LN.
+	*/
+	
+	if acn.cls="D" do {
+		type RecordDEP dep=Db.getRecord("DEP","CID=:CID",1)
+		set X=dep.co
+		}
+	else  do {
+		type RecordLN ln=Db.getRecord("LN","CID=:CID",1)
+		set X=ln.co	
+		}
+	if X.isNull() set X=CUVAR.co
+	
+	quit X
+	
+	
+	//-----------------------------------------------------------------
+Public GETCO1(ACN,CO)	// Return the company code from CIF based on ACN
+	//-----------------------------------------------------------------
+	/*
+	ARGUMENTS:
+		.ACN	Customer Number	/TYP=N/REQ/MECH=VAL
+		.CO	Company Code	/TYP=T/NOREQ/MECH=VAL
+	
+	Will return the company code associated with a customer record.  If
+	the company code is not defined in the customer record, then the
+	company short name from institution variables will be returned.
+	*/
+	//-----------------------------------------------------------------
+
+	type public String CRDNUM,CRDTYP
+	if 'CO.get().isNull() quit CO
+	
+	if ACN.get() do {
+		type RecordCIF cif=Db.getRecord("CIF","ACN=:ACN",1)
+		set CO=cif.co
+		}
+	if 'ACN.get() do {
+		set ACN=$$CMPACN^CIFCDI(CRDTYP,CRDNUM)
+		if ACN.get() do {
+			type RecordCIF cif=Db.getRecord("CIF","ACN=:ACN",1)
+			set CO=cif.co
+			}
+		}
+	
+	if CO.get().isNull() set CO=CUVAR.co
+	
+	quit CO
+	
+	
+	//-----------------------------------------------------------------
+Public GREFNUM(ACN,CRDTYP,CRDNUM)	//	Store account number in CMSRECCRD (REFNUM)
+	//-----------------------------------------------------------------
+	/*
+	ARGUMENTS:
+		.ACN	Customer Number	/TYP=N/REQ/MECH=VAL
+		.CRDTYP Card Type	/TYP=T/REQ/MECH=VAL
+		.CRDNUM Card Number	/TYP=T/REQ/MECH=VAL
+	
+	Returns an account number related to this customer.  If an 
+	institution already ordered a card for the customer, the column
+	[ACN]PRECARD will contain the pre-assigned card number and the
+	first account will be returned that is set up with a pre-assigned 
+	card that is the same as the card number currently being processed.
+	Otherwise, the highest account number found for this customer
+	will be returned, if a primary account has not been set up for
+	the card record.
+	*/
+	//-----------------------------------------------------------------
+
+	type Boolean FOUND
+	type Number PRECARD,XCID
+	
+	set FOUND=0
+	set XCID=""	// SPG 11/22/02
+	
+	if 'ACN.get() set ACN=$$CMPACN^CIFCDI(CRDTYP,CRDNUM)
+	
+	type ResultSet rs=Db.select("CID","RELCIF","ACN=:ACN")
+	while rs.next() do { quit:FOUND
+		set XCID=rs.getCol(1)
+	
+		type RecordACN acn=Db.getRecord("ACN","CID=:XCID",1)
+		if acn.getMode() set PRECARD=acn.precard
+		
+		if PRECARD=CRDNUM set FOUND=1
+		
+		}
+	
+	if FOUND quit XCID
+	
+	else  do {
+		type ResultSet rs1=Db.select("CID","CRDGRP","CRDTYP=:CRDTYP AND CRDNUM=:CRDNUM AND PRIMCRD=1")
+		if rs1.next() set XCID=rs1.getCol(1)
+		}
+	
+	quit XCID
+	
+	
+	//-----------------------------------------------------------------
+Public GACTYP(CID) // 	Return the card type based on CID
+	//-----------------------------------------------------------------
+	/*
+	ARGUMENTS:
+		.CID	Account Number	/TYP=N/REQ/MECH=VAL
+	
+	Returns the first card type tied to this account.  If the customer
+	does not have a card tied to this account, 0 will be returned.
+	*/
+	//-----------------------------------------------------------------
+
+	type String CRDTYP
+	
+	type ResultSet rs=Db.select("CARDTYPE","ACNCRD","CID=:CID")
+	if rs.isEmpty() quit 0
+	
+	if rs.next() set CRDTYP=rs.getCol(1)
+	
+	quit CRDTYP
+	
+	
+	//-----------------------------------------------------------------
+Public GACNUM(CID) //        Return the card number based on CID
+	//-----------------------------------------------------------------
+	/*
+	ARGUMENTS:
+		.CID	Account Number	/TYP=N/REQ/MECH=VAL
+	
+	Returns the first card number tied to this account.  If a customer
+	does not have a card tied to this account, 0 will be returned.
+	*/
+	//-----------------------------------------------------------------
+
+	type String CRDNUM
+	
+	type ResultSet rs=Db.select("CARDNUM","ACNCRD","CID=:CID")
+	if rs.isEmpty() quit 0
+	
+        if rs.next() set CRDNUM=rs.getCol(1)
+	
+	quit CRDNUM
+
+	
+	//-----------------------------------------------------------------
+Public GFCTYP(ACN) // 	Return the card type based on ACN
+	//-----------------------------------------------------------------
+	/*
+	ARGUMENTS:
+		.ACN	Customer Number	/TYP=N/REQ/MECH=VAL
+	
+	Returns the first card type associated with this customer.  If 
+	the customer does not have any cards, 0 will be returned.
+	*/
+	//-----------------------------------------------------------------
+
+	type String CRDTYP
+	type ResultSet rs=Db.select("CRDTYP","CRD","ACN=:ACN")
+	if rs.isEmpty() quit 0
+	
+	if rs.next() set CRDTYP=rs.getCol(1)
+	
+	quit CRDTYP
+
+	
+	//-----------------------------------------------------------------
+Public GFCNUM(ACN) //        Return the card number based on ACN
+	//-----------------------------------------------------------------
+	/*
+	ARGUMENTS:
+		.ACN	Customer Number	/TYP=N/REQ/MECH=VAL
+	
+	Returns the first card number associated with this customer.  If
+	the customer does not have any cards, 0 will be returned.
+	*/
+	//-----------------------------------------------------------------
+
+	type String CRDNUM
+	type ResultSet rs=Db.select("CRDNUM","CRD","ACN=:ACN")
+	if rs.isEmpty() quit 0
+	
+	if rs.next() set CRDNUM=rs.getCol(1)
+	
+	quit CRDNUM
+
+	
+	//-----------------------------------------------------------------
+Public GORDER(CRDTYP,CRDNUM,GRP)	//	Return the order number on CRDGRP
+	//-----------------------------------------------------------------
+	/*
+	ARGUMENTS:
+		.CRDTYP	Card Type	/TYP=T/REQ/MECH=VAL
+		.CRDNUM Card Number	/TYP=N/REQ/MECH=VAL
+		.GRP	Account Group	/TYP=T/REQ/MECH=VAL
+	
+	Returns the number of accounts based on account group that is tied
+	to this card type and card number.  If no accounts for this group
+	are tied to this card, the value of 1 is returned.
+	*/
+	//-----------------------------------------------------------------
+
+	type Number ORDER
+	
+	set ORDER=1
+	type ResultSet rs=Db.select("CID","CRDGRP","CRDTYP=:CRDTYP AND CRDNUM=:CRDNUM AND GRP=:GRP")
+	
+	if rs.isEmpty() quit ORDER
+	
+	while rs.next() set ORDER=ORDER+1
+	
+	quit ORDER
+
+	
+	//-----------------------------------------------------------------
+Public SETCARD(NEWTYP,NEWNUM,ACN,XTJD)	//	Build columns for newly issued cards in [CRD]
+	//-----------------------------------------------------------------
+	/*
+	ARGUMENTS:
+		.NEWTYP Card Type	/TYP=T/REQ/MECH=VAL
+		.NEWNUM Card Number	/TYP=N/REQ/MECH=VAL
+		.ACN	Customer Number	/TYP=N/REQ/MECH=VAL
+		.XTJD	Processing Date	/TYP=D/REQ/MECH=VAL
+	
+	This sub-routine adds all of the additional card record columns
+	for new and pre-assigned cards.  This is called by the procedure
+	definition MPSLNK.
+	*/
+	//-----------------------------------------------------------------
+
+	type public Boolean ER
+	type public Number PREPIN
+	type Number RNWROFF,RNWOFF
+	type String CRDNUM,CRDTYP,EXP
+	
+	set CRDTYP=NEWTYP.get()
+	set CRDNUM=NEWNUM.get()
+	
+	
+	type RecordCRD crd=Db.getRecord("CRD","CRDTYP,CRDNUM")
+	type RecordCRDTYP crdtyp=Db.getRecord("CRDTYP","CRDTYP")
+	
+	if 'ACN.get() set ACN=crd.acn
+	
+	do crd.setAuditFlag(1)			// SPG 01/28/03
+	
+	set crd.lmt=crdtyp.dlylmt		// Daily Limit - Card
+	set crd.hldnet=crdtyp.hldnet		// Hold Days - Network
+	set crd.hldnon=crdtyp.hldnon		// Hold Days - Non-Network
+	set crd.stat=crdtyp.crtnstat		// Card Creation Status
+	if crd.stat=14 set crd.stat=0           // Active
+	set crd.crdpl=crdtyp.crdpl		// Card Plastic Type
+	set crd.term=crdtyp.term		// Card Term
+
+	/*
+	Pre-assigned and Replacement cards are ordered same day that 
+	maintenance is done to the card status or if a card has already
+	been pre-assigned.
+	*/
+	if 'crd.ord set crd.ord=XTJD		// Order Date
+
+	if crd.term'="" do {
+		
+		set ER=0
+		set EXP=$$EXT^UMDT(crd.term,crd.ord)
+		if ER quit
+		set crd.expdt=$$EOMJD^SCADAT(EXP)
+		set RNWROFF=crdtyp.RNWROFF
+		set RNWOFF=crdtyp.RNWOFF
+		set crd.rexpdt=crd.expdt-RNWROFF
+		set crd.rcrddt=crd.expdt-RNWOFF
+		}
+	
+	/* 
+	If the customer selected his own PIN, CRD.PINGEN should be set to
+	a 1.  Otherwise, it will be set to a 2 so that MPS will generate the
+	PIN number for the customer.
+	*/
+	
+	if 'crd.pingen set crd.pingen=2		// System generate PIN
+	
+	if PREPIN.get() set crd.encpin=PREPIN	// Customer selected PIN
+	
+	do SEQFILE(.crd)
+	do crd.save()
+	
+	quit
+	
+		
+SEQFILE(RecordCRD crd)	// Update information in CRTEXT file
+	
+	type public Number ACN,CID
+	type public String CRDNUM,CRDTYP
+	
+	type RecordCRDEXT crdext=Class.new("RecordCRDEXT")
+        set crdext.ordt=crd.ord
+        set crdext.acn=ACN
+        set crdext.cid=CID
+        set crdext.crdnum=CRDNUM
+	set crdext.crdtyp=CRDTYP
+        do crdext.bypassSave()
+	quit
+
+	//-----------------------------------------------------------------	
+Public REPLACE(CRDTYP,CRDNUM,ACN,XTJD,RPLCRD)	// Replacement cards
+	//-----------------------------------------------------------------
+	/*
+	ARGUMENTS:
+		.CRDTYP	Card Type		/TYP=T/REQ/MECH=VAL
+		.CRDNUM Card Number		/TYP=N/REQ/MECH=VAL
+		.ACN	Customer Number 	/TYP=N/REQ/MECH=VAL
+		.XTJD	Processing Date 	/TYP=D/REQ/MECH=VAL
+	
+	RETURNS:
+		.RPLCRD Card Replaced Flag	/TYP=L/REQ/MECH=VAL
+	
+	This sub-routine creates a replacement card when the status of
+	a card record has changed to a status that allows replacement cards
+	to be issued.  This code is called by the batch definition BCHMPSEX.
+	*/
+	//-----------------------------------------------------------------
+	
+	type public String CO
+	type Boolean ALLOW,OPRIM
+	type Date ORDT
+	type Number OCID,STAT
+	type String OGRP,RCRDNUM,RCRDTYP,RPLTYP,RCRD,OCRDNUM,OCRDTYP
+	
+	set ORDT=XTJD
+	set RPLCRD=0
+	type RecordUTBLMPS mps=Db.getRecord("UTBLMPS","CO=:CO,CARDTYP=:CRDTYP",1)
+	if mps.getMode() set RPLTYP=mps.rplcrdtyp
+	
+	type RecordCRD crd=Db.getRecord("CRD","CRDTYP=:CRDTYP,CRDNUM=:CRDNUM",1)
+	if crd.getMode() do {
+		set STAT=crd.stat
+		set RCRD=crd.rplcrd
+		}
+	if RCRD quit		// This card has already been replaced
+	
+	// Only continue if this Status is allowed a replacement card
+	type RecordUTBLCRDSTAT crdstat=Db.getRecord("UTBLCRDSTAT","CRDST=:STAT",1)
+	if crdstat.getMode() set ALLOW=crdstat.replace
+	if 'ALLOW quit
+	
+	set (OCRDTYP,RCRDTYP)=CRDTYP
+	if 'RPLTYP.isNull() set RCRDTYP=RPLTYP
+	set OCRDNUM=CRDNUM
+	
+	set crd.rplcrd=$$CRDNUM^MPSCARDU(CO,RCRDTYP)
+	set crd.rcrddt=XTJD
+	do crd.bypassSave()
+	
+	set CRDTYP=RCRDTYP
+	set CRDNUM=RCRDNUM
+	
+	type RecordCRD crd1=Class.new("RecordCRD")
+	
+	set crd1.crdtyp=CRDTYP
+	set crd1.crdnum=CRDNUM
+	set crd1.acn=ACN
+	set crd1.ord=ORDT
+	do crd1.save()
+
+	type RecordCRDGRP crdgrp=Class.new("RecordCRDGRP")
+	
+	set crdgrp.crdtyp=CRDTYP
+	set crdgrp.crdnum=CRDNUM
+	
+	type ResultSet rs=Db.select("GRP,CID,PRIMCRD","CRDGRP","CRDTYP=:OCRDTYP AND CRDNUM=:OCRDNUM")
+	while rs.next() do {
+		
+		set OGRP=rs.getCol(1)
+		set OCID=rs.getCol(2)
+		set OPRIM=rs.getCol(3)
+
+		type RecordACN acn=Db.getRecord("ACN","CID=:OCID",1)
+		if acn.getMode() set crdgrp.lnm=acn.lnm
+
+		set crdgrp.grp=OGRP
+		set crdgrp.cid=OCID
+		set crdgrp.primcrd=OPRIM
+		do crdgrp.save()
+		}
+		
+	do SETCARD(CRDTYP,CRDNUM,ACN,XTJD)
+	
+	set RPLCRD=1
+	
+	quit
+	
+	
+	//-----------------------------------------------------------------
+Public PP01(CO,CARDTYP,TYP)	// Data-entry screen post processor for [UTBLMPSPROD]TYP
+	//-----------------------------------------------------------------
+	/*
+	ARGUMENTS:
+		.CO		Company Code	/TYP=T/REQ/MECH=VAL
+		.CARDTYP 	Card Type	/TYP=T/REQ/MECH=VAL
+		.TYP		Product Type	/TYP=N/REQ/MECH=VAL
+	
+	Verifies that the product type is defined and that the type has
+	not been set up for this company code under a different card type.
+	*/
+	//-----------------------------------------------------------------
+
+	type public Boolean ER
+	type public String RM
+	type String GRP
+	
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE=:TYP",1)
+	if 'prodctl.getMode() set ER=1,RM=$$^MSG(1503) quit
+	
+	set GRP=prodctl.grp
+	if '((GRP="DDA")!(GRP="SAV")!(GRP="RC")!(GRP="LN")) set ER=1,RM=$$^MSG(1368) quit
+	
+	type ResultSet rs=Db.select("TYP","UTBLMPSPROD","CO=:CO AND TYP=:TYP AND CARDTYP NOT =:CARDTYP")
+	if rs.isEmpty() quit
+	
+	set ER=1,RM=$$^MSG(1485,TYP)
+
+	quit
+	
+	
+	//-----------------------------------------------------------------
+Public PP02(CO,CRDTYP)	// Data-entry screen post processor for [UTBLMPSPROD]CARDTYP and [UTBLMPSPROD]ACARDTYP and [UTBLMPS]RPLCRDTYP
+	//-----------------------------------------------------------------
+	/*
+	ARGUMENTS:
+		.CO	Company Code	/TYP=T/REQ/MECH=VAL
+		.CRDTYP Card Type	/TYP=T/REQ/MECH=VAL
+	
+	Verifies if the card type entered exists in the MPS_1 user table,
+	otherwise "Invalid table value" is returned.
+	*/
+	//-----------------------------------------------------------------
+	
+	type public Boolean ER
+	type public String RM
+	
+	type RecordUTBLMPS mps=Db.getRecord("UTBLMPS","CO=:CO,CARDTYP=:CRDTYP",1)
+	if 'mps.getMode() set ER=1,RM=$$^MSG(1485,CRDTYP)
+
+	quit
+	
+
+vSIG()	quit "60402^36134^Renga SP^15225"	// Signature - LTD^TIME^USER^SIZE

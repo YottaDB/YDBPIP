@@ -1,0 +1,178 @@
+LNACRFE	// Back Office Loan Accrual Run
+	/*
+	       ORIG:  Neal E. Gorman (5053)
+	       DESC:  Back Office Loan Accrual Run
+	      INPUT:
+	     OUTPUT:
+
+	  ---- Revision History ------------------------------------------------
+
+	   12/08/04 - TITOVE - CR 13229
+	   	      Modified GRP section to prevent undefined, removed ERR1,
+	   	      VPG, VPG0 and VER sections. In FILE section, modified code
+	   	      to reference the lnacr3rp ResultSet for SCA010 report.
+	   	      Removed second call to LNACR1, now AACM=1 and AACM=2
+	   	      records will be processed simultaneously. Added logic to
+	   	      support that to GRP section. 
+
+	   04/23/02 - SHVACHKINAD - 49794
+		      Converted to PSL.
+	 			
+	   04/03/00 - TANY - 37915
+	              Optimized performance by modifying ^SCADAT1 calls
+	              to ^SCAJD. Also remove revision history older than
+	              one year.
+
+	*/
+	 
+INIT
+	catch vERROR {
+		new ET,RM
+		set ET=vERROR.type
+	
+		do ZE^UTLERR
+	
+		// Error in account, not processed
+		set ET=$$^MSG(3511)
+
+		set ET=ET_"-"_vERROR.thrownAt
+		set RM=vERROR.description
+		do LOGERR
+		do END
+		}	
+
+	kill VFMQ
+
+        set %PG=1,%PAGE=1
+
+	do VPG00
+		
+	if VFMQ'="Q",'ER.get() do FILE
+
+	do END
+	
+	quit
+	
+
+VPG00	// Set up
+	set %TAB("EFD")=".EFD1/XPP=D PSEFD^LNACRFE",%EffectiveDate=%SystemDate 
+	set %TAB("%ANT")=".%ANT1/XPP=I EFD'=TJD,'X S ER=1,ET=""LABD"" D ^UTLERR Q",%ANT=1
+	set %TAB("IO")=$$IO^SCATAB($I)
+
+	set %READ="@@%FN,,,EFD/REQ,%ANT/REQ,IO/REQ"
+	do ^UTLREAD if VFMQ="Q" quit
+	quit
+
+
+FILE	// File data
+	
+	new GRP,RESTART,SAVEFD,TYPE
+	set RESTART=0 
+	type ResultSet lnacr1=Db.select("EFD","LNACR1","EFD=:%EffectiveDate")
+	type ResultSet lnacr3=Db.select("EFD","LNACR3","EFD=:%EffectiveDate")
+
+        if ('lnacr1.isEmpty()) ! ('lnacr3.isEmpty()) set RESTART=1
+
+	set (GRP,TYPE)="" 
+	set TIO=IO 
+	set %PLDF=1
+	
+	do GRP
+	
+	// Current products not coded for periodic accrual
+	if '$D(ACM) do { quit
+		set ET="NOMEACR" 
+		if $D(%EXT) quit
+		set ER=1 
+		do ^UTLERR 
+		set VFMQ="Q"
+	}
+
+	/* Calculate accruals by calling off to appropriate routine based
+	   upon value of accounting accrual method.  If method is equal
+	   to "2" then act as if it was "1".  Method "2" should only be
+	   used as a payoff accrual method.
+	*/
+
+	// Pre-calculated (Amortized) and Available For Payoff Calc Only
+	if $D(ACM(1)) set %ACM=1 do ^LNACR1
+	// Add-on, discount
+	if $D(ACM(3)) set %ACM=3 do ^LNACR3
+
+	// Generate reports
+	set SAVEFD=%EffectiveDate
+	do OPEN^SCAIO
+
+	type ResultSet lnacr1rp=Db.select("EFD","LNACR1","EFD=:%EffectiveDate")
+	// Loan Accrual Summary - Method 1 report
+	if 'lnacr1rp.isEmpty() set RID="SCA009" do REP	
+	
+	type ResultSet lnacr3rp=Db.select("EFD","LNACR3","EFD=:%EffectiveDate")
+	// Loan Accrual Summary - Method 3 report
+        if 'lnacr3rp.isEmpty() set RID="SCA010" do REP
+
+	do CLOSE^SCAIO
+
+	// Accrual run completed
+	set ER="W" set RM=$$^MSG(201)
+	
+	quit
+	
+
+REP	// Print reports
+	set %ED=$$DAT^%ZM(%EffectiveDate,"MM/DD/YY")
+	set MIN(1)=%EffectiveDate-1 
+	set MAX(1)=%EffectiveDate
+	set (%NOOPEN,%NOCLOSE)=""
+	do ^URID 
+	do V0^@PGM
+	set %EffectiveDate=SAVEFD
+	quit
+	
+
+END	// Delete records from LNACR1 and LNACR3 tables
+
+	if 'RESTART.get(),%ANT.get() do {
+		do Db.fastDelete("LNACR1","EFD")
+		do Db.fastDelete("LNACR3","EFD")
+		}
+ 
+	kill %ACM,%ANT,%EXT,%TAB,ACM,EFD,GRP,IO,RESTART,TYPE
+
+	quit
+	
+
+GRP	
+	type String CLS = "L"
+	
+	type ResultSet prodctl = Db.select("GRP, TYPE, AACM", "PRODCTL", "CLS = :CLS")
+
+	if 'prodctl.isEmpty() while prodctl.next() do {	
+		set GRP = prodctl.getCol(1)
+		set TYPE = prodctl.getCol(2)
+		set %ACM = prodctl.getCol(3)
+		if '%ACM quit
+		// Accounts with AACM = 2 are also filed in LNACR1 table, 
+		// treat them the same as accounts with AACM = 1
+		if %ACM = 2 set %ACM = 1
+		set ACM(%ACM,GRP,TYPE) = ""
+	}
+		
+	quit
+	
+
+PSEFD	// Post processor for EFD
+	set %JD=X if X'?5N set %JD=$$^SCAJD(X)
+	
+	// Date must not precede system date
+	if %JD<%SystemDate set ER=1 set ET="LPSTDT" do ^UTLERR
+	quit
+	
+
+LOGERR	// Log error in exception file: Loan Accrual Calculation
+
+	do LOG^UTLEXC($T(+0),"*",$$^MSG(3809),$G(CID),$G(%ZTSEQ),$G(ET))
+	kill ET,%ZTSEQ
+	quit	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "59877^64127^Eugene Titov^3900"	// Signature - LTD^TIME^USER^SIZE

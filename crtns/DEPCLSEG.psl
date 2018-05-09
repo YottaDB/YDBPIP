@@ -1,0 +1,199 @@
+DEPCLSEG(RecordDEP dep,RecordTTX ttx,RecordTRN trn)
+	/*
+	ORIG:   JERUCHIMC - 08/19/98
+	DESC:   This is the posting routine for trancode CCLBSEG - CD Closeout
+		Ledger Balance Segments.  This routine will withdraw the funds
+		from the principal balance of the segment.  It will also create
+		the following secondary transactions.
+
+		1. Reduce DEPSEG.AIACR,
+		2. Reduce DEPSEG.AIBAL
+		3. Reduce DEPSEG.POSACR.
+		4. Credit general ledger account.
+
+	---- Revision History ------------------------------------------------
+
+	12/13/02 - ZWITKOWITSM - 51349
+		   Removed isDefined method.
+
+	11/14/02 - ZWITKOWITSM - 43583
+		   PSL clean-up.
+
+	06/13/02 - ZWITKOWITSM - 43583
+		   Converted to PSL.
+
+	----------------------------------------------------------------------
+	*/
+
+	type Public Cache %CACHE()
+
+	if $G(SEG)="" quit
+
+	type RecordDEPSEG depseg=Db.getRecord("DEPSEG","CID,SEG",1)
+	if depseg.getMode()=0 quit
+
+	new HISTSEQ,OCID,OFFAMT,SECSEQ,TSO,TYPE
+
+	set OCID=CID
+	set TYPE=dep.type
+	set HISTSEQ=Db.currVal("HIST","CID")
+	set SECSEQ=Db.currVal("HISTDST","CID,HISTSEQ")
+
+	type RecordPRODCTL prodctl=%CACHE("PRODCTL").getRecord("PRODCTL","TYPE")
+
+	// Use exact closeout amount: ~p1
+	if depseg.bal'=TAMT do Runtime.setErrMSG("DEP",2826,depseg.bal) quit
+
+	// Segments in use flag must be on
+	if dep.segflg'=1 do Runtime.setErrMSG("DEP",7893) quit
+
+	// Account segment ~p1 has not renewed
+	if depseg.dlr="" do Runtime.setErrMSG("DEP",3848,SEG) quit
+
+	// Exceeds renewal grace period
+	if (depseg.dlr+CUVAR.GRACE)<%SystemDate do Runtime.setErrMSG("DEP",1034) quit
+
+	// Calculate pieces of TAMT
+	set PRIN=$P(TAMT,"#",1)
+
+	// Reset TAMT
+	set $P(TAMT,"#",8)=depseg.aibal
+	set $P(TAMT,"#",13)=depseg.posacr
+	set $P(TAMT,"#",14)=depseg.aiacr
+	set ttx.tamt=TAMT
+
+	// Withdrawal principal balance.
+	set TSO="SEGP#"_SEG_":"_TAMT
+	set TSO=$$FIELDIN^UTSO(TSO,"SEG",SEG)
+	set ttx.tso=TSO
+
+	// ^DEPPO may update depseg, kill current object
+	kill depseg
+
+	do ^DEPPO(.dep,.ttx,.trn)
+
+	// Reload depseg, may have been updated by ^DEPPO
+	type RecordDEPSEG depseg=Db.getRecord("DEPSEG","CID,SEG")
+
+	set TSO="SEG#"_SEG
+
+	// Decrease Accrual on Interest.
+	if depseg.aiacr>0 do { quit:ER
+
+		// Decrease accrual on interest
+		set TCMT=$$^MSG(3849)
+
+		do CRTTX(.dep,prodctl.draai,depseg.aiacr,"",TSO,TCMT)
+		}
+
+	// Decrease Available Interest Balance.
+	if depseg.aibal>0 do { quit:ER
+
+		// Decrease available interest
+		set TCMT=$$^MSG(3850)
+		
+		do CRTTX(.dep,prodctl.drpai,depseg.aibal,"",TSO,TCMT)
+		}
+
+	// Decrease Positive Accrual.
+	if depseg.posacr>0 do { quit:ER
+
+		// Decrease positive accrual
+		set TCMT=$$^MSG(3851)
+
+		do CRTTX(.dep,prodctl.dradin,depseg.posacr,"",TSO,TCMT)
+		}
+
+	// Deposit interest to G/L account.
+	set OFFAMT=depseg.aibal+depseg.posacr+depseg.aiacr
+	if OFFAMT>0 do {
+
+		// Get interest expense G/L , or if undefined, get suspense G/L.
+		new GL,GLSC
+
+		set GLSC=dep.glsc
+
+		type RecordUTBLGLSC utblglsc=%CACHE("UTBLGLSC").getRecord("UTBLGLSC","GLSC")
+
+		set GL=utblglsc.dgli
+		if GL="" set GL=CUVAR.GLTS
+
+		do CRTTX(.dep,"MCR",OFFAMT,GL,"","")
+		}
+
+	quit
+
+
+CRTTX(RecordDEP dep,ETC,TAMT,GL,TSO,TCMT)
+	/*
+	This subroutine will accept 5 parameters;
+	
+		ETC   -   External Transaction Code.
+		TAMT  -   Transaction Amount.
+		CID   -   Customer Id.
+		TSO   -   Transaction Source.
+		TCMT  -   Teller Comment.
+
+	With these parameters it will create a TTX record for posting.
+	*/
+
+	type Public Cache %CACHE()
+
+	set SECSEQ=SECSEQ+.01
+
+	type RecordTRN trn=%CACHE("TRN").getRecord("TRN","ETC")
+	type RecordTTX ttx=Class.new("RecordTTX")
+
+	if GL="" set ttx.cid=dep.cid
+	else  set ttx.cid=GL
+	// need 7th bit 1 to do reversals
+	set ttx.itc=$$ITC^TTXEXT(trn.itc,7,1)
+	set ttx.etc=ETC
+	set ttx.tamt=TAMT
+	set ttx.efd=%EffectiveDate
+	set ttx.tlo=%UserStation
+	set ttx.tso=TSO
+	set ttx.tcmt=TCMT
+	set ttx.cdt=%CurrentDate
+	set ttx.tim=%CurrentTime
+
+	do TRNSINGL^TRNDRV(.ttx,.dep,ttx.efd,dep.boo,5)
+	if ER quit
+
+	type RecordHISTDST histdst=Class.new("RecordHISTDST")
+
+	set histdst.cid=OCID
+	set histdst.tseq=HISTSEQ
+	set histdst.dstseq=SECSEQ
+	set histdst.acct=ttx.cid
+	set histdst.itc=ttx.itc
+	set histdst.etc=ttx.etc
+	set histdst.tamt=ttx.tamt
+	set histdst.tlo=ttx.tlo
+	set histdst.tso=ttx.tso
+	set histdst.tcmt=ttx.tcmt
+	set histdst.cdt=ttx.cdt
+	set histdst.tim=ttx.tim	
+
+	do histdst.bypassSave()
+
+	quit
+
+
+Public EC(RecordDEP dep,RecordTTX ttx,RecordTRN trn)
+
+	new AIACR,AIBAL,POSACR,PRIN,SEG,TAMT
+
+	set TAMT=ttx.tamt
+	set SEG=$$FIELD^UTSO(ttx.tso,"SEGP")
+	set SEG=$P(SEG,":",1)
+	set POSACR=$P(TAMT,"#",13)
+	set AIBAL=$P(TAMT,"#",8)
+	set AIACR=$P(TAMT,"#",14)
+	set PRIN=$P(TAMT,"#",1)
+
+	do ^DEPEC0(.dep,.ttx,.trn)
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "59886^43508^Sanchez SCM Administrator^4358"	// Signature - LTD^TIME^USER^SIZE

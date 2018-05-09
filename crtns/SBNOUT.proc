@@ -1,0 +1,1395 @@
+SBNOUT		/*
+	 Procedure ID: SBNOUT
+	 DESC: Shared Branch Network ISO 8583 Message Processor
+	 ORIG: Carol Scott - 03/21/01
+        ---- Revision History ------------------------------------------------
+	
+	10/27/05 - KELLYP - CR 16880
+		  Modified REPLY section to use PRISEQ instead of SEQ (which
+		  is null at that point) when updating the TSO field of the
+		  primary transaction that caused the SBN message to be 
+		  generated.
+
+	09/30/05 - SAHOOU - CR 16880
+		   . Changed TSODATA section to use SEQ instead of seq.
+		   . Modified FINTRN section by removing this line 
+		     "Set INTRFACE=”ISOSBN" from the do block and put it in the
+		     top of the section.
+		   
+	09/13/05 - KELLYP - CR 16880
+		   Converted entire procedure to current PSL standards.
+
+	08/16/05 - KELLYP - CR 16880
+		   . Modified FINTRN section by removing tseq parameter from 
+		   the parameter list.  This variable was only used when
+		   filing records to SBREJTRN, so we only generate the value
+		   when this is necessary.
+		   . Changed loop in FINTRN section to use seq instead of SEQ 
+		   (conversion error).
+		   . Changed TSODATA section to use seq instead of SEQ and to
+		   use Runtime methods for setting errors.
+		   . Added ttx() to parameter list for BLDBTM section and
+		   modified calls to pass it.
+
+	12/29/03 - CARROLLJ - CR7658
+		   Removed variable JOB from new list in NXTSEQ section.
+
+	06/25/03 - CARROLLJ - 51349
+		   Removed the use of the TR array.
+ 
+         ----------------------------------------------------------------------
+	*/
+	
+	#OPTIMIZE FUNCTIONS OFF	// Temporary patch for .justify issues
+	
+	quit
+
+public CUSVER(String ISOCU,String ISOACN,Number PRCDX,String QAL1,String QAL2,String IMID,String RETURN)
+
+	/*
+
+	INPUTS:
+		ISOCU	Credit Union Code
+		ISOACN	Customer number=suffix
+		PRCDX   Processing Code
+		QAL1	Qualifier 1 for outgoing request
+		QAL2	Qualifier 2 for outgoing request
+		IMID	Identifies type of message. (all 0100 at this level) 
+	OUTPUT:
+		return  Return array containing customer info and account info. 
+	*/	
+
+	type public Boolean ER
+	type public Number BRCD
+	type public String %SVCNTXT()
+
+	type Boolean FINFLG,JNTALL,REVFLG,SBFPFLG,UNIQID
+	type Date FSCCDT
+	type Number RSPCD,TRAMT
+	type String ACN,CONTINUE,CRCDNO,INTRFACE,JNT,OLDREP,OLDREQ,OWNER,REFNUM
+	type String REPLY,REQUEST,SBNID
+	
+	type RecordTTX ttx()	// Dummy TTX array for BLDBTM call
+
+	set ACN=ISOACN
+	set (FINFLG,JNTALL,REVFLG,SBFPFLG,TRAMT,UNIQID)=0
+	set (JNT,OLDREP,OLDREQ,OWNER)=""
+	
+	set INTRFACE="ISOSBN"
+
+	// New %SVCNTXT functionality for timeouts
+	if '%SVCNTXT.get().isNull() do {
+		type Number TMPBRCD
+		set TMPBRCD=BRCD	// INIT^ISO8583 resets BRCD
+		do INIT^ISO8583(INTRFACE)
+		set BRCD=TMPBRCD
+		set OLDREQ=%SVCNTXT.piece("|",1)
+		set OLDREP=%SVCNTXT.piece("|",2)
+		set SBNID=%SVCNTXT(0).piece("|",1)
+		set REFNUM=%SVCNTXT(0).piece("|",2)
+		set CRCDNO=%SVCNTXT(0).piece("|",3)
+		if OLDREP.extract(1,4)'="0110" do {
+			set JNT=%SVCNTXT(0).piece("|",4)
+			set JNTALL=%SVCNTXT(0).piece("|",5)
+			set CONTINUE=%SVCNTXT(0).piece("|",6)
+			set OWNER=%SVCNTXT(0).piece("|",7)
+			}
+		set RETURN(1)=%SVCNTXT("return1").get()
+		set RETURN(2)=%SVCNTXT("return2").get()
+		}
+	if ('OLDREQ.isNull()),(OLDREP.isNull()) set REQUEST=OLDREQ do EXCH(.ttx()) quit
+	else  if ('OLDREQ.isNull()),('OLDREP.isNull()) set REQUEST=OLDREQ,REPLY=OLDREP do REP(.ttx()) quit
+
+	// Required field cannot be null
+	if (ISOCU.isNull()) do Runtime.setErrMSG("UTBLSBCU",2388) quit:ER
+	if (ISOACN.isNull()) do Runtime.setErrMSG("UTBLSBCU",2388) quit:ER
+	
+	do BLDBTM(.ttx())
+	
+	quit
+
+BLDBTM(RecordTTX ttx())	
+	/*
+	 This section will build the ISO8583 message, send it and format 
+	 required return information depending on the type of request.
+	 
+	 Many of the public variables declared below are public because
+	 BLDBTM is called by both the CUSVER and FINTRN sections which
+	 need access to them.
+	*/
+
+	type public Boolean ER
+	type public Number BRCD
+	type public String %SVCNTXT(),CRCDNO,IMID,INTRFACE,ISOCU,REFNUM,REQUEST,RETURN
+
+	type Boolean ASCII
+	type Number I,TMPBRCD
+	type String BIT(),BITSTRNG,ISOBIN,TBL()
+
+	set RETURN=""
+	set BITSTRNG=""
+
+	// Check to make sure credit union exists
+	set ISOBIN=ISOCU
+
+	// Invalid credit union
+	if ISOBIN.isNull() do Runtime.setErrMSG("UTBLSBCU",4999) quit:ER
+	if 'Db.isDefined("UTBLSBCU","ISOBIN") do Runtime.setErrMSG("UTBLSBCU",4999) quit:ER
+	
+	set TMPBRCD=BRCD		// INIT^ISO8583 resets BRCD
+	do INIT^ISO8583(INTRFACE)
+	set BRCD=TMPBRCD
+
+	// Create unique message number
+	set REFNUM=$$LJ^%ZTEXT(CUVAR.ISO,4,"",1)
+	set REFNUM=REFNUM_$$DAT^%ZM(%CurrentDate,"MMDD")_$$TIM^%ZM(%CurrentTime,"60SS")
+	set %SVCNTXT(0).piece("|",2)=REFNUM
+
+	// Get the numeric equivalent of currency code
+	type RecordCRCD crcd=Db.getRecord("CRCD","CO=:%CompanyName,CRCD=:%SystemCurrency")
+	set %SVCNTXT(0).piece("|",3)=crcd.crcdno
+	set CRCDNO=crcd.crcdno
+
+	// Create bit array
+	do FORMBIT(.BIT,.ttx())
+
+	quit:ER		// Quit on error in FORMBIT section
+
+	set ASCII=1
+	
+	// Kill BITS 105 - 108 if they have no data
+	for I=105:1:108 if BIT(I).get().isNull() kill BIT(I)
+
+	// Build outgoing bitmap
+	set REQUEST=$$BLDOM^ISO8583(IMID,.BIT(),.TBL)
+
+	// Save request (as repeat message) in case of timeout
+        set %SVCNTXT.piece("|",1)=REQUEST.extract(1,3)_"1"_REQUEST.extract(5,REQUEST.length())
+        
+	do EXCH(.ttx())
+	
+	quit
+
+EXCH(RecordTTX ttx())	// Exchange messages w/ daemon or FSCC
+
+	type public Boolean ER,FINFLG,SBFPFLG
+	type public Number RSPCD
+	type public String %SVCNTXT(),REPLY,REQUEST,RM
+
+	// If message is a force post send it to the DAEMON process and quit
+	if SBFPFLG do DAEMON(.REQUEST) quit
+
+	// Send the message request and await reply
+	set REPLY=$$EXCH^SBNUTL(.REQUEST)
+	set %SVCNTXT.piece("|",2)=REPLY	// Save reply in case of timeout
+
+	// Consider as timeout if no response
+	if REPLY.isNull() set REPLY=0
+	
+	// ER prevents SBNR restriction from being displayed for financial transactions
+	if FINFLG,ER set ER=0
+
+	// Set rspcd=2 (produces restriction for fin's)
+	// when trouble with exchanging the message.
+	if REPLY=-1 set RSPCD=91 do RSPERR(91) quit
+	if REPLY=0 set RSPCD=2 do RSPERR(91) quit
+	if ER,(RM["CS_") set ER=0,RSPCD=91 quit
+	do REP(.ttx())
+	quit
+
+REP(RecordTTX ttx())
+	
+	type public Boolean CONTINUE,FINFLG,JNTALL
+	type public String JNT,REPLY,REQUEST,RETURN
+	
+	// Remove header from request msg prior to storing in NSMLOG
+	do REMHDR^SBNUTL(.REQUEST)
+
+	// Log message to NSMLOG	
+	do LOGNSM
+	if '(FINFLG),(REPLY.isNull()) quit
+
+	set RETURN=$$REPLY(.REPLY,.RETURN,.ttx())
+
+	// Might need to add single joint owner name to all accts
+	if ('CONTINUE.exists())!(CONTINUE="      ") do JNTCHK(.RETURN,JNTALL,JNT)
+
+	// Kill return(1) & return(2) if not defined
+	if RETURN(1).get().isNull() kill RETURN(1)
+	if RETURN(2).get().isNull() kill RETURN(2)
+
+	quit
+
+
+REPLY(String REPLY,String RETURN,RecordTTX ttx())
+
+	/*
+
+	INPUTS:
+		reply	Reply message returned from host
+	OUTPUT:
+		return	Formatted return string
+
+	*/
+
+	type public Boolean ER,FINFLG
+	type public Date FSCCDT
+	type public Number PRCDX,PRISEQ
+	type public String CONTINUE,QAL1,RM,RSPCD,%SVCNTXT(),TBL()
+
+	type Number I
+	type String BIT(),I,IMID,PH,PHNUM,RESPCODE,SS,SSNUM,X
+
+	set IMID=$$BITMAP^ISO8583(REPLY,.TBL(),.BIT())
+
+	// Handle reception of 0620 message as a format error
+	if (IMID="0620") do RSPERR(30) quit ""
+
+	do VALIDATE(IMID,.BIT)
+
+	if FINFLG set RSPCD=BIT(39).get()
+	set RESPCODE=BIT(39).get()
+	if (RESPCODE'="00"),(RESPCODE'="R2") do RSPERR(RESPCODE) quit ""
+		
+	// If nothing is returned by host and it isn't a financial trx, quit
+	if (('BIT(105).exists())!(BIT(105).isNull())),(FINFLG.isNull()) quit ""
+
+	// Set value of the system date per FSCC to be checked against CUVAR.SBPROCDT
+	set FSCCDT=BIT(15)
+	if FINFLG do {
+		set FSCCDT=$$CUVSTLDT^SBNUTL(FSCCDT)
+		set ttx(PRISEQ).tso=$$FIELDIN^UTSO(ttx(PRISEQ).tso,"SBPROCDT",FSCCDT)
+		set REPLY=BIT(39)
+		}
+
+	// verification
+	if QAL1="VER" do VERIFY(.RETURN)
+
+	//statement
+	if QAL1="STM" do STATEMENT(.RETURN)
+
+	if CONTINUE.exists(),(CONTINUE'="      ") do {
+	
+		type String REPLY,REQUEST
+	
+		do FORMBIT(.BIT,.ttx())
+		set BIT(3)="390000"			
+		set BIT(127)="         "_CONTINUE	
+		set IMID="0200"				
+		set BIT(120)=BIT(120).extract(4,6)_"   "	
+		for I=105:1:108 kill BIT(I)
+
+		// Create another message to retrieve the additional info.		
+		set REQUEST=$$BLDOM^ISO8583(IMID,.BIT,.TBL)
+
+		// Save new request and set last reply to null
+		set %SVCNTXT.piece("|",1)=REQUEST.extract(1,3)_"1"_REQUEST.extract(5,REQUEST.length())
+		set %SVCNTXT.piece("|",2)=""
+
+		// Save return values after composing new request
+		set %SVCNTXT("return1")=RETURN(1).get()
+		set %SVCNTXT("return2")=RETURN(2).get()
+
+		set REPLY=$$EXCH^SBNUTL(.REQUEST)
+
+		// Save new reply
+		set %SVCNTXT.piece("|",2)=REPLY
+
+		// Save continuation control
+		set %SVCNTXT(0).piece("|",6)=CONTINUE
+
+		// Remove header from request msg prior to storing in NSMLOG
+		do REMHDR^SBNUTL(.REQUEST)
+ 
+		// Log message to NSMLOG
+		do LOGNSM
+
+		// Treat null reply as timeout
+		if REPLY.isNull() set REPLY=0
+
+		// Modified to call RSPERR to get RM
+		if REPLY=-1 set RSPCD=2 do RSPERR(91) quit
+		if REPLY=0 set RSPCD=91 do RSPERR(91) quit
+		if (ER)!(RM["CS_TIMEOUT") quit
+	
+		set RETURN=$$REPLY(REPLY,.RETURN)
+		}
+
+	// Following code is performed for all successful fin. transactions
+	if (FINFLG),(REPLY="00") do {
+		type String FAVLBAL,FLBAL,LNIF,LNNP,LNPA,TAVLBAL,TLBAL
+
+		set (FAVLBAL,FLBAL,TAVLBAL,TLBAL)="N/A"
+		set (LNIF,LNPA,LNNP)=""
+
+		if QAL1'="TFR" do {
+			/*
+		 	 BIT 54 should be in the following format:
+		         NNTTCCCX999999999999
+
+			 Where NN is the account type, TT is the amount type 
+			 (01 for available balance, 02 for ledger balance), CCC
+			 is the currency code, X is the balance indicator (C
+			 positive, D for negative), and 999999999999 is the
+			 balance (zero padded).
+			*/
+
+			type String BAL,TMP54
+
+			if BIT(54).get().isNull() quit
+
+			set TMP54=BIT(54)
+
+			// Break balance string in BIT 54 into individual balanaces
+			for I=1:1 quit:(TMP54.isNull())  do {
+				set BAL(I)=TMP54.extract(1,20)
+				set TMP54=TMP54.extract(21,TMP54.length())
+				}
+
+			set I=0
+			// Determine balance type and set up balances accordingly
+			for  set I=BAL(I).order() quit:I.isNull()  do {
+				type Boolean NEG
+				type Number BALTYP,TMPBAL
+
+				set BALTYP=+BAL(I).extract(3,4)
+				set NEG=$S(BAL(I).extract(8)="D":1,1:0)
+				set TMPBAL=(BAL(I).extract(9,20)*.01)
+
+				if NEG set TMPBAL="-"_TMPBAL
+				// 1=Ledger, 2=Available
+				if BALTYP=1 set FLBAL=TMPBAL
+				else  if BALTYP=2 set FAVLBAL=TMPBAL
+				} 
+
+			// Extract Loan Payment Information
+			if PRCDX.extract(1,2)="55" do {
+				type String LNEXT
+				set LNEXT=""
+				for I=105:1:108 if BIT(I).exists() set LNEXT=LNEXT_BIT(I)
+				set LNEXT=LNEXT.extract(6,LNEXT.length())
+				do LNPMT(LNEXT,.LNIF,.LNNP,.LNPA)
+				}
+			}
+
+		if QAL1="TFR" do {
+			type String EXTSTR
+
+			// Get balance info from extended fields for transfers
+			set EXTSTR=""
+			for I=105:1:108 if BIT(I).exists() set EXTSTR=EXTSTR_BIT(I)
+
+			set EXTSTR=EXTSTR.extract(6,EXTSTR.length())  // Remove header
+
+			for I=1:1:2 do {   // Once for From and once for To
+				type Number TMPBAL1,TMPBAL2
+				type String BALTYP1,BALTYP2
+
+				set BALTYP1=EXTSTR.piece("\",1)
+				set TMPBAL1=(EXTSTR.piece("\",2))*.01
+				set BALTYP2=EXTSTR.piece("\",3)
+				set TMPBAL2=(EXTSTR.piece("\",4))*.01
+
+				set EXTSTR=EXTSTR.extract(25,EXTSTR.length())
+
+				if I=1 do {	// From Account Balances
+					set FAVLBAL=$S(BALTYP1=1:TMPBAL1,BALTYP2=1:TMPBAL2,1:0)
+					set FLBAL=$S(BALTYP1=2:TMPBAL1,BALTYP2=2:TMPBAL2,1:0)
+					}
+				else  do {	// To Account Balances
+					set TAVLBAL=$S(BALTYP1=1:TMPBAL1,BALTYP2=1:TMPBAL2,1:0)
+					set TLBAL=$S(BALTYP1=2:TMPBAL1,BALTYP2=2:TMPBAL2,1:0)
+					}
+
+				// Extract Loan Payment Information
+				if I=2 set EXTSTR=EXTSTR.extract(2,EXTSTR.length())
+				if 'EXTSTR.isNull() do LNPMT(EXTSTR,.LNIF,.LNNP,.LNPA)
+				}
+			}
+
+		// Put to and from balances into TSO
+		do INTOTSO(FAVLBAL,FLBAL,TAVLBAL,TLBAL,LNIF,LNNP,LNPA,.ttx())
+		}
+	quit RETURN
+
+
+VERIFY(String RETURN())  // Create return string for verification
+
+	type public Boolean JNTALL
+	type public Number ACN
+	type public String BITSTRNG,CONTINUE,IMID,ISOCU,JNT,OWNER,QAL2,%SVCNTXT()
+
+	type Number CNT,I
+	type String EXTTAG,HOLDVAL,NUMACC,TYPEACCT
+
+	if 'CONTINUE.exists()!(CONTINUE="      ") do {
+		
+		type String CITYST,JOINT,PH,PHNUM,SS,SSNUM,STREET
+	
+		set RETURN(1)=ACN_$C(9)
+	 	
+		// Get credit union info and compose the return string
+		type RecordUTBLSBCU isorec=Db.getRecord("UTBLSBCU","ISOBIN=:ISOCU")
+		set RETURN(1)=RETURN(1)_isorec.nam_$C(9)
+		set RETURN(1)=RETURN(1)_isorec.addr_$C(9)
+		set RETURN(1)=RETURN(1)_isorec.city_", "_isorec.state_" "_isorec.cuzip_$C(9)
+		set RETURN(1)=RETURN(1)_isorec.phone_$C(9)
+
+		// Add the member's info to end of credit union info
+		for I=2:1:9 do {
+			if BITSTRNG.piece("\",I).isNull() set BITSTRNG.piece("\",I)=" "
+
+			// OWNER is primary member returned				
+			if (I=2) do {  quit
+				set RETURN(1)=RETURN(1)_BITSTRNG.piece("\",I)_$C(9)
+				set OWNER=BITSTRNG.piece("\",I)	
+				set %SVCNTXT(0).piece("|",7)=OWNER
+				}
+			// JNT is single joint owner
+			if (I=3) do {  quit
+				set JOINT=BITSTRNG.piece("\",I)_$C(13,10)
+				if BITSTRNG.piece("\",I)'=" " do {
+					set JNT=JOINT.piece($C(13,10),1),%SVCNTXT(0).piece("|",4)=JNT
+					set JNTALL=1,%SVCNTXT(0).piece("|",5)=JNTALL
+					}
+				}
+			if (I=4) set STREET=BITSTRNG.piece("\",I)_$C(9) quit
+			if (I=5) set CITYST=BITSTRNG.piece("\",I)_", "_BITSTRNG.piece("\",(I+1))_" "_BITSTRNG.piece("\",(I+2))_$C(9),I=I+2 quit
+			if (I=8) do {
+				set SSNUM=BITSTRNG.piece("\",I)
+				if SSNUM=" " set SSNUM="000000000"
+				set SS=SSNUM.extract(1,3)_"-"
+				set SS=SS_SSNUM.extract(4,5)_"-"
+				set SS=SS_SSNUM.extract(6,9)_$C(9) 
+				}
+			if (I=9) do {
+				set PHNUM=BITSTRNG.piece("\",I)
+				if 'PHNUM set PHNUM="0000000000"
+				set PH=PHNUM.extract(1,3)_"-"
+				set PH=PH_PHNUM.extract(4,6)_"-"
+				set PH=PH_PHNUM.extract(7,10)_$C(9) 
+				}
+			}
+		set RETURN(1)=RETURN(1)_SS_STREET_CITYST_PH_JOINT
+		set RETURN(2)=""
+
+		}  // CONTINUE 
+
+	/*
+	 0100 is used for initial member verification, but
+	 follow-ups should be 0200 account inquiries.
+	*/
+	if IMID="0110" set CNT=$S(QAL2="SLI":12,1:10)
+	else  set CNT=$S(QAL2="SLI":5,1:3)
+
+	do ACTCNTRL(CNT)
+	if (NUMACC="00") quit
+	set EXTTAG=QAL2_"TAG"
+	do @EXTTAG
+
+	if 'JNT.isNull() do {
+		type String TMPSTR
+
+		if JNT.length(";")<3 set TMPSTR=JNT
+		else  set TMPSTR=JNT.extract(1,JNT.length()-2)	// Remove "; "
+
+		set RETURN(1).piece($C(9),11)=TMPSTR_$C(13,10)
+		}
+
+	quit
+
+
+SLITAG  // Share/Loan verification
+
+	type public Number CNT
+	type public String HOLDVAL,NUMACC,TYPEACCT
+
+	type Number H
+	
+	set H=CNT
+	
+	if TYPEACCT="S" do SAITAG
+
+	/* 
+	  HOLDVAL will be set if there were share accounts passed back by host.
+	  Otherwise, the value of NUMACC and TYPEACCT will have been set in the
+	  ACTCNTRL section  
+	*/
+
+	if 'HOLDVAL.get().isNull() do {
+		set HOLDVAL=HOLDVAL.piece("&",2)
+		set NUMACC=HOLDVAL.extract(1,2)
+
+		set TYPEACCT=HOLDVAL.extract(3,3)
+		set HOLDVAL=""
+		}
+
+	if NUMACC="00" quit
+	if TYPEACCT="L" do LAITAG
+	quit
+
+
+SAITAG  // Set up account return information for a share account
+
+	type public Number H,NUMACC
+	type public String P(),RETURN()
+	
+	type Number I,X
+	
+	for I=1:1:NUMACC do {
+		// Do the first eight entries that are common to all inquiry
+		do FIRSTSET(.H)
+
+		// This is a joint owner name, not an account
+		if 'P(2) quit
+
+		// Put account information into return string
+		for X=1:1:12 set RETURN(2)=RETURN(2)_P(X)_$C(9)
+		set RETURN(2)=RETURN(2)_P(13)_$C(9)_P(14)_$C(13,10)
+		}	
+	quit		
+	
+
+
+IAITAG   // Set up account return information for an investment account
+
+	type public Number CNT,NUMACC
+	type public String BITSTRNG,P(),RETURN()
+
+	type Number H,I,J,NUM,X
+
+	set H=CNT
+
+	// Reads through the return string and format account info.
+	for I=1:1:NUMACC do {
+
+		// Do the first eight entries that are common to all inquiry
+		do FIRSTSET(.H)
+		set X=8
+		for J=1:1:5 do {
+			set H=H+1,X=X+1
+
+			// This is a joint owner name, not an account
+			if 'P(2) quit
+
+			// Remove leading zeros from number fields(penalty,div,rate)
+			if (J>0)&(J<3) set P(X)=$$FMTNUM(BITSTRNG.piece("\",(H)))
+
+			// Format per diem
+			if (J=3) do {
+				set NUM=BITSTRNG.piece("\",(H))/1000
+				set P(X)=$$NUM^%ZM(NUM,2)
+				}
+
+			// Format Maturity date
+			if (J>3) set P(X)=$$JD(BITSTRNG.piece("\",(H)))			
+			} // End j loop
+
+		// This is a joint owner name, not an account
+		if 'P(2) quit
+
+		// Put account information into return string
+		for X=1:1:12 set RETURN(2)=RETURN(2)_P(X)_$C(9)
+		set RETURN(2)=RETURN(2)_P(13)_$C(9)_P(14)_$C(13,10)
+		}	// End NUMACC loop
+
+	quit
+
+LAITAG  // Set up account return information for a loan
+
+	type public Number H,NUMACC
+	type public String BITSTRNG,P(),RETURN()
+
+	type Number I,J,X
+
+	for I=1:1:NUMACC do {
+		// Do the first eight entries that are common to all inquiry
+		do FIRSTSET(.H)
+		for J=9:1:11 do {
+			set H=H+1
+
+			// This is a joint owner name, not an account
+			if 'P(2) quit
+
+			if (J'=10) set P(J)=$$FMTNUM(BITSTRNG.piece("\",(H)))
+			else  set P(J)=$$NUM^%ZM((BITSTRNG.piece("\",(H))/10000),5)
+			} // End j loop
+
+		// This is a joint owner name, not an account
+		if 'P(2) quit
+
+		// Put account information into return string
+		for X=1:1:12 set RETURN(2)=RETURN(2)_P(X)_$C(9)
+		set RETURN(2)=RETURN(2)_P(13)_$C(9)_P(14)_$C(13,10)
+		}	
+	quit		
+	
+
+FIRSTSET(String H)	
+	/* 
+	 Set up the first eight RETURN(2) items 
+
+		Account Number
+		SLC (Service Line Code)
+		Account Type 
+		Account Description
+		null	(loan/payment next date)
+		null	(loan/payment amount)
+		Ledger Balance
+		Available Balance
+	*/
+
+	type public Boolean JNTALL
+	type public String P()
+	type public String BITSTRNG,HOLDVAL,JNT,OWNER,RETURN,%SVCNTXT(),TYPEACCT
+
+	type Boolean JNTCID
+	type Number X
+	type String SLC
+
+	// Initialize a return string
+	for X=1:1:14 set P(X)=" "
+
+	// Assume account is not jointly owned
+	set JNTCID=0
+
+	for X=1:1:8 do {
+
+		set H=H+1
+
+		if X=3 quit
+
+		// Set up piece 5 and 6 for Loan verification (due dt, pmt amt)
+		if TYPEACCT="L" do {
+			if (X=5) set P(X)=$$JD(BITSTRNG.piece("\",H))
+			if (X=6) set P(X)=$$FMTNUM(BITSTRNG.piece("\",H))
+			}
+ 
+                if ((X=5)!(X=6)),TYPEACCT'="L" set H=H-1 quit
+                if ((X=5)!(X=6)),TYPEACCT="L" quit
+
+		// Determine the service line code for the 3rd piece
+		if X=2 do { quit
+			set (SLC,P(X))=BITSTRNG.piece("\",H)
+			set X=X+1
+			if 'SLC set P(X)=BITSTRNG.piece("\",H) quit
+			type RecordSTBLSBSLC ssbslc=Db.getRecord("STBLSBSLC","SLC=:SLC")
+			set P(X)=ssbslc.type
+			}
+
+		if (X=8),(BITSTRNG.piece("\",H)["&") do {
+			set HOLDVAL=BITSTRNG.piece("\",H)
+			set BITSTRNG.piece("\",H)=HOLDVAL.piece("&",1)
+			}
+
+		if (X>6)&(X<9) set P(X)=$$FMTNUM(BITSTRNG.piece("\",H))
+		else  set P(X)=BITSTRNG.piece("\",H)
+		}
+
+	// Joint account, flag it and remove the =J delimiter (occurs at end)
+	if P(1)["=J" set JNTCID=1,P(1)=P(1).piece("=J",1),JNTALL=0,%SVCNTXT(0).piece("|",5)=JNTALL
+
+	// Joint owner name (not an account)
+	if 'P(2) do JON(.RETURN,.P) quit
+
+	// Owner's name concatenated with Joint owner name (or null)
+	set P(14)=OWNER_$S(JNTCID:"; "_JNT,1:"")
+
+	quit
+
+
+JON(String RETURN, String P)	// Handle Multiple Joint Owner Names
+	/*
+	 This section handles joint mode 3 where joint owner names are returned
+	 as accounts in a member verification or account inquiry message. Since
+	 the JON's are returned at the end of the list of accounts (after
+	 RETURN(2) has been built), this section goes back through RETURN(2)
+	 and adds the JON to the member name list for the account specified.
+	 This section also adds the JON to the list of all joint owner names
+	 (JNT) which is stored for return to PFW at the end of RETURN(1).
+	*/
+
+	type public String JNT,%SVCNTXT()
+
+	type Boolean EXIT
+	type Number I,JCID
+	type String JON,TMPJON,TMPSTR
+
+	set JON=P(1)
+	set JCID=P(4)
+	set I=1,EXIT=0
+
+	// Find account number this joint owner pertains to in return string
+	for  set TMPSTR=RETURN(2).piece($C(13,10),I) quit:(TMPSTR.isNull())!(EXIT)  do {
+		if TMPSTR.piece($C(9),1)[JCID do {
+			set EXIT=1
+			set TMPJON=TMPSTR.piece($C(9),14)
+			set TMPJON=TMPJON_"; "_JON	// Add JON to list of JON's
+			set TMPSTR.piece($C(9),14)=TMPJON
+			set RETURN(2).piece($C(13,10),I)=TMPSTR
+			}
+		set I=I+1
+		}
+
+	// Add joint owner name to list of all joint owners for all accounts
+	if JNT'[JON set JNT=JNT_JON_"; ",%SVCNTXT(0).piece("|",4)=JNT
+
+	quit
+
+
+ACTCNTRL(Number CNT) 
+	/*
+	 Determine the number of accounts returned, the type, and if there
+	 is a continuation character.
+	*/	
+
+	type public Number NUMACC
+	type public String BITSTRNG,CONTINUE,TYPEACCT
+	
+	type String ACCTTYP
+
+	set ACCTTYP=BITSTRNG.piece("\",CNT)
+
+	// Number of accounts returned
+	set NUMACC=ACCTTYP.extract(1,2)
+	
+	// Type of account (ie. investment)
+	set TYPEACCT=ACCTTYP.extract(3,3)
+
+	// Continuation control character
+	set CONTINUE=ACCTTYP.extract(4,9)
+	
+	// No share accounts sent back, check for Loan accounts
+	if (ACCTTYP["&"),NUMACC="00" do {
+		type String TEMP
+		set TEMP=ACCTTYP.piece("&",2)
+		set NUMACC=TEMP.extract(1,2)
+		set TYPEACCT=TEMP.extract(3,3)
+		}
+
+	quit
+
+
+STATEMENT(String RETURN)	// Format return string for a statement
+
+	type public String BIT(),BITSTRNG
+
+	type Number I
+
+	set RETURN=""
+
+	// Strip off *S1*/99X/ header
+	set BITSTRNG=BITSTRNG.extract(10,BITSTRNG.length())
+
+	for I=1:1 quit:(BITSTRNG.isNull())  do {
+		type String AMT,BAL,DT,ETC,FEES,TMPD,TMPL,TRMID
+		
+		set TMPD=BITSTRNG.piece("\",1)
+		set DT=TMPD.extract(3,4)_"/"_TMPD.extract(5,6)_"/"_TMPD.extract(1,2)
+		set RETURN=RETURN_DT_$C(9)
+		set BITSTRNG=BITSTRNG.extract(8,BITSTRNG.length())
+
+		set ETC=BITSTRNG.piece("\",1)
+		set TMPL=ETC.length()+2
+		set RETURN=RETURN_ETC_$C(9)
+		set BITSTRNG=BITSTRNG.extract(TMPL,BITSTRNG.length())
+
+		set AMT=$$FMTNUM(BITSTRNG.piece("\",1))
+		set RETURN=RETURN_AMT_$C(9)
+		set BITSTRNG=BITSTRNG.extract(11,BITSTRNG.length())
+
+		set FEES=$$FMTNUM(BITSTRNG.piece("\",1))
+		set BITSTRNG=BITSTRNG.extract(21,BITSTRNG.length())
+
+		set BAL=$$FMTNUM(BITSTRNG.piece("\",1))
+
+		set RETURN=RETURN_BAL_$C(9)_FEES_$C(9)_BIT(102)_$C(13,10)
+		set BITSTRNG=BITSTRNG.extract(11,BITSTRNG.length())
+
+		set TRMID=BITSTRNG.piece("\",1)
+		set TMPL=TRMID.length()+9
+		set BITSTRNG=BITSTRNG.extract(TMPL,BITSTRNG.length())
+		}
+
+	quit
+
+
+VALIDATE(String MID,String BIT())
+	
+	type public Boolean ER,FINFLG,VALID
+	type public String BITSTRNG,RESPONSE,RETURN
+	
+	type Literal String VALMID="-0110-0210-0230-0430-0610-0810"
+	
+	type Number I
+	
+	// Check if communication response
+	if '(MID.extract(3)#2) set RESPONSE=0 quit
+
+	// Check if the message id is valid
+	// Invalid transaction ~p1
+	if VALMID'[MID set VALID=0 do Runtime.setErrMSG("SBNCTRL",1502,MID) quit:ER
+	
+	set VALID=1
+
+	// CHECK RESPONSE CODE AND DETERMINE IF NEGATIVE RESPONSE AND IF VALID
+	if (FINFLG.isNull()),(BIT(105).exists()) quit
+
+	//set up a return string
+	set BITSTRNG="",RETURN=""
+	for I=105:1:108 if BIT(I).exists() set BITSTRNG=BITSTRNG_BIT(I)
+
+	quit
+
+FORMBIT(String BIT(),RecordTTX ttx())  // Create the bit array in standard format
+
+	type public Boolean ER,FINFLG,REVFLG
+	type public Number BRCD,PRCDX,PRISEQ
+	type public String CRCDNO,ISOACN,ISOCU,QAL1,QAL2,REFNUM,SBNID,SPR,%SVCNTXT()
+	type public String TOACCT,TRAMT,UNIQID,XSPR,XTLO
+
+	type Number SBIID
+	type String BRNAME,BRSTATE,READD,RECTR,RECTY,REST,SBPT,TERMID
+
+	// Branch code not defined
+	if BRCD.get().isNull() do Runtime.setErrMSG("UTBLBRCD","6654") quit:ER
+
+	// Retrieve SBN Acquirer Identifiers
+	type RecordUTBLBRCD ubrcd=Db.getRecord("UTBLBRCD","BRCD=:BRCD")
+	
+	set SBIID=ubrcd.sbiid
+	// Missing required data item ~p1
+	if SBIID.isNull() do Runtime.setErrMSG("UTBLBRCD","1767","UTBLBRCD.SBIID") quit:ER
+
+	set SBPT=ubrcd.sbpt
+	// Missing required data item ~p1
+	if SBPT.isNull() do Runtime.setErrMSG("UTBLBRCD","1767","UTBLBRCD.SBPT") quit:ER
+
+	set BRSTATE=ubrcd.brstate
+	// Missing required data item ~p1
+	if BRSTATE.isNull() do Runtime.setErrMSG("UTBLBRCD","1767","UTBLBRCD.BRSTATE") quit:ER
+
+	set SBNID=ubrcd.sbnid
+	// Missing required data item ~p1
+	if SBNID.isNull() do Runtime.setErrMSG("UTBLBRCD","1767","UTBLBRCD.SBNID") quit:ER	
+
+	set BRNAME=ubrcd.desc
+	if BRNAME.isNull() set BRNAME=CUVAR.conam
+
+	set READD=$$LJ^%ZTEXT(ubrcd.brad1,23," ",1)
+	set RECTY=$$LJ^%ZTEXT(ubrcd.brcity,13," ",1)
+	set REST=$$LJ^%ZTEXT(ubrcd.brstate,2," ",1)
+	set RECTR=$$LJ^%ZTEXT(ubrcd.brcntry,2," ",1)
+
+	set SBIID=SBIID.extract(1,11)
+	set SBPT=$$LJ^%ZTEXT(SBPT,6," ",1)
+
+	set SBNID="A0"_SBPT_BRSTATE_SBNID	// Hardcoded "100" for bitmap
+
+	set BIT(2)=$$LJ^%ZTEXT(ISOCU,19,9)	// Pad ISO with 9's
+	set BIT(3)=PRCDX
+	set BIT(4)=$$RJ^%ZTEXT(TRAMT,12,0)
+	set BIT(7)=$$DAT^%ZM(%CurrentDate,"MMDD")_$$TIM^%ZM(%CurrentTime,"2460SS")
+	if REVFLG set BIT(11)=$$RJ^%ZTEXT(XTLO,6,0)
+	else  set BIT(11)=$$RJ^%ZTEXT($$GET^NXTSEQ("SBNISO",6),6,0)
+	set UNIQID=BIT(11)
+	set %SVCNTXT(0).piece("|",5)=UNIQID
+	set BIT(12)=$$TIM^%ZM(%CurrentTime,"2460SS")
+	set BIT(13)=$$DAT^%ZM(%CurrentDate,"MMDD")
+	set SPR=BIT(13)_BIT(12)
+	set %SVCNTXT(0).piece("|",6)=SPR
+	set BIT(14)=4912
+	set BIT(15)=$$DAT^%ZM(%CurrentDate,"MMDD")
+	set BIT(18)=6011
+	set BIT(22)="012"
+	set BIT(32)=SBIID
+	set BIT(33)=11111111111
+	set BIT(37)=$$RJ^%ZTEXT(REFNUM,12,0)
+	if REVFLG set BIT(39)="00"
+	if '$D(BRCD) set BRCD=""
+	set TERMID=$TR(BRCD_%UserStation,"\","")
+	set TERMID=$TR(TERMID,"-","")
+	set BIT(41)=$$LJ^%ZTEXT(TERMID,8," ",1)
+	set BIT(42)="               "
+	set BIT(43)=READD_RECTY_REST_RECTR
+	set BIT(48)=BRNAME
+	set BIT(49)=$$RJ^%ZTEXT(CRCDNO,3,0)
+	set BIT(57)="   "
+	if QAL1="SPC" set BIT(57)="203"
+	set BIT(58)="0100100012"
+	set BIT(63)=SBNID
+	if '(ISOACN["=") set ISOACN=ISOACN_"="
+	set BIT(102)=ISOACN
+	set BIT(103)=""	
+	set BIT(120)=QAL1_QAL2
+	set BIT(127)=""	
+	set SBNID=%CurrentDate_$E("00000",1,5-%CurrentTime.length())_%CurrentTime_$E("000000",1,6-%ProcessID.length())_%ProcessID_$E("00000",1,5-UNIQID.length())_UNIQID
+	set %SVCNTXT(0).piece("|",1)=SBNID
+
+	// For financial transactions only
+	if FINFLG set ttx(PRISEQ).spr=SPR,ttx(PRISEQ).tlo=UNIQID
+		
+	if REVFLG do {	// For reversals only
+		set BIT(12)=XSPR.extract(5,10),BIT(13)=XSPR.extract(1,4)
+		set BIT(60)="8028"
+		set BIT(90)="0200"_BIT(11)_BIT(13)_BIT(12)_$$RJ^%ZTEXT(BIT(32),11,0)_"00000000000"
+		}
+
+	if (QAL1="TFR") set BIT(103)=TOACCT
+	
+	quit
+
+
+FMTNUM(String NUMSTRNG)
+	/*
+	 Pass in bitstring to be checked for negative and remove leading zeros
+	 if the negative sign exits.  Format incoming string with commas and 
+	 decimal.
+
+         ARGUMENT:
+                NUMSTRNG   - Numeric string to be formatted "00123456" or
+						             "00-123456"
+         OUTPUT:
+                NEWNUM     - Formatted number 1,234.56 or -1,234.56
+	*/
+
+	type String NEWNUM
+
+	if NUMSTRNG["-" set NUMSTRNG=NUMSTRNG.extract($F(NUMSTRNG,"-")-1,NUMSTRNG.length())
+	set NEWNUM=$$NUM^%ZM((NUMSTRNG/100),2,".,P")
+
+	quit NEWNUM
+
+JD(String DTMSK)
+	/*
+	 Return date in MMDDYY fomat
+	 ARGUMENT:
+		dtmsk	- Message date (YYMMDD mask)
+	 OUTPUT:
+		newdate - MMDDYY
+
+	*/
+
+	type Number DAY,MO,YEAR
+	type String NEWDATE
+
+	if DTMSK.isNull() set DTMSK="000000"
+	set DAY=DTMSK.extract(5,6)
+	set MO=DTMSK.extract(3,4)
+	set YEAR=DTMSK.extract(1,2) 
+	set NEWDATE=MO_"/"_DAY_"/"_YEAR
+
+	quit NEWDATE
+
+
+public FINTRN(RecordTTX ttx(),String RSPCD)
+
+	/*  
+	 This section is called by TRN^SBNUTL (from TRNDRV) for 
+	 financial transactions.
+
+	INPUTS:	ttx	TTX array
+
+	OUTPUTS:
+		RSPCD	Response code - 
+			0  Transaction rejected by host
+			1  Transaction accepted by host
+			2  No reply from host/transaction timed out
+
+	TRN^SBNUTL will also check ER upon exit from procedure.  This procedure will 
+	set ER and RM based on edit checks as well as setting RM when a trans-
+	action is rejected by the host.  It will use values from STBLSBRSPCD to
+	set RM
+	*/
+
+	type public Boolean ER
+	type public Cache %CACHE()
+	type public Number BRCD
+	type public String RM,%SVCNTXT()
+
+	type Boolean FINFLG,JNTALL,REVFLG,SBFPFLG
+	type Date FSCCDT
+	type Number I,PRCDX,PRISEQ,SEQ,TMPBRCD,TRAMT,TRNTYP
+	type String BIT(),BITSTRNG,CRCDNO,EC,ETC,EXTFLD,FCID,IMID,INTRFACE,ISOACN,ISOBIN,ISOCU,JNT
+	type String OLDREP,OLDREQ,PRIETC,QAL1,QAL2,REFNUM,REPLY,REQUEST,RETURN,REV,RSPCODE,SBNID,SPR
+	type String TBL(),TMP,TOACCT,TSO,UNIQID,XRM,XSPR,XTLO,XUID
+
+	set (EC,ISOACN,ISOCU,JNT,JNTALL,SEQ,REPLY,RETURN,RSPCD)=""
+	set (FSCCDT,PRCDX,REV,TOACCT,QAL1,SPR,XSPR)=""
+	set FINFLG=1,(REVFLG,SBFPFLG)=0
+	set IMID="0200"
+	
+	set INTRFACE="ISOSBN"
+
+	// Read through ttx array and determine TRAMT and QAL val based on trntyp
+	for  set SEQ=ttx(SEQ).order() quit:SEQ.isNull()  do { quit:ER
+
+		set ETC=ttx(SEQ).etc
+
+		type RecordTRN trn=%CACHE("TRN").getRecord("TRN","ETC = :ETC")
+		
+		set TRNTYP=trn.sbtrntyp
+		
+		type RecordSTBLSBTSD ssbtsd=Db.getRecord("STBLSBTSD","TRNTYP=:TRNTYP")
+
+		// Get TRAMT and TSO data from the primary transaction
+		if (TRNTYP<12)!(TRNTYP=26) do {
+			set PRISEQ=SEQ
+			set %SVCNTXT(0).piece("|",4)=PRISEQ
+			if TRNTYP=26 set IMID="0100"
+			
+			set TSO=ttx(PRISEQ).tso
+			
+			set PRCDX=ssbtsd.isocd
+
+			set TRAMT=ttx(SEQ).tamt*100 
+			do TSODATA(.ttx(),.ISOCU,.ISOACN,.SBFPFLG) quit:ER
+			if (PRCDX=210010) set TOACCT=ISOACN
+			set PRIETC=ETC
+		
+			/*
+			 If error correct & REV was found in TSO change MID and get
+			 TSO data from original transaction. 
+			*/
+
+			// Only check for EC from TSO
+			if ('EC.isNull()) do {
+				/*
+				 Modified the following to retrieve these
+				 values from ttx instead of HIST (since
+				 G/L's don't have HIST entries).
+				*/
+				set IMID="0420",REVFLG=1,SBFPFLG=1
+				set TRAMT=TRAMT*(-1)
+				set XSPR=ttx(SEQ).spr
+				set XTLO=ttx(SEQ).tlo
+				set XTLO=XTLO.replace("-")
+				set XTLO=XTLO.replace("\")
+				set XTLO=XTLO.extract(1,6)
+				}
+			}		
+		if ((TRNTYP>15)&(TRNTYP<25))!(TRNTYP=27) set QAL1=ssbtsd.qual1
+		if (TRNTYP>5),(TRNTYP<10) set QAL1="TFR"
+		}
+
+	if SBFPFLG,'REVFLG set IMID="0220"
+
+	// Create an extended field for deposit transaction 
+	if PRCDX="210010",'REVFLG do { quit:ER
+		do EXT210010(.ttx(),.EXTFLD,.QAL1) quit:ER
+		for I=105:1:108 set BIT(I)=""   // Initialize Large Data Bits
+		// Bits 105 - 108 are 255 chars max
+		for I=105:1:108 set BIT(I)=EXTFLD.extract(1,255),EXTFLD=EXTFLD.extract(256,EXTFLD.length())
+		}
+
+	// If it is a transfer get the "to" account & transfer amt from tso
+	if QAL1="TFR" do {
+		set TOACCT=$$FIELD^UTSO(TSO,"SBCID2")
+		set TRAMT=$$FIELD^UTSO(TSO,"SBTXAMT")*100
+		}
+	/*
+	 Set QAL2 and save off user ID because INIT^ISO8583 will reset it and
+	 screw everything up  
+	*/
+	set QAL2="   ",XUID=%UserID
+
+	// New %SVCNTXT functionality for timeouts
+	set (OLDREQ,OLDREP)=""
+	if '%SVCNTXT.get().isNull() do {
+		if 'BRCD.exists() set BRCD=CUVAR.bobr
+		set TMPBRCD=BRCD	// INIT^ISO8583 resets BRCD
+		do INIT^ISO8583(INTRFACE)
+		set BRCD=TMPBRCD
+		set OLDREQ=%SVCNTXT.piece("|",1)
+		set OLDREP=%SVCNTXT.piece("|",2)
+		set SBNID=%SVCNTXT(0).piece("|",1)
+		set REFNUM=%SVCNTXT(0).piece("|",2)
+		set CRCDNO=%SVCNTXT(0).piece("|",3)
+		set PRISEQ=%SVCNTXT(0).piece("|",4)
+		set ttx(PRISEQ).tlo=%SVCNTXT(0).piece("|",5)
+		set ttx(PRISEQ).spr=%SVCNTXT(0).piece("|",6)
+		set TMP=$$GET^NXTSEQ("SBNISO",6)
+		}
+	
+	/*
+	 The following section of code is used in the event of timeouts.  The
+	 original request/reply messages are saved in the %SVCNTXT array when 
+	 sent/received.  %SVCNTXT will persist through a timeout, so, in the
+	 event of a timeout, the messages don't need to be reconstructed or
+	 re-interpreted (which could lead to additional timeouts).
+	*/
+		
+	// Sent request, didn't get reply, then timed out 
+	if ('OLDREQ.isNull()),(OLDREP.isNull()) set REQUEST=OLDREQ do EXCH(.ttx()) if 1
+	
+	// Sent request, got reply, then timed out
+	else  if ('OLDREQ.isNull()),('OLDREP.isNull()) set REQUEST=OLDREQ,REPLY=OLDREP do REP(.ttx()) if 1
+	
+	// Didn't send request at all
+	else  do BLDBTM(.ttx())
+
+	if ER set RSPCD=0 quit
+
+	// Restore user ID as it was set to ATM teller in INIT^ISO8583
+	set %UserID=XUID
+
+	// Successfully transacted
+	if (RSPCD="00")!(RSPCD="R2")!(RSPCD=1) set RSPCD=1  quit
+
+	/*
+	 No reply from the server therefore a reversal request is created and
+	 sent to DAEMON process	
+	*/
+
+	// Exchange failed: prompt for override/create reversal
+	if (RSPCD="2") do {  quit
+		set IMID="0420"
+		for I=105:1:108 kill BIT(I)
+		// Build outgoing bitmap
+	        set REQUEST=$$BLDOM^ISO8583(IMID,.BIT,.TBL())
+		do DAEMON(.REQUEST) 
+		set RSPCD=2
+		}
+
+	// Can't connect: prompt for override/don't create reversal
+	if RSPCD="91" set RSPCD=2 quit
+
+	/*
+	 The only response remaining is a rejected transaction, all
+	 others have quit the routine by this point   
+	*/
+	set RSPCODE=RSPCD,RSPCD=0
+	
+	// Get PROFILE error message from STBLSBRSPCD
+	do RSPERR(RSPCODE)
+
+	// Generate next TSEQ for this TJD,BRCD,UID
+	type Number TSEQ = 1
+	type ResultSet rs=Db.select("TSEQ","SBREJTRN","SPD=:%SystemDate AND BRCD=:BRCD AND UID=:%UserID","TSEQ DESC")
+	if rs.next() set TSEQ=rs.getCol("TSEQ")+1
+	
+	// Insert message into rejected transaction file
+	type RecordSBREJTRN sbrejtrn=Class.new("RecordSBREJTRN","%SystemDate,BRCD,%UserID,TSEQ,SBNID")
+	set sbrejtrn.srccid=ISOACN
+	set sbrejtrn.tocid=TOACCT
+	set sbrejtrn.trntyp=TRNTYP
+	set sbrejtrn.rspcd=RSPCODE
+	set sbrejtrn.rspdes=RM
+	set sbrejtrn.tamt=TRAMT
+	set sbrejtrn.isobin=ISOCU
+	set sbrejtrn.etc=PRIETC
+	set sbrejtrn.trntm=$$TIM^%ZM(%CurrentTime,"24:60:SS")
+	do sbrejtrn.bypassSave()
+
+	quit 
+	
+EXT210010(RecordTTX ttx(),String EXTFLD,String QAL1) // Create deposit extended fields and determine qal1
+
+	type public Cache %CACHE()
+	type public Number TRAMT
+	type public String KEYVAL
+
+	type Number CI,CIA,CIATOT,CL,CLA,CLATOT,CN,CNA,CNATOT,CS,CSH,CSHTOT,SEQ,TOTCHK
+	type String ABCVAL,ETC,QAL()
+
+	set CLATOT=0,CLA=0,CNATOT=0,CNA=0,CIATOT=0,CIA=0,CSH=0,CSHTOT=0
+	set CL=0,CN=0,CI=0,CS=0,QAL1=""
+
+	set SEQ=0
+	for  set SEQ=ttx(SEQ).order() quit:SEQ.isNull()  do {
+
+		set ETC=ttx(SEQ).etc
+		
+		type RecordTRN trn=%CACHE("TRN").getRecord("TRN","ETC = :ETC")
+		
+		if trn.sbtrntyp=1 set TRAMT=ttx(SEQ).tamt
+		if trn.sbtrntyp=12 set CLATOT=ttx(SEQ).tamt+CLATOT,CLA=CLA+1,CL=1
+		if trn.sbtrntyp=13 set CNATOT=ttx(SEQ).tamt+CNATOT,CNA=CNA+1,CN=1
+		if trn.sbtrntyp=14 set CIATOT=ttx(SEQ).tamt+CIATOT,CIA=CIA+1,CI=1
+		if trn.sbtrntyp=15 set CSHTOT=ttx(SEQ).tamt*100,CSH=CSH+1,CS=1
+		}
+
+	// Extended field format correction
+	set CIA=CIA.zero(2),CLA=CLA.zero(2),CNA=CNA.zero(2)
+	set CIATOT=CIATOT.zero(9,2,1),CLATOT=CLATOT.zero(9,2,1),CNATOT=CNATOT.zero(9,2,1)
+
+	set EXTFLD="*S1*\I"_CIA_"\"_CIATOT_"\L"_CLA_"\"
+	set EXTFLD=EXTFLD_CLATOT_"\N"_CNA_"\"_CNATOT_"\"	
+	
+	// Find total # of checks to select the "A","B" or "C" value for QAL1
+	set TOTCHK=CLA+CNA+CIA,KEYVAL=CL_CN_CI
+	if KEYVAL="000" set QAL1="CSH" quit
+
+	// Create an array to compare the key value and select a QAL
+	set QAL("100")="CL",QAL("010")="CN",QAL("001")="CI"
+	if QAL(KEYVAL).exists() set QAL1=QAL(KEYVAL)
+
+	// If only one type of deposit (local, nonlocal, hold) set QAL & quit
+	if 'QAL1.isNull() set ABCVAL=$S(TOTCHK<6:"A",TOTCHK<11:"B",TOTCHK>10:"C"),QAL1=QAL1_ABCVAL quit
+
+	// If non-local checks are used, always use "CN" indicator
+	if (CNA>0) set QAL1=$S(CNA<6:"CNA",CNA<11:"CNB",CNA>10:"CNC") quit
+ 
+	// If local checks are used, use "CL" indicator
+	if (CLA>0) set QAL1=$S(CLA<6:"CLA",CLA<11:"CLB",CLA>10:"CLC") quit
+ 
+	/*
+	 If none of the previous two conditions are met, immediate
+	 checks are being used.
+	*/
+	set QAL1="CI"_$S(TOTCHK<6:"A",TOTCHK<11:"B",TOTCHK>10:"C")
+
+	quit
+
+
+LOGNSM  // Log message to NSMLOG
+
+	type public String INTRFACE,SBNID,REPLY,REQUEST,RM
+
+	do NSMLOG^PBSNSM(INTRFACE,SBNID,REQUEST,REPLY,RM.get().extract(1,40))
+	quit
+
+INTOTSO(Number FAVLBAL,Number FLBAL,Number TAVLBAL,Number TLBAL,Number LNIF,String LNNP,Number LNPA,RecordTTX ttx())
+
+	type public Number PRISEQ
+
+	type String TSO
+
+	// Put available and ledger balances into tso so reciept can be printed	
+	set TSO=ttx(PRISEQ).tso
+	set TSO=$$FIELDIN^UTSO(.TSO,"SBFABAL",FAVLBAL)
+	set TSO=$$FIELDIN^UTSO(.TSO,"SBFLBAL",FLBAL)
+	if 'TAVLBAL.isNull() set TSO=$$FIELDIN^UTSO(.TSO,"SBTABAL",TAVLBAL)
+	if 'TLBAL.isNull() set TSO=$$FIELDIN^UTSO(.TSO,"SBTLBAL",TLBAL)
+	if 'LNIF.isNull() set TSO=$$FIELDIN^UTSO(.TSO,"SBLNIF",LNIF)
+	if 'LNNP.isNull() set TSO=$$FIELDIN^UTSO(.TSO,"SBLNNP",LNNP)
+	if 'LNPA.isNull() set TSO=$$FIELDIN^UTSO(.TSO,"SBLNPA",LNPA)
+
+	set ttx(PRISEQ).tso=TSO
+
+	quit
+
+TSODATA(RecordTTX ttx(),String ISOCU,String ISOACN,Boolean SBFPFLG)
+	
+	type public Boolean ER
+	type public Number EC,REV,SEQ
+	
+	type String TSO
+	
+	set TSO=ttx(SEQ).tso
+	
+	// Make sure TSO contains Credit union info
+	set ISOCU=$$FIELD^UTSO(TSO,"SBISO") 
+	
+	// Required fields cannot be null - ~p1
+	if ISOCU.isNull() do Runtime.setErrMSG("SBNET","2388","SBISO") quit:ER
+	
+	// Make sure TSO contains Account info
+	set ISOACN=$$FIELD^UTSO(TSO,"SBCID1") 
+	
+	// Required fields cannot be null - ~p1
+	if ISOACN.isNull() do Runtime.setErrMSG("SBNET","2388","SBCID1") quit:ER
+	
+	set EC=$$FIELD^UTSO(TSO,"EC") 
+	set REV=$$FIELD^UTSO(TSO,"REV") 
+	
+	// Check for force post flag
+	set SBFPFLG=$$FIELD^UTSO(TSO,"SBFPFLG")
+	if 'SBFPFLG set SBFPFLG=0 
+	
+	quit
+
+DAEMON(String REQUEST) // Put message into global to be sent by DAEMON process
+
+	type public Boolean ER
+	type public Number BRCD,TRNTYP
+	type public String IMID,ISOACN,ISOCU,REPLY,RSPCD,SBNID,TOACCT,TRAMT
+
+	type Number END,SEQ
+
+	type RecordSTBLSBTSD ssbtsd=Db.getRecord("STBLSBTSD","TRNTYP=:TRNTYP")
+
+	// Restrict size of SBADVMSG.MSGTEXT to 450  
+	set END=(REQUEST.length()/450)
+	set END=END+1
+	for SEQ=1:1:END do {
+		set ER=0
+
+		type RecordSBADVMSG sbadvmsg=Class.new("RecordSBADVMSG","PROCDT=:%SystemDate,MSGID=:SBNID,SEQ=:SEQ")
+		set sbadvmsg.msgtext=REQUEST.extract(1,450)
+		do sbadvmsg.save()
+		
+		set REQUEST=REQUEST.extract(451,REQUEST.length())
+		
+		type RecordSBADVDTL sbadvdtl=Class.new("RecordSBADVDTL","PROCDT=:%SystemDate,MSGID=:SBNID")
+		set sbadvdtl.srccid=ISOACN
+		set sbadvdtl.tocid=TOACCT
+		set sbadvdtl.tamt=TRAMT
+		set sbadvdtl.trntyp=ssbtsd.des
+		set sbadvdtl.isobin=ISOCU
+		set sbadvdtl.msgtyp=IMID
+		set sbadvdtl.brcd=BRCD
+		set sbadvdtl.uid=%UserID
+		do sbadvdtl.save()
+		
+		if 'ER set RSPCD=1
+		}
+
+	// Set reply to value so that it quits out of fintrn properly
+	set REQUEST="",REPLY="X"
+	quit	
+
+RSPERR(String RSPCD)  // Get PROFILE error number from STBLSBRSPCD and return
+
+	type public Boolean ER,FINFLG
+	type public String RM
+
+	if 'FINFLG set ER=1
+
+	if RSPCD.isNull() set RSPCD="02"
+
+	type RecordSTBLSBRSPCD ssbrspcd=Db.getRecord("STBLSBRSPCD","RSPCODE=:RSPCD",1)
+
+	// Teller contact Host Credit Union - Special Conditions
+	if 'ssbrspcd.getMode() set RSPCD="02",RM=$$^MSG(5027) quit
+
+	set RM=$$^MSG(ssbrspcd.errno)
+
+	quit
+
+LNPMT(String LNEXT,Number LNIF,String LNNP,Number LNPA)  // Extract Loan Payment Information
+
+	// Loan Interest/Fees
+	set LNIF=LNEXT.piece("\",1)*.01
+
+	// Loan Principal Amount
+	set LNPA=LNEXT.piece("\",2)*.01
+
+	// Loan Next Payment Date
+	set LNNP=LNEXT.piece("\",3)
+	set LNNP=$$FDAT^%ZM(LNNP,"YYMMDD")
+	set LNNP=$$DAT^%ZM(LNNP,"MMDDYY")
+
+	quit
+
+JNTCHK(String RETURN,Boolean JNTALL,String JNT)	// Determine if all accounts are jointly owned by JNT
+
+	type Number I
+	type String TMPSTR
+
+	if 'JNTALL quit
+	if JNT.isNull() quit
+
+	set I=1,TMPSTR=""
+	for  set TMPSTR=RETURN(2).piece($C(13,10),I) quit:TMPSTR.isNull()  do {
+		type String TMPJON
+		set TMPJON=TMPSTR.piece($C(9),14)
+		set TMPJON=TMPJON_"; "_JNT      // Add JNT to list of JON's
+		set TMPSTR.piece($C(9),14)=TMPJON
+		set RETURN(2).piece($C(13,10),I)=TMPSTR
+		set I=I+1
+		}
+
+	quit
+
+vSIG()	quit "60200^45257^Pat Kelly^37845"	// Signature - LTD^TIME^USER^SIZE

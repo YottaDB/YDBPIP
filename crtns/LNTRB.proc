@@ -1,0 +1,284 @@
+LNTRB	
+	/*
+	Create transaction
+
+	   ORIG:  David Caliendo - 05/05/86
+	
+	---- Revision History ------------------------------------------------
+	
+	10/13/06 - SmithCD - CR 23395
+		   Modified TRN section to pass 5 (secondary) instead 4 
+		   (system-generated) if new parameter SECONDARY is passed. 
+		   Prevents "Account closed" error when reversing or error 
+		   correcting a payoff transaction that has early payoff 
+		   penalty (miscellaneous charge) secondary transaction 
+		   (prevents LNUEFD from trying to reverse it directly instead 
+		   of allowing the originating transaction to reverse it). 
+		   Note that in p01, the lnsysgen variable was used for this 
+		   purpose (in the opposite manor).
+	
+	05/20/06 - TITOVE - CR 21399
+		   Restored the following change:		   
+		   02/17/06 - KELLYP - CR 19579
+		   Modified POST section to call TRN for miscellaneous 
+		   transactions (e.g., when called in certain places from 
+		   LNPTS23).
+
+	03/08/06 - TITOVE - CR 19832
+		   Modified CREATE to correctly set OCC and preserve ITC.
+
+	02/25/06 - chhabris - CR19307
+		   Modified POST section to instantiate tmpacn as it was
+		   never instantiated and was throwing errors if acn,dep
+		   or ln object does not exist.
+	
+	01/30/06 - SmithCD - CR 19343 (16890)
+		   . Modified POST section to call HIS4^LNPTS1 after posting 
+		     the transaction to file to the lower level of history
+		   . In CREATE section, added the insertion of "REAPPLY", (if 
+		     present in ttxpri.tso) into ttx.tso, and interest posting 
+		     bit (if present in ttxpri.itc4) into ttx.itc
+		   . Modified the POST section to apply a hierarchy to 
+		     determine the correct account object to use (passed to 
+		     new section TRN - compiler will not otherwise allow for 
+		     conditionally defining objects)
+		   . Replaced code in CREATE section that used ln / acn 
+		     objects to get the override cost center with a Db.select() 
+		     to avoid issue with object.exists()
+		   . Modified CREATE section to return an error if the tran 
+		     code is invalid
+		   . Modified .getRecord() of trn to use %CACHE() for 
+		     efficiency
+		   . Replaced ITC section with calls to $$ITC^TTXEXT
+	
+	05/31/05 - SmithCD - CR 15902
+		   . Repeated the same action in last change (CR 13136) for 
+		     other non-required parameters in POST section
+		   . Modified POST section to declare acn public and pass it 
+		     to TRNSINGL^TRNDRV if it exists (allows changes to be 
+		     seen by the rest of the application in existing acn 
+		     object, instead of only on disk; note this should be 
+		     changed at a later date for POST to accept acn as a 
+		     parameter instead - there are about 90 calls to it in 
+		     the system)
+		   . Modified CREATE section to account for non-required 
+		     %EffectiveDate field not defined
+		   . Modified to comply with current PSL standards
+		   . Retrofitted the following change from p01 version (note 
+		     the SET section has been replaced with the CREATE):
+			02/10/04 - APPLEYARDM - CR 7906
+				Modified section SET to use CUVAR2 rather than 
+				TJD to designate the current date.
+	
+	04/18/05 - GEORGES - 13136
+		   Modified section POST to get value of BRCDE before
+		   calling create function.
+
+	----------------------------------------------------------------------
+	*/	
+
+	quit
+
+
+public POST(RecordTTX ttxpri,	 // Primary transaction		/NOREQ/REF:R
+	    Number CID,		 // Account number
+	    String ETC,		 // External tran code
+	    Number TAMT,	 // Transaction amount
+	    Date %EffectiveDate, // Effective date		/NOREQ
+	    String %UserStation, // Teller location
+	    String TSO,		 // Transaction source		/NOREQ
+	    String TCMT,	 // Teller comment		/NOREQ
+	    String CRCD,	 // Currency Code
+	    Number OCC,		 // Override cost center	/NOREQ
+	    Number BRCDE,	 // Branch Code			/NOREQ
+	    Number TRC,		 // Transaction Trace Number	/NOREQ
+	    String UIDT,	 // User ID			/NOREQ
+	    Boolean SECONDARY)	 // System generated		/NOREQ/DFT=0
+
+	// This line tag calls TRNDRV to post the transaction
+	
+	type public Cache %CACHE()
+	type public RecordACN acn
+	type public RecordLN ln
+	type public RecordDEP dep, dep()
+	type public Boolean ER
+	type public Date CUVAR2
+
+	type RecordACN tmpacn
+	type Number BRCD, TYPE
+	type String CLS, GRP
+
+	set BRCD = CUVAR.BOBR
+
+	type RecordTTX ttx = Class.new("RecordTTX")
+	
+	set %EffectiveDate = %EffectiveDate.get()
+	set TCMT = TCMT.get()
+	set TSO = TSO.get()
+	set OCC = OCC.get()
+	set BRCDE = BRCDE.get()
+	set TRC = TRC.get()
+	set UIDT = UIDT.get()
+
+	do CREATE(.ttx, .ttxpri, CID, ETC, TAMT, %EffectiveDate, %UserStation, TSO, TCMT, CRCD, OCC, BRCDE, TRC, UIDT) quit:ER
+
+	type RecordTRN trn = %CACHE("TRN").getRecord("TRN", "ETC=:ETC")
+
+	// Apply hierarchy for account objects to pass to TRNDRV
+	if trn.cls = "L" do { quit:ER
+		// Use pre-existing loan object
+		if ln.exists(), CID = ln.cid do TRN(.ttx, .ln) quit
+
+		// Use account object
+		if acn.exists(), CID = acn.cid do TRN(.ttx, .acn) quit
+
+		// Account object is for a different account - make invisible
+		set tmpacn = Db.getRecord("LN", "CID=:CID")
+
+		do TRN(.ttx, .tmpacn)
+		}
+	else  if trn.cls = "D" do { quit:ER
+		// Use dep() object from unwind / reapply process
+		if dep(CID).exists() do TRN(.ttx, .dep(CID)) quit
+		
+		// Use dep object
+		if dep.exists(), CID = dep.cid do TRN(.ttx, .dep) quit
+
+		// Use account object
+		if acn.exists(), CID = acn.cid do TRN(.ttx, .acn) quit
+		
+		// Account object is for a different account - make invisible
+		set tmpacn = Db.getRecord("DEP", "CID=:CID")
+
+		do TRN(.ttx, .tmpacn)
+		}
+	// For misc. transactions - no need to pass the account object to TRNDRV
+	else  do TRN(.ttx, "") quit:ER
+
+	// All secondary transactions should file to the History of Loan 
+	// Secondary Transactions table
+	do HIS4^LNPTS1(.ttx) quit:ER
+
+	quit 
+
+
+TRN(RecordTTX ttx,		// Transaction			/REF:RW
+    RecordACN acn)		// Account			/REF:RW
+    
+    	// Post secondary transaction
+    	
+    	type public Date %SystemDate
+    	type public Number BRCD
+    	type public Boolean SECONDARY
+    	
+    	type Number TMODE
+    	
+    	// Force transaction to be secondary
+    	if SECONDARY.get() set TMODE = 5
+    	// Default to system generated
+    	else  set TMODE = 4
+
+	do TRNSINGL^TRNDRV(.ttx, .acn, %SystemDate, BRCD, TMODE)
+
+	quit
+
+
+public CREATE(RecordTTX ttx,	   // New transaction		   /REF:W
+	      RecordTTX ttxpri,	   // Primary transaction 	   /NOREQ/REF:R
+	      Number CID,	   // Account number
+	      String ETC,	   // External tran code
+	      Number TAMT,	   // Transaction amount
+	      Date %EffectiveDate, // Effective date		   /NOREQ
+	      String %UserStation, // Teller location
+	      String TSO,	   // Transaction source	   /NOREQ
+	      String TCMT,	   // Teller comment		   /NOREQ
+	      String CRCD,	   // Currency code
+	      Number OCC,	   // Override cost center	   /NOREQ
+	      Number BRCDE,	   // Branch Code		   /NOREQ
+	      Number TRC,	   // Transaction Trace Number	   /NOREQ
+	      String UIDT)	   // User ID			   /NOREQ
+
+	// Builds TTX object does not post the transaction
+
+	type public RecordLN ln
+	type public RecordACN acn
+	type public Date CUVAR2, VDT
+	type public Cache %CACHE()
+	type public String ITC, RM
+
+	type String TTXBLD()
+	type Date TTXVDT
+
+	set %EffectiveDate = %EffectiveDate.get()
+	
+	set TSO = TSO.get()
+	
+	// Invalid transaction code
+	if 'Db.isDefined("TRN", "ETC=:ETC") do { quit
+		do Runtime.setErrMSG("TRN", 3592)
+		set RM = RM_" "_ETC
+		}
+		
+	type RecordTRN trn = %CACHE("TRN").getRecord("TRN", "ETC=:ETC")
+	set ITC = trn.itc
+
+	// Transfer particular items from primary to new transaction, if 
+	// primary is passed in
+	if ttxpri.exists() do {
+		type Boolean REAPPLY
+		
+		// Flag as secondary
+		set ITC = $$ITC^TTXEXT(ITC, 7, 1)
+		
+		set TTXVDT = ttxpri.vdt
+
+		// Copy interest posting bit from primary transaction
+		if ttxpri.itc4 set ITC = $$ITC^TTXEXT(ITC, 4, 1)
+
+		// Reapply indicator should propagate to secondary transactions
+		set REAPPLY = $$FIELD^UTSO(ttxpri.tso, "REAPPLY")
+		if REAPPLY set TSO = $$FIELDIN^UTSO(TSO, "REAPPLY", REAPPLY)
+		
+		if '$$FIELD^UTSO(TSO, "REV").isNull(), ttxpri.itc12 set ITC = $$ITC^TTXEXT(ITC, 12, 1))
+		else  if '$$FIELD^UTSO(TSO, "EC").isNull(), ttxpri.itc6 set ITC = $$ITC^TTXEXT(ITC, 6, 1)
+		}
+	else  set TTXVDT = VDT.get()
+	
+	if CUVAR2.get().isNull() do {
+		type RecordCUVAR cuvar = Db.getRecord("CUVAR")
+		set CUVAR2 = cuvar.tjd
+		}
+	
+	// Safe to withhold effective date from transaction if all dates match
+	if %EffectiveDate = CUVAR2 set %EffectiveDate = ""
+
+	// Call TTXBLD to create trasaction
+        set TTXBLD("CID") = CID
+        set TTXBLD("ITC") = ITC
+        set TTXBLD("ETC") = ETC
+        set TTXBLD("TAMT") = TAMT
+        set TTXBLD("EFD") = %EffectiveDate
+        set TTXBLD("TLO") = %UserStation.get()
+        set TTXBLD("TCMT") = TCMT.get()
+        set TTXBLD("CRCD") = CRCD
+        set TTXBLD("TSO") = TSO
+        
+	if 'TTXVDT.isNull() set TTXBLD("VDT") = TTXVDT
+	
+	if trn.cls = "L" do {
+		// Automatically override the cost center for loan transactions
+		type ResultSet rs = Db.select("CC", "LN", "CID=:CID")
+		if rs.next() set OCC = rs.getCol("CC")
+                }
+	
+	if 'OCC.get().isNull() set TTXBLD("OCC") = OCC
+	
+	set TTXBLD("BRCDE") = BRCDE.get()
+	set TTXBLD("TRC") = TRC.get()
+	set TTXBLD("UIDT") = UIDT.get()
+
+	do TTX^TTXBLD(.ttx, .TTXBLD())
+
+	quit
+
+vSIG()	quit "60551^49795^Chad Smith^9035"	// Signature - LTD^TIME^USER^SIZE

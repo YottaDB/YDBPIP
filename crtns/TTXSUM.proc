@@ -1,0 +1,310 @@
+public	TTXSUM
+	/*
+		 TTX into TPRF accumulation utility
+		
+		 ORIG: Frank Sanchez (2497)
+	
+		 DESC: Accumulate teller totals and store in TPCTRL.
+	
+		INPUT:
+		        A(1) = Date to accumulate totals on
+		        BRCD = Branch code
+		        UID = User ID
+	
+	     	OUTPUT:
+		        TY(CRCD,CLS,GRP,ETC)=Count|Amount
+	
+	  ---- Revision History ------------------------------------------------
+	  
+	   10/18/05 - TITOVE - CR 17832
+	   	      Modified NEW section to correct code that resets values
+	   	      in TPCTRL, TPETC and TPPMTOT tables, correctly set the
+	   	      value of LSTSEQ and only save TPCTRL once. Modified
+	   	      CATCHUP section to select distinct records only from
+	   	      TPCTRL table.
+
+	   07/12/05 - KELLYP - CR 16583
+	   	      Modified NEW section to prevent RDBSAVEFAIL errors
+	   	      causes by multiple saves of the tpctrl object.
+	  
+	   05/05/05 - TITOVE - CR 14192
+	   	      Modified as part of DBI2 project. Removed ERR section
+	   	      and LOAD tag.
+
+	   01/15/05 - RussellDS - CR13817
+	   	      Correct logic in NEW section.  Clean up PSL warnings
+	   	      not related to scope.
+	   	      
+	   	      Correct record access to TPCTRL to instantiate new
+	   	      record if one does not exist (sections NEW and CASH).
+
+	*/	
+
+	type public Cache %CACHE()
+	type public Number BRCD
+	type public String A(), TY(,,,), UID
+
+	type Date JD
+	type String Y
+	
+	set JD = A(1)
+	 
+	do NEW(JD)
+
+	type DbSet ds = Db.selectDbSet("TPETC","BRCD=:BRCD AND UID=:UID AND TPD=:JD")
+
+	while ds.next() do {
+		
+		type RecordTPETC tpetc = ds.getRecord("TPETC")
+		
+		type RecordTRN trn = %CACHE("TRN").getRecord("TRN", "ETC = :tpetc.etc")
+
+		set Y = TY(tpetc.crcd,trn.cls,trn.grp,tpetc.etc).get()
+		
+		set Y.piece("|",1) = Y.piece("|",1) + tpetc.count
+		set Y.piece("|",2) = Y.piece("|",2) + tpetc.total
+		
+		set TY(tpetc.crcd,trn.cls,trn.grp,tpetc.etc) = Y
+		}
+	
+	quit 
+	
+
+NEW(Date JD)	// Add unaccumulated activity to previous accumulation
+
+	type public Boolean %MCP
+	type public Number BRCD, ER
+	type public String TPRF(,,), TTX(,,), UID
+	
+	type Date DAT
+	type Number AMT, LSTSEQ
+	type String CRCD, ETC, TRNDATA(,,)
+
+	// Record locked by another user
+	lock +TTX(JD,BRCD,UID):5 else  do Runtime.setErrSTBLER("TTX","RECLOC") quit 
+
+	// Record locked by another user
+	lock +TPRF(BRCD,UID,JD):5 else  do Runtime.setErrSTBLER("TTX","RECLOC") lock -TTX(JD,BRCD,UID) quit 
+	
+	type RecordTPCTRL tpctrl = Db.getRecord("TPCTRL", "BRCD = :BRCD, UID = :UID, TPD = :JD", 1)
+
+	// Bad previous accumulation, null out Last Transaction Accumulated in TPCTRL
+	// and delete TPETC and TPPMTOT tables (their data will be re-accumulated). 
+	if tpctrl.accmplt do {
+		
+		do Db.delete("TPETC","BRCD=:BRCD AND UID=:UID AND TPD=:JD")
+		
+		do Db.delete("TPPMTOT","BRCD=:BRCD AND UID=:UID AND TPD=:JD")
+		
+		set tpctrl.lsttrn = ""
+		}
+
+	// In case of PM-ing, accumulate data for the PM date instead
+	if tpctrl.pmdate,(tpctrl.pmdate '= JD) do NEW(tpctrl.pmdate) quit:ER
+
+	set LSTSEQ = +tpctrl.lsttrn
+	
+	set CRCD = %SystemCurrency
+	
+	type DbSet ds = Db.selectDbSet("TTX","TJD=:JD AND BRCD=:BRCD AND UID=:UID AND ITC IS NOT NULL AND TSEQ>:LSTSEQ", "TJD,BRCD,UID,TSEQ ASC")
+		
+	while ds.next() do {
+		
+		type RecordTTX ttx = ds.getRecord("TTX")
+		
+ 		set LSTSEQ = ttx.tseq
+	
+		if %MCP do {
+			
+			set CRCD = ttx.crcd
+			
+			if CRCD.isNull() set CRCD = %SystemCurrency
+			}
+			
+
+		set TRNDATA(CRCD,ttx.etc) = TRNDATA(CRCD,ttx.etc).get()
+		
+		set TRNDATA(CRCD,ttx.etc).piece("|",1) = TRNDATA(CRCD,ttx.etc).piece("|",1) + ttx.tamt		
+		set TRNDATA(CRCD,ttx.etc).piece("|",2) = TRNDATA(CRCD,ttx.etc).piece("|",2) + 1
+	
+		// PM'ed activity
+		if ttx.itc8 do {
+			
+			set TRNDATA(CRCD,ttx.etc).piece("|",3) = TRNDATA(CRCD,ttx.etc).piece("|",3) + ttx.tamt
+			set TRNDATA(CRCD,ttx.etc).piece("|",4) = TRNDATA(CRCD,ttx.etc).piece("|",4) + 1
+	
+			set DAT = JD - ttx.itc8
+			
+			if 'TRNDATA(CRCD,ttx.etc,DAT).data() set TRNDATA(CRCD,ttx.etc,DAT) = ""
+			
+			set TRNDATA(CRCD,ttx.etc,DAT).piece("|",1) = TRNDATA(CRCD,ttx.etc,DAT).piece("|",1) + ttx.tamt
+			set TRNDATA(CRCD,ttx.etc,DAT).piece("|",2) = TRNDATA(CRCD,ttx.etc,DAT).piece("|",2) + 1
+			}
+		}
+	
+	// No new transactions have been posted
+	if LSTSEQ = +tpctrl.lsttrn do DECLOC quit
+	
+	// Update Last Transaction Accumulated and Accumulation Complete Indicator
+	set tpctrl.lsttrn = LSTSEQ 
+	set tpctrl.accmplt = ""
+	
+	do tpctrl.save()
+	
+	set (CRCD,DAT,ETC) = ""
+	for  set CRCD = TRNDATA(CRCD).order() quit:CRCD.isNull()  do {
+		
+		for  set ETC = TRNDATA(CRCD,ETC).order() quit:ETC.isNull()  do {
+			
+			type RecordTPETC tpetc = Db.getRecord("TPETC", "BRCD = :BRCD, UID = :UID, TPD = :JD, CRCD = :CRCD, ETC = :ETC", 1)
+
+			set tpetc.total = tpetc.total + TRNDATA(CRCD,ETC).piece("|",1)
+			set tpetc.count = tpetc.count + TRNDATA(CRCD,ETC).piece("|",2)
+			set tpetc.ppmamt = tpetc.ppmamt + TRNDATA(CRCD,ETC).piece("|",3)
+			set tpetc.ppmcount = tpetc.ppmcount + TRNDATA(CRCD,ETC).piece("|",4)
+
+			do tpetc.save()
+	
+			for  set DAT = TRNDATA(CRCD,ETC,DAT).order() quit:DAT=""  do {
+				
+				type RecordTPPMTOT tppmtot = Db.getRecord("TPPMTOT","BRCD = :BRCD, UID = :UID, TPD = :JD, CRCD = :CRCD, ETC = :ETC, CDATE = :DAT", 1)	
+
+				set tppmtot.tamt = tppmtot.tamt + TRNDATA(CRCD,ETC,DAT).piece("|",1)
+				set tppmtot.tcount = tppmtot.tcount + TRNDATA(CRCD,ETC,DAT).piece("|",2)
+				
+				do tppmtot.save()
+				}
+			}
+		}
+	
+	do DECLOC
+
+	quit 
+	
+
+public	CATCHUP(Date JD) // Accumulate all of TPCTRL for a date (no output array)
+
+	/*	
+	   This line tag should be called by dayend applications and reports
+	   which need no output arrays from TTXSUM, but want to ensure that
+	   the TPRF file is completely built.
+	
+	   ARGUMENTS
+	   . JD 	Teller Posting Date  			/TYP=D/REQ
+	
+	*/ 
+	
+	type public String TTX()
+
+	// Record locked by another user
+	lock +TTX(JD):5 else  do Runtime.setErrSTBLER("TTX","RECLOC") quit 
+	
+	type Number BRCD
+	type String UID
+	
+	type ResultSet rs = Db.select("DISTINCT BRCD,UID","TPCTRL")
+
+	while rs.next() do {
+		
+		set BRCD = rs.getCol("BRCD")
+		set UID = rs.getCol("UID")
+
+		do NEW(JD) 
+		}
+	
+	lock -TTX(JD)
+
+	quit 
+	
+
+public	CASH(Number BRCD,			// Branch code
+	      String UID,			// User ID
+        Date %SystemDate,			// Transaction date
+             String CRCD)			// Currency code
+
+	/*	
+	   This function returns cash information for a specified branch code,
+	   user ID, date and currency code.
+	
+	   RETURNS:
+		 . $$ 		Cash information
+	    	      		amt1|amt2|amt3|amt4|amt5|amt6
+	
+     	   		where: 	amt1 = Today's Cash In
+	     			amt2 = Today's Cash Out
+	     			amt3 = Cash In from prior day(s)
+	     			amt4 = Cash Out from prior day(s)
+	     			amt5 = Cash In PMed to future date
+	    			amt6 = Cash Out PMed to future date
+	
+	*/
+	
+	type Date A()
+	type Number I
+	type String CASH, CSHETC(,), N
+	
+	set CASH = ""
+	
+	set A(1) = %SystemDate
+	
+	do ACCUM 
+
+	do CSHETC^TTXEXT(.CSHETC)
+
+	type RecordTPCTRL tpctrl = Db.getRecord("TPCTRL", "BRCD,UID,%SystemDate", 1)
+	
+	set N = ""
+	
+	for I = 0,1 for  set N = CSHETC(I,N).order() quit:N.isNull()  do {
+		
+		type RecordTPETC tpetc = Db.getRecord("TPETC", "BRCD = :BRCD, UID = :UID, TPD = :%SystemDate, CRCD = :CRCD, ETC = :N", 1)
+
+		set CASH.piece("|",I + 1) = CASH.piece("|",I + 1) + tpetc.total
+		set CASH.piece("|",I + 3) = CASH.piece("|",I + 3) + tpetc.ppmamt
+	
+		if tpctrl.pmdate do {
+			
+			type RecordTPPMTOT tppmtot = Db.getRecord("TPPMTOT","BRCD = :BRCD, UID = :UID, TPD = :tpctrl.pmdate, CRCD = :CRCD, ETC = :N, CDATE = :%SystemDate", 1)
+    
+			set CASH.piece("|",I + 5) = CASH.piece("|",I + 5) + tppmtot.tamt
+			}
+		}
+		
+	quit CASH
+	
+
+public	CRCD	// Define default currency DCRCD
+	
+	type public Boolean %MCP
+	type public String CRCD, DCRCD
+
+	set DCRCD = %SystemCurrency
+	
+	if '%MCP set CRCD = DCRCD
+	
+	quit 
+	
+
+DECLOC	// Decrement locks
+	
+	type public Date JD
+	type public Number BRCD
+	type public String TPRF(,,), TTX(,,), UID
+
+	lock -TTX(JD,BRCD,UID)
+	lock -TPRF(BRCD,UID,JD)
+
+	quit
+
+
+public	ACCUM	// Accumulate TPCTRL; does not return TY array
+	
+	type public String A()
+
+	type String TY(,,,)
+	
+	do NEW(A(1))
+	
+	quit
+
+vSIG()	quit "60191^51098^Eugene Titov^7715"	// Signature - LTD^TIME^USER^SIZE

@@ -1,0 +1,793 @@
+STPPROC		/*
+	ORIG: GOLPIRAD - 10/27/95
+	DESC: Stop Register Processing Procedures
+
+	KEYWORDS: stop, stop register, black list, account, check, ACH,
+		  customer, check amount, document
+
+	RELATED:
+	. DEPSTP.M - drives these functions
+	. CHKPROC.M - calls screen CHKFOR and CSHLIM linetag
+
+	PROTOTYPES:
+	STP1(.dep)			determine if active stops against
+					customer ACN exist
+
+	STP2(.acn,CTL)			find active account stops against CID
+
+	STP3(.acn,CHK,JD,CTL)		determine if active account stops 
+					against check CHK belonging to CID
+
+	STP4(.acn,TAMT,CTL)		determine if an active stops exists on 
+					account CID for TAMT
+
+	STP5(.acn,ACH,AMT,DC,CTL)	determine is an active ACH stop exists
+
+	STP6(INST,CID,CTL)		determine if an active stop exists for 
+					account CID belonging to outside 
+					institution INST (on-them stop)
+
+	STP7(INST,CID,CHK,CTL)		determine if an active stop exists for a
+					check belonging to outside institution 
+					INST (on-them stop)
+
+	STP8(TYP,NUM,CTL)		determine if an active document stop 
+					exists against document NUM of 
+					document type TYP (on us)
+
+	STP9(TYP,NUM,INST,CTL)		determine if an active stop placed by an
+					outside institution exists against a 
+					document (on them)
+	
+	STPDOC(TYP,NUM,CTL)		determine if an active document stop 
+					exists against document NUM of document 
+					type TYP - regardless of the 
+					institution who placed it
+
+	---- Revision History -------------------------------------------------
+	05/28/07 - John Varga - CR24940
+		   When checking whether the transaction hasnt been overridden
+		   the variable SEQ was undefined. Changed it to TRNSEQ.
+		   
+	11/16/06 - Ravindra Rathi - CR 23189
+	           Modified STPREP section to define STPTYP variable for removing
+	           undefined error,changed the setting of %BLK variable as the 
+	           reports were not getting displayed and removed 
+	           'if rs.isEmpty() quit' condition.
+	           	
+	03/03/06 - RussellDS - CR19065
+		   Replace stp* references with DEP or LN, no longer ACN.
+
+	01/29/03 - ZWITKOWITSM - 51349
+		   Correct select structure in section STP5.
+
+	11/14/02 - ZWITKOWITSM - 43583
+		   PSL clean-up.
+
+	06/13/02 - ZWITKOWITSM - 43583
+		   Converted to PSL.
+
+	11/02/00 - Jerry Morse - NCR20416 / ARQ #42141
+		   Added page break to section STPREP.  We are printing
+		   several reports within the same device open/close
+		   section and DATA QWIK cannot handle the page breaks in
+		   the normal way.
+
+	-----------------------------------------------------------------------
+	*/
+
+	quit 
+
+
+Public STP1(RecordDEP dep)
+	/*
+	determine if active stops against customer ACN exist
+
+	parameters:	dep - Deposit Account			/TYP=RecordDEP/REQ
+
+	return values:  0 = no active account stops exist for the account
+			1 = an active account stop exists for the account
+	*/
+ 
+	quit ''dep.stp1
+
+
+Public STP2(RecordACN acn,CTL)
+	/*
+	find active account stops against CID
+
+	parameters:	acn - Account				/TYP=RecordACN/REQ
+			CTL = override control flag		/TYP=N/MECH=VAL/REQ
+	                     0 - do not create OVR array
+	                     1 - create OVR array
+
+	return values:  0 = no active account stops exist for the account
+	                1 = an active account stop exists for the account
+	*/
+	type public Number TRNSEQ
+	
+	type Number stp2
+	
+	if (acn.cls = "D") do {
+		
+		type RecordDEP dep = {RecordDEP}acn
+		set stp2 = dep.stp2
+	}
+	else  do {
+		
+		type RecordLN ln = {RecordLN}acn
+		set stp2 = ln.stp2
+	}
+
+	if 'stp2 quit 0
+
+	new CID,DONE,FOUND
+	
+	set CID=acn.cid
+	set DONE=0
+	set FOUND=0
+
+	type ResultSet rs=Db.select("ACT,EXP,SEQ,SRC","STOP2","CID=:CID")
+
+	if rs.isEmpty() quit 0
+
+	new ACT,EXP,SRC,STPSEQ,X
+
+	while rs.next() do { quit:DONE
+
+		set ACT=rs.getCol(1)
+		set EXP=rs.getCol(2)
+		set STPSEQ=rs.getCol(3)
+		set SRC=rs.getCol(4)
+
+		// disregard expired stops
+		if EXP,EXP'>%SystemDate quit
+
+		set FOUND=1
+
+		// quit if not creating OVR
+		if 'CTL set DONE=1 quit
+
+		if SRC'="" do {
+			set X=$S(ACT:"STP1",1:"STP10")
+			set OVR(CID,"OVR",X)=$P(SRC,",",2)
+			}
+
+		else  do {
+			set X=$S(ACT:"STP2",1:"STP20")
+			set OVR(CID,"OVR",X)=CID
+			}
+
+		// if transaction hasn't been overridden yet, log it in STOPLOGL
+		if '$D(TSPV(TRNSEQ,CID,"OVR",X)) do SETLOG(%SystemDate,%UserID,CID,$G(TAMT),"","2",CID,STPSEQ,"","")
+	
+		// have we found all possible types of overrides
+		if $D(OVR(CID,"OVR","STP1")),$D(OVR(CID,"OVR","STP10")),$D(OVR(CID,"OVR","STP2")),$D(OVR(CID,"OVR","STP20")) set DONE=1
+
+		}
+
+	quit FOUND
+
+
+Public STP3(RecordACN acn,CHKNUM,JD,CTL)
+	/*
+	determine if active account stops against exist
+	check CHK belonging to account CID
+
+	parameters:	acn - Account				/TYP=RecordACN/REQ
+			CHKNUM = check number			/TYP=N/MECH=VAL/REQ
+			JD = system date			/TYP=N/MECH=VAL/REQ
+			CTL = override control flag		/TYP=N/MECH=VAL/REQ
+	                        0 - do not create OVR array
+	                        1 - create OVR array
+
+	return values:  0 = no active check stops exist for check CHK
+	                1 = an active check stop exists for check CHK
+	*/
+
+	type public Number TRNSEQ
+	type Number stp3
+	
+	if (acn.cls = "D") do {
+		
+		type RecordDEP dep = {RecordDEP}acn
+		set stp3 = dep.stp3
+	}
+	else  do {
+		
+		type RecordLN ln = {RecordLN}acn
+		set stp3 = ln.stp3
+	}
+
+	if 'stp3 quit 0
+
+	new CID,DONE,FOUND
+
+	set CID=acn.cid
+	set DONE=0
+	set FOUND=0
+	
+	type ResultSet rs=Db.select("ACT,EXP,CHKHI,CHKLO,SEQ","STOP3","CID=:CID AND CHKHI NOT <:CHKNUM AND CHKLO NOT >:CHKNUM")
+
+	if rs.isEmpty() quit 0
+
+	new ACT,EXP,CHKHI,CHKLO,STPSEQ,X
+
+	while rs.next() do { quit:DONE
+
+		set ACT=rs.getCol(1)
+		set EXP=rs.getCol(2)
+		set CHKHI=rs.getCol(3)
+		set CHKLO=rs.getCol(4)
+		set STPSEQ=rs.getCol(5)
+
+		// Low check # > check #
+		if CHKLO]]CHKNUM quit
+		// disregard expired stops
+		if EXP,EXP'>JD quit
+
+		set FOUND=1
+
+		// quit if not creating OVR
+		if 'CTL set DONE=1 quit
+
+		set X=$S(ACT:"STP3",1:"STP30")
+		set OVR(CID,"OVR",X)=CHKNUM
+
+		// check if already overridden
+		if '$D(TSPV(TRNSEQ,CID,"OVR",X)) do SETLOG(%SystemDate,%UserID,CID,$G(TAMT),CHKNUM,"3",CID,CHKHI,STPSEQ,"")
+
+		if $D(OVR(CID,"OVR","STP3")),$D(OVR(CID,"OVR","STP30")) set DONE=1
+
+		}
+
+	quit FOUND
+
+
+Public STP4(RecordACN acn,TAMT,CTL)
+	/*
+	determine if an active stops exists on account CID for amount TAMT
+
+	parameters:   TAMT = transaction amount			/TYP=N/MECH=VAL/REQ
+	              CTL = override control flag		/TYP=N/MECH=VAL/REQ
+	                     0 - do not create OVR array
+	                     1 - create OVR array
+
+	return values:  0 = no active stops found for TAMT on account CID
+	                1 = at least one active stops exists for TAMT
+	*/
+
+	type public Number TRNSEQ
+	type Number stp4
+	
+	if (acn.cls = "D") do {
+		
+		type RecordDEP dep = {RecordDEP}acn
+		set stp4 = dep.stp4
+	}
+	else  do {
+		
+		type RecordLN ln = {RecordLN}acn
+		set stp4 = ln.stp4
+	}
+
+	if 'stp4 quit 0
+
+	new CID,DONE,FOUND
+
+	set CID=acn.cid
+	set DONE=0
+	set FOUND=0
+
+	type ResultSet rs=Db.select("ACT,EXP,SEQ","STOP4","AMT=:TAMT")
+
+	if rs.isEmpty() quit 0
+
+	new ACT,EXP,STPSEQ,X
+
+	while rs.next() do { quit:DONE
+
+		set ACT=rs.getCol(1)
+		set EXP=rs.getCol(2)
+		set STPSEQ=rs.getCol(3)
+
+		// disregard expired stops
+		if EXP,EXP'>%SystemDate quit
+
+		set FOUND=1
+
+		// quit if not creating OVR
+		if 'CTL set DONE=1 quit
+
+		set X=$S(ACT:"STP4",1:"STP40")
+		set OVR(CID,"OVR",X)=$$^SCARND(TAMT,0,CID)
+
+		// check if already overridden
+		if '$D(TSPV(TRNSEQ,CID,"OVR",X)) do SETLOG(%SystemDate,%UserID,CID,$G(TAMT),"","4",CID,TAMT,STPSEQ,"")
+
+		if $D(OVR(CID,"OVR","STP4")),$D(OVR(CID,"OVR","STP40")) set DONE=1
+
+		}
+
+	quit FOUND
+
+
+Public STP5(RecordACN acn,ACH,TAMT,DC,CTL)
+	/*
+	determine is an active ACH stop exists
+
+	parameters:   acn = Account				/TYP=RecordACN/REQ
+		      ACH = company ID				/TYP=N/MECH=VAL/REQ
+		     TAMT = transaction amount			/TYP=N/MECH=VAL/REQ
+	               DC = debit/credit indicator		/TYP=N/MECH=VAL/REQ
+	              CTL = override control flag		/TYP=N/MECH=VAL/REQ
+	                    0 - do not create OVR array
+	                    1 - create OVR array
+
+	return values:  0 = no active ACH stop for CID, for comapny ACH,
+	                    amount TAMT and debit/credit flag DC
+	                1 = active ACH stop exists for CID, for comapny ACH,
+	                    amount TAMT and debit/credit flag DC
+	*/
+
+	type public Number TRNSEQ
+	type Number stp5
+	
+	if (acn.cls = "D") do {
+		
+		type RecordDEP dep = {RecordDEP}acn
+		set stp5 = dep.stp5
+	}
+	else  do {
+		
+		type RecordLN ln = {RecordLN}acn
+		set stp5 = ln.stp5
+	}
+
+	if 'stp5 quit 0
+
+	new CID,DONE,FOUND
+
+	set CID=acn.cid
+	set DONE=0
+	set FOUND=0
+
+	type ResultSet rs=Db.select("ACT,EXP,SEQ","STOP5","CID=:CID AND DC=:DC AND AMT=:TAMT")
+
+	if rs.isEmpty() quit 0
+
+	new ACT,EXP,STPSEQ,X
+
+	while rs.next() do { quit:DONE
+
+		set ACT=rs.getCol(1)
+		set EXP=rs.getCol(2)
+		set STPSEQ=rs.getCol(3)
+
+		// disregard expired stops
+		if EXP,EXP'>%SystemDate quit
+
+		set FOUND=1
+
+		// quit if not creating OVR
+		if 'CTL set DONE=1 quit
+
+		set X=$S(ACT:"STP5",1:"STP50")
+		set OVR(CID,"OVR",X)=ACH
+
+		// check if already overridden
+		if '$D(TSPV(TRNSEQ,CID,"OVR",X)) do SETLOG(%SystemDate,%UserID,CID,$G(TAMT),"","5",CID,ACH,STPSEQ,"")
+
+		if $D(OVR(CID,"OVR","STP5")),$D(OVR(CID,"OVR","STP50")) set DONE=1
+
+		}
+
+	quit FOUND
+
+
+Public STP6(INST,OCID,CTL)
+	/*
+	determine if an active stop exists for account CID
+	belonging to outside institution INST (on-them stop)
+
+	parameters:  INST = institution ID			/TYP=N/MECH=VAL/REQ
+	             OCID = account number			/TYP=N/MECH=VAL/REQ
+	              CTL = override control flag		/TYP=N/MECH=VAL/REQ
+	                    0 - do not create OVR array
+	                    1 - create OVR array
+
+	return values:  0 = no active stop exists for account OCID belonging
+	                    to outside institution INST
+	                1 = active stop exists for account OCID belonging to
+	                    outside institution INST
+	*/
+
+	type public Number TRNSEQ
+	type RecordSTOP6 stop6=Db.getRecord("STOP6","INST,OCID",1)
+
+	if stop6.getMode()=0 quit 0
+
+	// disregard expired stops
+	if stop6.exp,stop6.exp'>%SystemDate quit 0
+
+	if CTL do {
+		new X
+
+		set X=$S(stop6.act:"STP2",1:"STP20")
+		set OVR("*","OVR",X)=OCID
+
+		// check if already overridden
+		if '$D(TSPV(TRNSEQ,"*","OVR",X)) do SETLOG(%SystemDate,%UserID,CID,$G(TAMT),"","6",INST,OCID,"","")
+
+		}
+
+	quit 1
+
+
+Public STP7(INST,OCID,CHK,CTL)
+	/*
+	determine if an active stop exists for a check
+	belonging to outside institution INST (on-them stop)
+
+	parameters:  INST = institution ID			/TYP=N/MECH=VAL/REQ
+	             OCID = account number			/TYP=N/MECH=VAL/REQ
+	              CHK = check number			/TYP=N/MECH=VAL/REQ
+	              CTL = override control flag		/TYP=N/MECH=VAL/REQ
+	                    0 - do not create OVR array
+	                    1 - create OVR array
+
+	return values:  0 = no active stop exists for the check CHK belonging
+	                    to account OCID from outside institution INST.
+	                1 = an active stop exists for the check CHK belonging
+	                    to account OCID from outside institution INST.
+	*/
+
+	type public Number TRNSEQ
+	set CHK=+CHK
+
+	new DONE
+
+	set DONE=0
+
+	type ResultSet rs=Db.select("ACT,EXP,OUTCHK","STOP7","INST=:INST AND OUTACC=:OCID AND OUTCHK NOT <:CHK AND OUTCHKE NOT >:CHK")
+
+	if rs.isEmpty() quit 0
+
+	new ACT,EXP,OUTCHK,X
+
+	while rs.next() do { quit:DONE
+
+		set ACT=rs.getCol(1)
+		set EXP=rs.getCol(2)
+		set OUTCHK=rs.getCol(3)
+
+		// disregard expired stops
+		if EXP,EXP'>%SystemDate quit
+
+		set DONE=1
+	
+		if CTL do {
+			set X=$S(ACT:"STP3",1:"STP30")
+			set OVR("*","OVR",X)=CHK
+	
+			// check if already overridden
+			if '$D(TSPV(TRNSEQ,"*","OVR",X)) do SETLOG(%SystemDate,%UserID,CID,$G(TAMT),CHK,"7",INST,OCID,OUTCHK,"")
+			}
+		}
+
+	quit DONE
+
+
+Public STP8(TYP,NUM,CTL)
+	/*
+	determine if an active document stop exists against
+	document NUM of document type TYP (on us)
+	
+	parameters:   TYP = document type			/TYP=N/MECH=VAL/REQ
+	              NUM = document number			/TYP=N/MECH=VAL/REQ
+	              CTL = override control flag		/TYP=N/MECH=VAL/REQ
+	                    0 - do not create OVR array
+	                    1 - create OVR array
+
+	return values:  0 = no active document stop placed against document
+	                    type TYP, document NUM
+	                1 = an active document stop exists against document
+	                    type TYP, document NUM
+	*/
+
+	type public Number TRNSEQ
+	new DONE
+
+	set DONE=0
+
+	type ResultSet rs=Db.select("ACT,EXP,SEQ","STOP8","DOCTYP=:TYP AND DOCNUM=:NUM")
+
+	if rs.isEmpty() quit 0
+
+	new ACT,EXP,STPSEQ,X
+
+	while rs.next() do { quit:DONE
+
+		set ACT=rs.getCol(1)
+		set EXP=rs.getCol(2)
+		set STPSEQ=rs.getCol(3)
+
+		// disregard expired stops
+		if EXP,EXP'>%SystemDate quit
+
+		set DONE=1
+
+		if CTL do {
+
+			set X=$S(ACT:"STP6",1:"STP60")
+			set OVR("*","OVR",X)=NUM
+
+			// check if already overridden
+			if '$D(TSPV(TRNSEQ,"*","OVR",X)) do SETLOG(%SystemDate,%UserID,CID,$G(TAMT),"","8",TYP,NUM,STPSEQ,"")
+			}
+		}
+
+	quit DONE
+
+
+Public STP9(TYP,NUM,INST,CTL)
+	/*
+	determine if an active stop placed by an outside
+	institution exists against a document (on them)
+
+	parameters:   TYP = document type			/TYP=N/MECH=VAL/REQ
+	              NUM = document number			/TYP=N/MECH=VAL/REQ
+	             INST = institution ID			/TYP=N/MECH=VAL/REQ
+	              CTL = override control flag		/TYP=N/MECH=VAL/REQ
+	                    0 - do not create OVR array
+	                    1 - create OVR array
+
+	return values:  0 = no active stop exists against the document NUM of
+	                    document type TYP from institution INST
+	                1 = an active stop exists against the document NUM of
+	                    document type TYP from institution INST
+	*/
+
+	type public Number TRNSEQ
+	type RecordSTOP9 stop9=Db.getRecord("STOP9","TYP,NUM,INST",1)
+
+	if stop9.getMode()=0 quit 0
+
+	// disregard expired stops
+	if stop9.exp,stop9.exp'>%SystemDate quit 0	
+
+	if CTL do {
+		new X
+
+		set X=$S(stop9.act:"STP6",1:"STP60")
+		set OVR("*","OVR",X)=NUM
+
+		// check is already overridden
+		if '$D(TSPV(TRNSEQ,"*","OVR",X)) do SETLOG(%SystemDate,%UserID,CID,$G(TAMT),"","9",TYP,NUM,INST,"")
+		}
+
+	quit 1
+
+
+Public STPDOC(TYP,NUM,CTL)
+	/*
+	determine if an active document stop exists against document NUM
+	of document type TYP - regardless of the institution who placed it
+
+	parameters:   TYP = document type			/TYP=N/MECH=VAL/REQ
+	              NUM = document number			/TYP=N/MECH=VAL/REQ
+	              CTL = override control flag		/TYP=N/MECH=VAL/REQ
+	                    0 - do not create OVR array
+	                    1 - create OVR array
+
+	return values:  0 = no active stops found for document NUM of
+	                    document type TYP
+	                1 = an active stop exists for document NUM of
+	                    document type TYP
+	*/
+
+	quit:$$STP8(TYP,NUM,CTL) 1		// check document stops
+
+	new DONE
+
+	set DONE=0
+
+	type ResultSet rs=Db.select("INST","STOP9","DOCTYP=:TYP AND DOCNUM=:NUM")
+
+	if rs.isEmpty() quit 0
+
+	// check outside institution stops
+	while rs.next() do { quit:DONE
+		new INST
+		set INST=rs.getCol(1)
+		set DONE=$$STP9(TYP,NUM,INST,CTL)
+		}
+
+	quit DONE
+
+
+Public STPEXP1(CID,CHKNUM,JD)
+	/*
+	see if a stop was on the check and if it has expired.
+
+	parameters:   CID = document type			/TYP=N/MECH=VAL/REQ
+	           CHKNUM = document number			/TYP=N/MECH=VAL/REQ
+	               JD = override control flag		/TYP=N/MECH=VAL/REQ
+
+
+	returns:   0 - no stop on check OR the stop on the check has expired
+	           1 - check stop has a stop on it and it has not expired
+
+	Extrinsic to be called by check action table
+	*/
+
+	new RET
+
+	do STPEXP2(CID,CHKNUM,$G(JD),0,.RET)
+
+	quit RET
+
+
+STPEXP2(CID,CHKNUM,JD,CTL,RET)
+	/*
+	see if a stop was on the check and if it has expired.
+
+	       CID     = Account Number
+	       CHKNUM  = Check Number
+	       TJD     = System Date
+	       CTL     = override control flag
+	               0 - do not create OVR array
+	               1 - create OVR array
+	       RET     = Return variable
+	               0 - no stop on check OR the stop has expired
+	               1 - check has a stop on it and it has not expired
+	*/
+
+	if $G(%LOGID) do STUB^PBSCLI("STPEXP2^STPPROC(CID,CHKNUM,JD,CTL,.RET)",,,,"%UID,TAMT","OVR") quit
+
+	type public Number TRNSEQ
+	set RET=0
+	if '$D(JD) set JD=%SystemDate
+
+	type ResultSet rs=Db.select("CHKHI,SEQ,ACT,EXP,CHKLO","STOP3","CID=:CID AND CHKHI NOT <:CHKNUM")
+
+	if rs.isEmpty() quit
+
+	new ACT,CHKHI,CHKLO,EXP,STPSEQ,X
+
+	while rs.next() do { quit:RET
+
+		set CHKHI=rs.getCol(1)
+		set STPSEQ=rs.getCol(2)
+		set ACT=rs.getCol(3)
+		set EXP=rs.getCol(4)
+		set CHKLO=rs.getCol(5)
+
+		// Low check # > check #
+		if CHKLO]]CHKNUM quit
+		// disregard expired stops
+		if EXP,(EXP'>JD) quit
+		// just find one active
+		if 'CTL set RET=1 quit
+
+		set X=$S(ACT:"STP3",1:"STP30")
+		set OVR(CID,"OVR",X)=CHKNUM
+
+		if '$D(TSPV(TRNSEQ,CID,"OVR",X)) do SETLOG(JD,%UID,CID,$G(TAMT),CHKNUM,3,CID,CHKHI,STPSEQ)
+		if $D(OVR(CID,"OVR","STP3")),$D(OVR(CID,"OVR","STP30")) set RET=1
+		}
+
+	quit
+
+
+Public STPREP
+	// call all stop reports but direct all output to one device (either
+	// the terminal or an RMS file.)
+
+	new %CLOSE,%OPEN,%NOCLOSE,%NOOPEN,DP,IO,PGM,QI,RID
+	type Number STPTYP
+	type public Number TRNSEQ
+
+	set %TAB("IO")=$$IO^SCATAB($I)
+	set %TAB("DP")=".TJD4"
+	set %READ="@@%FN,,IO,DP"
+
+	do ^UTLREAD if VFMQ="Q" set ER=1 quit 
+	do OPEN^SCAIO
+
+	new %LIBS
+
+	set %LIBS="SYSDEV"
+
+	// now get each stop type, then it's report ID and then the program
+	// name to call.
+
+	type ResultSet rs=Db.select("STPTYP","UTBLCHKSTP")
+
+	while rs.next() do {
+
+		// get RID based on STPTYP
+		set STPTYP=rs.getCol("STPTYP")
+		do GETRID^CHKSTP(STPTYP) quit:$G(ER)
+		
+		// these need to be reset each time since DQ changes them as
+		// each report is run
+		set %NOOPEN=1
+		set %NOCLOSE=1
+		set %BLK="/,"_IO_",,,,"
+
+		do DRV^URID
+
+		write $C(12),!
+
+		set ER=0 set RM=""
+		}
+
+	do CLOSE^SCAIO
+
+	quit 
+
+
+SETLOG(JD,UID,CID,TAMT,CHK,KEY1,KEY2,KEY3,KEY4,KEY5)	// Set detected stop in [STOPLOGL]
+
+	new SEQ,STPKEY
+
+	set SEQ=Db.nextVal("STOPLOGL","JD,UID")
+
+	set STPKEY=$$BLDKEY(KEY1)
+	set:$G(KEY2)'="" STPKEY=STPKEY_","_$$BLDKEY(KEY2)
+	set:$G(KEY3)'="" STPKEY=STPKEY_","_$$BLDKEY(KEY3)
+	set:$G(KEY4)'="" STPKEY=STPKEY_","_$$BLDKEY(KEY4)
+	set:$G(KEY5)'="" STPKEY=STPKEY_","_$$BLDKEY(KEY5)
+
+	type RecordSTOPLOGL stoplogl=Class.new("RecordSTOPLOGL")
+
+	set stoplogl.date=JD
+	set stoplogl.uid=UID
+	set stoplogl.seq=SEQ
+	set stoplogl.time=%CurrentTime
+	set stoplogl.stpkey=STPKEY
+	set stoplogl.cid=$G(CID)
+	set stoplogl.tamt=$G(TAMT)
+	set stoplogl.chknum=$G(CHK)	
+
+	do stoplogl.bypassSave()
+
+	quit 
+
+
+BLDKEY(KEY)	// Return the key with ""
+
+	set:KEY["," KEY=$$REPLACE^DBSFRM1(KEY,",","""_$C(44)_""")
+	set KEY=""""_KEY_""""
+
+	quit KEY
+
+
+Public INQSTP	// Prompt for account and device to call screen DEPSTP (Stop Payments Info.)
+
+	kill VFMQ,OLNTB
+
+	set %ProcessMode=2
+	set %PG=1
+	set %PAGE=1
+	set %TAB("CID")=".CID1/XPP=S %EXT=1 D ^UACN"
+	set %TAB("IO")=$$IO^SCATAB($I)
+	set %READ="@@%FN,,,CID/REQ,IO/REQ"
+	set %NOPRMT="N"
+
+	do ^UTLREAD quit:VFMQ="Q" 
+
+	set SID="DEPSTP"
+
+	do ^USID if PGM="" set ET="INVLDSCR" do ^UTLERR quit 
+
+	if IO'=$I do OPEN^SCAIO quit:$G(ER) 
+
+	do ^@PGM
+
+	if IO'=$I do CLOSE^SCAIO quit:$G(ER) 
+
+	quit 
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60778^44665^John Varga^18372"	// Signature - LTD^TIME^USER^SIZE

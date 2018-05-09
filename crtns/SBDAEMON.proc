@@ -1,0 +1,356 @@
+SBDAEMON	  /*
+ORIG: ANTONOVV - 05/07/2001
+DESC: SBN 220 and 420 Polling Server Procedure
+
+ ---- Comments --------------------------------------------------------
+
+   This procedure is designed to be run on a background as a detached process.
+ Functions @SBDMNST and @SBDMNSP call DQENTRY^SBDAEMON section, in order to
+ start and stop the daemon process. Calls to START and STOP sections directly
+ allow to start or stop the process from a script or another routine.
+   The purpose of this procedure is to pull messages from the ^SBADVMSG 
+ queue and send them to the NCR router when the connection is available. 0220
+ and 0420 messages will be put in the queue by SBN-ISO message out handler 
+ (SBNOUT routine) if message router goes down. The daemon process will try 
+ to establish a connection and resend the messages again. 
+   If no responce received from NCR the message will be resent limited number 
+ of times and then marked with a "failed" flag. User will have an ability to
+ browse through all failed messages in a report (runs separatelly). Using
+ function @SBNMOVE (calls section MOVE of this procedure) user will be able to 
+ move failed message back to the SBN advice queue to try to resend it again. 
+ 
+ --- Revision History -------------------------------------------------
+	
+	09/06/05 - SAHOOU - CR 16880
+		Replaced depricated methods and changed according to  
+		current PSL standards.
+
+	12/29/03 - CARROLLJ - CR7658
+		Added #ACCEPT prior to xecute command to correct compile
+		errors.
+
+ ----------------------------------------------------------------------
+  */
+
+LOOP	// Public. Main Loop
+
+	new CMD,HTIME,HEXPID,PROCID,PROCNM,stopflg,XKILL,vzsav
+	type public Boolean ER
+	type public String RM
+	type String TJD
+ 
+	// Constants
+	set HTIME=30	    	// Hang Interval (sec)
+	set PROCNM="SBDAEMON"
+
+	// 48909 - Need to use XKILL to kill symbol table/sys vars
+	set XKILL="kill (CMD,HTIME,HEXPID,PROCID,PROCNM,stopflg,vzsav,XKILL)"
+
+	// Update process Id
+	set HEXPID=$$DECHEX^%ZHEX($J)
+	type RecordSBNCTRL sbnctrl=Db.getRecord("SBNCTRL","PROCNM=:PROCNM",1)
+	set sbnctrl.procid=HEXPID
+	do sbnctrl.save()
+
+	// 48909 - Load system variables
+	set vzsav=$$INIT^PBSUTL 
+
+	// Run the daemon process in a loop until user issued a stop command
+	// Hang before repeating the cycle
+	set stopflg=0
+	for  quit:stopflg=1  do { quit:$G(ER)
+
+		// 48909 - Initialize system variables
+		set:$G(vzsav)="" vzsav=$$INIT^PBSUTL do VLOD^PBSUTL(vzsav)
+		type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+		if cuvar.tjd '=%SystemDate set vzsav=$$INIT^PBSUTL do VLOD^PBSUTL(vzsav)
+		do proc		// Process all messages currently queued up
+
+		// 48909 - Clean up symbol table
+		#ACCEPT DATE=12/29/03;PGM=John Carroll
+		xecute XKILL
+
+		hang HTIME 
+		}  // for
+
+	set CMD=""
+	set PROCID=""
+	if stopflg=1 do Db.update("SBNCTRL","PCMD=NULL,PROCID=NULL","PROCNM=:PROCNM")
+	quit  // LOOP
+
+proc	// Private. Daemon Process
+
+	new date,messageID,PROCNM
+	type public Boolean ER
+	type public String RM
+	type Number stopflg,dtlTmssnt,BRCD
+	type String ET,firstLine,FLDFLG,dtlFldFlg,dtlMsgtyp
+	type Date stlDate	
+
+	// Constants
+	set PROCNM="SBDAEMON"
+
+	// Stop the process if user issued a stop command
+	type RecordSBNCTRL sbnctrl=Db.getRecord("SBNCTRL","PROCNM=:PROCNM")
+	if sbnctrl.pcmd="STOP" set stopflg=1 quit
+	set date=""
+	set messageID=""
+	type DbSet ds=Db.selectDbSet("SBADVDTL")
+	while ds.next() do { quit:stopflg
+		type RecordSBADVDTL sbadvdtl=ds.getRecord("SBADVDTL")
+		set date=sbadvdtl.procdt
+		set messageID=sbadvdtl.msgid
+		set dtlFldFlg=sbadvdtl.fldflg
+		set dtlTmssnt=sbadvdtl.tmssnt
+		set dtlMsgtyp=sbadvdtl.msgtyp
+		set BRCD=sbadvdtl.brcd
+		
+		new BIT,DATE
+		new julStDt,message,MSG,MSGID,MSGTYP,MSGFLN,mid
+		new reply,sbadvmsg,sbnTmsrsnd,seq,TBL,TMSSNT
+
+		// Stop the process if user issued a stop command
+		type RecordSBNCTRL sbnctrl1=Db.getRecord("SBNCTRL","PROCNM=:PROCNM")
+		if sbnctrl1.pcmd="STOP" set stopflg=1 quit
+				
+		if dtlFldFlg=1 quit  // Skip failed messages
+		
+		// No message assosiated with details
+		set seq=1
+		if 'Db.isDefined("SBADVMSG","date,messageID,seq") set ER=1 quit
+	
+		// Build the message
+		set seq=0
+		set message=""
+		type DbSet ds1=Db.selectDbSet("SBADVMSG")
+	        while ds1.next() do {
+		       type RecordSBADVMSG sbadvmsg=ds1.getRecord("SBADVMSG")
+		       set seq=sbadvmsg.seq
+		       set message=sbadvmsg.msgid
+		       if message="" do { quit:$G(ER)
+			   type RecordSBADVMSG sbadvmsg=Db.getRecord("SBADVMSG","PROCDT=:date,MSGID=:messageID,SEQ=:seq")
+			   set message=sbadvmsg.msgtext
+			   set firstLine=message
+		           } // if
+			}   
+		
+		// Exchange the message
+		set reply=$$EXCH^SBNUTL(message)
+
+		// Catch any errors occured during exchange. Log to the SCAER
+		if $G(ER) do {
+			set ET=RM
+			do ^UTLERR 
+			set ER=0 
+			set RM="" 
+			set ET=""
+			} // if 
+
+		// The host server connection w/ the message router is down
+		if reply=-1 quit
+
+		// If no reply received or error occured message must
+		// be resent
+
+		// 46356 - Modified to act as no reply when receiving 0620
+		if $G(ER)!('reply)!($E(reply,1,4)="0620") do { quit:$G(ER)
+			// Increase Times Sent
+			set dtlTmssnt=dtlTmssnt+1
+			set sbnTmsrsnd=CUVAR.tmsrsnd
+			if dtlTmssnt'<sbnTmsrsnd set dtlFldFlg=1
+
+			// Reply message contains no data
+			if reply="" set reply=$$^MSG(4331)
+			
+			// Log message to the NSMLOG
+			do NSMLOG^PBSNSM(dtlMsgtyp,messageID,message,reply,$G(RM)) quit:$G(ER)
+
+			// Update times sent and flag in the message details
+			set TMSSNT=dtlTmssnt
+			set DATE=date
+			set MSGID=messageID
+			set FLDFLG=dtlFldFlg
+			set MSGTYP=dtlMsgtyp.extract(1,3)_1
+			do Db.update("SBADVDTL","FLDFLG=:FLDFLG,TMSSNT=:TMSSNT,MSGTYP=:MSGTYP","PROCDT=:DATE AND MSGID=:MSGID") 
+			// Update message type
+			set MSGFLN=(firstLine.extract(1,3))_1_(firstLine.extract(5,9999))
+			do Db.update("SBADVMSG","MSGTEXT=:MSGFLN","PROCDT=:DATE AND MSGID=:MSGID AND SEQ=1")
+			}  // if
+			
+		// If reply returned, logg to NSMLOG & delete from SBADVDTL
+		else  do { quit:$G(ER)
+
+			// Log message to the NSMLOG
+			do NSMLOG^PBSNSM(dtlMsgtyp,messageID,message,reply,$G(RM)) quit:$G(ER)
+
+			// Initialize variables
+			do INIT^ISO8583("ISOSBN")
+			// Convert the reply message from a string into the bit format 
+			set mid=$$BITMAP^ISO8583(message,.TBL,.BIT)	
+			set stlDate=BIT(15)  // MMDD Settlement date
+			// Update settlement date in the CUVAR
+			set julStDt=$$CUVSTLDT^SBNUTL(stlDate)
+
+			// Remove message from the advice queue
+			set MSGID=messageID
+			set DATE=date
+			do Db.delete("SBADVMSG","PROCDT=:DATE AND MSGID=:MSGID")
+			do Db.delete("SBADVDTL","PROCDT=:DATE AND MSGID=:MSGID")
+			}  // else
+		}
+	quit	// proc
+
+DQENTRY(MODE)	// Public. DATA-QWIK Entry Point
+	/*	
+	This section is designed to allow user to start and stop Daemon
+	Process from DATA-QWIK, using functions @SBDMNST and @SBDMNSP.
+	A confirmation screen will be displayed.
+
+	This section should be called from D/Q only. Scripts for starting and 
+	stopping process should use START and STOP sections directly. 
+	
+	ARGUMENTS:
+		.MODE	Process mode	TYP=N/MECH=VAL/REQ=1
+			0 - Start the pprocess
+			1 - Stop the process
+	*/
+	type public Boolean ER
+	type public String RM,VFMQ,%READ,%TAB(),%NOPRMT
+	
+	// Invalid command ~p1
+	if '(($G(MODE)=1)!($G(MODE)=0)) set ER=1 set RM=$$^MSG(1287,$G(MODE)) quit
+
+	new procnm,SBNCMD
+	set procnm="SBDAEMON"
+
+	// Set up query screen
+	set %READ="@@%FN,,,SBNCMD"
+	set %NOPRMT="N"
+	if MODE=0 set %TAB("SBNCMD")=".SBNCMD/LEN=1/DES=""Start the SBN Daemon Process?""/REQ"
+	if MODE=1 set %TAB("SBNCMD")=".SBNCMD/LEN=1/DES=""Stop the SBN Daemon Process?""/REQ"
+	do ^UTLREAD
+
+	if VFMQ="Q" do {  quit
+		// ~p1 server not started
+		if MODE=0 set ER="W" set RM=$$^MSG(1369,procnm)
+		// ~p1 server not scheduled to stop
+		if MODE=1 set ER="W" set RM=$$^MSG(1372,procnm)
+		} // if
+
+	if "Y,y,1"[$G(SBNCMD) do { quit
+		if MODE=0 do {
+			do START 
+			if ER'=0  set ER="W" quit
+			// ~p1 server started
+			else  set ER="W" set RM=$$^MSG(1363,procnm)
+			} // if 
+		if MODE=1 do {
+			do STOP 
+			if ER'=0  set ER="W" 
+			// ~p1 server scheduled to stop
+			else  set ER="W" set RM=$$^MSG(1370,procnm)
+			} // if
+		} // if
+
+	quit  // DQENTRY
+
+START	// Public. Start SBN Daemon Process
+	
+	new PROCNM,RTNAME,SBNCMD,startflg
+	type public Boolean ER
+	type public String RM
+	
+	// Constants
+	set PROCNM="SBDAEMON"
+	set RTNAME="LOOP^SBDAEMON"
+	 
+	// ~p1 server is already running
+	if $$getPid()'="" do Runtime.setErrMSG("SBNCTRL",1168,"PROCNM") quit
+ 
+	// Check if the process entry exists. For further updates.
+	type RecordSBNCTRL sbnctrl=Db.getRecord("SBNCTRL","PROCNM=:PROCNM",1)
+	set sbnctrl.pcmd=""
+	set sbnctrl.procid=""
+	do sbnctrl.save()
+		 
+	// Detach the process
+	set startflg=$$detach(RTNAME,PROCNM)
+	// ~p1 server not started
+	if 'startflg do Runtime.setErrMSG("SBNCTRL",1369,"PROCNM") quit
+	quit  // START
+
+detach(rtname,procnm)   // Private. Detach SBN Daemon Process
+
+	new x
+	type public String RM
+ 
+	// Detach the server
+	set x=$$^%ZJOB(rtname,"PRO="_procnm)
+ 
+	// Process Submitted
+	if x set RM($O(RM(""),-1)+1)=$$^MSG(6800,procnm)
+ 
+	// Process Not Submitted
+	else  set RM($O(RM(""),-1)+1)=$$^MSG(6799,procnm)
+ 
+	quit (x)  // detach
+
+getPid()	// Private. Returns current process Id if it is valid.
+
+	new pid
+	type public String PROCNM 
+	set PROCNM="SBDAEMON"
+	type RecordSBNCTRL sbnctrl=Db.getRecord("SBNCTRL","PROCNM=:PROCNM",1)
+	set pid=sbnctrl.procid
+	if pid="" quit ""
+	set pid=$$HEXDEC^%ZHEX(pid)
+	if '$$VALID^%ZPID(pid) quit ""
+	quit pid  // getPid
+
+STOP	// Public. Stop SBN Daemon Process
+
+	new CMD,PROCNM
+	type public Boolean ER
+	type public String RM
+	
+	set PROCNM="SBDAEMON"
+	set CMD="STOP"
+	
+	// Process stopped
+	if $$getPid()="" do Runtime.setErrMSG("SBNCTRL",2238) quit
+
+	type RecordSBNCTRL sbnctrl=Db.getRecord("SBNCTRL","PROCNM=:PROCNM",1)
+	set sbnctrl.pcmd=CMD
+	do sbnctrl.save()
+	quit  // STOP
+
+MOVE	// Public. Move messages back to the Advice Queue.
+	/*
+	This section designed to requeue failed message for resending.
+	The SBNMOVE function invokes this code.
+	*/
+	new MSGID,LKUP
+	type public Boolean ER
+	type public String RM,VFMQ,%TAB(),%NOPRMT,%READ
+		
+	set LKUP="[SBADVDTL]FLDFLG=1"
+	set %TAB("MSGID")="/DES=Message Id/TYP=T/LEN=40/TBL=[SBADVDTL]MSGID,PROCDT:DESC:QU LKUP"
+	set %READ="@@%FN,,,MSGID/REQ",%NOPRMT="N"
+	do ^UTLREAD 
+
+	// Failed message ~p1 has not been requeued for transmission
+	if VFMQ="Q" set ER="W" set RM=$$^MSG(4964) quit
+
+	// Change status
+	do Db.update("SBADVDTL","FLDFLG=0,TMSSNT=0","MSGID=:MSGID")
+	// Failed message ~p1 has not been requeued for transmission
+	if $G(ER) set ER="W" set RM=$$^MSG(4964) quit
+
+	// Failed message ~p1 has been requeued for transmission
+	set RM=$$^MSG(4963,MSGID)
+
+	set ER="W"
+	
+	quit  // MOVE 
+
+vSIG()	quit "60200^45257^Pat Kelly^10285"	// Signature - LTD^TIME^USER^SIZE

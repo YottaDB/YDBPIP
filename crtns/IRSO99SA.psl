@@ -1,0 +1,426 @@
+IRSO99SA		/*
+	ORIG: DHANALAKSHMI R - 08/17/2006
+	DESC: IRS Processing - Form 1099-SA Original
+
+	---- Comments --------------------------------------------------------
+			  THIS PROCEDURE IS TO BE COMPILED
+			      DO NOT RUN STANDALONE
+
+	I18N=QUIT: Excluded from I18N standards.
+	
+	---- Revision History ------------------------------------------------
+
+	07/31/07 - DHANALAKSHMI R - CR 28459
+		Modified the section BRECBLD to implement the recent changes 
+		in PO, to correct the payment amount and distribution code  
+		for distributions made using the reason code 18, 19 and 24.
+
+	05/30/07 - DHANALAKSHMI R - CR 25413
+		Added for IRS processing of Health Savings Account 
+		(Form 1099-SA Original).
+
+	*/
+
+        quit
+
+
+MTRCNTRL
+
+	// Master control
+
+	type public Number ER
+
+	do Db.delete("B1099SA")
+
+	// Build and write the "A" record
+	do ARECBLD quit:ER
+
+	// Build and write the "B" record
+	do BRECBLD quit:ER
+
+	// Build and write the "C" record
+	do CRECBLD quit:ER
+
+	// Store the TTR report totals
+	do STORETOT
+
+	quit
+	
+
+ARECBLD
+
+	// "A" record builder
+
+	type public String TAMT()
+
+	type Number AMTIND
+	type String FORMCODE
+
+	// IRS form code
+	set FORMCODE = "M"
+
+	// IRS amount type indicator
+	set AMTIND = 124
+
+	set TAMT(1).piece("|",2) = "Gross distribution"
+	set TAMT(2).piece("|",2) = "Earnings on Excess Contributions"
+	set TAMT(4).piece("|",2) = "Fair Market Value of Account on DOD"
+
+	// Write the record to tape
+	do ARECWRT
+
+	quit
+
+
+BRECBLD
+
+	// "B" record builder
+
+	type public Number AMT(), YEAR
+
+	type Number ACN, CID, CIFDODYR, DCODE, IRATYP, RPASEQ
+	type String ADDR, CITY, CNTRY, CORRTN, FORCNTY, FULLADDR, LNAME, NAME
+	type String SPECIAL, STATE, TIN, TINTYPE, ZIP
+
+	type DbSet ds = Db.selectDbSet("IRA","TAXYR=:YEAR")
+
+	while ds.next() do {
+
+		type RecordIRA ira = ds.getRecord("IRA")
+
+		set ACN = ira.acn
+		set RPASEQ = ira.rpaseq
+
+		type RecordIRATYPE iratype = Db.getRecord("IRATYPE", "ACN=:ACN,RPASEQ=:RPASEQ")
+
+		set IRATYP = iratype.iratyp
+
+		// Quit if not a HSA
+		if (IRATYP '= 18),(IRATYP '= 19)  quit
+
+		type RecordCIF cif = Db.getRecord("CIF", "ACN = :ACN")
+
+		// Account number (RPA sequence number)
+		set CID=ACN_"-"_RPASEQ
+
+		set TIN=cif.taxid
+
+		// Type of TIN
+		if (TIN?2N1"-"7N) set TINTYPE=1
+		else  if (TIN?3N1"-"2N1"-"4N) set TINTYPE=2
+		else  set TINTYPE=" "
+
+		// Corrected return indicator
+		set CORRTN=" "
+
+		set NAME = cif.nam
+		set LNAME = cif.lnm
+
+		set FULLADDR = cif.mad1_"|"_cif.mad2_"|"_cif.mad3_"|"_cif.mcity_"|"_cif.mstate_"|"_cif.mzip_"|"_cif.mcntry
+		set ADDR = FULLADDR.piece("|",1)_" "_FULLADDR.piece("|",2)_" "_FULLADDR.piece("|",3)
+
+		// Payee City
+		set CITY = FULLADDR.piece("|",4)
+
+		// Payee State
+		set STATE = FULLADDR.piece("|",5)
+
+		// Payee ZIP
+		set ZIP = FULLADDR.piece("|",6).piece("-",1)_FULLADDR.piece("|",6).piece("-",2)
+
+		// Foreign country
+		set CNTRY = FULLADDR.piece("|",7)
+
+ 		// Foreign country indicator
+		set FORCNTY = $S(FULLADDR.piece("|",7)="US":" ",1:1)
+
+		// Gross Distributions Amount
+		set AMT(1) = (ira.d1 + ira.d15) * 100
+
+		if AMT(1) do {
+
+ 			// Distribution Code
+			set DCODE = 1
+			do SPECIAL,BRECWRT,B1099SA(ACN)
+		}
+
+		// Distributions against Excess Contribution
+		set AMT(1) = (ira.d18 + ira.d19 + ira.d22 + ira.d23 + ira.d24) * 100
+
+		if AMT(1) do {
+
+ 			// Distribution Code
+			set DCODE = 2
+			set AMT(2) = ira.d22 + ira.d23
+			do SPECIAL,BRECWRT,B1099SA(ACN)
+			set AMT(2) = 0
+		}
+
+		// Disability
+		set AMT(1) = ira.d5 * 100
+
+		if AMT(1) do {
+
+ 			// Distribution Code
+			set DCODE = 3
+			do SPECIAL,BRECWRT,B1099SA(ACN)
+		}
+
+		// Prohibited Transaction
+		set AMT(1) = ira.d7 * 100
+
+		if AMT(1) do {
+
+ 			// Distribution Code
+			set DCODE = 5
+			do SPECIAL,BRECWRT,B1099SA(ACN)
+		}
+
+		if cif.dod.isNull() quit
+		else  if (ira.d6) do {
+
+			set CIFDODYR = cif.dod.year()
+
+			// B record for Beneficiary after A/C owner's Death
+			do DEATH
+		}
+	}
+	quit
+
+
+DEATH
+
+	// B record for Beneficiary after A/C owner's Death
+	type public Number ACN, AMT(), CID, CIFDODYR, DCODE, RPASEQ, YEAR
+
+	type Number CIDSAVE, FMVDOD, IRACID
+	type String ADDR, CITY, CNTRY, FORCNTY, FULLADDR, LNAME, NAME
+	type String SPECIAL, STATE, TIN, TINTYPE, ZIP
+
+	set CIDSAVE=CID
+
+	type DbSet ds1=Db.selectDbSet("IRABEN1","ACN=:ACN AND RPASEQ=:RPASEQ AND CYR=:YEAR")
+
+	while ds1.next() do {
+
+		type RecordIRABEN1 iraben1=ds1.getRecord("IRABEN1")
+
+		set AMT(1) = (iraben1.tamt + iraben1.wth + iraben1.totstwh) * 100
+
+		type RecordIRABEN iraben=Db.getRecord("IRABEN","ACN=:ACN,RPASEQ=:RPASEQ,BENSEQ=:iraben1.benseq")
+
+		// Beneficiary is a PROFILE customer and address missing in IRABEN table
+		if 'iraben.benacn.isNull(),iraben.benmad1.isNull() do {
+
+			type RecordCIF cif = Db.getRecord("CIF", "ACN = :iraben.benacn")
+
+			set FULLADDR=$$FULLADDR^RSPADD(iraben.benacn,RPASEQ)
+
+			quit:FULLADDR.isNull()
+
+			set ADDR=FULLADDR.piece("|",1)_" "_FULLADDR.piece("|",2)_" "_FULLADDR.piece("|",3)
+
+			// Beneficiary City
+			set CITY=FULLADDR.piece("|",4)
+
+			// Beneficiary State
+			set STATE=FULLADDR.piece("|",5)
+
+			// Beneficiary Zip
+			set ZIP=FULLADDR.piece("|",6).piece("-",1)_FULLADDR.piece("|",6).piece("-",2)
+
+			// Foreign country
+			set CNTRY=FULLADDR.piece("|",7)
+
+		  	// Foreign country indicator
+			set FORCNTY=$select(CNTRY="US":" ",1:1)
+
+			set TIN=cif.taxid
+			set NAME = cif.nam
+			set LNAME = cif.lnm
+		}
+
+		// Beneficiary is not a PROFILE customer
+		else  do {
+
+			set NAME=iraben.benname
+			set LNAME=iraben.benlnm
+			set TIN=iraben.bentaxid
+
+			// Set line 2 and line 3 of Beneficiary address
+			set ADDR=iraben.benmad1_" "_iraben.benmad2_" "_iraben.benmad3
+			set FULLADDR.piece("|",1)=iraben.benmad1
+			set FULLADDR.piece("|",2)=iraben.benmad2
+			set FULLADDR.piece("|",3)=iraben.benmad3
+			set CITY=iraben.bencity
+			set STATE=iraben.benstate
+			set ZIP=iraben.benzip.piece("-",1)
+			set FULLADDR.piece("|",6)=ZIP
+			set CNTRY=iraben.bencntry
+			set FORCNTY=$select(CNTRY="US":" ",1:1)
+		}	
+
+		type RecordUTBLBENREL utbenrel=Db.getRecord("UTBLBENREL","BENREL=:iraben.benrel")
+
+		// Distribution Code
+		set DCODE = 4
+		if CIFDODYR < YEAR do {
+			if (utbenrel.spi = 1) set DCODE = 1
+			else  if (utbenrel.spi '= 2) set DCODE = 6
+		}
+
+		set AMT(4) = 0
+		if (utbenrel.spi '= 1) do {
+
+			set FMVDOD = 0
+			type ResultSet rs = Db.select("CID,DBAL,DFMV","RELCIF","ACN = :ACN")
+			while rs.next() do {
+
+				set IRACID = rs.getCol("CID")
+				type RecordDEP dep = Db.getRecord("DEP","CID =:IRACID")
+				if (dep.rpaseq = RPASEQ) set FMVDOD = FMVDOD + rs.getCol("DFMV")
+			}
+
+			//Fair Market Value
+			set AMT(4) = (iraben.benpct * FMVDOD)
+		}
+
+		type RecordIRATYPE iratype1=Db.getRecord("IRATYPE","ACN=:ACN,RPASEQ=:RPASEQ", 1)
+
+		// Account number (sequence number)
+		set CID=iraben1.benseq_"-"_RPASEQ
+
+		// Type of TIN
+		if (TIN?2N1"-"7N) set TINTYPE=1
+		else  if (TIN?3N1"-"2N1"-"4N) set TINTYPE=2
+		else  set TINTYPE=" "
+
+		do SPECIAL,BRECWRT,B1099SA(iraben1.benseq)
+		set AMT(4) = 0
+	}
+
+	set CID=CIDSAVE
+	quit
+
+
+SPECIAL
+
+	// Build Special Data
+
+	type public String SPECIAL
+	type public Number DCODE
+	
+	// Special date position 544-750
+	// Blank |544
+	set SPECIAL = " "
+
+	// Distribution Code |545
+	set SPECIAL = SPECIAL_DCODE
+
+	// Blank 546|547
+	set SPECIAL = SPECIAL_"  "
+
+	// HSA Indicator |548
+	set SPECIAL = SPECIAL_1
+
+	// Blank|549|750
+	set SPECIAL = SPECIAL_"".justify(202)
+
+	quit
+
+
+B1099SA( Number ACN)
+
+	// Insert "B" Records into B1099SA File
+
+	type public Number AMT(), CID, DCODE, FAMT(), FCNT, TINTYPE
+	type public String CITY, FULLADDR, LNAME, NAME, STATE, TIN
+
+	type Number BSEQ
+	type String X
+
+	if (TINTYPE = 2) set X = LNAME
+	else  set X = NAME
+	
+	do NAMCNTRL^IRSTPMTR
+	
+	type ResultSet rs = Db.select("BSEQ","B1099SA","PDATE=:%SystemDate AND BACN=:ACN","BSEQ DESC")
+	if rs.next() set BSEQ = rs.getCol("BSEQ") + 1
+	else  set BSEQ = 1
+
+	type RecordB1099SA b1099sa = Db.getRecord("B1099SA","PDATE=:%SystemDate,BACN=:ACN,BSEQ=:BSEQ", 1)
+	
+	set b1099sa.bnamcon = X
+	set b1099sa.btintype = TINTYPE
+	set b1099sa.btin = TIN.translate(" ","-")
+	set b1099sa.bcid = CID
+	set b1099sa.bamt1 = AMT(1)/100
+	set b1099sa.bamt2 = AMT(2)/100
+	set b1099sa.bamt4 = AMT(4)/100
+	set b1099sa.bname = NAME
+	set b1099sa.baddr1 = FULLADDR.piece("|",1)
+	set b1099sa.baddr2 = FULLADDR.piece("|",2)
+	set b1099sa.baddr3 = FULLADDR.piece("|",3)
+	set b1099sa.bcity = CITY
+	set b1099sa.bstate = STATE
+	set b1099sa.bzip = FULLADDR.piece("|",6)
+	set b1099sa.bdcode = DCODE
+	set b1099sa.bhsai = 1
+
+	do b1099sa.save()
+
+	// Calculate number of records and tax form report totals
+	set FCNT = FCNT + 1
+	set FAMT(1) = FAMT(1) + (AMT(1)/100)
+	set FAMT(2) = FAMT(2) + (AMT(2)/100)
+	set FAMT(4) = FAMT(4) + (AMT(4)/100)
+
+	quit
+
+
+CRECBLD
+
+	// "C" record builder
+
+	// Write the record to tape
+	do CRECWRT
+	
+	quit
+
+
+%STOPLOD
+
+	// Stop %ZRTNLOD from this point on down
+	quit
+
+
+TRECWRT
+
+	// Dummy line reference for GT.M
+	quit
+
+
+ARECWRT
+
+	// Dummy line reference for GT.M
+	quit
+
+
+BRECWRT
+
+	// Dummy line reference for GT.M
+	quit
+
+
+CRECWRT
+
+	// Dummy line reference for GT.M
+	quit
+
+
+STORETOT
+
+	// Dummy line reference for GT.M
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60842^22015^Dhanalakshmi R^8546"	// Signature - LTD^TIME^USER^SIZE

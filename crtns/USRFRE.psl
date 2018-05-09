@@ -1,0 +1,926 @@
+USRFRE	// User Defined Frequency Utility
+        /*
+           ORIG:  Allan R. Mattson - 08/29/86
+ 
+        ---- Revision History ------------------------------------------------
+
+	07/05/07 - KinI - CR 28030
+		   Modified FILE2 section to set UPDFLG flag for other then
+		   create mode.
+
+	07/03/07 - KinI - CR 27992
+		   Modified FILE2 section to add UPDFLG flag setting in order
+		   to be able to save modifications to the regular frequency.
+
+	02/23/07 - PUTTASWH - CR25372
+	 	   Modified VPG section to incorporate the page control
+	 	   logic according to new standard. Modified DELTBL section 
+	 	   to delete the USRFRE record if in delete mode only. Also
+	 	   deleted calls to the DBSLOGIT proceedure in the FILE1,
+	 	   FILE2,TYPE2 sections.
+ 
+	01/25/06 - TITOVE - CR 19230
+		   Modified FILE2 section not to reset update mode to insert,
+		   in cases when user frequency is based on Profile frequency.
+
+	12/13/05 - TITOVE - CR 17040
+		   Major re-write as part of DBI2/DBI3 projects.
+
+        */
+        
+        quit		// Dummy quit for compiler
+        
+ 
+public NEW     //
+        do INIT(0)
+        quit
+
+ 
+public UPD     //
+        do INIT(1)
+        quit
+
+ 
+public DEL     //
+        do INIT(3)
+        quit
+
+
+INIT(Number %ProcessMode)
+
+	type Number %PAGE, %PG, FRETYP, OPT, TPG
+        type String MONNAME, OLNTB, VFMQ
+
+	catch vERROR {
+        	
+		type String ET, RM
+                
+		set ET = vERROR.type
+                
+                if ET["%GTM-" do ZE^UTLERR quit
+                
+                set ET = ET_"-"_vERROR.thrownAt
+                
+		set RM = vERROR.description
+                
+                do ^UTLERR
+		}
+
+	set OPT = %ProcessMode
+	set %PG = 0
+	set (%PAGE,TPG) = 1
+        
+	do VPG
+
+	quit
+ 
+ 
+VPG	// Page control
+
+	type public Number %PG, FRETYP
+	type public String VFMQ
+	
+	type Boolean FINISH = 0
+        
+        type RecordUSRFRE fUSRFRE
+        type RecordUSRFRER fUSRFRER()
+	
+	for  do { quit:FINISH
+        	
+        	if (%PG = 0) do VPG00(.fUSRFRE)
+        	
+        	if (%PG > 0) do VPG01(.fUSRFRE,.fUSRFRER())
+        	
+        	if "DFQ"[VFMQ do VER(.fUSRFRE,.fUSRFRER()) set FINISH = 1 quit
+        	
+        	set %PG = %PG + 1
+       
+                }
+        quit
+ 
+ 
+VPG00(RecordUSRFRE fUSRFRE)     // Set up
+
+	type public Number %PAGE, ER, FRETYP, Z
+	type public String %TAB, ET, MAXDAYS, UFRE, UTBL(,), VFMQ
+	
+	type String %READ
+
+        set %TAB("UFRE") = ".UFRE1/TBL=[USRFRE]UFRE/XPP=I '%OSAVE D PFRE^USRFRE"
+        set %READ = "@@%FN,,,UFRE/REQ"
+ 
+        // If creating a new frequency, display prompt for type (regular/irregular)
+        if (%ProcessMode = 0) do {
+
+        	set %TAB("FRETYP") = ".FRETYP1/HLP=[USRFRE]FRETYP/TBL=[STBLFRETYP]"
+
+        	set %READ = %READ_",FRETYP/REQ"
+
+        	set FRETYP = 0
+        	}
+
+        do ^UTLREAD
+ 
+        if ER do ERR quit
+        
+        if (VFMQ = "Q") quit
+ 
+	set fUSRFRE = Db.getRecord("USRFRE","UFRE = :UFRE", 1)
+	
+	do fUSRFRE.setAuditFlag(1)
+
+        if (%ProcessMode '= 0) set FRETYP = fUSRFRE.fretyp
+  
+        // Load type 2 into OLD
+        if (FRETYP = 2),%ProcessMode set (%PAGE,Z) = 0 do OLD
+ 
+        set MAXDAYS = "31|29|31|30|31|30|31|31|30|31|30|31"
+ 
+        if (%ProcessMode '= 2) do {
+        
+                lock +UTBL("FRE",UFRE):2
+                else  set ET = "RECLOC" do ERR do END
+                }
+ 
+        quit
+ 
+ 
+VPG01(RecordUSRFRE fUSRFRE,RecordUSRFRER fUSRFRER())
+
+	// Call one of the frequency screens, depending on FRETYP value
+	
+	type public Date OLD(,,)
+	type public Number %PG, %REPEAT, ER, FRETYP, SVYEAR, YEAR
+	type public String MOREP, UFRE, VFMQ
+	
+	type String SID
+
+        if FRETYP do LOAD(.fUSRFRER())
+        
+        do fUSRFRE.setAuditFlag(1)
+ 
+        if (FRETYP = 2) set MOREP = "" if %ProcessMode,(OLD("").order(-1) > YEAR) set MOREP = 1
+ 
+        set SID = $select(FRETYP=0:"USRFRE",FRETYP=2:"USRFRE2A",1:"USRFRE1")
+        
+        if (%PG > 1) set SID = "USRFRE2"
+ 
+        if FRETYP set %REPEAT = 12
+        
+        set ER = 0
+ 
+        if (SID = "USRFRE") do DRV^USID(%ProcessMode,SID,.fUSRFRE)
+        
+        else  do DRV^USID(%ProcessMode,SID,.fUSRFRE,.fUSRFRER())
+ 
+        if ER!(VFMQ = "Q")!(FRETYP '= 2) quit
+ 
+        if YEAR.get().isNull() set YEAR = SVYEAR
+        
+        set (YEAR,SVYEAR) = YEAR + 1
+        
+        quit
+ 
+ 
+PFRE    // Frequency post-processor
+
+	type public Number ER
+	type public String ET, I(), RM, X
+	
+	type Date JD
+
+        if X.isNull() quit
+        
+        set I(3) = ""
+ 
+        // Character '/' is not allowed
+        if X["/" do Runtime.setErrMSG("USRFRE",516) quit
+ 
+	// Frequency already exists
+	if Db.isDefined("USRFRE","UFRE = :X") do { quit
+
+		set ER = 1
+		type RecordSTBLER fSTBLER = Db.getRecord("STBLER","KEY = 'FREQEXST'")
+                set RM = X_" - "_fSTBLER.rm_"|22000"
+                }
+ 
+        set JD = %SystemDate.nextFreqDate(X)
+
+        if ER set ER = 0 set (ET,RM) = "" quit
+ 
+	// PROFILE frequency - cannot be a user frequency
+	type RecordSTBLER fSTBLER = Db.getRecord("STBLER","KEY = 'FREQPRO'")
+
+        set ER = 1,RM = X_" - "_fSTBLER.rm_"|22000"
+ 
+        quit
+ 
+ 
+ERR     // Log error
+
+	type public Number ER
+	type public String VFMQ
+
+        set ER = 1
+        
+        do ^UTLERR
+ 
+        set VFMQ = "Q"
+ 
+        quit
+ 
+ 
+VER(RecordUSRFRE fUSRFRE,RecordUSRFRER fUSRFRER())
+
+	type public String VFMQ
+
+        if (%ProcessMode = 2)!(%ProcessMode = 4)!(VFMQ = "Q") do END quit
+ 
+        do FILE(.fUSRFRE,.fUSRFRER())
+ 
+        quit
+ 
+ 
+FILE(RecordUSRFRE fUSRFRE,RecordUSRFRER fUSRFRER())
+
+	type public Number AF, ER, FRETYP
+	type public String ET, TMP()
+	
+	type Boolean UPDFLG = 0
+ 
+        // PROFILE frequency, no MONTHs/DAYs to file
+        if (FRETYP = 0) do FILE2(.fUSRFRE) quit
+ 
+        if (FRETYP = 1) do BUILD
+ 
+        if (FRETYP = 2) do BUILD1
+ 
+        // Delete Mode
+        if (%ProcessMode = 3) do FILE2(.fUSRFRE) quit
+ 
+        if (FRETYP = 2) do TYPE2(.fUSRFRE,.fUSRFRER()) quit
+ 
+        // Validate user input
+        set (AF,ER) = 0
+        kill ET,TMP
+ 
+	// Check user input for errors, build TMP array
+        do FILECHK(.fUSRFRER())
+ 
+        // Error, reprocess
+        if ER do RESTART(.fUSRFRE,.fUSRFRER()) quit
+ 
+	if (AF '> 0) do { quit
+
+                // Enter at least one valid date
+                set ET = "FREQAFMIN"
+                
+                do RESTART(.fUSRFRE,.fUSRFRER())
+                }
+ 
+        do FILE1(.fUSRFRE,.fUSRFRER())
+ 
+        quit
+ 
+ 
+FILE1(RecordUSRFRE fUSRFRE,RecordUSRFRER fUSRFRER())
+
+	// Delete old data, file new, log changes to LOG and LOG1 tables for FRETYP=1
+	
+	type public Boolean UPDFLG
+	type public String OLDARR(,), TMP(,), UFRE
+	
+	type String NEWARR(,)
+	type Number DAY, MONTH
+	
+	// Check to see if USRFRE table data has been updated, then delete USRFRE*
+        if (%ProcessMode = 1) do {
+        	
+        	set UPDFLG = $$COMPARE(.fUSRFRE,UFRE) 
+
+        	do DELTBL(UFRE)
+        	}
+ 
+        set (MONTH,DAY) = ""
+        for  set MONTH = TMP(MONTH).order() quit:MONTH.isNull()  do {
+        	
+                for  set DAY = TMP(MONTH,DAY).order() quit:DAY.isNull()  do {
+                	
+                        set NEWARR(MONTH,DAY) = ""
+                        
+                        type RecordUSRFRE1 usrfre1 = Db.getRecord("USRFRE1","UFRE = :UFRE,MONTH = :MONTH,DAY = :DAY", 1)
+
+                        do usrfre1.save()
+                        }
+                }
+ 
+        // Remove matching entries, to only log differences between old and new data
+        do CHK
+
+	// Log entries being deleted, before updated ones are inserted
+        set (MONTH,DAY) = ""
+        for  set MONTH = OLDARR(MONTH).order() quit:MONTH.isNull()  do {
+        	
+                for  set DAY = OLDARR(MONTH,DAY).order() quit:DAY.isNull()  do {
+
+			type RecordUSRFRE1 usrfre1 = Db.getRecord("USRFRE1","UFRE = :UFRE,MONTH = :MONTH,DAY = :DAY", 1)
+
+                        do usrfre1.setAuditFlag(1)
+                        
+                        }
+                }
+ 
+	// Log updated entries being inserted
+        set (MONTH,DAY) = ""
+        for  set MONTH = NEWARR(MONTH).order() quit:MONTH.isNull()  do {
+        	
+                for  set DAY = NEWARR(MONTH,DAY).order() quit:DAY.isNull()  do {
+
+			type RecordUSRFRE1 usrfre1 = Db.getRecord("USRFRE1","UFRE = :UFRE,MONTH = :MONTH,DAY = :DAY", 1)
+
+                        do usrfre1.setAuditFlag(1)
+                        
+                        }
+                }
+
+        do FILE2(.fUSRFRE)
+ 
+        quit
+        
+ 
+FILE2(RecordUSRFRE fUSRFRE)
+ 
+	type public Boolean UPDFLG
+	type public Number AF, FRETYP
+	type public String OLDARR(,), OLDARR2(), UFRE
+	
+	type Date DATE
+	type Number DAY, MONTH
+	
+	do fUSRFRE.setAuditFlag(1)
+
+        if (fUSRFRE.fretyp '= FRETYP) set fUSRFRE.fretyp = FRETYP
+ 
+        if AF.exists(),(fUSRFRE.af '= AF) set fUSRFRE.af = AF
+ 
+ 	if (%ProcessMode '= 0) set UPDFLG = $$COMPARE(.fUSRFRE,UFRE)
+ 	
+        if (%ProcessMode < 2) do {
+        	
+		// Update of type "Delete then Insert", need to reset mode
+		// except for Type 0 - Profile frequency
+		if (%ProcessMode = 1),FRETYP do fUSRFRE.setMode(0)
+
+		// Only save USRFRE record if it actually changed
+		if (%ProcessMode = 0)!((%ProcessMode = 1)&(UPDFLG)) do fUSRFRE.save()
+
+        	// Always log USRFRE entry for inserts
+        	       	
+        	// For updates, only log USRFRE entry if anything has changed
+        	}
+        
+        // Proceed further only for Deletes
+        if (%ProcessMode '= 3) do END quit
+        
+        if (FRETYP = 1) do {
+
+		// Log entries being deleted
+		set (MONTH,DAY) = ""
+                for  set MONTH = OLDARR(MONTH).order() quit:MONTH.isNull()  do {
+                        for  set DAY = OLDARR(MONTH,DAY).order() quit:DAY.isNull()  do {
+
+				type RecordUSRFRE1 usrfre1 = Db.getRecord("USRFRE1","UFRE = :UFRE,MONTH = :MONTH,DAY = :DAY", 1)
+                                
+				do usrfre1.setAuditFlag(1)
+                                
+				}
+                        }
+ 
+                }
+ 
+        if (FRETYP = 2) do {
+        	
+                // Log entries being deleted
+                set DATE = ""
+                for  set DATE = OLDARR2(DATE).order() quit:DATE.isNull()  do {
+
+			type RecordUSRFRE2 usrfre2 = Db.getRecord("USRFRE2", "UFRE = :UFRE, DATE = :DATE", 1)
+			
+			do usrfre2.setAuditFlag(1)
+
+                        }
+ 
+                }
+ 
+              
+        // Delete URSFRE* data for this frequency
+        do DELTBL(UFRE)
+ 
+        do END
+ 
+        quit
+ 
+ 
+END     // Processing complete, display appropriate message
+
+	type public Number ER
+	type public String RM, UFRE, VFMQ
+
+        quit:ER!(%ProcessMode = 2)!(%ProcessMode = 4)
+ 
+        set UFRE = UFRE.get()
+ 
+        if (VFMQ = "Q") do {
+ 
+                // User-defined frequency ~p1 not created
+                if (%ProcessMode = 0) set RM = $$^MSG(2880,UFRE) quit
+ 
+                // User-defined frequency ~p1 not modified
+                if (%ProcessMode = 1) set RM = $$^MSG(2882,UFRE) quit
+ 
+                // User-defined frequency ~p1 not deleted
+                set RM = $$^MSG(2881,UFRE)
+                }
+        else  do {
+ 
+                // User-defined frequency ~p1 created
+                if (%ProcessMode = 0) set RM = $$^MSG(2877,UFRE) quit
+ 
+                // User-defined frequency ~p1 modified
+                if (%ProcessMode = 1) set RM = $$^MSG(2879,UFRE) quit
+ 
+                // User-defined frequency ~p1 deleted
+                set RM = $$^MSG(2878,UFRE)
+                }
+ 
+        set ER = "W"
+ 
+        quit
+ 
+ 
+FILECHK(RecordUSRFRER fUSRFRER())	// Validate all input
+
+	type public Number DAY, ER, FRETYP, MAXDAY, MAXDAYS(), MONTH
+	type public String MONNAME, TMP()
+	
+	type Number I
+	type String VAR
+
+        for MONTH = 1:1:12 do { quit:ER
+                
+                set MAXDAY = MAXDAYS.piece("|",MONTH)
+                
+                set TMP(MONTH) = ""
+                
+                set MONNAME = fUSRFRER(MONTH).monname
+ 
+                for I = 1:1:6 do { quit:ER
+                	
+                	set VAR = "DATE"_I
+                	
+                        set DAY = fUSRFRER(MONTH).@VAR quit:DAY.isNull()
+                        
+                        if (DAY = "e") set DAY = "E"
+                        
+                        if (FRETYP = 2),DAY?1"E" do FINDE
+ 
+                        if DAY?1"E" do ENDCHK quit:ER  do ADDDAY quit
+ 
+                        if (DAY < 1)!(DAY > MAXDAY) do BADDAY quit
+ 
+                        do ENDCHK quit:ER
+ 
+                        do ADDDAY
+                        }
+                }
+ 
+        quit
+ 
+ 
+ENDCHK
+
+	// Cannot specify end-of-month AND the actual last day
+
+	type public Number MAXDAY, MONTH
+	type public String DAY, TMP(,)
+
+        if (DAY = "E"),TMP(MONTH,MAXDAY).exists() do NOTBOTH quit
+ 
+        if (DAY = MAXDAY),TMP(MONTH,"E").exists() do NOTBOTH quit
+ 
+        if (MONTH = 2),((DAY > 27)!(DAY = "E")) do FEBCHK
+ 
+        quit
+ 
+ 
+FEBCHK  // Disallow choosing both FEB 28 and 29
+
+	type public Number DAY, ER, FRETYP, MAXDAY, MONTH, YEAR
+	type public String ET, TMP(,)
+
+	// February - choose E or 28 or 29
+	if (DAY = 28),TMP(MONTH,29).exists()!TMP(MONTH,"E").exists() set ER = 1,ET = "FREQBADFEB" quit
+ 
+	// February - choose E or 28 or 29
+	if (DAY = 29),TMP(MONTH,28).exists()!TMP(MONTH,"E").exists() set ER = 1,ET = "FREQBADFEB" quit
+ 
+	// February - choose E or 28 or 29
+	if (DAY = "E"),TMP(MONTH,MAXDAY-1).exists() set ER = 1,ET = "FREQBADFEB" quit
+ 
+	// Invalid date
+	if (FRETYP = 2),($$^SCAJD(MONTH_"/"_DAY_"/"_YEAR,"MM/DD/YEAR") < 0) set ER = 1,ET = "INVLDDT"
+ 
+	quit
+ 
+ 
+NOTBOTH
+
+	type public Number ER
+	type public String ET, MAXDAY, MONNAME, MONTH
+
+        set ER = 1
+
+        // <<MONNAME>> - choose E or <<MAXDAY>>
+        set ET = "FREQEITHER"
+ 
+        quit
+ 
+ 
+BADDAY
+
+	type public Number DAY, ER
+	type public String ET, MONNAME, MONTH
+
+	set ER = 1
+
+	// <<MONNAME>> <<DAY>> is not a valid date
+	set ET = "FREQINVDAT"
+ 
+	quit
+ 
+ 
+ADDDAY  // Add DAY to TMP list
+
+	type public Date OLD(,,)
+	type public Number %PG, AF, DAY, FAF, FRETYP, MONTH, YEAR
+	type public String DAT(), TMP(,)
+	
+	type Date %JD
+
+        if (FRETYP = 2) do {
+        	
+                set %JD = $$^SCAJD(MONTH_"/"_DAY_"/"_YEAR,"MM/DD/YEAR")
+                set OLD(+YEAR,+MONTH,+DAY) = %JD
+                set DAT(%JD) = ""
+                }
+ 
+        quit:TMP(MONTH,DAY).exists()
+ 
+        set TMP(MONTH,DAY) = ""
+        
+        set AF = AF + 1
+ 
+        if (FRETYP = 2),(%PG = 1) set FAF = FAF + 1
+ 
+        quit
+ 
+ 
+RESTART(RecordUSRFRE fUSRFRE,RecordUSRFRER fUSRFRER())
+
+	// Validation problems, retry
+
+	type public Number %PAGE, %PG
+	type public String VFMQ
+	
+	type Boolean FINISH = 0
+
+        do ERR
+ 
+        set (%PG,%PAGE) = 1
+ 
+        kill VFMQ
+ 
+        for  do { quit:FINISH
+        	
+                do VPG01(.fUSRFRE,.fUSRFRER())
+                
+                if "DFQ"[VFMQ do VER(.fUSRFRE,.fUSRFRER()) set FINISH = 1 quit
+                
+                set %PG = %PG + 1
+                }
+ 
+        quit
+ 
+ 
+LOAD(RecordUSRFRER fUSRFRER())
+
+	// Get all necessary data for irregular frequencies
+	
+	type public Number %PG, FRETYP, OLD(,,), PG(), SVYEAR, YEAR
+	
+	type Number DAY, I, J, MONTH, PREVMON
+	type String VAR, X
+
+	// Load names of the months
+
+        type RecordDBCTLDVFMCAL fDBCTLDV = Db.getRecord("DBCTLDVFMCAL","TYP = 'ML'")
+ 
+        // I18N=OFF
+        if fDBCTLDV.des set X = fDBCTLDV.des
+        else  set X = "January,February,March,April,May,June,July,August,September,October,November,December"
+        // I18N=ON
+ 
+	for I = 1:1:12 do {
+		
+		set fUSRFRER(I) = Db.getRecord("USRFRER", "1 = 1", 1)
+		
+		set fUSRFRER(I).monname = X.piece(",",I).justify(10)
+		}
+ 
+        if (%ProcessMode = 0) quit
+ 
+        set (MONTH,DAY) = ""
+ 
+        if (FRETYP = 2),PG(%PG).exists() do {
+        	
+                set (SVYEAR,YEAR) = PG(%PG)
+                
+                for  set MONTH = OLD(YEAR,MONTH).order() quit:MONTH.isNull()  do {
+                	
+                        for J = 1:1 set DAY = OLD(YEAR,MONTH,DAY).order() quit:DAY.isNull()  do {
+                                
+                                set VAR = "DATE"_J
+                                
+                                set fUSRFRER(+MONTH).@VAR = DAY
+				}
+                        }
+                }
+                
+        else  do {
+        	
+                type ResultSet rs = Db.select("MONTH,DAY","USRFRE1","UFRE=:UFRE","MONTH")
+                
+                set PREVMON = 0
+                
+                while rs.next() do {
+                	
+                	set MONTH = rs.getCol("MONTH")
+                	set DAY = rs.getCol("DAY")
+                	
+			if (MONTH '= PREVMON) set J = 1
+                	else  set J = J + 1
+                	
+                	set VAR = "DATE"_J
+                	
+                	set fUSRFRER(+MONTH).@VAR = DAY
+                	
+			set PREVMON = MONTH
+                	}
+                }
+ 
+        quit
+ 
+ 
+public	SPP(RecordUSRFRER fUSRFRER())     // Screens USRFRE2, USRFRE2A post-processor
+
+        // Validate user input, set up DAT array
+	type public Number %PAGE, %PG, %REPEAT, AF, FAF, ER, ST, TPG, YEAR
+	type public String OLD(,,), SV(), TMP()
+
+        set (AF,ER) = 0
+
+        kill TMP
+ 
+        if (%PG = 1) set FAF = 0
+        
+        kill OLD(YEAR)
+ 
+        do FILECHK(.fUSRFRER())
+        
+        if ER do ERR
+ 
+        set ST = (%REPEAT * %PG) - (%REPEAT - 1)
+        
+        set TPG = %PAGE
+        
+        set SV(%PG) = ""
+ 
+        quit
+ 
+ 
+TYPE2(RecordUSRFRE fUSRFRE,RecordUSRFRER fUSRFRER())
+
+	// Frequency type 2 processing. File and log type 2 data.
+
+	type public Boolean UPDFLG
+	type public Number AF, FAF, YEAR
+	type public String DAT(), ET, OLDARR2(), PG(), SV(), UFRE
+	
+	type Date D
+	type Number P, Y
+	type String NEWARR2()
+ 
+        set (D,P) = ""
+
+        set AF = FAF
+ 
+        // Check that all pages are in DAT array
+        for  set P = PG(P).order() quit:P.isNull()  if 'SV(P).exists() set Y = PG(P) do NOLD
+ 
+        if 'DAT.data() do { quit
+
+		// Enter at least one valid date
+                set ET = "FREQAFMIN"
+                
+                kill YEAR
+                
+                do RESTART(.fUSRFRE,.fUSRFRER())
+                }
+ 
+ 	// Check to see if USRFRE table data has been updated, then delete USRFRE*
+        if (%ProcessMode = 1) do {
+        	
+        	set UPDFLG = $$COMPARE(.fUSRFRE,UFRE) 
+
+        	do DELTBL(UFRE)
+        	}
+ 
+        for  set D = DAT(D).order() quit:D.isNull()  do {
+        	
+                set NEWARR2(D) = ""
+ 
+                // Set the table entries
+                type RecordUSRFRE2 usrfre2 = Db.getRecord("USRFRE2", "UFRE = :UFRE, DATE = :D", 1)
+                
+                do usrfre2.save()
+                }
+ 
+        // Remove matching entries, to only log differences between old and new data
+        do CHK1
+ 
+	// Log entries being deleted, before updated ones are inserted
+        set D = ""
+        for  set D = OLDARR2(D).order() quit:D.isNull()  do {
+        	
+                type RecordUSRFRE2 usrfre2 = Db.getRecord("USRFRE2", "UFRE = :UFRE, DATE = :D", 1)
+                
+                do usrfre2.setAuditFlag(1)
+
+                }
+ 
+        // Log new/updated entries being inserted
+        set D = ""
+        for  set D = NEWARR2(D).order() quit:D.isNull()  do {
+        	
+                type RecordUSRFRE2 usrfre2 = Db.getRecord("USRFRE2", "UFRE = :UFRE, DATE = :D", 1)
+                
+                do usrfre2.setAuditFlag(1)
+ 
+                }
+ 
+        do FILE2(.fUSRFRE)
+ 
+        quit
+ 
+ 
+OLD     // Load in frequency type 2 data
+
+	type public Date OLD(,,)
+	type public Number %PAGE, PG(), Z
+	type public String UFRE
+
+        type Date JD
+        type Number D, M, Y
+        
+        type ResultSet rs = Db.select("DATE","USRFRE2","UFRE=:UFRE","DATE ASC")
+	
+	while rs.next() do {
+		
+                set JD = rs.getCol("DATE")
+                
+                set D = JD.day()
+                
+                set M = JD.month()
+
+                set Y = JD.year()
+                
+                if (+Y '= +Z) set Z = Y set %PAGE = %PAGE + 1 set PG(%PAGE) = Y
+                
+                set OLD(+Y,+M,+D) = JD
+                }
+ 
+        quit
+ 
+ 
+NOLD    // Load OLD into DAT
+
+	type public Date OLD(,,)
+	type public Number Y
+	type public String DAT()
+	
+	type Number D, M
+
+        set (D,M) = ""
+
+        for  set M = OLD(Y,M).order() quit:M.isNull()  do {
+                for  set D = OLD(Y,M,D).order() quit:D.isNull()  set DAT(OLD(Y,M,D)) = ""
+                }
+ 
+        quit
+ 
+ 
+FINDE   // Find last DAY of MONTH
+
+	type public Number DAY, MONTH, YEAR
+
+	type Date JD
+
+        set JD = $$^SCAJD(MONTH_"/1/"_YEAR,"MM/DD/YEAR")
+
+        set DAY = JD.nextFreqDate("1MAE").day()
+ 
+        quit
+ 
+ 
+BUILD   // Build the local array for USRFRE1 file
+
+	type public String OLDARR(,), UFRE
+
+        type ResultSet rs = Db.select("MONTH,DAY","USRFRE1","UFRE=:UFRE","MONTH,DAY")
+	
+	while rs.next() set OLDARR(rs.getCol("MONTH"),rs.getCol("DAY")) = ""
+ 
+        quit
+ 
+ 
+BUILD1  // Build the local array for USRFRE2 file
+
+	type public String OLDARR2(,), UFRE
+
+        type ResultSet rs = Db.select("DATE","USRFRE2","UFRE=:UFRE","DATE ASC")
+
+	while rs.next() set OLDARR2(rs.getCol("DATE")) = ""
+ 
+        quit
+ 
+ 
+CHK     // Compare the old and new entries for USRFRE1 and delete the common ones
+
+	type public String NEWARR(,), OLDARR(,)
+
+	type Number DAY, I, J, MONTH
+
+        set (DAY,I,J,MONTH) = ""
+ 
+        for  set MONTH = OLDARR(MONTH).order() quit:MONTH.isNull()  do {
+                for  set DAY = OLDARR(MONTH,DAY).order() quit:DAY.isNull()  do {
+                        for  set I = NEWARR(I).order() quit:I.isNull()  do {
+                                for  set J = NEWARR(I,J).order() quit:J.isNull()  if (MONTH = I),(DAY = J) kill NEWARR(I,J),OLDARR(MONTH,DAY)
+                                }
+                        }
+                }
+ 
+        quit
+ 
+ 
+CHK1    // Compare the old and new entries for USRFRE2 and delete the common ones
+
+	type public String NEWARR2(,), OLDARR2(,)
+
+        type Number I, J
+
+        set (I,J) = ""
+ 
+        for  set I = OLDARR2(I).order() quit:I.isNull()  do {
+        	
+                for  set J = NEWARR2(J).order() quit:J.isNull()  if (I = J) kill OLDARR2(I),NEWARR2(J)
+		}
+
+ 
+        quit
+        
+DELTBL(String UFRE)	// Delete USRFRE* tables entries
+
+	if (%ProcessMode=3) do Db.delete("USRFRE","UFRE=:UFRE")
+
+	do Db.delete("USRFRE1","UFRE=:UFRE")
+
+	do Db.delete("USRFRE2","UFRE=:UFRE")
+                
+	quit
+	
+	
+COMPARE(RecordUSRFRE fUSRFRE,
+        String UFRE)
+
+	// Check to see if USRFRE table data has been changed by this process
+	
+	type RecordUSRFRE usrold = Db.getRecord("USRFRE", "UFRE = :UFRE")
+	
+	type ResultSet rs = usrold.compare(.fUSRFRE)
+	
+	if 'rs.isEmpty() quit 1
+	
+	quit 0
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60816^52777^Irina Kin^21845"	// Signature - LTD^TIME^USER^SIZE

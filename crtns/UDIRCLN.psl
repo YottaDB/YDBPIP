@@ -1,0 +1,520 @@
+UDIRCLN	// Clean directory prior to installation
+	/*
+	ORIG: Neal Gorman - 07/27/1990
+	DESC: Clean directory prior to installation
+
+	---- Comments --------------------------------------------------------
+	Initialize a Profile directory by:
+	
+	  - remove data from all but selected tables
+	  - set CUVAR.TJD date
+	  - set QUEUEB next and last run dates
+	  
+	The approach used to to use the global names to which tables are mapped.
+	This is done to more easily manage common, system, and user tables.  If
+	we didn't use a global name map, we'd  have to list all tables and
+	remember to modify the list whenever new common, system, or user tables
+	were created.
+	
+	The section GLOBALS is still necessary after the main table deletion
+	since a number of globals remain that are used by code that has not
+	yet been converted to PSL, particularly DATA-QWIK.  Once all code is
+	in PSL and all globals mapped to tables, this section should be removed.
+	
+	This procedure will generate the temporary procedure, UDIRCLN2, which
+	will contain the code to perform the table deletions, since there is
+	currently no PSL method for dynamic deletion.  UDIRCLN2 will be generated,
+	run, then deleted.
+	  
+	LIBRARY:
+	
+		. EXEC	- Function entry point, prompts for date
+		. %EXT	- External entry point, unprompted, generally called
+			  from a script.
+	
+	---- Revision History ------------------------------------------------
+	
+	08/22/07 - PUTTASWH - CR 28718
+		   Modified the CLEAN section to create a new UTBLKILL array
+		   that will serve to define tables mapped to the UTBL global
+		   that should be killed.  Modified related processing in the
+		   CLEAN section not to save tables defined in UTBLKILL.  
+		   These changes were necessary to prevent UDIRCLN from 
+		   erroring out due to the fact that LNLS2 was kept but DEP 
+		   was not, leading to a foreign key constraint violation.
+		   
+	09/11/07 - PUTTASWH - CR26720
+		   Modified EXEC section to display the entire information
+		   message when UDIRCLN is run.		    
+		   
+	12/08/06 - RussellDS - CR22719
+		   Added check for database prior to calling ^DBMAP.
+	
+	06/26/06 - RussellDS - CR21912
+		   Modified call to $$getFlrLgc^UCXDD to use the method and
+		   the modified parameter for qualifiers.
+		   
+		   Added DBSPID to tables to save.
+	
+	06/08/06 - RussellDS - CR21672
+		   Modified logic to use fastDelete if possible to avoid
+		   transaction too big errors when deleting large globals.
+	
+	05/17/06 - RussellDS - CR21382
+		   Changed generated code to use Db.delete with qualifiers
+		   instead of Db.fastDelete in order to support the /NOLOG
+		   qualifiter to avoid logging changes for tables with log
+		   flag on.
+	
+	04/19/06 - RussellDS - CR20209
+		   Removed reference to obsolete table SECPROD and MFPROD.
+	
+	03/01/06 - RussellDS - CR19065
+		   Modify to delete based on foreign keys, so as to delete
+		   children before parents.
+	
+	10/24/05 - KumarSS - CR 17905
+		   DBTBLSP table is added to the SAVE array so that 
+		   it is not deleted when a UDIRCLN is executed.
+	
+	06/27/05 - RussellDS - CR16440
+		   Add DBMAP to save list.
+		   
+		   Fix handling of DATA in %EXT section.
+	
+	04/19/05 - KumarSS - CR 15528
+		   TBX and UCS tables are added to the save list in CLEAN
+		   section.
+		   Added code to rebuild the Database Schema Mab table after 
+		   rebuilding the Indexes in the CLEAN section.
+		   Modified where clause, in CLEAN section, of Db.selectDbSet 
+		   method that selects the data from DBTBL1 table, to include 
+		   the record with non-empty values in GLOBAL field. 
+	
+	10/21/04 - RussellDS - CR12671
+		   Converted to PSL.
+	*/
+
+	// I18N=QUIT
+	quit			// No entry from top
+	
+
+public EXEC	// Entry line tag
+
+	type Date CUVARTJD
+	type String %READ, %TAB(), HDG1, HDG2, HDG3, HDG4, HDG5, VFMQ, X
+	
+	set HDG1 = "By running this routine, all accounts," 
+	set HDG2 = "CIFs, posting files, etc... will be   "
+	set HDG3 = "deleted.  This routine should only be " 
+	set HDG4 = "run when cleaning out a directory for "
+	set HDG5 = "a data conversion or a test directory."
+
+	set %TAB("CUVARTJD") = ".JD1"
+	set %READ = "@HDG1/CEN,@HDG2/CEN,@HDG3/CEN,@HDG4/CEN,@HDG5/CEN,,CUVARTJD/REQ"	
+	
+	do ^UTLREAD quit:VFMQ = "Q"
+	
+	write !!
+	read "Are you sure you want to run UDIRCLN?  No=> ", X
+	
+	set X = X.upperCase()
+	
+	if X = "Y" ! (X = "YES") do {
+		
+		write !!
+		
+		do CLEAN(CUVARTJD)
+	}
+	else  write !!, "Not run",!
+	
+	quit
+
+
+public %EXT(String DATE,	// Date (Julian or non-Julian)
+     	    String MASK)	// Date mask if DATE is not Julian	/NOREQ
+     	    
+	/*
+	External line tag used to execute directory clean prior to 
+	installations.  This will be used during conversions.  Typically,
+	VMS command files or UNIX scripts are written to execute the 
+	conversion process.
+	*/
+
+	type Date CUVARTJD
+	
+	if DATE?1.5N set CUVARTJD = {Date}DATE
+	else  set CUVARTJD = DATE.toDate(MASK.get())
+	
+	if CUVARTJD.isNull() quit
+	
+	do CLEAN(CUVARTJD)
+	
+	quit
+
+
+CLEAN(Date CUVARTJD)	// Date to set CUVAR.TJD to
+
+	type Boolean %MCP, ER
+	type Number COUNT, N
+	type String %DB, delorder(,), FID, pslcode(), SAVE(), TAB, TBLLST(,), UTBLKILL()	
+
+	use 0
+	
+	write !, "Delete data from extraneous tables to initialize directory.", !!
+	
+	/*
+	Save will contain list of tables mapped to the specified globals
+	to leave alone.  All other will have all data deleted.
+	
+	Note that % and I18N globals will be saved.  See section below that
+	does the deletions.
+	*/
+	
+	set SAVE("CHKDEV") = ""
+	set SAVE("CNVTBL") = ""
+	set SAVE("CNVTBLC") = ""
+	set SAVE("CRADEN") = ""
+	set SAVE("CRCD") = ""
+	set SAVE("CTBL") = ""
+	set SAVE("CUVAR") = ""
+	set SAVE("DBCTL") = ""
+	set SAVE("DBINDX") = ""
+	set SAVE("DBMAP") = ""
+	set SAVE("DBSPID") = ""
+	set SAVE("dbtbl") = ""
+	set SAVE("DBTBL") = ""
+	set SAVE("DBTBLSP") = ""
+	set SAVE("DDP") = ""
+	set SAVE("GLAD") = ""
+	set SAVE("EFTFEE") = ""
+	set SAVE("ELFELE") = ""
+	set SAVE("ELFLINK") = ""
+	set SAVE("ELFMAP") = ""
+	set SAVE("ELFMLI") = ""
+	set SAVE("FSCTL") = ""
+	set SAVE("GLCTL") = ""
+	set SAVE("OBJECT") = ""
+	set SAVE("OBJSCRIP") = ""
+	set SAVE("QUEUE") = ""
+	set SAVE("SCATBL") = ""
+	set SAVE("SCALIB") = ""
+	set SAVE("SCAU") = ""
+	set SAVE("SQL") = ""
+	set SAVE("STBL") = ""
+	set SAVE("TBXFIX") = ""
+	set SAVE("TBXINST") = ""
+	set SAVE("TBXLOAD") = ""
+	set SAVE("TBXLOG") = ""
+	set SAVE("TBXLOGX") = ""
+	set SAVE("TBXREJ") = ""
+	set SAVE("TRN") = ""
+	set SAVE("UCSSEC") = ""
+	set SAVE("UTBL") = ""
+	set SAVE("UTBLCTL") = ""
+	set SAVE("UTBLDFTC") = ""
+	set SAVE("UTBLDFTD") = ""
+	set SAVE("UTBLDFTL") = ""
+	set SAVE("XDBREF") = ""
+	
+	// Tables mapped to ^UTBL that need to be deleted
+	set UTBLKILL("LNLS1") = ""
+	set UTBLKILL("LNLS2") = ""
+	set UTBLKILL("LNLS3") = ""
+	set UTBLKILL("SFUPD") = ""
+	
+	// Build UDIRCLN2
+	
+	write !!,"Will build routine UDIRCLN2 to delete data from tables.  This routine will"
+	write !,"handle 100 tables at a time, to avoid generating a routine that gets to large."
+	write !!,"Order of deletion ensures that foreign key relationships are respected, so"
+	write !,"that tables that are children get deleted before parents.",!
+	
+	set (COUNT, ER) = 0
+	set TAB = $C(9)
+	
+	do getOrder(.TBLLST(,))
+
+	type ResultSet rs = Db.select("FID", "DBTBL1")
+	
+	// Add all tables not involved in foreign key relationships
+	while rs.next() if 'TBLLST(rs.getCol("FID")).exists() set TBLLST(rs.getCol("FID")) = 0
+	
+	// Build delete order list
+	set FID = ""
+	for  set FID = TBLLST(FID).order() quit:FID.isNull()  set delorder(TBLLST(FID), FID) = ""
+	
+	set (FID, N) = ""
+	for  set N = delorder(N).order() quit:N.isNull()  do { quit:ER
+		for  set FID = delorder(N, FID).order() quit:FID.isNull()  do { quit:ER
+			
+			// Every 100 tables, compile and execute UDIRCLN2, then
+			// start buidling the next one
+			if (COUNT # 100 = 0) do { quit:ER
+			
+				if COUNT > 0 set ER = $$RUNDELET(.pslcode()) quit:ER
+			
+				write !,"Generating UDIRCLN2 ("_COUNT_") ..."
+			
+				do addcode(0,"UDIRCLN2"_TAB_"// UDIRCLN Table Deletion Code Compiled Program")
+				do addcode(1,"// Compiled:  "_%CurrentDate.toString())
+				do addcode(0,"")
+				do addcode(1,"// THIS IS A COMPILED ROUTINE.  Compiled by procedure UDIRCLN")
+				do addcode(0,"")
+				do addcode(1,"// Start count at "_COUNT)
+				do addcode(0,"")
+			}
+		
+			type RecordDBTBL1 dbtbl1 = Db.getRecord("DBTBL1", "%LIBS='SYSDEV',FID=:FID", 1)
+			
+			quit:(dbtbl1.getMode() = 0)
+		
+			type String global = dbtbl1.global
+			
+			// Leave table where global is null, mapped to Z* or z* globals, or is dummy table
+			quit:global.isNull()
+			quit:global.isLike("Z%")
+			quit:global.isLike("z%")
+			quit:(dbtbl1.filetyp = 5)
+					
+			// Delete SFUPD even though UTBL global
+			if (SAVE(global).exists() ! (global.extract(1) = "%") ! global.isLike("I18N%")) &  ('UTBLKILL(FID).exists()) do {
+				
+				do addcode(1,"write """_dbtbl1.fid_""", ?15, ""Saved"", !")
+			}
+		
+			else  do {
+				
+				type PSLTable tbldes = PSL.getPSLTable(dbtbl1.fid, 1)
+				
+				// See if OK to use fastDelete
+				if tbldes.getFilerLogic("DELETE", "/NOJOURNAL/NOTRIGAFT/NOTRIGBEF").isNull() do {
+
+					do addcode(1,"do Db.fastDelete("""_dbtbl1.fid_""")")
+				}
+				else  do addcode(1,"do Db.delete("""_dbtbl1.fid_""", """", ""/NOJOURNAL/NOLOG/NOTRIGAFT/NOTRIGBEF/NOINDEX/NOVALFK"")")
+				do addcode(1,"write """_dbtbl1.fid_""", ?15, ""Deleted"", !")
+			}
+		
+			set COUNT = COUNT + 1
+		}
+	}
+
+	quit:ER
+	
+	// Run final set, if there are any
+	if pslcode.data() set ER = $$RUNDELET(.pslcode()) quit:ER
+	
+	write !!,"Done with UDIRCLN2 ... Deleting it.",!!
+	do DEL^%ZRTNDEL("UDIRCLN2")
+	
+	do GLOBALS(.SAVE())
+
+	write !!,"Set control level of system balance file.", !
+	
+	type RecordCUVAR cuvar = Db.getRecord("CUVAR")
+	
+	set cuvar.tjd = CUVARTJD
+	set %MCP = cuvar.%mcp
+	do cuvar.bypassSave()
+	
+	type RecordTTLPA ttlpa = Db.getRecord("TTLPA","PA='PA'",1)
+	
+	set ttlpa.cdate = CUVARTJD - 1
+	do ttlpa.bypassSave()
+
+	write !!,"Rebuild indexes.", !
+	do ALL^DBSINDXZ("PBS")
+	
+	set %DB = $$TRNLNM^%ZFUNC("SCAU_DB")
+	if %DB.isNull() set %DB = "GTM"
+	if (%DB '= "GTM") do {
+	
+		write !!,"Rebuild Database Schema Map.", !
+		do ALL^DBMAP(%DB)
+	}
+
+	write !!,"Initialize QUEUEB next and last run date entries.", !
+	// Define the next date for all events based on the date entered by
+	// the user when cleaning the directory
+	type DbSet queuebds = Db.selectDbSet("QUEUEB")
+	
+	while queuebds.next() do {
+		type RecordQUEUEB queueb = queuebds.getRecord("QUEUEB")
+		
+		set queueb.nrd = CUVARTJD
+		set queueb.lrd = CUVARTJD - 1
+		
+		do queueb.bypassSave()
+	}
+	
+	write !, "UDIRCLN is complete.",!
+	
+	quit
+	
+
+RUNDELET(String pslcode())	// PSL code for UDIRCLN		/MECH=REFARR:RW
+
+	/*
+	Compile and run UDIRCLN2
+	
+	RETURNS:
+		$$	Error indicator				/TYP=L
+			0 = No error
+			1 = Error
+	*/
+
+	type Boolean ER = 0
+	type String CMPERR()
+
+	do addcode(0,"")
+	do addcode(1,"quit")
+	
+	// Build compiled routine
+	do BUILDRTN^UCGM(.pslcode,"UDIRCLN2",.CMPERR)
+	if 'CMPERR("").order().isNull() do {
+		
+		type String N = ""
+
+		for  set N = CMPERR(N).order() quit:N.isNull()  write CMPERR(N),!
+	}
+	
+	if CMPERR.get() do {
+		
+		set ER = 1
+		write "Fatal error in UDIRCLN2 ... quiting",!
+	}
+	
+	else  do {
+		write !, "Running UDIRCLN2",!
+		// Accept to avoid subroutine not accessible warning
+		#ACCEPT Date=03/02/06; Pgm=RussellDs; CR=19065
+		do ^UDIRCLN2
+	}
+	
+	kill pslcode
+	
+	quit ER
+	
+	
+GLOBALS(String SAVE())	// Save list
+
+	/*
+	Delete any globals that aren't mapped to tables
+
+	This code should be removed once all globals are mapped to tables.
+	*/
+	
+	type String global="^%zz"
+	
+	write !!,"Remove globals not mapped to tables.",!!
+	
+	#ACCEPT Date=11/12/04;PGM=Dan Russell;CR=12671
+	#BYPASS
+	for  set global=$O(@global) quit:(global="")!(global]]"^Yzz")  do
+	.	write global,?15
+	.	if (global?1"^I18N".E)!$D(SAVE($E(global,2,$L(global)))) write "Saved",!
+	.	else  do
+	..		kill @global
+	..		write "Deleted",!
+	#ENDBYPASS
+	
+	quit
+	
+	
+getOrder(String TBLLST(,))
+
+	/* TBLLST(table) = delete order
+	               , parent) = "" - parent of table
+	               
+	   If TBLLST(table) entry for parent already exists and is at 
+	   same or higher delete level, OK.  Otherwise, if new delete
+	   level is higher, bump the table to new delete level and all
+	   parents in chain by same amount.
+	
+	*/
+	
+	type DbSet ds = Db.selectDbSet("DBTBL1F")
+	
+	while ds.next() do {
+		
+		type Number level
+		type String child, parent
+	
+		type RecordDBTBL1F dbtbl1f = ds.getRecord("DBTBL1F")
+		
+		set child = dbtbl1f.fid
+		set parent = dbtbl1f.tblref
+		
+		if 'TBLLST(child).exists() set TBLLST(child) = 1
+		
+		set TBLLST(child, parent) = ""		
+		set level = TBLLST(child)	// Get current level
+		set level = level + 1		// Level for parent
+		if 'TBLLST(parent).exists() set TBLLST(parent) = level
+		else  do {
+			
+			type Number curlev, diff
+			type String LOOPCHK()
+			
+			set curlev = TBLLST(parent)
+			
+			quit:(curlev >= level)
+			
+			set diff = level - curlev
+			
+			// Bump parent and any of it's parents by difference
+			do bump(.TBLLST(,), parent, diff, .LOOPCHK())
+		}
+	}
+	
+	quit
+	
+
+bump(String TBLLST(,),	// Table list
+     String table,	// Starting table to bump
+     Number diff,	// Amount to bump
+     String LOOPCHK())	// List to check for invalid looping
+     
+	/*
+	Bump this table and all parents by the delete level difference.
+	
+	LOOPCHK ensures that we don't have an invalid foreign key looping
+	relationship that turns back on itself.
+	*/
+	
+	type Number newlevel
+	type String N
+	
+	if LOOPCHK(table).exists() throw Class.new("Error","%DQ-E-RECURSIVEFORKEY,Recursive foreign key relationship - "_table)
+	set LOOPCHK(table) = ""
+     
+	set TBLLST(table) = TBLLST(table) + diff
+	set newlevel = TBLLST(table)
+	
+	set N = ""
+	for  set N = TBLLST(table, N).order() quit:N.isNull()  if TBLLST(N).get()'>newlevel do bump(.TBLLST(,), N, diff)
+	
+	quit
+
+	
+addcode(Number TABS,		// Number of tabs to add
+	String CODE)		// Code to add to array
+	
+	/*
+	Add new line to CODE array
+	*/
+
+	type Public String pslcode()
+	
+	type Number I, LINENO
+	
+	set LINENO = pslcode("").order(-1) + 1	 	// Add to end
+	
+	if TABS for I = 1:1:TABS set CODE = $C(9)_CODE
+	
+	set pslcode(LINENO) = CODE
+
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60865^30871^Hema Puttaswamy^13452"	// Signature - LTD^TIME^USER^SIZE

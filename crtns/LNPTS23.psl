@@ -1,0 +1,1079 @@
+public LNPTS23(RecordLN ln,		// Loan account			/REF:RW
+	       RecordTTX ttx,		// Original transaction		/REF:RW
+	       RecordTRN trn)		// Transaction code		/REF:R
+
+	/*
+	Payoff Controller
+
+	       ORIG:  David Caliendo (5527) - 07/23/86
+	       DESC:  Loan Payoff Controller
+
+	
+	--- Revision History -------------------------------------------------
+	
+	07/23/07 - CHHABRIS - CR27841
+		   Modified to include the Payoff VAT amount calculations for
+		   Interest, Fees and Late charges. These VAT amounts will be
+		   added up to the net payoff amount. Modified section UP1 to
+		   reduce/payoff the VAT amounts on Interest, Fees and Late
+		   charges. Also, changed the reference for the parameter 'ttx'
+		   to :RW. Added documentation for the transaction being posted
+		   before the call to ZEROBIL1 section.
+		   Modified ZEROBIL2 section to call SUB^BILFUNCS to get the
+		   acronym plus the control data for the element/piece number
+		   from the lnbil1 record. Previously GETELEMENT^BILFUNCS was
+		   called instead, which was only getting the element. This
+		   caused HISTSB to get updated with 0 for each bill element
+		   paid, instead of the actual bill element amounts paid for
+		   that bill sequence. Reversals relies on HISTSB to accurately
+		   reflect the changes to the bills, so it can restore the bill
+		   amounts. B/c they were incorrect, reversal of payoffs were
+		   previously not restoring bills to their original state.
+		   Modified to pass trn object to the UP1 section.
+		   Modified ADJ section to set TCMT variable and pass it to
+		   LNTRB and not to set the TSO variable to SGAA as the system
+		   will not reverse the transaction if ttx.tso contains SGAA.
+		   Modified to refer %ACR instead of ln.acr to calculate ACRREM.
+
+	05/07/07 - GIRIDHAL - CR 26692
+		   Modified section LNFEE to pass in SECONDARY flag for fees
+		   assessed at Payoff.
+
+	04/02/07 - GIRIDHAL - CR 26385
+		   The LNFEE section of LNPTS23.PROC has been  modified to pass 
+		   the result of calling $$FEEINC^LNFEEU, instead of trn.acn, 
+		   as the CID parameter to POST^LNTRB for posting the offset to 
+		   the transaction that takes unamortized deferred fees 
+		   into income at payoff.
+		   
+	01/05/07 - KUMARB - CR24680
+		   Modified section UP1 to update the principal and interest
+		   amounts on loans with Segments Allowed (LN.SEGMENTS)
+		   selected by calling PAYBAL^LNSEG and PAYACR^LNSEG 
+		   respectively.
+
+	11/30/06 - KELLYP - CR 24328
+		   Moved the setting of ln.bal to the UP1 section.  This fixes
+		   a problem introduced by CR 24220 below where ln.balint was 
+		   not being reduced to zero after a payoff because ln.bal 
+		   still had a value when LNPTS was called by the EXIT section.
+
+	11/21/06 - KELLYP - CR 24220
+		   Modified top-level to move the setting of ln.bal after the
+		   call to UP1.  This prevents a problem where the ending 
+		   balance in HIST for loans with rebates was not updated
+		   correctly and showed a negative value after the rebate
+		   transaction was applied.
+
+	11/03/06 - KELLYP - CR 23908
+		   Modified LNFEE section to pass TSO instead of ttx.tso to 
+		   POST^LNTRB to correct a problem where the fee type wasn't
+		   included in the TSO field of the deferred fee transaction
+		   which prevented the unamortized amount from being taken
+		   into income at payoff.  Modified same section to post those
+		   transactions as secondary transactions since they're being
+		   generated as a result of the payoff, and also so they can
+		   be automatically reversed if the payoff is reversed.
+	
+	10/13/06 - SmithCD - CR 23395
+		   . Replaced ttx.tso with TSO in call to POST^LNTRB for 
+		     miscellaneous payoff transaction in MISC section to match 
+		     p01. The missing "FEETYP:EPPEN" in the execution of the 
+		     transaction causes the creation of an LNFEE record with 
+		     FEETYP="*" instead of FEETYP="EPPEN".
+		   . Modified to pass new SECONDARY parameter to POST^LNTRB
+		     calls.
+		   . Modified call to PFLG in UP1 section to pass the ttx 
+		     parameter, and removed call to HSEQ^LNPTSU (not needed) 
+		     to prevent an undefined error.
+		   . Modified IDGP^LNPTS4 call to pass required ln parameter.
+	
+	  09/25/06 - SANTHUMS - 23160	
+	  	     . Declared a new ttx array ttxreb() and passed this 
+	  	       array to LNPTS20 procedure and UP1 sections.
+	  	     . Modified UP1 section to post the rebate transaction(s) 
+	  	       to the loan.	
+
+	  08/31/06 - KELLYP - CR 22862
+	  	     Modified ZEROFEE section to prevent UNDEFINED error on
+	  	     FEETYP variable.
+	
+	  07/31/06 - KELLYP - CR 22048
+	  	     Modified to eliminate PRECEDENCE warnings.
+	
+	  05/31/06 - SmithCD - CR 19732
+		     Moved setting of "SGAA" into TSO to the top of the ADJ 
+		     section (previously was getting into the offsetting G/L
+		     transaction, but not the adjustment transaction itself - 
+		     causing a "Account Closed" error on payoff reversal / 
+		     error correct).
+	
+	  05/25/06 - GIRIDHAL - CR 21297
+	  	     Removed references to SPLTDY.
+	  	     
+	  03/09/06 - KELLYP - CR 19958
+		     Modified EXIT section to remove the third parameter from
+		     the call to REMOVE^PROCEFT.
+
+	  02/17/06 - KELLYP - CR 19579
+	  	     Modified all calls to POST^LNTRB to pass the correct
+	  	     account number; in some cases CID was used instead of
+	  	     trn.acn or ln.cid.  Added quit:ER after each call to
+	  	     POST^LNTRB and changed PRODCTL and TRN getRecord calls 
+	  	     with %CACHE references for the same.  Also modified 
+	  	     top level to set up ttx.tso properly for payoff-related
+	  	     fees prior to calling the MISC section.
+	
+	  02/04/06 - TITOVE - CR 19182
+	  	     Modified the call to UP1 section to pass TTX object.
+
+	  01/27/06 - SmithCD - CR 19343 (16890)
+		     Replaced %NOREV with "SGAA" insertion into TSO 
+		     (HIS^LNPTS1 will use SGAA to set histlst.rflg). 
+		     Performed some minor cleanup.
+	   
+	  07/11/05 - SwarnalathaP - 16503
+	  	     Modified ADJ section and added quit:ER while calling 
+	  	     POST^LNTRB since it should not allow the normal process to 
+	  	     be followed upon hitting the error and the error will be 
+	  	     reported to the user as ER hangs around without resetting.
+
+	  06/23/05 - KinI - 16414
+	  	     Modified UP1 section to replace Class.new method on DTJCL
+	  	     table since this record is created when disbursing the 
+	  	     loan and then the same attempt is made on subsequent
+	  	     transactions causing Oracle unique constraint violation.
+
+	   06/13/05 - Carol Scott - cr 15816
+	   	 *    Removed calls to POSTTRN and replaced them with calls
+	   	      to POST^LNTRB. The code was redundant.
+	  
+	   06/09/05 - KinI - 16252
+	   	      Modified LNFEE section to add the 3rd parameter to LNFEEP
+	   	      Db.getRecord method. Assess Misc Charge transaction can 
+	   	      be generated during a payoff that would create "*" fee 
+	   	      type on the loan that does not exist in loan fee plan 
+	   	      file.
+	   	      Modified top section to reset TAMT to misc charge amount
+	   	      before posting secondary Assess Misc Charge transaction.
+	   	      Otherwise it was set to the payoff amount.
+	   	      Modified EXIT section to correct the number of parameters
+	   	      sent to CNTCR^LNPTS3.
+	   	      Modified ZEROBIL1 section to replace lnbil1.bp1 master 
+	   	      field reference with direct sub-field updates and removed 
+	   	      master fields update as it is considered a special type 
+	   	      of computed per DBI standards. 
+	   	       	      
+	   05/05/05 - Carol Scott - CR 15816
+	   	 *    Added section SETFMA in order to conditionally instantiate
+	   	      the acn object if ln.fma was defined.
+	   	 *    Modified references to PCFL23 to use ln.pcfl5.
+	   	 *    Replaced some local variables that were being initialized
+	   	 *    In LNPTS23A so were undefined when they were hit.
+	   	      LNPTS23A has been obsoleted.
+	   	 *    Section UP1; Defined BP1 with object reference.
+	   	 *    Need to change every reference to TSO to ttx.tso.
+		 *    Added ADJFLG to LNFEE section to define it and added
+		      it to the parameters passed into LNPTS13.
+	   			   
+	   05/12/05 - KUMARB - CR15908
+		      Modified section PREPROC, set the value for PAYOFF
+		      which returns from LNTCP1.
+	   
+	   04/06/05 - JERUCHIMC - 14057
+	              Add ln parameter to call to LSDTJ^LNPTS1.
+
+	  -----------------------------------------------------------------------
+	*/
+	
+	type public Boolean ER
+	type public String OVR(,,)
+	type public Date CUVAR2
+	type public Number CID,ZAMT
+	
+	type Number ACRREM,VATREMACR
+
+	type RecordTTX ttxreb()
+
+	set VATREMACR = 0
+
+	//Run tran code post-processor as a pre-processor to this routine.
+	do PREPROC(.ln,.ttx) quit:ER
+
+	new CALC,FEES,FINB,OPR8R,RECOV,TAXB,TAXYEOFF,YEOFF
+
+	set OPR8R=1
+	if $E(trn.itc,1)-ln.trb set OPR8R=-1
+
+	if ln.rdt'="",(ln.rdt'=%EffectiveDate) set OVR(ln.cid,"OVR","RDTNVD")=""
+	if ln.rdt'="",('ln.rnflg) set OVR(ln.cid,"OVR","RNFNVD")=""
+
+	if 'trn.pcfl5 do PROC^LNPTS26(.ln,.ttx,.trn) quit
+
+	if CUVAR2.get().isNull() set CUVAR2=%SystemDate
+
+	set FINB=$$BOFY^SCADAT(CUVAR2,1)
+	set TAXB=$$BOTY^SCADAT(CUVAR2,1)
+
+	set YEOFF=CUVAR.YEOFF
+	set TAXYEOFF=CUVAR.TAXYEOFF
+
+	kill ZTB
+
+	new LCHG
+	set LCHG=ln.lchg
+
+	set ln.clr=$$FIELD^UTSO(ttx.tso,"CLR")
+
+	// Set restrictions for data items specified in table UTBLCNTL
+	do SETRCNTL(.ln)
+
+	if ln.relcid do RELCID(.ln) quit:ER
+
+	set EPPEN=$G(EPPEN)
+
+	// Check for capitalized insurance rebates and build TR array
+	do ^LNPTS20(.ln,.ttx,.ttxreb()) quit:ER
+
+	// Determine escrow payoff and set up TR array
+	do ^LNPTS21(.ln,.ttx) quit:ER
+
+	// Set up possible payoff accrual adjustments
+	do ^LNPTS22(.ln) quit:ER
+
+	/*
+	Calc total current payoff amount where:
+	 BAL=BALANCE - TB(P)
+	 ACR= ACCRUAL  TB(I)
+	 LCHG IS THE LATE CHARGE TB(L)
+	 ESCACR IS TOTAL ESCROW ACCRUAL   N/A
+	 ESCBAL IS TOTAL ESCROW BALANCE   N/A
+	 ESCADJ IS THE TOTAL ESCROW ACCRUAL ADJUSTMENT FOR EFD PAYOFF  N/A
+	 REBATE IS ADDON AMORT INTEREST REBATE  TB(I)
+	 TRBT IS THE TOTAL OF ALL CAP INSURANCES    TB(P)
+	 ADJ IS THE ACCRUAL ADJUSTMENT FOR THE LOAN ACCOUNT  TB(I)
+	 ZA IS THE ADDON SIMPLE INTEREST ADJUST FOR LATE PAYOFFS TB(I)
+	 EPPEN IS THE EARLY PAYOFF PEN AMOUNT  TB(M)
+	 OPCHG IS OTHER PAYOFF PEN CHARGES  TB(M)
+	 COA IS THE CHARGE-OFF BALANCE
+	 REC IS THE RECOVERY BALANCE
+	*/
+
+	// Check min/max values and make adjustments if necessary
+	do POPT^LNPTS12(.ln,.ttx,.LCHG) quit:ER
+
+	set FEES=$$FEES^LNPO2(.ln,ln.cid,,,.ttx) quit:ER
+
+	if ln.tba do {
+		type ResultSet rs=Db.select("FEETYP","LNFEE","CID=:ln.cid")
+		if 'rs.isEmpty() set OVR(ln.cid,"OVR","FEEPYOFF")=$$^SCARND(ln.tba,0,)
+		}
+
+	// Remaining accrual amount = Total accrual - Total interest billed due
+	set ACRREM = %ACR - ln.duin2
+
+	// VAT on Interest Calculation Option
+	if ln.vatintopt,ACRREM do { quit:ER
+	
+		type RecordLNBIL1 lnbil1 = Class.new("RecordLNBIL1")
+		
+		// Calculate the VAT on remaining accrual for the loan account.
+		// We are passing '20' as the 4th parameter as we just want to calculate the
+		// VAT and also process the secondary offset transactions.
+		do VATINT^PROCLNB1(.ln,.lnbil1,ACRREM,"20",%UserClass,%UserID,ln.boo,.VATREMACR,.ttx)
+		}
+
+	set CALC=ln.bal+%ACR.roundCur(ln.crcd)+LCHG+FEES-(ESCROW+REBATE+TRBT)
+	set CALC=CALC+EPPEN+OPCHG-ln.unapf-ln.coa+ln.rec+ln.vatintdue+ln.vatfeedue+ln.vatlchgdue
+	if ln.aruf set CALC=CALC-ln.udbal
+	set CALC=$$^SCARND(CALC,0,ln.cid)
+	
+	// Set PAYLKAMT locally in case INCRS is true and PAYLKAMT must be
+        // used as a negative.
+        set PAYLKAMT=ln.paylkamt
+        
+	if INCRS do {
+		set CALC=-CALC
+		if PAYLKAMT set PAYLKAMT=-PAYLKAMT
+		}
+
+	set RECOV=$$RECOV^LNPTS2(ttx.tso)
+	quit:ER
+
+	if PAYLKAMT="",ZAMT-CALC,trn.pcfl10 set OVR(ln.cid,"OVR","PAYOFF")=CALC
+
+	if (%EffectiveDate'<ln.paylkfrm&(%EffectiveDate'>ln.paylkto))!'(ZAMT-PAYLKAMT=0) do {
+		if PAYLKAMT'="",ZAMT-PAYLKAMT set OVR(ln.cid,"OVR","POLO")=$$^SCARND(PAYLKAMT,0,ln.cid)
+		if RECOV,PAYLKAMT="",ZAMT-(CALC+RECOV),(trn.pcfl10) set OVR(CID,"OVR","PAYREC")=CALC+RECOV
+		}
+
+	new TOTADJ
+	if ln.fma do SETFMA(.ln)
+	if ln.stat=1,trn.pcfl5 set OVR(CID,"OVR","LCWEB")=""
+
+	new TSO
+	if EPPEN do {
+		new EPPENMET,FEETYPE
+
+		set EPPENMET=ln.eppenmet
+
+		type RecordUTBLLNPPN utlnppn=Db.getRecord("UTBLLNPPN","METHOD=:EPPENMET")
+		set FEETYPE=utlnppn.feetyp
+
+		if FEETYPE="" set FEETYPE="EPPEN"
+		set TSO="LNFEEIN#"_FEETYPE_":"_EPPEN		
+		set TAMT=EPPEN
+		
+		do MISC(.ln,.ttx,TSO)
+		}
+
+	if OPCHG do {
+		set TSO="LNFEEIN#OPCHG:"_OPCHG
+		set TAMT=OPCHG
+		
+		do MISC(.ln,.ttx,TSO)
+		}
+
+	do LNFEE(.ln,.ttx,0)
+	quit:ER
+
+	if LCHG do {
+		do GL^LNPTSU(.ttx,LCHG*OPR8R,4)
+		do %HSEQ^LNPTSU(.ttx,"*#L#"_(LCHG*OPR8R))
+		}
+
+	if ln.unapf do {
+		do GL^LNPTSU(.ttx,-(ln.unapf*OPR8R),9)
+		do %HSEQ^LNPTSU(.ttx,"*#F#"_(-(ln.unapf*OPR8R)))
+		set ln.unapf=0
+		}
+
+	if ln.coa do GL^LNPTSU(.ttx,-(ln.coa*OPR8R),10)
+
+	if RECOV+ln.rec do GL^LNPTSU(.ttx,(RECOV+ln.rec)*OPR8R,11)
+
+	set ACR=$$^SCARND(ln.acr,0,CID)
+	set TOTADJ=ADJ
+
+	// Loans with IAM=0 - Simple Interest
+	if 'ln.iam do {
+		new LNINTADJ,X
+
+		// Find Adjusted payoff amount.
+		set LNINTADJ=(CALC-(ZAMT-RECOV))
+
+		// Post interest adjustment(Accrued and adjusted payoff amount)
+		set ln.ipl=ln.ipl+ACR+ADJ-LNINTADJ
+
+		if (YEOFF)&(%EffectiveDate<FINB)&(CUVAR2'>(FINB+YEOFF-1)) set ln.ipy=ln.ipy+ACR+ADJ-LNINTADJ
+		else  set ln.iytd=ln.iytd+ACR+ADJ-LNINTADJ
+		if (TAXYEOFF)&(%EffectiveDate<TAXB)&(CUVAR2'>(TAXB+TAXYEOFF-1)) set ln.ipty=ln.ipty+ACR+ADJ-LNINTADJ
+		else  set ln.itytd=ln.itytd+ACR+ADJ-LNINTADJ
+
+		set X=(ACR+ADJ-LNINTADJ)*OPR8R
+		do GL^LNPTSU(.ttx,X,3)
+		do %HSEQ^LNPTSU(.ttx,"*#I#"_X)
+
+		// Update adjustments with unpaid amount.
+		set TOTADJ=TOTADJ-LNINTADJ
+		set ADJ=ADJ-LNINTADJ
+
+		// Save accrual adjustment resulting from payoff adjustment
+		if LNINTADJ do {
+			new LNERC
+			set LNERC=ttx.lnerc
+			set $P(LNERC,"#",11)=LNINTADJ
+			set ttx.lnerc=LNERC
+			}
+		}
+
+	// Loans with an IAM'=0
+	if ln.iam do IAM(.ln,.ttx)
+
+	// Adjust accrual for any difference
+	if ADJ do ADJ(.ln,.ttx,ADJ) quit:ER
+
+	set ln.ppl=ln.ppl+LCHG
+
+	if (YEOFF)&(%EffectiveDate<FINB)&(CUVAR2'>(FINB+YEOFF-1)) set ln.ppy=ln.ppy+LCHG
+	else  set ln.pytd=ln.pytd+LCHG
+	if (TAXYEOFF)&(%EffectiveDate<TAXB)&(CUVAR2'>(TAXB+TAXYEOFF-1)) set ln.penpty=ln.penpty+LCHG
+	else  set ln.pentytd=ln.pentytd+LCHG
+
+	set LCHG=ln.lchg-LCHG
+
+	// Reduce BALCMP, but leave enough funds in either BAL or UDBAL
+	// for the rebate transaction to be processed.
+	new BALC
+	set BALC=ln.bal-ln.udbal
+	set ln.balcol=TRBT
+
+	if ln.aruf,ln.revf do {  quit
+		do UP1(.ln,.ttx,.ttxreb(),trn)
+		set ln.udbal=ln.udbal+BALC-TRBT
+		do GL^LNPTSU(.ttx,(BALC-TRBT)*OPR8R,5)
+		do %HSEQ^LNPTSU(.ttx,"*#U#"_((BALC-TRBT)*OPR8R))
+		set ln.poamt=ln.poamt+((BALC-TRBT)*OPR8R)
+		}
+
+	if ln.aruf do {  quit
+		do UP1(.ln,.ttx,.ttxreb(),trn)
+		set ln.bal=ln.udbal+TRBT
+		do GL^LNPTSU(.ttx,BALC*OPR8R,2)
+		do %HSEQ^LNPTSU(.ttx,"*#P#"_(BALC*OPR8R))
+		set ln.poamt=ln.poamt+(BALC*OPR8R)
+		if ln.idgp'="" do IDGP^LNPTS4(.ln,-BALC)
+		}
+
+	set BALC=ln.bal-TRBT
+	// Add-on item rebate of ~p1 leaves remaining balance of ~p2
+	do GL^LNPTSU(.ttx,BALC*OPR8R,2)
+	do %HSEQ^LNPTSU(.ttx,"*#P#"_(BALC*OPR8R))
+
+	set ln.poamt=ln.poamt+(BALC*OPR8R)
+	if 'ln.aruf,ln.revf set ln.udbal=ln.udbal+ln.bal-TRBT
+	
+	do UP1(.ln,.ttx,.ttxreb(),trn) quit:ER
+
+	quit
+
+	
+SETFMA(RecordLN ln)
+
+	type public String OVR(,,)
+	type public Number CID
+ 
+	type RecordACN acn=Db.getRecord("ACN","CID=:ln.fma")
+	if ln.fmo,acn.bal set OVR(CID,"OVR","FMB")=""
+ 
+        quit
+
+        
+UP1(RecordLN ln,		// Loan account				/REF:RW
+    RecordTTX ttx,		// Primary Transaction			/REF:RW
+    RecordTTX ttxreb(),	 	// Rebate Transaction			/REF:RW
+    RecordTRN trn)		// Transaction code			/REF:R
+
+	type public Cache %CACHE()
+	type public Boolean ER
+	type public Date CUVAR2
+	type public Number TOTADJ
+
+	type Number TAMT
+	type String N
+
+	// Pay off VAT on interest due
+	if ln.vatintdue do VATPMT^LNPTS15(.ln,.ttx,trn) quit:ER
+
+	// Pay off VAT on fee due
+	if ln.vatfeedue do VATPMT^LNPTS13(.ln,.ttx,trn) quit:ER
+
+	// Pay off VAT on late charge due
+	if ln.vatlchgdue do VATPMT^LNPTS12(.ln,.ttx,trn) quit:ER
+
+	// Spin off customer rebate transactions
+	if ttxreb(1).exists() do { quit:ER
+		type Number ND = 0
+		for  set ND=ttxreb(ND).order() quit:ND.isNull()  do POST^LNTRB(.ttxreb(ND),ln.cid,ttxreb(ND).etc,ttxreb(ND).tamt,%EffectiveDate,%UserStation,ttxreb(ND).tso,"",ln.crcd,ln.cc,"","","",1)
+		}	
+		
+	#IF ('CUVAR.NOSEGMENTS!(CUVAR.NOSEGMENTS=3))!($$SEGUSE^BTTOPTMZ("L"))
+		if ln.segments do {
+			do PAYBAL^LNSEG(.ln, .ttx, ln.bal, 1)
+			do PAYACR^LNSEG(.ln, .ttx, -(ln.acr-TOTADJ))
+			}
+	#ENDIF
+	
+	// Reset HABL2 (high account balance between zero balances)
+	if ln.bal>0 set ln.habl2=0
+	set ln.balint=0
+	
+	// BAL must be zeroed out after the rebate 
+	// ttx's but before the call to ZEROBIL1
+	set ln.bal=0
+
+	set ln.acr=-TOTADJ
+	
+	type RecordDTJCL dtjcl=Db.getRecord("DTJCL","TJD=:CUVAR2,CLS=:ln.cls,GRP=:ln.grp,TYP=:ln.type,CID=:ln.cid",1)
+	if dtjcl.getMode()=0 do dtjcl.bypassSave()
+
+	if ln.pflg do PFLG(.ln,.ttx)
+
+	// Update LNPP2.TPO field
+	if ln.ppflg do PPFLG	
+
+	if INCRS do {
+		set N=""
+		for  set N=TB(N).order() quit:N=""  do {
+			for J=1,3 set:TB(N).piece(",",J) TB(N).piece(",",J)=-TB(N).piece(",",J)
+			}
+	
+		for  set N=ZTB(N).order() quit:N=""  do {
+			for J=1,3 if ZTB(N).piece(",",J) set ZTB(N).piece(",",J)=-ZTB(N).piece(",",J)
+			}
+		}
+
+	set N=""
+	for  set N=ZTB(N).order() quit:N=""  if ZTB(N) do ZTB(.ln,.ttx,N)
+
+	set (CUPR,CUIN,CUES,UNPR,UNIN,UNES)=0
+	set ln.tdue=0
+
+	if 'ln.aruf do ZEROBIL1(.ln,.ttx) quit
+	if 'ln.udbal do ZEROBIL1(.ln,.ttx) quit
+
+	set TAMT=$S(ln.aruf&ln.revf:ln.udbal+TRBT,1:ln.udbal)
+	
+	type RecordPRODCTL prodctl=%CACHE("PRODCTL").getRecord("PRODCTL","TYPE=:ln.type")
+
+	// DR Capitalized Deficiency Tran Code
+	do POST^LNTRB(.ttx,ln.cid,prodctl.drtrcd,TAMT,%EffectiveDate,%UserStation,"","",ln.crcd,"","","","",1) quit:ER
+
+	// CR Decrease Undisb Funds Tran Code
+	do POST^LNTRB(.ttx,ln.cid,prodctl.crtrdf,TAMT,%EffectiveDate,%UserStation,"","",ln.crcd,"","","","",1) quit:ER
+
+	do ZEROBIL1(.ln,.ttx)
+
+	quit
+
+
+ZEROBIL1(RecordLN ln,	 	// Loan Object	 
+	 RecordTTX ttx)		// Original Transaction Object
+	 
+	// Zero out all bills
+
+	type Number BSEQ, OSEQ
+
+	set OSEQ=ln.oseq-1
+	set BSEQ=ln.bseq
+	
+	type RecordLNBIL1 lnbil1
+	
+	type DbSet rs=Db.selectDbSet("LNBIL1","CID=:CID AND SCHSEQ>:OSEQ")
+	while rs.next() do {
+		set lnbil1=rs.getRecord("LNBIL1")
+		set OSEQ=lnbil1.schseq
+
+		if $$IDP^LNPTS3(.lnbil1) do %HSEQ^LNPTSU(.ttx,OSEQ_"#P#"_lnbil1.cpid)
+
+		set lnbil1.casd=0
+		set lnbil1.cpid=0
+
+		do ZEROBIL2(.lnbil1,.ttx)
+		do ZEROFEE(.ttx,OSEQ)
+
+		do lnbil1.bypassSave()
+		}
+
+	do EXIT(.ln,.lnbil1)
+	
+	quit
+
+
+ZEROBIL2(RecordLNBIL1 lnbil1,RecordTTX ttx)	// Zero out all payment element records
+	/*
+	
+	Arguments:
+	. lnbil1	Bill record			/TYP=RecordLNBIL1/REQ/REF:R
+	. ttx		Original Transaction Object	/TYP=RecordTTX/REQ/REF:R
+
+	*/
+	new AMTDUE,ELEMT,PC,PR
+
+	for PC=1:1:20 do {
+
+		set ELEMT=$$SUB^BILFUNCS(PC,.lnbil1)
+		if ELEMT="" quit
+
+		set PR=$P(ELEMT,"#",1)
+		if PR="L" quit
+
+		set AMTDUE=$P(ELEMT,"#",4)
+		set $P(ELEMT,"#",4)=0
+
+		do SETELMT^BILFUNCS(.lnbil1,PC,ELEMT)
+
+		if AMTDUE do %HSEQ^LNPTSU(.ttx,OSEQ_"#"_PR_"#"_AMTDUE)
+		}
+
+	quit
+
+
+ZEROFEE(RecordTTX ttx,Number OSEQ)	// Zero out fee level of bill file
+	/*
+	
+	Arguments:
+	. ttx	Original Transaction Object	/TYP=RecordTTX/REQ/REF:R
+	. OSEQ	Scheduled sequence		/TYP=N/REQ
+
+	*/
+
+	type DbSet ds=Db.selectDbSet("LNBIL5","CID=:CID AND SCHSEQ=:OSEQ AND BRFAMT<>0")
+	while ds.next() do {
+		type RecordLNBIL5 lnbil5=ds.getRecord("LNBIL5")
+		
+		do %HSEQ^LNPTSU(.ttx,OSEQ_"#"_lnbil5.feetyp_"#"_lnbil5.brfamt)
+
+		set lnbil5.brfamt=0
+		do lnbil5.bypassSave()
+		}
+
+	quit
+
+
+EXIT(RecordLN ln,		// Loan account			/REF:RW
+     RecordLNBIL1 lnbil1)	// Bill				/REF:R
+
+	// Exit payoff processing
+	
+	type public Boolean ER
+	type public Number CID,ZAMT
+
+	do ^LNPTS(.ln)
+
+	set ZAMT=0
+
+	// Update CNTCR and full payment counters
+	do CNTCR^LNPTS3(.ln,PRETRN("DSEQ")) quit:ER
+	
+	set ln.rec=0
+	set ln.lchg=LCHG
+
+	do REMOVE^PROCEFT(CID,%EffectiveDate) quit:ER
+
+	quit 
+
+
+RELCID(RecordLN ln)		// Loan account				/REF:R
+
+	// Verify Related Account Balances
+
+	type public Boolean ER
+
+	new ACR,BAL,CID
+
+	set CID=ln.relcid
+
+	type RecordLN lnrel=Db.getRecord("LN","CID")
+
+	// Related account ~p1 has a balance of $~p2
+	set BAL=$$^SCARND(lnrel.bal,0,CID)
+	if BAL do Runtime.setErrMSG("LN",2347,"CID~BAL") quit:ER
+
+	if lnrel.acr<.01,lnrel.acr>-.01 quit
+
+	// Related account ~p1 has an accrual balance of $~p2
+	set ACR=$$^SCARND(lnrel.acr,0,CID)
+	do Runtime.setErrMSG("LN",2348,"CID~ACR") quit:ER
+
+	quit
+
+	
+ZTB(RecordLN ln,RecordTTX ttx,N)
+	/*
+	
+	Arguments:
+	. ln	Loan Object			/TYP=RecordLN/REQ/REF:R
+	. ttx	Original Transaction Object	/TYP=RecordTTX/REQ/REF:R
+	. N	Payment Element			/TYP=S/REQ
+	*/
+
+	new ELMT
+	set ELMT=N 
+	if ln.aruf,ln.revf,N="U" set ELMT="P"
+
+	if N'="M" do %HSEQ^LNPTSU(.ttx,"*#"_ELMT_"#"_(ZTB(N)*OPR8R))
+	
+	quit
+
+
+ADJ(RecordLN ln, RecordTTX ttx, Number ADJ)
+
+	/*
+	Payoff amount entered does not equal the calculated payoff amount
+ 	
+	Arguments:
+	. ln	Loan Object			/TYP=RecordLN/REQ/REF:R
+	. ttx	Original Transaction Object	/TYP=RecordTTX/REQ/REF:R
+	*/
+
+	// Adjust the loan's accrual for the difference
+
+	type public Cache %CACHE()
+
+	type public Boolean ER	
+	type public Number TOTADJ
+	
+	type Boolean DIR
+	type String ETC,TCMT,TSO
+	type Number TAMT
+
+	set TSO=""
+	
+	// Loan payoff - Adjustment
+	set TCMT = $$^MSG(6875)_" - "_$$^MSG(7832)
+
+	set DIR=$select(ADJ<0:1,1:0)
+
+	if 'ln.trb set DIR='DIR
+
+	set TAMT=ADJ
+	set TOTADJ=TOTADJ-ADJ
+
+	if DIR set TAMT=-TAMT
+	
+	type RecordPRODCTL prodctl=%CACHE("PRODCTL").getRecord("PRODCTL","TYPE=:ln.type")
+
+	if 'DIR set ETC=prodctl.dradin
+	if DIR set ETC=prodctl.cradin
+
+	do POST^LNTRB(.ttx,ln.cid,ETC,TAMT,%EffectiveDate,%UserStation,TSO,TCMT,ln.crcd,"","","","",1) quit:ER
+
+	// Post offset to interest income for the accrual adjustment. Use the
+	// cost center of the loan account.
+
+	type RecordUTBLGLSC glsc=%CACHE("UTBLGLSC").getRecord("UTBLGLSC","GLSC=:ln.glsc")
+
+	if ln.trb,'DIR set ETC="MCR"
+	else  set ETC="MDR"
+
+	do POST^LNTRB(.ttx,glsc.lgli,ETC,TAMT,%EffectiveDate,%UserStation,TSO,TCMT,ln.crcd,ln.cc,"","","",1) quit:ER
+	
+	quit
+
+	
+PFLG(RecordLN ln,		// Loan account				/REF:R
+     RecordTTX ttx)		// Transaction				/REF:R
+
+	// Set up dayend entry for payoff of sold loan
+
+	type Number IRN,PSEQ
+	
+	// Define variable IRN to be used in ^LNLS9A
+	set IRN=ln.irn/100
+
+	type ResultSet rs=Db.select("PSEQ","LNLS6","CID=:CID")
+
+	while rs.next() do {
+		
+		set PSEQ=rs.getCol("PSEQ")
+
+		// Call LNLS9A to update LNLS6 and DAYEND
+		do ^LNLS9A(.ln,.ttx)
+		}
+
+	quit 
+
+
+PPFLG	// Update Total Paid Off field for purchased loan
+
+	type public Number CID
+
+	new PL,SLCD
+
+	type RecordLNPP6 lnpp6=Db.getRecord("LNPP6","CID",1)
+	if lnpp6.getMode()=0 quit
+
+	set SLCD=lnpp6.slcd
+	set PL=lnpp6.pl
+
+	type RecordLNPP2 lnpp2=Db.getRecord("LNPP2","SLCD,PL")
+	set lnpp2.tpo=lnpp2.tpo+1
+	do lnpp2.bypassSave()
+
+	quit 
+
+
+MISC(RecordLN ln,		// Loan account			/REF:RW
+     RecordTTX ttx,		// Transaction			/REF:R
+     String TSO)		// Teller source		/REF:R
+
+	// Set up transactions for misc payoff charges
+
+	type public Cache %CACHE()
+	type public Boolean ER
+	type public Number TAMT
+
+	type String CC,CRCD,ETC
+
+	set %UserStation=ttx.tlo
+	set CRCD=ln.crcd
+	set CC=ln.cc
+
+	type RecordPRODCTL prodctl=%CACHE("PRODCTL").getRecord("PRODCTL","TYPE=:ln.type")
+	set ETC=prodctl.drtrmi
+
+	// Miscellaneous charge code missing from product type ~p1
+	if ETC.isNull() do Runtime.setErrMSG("LN",8431,ln.type) quit
+
+	do POST^LNTRB(.ttx,ln.cid,ETC,TAMT,%EffectiveDate,%UserStation,TSO,"",CRCD,,,,,1) quit:ER
+	set ETC=prodctl.crtric
+
+	// Payoff charge income code missing from product type ~p1
+	if ETC.isNull() do Runtime.setErrMSG("LN",8432,ln.type) quit
+
+	type RecordTRN trn=%CACHE("TRN").getRecord("TRN","ETC=:ETC")
+
+	do POST^LNTRB(.ttx,trn.acn,ETC,TAMT,%EffectiveDate,%UserStation,TSO,"",CRCD,CC,"","","",1) quit:ER
+
+	quit 
+
+
+IAM(RecordLN ln,		// Loan account				/REF:RW
+    RecordTTX ttx)		// Transaction				/REF:R
+
+	// Will create transactions for uncollected interest
+	
+	type public Date CUVAR2
+	type public Number ZAMT
+
+	// If the loan was never disbursed then there is no need to post
+	// interest to GL's.
+	if 'ln.cntdr quit
+	
+	type Number I
+
+	new DIFF,PAYADJ
+
+	// Find remaining uncollected interest
+	set IUNC=ln.iun-(ln.ipl-ln.extamt)
+	do GL^LNPTSU(.ttx,-IUNC*OPR8R,8)
+	
+	/*
+	   Has borrower paid (too much/not enough) interest ?
+	   E.g. does the rebate cut into what they have paid ?
+	   DIFF will be negative if REBATE is larger than IUNC.
+	*/
+	set DIFF=IUNC-REBATE
+	if '(ADJ+DIFF) set TOTADJ=0
+	set ADJ=ADJ+DIFF
+	set ln.ipl=ln.ipl+DIFF
+
+	if (YEOFF)&(%EffectiveDate<FINB)&(CUVAR2'>(FINB+YEOFF-1)) set ln.ipy=ln.ipy+DIFF
+	else  set ln.iytd=ln.iytd+DIFF
+	if (TAXYEOFF)&(%EffectiveDate<TAXB)&(CUVAR2'>(TAXB+TAXYEOFF-1)) set ln.ipty=ln.ipty+DIFF
+	else  set ln.itytd=ln.itytd+DIFF
+
+	do GL^LNPTSU(.ttx,DIFF*OPR8R,3)
+
+	// If there is accrual we need to post it to the account.
+	if %ACR do {
+		do GL^LNPTSU(.ttx,%ACR*OPR8R,3)
+		set ln.ipl=ln.ipl+%ACR
+
+		if (YEOFF)&(%EffectiveDate<FINB)&(CUVAR2'>(FINB+YEOFF-1)) set ln.ipy=ln.ipy+%ACR
+		else  set ln.iytd=ln.iytd+%ACR
+		if (TAXYEOFF)&(%EffectiveDate<TAXB)&(CUVAR2'>(TAXB+TAXYEOFF-1)) set ln.ipty=ln.ipty+%ACR
+		else  set ln.itytd=ln.itytd+%ACR
+		}
+
+	// Find the remaining amount needed to zero the loan.  This amount
+	// is the accrual adjustment due to an adjusted payoff amount.
+	set PAYADJ=ZAMT-(ln.bal-TRBT)+ESCROW
+
+	for I=3,4,5,6,8,10,11 set PAYADJ=PAYADJ-$P(ttx.tamt,"#",I)
+
+	if PAYADJ do {
+		do GL^LNPTSU(.ttx,PAYADJ*OPR8R,3)
+		set ln.ipl=ln.ipl+PAYADJ
+
+		if (YEOFF)&(%EffectiveDate<FINB)&(CUVAR2'>(FINB+YEOFF-1)) set ln.ipy=ln.ipy+PAYADJ
+		else  set ln.iytd=ln.iytd+PAYADJ
+		if (TAXYEOFF)&(%EffectiveDate<TAXB)&(CUVAR2'>(TAXB+TAXYEOFF-1)) set ln.ipty=ln.ipty+PAYADJ
+		else  set ln.itytd=ln.itytd+PAYADJ
+
+		if ln.ipl>ln.iun do {
+			if (YEOFF)&(%EffectiveDate<FINB)&(CUVAR2'>(FINB+YEOFF-1)) set ln.ipy=ln.ipy-(ln.ipl-ln.iun)
+			else  set ln.iytd=ln.iytd-(ln.ipl-ln.iun)
+			if (TAXYEOFF)&(%EffectiveDate<TAXB)&(CUVAR2'>(TAXB+TAXYEOFF-1)) set ln.ipty=ln.ipty-(ln.ipl-ln.iun)
+			else  set ln.itytd=ln.itytd-(ln.ipl-ln.iun)
+			set ln.ipl=ln.iun
+			}
+
+		set ADJ=ADJ+PAYADJ
+		}
+
+	//  Offset ACR
+	if ADJ set TOTADJ=ADJ
+
+	quit 
+
+
+SETRCNTL(RecordLN ln)		// Loan account				/REF:R
+
+	/*
+	Set restrictions for data items specified in user table CNTD
+
+	    CNCD  =  Closeout Notification Code
+	    CNTDRFLG  =  Restriction Flag to display (UTBLCNTD)
+	*/
+
+	new CNCD,CNTLLOGF,GRP,LNLOGF
+
+	set GRP=ln.grp
+
+	type DbSet rs=Db.selectDbSet("UTBLCNTL","GRP=:GRP")
+	while rs.next() do {
+		type RecordUTBLCNTL cntl=rs.getRecord("UTBLCNTL")
+
+		set CNCD=cntl.key
+		set CNTLLOGF=cntl.logf
+
+		set LNLOGF=ln.@CNCD
+
+		if (LNLOGF&CNTLLOGF)!('LNLOGF&'CNTLLOGF) do SETOVR(.cntl)
+
+		}
+
+	do SCOCHK
+
+	quit 
+
+
+SETOVR(RecordUTBLCNTL cntl)	// Set up override for closeout notification
+
+	type public String OVR(,,)
+	type public Number CID
+
+	if cntl.rflg'="" set OVR(CID,"RFLG",cntl.rflg)=""
+
+	quit 
+
+
+public	LNFEE(RecordLN ln,		// Loan account			/REF:RW
+	      RecordTTX ttx,		// Transaction			/REF:R
+	      Number CTL)		// Control indicators		/NOREQ
+	      
+	// Reduces fees billed/not due and assesses fees due at payoff
+
+	type public Cache %CACHE()
+	type public Number ADJFLG
+	type public Boolean ER
+	type public Number CID
+	
+	new DUE,FEE,FEEAMT,LNFEEIN,SEQ,ZAMT
+
+	set CTL=$G(CTL)
+	if $G(CRCD)="" set CRCD=ln.crcd
+
+	set FEEAMT=0
+	set ADJFLG=0
+
+	do IPFEES^LNPO2(.ln,1) quit:ER
+
+	// Address frequency-based fees due at payoff and fees deferred
+	type DbSet rs=Db.selectDbSet("LNFEE","CID=:CID")
+	while rs.next() do { quit:ER
+		type RecordLNFEE lnfee=rs.getRecord("LNFEE")
+		set FEE=lnfee.feetyp
+
+		type RecordLNFEEP lnfeep=Db.getRecord("LNFEEP","FEE",1)
+
+		// Assess fee if closing account and not linked and s/b assessed at payoff
+		if 'CTL.extract(1),'lnfeep.lfee,lnfeep.fpoff do CALC^LNFEEU(.ln,.ttx,CID,FEE,"",111,.FEEAMT,1)
+
+		// Outstanding fee income deferred
+		// Consider all deferred whether account is kept open or not
+		if lnfee.deftot do {
+			new AMT,AV,FSQ,TC,TSO,GACN
+
+			// Collate through deferred fee sequences
+			type DbSet rs2=Db.selectDbSet("LNFEED","CID=:CID AND FEETYP=:FEE")
+			while rs2.next() do {
+
+				type RecordLNFEED lnfeed=rs2.getRecord("LNFEED")
+				set FSQ=lnfeed.feeseq
+
+				// Calculate deferred fee outstanding
+				set AMT=lnfeed.deforg-lnfeed.amofa
+
+				// Quit if no amount outstanding
+				if AMT=0 quit 
+
+				// Find absolute value
+				set AV=$TR(AMT,"-")
+
+				set TSO="LNFEEIN#"_FEE_":"_AV_"~LNFSQ#"_FSQ
+
+				type RecordPRODCTL prodctl=%CACHE("PRODCTL").getRecord("PRODCTL","TYPE=:ln.type")
+
+				if AMT>0 set TC=prodctl.drtrdfda
+				else  set TC=prodctl.crtrdfia
+
+				// Bring deferred income to zero (secondary transaction)
+				do POST^LNTRB(.ttx,ln.cid,TC,AV,%EffectiveDate,%UserStation,TSO,"",CRCD,,,,,1) quit:ER
+
+				// Define income offset tran code
+				set TC=CUVAR.FEEICRTC
+				if TC="" set TC="MCR"
+				if AMT<0 set TC="MDR"
+				
+				type RecordTRN trn=%CACHE("TRN").getRecord("TRN","ETC=:TC")
+
+				// Call to FEEINC^LNFEEU to get the GL income account.
+				set GACN=$$FEEINC^LNFEEU(CID,FEE,ln.glsc)
+
+				// Offset transaction with update to income (secondary transaction)
+				do POST^LNTRB(.ttx,GACN,TC,AV,%EffectiveDate,%UserStation,TSO,"",CRCD,ln.cc,,,,1) quit:ER
+				}
+			}
+		}
+
+	do FEEDUE^LNFEEU(.ln,.ttx,CID,2,1101,%EffectiveDate,"","","",ttx.etc) quit:ER
+
+	// Calculate "at billing" fees based on interest and principal
+	set DUE=ln.cuin
+	set:DUE<0 DUE=0
+	set DUE=DUE+ln.unin
+	set DUE=%ACR-DUE
+	do FEEDUE^LNFEEU(.ln,.ttx,CID,3,1101,%EffectiveDate,"",DUE,"I","",.FEEAMT) quit:ER
+
+	set DUE=ln.cupr
+	set:DUE<0 DUE=0
+	set DUE=DUE+ln.unpr
+	set DUE=BALCMP-DUE
+	do FEEDUE^LNFEEU(.ln,.ttx,CID,3,1101,%EffectiveDate,"",DUE,"P","",.FEEAMT) quit:ER
+
+	set LNFEEIN=$$FIELD^UTSO(ttx.tso,"LNFEE")
+	set ZAMT=0
+
+	type ResultSet rs3=Db.select("FEETYP,FEEREM","LNFEE","CID=:CID")
+        while rs3.next() set ZAMT=ZAMT+rs3.getCol(2)
+
+	do LNFEE^LNPTS13(.ln,.ttx,0,ADJFLG)
+	
+	quit
+
+
+PREPROC(RecordLN ln,		// Loan account				/REF:R
+	RecordTTX ttx)		// Transaction				/REF:R
+
+	/*
+	Pre-processor to posting program
+
+	   Initialize necessary variables for payoff charges, accrual
+	   adjustments, rebates, etc.
+	*/
+	
+	type Number PAYOFF
+	
+	set PAYOFF=$$EXEC^LNTCP1(.ln,.ttx)
+
+	//Loan not disbursed. Close acct by changing account status.
+	if (ln.tdr'>0),(PAYOFF<0),(ln.iam>0) do Runtime.setErrMSG("LN",3864) quit
+
+	quit
+
+
+SCOCHK	// If any standing orders are associated with this account give an
+	// override restriction
+	
+	type public String OVR(,,)
+	type public Number CID
+
+	type ResultSet rs=Db.select("SEQ","EFTPAY","CID=:CID AND STATUS='A'")
+	if 'rs.isEmpty() set OVR(CID,"OVR","EFT")=""
+
+	quit 
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60841^77892^Sanjay Chhabria^29554"	// Signature - LTD^TIME^USER^SIZE

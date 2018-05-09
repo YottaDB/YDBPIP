@@ -1,0 +1,2474 @@
+UAVB	
+	/*
+	
+	Average Balance Utility
+	
+	---- Revision History -------------------------------------------------
+	
+	05/24/07 - SHANKK- CR27303
+		    Modified sections HIST4 and EXEC to use variable TSEQ instead
+		    of SEQ.  The begining sequence number was always being set to 
+		    the ending sequence number.  Only one transaction was being 
+		    shown on statements.
+		
+	05/23/07 - Mugilvannan - CR27276
+		   Modified to correct the Undefined local variable H in 
+		   FMT1^UAVB, by using hist.tjd instead H.
+		   
+	04/17/07 - RussellDS - CR26387
+		   Eliminated use of UHFETCH.
+		   
+		   Added setting of HST info in EXEC section.
+	  
+	10/19/06 - Hillanbrand - CR 23306
+	           Declared %TRN as public since this string is a return.  This
+	           corrects and issue found with SCA333.REP which uses %TRN.
+	
+	08/11/06 - SmithCD - CR 22489 (20748)
+		   Returned %SEQ parameter to SEQ in INIT section, as it is in 
+		   p01. %SEQ is a floating variable in p01 and served to 
+		   identify a transaction in the transaction set. The need to 
+		   identify the sequence number is only necessary prior to p04.
+		   In p04, the entire set of transactions are not visible - 
+		   only the current transaction being processed could be 
+		   visible. The other transactions in the set that have already
+		   been processed are in HIST by this point, so in that way 
+		   they will be included automatically when UAVB goes through 
+		   history. Hence, %SEQ references have been removed in p04. 
+		   Also removed ADJBALT section, and improved section headers 
+		   to standards.
+
+	   08/02/06 - KELLYP - CR 22048
+	   	      Modified HLD4 section to eliminate PRECEDENCE warning.
+
+	   07/20/06 - KELLYP - CR 22174
+	   	      Modified UAVB5 to prevent RECNOFL on LNLSDT.
+
+	   06/30/06 - swarnalp - CR21381
+	   	      Modified INIT section to replace the killing of variable X 
+	   	      with the appropriate type defined declaration, as the kill 
+	   	      command completely wipes off the X array when the system 
+	   	      gets into this section and the value of X array is lost 
+	   	      in RECALC procedure causing "UNDEFINED" error for the 
+	   	      variable X during backdated teller transaction for the 
+	   	      primary account while determining the combined balance 
+	   	      interest rate. Also cleaned up the neighbouring variables 
+	   	      of X by replacing kill with the proper type defined 
+	   	      declaration. 
+	   	      
+	   06/14/06 - chhabris - CR21178
+	   	      Modified HIS3 section to call HIS4 only for the first
+	   	      record, also modified HIST section to remove the check
+	   	      for "ADJAVCR" in TSO as it was reducing the balance 2 
+	   	      times, first in HIST and the second time in EXEC section.
+
+	   03/10/06 - AlagarsamyS - 20036
+	   	      Modified the section TR to avoid RECNOFL error while 
+	   	      running DEPVER001 function.
+	   	      
+	   02/17/06 - Hillanbrand - 19266
+	              Corrected UNDEFINED,EXEC+106 on H by correctly using
+	              hist.tjd instead of H. if $E(CTL,14),hist.tjd'>TD 
+	   
+	   01/03/06 - Hillanbrand - 17730
+	              Corrected problem of AV(30) getting set with every
+	              transaction since the variable I was laying around.
+	              Removed the $G(I) and moved the check on I on the
+	              condition. 
+	              if %EffectiveDate>FD set I=$P(TAMT,"#",3) if I do {
+	              
+	              Also modifications to calling HIS3 and HIS7 subsections
+	              from HIST.  HIS3 should only be executed once after HIST
+	              sends in a transaction.  HIS7 should then only be called
+	              once as well when completed.  Previously HIS3 and HIS7 
+	              were being executed for every transaction found in HIST 
+	              which caused the UAVB arrays to be incorrect.  This issue 
+	              was found with and extension payment which will adjust the 
+	              accrual balance using UAVB and the accrual balance ended 
+	              up incorrectly being negative.
+	   
+	   11/30/05 - MbuiM - 18371
+	   	     	Modified INIT section to remove PFLG and UAVB5 section
+	   	     	to replace PFLG with ln.pflg. This is now consistent 
+	   	     	with prior versions before conversion to PSL.
+	  
+	   10/10/05 - MbuiM - 17861
+	   		Modified sections CALCWRN, CALCWRN2 and AVBLINT to data
+	   		type the variable JD that was causing the undefined 
+	   		errors; UNDEFINED,AVBLINT+7^UAVB
+
+	   06/03/05 - KinI - 15524
+	   		Modified to declare LN and DEP records more explicitly 
+	   		when using the type casting.
+	   		Updated top section to set SEQ to the top history 
+	   		sequence instead of generating the next one.
+
+	   05/10/05 - Carol Scott - CR 15816
+			Added parameter WIRN() to call CALCWRN section.
+		 	  
+	   04/19/05 - SmithCD - CR15305
+	   	      . Modified CALCWRN3 section to pass parameters to 
+	   	        CTL^UINDX in the proper sequence by removing an extra 
+	   	        comma
+	   	      . Removed call to INDDATA^LNU, and otherwise cleaned up 
+	   	        the section
+	   	      . Changed EVENT section to eliminate parsing of INDEX
+	   	      . Removed all occurrences of "ORDER BY" in order by 
+	   	        clauses of select and selectDbset statements b/c they 
+	   	        can cause problems in an eOracle environment
+	   	      . Modified Catch block to set ER so the calling 
+	   	        application doesn't continue processing the account 
+	   	        as if no error has occurred (for %PSL and %GTM errors)
+	   	      . Replaced deprecated feature .getPointer() reference 
+	   	        with .exists()
+
+	--------------------------------------------------------------------
+	*/
+	
+	// Should not be called from the top
+	quit
+
+
+public INIT(RecordACN acn,	// Account				/REF:RW/NOREQ
+	    Number CID,		// Account number
+	    Date FD,		// Begininning date
+	    Date TD,		// Ending date
+	    String CTL,		// Calculation control			/NOREQ
+	    Number SEQ,		// Starting history sequence		/NOREQ
+	    Number BAL,		// Beginning balance if known		/NOREQ
+	    Number ES,		// Ending history sequence		/NOREQ
+	    String WIRN())	// Weighted interest data		/REF:W/NOREQ
+
+	/*
+	Average Balance Utility
+
+	   KEYWORDS: Calculations, Interest
+
+	   Additional notes on ARGUMENTS:
+
+	       . CTL
+                       A string of characters (0 or 1) which
+	               instruct system to calculate certain
+	               values, or the method by which these
+	               values are calculated.
+
+	                Position  Action (Y/N)
+
+	                    1     Calculate weighted interest rate and several other "low overhead" 
+	                    	  calculations
+                            2     Calculate sum of Reg Z loan tran charges
+	                    3     Calculate average collected/available balance
+	                    4     Calculate disbursement totals (# and $)
+	                    5     Calculate payment totals (# and $)
+	                    6     Calculate days with 0 or neg balance
+	                    7     New, closed account option
+	                            0 - Set FD equal to ODT if opened after FD
+	                                Set TD equal to DTC if closed after TD
+	                            1 - Use original values of FD and TD
+	                    8     Effective date reset option
+	                            0 - Use FD vs EFD in DDYS calc if EFD < FD
+	                            1 - Use EFD regardless of proximity to FD
+	                    9     Update %TRN array (# times tran codes used)
+	                   10     Update X array (accrual recalc flag)
+	                   11     Called by transaction processing.  Must
+	                          consider other transactions on the posting
+	                          screen.
+	                   12     IX array load option.  Passed to ^UINDX to
+	                          communicate whether or not IX is fully
+	                          loaded.
+	                            0 - IX not loaded.  UINDX must load before
+	                                calculating rates.
+	                            1 - IX loaded.  UINDX will calculate rates
+	                                based solely on the local IX array.
+	                   13     Statement load option.  Extra processing
+	                          includes creation of check array:
+	                          STMCHK(CID,n)= check no. | amount | date
+	                   14     Calculate the total scheduled principal
+	                          payments. Scheduled means it is assoc.
+	                          with a bill.
+	                            0 - dont calculate.
+	                            1 - calculate.
+	                   15     Specifies whether (1) or not (0) the
+	                          system should ignore the fact that
+	                          the history cut-off date precedes the
+	                          value of FD.  If 0, an error message
+	                          will be returned and no amounts
+	                          calculated.
+	                   16     Loan bill history option.  If 1, create
+	                          HST(TJD,SEQ) array for use on bill.
+	                   17     Recalculate loan account rates.
+	                          Currently used by mass index changes 2/24/92.
+			   18     Loan Transaction Activity.
+	               		  Calculate Monthly Loan Amounts from History.
+	                   19     Use zero in place of negative balances
+	                          (Reg DD requirement)
+			   20     Evaluate history transactions according
+	        		  to the effecvtive date.
+
+	   INPUTS:
+
+	   RETURNS:
+		. UAVB(1) structured as followed:
+
+	             Piece  Value
+	               1    Average balance
+	               2    High balance (intra-day)
+	               3    High balance (end-of-day)
+	               4    High balance (end-of-day date)
+	               5    Low balance (intra-day)
+	               6    Low balance (end-of-day)
+	               7    Low balance (end-of-day date)
+	               8    Total credits ($$$)   Debit and credit totals
+	               9    Total debits ($$$)    only include those
+	              10    Number of credits     transactions which affect
+	              11    Number of debits      the principal balance.
+	              12    Ending balance (date TD)
+	              13    Ending collected balance (date TD)
+	              14    Beginning TSEQ
+	              15    Ending TSEQ
+	              16    Enclosures
+	              17    Total fee transactions
+	              18    Total interest transactions
+	              19    Beginning balance
+	              20    Average balance for interest (Average BALINT)
+	              21    Beginning balance (not adjusted by add-on int)
+	              22    Ending balance (not adjusted by add-on int)
+
+		. UAVB(2) with data that may optionally appear
+
+		     Piece  Value
+	               1    Weighted interest rate (& rate change (WIRN) array)
+	               2    Sum of Reg Z loan tran charges
+	               3    Average collected balance
+	               4    Total payments ($$$)
+	               5    Number of payments
+	               6    Total disbursements ($$$)
+	               7    Number of disbursements
+	               8    Number of days with 0 or negative balance
+	               9    Number of consecutive days with 0 or negative balance
+	              10    Net change in accrued interest via transactions.
+	                    Accrual increases will increase, accrual decreases
+	                    will decrease this field.
+	              11    Total scheduled principal payment amount
+	              12    Totals from TAMT with # delimiter for debits
+	              13    Totats from TAMT with # delimiter for credits
+	              14    Average Undisbursed Loan Balance
+	       		    ((Undis. Bal. * # days)+(U.B. * D))/(TD-FD)
+	              15    Accrued interest from FD to TD-1.  Currently,
+	                    this is only calculated for loans that bill
+	                    accrued or anticipated interest.
+	              16    Average available balance
+
+		. WIRN() - interest rates, balances by date (optional)
+
+		     Piece  Value
+	               1    Interest Rate
+	               2    Principal Balance
+	               3    Rate Set By Flag
+	      			0 - Rate Set by Account Activity
+	     			1 - Rate Set by File Maintenance
+	     			2 - Rate Set by Scheduled Change
+	               4    Index Name
+	               5    Adjusted Balance for Accrual Calculation
+	               6    Current Interest
+	               7    Uncollected Interest
+	               8    Current Principal
+	               9    Uncollected Principal
+	              10    Current Escrow
+	              11    Uncollected Escrow
+	              12    Escrow Suspense (Total Escrow Balance)
+	              13    Late Charges
+	              14    Miscellaneous Charges
+	              15    Deferred Interest - Capitalized
+	              16    Interest for Current Due Period
+	              17    Principal for Current Due Period
+	              18    Escrow for Current Due Period
+	              19    Interest Calculation Principal Adjustments
+	              20    (Flag)
+	              21    Miscellaneous Charges Outstanding, not Billed
+	              22    Unapplied Funds
+	              23    Principal Variance
+	              24    Credit Limit - Current
+	              25    Total Disbursement Amount
+	              26    Revolving Account Flag
+	              28    Post Date
+
+		. X() - principal chg by effective date (optional)
+	        . %TRN array - transaction code counter (optional)
+	        . UAVB(5) with data that may optionally appear
+
+		     Piece  Value
+	               1    Principal Reduction
+	               2    Principal Balance Increase
+	               3    Interest Collected
+	               4    Reduction in Interest Collected
+	               5    Interest Accrual Decrease Adjustments
+	               6    Interest Accrual Increase Adjustments
+	               7    Late Charge Collection
+	               8    Late Charge Assessment
+	               9    Undisbursed Principal Increase
+	              10    Undisbursed Principal Reduction
+	              11    Miscellaneous Charge Collection
+	              12    Miscellaneous Charge Assessment
+	              13    Escrow Funds Collected
+	              14    Escrow Funds Balance Reduction
+	              15    Uncollected Interest Balance Increase
+	              16    Uncollected Interest Balance Reduction
+	              17    Unapplied Funds Balance Increase
+	              18    Unapplied Funds Balance Reduction
+	              19    Principal Charge Off Increase
+	              20    Principal Charge Off Reduction
+	              21    Principal Charged Off Recovery
+	              22    Principal Charged Off Recovery Reduction
+	              23    Negative Amortization Reduction.
+	              24    Deferred Interest Capitalization
+	              25    Principal-Only Payments Received
+	              26    Loan Sale Service Fees Retained
+
+	   Note:
+	        Care should be taken to include only those days appropriate
+	        for the calculation.  Should the last statement date be
+	        12/31/89 and the next be 01/31/90, FD should be set to
+	        01/01/90 and TD to 01/31/90 for an avg stmt cycle balance.
+
+	        Balances and counters are stored in the array AV().  The
+	        total number of payments (as an example) is stored in AV(25)
+	        because it will be eventually stored in UAVB(2) piece 5.
+	*/
+
+	catch vERROR {
+		
+		type public Boolean %ZTHALT, ER
+ 		type String ET
+ 		
+		set %ZTHALT = 0
+		set ER = 1
+		set ET=vERROR.type
+
+		if ET.isLike("%%GTM-%") do ZE^UTLERR quit
+
+		do ^UTLERR
+		}
+
+	new ADJF,ADJEFD,ADJIND,ADJIRN,AOA,AV,AV9,AVLDYS,BALINT
+	new CBAL,CDDYS,CHKSEQ,CLS,CRCD,CURR,DC,DDYS,DFT,DIV,DTC
+	new EFD,EJD,ET,ETC,EXECFLG,H,HLD,HOLD,HTYPE,IAM,INT,INTMX,INTMN,INCRS
+	new ITC,IUN,NEGAMRED,OD,PH,PRDT,PRNCPLE,PVAR,TAMT,TCMT,TRB,TSO
+	new TYPE,UNC,Y,ZSUP
+
+	type Number IRF
+	type public String %TRN
+	type String FMHIT,X
+
+	set CTL=$G(CTL)
+
+	if $E(CTL,16) kill HST
+
+	if 'acn.exists() set acn=Db.getRecord("ACN","CID")
+
+	set CLS=acn.cls
+
+	/*
+	   FMHIT is an array used to determine when to modify WIRN if
+	   a file maintenance transaction is encountered.  Since UAVB
+	   collates backward through ^HIST, it must consider that a
+	   data item might be modified more than once on the same day.
+	   In this case, the new value is used from the latest HIST
+	   entry.  When the new value is extracted, an entry is placed
+	   in FMHIT(DI,JD), flagging that day.
+	*/
+
+	set ER=""
+	set UAVB(1)=""
+	set UAVB(2)=""
+	set UAVB(5)=""
+
+	if TD<FD set WIRN(FD)="" quit
+
+	if $E(CTL,20) set EXECFLG=0
+
+	for Y=1:1:19,21:1:31,34,35,36,120 set AV(Y)=""
+	set AV(32,0)=""
+	set AV(32,1)=""
+
+	// Initialize AV array for UAVB(5) if appropriate
+	if $E(CTL,18) for I=1:1:26 set AV("5"_I)=""
+
+	set $P(AV(33),"|",1)=0
+	set $P(AV(33),"|",2)=0
+
+	set ACTHIST=""
+	set AOA=""
+	set CHKSEQ=""
+	set IAM=""
+	set INTMN=""
+	set ADJF=""
+	set INTMX=99
+
+	set TYPE=acn.type 
+	set DFT=acn.acngrp
+	set CRCD=acn.crcd
+
+	set TRB=acn.trb
+	set IRF=acn.irf
+
+	if CLS="L" do {
+	
+		type RecordLN ln = {RecordLN}acn
+
+		set INTMN=ln.intmn
+		set INTMX=ln.intmx
+		set IAM=ln.iam
+
+		if '$E(CTL,11) quit
+
+		set HSEQ=Db.nextVal("HIST","CID")
+		}
+
+	// History cut-off (purge)
+	if acn.hisctf,acn.hisctf'<FD do {
+		if '$E(CTL,15) do Runtime.setErrSTBLER("ACN","UAVB1") quit:ER
+		if $E(CTL,15) set FD=acn.hisctf+1
+		}
+
+	// Define opening date (OD), close date (DTC), and possibly redefine TD
+	set OD=acn.odt
+
+	if CLS="D" do {
+		type RecordDEP dep = {RecordDEP}acn
+
+		if dep.dlr set OD=dep.dlr
+		}
+	else  do {
+		type RecordLN ln = {RecordLN}acn
+
+		set OD=ln.odd
+		if ln.revf,ln.odt<OD set OD=ln.odt
+		}
+
+	if '$E(CTL,7)&(OD>FD)!'$L(FD) set FD=OD
+
+	if acn.dtc,'$E(CTL,7),TD>acn.dtc set TD=acn.dtc
+
+	// Account closed prior to start date
+	if acn.dtc,acn.dtc<FD do Runtime.setErrMSG("ACN",1455) quit:ER
+
+	// End date precedes start date
+	if TD<FD do Runtime.setErrSTBLER("ACN","UAVB3") quit:ER
+
+	set SEQ=$G(SEQ)
+	set ES=$G(ES)
+
+	if $E(CTL) do {
+
+		do EXEC^UAVB0(.acn,.WIRN())
+
+		if '$D(WIRN(%SystemDate)) set WIRN(%SystemDate)=$G(WIRN($O(WIRN(%SystemDate),-1)))
+		}
+
+	set BAL=acn.bal
+	// Get top history sequence
+	set SEQ=Db.nextVal("HIST","CID")-1
+
+	if CLS="L" do {
+		type RecordLN ln = {RecordLN}acn
+		
+		if ln.aruf set BAL=BAL-ln.udbal
+		if ln.iam,BAL set AOA=ln.iun-ln.ipl
+		}
+
+	set BAL=BAL-AOA
+
+	if $E(CTL,3) do {
+		// In HLD0 section we use hold entry previous to FD, so we have
+		// to include the total hold amount on that date for hold type 7
+		type ResultSet rs=Db.select("EXPDT","HLD7","CID=:CID and EXPDT<:FD","EXPDT DESC")
+
+		// If no such date then use FD as a starting point
+		if rs.isEmpty() set PRDT=FD
+		else  if rs.next() set PRDT=rs.getCol(1)
+
+		// Build an array of outstanding hold amounts
+		do GETHOLD^UHLDSCA(7,CID,PRDT,TD,.HOLD)
+		do GETHOLD^UHLDSCA(8,CID,FD,TD,.HOLD)
+		}
+
+	// Divisor for average calculations
+	set DIV=TD-FD+1
+	if 'DIV set DIV=1
+
+	set DDYS=DIV*BAL
+	set CDDYS=DDYS
+
+	if $E(CTL,19),BAL<0 do {
+		set DDYS=0
+		set CDDYS=0
+		}
+
+	do HIST(.acn)
+
+	quit
+
+
+HIST(RecordACN acn)		// Account				/REF:R
+
+	/*
+	Pass history until reach end date (TD) to find ending balance
+	
+	   Pass backwards through history until the end date to determine the 
+	   ending balance for the specified period.
+ 
+	Example:
+ 
+  	  do HIST(.acn)
+ 
+	*/
+
+	new MAX,MIN,TSEQ
+	type Public Boolean FHIST=1
+
+	type ResultSet rs=Db.select("TSEQ","HIST","CID=:CID AND TJD>=:FD","TSEQ DESC")
+	if rs.isEmpty() do HIS6(.acn) quit
+	while rs.next() do {
+		if FHIST=0 quit
+		set TSEQ=rs.getCol(1)
+
+		type RecordHIST hist=Db.getRecord("HIST","CID,TSEQ")
+		do LOADH(.acn,.hist)
+
+		if hist.efd>%SystemDate quit
+
+		if '$E(CTL,20),EJD>TD set DDYS=$$DDYSADJ(TD-FD+1,P)
+		if $E(CTL,20),%EffectiveDate>TD set DDYS=$$DDYSADJ(TD-FD+1,P)
+
+		if $E(CTL,20),%EffectiveDate'>TD,EJD>TD do { quit
+			if %EffectiveDate<FD new %EffectiveDate set %EffectiveDate=FD
+			new EJD
+			set EJD=%EffectiveDate
+			do EXEC(.acn,.hist)
+			}
+
+		if 'TAMT do {
+			set TSO=hist.tso
+			set TCMT=hist.tcmt
+			do FMT0(.acn,.hist)
+			}
+
+		if CLS="L",$E(CTL) do ADJBALH(.hist)
+
+		if $E(CTL,20) set EBAL(%EffectiveDate)=$G(EBAL(%EffectiveDate))+P
+
+		set AOA=AOA+UNC
+
+		if P,'$E(CTL) do WRN4(2,%EffectiveDate,P)
+
+		if INCRS,$E(CTL,4),TAMT,$$TR(4),$E(CTL) do {
+			if '$D(WIRN(ADJEFD)) do {
+				set X=$O(WIRN(ADJEFD),-1)
+				set WIRN(ADJEFD)=WIRN(X)
+				}
+
+			do WRN4(25,ADJEFD,TAMT)
+			}
+
+		if 'FHIST quit
+
+		do HIS3(.acn,.hist) 
+
+		}
+
+	do HIS7(.acn)
+
+	quit
+
+
+HIS3(RecordACN acn,		// Account				/REF:R
+     RecordHIST hist)		// History				/REF:R
+
+	/*
+	Process hist records in the specified date range (FD through TD)
+ 
+	Returns:
+ 
+	. Success				/TYP=L
+		1 - Records in the specified date range were processed
+		0 - No Records existed in the specified date range
+ 
+	Example:
+ 
+	write $$HIS3(.hist)
+	*/
+	
+	type Public Boolean FHIST
+	type Number CTR1
+	set CTR1=0
+
+	type ResultSet rs=Db.select("TSEQ","HIST","CID=:CID AND TJD>=:FD AND TJD<=:TD","TSEQ DESC")
+	if rs.isEmpty() quit 
+	while rs.next() do {
+		set TSEQ=rs.getCol(1)
+
+		type RecordHIST hist=Db.getRecord("HIST","CID,TSEQ")
+		do LOADH(.acn,.hist)
+
+		//Store the ending information for the first record within the date range.
+		if CTR1=0 do HIS4
+		set CTR1=1
+
+		if $E(hist.itc,6) quit
+
+		set FHIST=0
+
+		do EXEC(.acn,.hist)
+
+		if CLS="L",$E(CTL) do {
+			do ADJBALH(.hist) quit:ER
+			if PVAR do WRN4(23,%EffectiveDate,PVAR)
+			}
+		}
+
+	quit
+
+
+HIS4	// Initialize values before history pass through specified date range
+
+	set BAL(TD)=BAL
+	if BAL do {
+		set AV(2)=BAL
+		set AV(5)=BAL
+		}
+
+	// Ending sequence
+	set AV(15)=TSEQ  //CR27303
+
+	// Starting sequence
+	set AV(14)=AV(15)
+
+
+	// For other than add-on loans, 12 and 120 are
+	// equal.  For add-on, 12 is net, 120 is gross.
+	set AV(12)=BAL
+	set AV(120)=BAL+AOA
+
+	quit
+
+
+HIS6(RecordACN acn)		// Account				/REF:R
+
+	// Set values based upon calculated balances if no history in range
+
+	if '($E(CTL,20)&EXECFLG) do {
+		set BAL(FD)=BAL
+
+		// Low and high balance
+		set AV(2)=BAL
+		set AV(5)=BAL
+
+		set DDYS=DIV*BAL
+		set CDDYS=DIV*BAL
+
+		if $E(CTL,19)&(BAL<0) do {
+			set DDYS=0
+			set CDDYS=0
+			}
+
+		if $E(CTL) set %EffectiveDate=FD
+
+		set AV(19)=BAL
+		set AV(12)=BAL
+		set AV(120)=BAL+AOA
+		}
+
+	do HIS7(.acn)
+
+	quit
+
+
+HIS7(RecordACN acn)		// Account				/REF:R
+
+	// Final clean-up before file
+
+	if 'ACTHIST set AV(14)=AV(14)+1
+
+	if '$D(BAL(FD)) do {
+		set BAL(FD)=BAL
+		set:AV(6)>BAL AV(6)=BAL
+		}
+
+	if OD-FD do {
+		set:AV(2)<BAL AV(2)=BAL
+		set:AV(5)>BAL AV(5)=BAL
+		}
+
+	if '$D(BAL(TD)) set BAL(TD)=BAL
+
+	// Calculate average collected and available balances.
+	if $E(CTL,3) do {
+		new HAMT,HDT
+		set HDT=$O(HOLD(7,CID,TD+1),-1)
+
+		// Get the outstanding hold amount for date, if any
+		set HAMT=+$G(HOLD(7,CID,HDT))
+
+		// Calculate the collected balance
+		set CBAL=BAL(TD)-HAMT
+		if CBAL<0 set CBAL=0
+
+		set CDDYS=DDYS do HLD4(7,.CDDYS)
+		set AV(23)=$$^SCARND(CDDYS/DIV,0,$G(CID))
+
+		set AVLDYS=DDYS do HLD4(8,.AVLDYS)
+		set AV(36)=$$^SCARND(AVLDYS/DIV,0,$G(CID))
+		}
+
+	// Find low,high balances (end-of-day)
+	do CAL(.acn)
+	if $E(CTL,6) do {
+		set AV(28)=+AV(28)
+		set AV(29)=+AV(29)
+		}
+
+	// Average balance calculations
+	set AV(1)=+$$^SCARND(DDYS/DIV,0,$G(CID))
+
+	if '$E(CTL) do FILE quit
+
+	//  average BALINT calc done later w/ AV(33)
+	if CLS="L" do {
+		do CALCWRN(.acn,(+$E(CTL,12))_(+$E(CTL,17)),FD,TD,.WIRN()) quit:$G(ER)
+		set $P(AV(33),"|",1)=$P(AV(33),"|",1)+$$AVBLINT(BALINT)
+		set AV(35)=AV(35)+AV(30)
+		}
+
+	do WRN1(.acn)
+	do %WIRN^UAVB0(.acn,.WIRN)
+
+	// Average Daily Undisbursed Loan Balance
+	set AV(34)=$$^SCARND(AV(34)/(TD-FD+1),0,$G(CID))
+
+	set X=$O(WIRN(""))
+	if X do {
+		set Y=WIRN(X)
+		do WRN3
+		set X=TD
+		for  set X=$O(WIRN(X)) quit:X=""  kill WIRN(X)
+		}
+
+	do LNDSEXP
+	
+	do FILE
+
+	quit
+
+
+EXEC(RecordACN acn,		// Account				/REF:R
+     RecordHIST hist)		// History				/REF:R
+
+	// Determine first if data items affecting averages were maintained
+
+	if hist.efd>%SystemDate quit
+
+	if $E(CTL,20) set EXECFLG=1
+	set ACTHIST=1
+	set AV(14)=TSEQ  //CR27303
+
+	if TAMT="" do { quit:('P)!(BALWSUPD=1)
+		set TSO=hist.tso
+		set TCMT=hist.tcmt
+		do FMT0(.acn,.hist)
+		}
+
+	new CLSOUT,TAMTINT
+
+	// Update low and high balance (intra-day) amounts
+	if '$L(AV(5)) do LOWB
+	if BAL<AV(5) set AV(5)=BAL
+	if BAL>AV(2) set AV(2)=BAL
+
+	if '$D(BAL(EJD)) set BAL(EJD)=BAL
+	if $E(CTL,20) set EBAL(%EffectiveDate)=$G(EBAL(%EffectiveDate))+P
+
+	set X=$S(%EffectiveDate<FD:FD,1:%EffectiveDate)
+
+	set DDYS=$$DDYSADJ(X-FD,P)
+	
+	// Control bit 16 turned on - create arrays for use on loan bill
+	if CTL.extract(16) do {
+		
+		type Number A
+		
+		set A = HST(EJD, "").order() - 1	// Reverses order from way presented
+		set HST(EJD, A) = hist.tjd_"|"_hist.itc_"|"_hist.etc_"|"_hist.tamt_"|"_hist.efd
+		set HST(EJD, A, 1) = BAL_"|"_(P + TAMT.piece("#", 8))_"|0|"_(BAL + AOA)
+	}
+
+	// Update collected balance amounts
+	// Update Reg Z transaction totals
+	if $E(CTL,2),TAMT,$$TR(19) set AV(22)=AV(22)-TAMT
+
+	// Update analysis counters and balance change array
+	if $E(CTL,9),TAMT set %TRN(hist.etc)=$G(%TRN(hist.etc))+$S(TAMT<0:-1,1:1)
+	if $E(CTL,10) set $P(X(%EffectiveDate),"|",1)=$G(X(%EffectiveDate))-P
+
+	// Determine if closeout
+	set CLSOUT=0
+	if TAMT'="",$$TR(5) set CLSOUT=1
+
+	/*
+	   If this is a deposit account, make sure we set the interest portion
+	   to correctly update the incease and decrease amounts which follow
+	   this section.  This is mostly for deposit closeout transations.
+	*/
+	set TAMTINT=0
+	if CLS="D" do {
+		set TAMTINT=$P(TAMT,"#",3)
+		if (P<0)!(CLSOUT) set TAMTINT=-TAMTINT
+		}
+
+	/*
+	   Total credit/debit amount and number for transactions affecting
+	   principal.  If both principal and interest is included in a
+	   transaction, update interest (amount and count) separately and
+	   on opposite side to prin+int (amount and count).  (Deals with
+	   closeout transactions.
+	   If the the transaction has a principal portion or is a close out then
+	   the transaction should be considered for updating the credit and debit
+	   amounts.  $$UPDCTR is used for loans.  If this is a deposit account
+	   this function will quit with a 1.
+	*/
+
+	if (P!CLSOUT)&$$UPDCTR() do {
+		if DC do {
+			// If principal amount then update
+			if P do {
+				set AV(8)=AV(8)+$S(TRB:-P,1:P)
+				set AV(10)=AV(10)+1
+				}
+			if 'CLSOUT,'TAMTINT quit
+			if $E(hist.itc,12) quit
+			set AV(8)=AV(8)+($S(TRB:-1,1:1)*TAMTINT)
+			set AV(9)=AV(9)+($S(TRB:-1,1:1)*TAMTINT)
+			}
+		else  do {
+			// If principal amount then update
+			if P do {
+				set AV(9)=AV(9)+$S(TRB:P,1:-P)
+				set AV(11)=AV(11)+1
+				}
+			if 'CLSOUT,'TAMTINT quit
+			if $E(hist.itc,12) quit
+			set AV(8)=AV(8)+($S(TRB:1,1:-1)*TAMTINT)
+			set AV(9)=AV(9)+($S(TRB:1,1:-1)*TAMTINT)
+			set AV(10)=AV(10)+1
+			}
+		}
+
+	// Total payment/disbursement amount and number (all tranactions)
+	if 'INCRS,$E(CTL,5),TAMT,$$TR(9) do {
+		 set AV(24)=AV(24)+TAMT
+		 set AV(25)=AV(25)+1
+		 }
+
+	if INCRS,$E(CTL,4),TAMT,$$TR(4) do {
+		set AV(26)=AV(26)+TAMT
+		set AV(27)=AV(27)+1
+		}
+
+	// Enclosure count
+	set AV(16)=AV(16)+$E(hist.itc,3)
+
+	set X=TAMT
+	set:X'["#" $P(X,"#",2)=+X
+
+	for I=1:1:$L(X,"#") set $P(AV(32,+DC),"#",I)=$P(AV(32,+DC),"#",I)+$P(X,"#",I)
+
+	// Total interest and fees
+	set X=$P(TAMT,"#",3)
+	if X,TAMT-X set AV(18)=AV(18)+X
+
+	kill XTSO
+	if TSO'="" do OUT^UTSO(.XTSO(),TSO)
+	if $D(XTSO("INT")) set AV(18)=AV(18)+TAMT
+	if $D(XTSO("FEE"))!$D(XTSO("SRVFEE")) set AV(17)=AV(17)+TAMT
+
+	// Create check array for statement processing
+	if $E(CTL,13) do CHKS(.hist)
+
+	// If CTL 14 is on and the record may contain principal payment, calc
+	// the principal payment amount that is not principal only.
+	if CTL.extract(14),hist.tjd'>TD do {
+
+		set ORGSEQ=$$HSEQ(CID,SEQ)
+		
+		// History of bills for satisfied
+		type DbSet ds = Db.selectDbSet("HISTSB", "CID=:CID AND SLN=:ORGSEQ", "SLSEQ ASC")
+		
+		if ds.next() do { quit
+			
+			type RecordHISTSB histsb = ds.getRecord("HISTSB")
+			
+			if (histsb.pe01_histsb.pe02_histsb.pe03_histsb.pe04_histsb.pe05 [ "#P#") do TSPP(.hist)
+		}
+	}
+
+	if '$$FIELD^UTSO(TSO,"ADJAVCR") set BAL=BAL-P
+
+	set AOA=AOA+UNC
+
+	// Calculate loan transaction activity and create AV(5)
+	if $E(CTL,18),TAMT do UAVB5(.acn)
+
+	// Update rate change (WIRN) array
+	if '$E(CTL) quit
+
+	/*
+	   Update changes to accrued interest.  This is used by loan effective-
+	   dating and will only consider ACR changes after (not on) the start
+	   date.  Excludes system generated (secondary) accrual adjustments.
+	*/
+
+	if %EffectiveDate>FD set I=$P(TAMT,"#",3) if I do {
+		// Determine if a secondary transaction
+		new Q
+		set Q=0
+
+		if $E(hist.itc,7) do { quit:Q
+			new PCFD20
+			// If secondary tran, quit if an accrual adjustment
+			set PCFD20=$$TR(20)
+
+			// Restrict Cash Withd for Non-Matured Prin
+			if PCFD20 set Q=1
+			}
+
+		set AV(30)=AV(30)+$S(TRB-$E(hist.itc):I,1:-I)
+		}
+
+	/*
+	   The index value might not be the same throughout the summary period.
+	   Find the correct index value from the WIRN entry closest to the
+	   effective date.  This value will be used to extract the correct
+	   rate for the effective date.
+	*/
+
+	set X=$S(%EffectiveDate<FD:FD,1:%EffectiveDate)
+
+	set INDEX=$P(WIRN($O(WIRN(X+1),-1)),"|",4)
+
+	if %EffectiveDate=EJD do {
+		if '$D(WIRN(%EffectiveDate)) do {
+			set X=$O(WIRN(%EffectiveDate),-1)
+			set WIRN(%EffectiveDate)=WIRN(X)
+			set $P(WIRN(%EffectiveDate),"|",3)=""
+			}
+		}
+
+	if INCRS,TAMT,$$TR(4) do WRN4(25,%EffectiveDate,TAMT)
+
+	// Effective dated transactions only - adjust WIRN balances
+	set %EffectiveDate=$S(%EffectiveDate<FD:FD,1:%EffectiveDate)
+
+	if '$D(WIRN(%EffectiveDate)) set WIRN(%EffectiveDate)=WIRN($O(WIRN(%EffectiveDate),-1))
+	if P,'$E(CTL) do WRN4(2,%EffectiveDate,P)
+
+	if CLS'="L" quit
+
+	set X=$P(TAMT,"#",9)
+	if X do {
+		set:INCRS X=-X
+		do WRN4(22,%EffectiveDate,X)
+		}
+
+	quit
+
+
+DDYSADJ(Number DAYS,		// Number of days
+	Number AMT)		// Amount
+
+	/*
+	Calculate the adjusted DDYS value
+
+	Returns:
+	. Adjusted DDYS value			/TYP=N
+ 
+	Example:
+	W $$DDYSADJ(DAYS,AMT)
+	*/
+
+	// don't use negative balance values if CTL19
+	if $E(CTL,19)&(BAL-AMT'>0) quit:BAL'>0 DDYS quit DDYS-(DAYS*BAL)
+
+	if $E(CTL,19)&(BAL'>0) quit DDYS+(DAYS*(BAL-AMT))
+
+	quit DDYS-(DAYS*AMT)
+
+
+FILE	// File to UAVB array
+
+	set $P(UAVB(1),"|",1)=AV(1)
+	set $P(UAVB(1),"|",2)=AV(2)
+	set $P(UAVB(1),"|",3)=AV(3)
+	set $P(UAVB(1),"|",4)=AV(4)
+	set $P(UAVB(1),"|",5)=AV(5)
+	set $P(UAVB(1),"|",6)=AV(6)
+	set $P(UAVB(1),"|",7)=AV(7)
+	set $P(UAVB(1),"|",8)=AV(8)
+	set $P(UAVB(1),"|",9)=AV(9)
+	set $P(UAVB(1),"|",10)=AV(10)
+	set $P(UAVB(1),"|",11)=AV(11)
+	set $P(UAVB(1),"|",12)=AV(12)
+	set $P(UAVB(1),"|",14)=AV(14)
+	set $P(UAVB(1),"|",15)=AV(15)
+	set $P(UAVB(1),"|",16)=AV(16)
+	set $P(UAVB(1),"|",17)=AV(17)
+	set $P(UAVB(1),"|",18)=AV(18)
+	set $P(UAVB(1),"|",19)=BAL
+	set $P(UAVB(1),"|",21)=BAL+AOA
+	set $P(UAVB(1),"|",22)=AV(120)
+
+	if $P(AV(33),"|",2) set $P(UAVB(1),"|",20)=(AV(33)/$P(AV(33),"|",2))
+	else  set $P(UAVB(1),"|",20)=+AV(33)
+
+	if $E(CTL,3) set $P(UAVB(1),"|",13)=$S($D(CBAL):CBAL,1:BAL)
+
+	if CTL do {
+		set $P(UAVB(2),"|",1)=AV(21)
+		set $P(UAVB(2),"|",2)=AV(22)
+		set $P(UAVB(2),"|",3)=AV(23)
+		set $P(UAVB(2),"|",4)=AV(24)
+		set $P(UAVB(2),"|",5)=AV(25)
+		set $P(UAVB(2),"|",6)=AV(26)
+		set $P(UAVB(2),"|",7)=AV(27)
+		set $P(UAVB(2),"|",8)=AV(28)
+		set $P(UAVB(2),"|",9)=AV(29)
+		set $P(UAVB(2),"|",10)=AV(30)
+		set $P(UAVB(2),"|",11)=AV(31)
+		set $P(UAVB(2),"|",12)=AV(32,0)
+		set $P(UAVB(2),"|",13)=AV(32,1)
+		set $P(UAVB(2),"|",14)=AV(34)
+		set $P(UAVB(2),"|",15)=$$^SCARND(AV(35),0,"","",5)
+		set $P(UAVB(2),"|",16)=AV(36)
+		}
+
+	if $E(CTL,18) do FILE5
+
+	quit
+
+
+public FILE5	// File UAVB(5).  Also called by routine LNCO3.
+
+	for I=1:1:26 set $P(UAVB(5),"|",I)=AV("5"_I)
+
+	quit
+
+
+public CALCWRN(RecordLN ln,	// Loan account				/REF:R
+	       String WCTL,	// Weighted interest rate control
+	       Date FD,		// From date
+	       Date TD,		// Through date
+	       String WIRN())	// Weighted interest rate data
+
+	/*
+	Calculate BALINT for each WIRN entry
+
+	   Be careful.  Any changes here should consider ICPA^LNFIL1 also.
+
+	           WCTL - Position 1 - 1 IX array pre-loaded from INDEXMC
+	                               0 IX array not pre-loaded
+
+	                           2 - 1 force re-calculation of loan rate
+	                               0 do not recalculate rates
+
+	                           3 - 1 called from ^LNPTS2B.  No need to do
+	                                 everything.
+	                               0 not called from ^LNPTS2B
+	  -----------------------------------------------------------------------
+
+	*/
+	type public Date JD
+	type public String EVENT()
+	
+	type String FRE,INDEX
+	type Date BJD,EFD,OJD
+	type Number INTAF,IRN,RATE
+	
+	kill JD
+
+	set INDEX=$$INDDATA^LNU(.ln)
+	set WCTL=WCTL.get()
+	set INTAF=""
+
+	set FRE=ln.intfre
+	if FRE'="" do {
+		set JD=$O(WIRN(""))
+		set NJD=$$NJD^UFRE(JD,FRE,.AF) quit:$G(ER)
+		set INTAF=AF
+		}
+
+	if INDEX'="",FRE="" set INTAF=365
+	if $E(WCTL,2),INDEX'="" do EVENT(.ln)
+
+	set BJD=$O(WIRN(""))
+	set OJD=BJD
+	set RATE=+WIRN(BJD)
+	set JD=OJD
+	set RTCHG=0
+
+	do CALCWRN2(.ln)
+
+	quit
+
+
+CALCWRN2(RecordLN ln)		// Loan account				/REF:R
+
+	type public Date JD
+	
+	for  set JD=$O(WIRN(JD)) do { quit:JD>TD
+		if JD>TD set JD=TD+1
+		if JD="" set JD=TD+1
+
+		// Adjust [LN]BALINT as it should have existed on OJD
+		do BALINT(.ln,OJD)
+
+		/*
+		   If this is a change date, call UINDX to get the new rate.
+		     Else, if rate was file-maintained on JD, use this new rate.
+		       Else, rate comes from prior WIRN entry.
+
+		   If the new rate is different, create a file-maintenance entry if:
+		     This is the effective-date date or
+		     This is an interest change date
+		*/
+
+		if $E(WCTL,2) do {
+			new ORATE,TRATE,TREXD
+
+			if CTL.extract(11) set HSEQ=Db.nextVal("HIST","CID")
+
+			set ORATE=RATE
+
+			if INTAF>360!$D(EVENT(OJD)) set RATE=$$CALCWRN3(.ln)
+			if '(INTAF>360!$D(EVENT(OJD))),$P(WIRN(OJD),"|",3) set RATE=+WIRN(OJD)
+	
+			/*
+			   Check for teaser rate.
+			   If the new rate is the same as what's already in WIRN,
+			    then there's nothing to change.
+			*/
+			if '$G(RTCHG),RATE-WIRN(OJD)=0 quit
+
+			set TREXD=ln.trexd
+			if TREXD do {
+				if OJD<TREXD set RATE=ln.trate quit
+				if $O(WIRN(OJD),-1),$O(WIRN(OJD),-1)'>TREXD set RATE=+WIRN(OJD)
+				}
+			if TREXD'>OJD,ORATE-RATE,OJD-BJD=0!(INTAF>360)!$D(EVENT(OJD)) do FMRATE
+			set $P(WIRN(OJD),"|",1)=RATE
+
+			// If this is a rate change date, set this rate into all
+			// subsequent entries for this change period
+			if $D(EVENT(OJD)),TREXD<OJD do {
+				new JD,TD
+				set TD=$O(EVENT(OJD))
+				if TD="" set TD=%SystemDate
+				set JD=OJD
+				for  set JD=$O(WIRN(JD)) quit:JD=""!(JD'<TD)!($P(WIRN(JD),"|",3)=1)  set $P(WIRN(JD),"|",1)=RATE
+				}
+			}
+
+		// Load in any file maintenance entries
+		//?? indirect sets into the A array
+		set N=""
+		for  set N=$O(WIRN(OJD,N)) quit:N=""  do {
+			set X=WIRN(OJD,N)
+			set $P(A($P(X,"|",3)),"|",$P(X,"|",4))=$P(X,"|",2)
+			}
+
+		// Calculate accrued interest from OJD to JD-1
+		if $D(AV(35)) set AV(35)=AV(35)+$$^UIC($P(WIRN(OJD),"|",5),OJD,JD-1,ln.iacm,+WIRN(OJD))
+
+		// Calculate UDBAL dollar days
+		if '$E(WCTL,3) do {
+			new BALCMP,CRLMT,REVF,TDR
+
+			set BALCMP=$P(WIRN(OJD),"|",2)
+			set CRLMT=$P(WIRN(OJD),"|",24)
+			set TDR=$P(WIRN(OJD),"|",25)
+			set REVF=$P(WIRN(OJD),"|",26)
+			set AV(34)=AV(34)+((JD-OJD)*$S(REVF:CRLMT-BALCMP,1:CRLMT-TDR))
+			}
+
+		set OJD=JD
+		}
+
+	quit
+
+
+CALCWRN3(RecordLN ln)		// Loan account				/REF:R
+
+	// Find rate as of OJD in WIRN
+	
+	type public Number BALINT, INTAF
+	type public String CLS, EVENT(), WCTL, WIRN()
+	type public Date OJD
+	type public Boolean ER
+	
+	type Date EFFDT, JD
+	type String INDEX, PAR()
+	type Number IRN, RATE, RRATE, SRATE, SVIRN, URATE
+
+	// Get index data as it existed on JD (the ln object considers file 
+	// maintenance in history)
+	set INDEX = ln.index
+	if INDEX.isNull() quit ln.irn
+
+	if INTAF > 360 set EFFDT = OJD
+	else  do {
+		set EFFDT = EVENT(OJD + 1).order(-1)
+		set EFFDT = $$INTOFFDT^LNCDI(EFFDT, ln.intoff, ln.intoffcl)
+		}
+
+	set JD = WIRN(EFFDT + 1).order(-1)
+	if JD set INDEX = WIRN(JD).piece("|", 4)
+
+
+	// Make sure effective date is not less than opening or disbursement 
+	// date
+
+	if EFFDT < ln.odd set EFFDT = ln.odd
+
+	/*
+	   Call off to UINDX to calculate the new rate.
+	   Interest changes limits may be in use - load
+	   rate as of EFD into account before calculating new rate.
+	*/
+	
+	set (IRN, SVIRN) = ln.irn
+
+	set JD = WIRN(EFFDT).order(-1)
+	if JD set IRN = +WIRN(JD)
+
+	// Reset ln.irn for possible use within CTL^UINDX
+	set ln.irn = IRN
+	set ln.balint = BALINT
+
+	set PAR("INDEX") = INDEX
+	set PAR("IXLOAD") = WCTL.extract(1)
+	set PAR("ROUND") = 1
+	set PAR("LIMIT") = 1
+
+	do CTL^UINDX(.ln, EFFDT, BALINT, .PAR()) quit:ER ""
+
+	set ln.irn = SVIRN
+
+	quit RATE
+
+
+BALINT(RecordLN ln,		// Loan account				/REF:R
+       Date JD)			// Date
+
+	// Calculate BALINT
+
+	new ICPA,X
+
+	set X=WIRN(JD)
+	set ICPA=ln.icpa
+
+	if ICPA'="" do {
+		type RecordUTBLICPA icparec=Db.getRecord("UTBLICPA","ICPA")
+		set ICPA=icparec.prio
+		}
+
+	set BALINT=$P(X,"|",2)
+
+	// Adjust BALINT for add-on loans
+	if BALINT,$E(ln.iam)=1 set BALINT=BALINT-ln.iun-ln.ipl+ln.extamt
+
+	if $E(ICPA,1) set BALINT=BALINT+$P(X,"|",7)
+	if $E(ICPA,2) set BALINT=BALINT-$P(X,"|",9)
+	if $E(ICPA,3) set BALINT=BALINT+$P(X,"|",11)
+	if $E(ICPA,4) set BALINT=BALINT-$P(X,"|",12)
+	if $E(ICPA,5) set BALINT=BALINT+$P(X,"|",14)
+	if $E(ICPA,6) set BALINT=BALINT+$P(X,"|",13)
+	if $E(ICPA,7),$P(X,"|",6)>0 set BALINT=BALINT+$P(X,"|",6)
+	if $E(ICPA,8),$P(X,"|",8)>0 set BALINT=BALINT-$P(X,"|",8)
+	if $E(ICPA,9),$P(X,"|",10)>0 set BALINT=BALINT+$P(X,"|",10)
+	if $E(ICPA,10) set BALINT=BALINT-$P(X,"|",15)
+	if $E(ICPA,11),$P(X,"|",8)<0 set BALINT=BALINT-$P(X,"|",8)
+	if $E(ICPA,12),($P(X,"|",24)<BALINT) set BALINT=$P(X,"|",24)
+
+	set $P(WIRN(JD),"|",5)=BALINT
+
+	quit
+
+
+EVENT(RecordLN ln)		// Loan account				/REF:R
+
+	// Build EVENT array with interest change dates
+
+	type public Date JD
+	type public String EVENT()
+	
+	if INTAF>359 do {
+		new INDX,N
+		
+		set N=FD-1
+		set INDX=ln.index
+
+		if $E(WCTL) for  set N=$O(IX(INDX,N)) quit:N=""  do {
+			set EVENT(N)=""
+			do LDWRN(N)
+			}
+
+		if '$E(WCTL) do {
+			type ResultSet rs=Db.select("EFD","INDEX0","INDEX=:INDX AND EFD>:N")
+			while rs.next() do {
+				set N=rs.getCol(1)
+				set EVENT(N)=""
+				do LDWRN(N)
+				}
+			}
+		}
+
+	// No ICHND
+	set JD=ln.ichnd
+	quit:JD=""
+
+	set FRE=ln.intfre
+	set EVENT(JD)=""
+	do LDWRN(JD)
+
+	for  set NJD=$$NJD^UFRE(JD,FRE,,1) quit:ER  do { quit:NJD<FD
+		set EVENT(NJD)=""
+		if NJD'<FD do {
+			do LDWRN(NJD)
+			quit:NJD<FD  
+			set JD=NJD
+			}
+		}
+
+	quit
+
+
+LDWRN(Date JD)			// Date
+
+	// Make sure WIRN is loaded for JD
+
+	if $D(WIRN(JD)) quit
+	if $O(WIRN(JD),-1)="" quit
+
+	set WIRN(JD)=WIRN($O(WIRN(JD),-1))
+
+	quit
+
+
+AVBLINT(Number BALINT)		// Balance for interest calculation
+
+	//  compute balance used for AVBALINT
+
+	type public Date JD
+	
+	type Date DY,X,Y
+
+	if '+$G(BALINT) quit 0
+
+	set X=JD
+	set Y=$O(WIRN(JD),-1)
+	if 'Y set Y=FD
+
+	//  # of days in this period
+	set DY=(X-Y)+1
+
+	set $P(AV(33),"|",2)=DY+$P(AV(33),"|",2)
+
+	quit BALINT*DY
+
+
+FMRATE	// File maintain interest rate
+
+	if OJD>%SystemDate quit
+
+	new %EffectiveDate,TSO
+
+	set TSO="HSEQ#"_$G(HSEQ)
+	set TCMT=CID_"[LN]IRN:"_ORATE_":"_RATE
+	set %EffectiveDate=OJD
+	do HISTBLD^ACNFUNCS(TCMT,,TSO)
+
+	set RTCHG=1
+
+	quit
+
+
+CHKS(RecordHIST hist)		// History				/REF:R
+
+	// Create check array for statement processing
+
+	if CLS'="D" quit
+	if $$DC^UTRB($E(hist.itc),TRB) quit
+
+	new I
+
+	if '$D(UAVBDDA(TYPE)) do {
+		type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE")
+		set UAVBDDA=prodctl.dda
+		set UAVBDDA(TYPE)=UAVBDDA
+		}
+
+	if 'UAVBDDA(TYPE) quit
+
+	// Not a check transaction
+	if '$D(XTSO("CK"))!(XTSO("CK")="") quit
+
+	set X=$G(XTSO("CK"))
+
+	for I=1:1 quit:'$D(CKNO(CID,X,I))
+
+	set CKNO(CID,X,I)=TAMT_"|"_EJD
+	set $P(CKNO(CID),"|",1)=$P($G(CKNO(CID)),"|",1)+1
+	set $P(CKNO(CID),"|",2)=$P(CKNO(CID),"|",2)+TAMT
+
+	quit
+
+
+public LOADH(RecordACN acn,	// Loan account				/REF:R
+	     RecordHIST hist)	// History				/REF:R
+
+	// Line tag called when hist is defined.  From UAVB, UAVB0, and LNCO3
+
+	set EJD=hist.tjd
+
+	do LOADH2(.acn,.hist)
+
+	quit
+
+
+LOADH2(RecordACN acn,		// Loan account				/REF:R
+       RecordHIST hist)		// History				/REF:R
+
+	new I,J
+
+	set ETC=hist.etc
+	set TAMT=hist.tamt
+	set %EffectiveDate=hist.efd
+	set TSO=hist.tso
+	set DC=$E(hist.itc)
+	set INCRS=TRB-DC
+	set NEGAMRED=hist.dir
+	set UNC=0
+
+	//   Get the Principal only payments.
+	set PRNCPLE=0
+	if 'ETC.isNull(),'INCRS,CTL.extract(18),acn.cls="L",$$TR(12) do {
+		
+		type Number addsub
+		
+		if (hist.itc6 ! hist.itc12), (TAMT < 0) set addsub = -1
+		else  set addsub = 1
+		
+		type DbSet ds = Db.selectDbSet("HISTSB", "CID=:CID AND SLN=:TSEQ", "SLSEQ ASC")
+		
+		while ds.next() do {
+			
+			type RecordHISTSB histsb = ds.getRecord("HISTSB")
+			
+			if (histsb.pe01bseq = "*"), (histsb.pe01ea = "P") set PRNCPLE = PRNCPLE + (addsub * histsb.pe01amt)
+			if (histsb.pe02bseq = "*"), (histsb.pe02ea = "P") set PRNCPLE = PRNCPLE + (addsub * histsb.pe02amt)
+			if (histsb.pe03bseq = "*"), (histsb.pe03ea = "P") set PRNCPLE = PRNCPLE + (addsub * histsb.pe03amt)
+			if (histsb.pe04bseq = "*"), (histsb.pe04ea = "P") set PRNCPLE = PRNCPLE + (addsub * histsb.pe04amt)
+			if (histsb.pe05bseq = "*"), (histsb.pe05ea = "P") set PRNCPLE = PRNCPLE + (addsub * histsb.pe05amt)
+		}
+	}
+
+	set:'%EffectiveDate %EffectiveDate=EJD
+
+	// Unadjusted effective date
+	set EFD2=%EffectiveDate
+	if %EffectiveDate<FD,'$E(CTL,8),'$E(CTL,20) set %EffectiveDate=FD
+
+	set ADJEFD=%EffectiveDate
+	if ADJEFD<FD set ADJEFD=FD
+
+	set P=TAMT
+
+	if TAMT="" quit
+	if TAMT["#" set P=$P(TAMT,"#",2)
+	else  set TAMT=TAMT_"#"_TAMT
+
+	if acn.cls="L" do {
+		type RecordLN ln = {RecordLN}acn
+
+		set P=P+$P(TAMT,"#",5)
+
+		// Uncol Int
+		if ln.iam do {
+			set UNC=-$P(TAMT,"#",8)
+			set P=P-UNC
+			}
+		}
+
+	// Return negative P if balance is reduced by this transaction
+	if 'INCRS set P=-P
+
+	if acn.cls="L",(BAL-P)<0 do {
+		type RecordLN ln = {RecordLN}acn
+
+		if 'ln.iam quit
+		set UNC=ln.iun
+		set P=P-UNC
+		}
+
+	quit
+
+
+ADJBALH(RecordHIST hist)	// History				/REF:R
+
+	new %TRAN
+	set %TRAN=""
+	set ITC=hist.itc
+
+	do ADJBAL(.hist)
+
+	quit
+
+
+ADJBAL(RecordHIST hist)		// History				/REF:R
+
+	// Adjust BALINT for all entries prior to EFD
+
+	new EFD,ESC,INT,N,PC,PRN
+
+	set %EffectiveDate=hist.efd
+	if '%EffectiveDate set %EffectiveDate=$S(%TRAN:%SystemDate,1:hist.tjd)
+
+	set PVAR=""
+	set INT=""
+	set PRN=""
+	set ESC=""
+	set N=.99
+
+	type RecordTTX ttx
+
+	// History of bills for satisfied
+	type DbSet ds = Db.selectDbSet("HISTSB", "CID=:CID AND SLN=:SEQ", "SLSEQ ASC")
+	
+	// Just do first record
+	if ds.next() do { quit
+		
+		type Boolean isNotNull = false
+
+		type RecordHISTSB histsb = ds.getRecord("HISTSB")
+		
+		do ADJBAL3(.ttx, histsb.pe01bseq, histsb.pe01ea, histsb.pe01amt, .isNotNull)
+		do ADJBAL3(.ttx, histsb.pe02bseq, histsb.pe02ea, histsb.pe02amt, .isNotNull)
+		do ADJBAL3(.ttx, histsb.pe03bseq, histsb.pe03ea, histsb.pe03amt, .isNotNull)
+		do ADJBAL3(.ttx, histsb.pe04bseq, histsb.pe04ea, histsb.pe04amt, .isNotNull)
+		do ADJBAL3(.ttx, histsb.pe05bseq, histsb.pe05ea, histsb.pe05amt, .isNotNull)
+		
+		if isNotNull do ADJBAL4(.ttx)
+	}
+
+	quit
+
+
+ADJBAL3(RecordTTX ttx, 		// Transaction		/REF:R
+	String pebseq,		// pe0nbseq
+	String peea,		// pe0nea
+	Number peamt,		// pe0namt
+	Boolean isNotNull)	// Not null indicator
+	
+	// Handled each of the HISTSB.PE0N elements
+
+	type public String H
+	type public Boolean %TRAN
+	type public Number CID,INT,PVAR
+	type public String CTL
+
+	type String D,ELMNT
+	type Boolean HIT
+	type Number PC,TOPFEE
+
+	if pebseq.isNull(), peea.isNull(), peamt.isNull() quit
+	
+	set isNotNull = true
+	
+	if (pebseq '> 0) do { quit
+	
+		if (peea = "P") set PVAR = PVAR + peamt
+	}
+	
+	if (peea = "I") set INT = INT + peamt
+	if (peea = "P") set PRN = PRN + peamt
+	
+	if $$ESC^LNU(peea) set ESC = ESC + peamt
+	
+	// Not called by transaction posting
+	quit:('CTL.extract(11) ! %TRAN)
+	
+	quit:'$$TR(9)
+	
+	// Not calculating weighted interest rate
+	quit:'CTL.extract(1)
+
+	// Do not check for intervening payments unless the element satisfied
+	// was part of a due payment.
+	set HIT = false
+	set ELMNT = peea
+	quit:ELMNT.isNull()
+		
+	if $$ESC^LNU(ELMNT) set HIT = true
+	
+	if 'HIT do { quit
+	
+		type Number TOPFEE
+		
+		set TOPFEE=$$TOPFEE^LNU(ELMNT)
+		
+		type RecordLN ln = Db.getRecord("LN", "CID=:CID")
+		type RecordLNBIL1 lnbil1 = Db.getRecord("LNBIL1", "CID=:CID,SCHSEQ=:ln.schseq")
+		
+		set HIT = $$SUB^BILFUNCS(TOPFEE, .lnbil1)
+	}
+
+	quit
+
+
+ADJBAL4(RecordTTX ttx)		// Transaction				/REF:R
+	
+	if %TRAN do ADJBAL4A(.ttx) quit
+
+	/*
+	   Existing history transaction.  Adjust WIRN entries from the effective
+	   date of this transaction back to the first date to the date range
+	   involved.
+	*/
+
+	do ADJBAL6(6,16,INT)
+	do ADJBAL6(8,17,PRN)
+	do ADJBAL6(10,18,ESC)
+
+	// LCHG
+	do ADJBAL5(13,$P(TAMT,"#",4))
+
+	// MCHG
+	do ADJBAL5(14,$P(TAMT,"#",6))
+
+	// TEB
+	do ADJBAL5(12,-$P(TAMT,"#",7))
+
+	quit
+
+
+ADJBAL4A(RecordTTX ttx)		// Transaction				/REF:R
+
+	/*
+
+	   This transaction is currently being processed on the teller
+	   screen.  Use the different pieces of TAMT to modify WIRN entries
+	   from the effective date of this transaction to the current
+	   system date.
+
+	   If this transaction is an error-correct or reversal, update
+	   WIRN array via ADJBAL9 and 10.
+	  -----------------------------------------------------------------------
+
+	*/
+
+	if %TRAN,$E(ttx.itc,6)+$E(ttx.itc,12) do ADJBAL4B quit
+
+	do ADJBAL7(6,16,INT)
+	do ADJBAL7(8,17,PRN)
+	do ADJBAL7(10,18,ESC)
+
+	// LCHG
+	do ADJBAL8(13,$P(TAMT,"#",4))
+
+	// MCHG
+	do ADJBAL8(14,$P(TAMT,"#",6))
+
+	// TEB
+	do ADJBAL8(12,$P(TAMT,"#",7))
+
+	quit
+
+
+ADJBAL4B
+
+	/*
+	Error-correct or reversal
+
+	   This section will "put money back" from reversal/error-correct
+	   transactions.  For principal, interest, or escrow, the following will
+	   occur until the transaction amount has been processed:
+	    1.  "Paid in advance" amounts will be decreased
+	    2.  "Current" amounts will be increased
+	    3.  "Uncollected" amounts will be increased
+	  -----------------------------------------------------------------------
+
+	*/
+
+	do ADJBAL9(6,16,INT)
+	do ADJBAL9(8,17,PRN)
+	do ADJBAL9(10,18,ESC)
+
+	// LCHG
+	do ADJBAL10(13,$P(TAMT,"#",4))
+
+	// MCHG
+	do ADJBAL10(14,$P(TAMT,"#",6))
+
+	// TEB
+	do ADJBAL10(12,$P(TAMT,"#",7))
+
+	quit
+
+
+ADJBAL5(Number PC,		// Weighted interest rate data location
+	Number V)		// Adjustment amount
+
+	new JD
+	set JD=%EffectiveDate
+
+	if INCRS set V=-V
+
+	for  set JD=$O(WIRN(JD),-1) quit:JD=""  set $P(WIRN(JD),"|",PC)=$P(WIRN(JD),"|",PC)+V
+
+	quit
+
+
+ADJBAL6(Number PC,		// First weighted interest rate data location
+	Number PC2,		// Second weighted interest rate data location
+	Number V)		// Adjustment amount
+
+	new %ESC,%INT,%PRN,%V,JD,X,Z
+
+	if %TRAN set JD=%SystemDate+1
+	else  set JD=%EffectiveDate
+
+	set %V=0
+
+	if INCRS set V=-V
+
+	for  set JD=$O(WIRN(JD),-1) quit:JD=""  do {
+		set X=WIRN(JD)
+		set Z=$P(X,"|",PC2)-$P(X,"|",PC)
+		set:Z>V Z=V
+	
+		set V1=$S(V>Z:Z,1:V)
+		set V2=V-V1
+
+		set $P(X,"|",PC)=$P(X,"|",PC)+V1
+		set $P(X,"|",PC+1)=$P(X,"|",PC+1)+V2-%V
+		set WIRN(JD)=X
+		}
+
+	quit
+	
+
+ADJBAL7(Number PC,		// First weighted interest rate data location
+	Number PC2,		// Second weighted interest rate data location
+	Number V)		// Adjustment amount
+
+	new %ESC,%INT,%PRN,%V,JD,X,Z
+
+	set JD=%EffectiveDate-1
+	set %V=0
+
+	if INCRS set V=-V
+
+	for  set JD=$O(WIRN(JD)) quit:JD=""  do {
+		set X=WIRN(JD)
+
+		// Int or prin amount for this due period
+		set Z=$P(X,"|",PC2)
+
+		// Amount to apply towards "uncollected"
+		set V1=$S($P(X,"|",PC+1)>V:V,1:$P(X,"|",PC+1))
+
+		// Amount to apply towards "current"
+		set V2=V-V1
+
+		set $P(X,"|",PC+1)=$P(X,"|",PC+1)-V1
+		set $P(X,"|",PC)=$P(X,"|",PC)-V2
+
+		set WIRN(JD)=X
+		}
+
+	quit
+
+
+ADJBAL8(Number PC,		// Weighted interest rate data location
+	Number V)		// Adjustment amount
+	
+	new JD
+	set JD=%EffectiveDate-1
+
+	if INCRS set V=-V
+
+	for  set JD=$O(WIRN(JD)) quit:JD=""  set $P(WIRN(JD),"|",PC)=$P(WIRN(JD),"|",PC)-V
+
+	quit
+
+
+ADJBAL9(Number PC,	// First weighted interest rate data location
+	Number PC2,	// Second weighted interest rate data location	/NOREQ
+	Number V)	// Adjustment amount
+	
+	// EC/reversal - adjust current/uncollected amts
+	
+	new JD,X,Z
+
+	// Change to positive for ease of use
+	set V=-V
+
+	set JD=%EffectiveDate-1
+	if INCRS set V=-V
+
+	for  set JD=$O(WIRN(JD)) quit:JD=""  do {
+		set X=WIRN(JD)
+
+		// int or prin amount for this due period
+		set Z=$P(X,"|",PC2)
+
+		// Total amount that can be added back to the "current" bucket
+		set V1=Z-$P(X,"|",PC)
+
+		// If amount to be added back is less than the total, reduce by the difference
+		if V1>V set V1=V
+
+		// Add amount back to "current" bucket
+		set $P(X,"|",PC)=$P(X,"|",PC)+V1
+
+		// Any amount remaining goes back into "uncollected" bucket
+		if V>V1 set $P(X,"|",PC+1)=$P(X,"|",PC+1)+(V-V1)
+
+		set WIRN(JD)=X
+		}
+	quit
+
+
+ADJBAL10(PC,V)	//
+
+	new JD
+	set JD=%EffectiveDate-1
+
+	if INCRS set V=-V
+
+	for  set JD=$O(WIRN(JD)) quit:JD=""  set $P(WIRN(JD),"|",PC)=$P(WIRN(JD),"|",PC)+V
+
+	quit
+
+
+LOWB	// Low balance - first transaction
+
+	if OD>FD,TD'<OD,'$E(CTL,7) do {
+		kill BAL(FD)
+		set BAL(%EffectiveDate)=BAL
+		set FD=%EffectiveDate
+		}
+
+	if $E(CTL,7),%EffectiveDate>OD set AV(5)=0 quit
+
+	set AV(5)=BAL
+
+	quit
+
+
+WRN1(RecordACN acn)		// Account				/REF:R
+
+	// Final clean-up - average interest rate calculation
+
+	new N
+
+	// Set final rate change entry for day after stop date
+	set %EffectiveDate=TD+1
+
+	// Ensure that WIRN entry exists for each interest change date
+	set %EffectiveDate=FD do WRN2
+
+	if CLS="L" do {
+		// If the teaser rate expired within period, make sure an entry
+		// is set in WIRN for the expiration date   ; DJH 10/29/95
+
+		set %EffectiveDate=acn.trexd
+		set EJD=%EffectiveDate
+		if %EffectiveDate'>FD!(%EffectiveDate>TD) quit
+
+		// Force teaser rate into every WIRN entry up to, but not
+		// including, the teaser rate expiration date.
+		set TRATE=acn.trate
+		set N=""
+		for  set N=$O(WIRN(N)) quit:N=""!(N'<%EffectiveDate)  set $P(WIRN(N),"|",1)=TRATE
+
+		// Do not set entry into WIRN for teaser rate expiration if exists
+		if $G(WIRN(%EffectiveDate))'="" quit
+
+		set WIRN(%EffectiveDate)=WIRN($O(WIRN(%EffectiveDate),-1))
+		set $P(WIRN(%EffectiveDate),"|",1)=RT
+		set $P(WIRN(%EffectiveDate),"|",4)=INDEX
+		}
+
+	quit
+
+
+WRN2	// Ensures that WIRN entry exists for each interest change date
+	
+	new EFFDT
+	set EFFDT=%EffectiveDate
+
+	for  set EFFDT=$O(EVENT(EFFDT)) quit:EFFDT=""!(EFFDT>TD)  do {
+		if $D(WIRN(EFFDT)) quit
+	
+		set JD=$O(WIRN(EFFDT),-1)
+		set WIRN(EFFDT)=WIRN(JD)
+		}
+
+	quit
+
+
+WRN3	// Scan for duplicate (same rate and balance) entries
+
+	// Keep all entries if called from transaction processing
+	if $E(CTL,11) quit
+
+	for  set X=$O(WIRN(X)) quit:X=""  do {
+		// Can't get rid of last entry
+		if $O(WIRN(X))="" quit
+
+		if WIRN(X)=Y kill WIRN(X) quit
+
+		set Y=WIRN(X)
+		}
+
+	quit
+
+
+WRN4(Number P,		// Weighted interest rate data location
+     Date JD,		// Date
+     Number AMT)	// Adjustment amount
+
+	// Effective-dated transaction - update appropriate piece
+
+	for  set JD=$O(WIRN(JD),-1) quit:JD=""  set $P(WIRN(JD),"|",P)=$P(WIRN(JD),"|",P)-AMT
+
+	quit
+
+
+public TR(Number P)		// Process control location
+
+	// Tran code processing flag check
+
+	type Public Cache %CACHE()
+	
+	if ETC.isNull() quit 0
+	
+	type RecordTRN trn=%CACHE("TRN").getRecord("TRN","ETC")
+
+	quit $E(trn.pcf,P)
+
+
+CTL20(RecordACN acn)		// Account				/REF:R
+
+	// Balances by effective date
+
+	new B,CHANGE,TMP,X
+
+	set X=BAL(FD)
+
+	if '$D(EBAL) set BAL=BAL(FD) quit
+	kill BAL
+
+	set D=""
+	set B=acn.bal
+	set CHANGE=0
+
+	for  set D=$O(EBAL(D),-1) quit:D<FD!(D="")  do {
+		set TMP=EBAL(D)
+		set BAL(D)=B-CHANGE
+		set B=BAL(D)
+		set CHANGE=TMP
+		if D<TD,'$D(BAL(TD)) set BAL(TD)=BAL(D)
+		}
+
+	if D=TD set BAL(TD)=B-CHANGE
+	if '$D(BAL(FD)) set BAL(FD)=+$G(BAL($O(BAL(FD))))-CHANGE
+	if '$D(EBAL(TD)),'$D(BAL(TD)) set BAL(TD)=B-CHANGE
+
+	//Resetting Ending Balance
+	set AV(12)=BAL(TD)
+	set AV(120)=BAL(TD)-AOA
+	set BAL=BAL(FD)
+	kill EBAL
+
+	quit
+
+
+HLD4(String FLD,		// Hold type
+     Number DLRDYS)		// Date last renewed days		/REF:RW
+
+	new BJD,DONE,HLD,OBAL,OFD,OHLD,OTD
+
+	set DONE=0
+	set OFD=""
+
+	if FLD=7 do {
+		type ResultSet rs=Db.select("EXPDT","HLD7","CID=:CID AND EXPDT<:FD+1","EXPDT DESC")
+		if 'rs.isEmpty(),rs.next() set OFD=rs.getCol(1)
+		}
+	if FLD=8 do {
+		type ResultSet rs=Db.select("EXPDT","HLD8","CID=:CID AND EXPDT<:FD+1","EXPDT DESC")
+		if 'rs.isEmpty(),rs.next() set OFD=rs.getCol(1)
+		}
+
+	if OFD="" set OFD=FD-1
+	else  set OFD=OFD-1
+
+	for  set OFD=$O(HOLD(FLD,CID,OFD)) quit:(OFD="")!(OFD>TD)!DONE  do {
+		// find start of hold
+		if $G(HOLD(FLD,CID,OFD))="" quit
+
+		// find end of hold
+		set OTD=$O(HOLD(FLD,CID,OFD))-1
+
+		if OTD=-1!(OTD>TD) do {
+			set OTD=TD
+			set DONE=1
+			}
+
+		// find hold amount
+		set OHLD=+$G(HOLD(FLD,CID,OFD))
+
+		// find balance at start of hold
+		set BJD=$O(CBAL(OFD+1),-1)
+
+		if BJD="" set BJD=$O(CBAL(OFD))
+		if OFD<FD set OFD=FD
+
+		for  quit:BJD>OTD  do {
+			set OBAL=$S($G(CBAL(BJD))="":CBAL,1:CBAL(BJD))
+			set BJD=$O(CBAL(BJD))
+
+			// Find balance changes during hold
+			if BJD=""!(BJD>OTD) set BJD=OTD+1
+
+			// Hold can't exceed balance
+			set HLD=$S(OHLD>OBAL:OBAL,1:OHLD)
+
+			// Adjust for hold
+			set DLRDYS=DLRDYS-((BJD-OFD)*HLD)
+			set OFD=BJD
+			}
+		set OFD=OTD
+		}
+
+	quit
+
+
+FMT0(RecordACN acn, RecordHIST hist)		// Account				/REF:R
+
+	// Look to see if data items affecting averages were maintained
+
+	// This variable BALWSUPD specifies if the history entry was
+	// a file maintanence to the BAL field.
+	set BALWSUPD=0
+
+	// Prior to or on FD
+	if $G(EFD2),EFD2'>FD quit
+
+	new DI,FLAG,NV,OV,X
+
+	set FLAG=""
+	set X=$P($P(TCMT,"[",2),"]",1)
+	if X["," set X=$P(X,",",2)
+
+	if "ZDEP,ZLN"'[X quit
+	set DI=$P($P(TCMT,"]",2),":",1)
+	if DI="" quit
+
+	if DI="BAL" do { quit
+		set P=$P(TCMT,":",2)-$P(TCMT,":",3)
+		set BALWSUPD=1
+		}
+
+	if DI="ANLIRN",$E(CTL,9) set $P(X(%EffectiveDate),"|",2)=$P(TCMT,":",3) quit
+
+	if '$E(CTL) quit
+
+	set OV=$P(TCMT,":",2)
+	set NV=$P(TCMT,":",3)
+
+	if "ICPA,ANLIRN,CRLMT,TDR,REVF"'[DI do FMT4(.acn) quit
+
+	if DI="ICPA" do { quit
+		set PC=19
+		do FMT1(.hist)
+		}
+
+	if DI="CRLMT" do { quit
+		set FLAG=24
+		set PC=24
+		do FMT1(.hist)
+		}
+
+	if DI="TDR" do { quit
+		set FLAG=25
+		set PC=25
+		do FMT1(.hist)
+		}
+
+	if DI="REVF" do { quit
+		set FLAG=26
+		set PC=26
+		do FMT1(.hist)
+		}
+
+	quit
+
+
+FMT1(RecordHIST hist)	// Reflect file maintenance in WIRN()
+
+	do ADJWIRN(OV,%EffectiveDate-1,PC)
+
+	if '$D(WIRN(%EffectiveDate)) do {
+		set WIRN(%EffectiveDate)=WIRN($O(WIRN(%EffectiveDate),-1))
+		set $P(WIRN(%EffectiveDate),"|",PC)=NV
+		}
+
+	if "INDEX,IRN,TRATE"[DI,'$P(WIRN(%EffectiveDate),"|",3) set $P(WIRN(%EffectiveDate),"|",3)=1
+
+	if hist.tjd-%EffectiveDate,'$D(FMHIT(DI,%EffectiveDate)) do {
+		set FMHIT(DI,%EffectiveDate)=""
+		set $P(WIRN(%EffectiveDate),"|",PC)=NV
+		}
+	quit
+
+
+FMT4(RecordACN acn)		// Account				/REF:R
+
+	// Reflect file maintenance in ln / dep objects
+
+	new DFID,DLIB,ER,FID,LIB,RM,X
+
+	set X=$P(TCMT,":",1)
+	set Y=$P(X,"[",2)
+	set Y=$P(Y,"]",1)
+	set ER=0
+	set X="["_$P(X,"[",2)
+
+	if Y["," do {
+		set DLIB=$P(Y,",",1)
+		set DFID=$P(Y,",",2)
+		}
+	else  set DLIB=%LIBS set DFID=Y
+
+	do ^DBSDI quit:ER
+
+	if '$D(WIRN(%EffectiveDate)) do {
+		set WIRN(%EffectiveDate)=WIRN($O(WIRN(%EffectiveDate),-1))
+		set $P(WIRN(%EffectiveDate),"|",3)=""
+		}
+
+	set X=$G(WIRN(%EffectiveDate,DI))
+	if X="" set X=OV_"|"_NV
+	else  set $P(X,"|",1)=OV
+
+	set WIRN(%EffectiveDate,DI)=X
+
+	if acn.cls="L" do {
+		type RecordLN ln = {RecordLN}acn
+
+		set ln.@DI=OV
+		}
+	else  do {
+		type RecordDEP dep = {RecordDEP}acn
+
+		set dep.@DI=OV
+		}
+
+	quit
+
+
+ADJWIRN(Number VAL,		// Value
+	Date JD,		// Date
+	Number PC)		// Weighted interest rate data location
+
+	/*
+	   Adjust WIRN array by setting the old value into every entry from
+	   the first entry up to, and including JD.
+	*/
+
+	new D
+
+	set JD=JD+1
+	set D=$O(FMHIT(DI,""))
+
+	if D,D<JD set JD=D
+
+	for  set JD=$O(WIRN(JD),-1) quit:JD=""!(FLAG&$P(WIRN(JD),"|",3))  set $P(WIRN(JD),"|",PC)=VAL
+
+	quit
+
+
+CAL(RecordACN acn)		// Account				/REF:R
+
+	// Calculate end-of-day low/high balances and days out of debt
+
+	if $E(CTL,20) do CTL20(.acn)
+
+	set AV(3)=+BAL(FD)
+	set AV(4)=FD
+	set AV(6)=+BAL(FD)
+	set AV(7)=FD
+	set N=""
+	set F=""
+
+	if OD>FD do {
+		set AV(4)=OD
+		set AV(7)=OD
+		if '$D(BAL(OD)) set BAL(OD)=BAL(FD)
+		set AV(3)=+BAL(OD)
+		set AV(6)=+BAL(OD)
+		kill BAL(FD)
+		}
+
+	for  set N=$O(BAL(N)) quit:N=""  do {
+
+		if $E(CTL,20),N>TD quit
+		if BAL(N)<AV(6) do {
+			set AV(6)=BAL(N)
+			set AV(7)=N
+			}
+
+		if BAL(N)>AV(3) do {
+			set AV(3)=BAL(N)
+			set AV(4)=N
+			}
+
+		if '$E(CTL,6) quit
+		if BAL(N)>0,'F quit
+		if BAL(N)>0 do { quit
+			set AV9(N-F)=""
+			set AV(28)=AV(28)+N-F
+			set F=""
+			}
+
+		if 'F set F=N
+		if N'=TD quit
+
+		// Special processing if out of debt on last day of period
+		if 'F do { quit
+			set AV(28)=AV(28)+1
+			set AV9(1)=""
+			}
+
+		set AV(28)=AV(28)+N-F+1
+		set AV9(N-F+1)=""
+		}
+
+	quit:'$E(CTL,6)
+
+	set AV(29)=$O(AV9(""),-1)
+
+	quit
+
+
+TSPP(RecordHIST hist)		// History				/REF:R
+
+	// Total the principal portion of the amounts paid on bills.
+
+	type Boolean isDone = false
+	type Number cnt = 1
+
+	quit:$E(hist.itc,12)!$E(hist.itc,6)
+	
+	type DbSet ds = Db.selectDbSet("HISTSB", "CID=:CID AND SLN=:SEQ", "SLSEQ ASC")
+	
+	while ds.next() do { quit:isDone
+		
+		type RecordHISTSB histsb = ds.getRecord("HISTSB")
+		
+		if (cnt = 1), (histsb.pe01_histsb.pe02_histsb.pe03_histsb.pe04_histsb.pe05 '[ "#P#") set isDone = true quit
+		set cnt = cnt + 1
+		
+		if (histsb.pe01bseq > 0), histsb.pe01ea = "P" set AV(31) = AV(31) + histsb.pe01amt
+		if (histsb.pe02bseq > 0), histsb.pe02ea = "P" set AV(31) = AV(31) + histsb.pe02amt
+		if (histsb.pe03bseq > 0), histsb.pe03ea = "P" set AV(31) = AV(31) + histsb.pe03amt
+		if (histsb.pe04bseq > 0), histsb.pe04ea = "P" set AV(31) = AV(31) + histsb.pe04amt
+		if (histsb.pe05bseq > 0), histsb.pe05ea = "P" set AV(31) = AV(31) + histsb.pe05amt	
+	}
+
+	quit
+
+
+public UAVB5(RecordLN ln)		// Loan account			/REF:R
+
+	// Create UAVB(5) values.  Also called by LNCO3.
+
+	// Principal Reduction
+	if 'INCRS set AV(51)=AV(51)+$P(TAMT,"#",2)
+	// Principal Bal. Increase
+	else  set AV(52)=AV(52)+$P(TAMT,"#",2)
+
+	// Tran code flag 20 distinguishes accrual adjustments and collections
+	// Accrual adjustment
+	if $$TR(20) set AV(55+INCRS)=AV(55+INCRS)+$P(TAMT,"#",3)
+	// Interest collected
+	else  set AV(53+INCRS)=AV(53+INCRS)+$P(TAMT,"#",3)
+
+	// Loan Sale Service Fee
+	// Loan is sold
+	if ln.pflg do {
+		new INV,PL,PSEQ
+
+		type ResultSet rs=Db.select("PSEQ,INCD,PL","LNLS6","CID=:CID")
+		while rs.next() do {
+			set PSEQ=rs.getCol(1)
+			set INV=rs.getCol(2)
+			set PL=rs.getCol(3)
+
+			type RecordLNLSDT lnlsdt=Db.getRecord("LNLSDT","EJD,INV,PL,CID,TSEQ",1)
+			if 'lnlsdt.getMode() quit
+			set AV(526)=AV(526)+lnlsdt.srvfee
+			}
+		}
+
+	/*
+	   If Incrs flag is NOT on;
+                   AV(57) = Late Charge Collection
+                   AV(59) = Undisbursed Principal Increase
+                   AV(511)= Miscellaneous Charge Collection
+                   AV(513)= Escrow Funds Collected
+                   AV(515)= Uncollected Int. Balance Increase
+                   AV(517)= Unapplied Funds Balance Reduction
+                   AV(519)= Principal Charge Off Increase
+                   AV(521)= Principal Charged Off Recovery
+
+	  If Incrs flag is ON;
+                   AV(58) = Late Charge Assessment
+                   AV(510)= Undisbursed Principal Reduction
+                   AV(512)= Miscellaneous Charge Collection
+                   AV(514)= Escrow Funds Balance Reduction
+                   AV(516)= Uncollected Interest Balance Reduction
+                   AV(518)= Unapplied Funds Balance Increase
+                   AV(520)= Principal Charge Off Reduction
+      		   AV(522)= Principal Charged Off Recovery Reduction
+	*/
+
+	for I=3:1:10 do {
+		set IND="5"_((I*2)+INCRS+1)
+		set AV(IND)=AV(IND)+$P(TAMT,"#",I+1)
+		}
+
+	// Negative Amort. Reduction
+	set AV(523)=AV(523)+NEGAMRED
+
+	// Deferred Int. Capitalization
+	if $$TR(16),INCRS set AV(524)=AV(524)+TAMT
+
+	// Principal-only Payments
+	set AV(525)=AV(525)+PRNCPLE
+
+	quit
+
+
+HSEQ(Number CID,		// Account number
+     Number TSEQ)		// Transaction sequence
+
+	/*
+	Returns history seq from which to get lower level data
+	
+	         If this is an error-correct or reversal, this will return
+	           the history sequence of the original transaction.
+	*/
+
+	new BRCD,ETC,HTJD,N,QUIT,UID
+
+	type RecordHIST hist=Db.getRecord("HIST","CID,TSEQ")
+
+	if hist.tamt'<0 quit TSEQ
+
+	if $E(hist.itc,6)+$E(hist.itc,12)=0 quit TSEQ
+
+	do OUT^UTSO(.UTSO,hist.tso)
+	if $E(hist.tamt,12) quit UTSO("REV")
+
+	set N=""
+	set HTJD=hist.tjd
+	set ETC=hist.etc
+	set BRCD=hist.brcd
+	set UID=hist.uid
+
+	type ResultSet rs=Db.select("TSEQ","HIST","CID=:CID AND ETC=:ETC AND BRCD=:BRCD AND UID=:UID AND TJD>=:HTJD","TSEQ DESC")
+	if 'rs.isEmpty() do {
+		while rs.next() do { quit:$G(QUIT)
+			set N=rs.getCol(1)
+			type RecordHIST hist2=Db.getRecord("HIST","CID,N")
+			set QUIT=$$MTCH(.hist,.hist2)
+			}
+		}
+
+	quit $S(N:N,1:TSEQ)
+
+
+MTCH(RecordHIST hist,		// history record			/REF:R
+     RecordHIST hist2)		// Comparison history record		/REF:R
+     
+     	// Returns indicator if this is the reversed/error-corrected history seq
+
+	if $D(UTSO("EC")),(hist2.trc'=UTSO("EC")) quit 0
+
+	if hist2.tamt+hist.tamt quit 0
+
+	quit 1
+
+
+UPDCTR()	// Update debit/credit counters if applicable
+
+	type Public Cache %CACHE()
+
+	// If there is no principle and its not a close out quit with a zero.
+	if 'P,'CLSOUT quit 0
+
+	// If there is no Transaction code quit with a zero.
+	if ETC="" quit 0
+
+	type RecordTRN trn=%CACHE("TRN").getRecord("TRN","ETC")
+
+	if '$E(trn.pcf) quit 0
+
+	if CLS="D" quit 1
+
+	// Update Counters, Amounts & Consider Restrictions
+	if $$DC^UTRB(DC,TRB),$E(trn.pcf,4) quit 1
+
+	// Update Last Payment Date Field
+	if '$$DC^UTRB(DC,TRB),$E(trn.pcf,9) quit 1
+
+	quit 0
+
+
+LNDSEXP	// Adjust BALINT for each WIRN entry by disbursement free amount
+
+	new EXPDT,JD,PRINAMT,SDD
+
+	type ResultSet rs=Db.select("SDD","LNDS1","CID=:CID")
+	quit:rs.isEmpty()
+	while rs.next() do {
+		set SDD=rs.getCol(1)
+		type RecordLNDS1 lnds1=Db.getRecord("LNDS1","CID,SDD")
+
+		set EXPDT=lnds1.expdt
+		if 'EXPDT!(EXPDT<FD) quit
+
+		if '$D(WIRN(EXPDT+1)) set WIRN(EXPDT+1)=WIRN($O(WIRN(EXPDT+1),-1))
+
+		set PRINAMT=lnds1.sda-lnds1.repymt
+		set JD=SDD-1
+
+		for  set JD=$O(WIRN(JD)) quit:JD=""!(JD>EXPDT)  do {
+			set $P(WIRN(JD),"|",5)=$P(WIRN(JD),"|",5)-PRINAMT
+			}
+		}
+	quit
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60774^38418^Keith Shank^59660"	// Signature - LTD^TIME^USER^SIZE

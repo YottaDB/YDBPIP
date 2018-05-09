@@ -1,0 +1,1311 @@
+BCHROLSG //Batch BCHROLLSEG - Automatic Rollover for Segments
+ ;;Copyright(c)2007 Sanchez Computer Associates, Inc.  All Rights Reserved - 08/30/2007 15:09 - joynerd
+ //
+ // ********** This is a DATA-QWIK generated Routine **********
+ // Level 33  - BCHROLLSEG Batch Definition
+ // ***********************************************************
+ //
+ //
+ type public Number ER
+ type public String %FN,RM
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ type Number %BatchExit,%BatchRestart,vBCHSTS
+ type String vCONTEXT,vINPUT,vSYSVAR,vRESULT
+ set %BatchExit=0,%BatchRestart=0,ER=0,RM=""
+ do INIT^BCHUTL(.vSYSVAR)
+ do vOPEN(.vINPUT,.%BatchExit) if %BatchExit quit
+ do JOBMGR^BCHUTL(%FN,"BCHROLLSEG",.vINPUT)
+ do ^JOBMGR(.vINPUT)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vPROC(CID) //
+ type public Number ER
+ type public String ET,%EVENT,%FN,%INTRPT(),RM,vCONTEXT
+ catch vERROR {
+ type public Number ER
+ type public String RM
+ 
+ do Runtime.rollback()
+ 
+ do LOG^UTLEXC("BCHROLLSEG","*","",CID.get(), vERROR.thrownAt, vERROR.type)
+ 
+ // DBFILER errors do not log on a call to ZE^UTLERR
+ if vERROR.type="%PSL-E-DBFILER" do {
+  type String ET = vERROR.type
+  do ^UTLERR
+ }
+ else  do ZE^UTLERR
+ 
+ set ER = 1
+ set RM = vERROR.description
+ }
+ if ('%INTRPT.get().isNull())!(%INTRPT.data() > 1) do INTRPT^BCHUTL(%EVENT.get())
+ do Runtime.start("BA")
+ set vCONTEXT=""
+ set (ET,RM)=""
+ set ER=0
+ do vEXEC(.vCONTEXT,CID)
+ if ER.get() do { quit
+ type String et
+ set et=$S(ET.get().isNull():RM.get(),1:ET)
+ 
+ do Runtime.rollback()
+ do LOG^UTLEXC("BCHROLLSEG","*","",CID.get(),"",et)
+ }
+ do Runtime.commit()
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vEXEC(vCONTEXT,CID) //
+	new ER
+	set ER=0
+	set CTL=1
+ 
+	new ts,ts2
+ 
+	type TranSet ts,ts2
+ 
+	// We need two transaction groups (or sets)
+	set ts=Class.new("TranSet")
+	set ts2=Class.new("TranSet")
+	
+	// Each thread processes all segments in one account
+	do DTL(CID,.ts,.ts2)
+
+	new par
+	set par("OPTION")=2
+	set par("IPMODE")=3
+ 
+	// post transactions sets
+	do ts.postTSet(TPD,BRCD,.par)
+	do ts2.postTSet(TPD,BRCD,.par)
+	
+	quit
+
+DTL(CID,TranSet ts,TranSet ts2)     // Process single account
+	 
+	// Deposit object
+	new dep
+	type RecordDEP dep=Db.getRecord("DEP","CID")
+ 
+	// Skip closed accounts
+	if dep.stat=4 quit
+ 
+	// Loop through dayend global looking for maturing segments
+	type ResultSet rs=Db.select("SEGMENT","DEPSEG","SEGMDT=:TJD and  CID=:CID AND SEGMENT NOT =0")
+	while rs.next() do { quit:ER
+		set SEGMENT=rs.getCol(1)
+		do SEGDTL(CID,SEGMENT,.ts,.ts2,.dep) if ER do EXC
+		}
+
+	quit
+
+SEGDTL(CID,SEGMENT,TranSet ts,TranSet ts2,RecordDEP dep)
+	// Process single segment
+
+	do dep.setAuditFlag(1) 
+	set ER=0,SAVCID=CID
+	set trseq=0
+ 
+	/*
+	If the balance on the account is not greater than zero place it
+	in the exception file.
+	*/
+
+	new depseg,CCODE
+	type RecordDEPSEG depseg=Db.getRecord("DEPSEG","CID,SEGMENT")
+	
+	if depseg.bal<0 set ER=1,ET="NEGBAL" quit 
+
+	set TYPE=dep.type
+	set CCODE=dep.ccode
+	new prodctl
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE")
+ 
+	set BAL=dep.bal
+	set CRCD=dep.crcd
+	set GLSC=dep.glsc
+	if '$D(TC(dep.type,dep.crcd)) do INI(.PDO,.prodctl)
+	new DWA set DWA=0
+	set IMO=dep.IMO				// Interest Maturity Option
+	set INT=$$^SCARND(dep.acr,0,CID)	// Accrued Positive Interest
+
+	// Process interest accrual
+	do SEGACR(.dep,.ts,.depseg,.prodctl,CID,INT) quit:ER
+
+	if 'depseg.bal,'depseg.aibal quit   //ACM 42299
+
+	if $G(IMO)="" do {
+		set RENCD=dep.rencd
+		// If IMO is not defined, use RENCD		/SMC
+		if RENCD=3 set IMO=0
+		else  set IMO=RENCD
+		}
+
+	/*
+	If IMO is 5, (add to partial renewal amount), then
+	lets treat this like IMO=0, except we will
+	force the interest to remain in the segment
+	even without a partial renewal amount.
+	*/
+
+	if (IMO=0)!(IMO=5) do IMO0(.dep,.depseg,.ts,.ts2,.prodctl)
+	if (IMO=1)!(IMO=3) do IMO1(.dep,.depseg,.ts,.ts2,.prodctl)
+	if IMO=2 do IMO2(.dep,.depseg,.ts,.ts2,.prodctl)
+	if IMO=4 do IMO4(.dep,.depseg,.ts,.ts2,.prodctl)
+	quit:ER
+
+	// Decrease [DEP]TNUMS by one. (renewal section increments this)
+	set dep.tnums=dep.tnums-1
+	do depseg.save()
+	do dep.save()
+
+	quit
+ 
+SEGACR(RecordDEP dep,TranSet ts,RecordDEPSEG depseg,RecordPRODCTL prodctl,CID,INT) 
+	// Accrual Section 	
+
+	new TAMT,TSO
+	set TSO="SEG#"_SEGMENT			// dfm 11/3/99
+	set AIACR=depseg.aiacr
+	set POSACR=depseg.posacr
+	set CHKAMT=dep.aecamt			// Anticipated check amount
+	set INTAMT=$P(CHKAMT,"#",3)		// Interest portion of check
+	set WTHAMT=$P(CHKAMT,"#",5)		// Withholding portion of check
+
+	// Post accrual on available interest to available interest bucket.
+	if AIACR>0 do {  if ER do EXC quit
+		// DR Adj Accrued Int on Available Int Tran Code
+		set TRAN=prodctl.draai
+		// ~p1 not defined for product type ~p2
+		if TRAN="" set ER=1,RM=$$^MSG(3699,"prodctl.draai",TYPE) quit
+
+		set TSO="SEG#"_SEGMENT
+		set TSO=$$FIELDIN^UTSO(TSO,"EXACTACR",AIACR)
+		set TSO=$$FIELDIN^UTSO(TSO,"ROLL")
+		set TCMT=""
+		set TAMT=$$^SCARND(AIACR,0,CID)
+		do CRTTX(.ts,TRAN,TAMT,CID,TSO,TCMT)
+
+		// CR Adj Int Posted on Available Int Tran Code
+		set TRAN=prodctl.crpai 
+		// ~p1 not defined for product type ~p2
+		if TRAN="" set ER=1,RM=$$^MSG(3699,"prodctl.crpai",TYPE) quit
+
+		set TSO="SEG#"_SEGMENT
+		set TSO=$$FIELDIN^UTSO(TSO,"EXACTACR",AIACR)
+		set TSO=$$FIELDIN^UTSO(TSO,"ROLL")
+		set TAMT=$$^SCARND(AIACR,0,CID)
+		do CRTTX(.ts,TRAN,TAMT,CID,TSO,"")
+		}
+
+	// Post positive accrual to segment's principal balance
+	// or to available interest bucket, depending on dep.iaf.
+	if POSACR>0 do {  if ER do EXC quit
+		// DR Adj Accrued Interest Tran Code
+		set TRAN=prodctl.dradin
+		// ~p1 not defined for product type ~p2
+		if TRAN="" set ER=1,RM=$$^MSG(3699,"prodctl.dradin",TYPE) quit
+
+		set TSO="SEG#"_SEGMENT
+		set TSO=$$FIELDIN^UTSO(TSO,"EXACTACR",POSACR)
+		set TSO=$$FIELDIN^UTSO(TSO,"ROLL")
+		set TCMT=""
+		set TAMT=$$^SCARND(POSACR,0,CID)
+		do CRTTX(.ts,TRAN,TAMT,CID,TSO,TCMT)
+
+		// CR Interest Tran Code
+		set TRAN=prodctl.crtrin
+		// ~p1 not defined for product type ~p2
+		if TRAN="" set ER=1,RM=$$^MSG(3699,"prodctl.crtrin",TYPE) quit
+
+		set TSO="SEG#"_SEGMENT
+		set TSO=$$FIELDIN^UTSO(TSO,"INT","")            //ACM 42299
+		set TSO=$$FIELDIN^UTSO(TSO,"EXACTACR",POSACR)
+		set TSO=$$FIELDIN^UTSO(TSO,"ROLL")
+		set TAMT=$$^SCARND(POSACR,0,CID)
+		do CRTTX(.ts,TRAN,TAMT,CID,TSO,"")
+		}
+
+	if ER do EXC quit
+	
+	quit       
+		
+CRTTX(TranSet ts,ETC,TAMT,CID,TSO,TCMT)      // Create TTX record
+ 
+	/*
+ 
+	EXTC  -   External Transaction Code.
+	TAMT  -   Transaction Amount.
+	CID   -   Customer Id.
+	TSO   -   Transaction Source.
+	TCMT  -   Teller Comment.
+ 
+	With these parameters it will create a TTX record for TTXP2 to post.
+	*/
+ 
+	quit:('TAMT)&(TSO'["EXACTACR")		//cds 5/19/00
+
+	new trn
+	type RecordTRN trn=Db.getRecord("TRN","ETC")
+       	
+	new ttx
+	type RecordTTX ttx=Class.new("RecordTTX")
+ 
+	new ITC						//ACM 42299
+	set ITC=trn.itc					//ACM 42299
+	if TSO["INT#" set ITC=$$ITC^TTXEXT(ITC,4)	//ACM 42299
+ 
+	set ttx.cid=CID
+	set ttx.itc=ITC					//ACM 42299
+	set ttx.etc=ETC
+	set ttx.tamt=TAMT
+	set ttx.efd=EFD
+	set ttx.tlo=%UserStation
+	set ttx.tso=TSO
+	set ttx.tcmt=TCMT
+	set ttx.crcd=CRCD
+	set ttx.custcd=CCODE			//dfm 11/2/99
+ 
+	set x=ts.copyTran(ttx)
+	quit
+
+BLDTSO(SEG,PRINAMT,INTAMT)
+
+	/*
+	This section builds a TSO used for segment transactions.
+	This section will not build a TSO which combines
+	multiple segments in one transaction.
+	*/
+
+	new TSO
+
+	// For TSO, Posting Routine expects this format:
+	// Example : SEGP#1:1000~SEGI#1:50
+	if INTAMT=0 set TSO="SEGP#"_SEG_":"_PRINAMT
+	else  if PRINAMT=0 set TSO="SEGI#"_SEG_":"_INTAMT
+	else  set TSO="SEGP#"_SEG_":"_PRINAMT_"~SEGI#"_SEG_":"_INTAMT
+
+	set TSO=$$FIELDIN^UTSO(TSO,"ROLL")
+
+	quit TSO
+	
+ACT(RecordDEP dep,RENCD)
+
+	// Determines if there is action to take if the renewal code = 0
+
+	if '(RENCD=0) quit
+	if dep.ero'="" set RENCD=3  // Earnings renewal option specified
+	if dep.rro'="" set RENCD=3  // Rate renewal option specified
+	if dep.dftmdt'="" set RENCD=3  // Default group specified
+	quit
+
+IMO0(RecordDEP dep,RecordDEPSEG depseg,TranSet ts,TranSet ts2,RecordPRODCTL prodctl,BWA)
+	// Interest remains on deposit. 
+	set AIBAL=depseg.aibal
+	set BAL=depseg.bal
+	set AIACR=depseg.aiacr
+	set AIBAL=AIBAL+$$^SCARND(AIACR,0,CID)
+	if dep.iaf=2 set AIBAL=AIBAL+$$^SCARND(depseg.posacr,0,CID)
+	if dep.iaf=0 set BAL=BAL+$$^SCARND(depseg.posacr,0,CID)
+	set PRENA=depseg.prena
+	set TYPE=dep.type
+	set RENCD=dep.rencd
+	set SEG=depseg.segment
+
+	// If there is action to take, possibly adjust RENCD.
+	do ACT(.dep,.RENCD)
+
+	// Determine default transaction codes from product type.
+	set DEBIT=prodctl.drtrgp
+	set CREDIT=prodctl.crtrgp
+	if DEBIT="" set ER=1,RM=$$^MSG(3699,"prodctl.drtrgp",TYPE)
+	if CREDIT="" set ER=1,RM=$$^MSG(3699,"prodctl.crtrgp",TYPE)
+	if ER do EXC quit
+	if (RENCD=0)!(RENCD=5) do {
+		/*
+		No Renewal of Principal, SO
+		Move Interest and Principal to zero segment.
+		*/
+		set TAMT=AIBAL+BAL,TCMT=$$^MSG(3581,0)
+		set TSO=$$BLDTSO(SEG,BAL,AIBAL)
+       		do CRTTX(.ts2,DEBIT,TAMT,CID,TSO,TCMT)
+		set TAMT=$$^SCARND(TAMT,0,CID)
+		set TSO=$$BLDTSO(0,TAMT,0),TCMT="" 
+		do CRTTX(.ts2,CREDIT,TAMT,CID,TSO,TCMT)
+		}
+	if RENCD=1 do {
+		// Close, disburse by Check.  Move Interest to Zero segment.
+		set TAMT=AIBAL+BAL-PRENA,TCMT=$$^MSG(7094)
+		set TSO=$$BLDTSO(SEG,(BAL-PRENA),AIBAL)
+		do CRTTX(.ts2,DEBIT,TAMT,CID,TSO,TCMT)
+		// deposit interest to zero segment or segment's balance
+		if AIBAL>0 do {
+			set TCMT=""
+			if (PRENA>0)!(IMO=5) set TSO=$$BLDTSO(SEG,AIBAL,0)
+			if ('PRENA>0)&(IMO'=5) set TSO=$$BLDTSO(0,AIBAL,0)
+			do CRTTX(.ts2,CREDIT,AIBAL,CID,TSO,TCMT)
+			}	
+		// pay by check
+		set TAMT=BAL
+		if PRENA>0 set TAMT=BAL-PRENA
+		do FEES(.dep,.TAMT,.prodctl) if ER do EXC quit
+	
+		set CKTYP=prodctl.ckmdt // Check Type For Principal Payout
+		if CKTYP="" set ER=1,RM=$$^MSG(3699,"prodctl.ckmdt",TYPE)
+		if ER do EXC quit
+		do GL(.dep,.ts2) quit:ER
+
+		// Update Check printing file
+		do XPDO(.dep)
+
+		// Partial Renewal
+		if (PRENA>0)!(IMO=5) do SEGRNW(.dep,.depseg)
+		}
+	if RENCD=2 do {
+		// Close, by Transfering Funds.  Move Interest to Zero segment.
+		set TAMT=AIBAL+BAL-PRENA,TCMT="TFR-"_dep.racn
+       		set TSO=$$BLDTSO(SEG,(BAL-PRENA),AIBAL)
+		do CRTTX(.ts2,DEBIT,TAMT,CID,TSO,TCMT)
+
+		new TTXPTR,tseq			// dfm 11/2/99
+		set tseq=$O(TTXPTR(""),-1)\1+1
+		set TTXPTR(tseq)=x
+
+		// deposit interest to zero segment
+		if AIBAL>0 do {
+			if (PRENA>0)!(IMO=5) set TSO=$$BLDTSO(SEG,AIBAL,0)
+			if ('PRENA>0)&(IMO'=5) set TSO=$$BLDTSO(0,AIBAL,0)
+			do CRTTX(.ts2,CREDIT,AIBAL,CID,TSO,TCMT)
+			set tseq=$O(TTXPTR(""),-1)\1+1
+			set TTXPTR(tseq)=x
+			}
+		set TAMT=BAL
+		if PRENA>0 set TAMT=BAL-PRENA
+		do TRANSFR(.dep,.ts2,0,TAMT,.prodctl)
+		// Parial Renewal
+		if (PRENA>0)!(IMO=5) do SEGRNW(.dep,.depseg)
+			}
+	if RENCD=3 do {
+		/*
+		Automatic Renewal of the Principal 
+		Take funds in AIBAL and move to BAL.
+		*/
+		if (AIBAL>0)&(dep.ero'=1) do {
+			set TCMT=$$^MSG(3787)
+			set TSO=$$BLDTSO(SEG,0,AIBAL)
+			do CRTTX(.ts2,DEBIT,AIBAL,CID,TSO,TCMT) quit:ER
+			set TSO=$$BLDTSO(SEG,AIBAL,0)
+			do CRTTX(.ts2,CREDIT,AIBAL,CID,TSO,TCMT) quit:ER
+			}
+		do SEGRNW(.dep,.depseg)
+		}
+	if RENCD=4 do {
+		if (PRENA>0)!(IMO=5) do {
+			// Withdrawal Interest From Segment
+			set TSO=$$BLDTSO(SEG,0,AIBAL)
+			set TCMT=$$^MSG(3787)
+			do CRTTX(.ts2,DEBIT,AIBAL,CID,TSO,TCMT) quit:ER
+			// Move Interest to segment
+			set TSO=$$BLDTSO(SEG,AIBAL,0)
+			do CRTTX(.ts2,CREDIT,AIBAL,CID,TSO,TCMT)
+			set TAMT=BAL-PRENA
+			set UNIQTSO=$$BLDTSO(SEG,TAMT,0)
+			// Create Payment Order
+			do EFTBUILD(.dep,0,TAMT,UNIQTSO,DEBIT)
+  			quit:ER
+			// Do partial renewal
+	      		do SEGRNW(.dep,.depseg)
+			}
+		if ('PRENA>0)&(IMO'=5) do {
+			// Withdrawal Interest From Segment
+			set TSO=$$BLDTSO(SEG,0,AIBAL)
+			set TCMT=$$^MSG(3787)
+			do CRTTX(.ts2,DEBIT,AIBAL,CID,TSO,TCMT) quit:ER
+			// Move Interest to 0 segment
+			set TSO=$$BLDTSO(0,AIBAL,0)
+			do CRTTX(.ts2,CREDIT,AIBAL,CID,TSO,TCMT) quit:ER
+			set UNIQTSO=$$BLDTSO(SEG,BAL,0)
+			// Create Payment Order
+			do EFTBUILD(.dep,0,BAL,UNIQTSO,DEBIT)
+			quit:ER
+			}	
+		}
+	quit
+
+IMO1(RecordDEP dep,RecordDEPSEG depseg,TranSet ts,TranSet ts2,RecordPRODCTL prodctl,BWA)
+
+	// IMO=1 - Pay interest by Check
+	set AIBAL=depseg.aibal
+	set BAL=depseg.bal
+	set AIACR=depseg.aiacr
+	set AIBAL=AIBAL+$$^SCARND(AIACR,0,CID)
+	if dep.iaf=2 set AIBAL=AIBAL+$$^SCARND(depseg.posacr,0,CID)
+	if dep.iaf=0 set BAL=BAL+$$^SCARND(depseg.posacr,0,CID)
+	set PRENA=depseg.prena
+	set TYPE=dep.type
+	set RENCD=dep.rencd
+	set SEG=depseg.segment
+
+	// If there is action to take, possibly adjust RENCD.
+	do ACT(.dep,.RENCD)
+
+	// Determine default transaction codes from product type.
+	set DEBIT=prodctl.drtrgp
+	set CREDIT=prodctl.crtrgp
+	if DEBIT="" set ER=1,RM=$$^MSG(3699,"prodctl.drtrgp",TYPE)
+	if CREDIT="" set ER=1,RM=$$^MSG(3699,"prodctl.crtrgp",TYPE)
+	if ER do EXC quit
+	if (RENCD=0)!(RENCD=5) do {
+		// No Renewal of Principal, SO Principal to zero segment.
+		set TAMT=AIBAL+BAL,TCMT=$$^MSG(3580)
+		set TSO=$$BLDTSO(SEG,BAL,AIBAL)
+		do CRTTX(.ts2,DEBIT,TAMT,CID,TSO,TCMT)
+		// Pay interest by Check
+		set TAMT=AIBAL
+		set CKTYP=prodctl.ckint      // Check Type For Interest Payout
+		if CKTYP="" set ER=1,RM=$$^MSG(3699,"prodctl.ckint",TYPE)
+		quit:ER
+		// Set up A arrays for FEES^DEPDBS
+		do FEES(.dep,.TAMT,.prodctl) if ER do EXC quit
+		do GL(.dep,.ts2) quit:ER
+		set CKTYP=prodctl.ckint
+		do XPDO(.dep)
+		// Move Principal to Zero Segment
+      		set BAL=depseg.BAL
+	  	set TSO=$$BLDTSO(0,BAL,0)
+		do CRTTX(.ts2,CREDIT,BAL,CID,TSO,$$^MSG(3581,0))
+		}
+	if ER do EXC quit
+
+	if RENCD=1 do {
+		// Close, disburse by Check.  Move Interest to Zero segment.
+		set TAMT=AIBAL+BAL-PRENA,TCMT=$$^MSG(7094)
+		set TSO=$$BLDTSO(SEG,(BAL-PRENA),AIBAL)
+		do CRTTX(.ts2,DEBIT,TAMT,CID,TSO,TCMT)
+		// pay by check
+		set TAMT=BAL+AIBAL
+		if PRENA>0 set TAMT=BAL-PRENA
+       		set CKTYP=prodctl.ckmdt      ; Check Type For Principal Payout
+		if CKTYP="" set ER=1,RM=$$^MSG(3699,"prodctl.ckmdt",TYPE)	
+		quit:ER
+		// Set up A arrays for FEES^DEPDBS
+		do FEES(.dep,.TAMT,.prodctl) if ER do EXC quit
+		do GL(.dep,.ts2) quit:ER
+		// Update Check printing file
+		set CKTYP=prodctl.ckint
+		if CKTYP="" set ER=1,RM=$$^MSG(3699,"prodctl.ckint",TYPE)    
+		quit:ER
+		do XPDO(.dep)
+		// Partial Renewal
+		if PRENA>0 do SEGRNW(.dep,.depseg)
+		}
+	if ER do EXC quit
+
+	if RENCD=2 do {
+		set TAMT=AIBAL+BAL-PRENA,TCMT="TFR - "_dep.racn_" "_$$^MSG(3580)
+		set TSO=$$BLDTSO(SEG,(BAL-PRENA),AIBAL)
+		do CRTTX(.ts2,DEBIT,TAMT,CID,TSO,TCMT)
+
+		new TTXPTR,tseq			// dfm 11/02/99
+		set tseq=$O(TTXPTR(""),-1)\1+1
+		set TTXPTR(tseq)=x
+
+		// Pay Interst by Check
+		set TAMT=AIBAL
+		set CKTYP=prodctl.ckint      ; Check Type For Interest
+		if CKTYP="" set ER=1,RM=$$^MSG(3699,"prodctl.ckint",TYPE)
+		quit:ER
+		// Set up A arrays for FEES^DEPDBS
+		do FEES(.dep,.TAMT,.prodctl) if ER do EXC quit
+		do GL(.dep,.ts2) quit:ER
+		// Update check printing file
+		set CKTYP=prodctl.ckint
+		do XPDO(.dep)
+		// Transfer Principal to another account
+		set TAMT=depseg.bal
+		if PRENA set TAMT=TAMT-PRENA
+		do TRANSFR(.dep,.ts2,0,TAMT,.prodctl)
+		// Partial Renewal
+		if PRENA do SEGRNW(.dep,.depseg)
+		}
+
+	if ER do EXC quit
+
+	if RENCD=3 do {
+		/*
+		Pay Interest by Check
+		Automatic Renewal of the Principal
+		*/
+		if AIBAL>0 do {
+			set TSO=$$BLDTSO(SEG,0,AIBAL),TCMT=$$^MSG(3580)
+			do CRTTX(.ts2,DEBIT,AIBAL,CID,TSO,TCMT) quit:ER
+			set CKTYP=prodctl.ckint      ; Check Type For Interest
+			if CKTYP="" set ER=1,RM=$$^MSG(3699,"prodctl.ckint",TYPE)
+			quit:ER
+			do FEES(.dep,.TAMT,.prodctl) if ER do EXC quit
+			do GL(.dep,.ts2) quit:ER
+			// Update check printing file
+			set CKTYP=prodctl.ckint
+			do XPDO(.dep)
+			}
+		do SEGRNW(.dep,.depseg)
+		}
+
+	if ER do EXC quit
+
+	if RENCD=4 do {
+		set TSO=$$BLDTSO(SEG,0,AIBAL),TCMT=$$^MSG(3580)
+		do CRTTX(.ts2,DEBIT,AIBAL,CID,TSO,TCMT) quit:ER
+		set TAMT=AIBAL
+		set CKTYP=prodctl.ckint      ; Check Type For Interest
+		if CKTYP="" set ER=1,RM=$$^MSG(3699,"prodctl.ckint",TYPE)    
+		quit:ER
+		// Set up A array for FEES^DEPDBS
+		do FEES(.dep,.TAMT,.prodctl) if ER do EXC quit
+       		do GL(.dep,.ts2) quit:ER
+		// Update check printing file
+		set CKTYP=prodctl.ckint
+		do XPDO(.dep)
+		set TAMT=depseg.BAL
+		if PRENA>0 set TAMT=TAMT-PRENA
+		set UNIQTSO=$$BLDTSO(SEG,TAMT,0)
+		do EFTBUILD(.dep,0,TAMT,UNIQTSO,DEBIT)
+		quit:ER
+		// Partial Renewal
+		if PRENA>0 do SEGRNW(.dep,.depseg)
+		}
+
+	if ER do EXC quit
+
+	quit
+
+IMO2(RecordDEP dep,RecordDEPSEG depseg,TranSet ts,TranSet ts2,RecordPRODCTL prodctl,BWA)
+
+	// IMO=2 - Transfer Interest to Another Account)
+	set AIBAL=depseg.aibal
+	set BAL=depseg.bal
+	set AIACR=depseg.aiacr
+	set AIBAL=AIBAL+$$^SCARND(AIACR,0,CID)
+	if dep.iaf=2 set AIBAL=AIBAL+$$^SCARND(depseg.posacr,0,CID)
+	if dep.iaf=0 set BAL=BAL+$$^SCARND(depseg.posacr,0,CID)
+	set PRENA=depseg.prena
+	set TYPE=dep.type
+	set RENCD=dep.rencd
+	set SEG=depseg.segment
+	new INTMATITA
+	set INTMATITA=dep.intmatita
+	/*
+	If there is no interest transfer account and the principal
+	renewal code is 2, and interest maturity option is null or
+	2, then use the principal transfer account as the account
+	to transfer interest to.
+	*/
+
+	if ($G(INTMATITA)="")&(RENCD=2) set INTMATITA=dep.racn
+
+	// If there is action to take, possibly adjust RENCD.
+	do ACT(.dep,.RENCD)
+
+	// Determine default transaction codes from product type.
+	set DEBIT=prodctl.drtrgp
+	set CREDIT=prodctl.crtrgp
+	if DEBIT="" set ER=1,RM=$$^MSG(3699,"prodctl.drtrgp",TYPE)
+	if CREDIT="" set ER=1,RM=$$^MSG(3699,"prodctl.crtrgp",TYPE)
+	if ER do EXC quit
+
+	new TTXPTR,tseq					// dfm 11/2/99
+
+	if (RENCD=0)!(RENCD=5) do {
+		set TAMT=AIBAL+BAL,TCMT="TFRI-"_INTMATITA
+		set TSO=$$BLDTSO(SEG,BAL,AIBAL)
+		do CRTTX(.ts2,DEBIT,TAMT,CID,TSO,TCMT)
+
+		set tseq=$O(TTXPTR(""),-1)\1+1		// dfm 11/2/99
+		set TTXPTR(tseq)=x
+
+		set TAMT=AIBAL
+		do TRANSFR(.dep,.ts2,1,TAMT,.prodctl)
+		// Move Principal to Zero Segment
+		set TAMT=BAL,TCMT=""
+		set TAMT=$$^SCARND(TAMT,0,CID)
+		set TSO=$$BLDTSO(0,TAMT,0)
+		do CRTTX(.ts2,CREDIT,TAMT,CID,TSO,TCMT)
+		}
+
+	if ER do EXC quit
+
+	if RENCD=1 do {
+		set TAMT=AIBAL+BAL,TCMT=$$^MSG(7094)_" TRFI-"_INTMATITA
+		set TSO=$$BLDTSO(SEG,(BAL-PRENA),AIBAL)
+		do CRTTX(.ts2,DEBIT,TAMT,CID,TSO,TCMT)
+
+		set tseq=$O(TTXPTR(""),-1)\1+1		// dfm 11/2/99
+		set TTXPTR(tseq)=x
+
+	 	if AIBAL>0 do {
+			set TAMT=AIBAL
+			do TRANSFR(.dep,.ts2,1,TAMT,.prodctl)
+			}
+		set TAMT=depseg.bal
+		if PRENA>0 set TAMT=TAMT-PRENA
+		set CKTYP=prodctl.ckmdt      ; Check Type For Principal
+		if CKTYP="" set ER=1,RM=$$^MSG(3699,"prodctl.ckmdt",TYPE)
+		// Set up A arrays for FEES^DEPDBS
+		do FEES(.dep,.TAMT,.prodctl) if ER do EXC quit
+	  	do GL(.dep,.ts2) quit:ER
+		// Update check printing file
+		set CKTYP=prodctl.ckint
+		do XPDO(.dep)
+		// Partial Renewal
+		if PRENA>0 do SEGRNW(.dep,.depseg)
+		}
+
+	if ER do EXC quit
+
+	if RENCD=2 do {
+		set TAMT=AIBAL+BAL,TCMT="TFR-"_dep.racn
+		if dep.racn'=INTMATITA set TCMT=TCMT_" TFRI-"_INTMATITA
+		set TSO=$$BLDTSO(SEG,(BAL-PRENA),AIBAL)
+		do CRTTX(.ts2,DEBIT,TAMT,CID,TSO,TCMT)
+
+		set tseq=$O(TTXPTR(""),-1)\1+1		// dfm 11/2/99
+		set TTXPTR(tseq)=x
+		set TTXPTR=0
+
+		/*
+		Both principal and interest are going to be transfered.
+		Are they going to the same account?
+		*/
+		if dep.racn=dep.INTMATITA do {  quit
+			set TAMT=AIBAL+BAL
+			if PRENA>0 set TAMT=TAMT-PRENA
+			do TRANSFR(.dep,.ts2,0,TAMT,.prodctl)
+			if PRENA>0 do SEGRNW(.dep,.depseg)
+			}
+		// Transfer interest seperately: first transfer interest.
+		if AIBAL>0 do {
+			set TAMT=AIBAL
+			do TRANSFR(.dep,.ts2,1,TAMT,.prodctl,1)
+			}
+		// Then transfer principal.
+		set TAMT=BAL
+		if PRENA>0 set TAMT=TAMT-PRENA
+		do TRANSFR(.dep,.ts2,0,TAMT,.prodctl)
+		}
+
+	if ER do EXC quit
+
+	if RENCD=3 do {
+		/*
+		Transfer Interest
+		Automatic Renewal of the Principal
+		Take funds in AIBAL and move to BAL.
+		*/
+		if AIBAL>0 do {
+			set TSO=$$BLDTSO(SEG,0,AIBAL),TCMT="TFRI-"_INTMATITA
+			do CRTTX(.ts2,DEBIT,AIBAL,CID,TSO,TCMT) quit:ER
+
+			set tseq=$O(TTXPTR(""),-1)\1+1		// dfm 11/2/99
+			set TTXPTR(tseq)=x
+
+       			do TRANSFR(.dep,.ts2,1,AIBAL,.prodctl) quit:ER
+			}
+		do SEGRNW(.dep,.depseg)
+		}
+
+	if ER do EXC quit
+
+	if RENCD=4 do {
+		if AIBAL>0 do {
+			set TSO=$$BLDTSO(SEG,0,AIBAL),TCMT="TFRI-"_INTMATITA
+			do CRTTX(.ts2,DEBIT,AIBAL,CID,TSO,TCMT) quit:ER
+
+			set tseq=$O(TTXPTR(""),-1)\1+1		// dfm 11/2/99
+			set TTXPTR(tseq)=x
+
+			do TRANSFR(.dep,.ts2,1,AIBAL,.prodctl) quit:ER
+			}
+		set TAMT=BAL
+		if PRENA>0 set TAMT=TAMT-PRENA
+		set UNIQTSO=$$BLDTSO(SEG,TAMT,0)
+		// Create payment order
+		do EFTBUILD(.dep,0,TAMT,UNIQTSO,DEBIT)
+		quit:ER
+		// Partial Renewal
+		if PRENA>0 do SEGRNW(.dep,.depseg)
+		}
+
+	if ER do EXC quit
+
+	quit
+
+IMO4(RecordDEP dep,RecordDEPSEG depseg,TranSet ts,TranSet ts2,RecordPRODCTL prodctl,BWA)
+
+	// External Transfer of interest
+	set AIBAL=depseg.aibal
+	set BAL=depseg.bal
+	set AIACR=depseg.aiacr
+	set AIBAL=AIBAL+$$^SCARND(AIACR,0,CID)
+	if dep.iaf=2 set AIBAL=AIBAL+$$^SCARND(depseg.posacr,0,CID)
+	if dep.iaf=0 set BAL=BAL+$$^SCARND(depseg.posacr,0,CID)
+	set PRENA=depseg.prena
+	set TYPE=dep.type
+	set RENCD=dep.rencd
+	set SEG=depseg.segment
+
+	// If there is action to take, possibly adjust RENCD.
+	do ACT(.dep,.RENCD)
+
+	// Determine default transaction codes from product type.
+	set DEBIT=prodctl.drtrgp
+	set CREDIT=prodctl.crtrgp
+	if (RENCD=0)!(RENCD=5) do {
+		if AIBAL>0 do {
+			set TAMT=AIBAL
+			set UNIQTSO=$$BLDTSO(SEG,0,TAMT)
+			do EFTBUILD(.dep,1,TAMT,UNIQTSO,DEBIT)
+			quit:ER
+			}
+		set TSO=$$BLDTSO(SEG,BAL,0),TCMT=$$^MSG(3581,0)
+		do CRTTX(.ts2,DEBIT,BAL,CID,TSO,TCMT)
+		// Move principal to zero segment.
+		set TSO=$$BLDTSO(0,BAL,0)
+		do CRTTX(.ts2,CREDIT,BAL,CID,TSO,"")
+		}
+
+	if RENCD=1 do {
+		if AIBAL>0 do {
+			set TAMT=AIBAL
+			set UNIQTSO=$$BLDTSO(SEG,0,TAMT)
+			do EFTBUILD(.dep,1,TAMT,UNIQTSO,DEBIT)
+			quit:ER
+			}
+		set TAMT=BAL
+		if PRENA>0 set TAMT=TAMT-PRENA
+		set TSO=$$BLDTSO(SEG,TAMT,0),TCMT=$$^MSG(7094)
+		do CRTTX(.ts2,DEBIT,TAMT,CID,TSO,TCMT)
+		set CKTYP=prodctl.ckmdt    ; Check Type For Principal
+		if CKTYP="" set ER=1,RM=$$^MSG(3699,"prodctl.ckmdt",TYPE)
+
+		// Create A arrays for FEES^DEPDBS
+		do FEES(.dep,.TAMT,.prodctl) if ER do EXC quit
+		do GL(.dep,.ts2) quit:ER
+
+		// Update check printing file
+		set CKTYP=prodctl.ckint
+		do XPDO(.dep)
+
+		// Partial Renewal
+		if PRENA>0 do SEGRNW(.dep,.depseg)
+		}
+
+	if RENCD=2 do {
+		if AIBAL>0 do {
+			set TAMT=AIBAL
+			set UNIQTSO=$$BLDTSO(SEG,0,TAMT)
+
+			// Create payment order
+			do EFTBUILD(.dep,1,TAMT,UNIQTSO,DEBIT)
+			quit:ER
+			}
+		set TAMT=BAL
+		if PRENA>0 set TAMT=TAMT-PRENA
+		set TSO=$$BLDTSO(SEG,TAMT,0),TCMT="TRF-"_dep.racn
+		do CRTTX(.ts2,DEBIT,TAMT,CID,TSO,TCMT)
+
+		new TTXPTR,tseq			// dfm 11/2/99
+		set tseq=$O(TTXPTR(""),-1)\1+1
+		set TTXPTR(tseq)=x
+
+		do TRANSFR(.dep,.ts2,0,TAMT,.prodctl)
+		// Partial Renewal
+		if PRENA>0 do SEGRNW(.dep,.depseg)
+		}
+
+	if RENCD=3 do {
+		if AIBAL>0 do {
+			set TAMT=AIBAL
+			set UNIQTSO=$$BLDTSO(SEG,0,TAMT)
+			do EFTBUILD(.dep,1,TAMT,UNIQTSO,DEBIT)
+			quit:ER
+			}
+		do SEGRNW(.dep,.depseg)
+		}
+
+	if RENCD=4 do {
+		set PRINAMT=BAL
+		if PRENA>0 set PRINAMT=PRINAMT-PRENA
+		set UNIQTSO=$$BLDTSO(SEG,PRINAMT,AIBAL)
+		set TAMT=PRINAMT_"|"_AIBAL
+
+		// Create payment order(s)
+		do EFTBUILD(.dep,2,TAMT,UNIQTSO,DEBIT)
+		quit:ER
+
+		// Partial Renewals
+		if PRENA>0 do SEGRNW(.dep,.depseg)
+		}
+	quit
+
+EFTBUILD(RecordDEP dep,PAR,TAMT,TSO,ETC)
+
+	/*
+	PAR : 0 = Principal , 1 = Interest , 2=both
+	If using parameter 2, this section expects TAMT to be in two pieces.
+	*/
+
+	new ACN,SEQ,RCID,RINS
+	set EXTACN=dep.primatetc
+	set EXTSEQ=dep.primatets
+	set AIEXTACN=dep.intmatetc
+	set AIEXTSEQ=dep.intmatets       
+	if AIEXTACN="" set AIEXTACN=EXTACN
+	if AIEXTSEQ="" set AIEXTSEQ=EXTSEQ 
+
+	set tamt=TAMT		// use tamt to hold a specific piece of TAMT
+      
+
+	// Get Account Currency
+	set CRCD=dep.crcd
+	
+	// Combine 2 payment orders into one if we can...
+	if (EXTACN=AIEXTACN)&(EXTSEQ=AIEXTSEQ)&(PAR=2) do {  quit  
+		set COMBAMT=$P(TAMT,"|",1)+$P(TAMT,"|",2)
+		// do not create zero amount payment record
+		if '(COMBAMT>0) quit
+		new cifext
+		if (EXTACN="")!(EXTSEQ="") set ER=1,RM=$$^MSG(2049)_" - "_CID quit
+		type RecordCIFEXT cifext=Db.getRecord("CIFEXT","EXTACN,EXTSEQ")
+		set RCID=cifext.extacct
+		set RINS=cifext.extinst
+		set EXTNAME=cifext.benname
+		set EXTCITY=cifext.bencity
+		set TSO=$$FIELDIN^UTSO(TSO,"EXTNAME",EXTNAME)
+		set TSO=$$FIELDIN^UTSO(TSO,"EXTCITY",EXTCITY)		
+		do ^EFTBUILD(CID,,RCID,RINS,COMBAMT,CRCD,TJD,,"PO",0,TSO,ETC)
+		}
+
+	if (PAR=2)!(PAR=0) do {
+		// Payout Prinicpal
+		if PAR=2 set tamt=$P(TAMT,"|",1)
+
+		// do not create zero amount payment record		
+		if '(tamt>0) quit
+
+		// Get RCID and RINS from CIFEXT file.
+		new cifext
+		if (EXTACN="")!(EXTSEQ="") set ER=1,RM=$$^MSG(2049)_" - "_CID quit
+		type RecordCIFEXT cifext=Db.getRecord("CIFEXT","EXTACN,EXTSEQ")
+		set RCID=cifext.extacct
+		set RINS=cifext.extinst
+		set EXTNAME=cifext.benname
+		set EXTCITY=cifext.bencity
+		if (PAR=2) set UTSO=$P(TSO,"~",1)
+		if (PAR=0) set UTSO=TSO
+		set UTSO=$$FIELDIN^UTSO(UTSO,"EXTNAME",EXTNAME)
+		set UTSO=$$FIELDIN^UTSO(UTSO,"EXTCITY",EXTCITY)
+		do ^EFTBUILD(CID,,RCID,RINS,tamt,CRCD,TJD,,"PO",0,UTSO,ETC)
+		}
+
+	if (PAR=2)!(PAR=1) do {
+		// Payout Interest
+		if PAR=2 set tamt=$P(TAMT,"|",2)
+
+		// do not create zero amount payment record
+		if '(tamt>0) quit
+		set EXTACN=AIEXTACN,EXTSEQ=AIEXTSEQ
+
+		// Get RCID and RINS from CIFEXT file.
+		new cifext
+		if (EXTACN="")!(EXTSEQ="") set ER=1,RM=$$^MSG(2049)_" - "_CID quit
+		type RecordCIFEXT cifext=Db.getRecord("CIFEXT","EXTACN,EXTSEQ")
+		set RCID=cifext.extacct
+		set RINS=cifext.extinst   
+		set EXTNAME=cifext.benname
+		set EXTCITY=cifext.bencity     
+		if (PAR=2) set UTSO=$P(TSO,"~",2)
+		if (PAR=1) set UTSO=TSO
+		set UTSO=$$FIELDIN^UTSO(UTSO,"EXTNAME",EXTNAME)
+		set UTSO=$$FIELDIN^UTSO(UTSO,"EXTCITY",EXTCITY)
+		do ^EFTBUILD(CID,,RCID,RINS,tamt,CRCD,TJD,,"PO",0,UTSO,ETC)
+		}
+	quit
+
+SEGRNW(RecordDEP dep,RecordDEPSEG depseg)
+       
+ 	new TCMT,%DT,OLDMDT,segment
+	
+	set OLDMDT=depseg.segmdt
+	do dep.setAuditFlag(1)		
+	do depseg.setAuditFlag(1)
+	// Recalculate segment maturity date.
+	set TERM=depseg.segterm
+	set MDT=$$EXT^UMDT(TERM,TJD)
+	set depseg.segmdt=MDT
+
+	// Increase [DEP]TNUMS by one.
+	set dep.tnums=dep.tnums+1
+	// Filer should create automatically new dayend entry
+	
+	// Recalculate interest rate.
+	set TYPE=dep.type
+	set OIRN=depseg.irn
+	set RRO=dep.rro
+	if RRO=0 do RRO0(.dep)
+	if RRO=1 do RRO1(.dep)
+	if RRO=2 do RRO2(.dep)
+	if RRO=4 do RRO4
+	if RRO=5 do RRO5
+	if RRO="" do RRO4
+	
+	quit:ER
+	
+	// Reset [DEP]RRO
+	set dep.rro=RRO
+	
+	// Reset [DEPSEG]IRN
+	if 'dep.segacr set depseg.irn=IRN	//cds 5/10/00
+
+	// Reset [DEPSEG]DLR
+	set depseg.dlr=TJD
+	
+
+	set TCMT=$$^MSG(3583)_": "_SEG 
+	// Manually create history entry - "segment renewal" 
+	do HIST(TJD,TLO,BRCD,%UID,0,TCMT,"",CID)
+	set segment=depseg.segment
+	// Create history entry - [DEPSEG]SEGMDT
+	set TCMT="Segment: "_segment_"  [DEPSEG]SEGMDT:"_OLDMDT_":"_MDT	
+	do HIST(TJD,TLO,BRCD,%UID,0,TCMT,"",CID)
+	quit
+
+ 
+HIST(TJD,TLO,BRCD,%UID,AMT,TCMT,ITC,CID)
+ 
+	new hist
+	type RecordHIST hist
+	set hist=Class.new("RecordHIST")
+	set hist.cid=CID
+	set hist.tseq=Db.nextVal("HIST","CID")
+	set hist.efd=TJD
+	if $G(AMT)>0 set hist.tamt=AMT
+	if $G(ITC)'="" set hist.itc=ITC
+	set hist.tlo=TLO 
+	set hist.tcmt=TCMT
+	set hist.cdt=$P($H,",",1)
+	set hist.time=$P($H,",",2)
+	set hist.brcd=BRCD
+	set hist.uid=%UID
+	do hist.bypassSave()
+	quit
+
+FEES(RecordDEP dep,TAMT,RecordPRODCTL prodctl)
+
+	type String ETC
+	type Number FEEAMT, FEEACT
+	set ETC=prodctl.drtrci
+ 	if ETC="" set ETC=prodctl.drtrgp
+ 	if ETC.isNull() do ETCERR^TTXEXT(prodctl.type, "DRTRGP") quit
+	type RecordTRN trn=Db.getRecord("TRN","ETC=:ETC")
+	do FEES^DEPDBS(.dep, .trn, .FEEAMT, .FEEACT)
+	set TAMT=TAMT-FEEACT-FEEAMT	
+	if TAMT<0 set TAMT=0
+	quit
+
+RRO0(RecordDEP dep)    // Renew
+
+	do SCH(.dep) quit:ER
+	quit
+
+RRO1(RecordDEP dep)    // Renew with rate comparison
+
+	do SCH(.dep) quit:ER  set IRN=$S(IRN>OIRN:IRN,1:OIRN)
+	quit
+
+RRO2(RecordDEP dep)    // Renew with one time rate comparison
+
+	do SCH(.dep) quit:ER  set IRN=$S(IRN>OIRN:IRN,1:OIRN)
+	set RRO=0
+	quit
+
+RRO4    // Retain existing rate
+
+	set IRN=OIRN
+	quit
+	
+RRO5    // Renew with rate in product skeleton
+
+	new proddftd
+	type RecordPRODDFTD proddftd=Db.getRecord("PRODDFTD","TYPE")
+	set IRN=proddftd.irn
+	quit
+
+SCH(RecordDEP dep)	// Rate schedule
+
+	if dep.sch="" set IRN=OIRN quit
+	set IRN=$$RSCH^URSCH(dep.sch,dep.bal,TJD,MDT,dep.rsintspr,dep.rsrndmtd) quit:ER
+	if IRN="" set ER=1,RM=$$^MSG(8476,SCH)
+	quit
+
+ 
+
+GL(RecordDEP dep,TranSet ts)    // Update GL array
+ 
+	new BCHID,CC,CRCD,GLSC,JOB,TYPE
+	set BCHID="BCHROLLSEG"
+	set JOB=%ProcessID
+	set CRCD=dep.crcd
+	set TYPE=dep.type
+	set GLSC=dep.glsc
+	set CC=dep.cc
+
+	if 'Db.isDefined("TMPBCHOFF","TJD,BCHID,JOB,""exp"",CRCD,TYPE,GLSC,CC") do {
+		do BDOFFSET^BCHSOURC("BCHROLLSEG","exp",dep.crcd,dep.type,dep.glsc,dep.cc,GLACN,GLACN,"MDR","MCR",TCMT)
+		}
+
+	do UPOFFSET^BCHSOURC("BCHROLLSEG","exp",dep.crcd,dep.type,dep.glsc,dep.cc,1,TAMT)
+		
+ 	quit
+ 
+TRANSFR(RecordDEP dep,TranSet ts,PAR,TAMT,RecordPRODCTL prodctl,skipexch)
+
+	if TAMT=0 quit       
+	new TYPE,CCODE
+	if $G(INTMATITA)="" set INTMATITA=dep.intmatita
+	if PAR=0 do {
+		set TACN=dep.racn
+		if TACN="" set ER=1,RM=$$^MSG(3700) 
+		}
+	
+	if PAR=1 do {
+		set TACN=INTMATITA
+		if TACN="" set ER=1,RM=$$^MSG(6051)
+		}
+	if ER do EXC quit
+
+	if $G(skipexch)="" set skipexch=0		// dfm 11/10/99
+	set TCMT="TFR-"_TACN
+	set XCID=CID
+	set CID=TACN
+
+	// Invalid tfr account ~p1
+	if 'Db.isDefined("ACN","CID") set TCMT=$$^MSG(4677,CID) do TSCR(.ts) quit	
+
+	// get the crtrgp from the product type of the transfer account.
+	new tracn
+	type RecordACN tracn
+	set tracn=Db.getRecord("ACN","CID")
+	set TYPE=tracn.type
+	set CCODE=tracn.ccode			// dfm 11/8/99
+
+	new traprod
+	type RecordPRODCTL traprod
+	set traprod=Db.getRecord("PRODCTL","TYPE")
+	set ETC=traprod.crtrgp
+
+	set STAT=dep.stat
+	set TYPE=dep.type
+
+	// Tfr account ~p1 closed
+	if STAT=4 set TCMT=$$^MSG(5816,CID) do TSCR(.ts) quit
+
+	set EXCH=0
+	#if CUVAR.%MCP do CRCD(.tracn,.dep)		
+
+	set TCMT="TFR-"_SAVCID
+	set TSO="TFR#"_SAVCID
+	set TSO=$$FIELDIN^UTSO(TSO,"ROLL")
+	set TAMT=$$^SCARND(TAMT,0,CID)
+	do CRTTX(.ts,ETC,TAMT,CID,TSO,TCMT) quit:ER
+
+	set tseq=$O(TTXPTR(""),-1)\1+1		// dfm 11/2/99
+	set TTXPTR(tseq)=x
+	if skipexch,EXCH set TTXPTR=skipexch
+
+	if $G(TTXPTR)=1 set EXCH=1		// in case prev exchange was skipped
+
+	Type RecordTTX ttx()
+	for  set tseq=$O(ttxptr(tseq)) q:tseq=""  do {
+		type RecordTTX tsx
+		set tsx=ts.getTran(TTXPTR(tseq))
+		set ttx(tseq)=tsx.copy()
+		}
+
+	if EXCH,'skipexch do CURXFR^TTXBLD(.ttx(),TTXPTR)	// dfm 11/2/99
+
+	set CID=XCID
+	quit
+
+CRCD(RecordACN tracn,RecordDEP dep)    // Restrict transfer between currencies
+       
+	set X=tracn.crcd set:X="" X=%CRCD if X=dep.crcd set EXCH=0 quit
+	// Flag Tfr between currencies
+	set EXCH=1
+	quit
+
+TSCR(TranSet ts)    // Transaction suspense (credit)
+       
+	set ET=TCMT do EXC
+	set ETC="TSCR"
+	set TSO="TFR#"_CID
+	set CID=$P(GLACN,"|",3)
+	do CRTTX(.ts,ETC,TAMT,CID,TSO,TCMT) quit:ER
+	quit     
+
+XPDO(RecordDEP dep)     // Set XPDO file to print checks
+ 
+	set CKSEQ=Db.nextVal("XPDO","TJD,CKTYP")
+ 
+	new xpdo
+	type RecordXPDO xpdo=Class.new("RecordXPDO")
+ 
+	set xpdo.tjd=TJD
+	set xpdo.cktyp=CKTYP
+	set xpdo.ckseq=CKSEQ
+	set xpdo.brcd=BRCD
+	set xpdo.uid=%UserID
+	set xpdo.cid=SAVCID
+	set xpdo.tamt=TAMT
+	set xpdo.efd=$S(dep.pmedat>%SystemDate:dep.pmedat,1:%SystemDate)
+ 
+	do xpdo.save()
+	quit
+
+INI(PDO,RecordPRODCTL prodctl)
+
+	// Initialize TC array (tran codes, G/L linkages by type)
+ 
+	set $P(TC(TYPE,10),"|",8)=prodctl.ckint
+	set $P(TC(TYPE,10),"|",9)=prodctl.ckmdt
+	for I=8,9 do CHKTYP(.PDO)
+	quit
+ 
+CHKTYP(PDO)  // Load check type (8=interest 9=maturity default="STND")
+ 
+	set X=$P(TC(TYPE,10),"|",I)
+	if X="" set X="STND",$P(TC(TYPE,10),"|",I)=X
+	if '$D(PDO(X)) do {
+		set PDO(X,0)=Db.nextVal("XPDO","TJD,X")
+	     	set PDO(X,1)=PDO(X,0)-1 	
+		}
+	quit
+ 
+EXC     // Log errors into the standard exception file
+ 
+	// Do not log an error if in inquiry mode
+	if '$E(CTL) do:$G(ET)'="" ^UTLERR quit
+ 
+	quit:$D(ITS)
+ 
+	if $G(ET)="" set ET=$G(RM)
+ 
+	// Automatic Rollovers
+	do LOG^UTLEXC($T(+0),"*",$$^MSG(4676),$G(CID),$G(%ZTSEQ),$G(ET),$S($G(CID):$G(BAL),1:""))
+	kill ET,%ZT,SEQ
+	quit
+
+
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXEC(vINPUT,vRETURN) //
+ type String vRECORD,CID
+ for  set vRECORD=vINPUT.piece("|",1),vINPUT=vINPUT.extract(vRECORD.length()+2,99999) quit:vRECORD.isNull()  do {
+ set CID=vRECORD.piece($C(9),1)
+ do vPROC(CID)
+ }
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXEC(vINPUT,vRETURN) //
+ type public String vBUFOVFL
+ type String vRECORD,vrow,CID
+ type Number vcur,vlen
+ set vINPUT=vBUFOVFL.get()
+ set vBUFOVFL="",vlen=0
+ type public ResultSet vRESULT
+ for  do { quit:'vcur
+ set vcur=vRESULT.next() if 'vcur quit
+ set vrow=vRESULT.getRow()_"|",vlen=vlen+vrow.length()
+ if vlen>32767 set vBUFOVFL=vrow,vcur=0 quit
+ set vINPUT=vINPUT_vrow if vlen+13>32767 set vcur=0 quit
+ }
+ set vINPUT=vINPUT.extract(1,vINPUT.length()-1)
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHPOST(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vOPEN(String vINPUT, Boolean %BatchExit) //
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ type public ResultSet vRESULT=Db.select("DISTINCT CID","DEPSEG","DEPSEG.SEGMDT=:TJD")
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ if vRESULT.isEmpty() set %BatchExit=1 quit
+ #ACCEPT Date=08/01/03;PGM=Allan Mattson;CR=20967
+ set %BatchExit=0
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHRINIT(vINPUT,vRETURN) //
+	new cuvar
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+
+	// IRA Interest Reason Code
+	set IRAINT=cuvar.iraint
+
+	// Rollover Payout G/L Offset Account
+	set GLACN=cuvar.rlcid
+
+	// Rollover Payout G/L Offset Tran Code
+	set GLTRN=cuvar.rletc
+
+	// Custom Interest Witholding Routine
+	set BWAPGM=cuvar.bwapgm
+
+	set TPD=%SystemDate 
+
+	set (EFD,TCMT,TSO)=""
+	kill ETC,GL,MAXADJ,TC
+ 
+	// Initialize Source, User ID, Userclass, and GL accounts.
+	do SOURCE^BCHSOURC("ROLL","ROLL",.%UserID,.BRCD,.%UserClass,.TSDRCID,.TSCRCID)
+ 
+	quit
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vTHREXIT(vINPUT,vRETURN) //
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHINIT(vINPUT,vRETURN) //
+	if $D(ITS) quit
+	set ER=0
+	do SOURCE^BCHSOURC("ROLL","ROLL",.%UserID,.BRCD,.%UserClass,.TSDRCID,.TSCRCID)
+	if ER quit
+ 
+	do ^TTXLOK
+ 
+	quit
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+private vSCHEXIT(vINPUT,vRETURN) //
+	do OFFSET^TTXBLD(%SystemDate,BRCD,%UserID,"BCHROLLSEG")
+
+ #ACCEPT Date=07/15/03;PGM=Allan Mattson;CR=20967
+ quit
+vVERSION() // Compiler Version ID
+ quit "V7-0.02"

@@ -1,0 +1,1168 @@
+public	DEPBW(RecordDEP dep,		// Deposit account		/REF:RW
+	      RecordTTX ttx,		// Transaction			/REF:RW	
+	      Number INT, 		// Interest amount		
+	      Number BWA, 		// Backup withholding		/REF:W
+	      Number NTAX, 		// Negative tax			/REF:W
+	      String BWAPGM, 		// Custom program		/NOREQ
+	      String AWTI, 		// Accrued withhold rax index	/NOREQ
+	      Number IRN, 		// Interest rate		/NOREQ
+	      Number TAXRATE, 		// Withholding tax rate		/NOREQ/REF:W
+	      String AWTIND(),		// Tax Index			/NOREQ/REF:RW
+	      Date FD,			// From Date for Avg Bal Calc	/NOREQ
+	      Date TD)			// To Date for Avg Bal Calc	/NOREQ
+	/*
+	   Calculates interest withholding. Has the ability to call a custom
+	   program for the calculation.
+
+	   KEYWORDS: Interest
+
+	   Additional notes on ARGUMENTS:
+	   . BWA
+	     Returned value of interest
+	     withholding amount as
+	     calculated by this procedure
+
+	   . NTAX
+	     Withholding on negative
+	     interest
+
+	   . BWAPGM
+	     Custom program to calculate
+	     withholding.  DEPBW dispatches
+	     to it if it is passed.
+
+	   . AWTI
+	     Tax index will be used if the
+	     custom program is not defined.
+	     Tax rate will be determined from
+	     the tax index depending on the rate
+	     of interest.
+
+	   . AWTIND()
+	     Accrued Withholding Tax index array,
+	     keyed by tax index and effective date.
+	     If it is not defined, it will be loaded
+	     from user table UTBLAWTR.
+	     
+	   . FD
+	     From date for Average Balance Calculation
+	     
+	   . TD
+	     End date for Average Balance Calcuation   
+
+	   EXAMPLE:
+	   do ^DEPBW(.dep, .ttx, INT, .BWA, .NTAX, "^ZINTWH", AWTI, IRN, .TAXRATE, .AWTIND(), FD, TD)
+
+	---- Revision History ------------------------------------------------
+
+	06/05/07 - NATRAJAH - CR 27445
+		   Modified WHTHRAMT section to add null check for DEP.INTWCALC
+		   (withholding calculation method) before processing 
+		   withholding tax to avoid GTM error caused due to
+		   INTWCALC not being a required field in DEP table.
+		   
+	03/12/07 - Chaithra - CR 26508
+		   Replaced 'if' condition with select statement in VATCRT and 
+		   VATEC sections to update dep.vatnegint with AMT, used to calculte 
+		   VAT on negative interest.
+		
+	03/13/07 - NATRAJAH - CR 24946
+		   . Added two new sections WHTHRAMT, CALC for the project 
+		     Withholding Tax Threshold Amount to calculate the 
+		     withholding tax based on the Average Balance and 
+		     Threshold amount.
+		   . Modified DEPBW section to add two new arguments FD, 
+		     TD that is required during Anticipated Earnings Check 
+		     Generation to calculate the average balance for  
+		     the period and WHTHRAMT section is called to calculate
+		     withholding tax based average balance.
+		     
+	03/06/07 - Chaithra / SmithCD - CR24945
+		   Included the section NEGTAX to calculate negative tax - 
+		   NTAX, based on dep.vatintopt flag, for the VAT Enhancement 
+		   project. Also included sections VATCRT and VATEC, called by 
+		   the newly created transaction codes used to calculate 
+		   Increase/Decrease Tax on Negative Interest. Modified order 
+		   of calculation when called from the top so the custom program 
+		   will always be called first, if present.
+	
+	07/19/06 - DESHPANDE S K - CR 20748
+		   Replaced Transaction Variable %TRNPRIM with Transaction 
+		   Stored Value.
+		   	
+	02/05/06 - TITOVE - CR 19182
+		   Reinstated the getPointer() method for now. There are
+		   at present cases when ttx="" and that is not caught by
+		   exists() method.
+	*/
+
+	type public Number ER
+	type Boolean DONE=0
+		
+	type Date DT,JD
+	type Number WA,WP,PCT
+	type String WS
+
+	set (BWA,WP,WA,WS) = ""
+
+	/*
+	  This is the hook to the Custom Backup Withholding Program.
+	  If the BWAPGM is passed in with a name of a custom program, it will
+	  be called instead of the normal backup withholding processing.
+
+	  .dep and .ttx may now need to be passed to the custom program since
+	  the conversion of this procedure to PSL.
+	*/
+	if 'BWAPGM.get().isNull() do { quit
+	
+		if BWAPGM'["^" set BWAPGM = "^"_BWAPGM
+		
+		do @BWAPGM
+		}
+		
+	// Call for the function to calculate Negative tax - VAT Enhancements
+	if INT < 0 set NTAX = $$NEGTAX(.dep, INT) quit
+
+	// No w/holding
+	if 'dep.bwf quit
+	
+	// Processing Withholding Tax Threshold Amount
+	do WHTHRAMT(.dep,INT,.BWA,.DONE,FD.get(),TD.get())
+	if DONE quit
+
+	// If Accr. Withholding Tax Ind. is defined
+	if 'AWTI.get().isNull() do { quit
+
+		type Date DATE
+
+		if %EffectiveDate set DATE = %EffectiveDate
+		else  set DATE = %SystemDate
+
+		set TAXRATE = $$AWT(AWTI,INT,.BWA,IRN.get(),DATE)
+		}
+
+	#ACCEPT DATE=02/05/06;PGM=Eugene Titov
+	if 'ttx.getPointer() do WPAR(.dep)
+	
+	#ACCEPT DATE=02/05/06;PGM=Eugene Titov
+	if ttx.getPointer() do WPAR2(.dep,.ttx)
+
+	if WP.isNull() set WP = CUVAR.%BWPCT
+
+	set PCT = 0
+
+	// Withholding Schedule
+	if 'WS.isNull() do {
+	
+		type ResultSet rs = Db.select("PCT","UTBLRSPWSCH","WSCH=:WS AND KEY NOT < :INT")
+
+		if rs.next() set PCT = rs.getCol("PCT")
+		}
+
+	/*
+	 Coding below is in accordance to IRS Federal Regulation
+	 26CFR31.3406(b):
+		1.  The annualized (anticipated) amount is determined by
+		dividing the amount of the payment (INT) by the number of
+		days in the period for which it is being paid, and then
+		mulitplying that result by the number days in the year.
+
+		2.  If the annualized amount is $10 or less, the payor may
+		elect not to withhold on that payment (BWO=1), regardless
+		of whether more than $10 may be or has been paid to the
+		payee in the other reportable payments during the calendar year.
+ 
+		3.  Conversely, if the annualized amount is more than $10,
+		withholding applies even if $10 or less is actually paid to
+		the payee during the calendar year.
+	*/ 
+
+	/*
+	 If cuvar.bwo="" or 0 calculate withholding regardless of amount
+	   - or -
+	 If interest being posted is greater than $10, then the anticipated
+	 amount will be greater than $10, calculate withholding.
+	*/
+	if 'CUVAR.BWO!($$^SCARND(INT,0,dep.cid) > 10) set BWA = $$^SCARND((((INT * WP) / 100) + ((INT * PCT) / 100) + WA),0,dep.cid) quit
+
+	set BWA = 0
+	set JD = %SystemDate
+
+	if %EffectiveDate,(%EffectiveDate < %SystemDate),'dep.ipf.isNull() do { quit:ER
+		/*
+		 If effective dated transaction causes an interest posting
+		 adjustment through RECALC or manual effective dated interest
+		 posting adjustment, must get IPLD from the last period prior
+		 to the effective dated posting.  Note: if the IPF or INP
+		 has been modified RECALC will not allow transaction.
+		*/
+
+		set JD = %EffectiveDate
+		set DT = %EffectiveDate.nextFreqDate(dep.ipf,,1) quit:ER
+
+		if (DT < dep.odt) set DT = dep.odt
+		}
+
+	else  set DT = $S('dep.ipld.isNull():dep.ipld,1:dep.odt)
+
+	if (JD '= DT) do {
+
+		type Number ANTINT, NODY
+
+		set NODY = $$NODY^SCADAT(JD,1)
+		
+		set ANTINT = $$^SCARND(((INT / (JD - DT)) * NODY),0,dep.cid)
+
+		if (ANTINT > 10) set BWA = $$^SCARND((((INT * WP) / 100) + ((INT * PCT) / 100) + WA),0,dep.cid)
+		}
+
+	quit
+
+
+public	WPAR(RecordDEP dep)	// Deposit account		/REF:R
+
+	// Tag for when ttx doesn't exist
+
+	type Boolean WPAR = 1
+
+	// Create fake ttx to pass to WPAR2
+	type RecordTTX ttx = Class.new("RecordTTX")
+
+	set ttx.tso = ""
+
+	do WPAR2(.dep,.ttx)
+
+	quit
+
+
+WPAR2(RecordDEP dep,		// Deposit account		/REF:RW
+      RecordTTX ttx)		// Transaction			/REF:R
+
+	/*
+	      Returns: WP (Percentage)
+	               WA (amount)
+	               WS (schedule)
+		       SWP (State Percentage)
+	               SWA (State amount)
+	               SWS (State schedule)
+	*/
+
+	new QUIT,SWC,WC
+
+	// Withholding percentage
+	set WP=$G(WP)
+	// Withholding amount
+	set WA=$G(WA)
+	// Withholding schedule
+	set WS=$G(WS)
+	// State Withholding percentage
+	set SWP=$G(SWP)
+	// State Withholding amount
+	set SWA=$G(SWA)
+	// State Withholding schedule
+	set SWS=$G(SWS)
+
+	set QUIT=0
+
+	if '$G(WPAR) do {
+
+		new UTSO
+
+		do OUT^UTSO(.UTSO,ttx.tso)
+
+		if ttx.getStoredValue("isPrimary") = 1 do {
+
+			if $D(UTSO("BWPCT")) set WP=UTSO("BWPCT") set QUIT=1 quit
+			//  Not a distribution
+			if '$D(UTSO("IRAD")),dep.ira set QUIT=1 quit
+			}
+
+		if QUIT quit
+
+		//  Interest Adjustment
+		if $D(UTSO("INTADJ")),dep.ira set QUIT=1 quit
+		//  Interest posting
+		if $D(UTSO("INT")),dep.ira set QUIT=1 quit
+		}
+
+	if QUIT quit
+
+	set (SWC,WC)=""
+
+	if dep.ira do {
+
+		new ACN,RPASEQ
+
+		set ACN=dep.acn
+		set RPASEQ=dep.rpaseq
+
+		type RecordIRATYPE iratype=Db.getRecord("IRATYPE","ACN,RPASEQ")
+
+		// W/H Calc method
+		set WC=iratype.rspwcalc
+		// RPA Withholding Schedule
+		set WS=iratype.rspwsch
+		// Withholding Percent
+		set WP=iratype.wthpct
+		// Withholding Amount
+		set WA=iratype.wthamt
+		// State W/H Calc method
+		set SWC=iratype.stwhcalc
+		// State RPA Withholding Schedule
+		set SWS=iratype.stwhsch
+		// State Withholding Percent
+		set SWP=iratype.stwhpct
+		// State Withholding Amount
+		set SWA=iratype.stwhamt
+		}
+
+	// if no plan calc meth use [DEP]INTWCALC
+	if WC="" set WC=dep.intwcalc
+
+	if WC="" quit
+
+	// Look at Withholding calculation table if values not defined yet.
+	if WP="",WA="",WS="" do {
+
+		type RecordUTBLWCALC uwcalc=Db.getRecord("UTBLWCALC","WC")
+
+		set WP=uwcalc.wpct
+		set WA=uwcalc.wamt
+		set WS=uwcalc.wsch
+		}
+
+	// Default calculation method parameters for state W/H
+	if SWP="",SWA="",SWS="",SWC'="" do {
+
+		type RecordUTBLWCALC uwcalc=Db.getRecord("UTBLWCALC","SWC")
+
+		set SWP=uwcalc.wpct
+		set SWA=uwcalc.wamt
+		set SWS=uwcalc.wsch
+		}
+
+	quit
+
+
+public CRT(RecordDEP dep,	// Deposit account		/REF:RW
+	   RecordTTX ttx,	// Transaction			/REF:RW
+	   RecordTRN trn,	// Transaction code		/REF:R
+	   String CTL)		// Control indicator
+	
+	/*
+	   Called by deposit transaction codes to apply withholding amounts applied.
+
+	   Additional notes on ARGUMENTS:
+	       . CTL
+	               0 - Prior Year
+	               1 - Current Year
+	*/
+	
+	type public Boolean ER
+
+	new BKT,CYR,DWA,RSPWIND,TYPE,TYR,UTSO,YR
+
+	set TYPE=dep.type
+
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE")
+	type RecordIRATYPE iratype
+
+	set CTL=$G(CTL)
+	set YR=$$PYFLAG^DEPINT(.dep,.ttx)
+	set TYR=$$PTYFLAG^DEPINT(.dep,.ttx)
+	set ER=0
+
+	do INIT(.dep,.ttx)
+
+	if 'dep.ira,CUVAR.CNTRY'="CA" do VER(.dep)
+	if ER quit
+
+	if dep.ira do {
+
+		new ACN,RPASEQ
+
+		set ACN=dep.acn
+		set RPASEQ=dep.rpaseq
+
+		set iratype=Db.getRecord("IRATYPE","ACN,RPASEQ")
+		}
+
+	else  do {
+		/*
+		Set up iratype to be passed to FILE.  This iratype will not be used.
+		It is only to prevent extra database hits when dep.ira is true.
+		*/
+		set iratype=Class.new("RecordIRATYPE")
+		set iratype.planid=""
+		}
+
+	// Define UTSO and IRA distribution withholding codes
+	do TSO(.ttx)
+	if ER quit
+
+	// Check TSO to see if mutual fund redemption
+	if $D(UTSO("MFLOT"))!$D(UTSO("MFSECID")) do { quit
+		if ttx.etc=prodctl.cradbw do FILE(.dep,.trn,.ttx,.iratype)
+		if ttx.etc=prodctl.dradbw do {
+			set TAMT=-TAMT
+			do FILE(.dep,.trn,.ttx,.iratype)
+			}
+		}
+
+	do AUT(.dep)
+	if ER quit
+
+	if 'dep.ira do FILE(.dep,.trn,.ttx,.iratype) quit
+
+	// Death/Beneficiary Processing
+	set IRAEXM=1
+	set DWA=TAMT
+	set TAMT=0
+
+	do DOD^IRA(.ttx,.iratype)
+	if ER quit
+
+	do BENREST^IRA(.dep)
+	if ER quit
+
+	set TAMT=DWA
+
+	// Invalid withholding category
+	if 'BKT do Runtime.setErrMSG("DEP",1508) quit
+
+	do FILE(.dep,.trn,.ttx,.iratype)
+
+	quit
+
+
+FILE(RecordDEP dep,		// Deposit account			/REF:RW
+     RecordTRN trn,		// Transaction code			/REF:R
+     RecordTTX ttx,		// Transaction				/REF:R
+     RecordIRATYPE iratype)	// Retirement plan account type		/REF:RW
+     
+     // File Data
+
+	new AMT
+
+	set AMT=+TAMT
+
+	if ttx.itc1-dep.trb=0 set AMT=-AMT
+
+	if '$G(STATETAX) set ttx.tamt=TAMT_"####"_$S(ttx.itc1:TAMT,1:-TAMT)
+	else  set ttx.tamt=TAMT_"##############"_$S(ttx.itc1:TAMT,1:-TAMT)
+
+	set dep.tld=%SystemDate
+
+	if YR do {
+		set dep.bwy=dep.bwy+AMT
+		// set FWY - Fed W/H Year-to-Date
+		if '$G(STATETAX) set dep.fwy=dep.fwy+AMT
+		// set SWY - State W/H Year-to-Date
+		else  set dep.swy=dep.swy+AMT
+		}
+	else  do {
+		set dep.bwp=dep.bwp+AMT
+		// set FWP - Fed W/H Prior Year
+		if '$G(STATETAX) set dep.fwp=dep.fwp+AMT
+		// set SWP - State W/H Prior Year
+		else  set dep.swp=dep.swp+AMT
+		}
+
+	// if Pr.year adjustment, check TRN.PCFD35
+	if TYR set dep.bwtytd=dep.bwtytd+AMT
+	else  if 'trn.pcfd35 set dep.bwpty=dep.bwpty+AMT
+
+	do NRUPD0(.dep,.ttx,.trn)
+
+	if 'dep.ira quit
+
+	if '$G(STATETAX) do {
+		set DWA=AMT
+
+		// IRA-specific filer
+		do UPDIRA^IRA(.dep,.ttx,.iratype,2)
+		}
+	else  do {
+		set DSWA=AMT
+
+		// IRA-specific filer
+		do UPDIRA^IRA(.dep,.ttx,.iratype,4)
+		}
+
+	if dep.nr,iratype.rspwind do UPDIRA^IRA(.dep,.ttx,.iratype,14)
+
+	quit
+
+
+public CRTST(RecordDEP dep,     // Deposit account		/REF:RW
+	     RecordTTX ttx,	// Transaction			/REF:R
+	     RecordTRN trn,	// Transaction code		/REF:R
+	     String CTL)	// Control indicator
+
+	/*
+	State backup withholding tax adjustment - transaction processing call
+	
+	  Called by deposit transaction codes to apply state withholding amounts applied.
+
+	  Additional notes on ARGUMENTS:
+		. CTL
+		      0 - Prior Year
+		      1 - Current Year
+        */
+        
+        type public Boolean ER
+
+	new BKT,CYR,DSWA,RSPWIND,STATETAX,TYPE,TYR,UTSO,YR
+
+	set YR=$$PYFLAG^DEPINT(.dep,.ttx)
+	set TYR=$$PTYFLAG^DEPINT(.dep,.ttx)
+	set ER=0
+	set CTL=$G(CTL)
+	set TYPE=dep.type
+
+	type RecordPRODCTL prodctl=Db.getRecord("PRODCTL","TYPE")
+	type RecordIRATYPE iratype
+
+	do INIT(.dep,.ttx)
+
+	if 'dep.ira,CUVAR.CNTRY'="CA" do VER(.dep)
+	if ER quit
+
+	if dep.ira do {
+
+		new ACN,RPASEQ
+
+		set ACN=dep.acn
+		set RPASEQ=dep.rpaseq
+
+		set iratype=Db.getRecord("IRATYPE","ACN,RPASEQ")
+		}
+
+	else  do {
+		/*
+		Set up iratype to be passed to FILE.  This iratype will not be used.
+		It is only to prevent extra database hits when dep.ira is true.
+		*/
+		set iratype=Class.new("RecordIRATYPE")
+		set iratype.planid=""
+		}
+
+	// Define UTSO and IRA distribution withholding codes
+	do TSO(.ttx)
+	if ER quit
+
+	if $D(UTSO("MFLOT"))!$D(UTSO("MFSECID")) do { quit
+
+		if ttx.etc=prodctl.cradbw do FILE(.dep,.trn,.ttx,.iratype)
+
+		if ttx.etc=prodctl.dradbw set TAMT=-TAMT do FILE(.dep,.trn,.ttx,.iratype)
+		}
+
+	do AUT(.dep)
+	if ER quit
+
+	if 'dep.ira do FILE(.dep,.trn,.ttx,.iratype) quit
+
+	// Death/Beneficiary Processing
+	set DSWA=TAMT
+	set TAMT=0
+
+	do DOD^IRA(.ttx,.iratype)
+	if ER quit
+
+	do BENREST^IRA(.dep)
+	if ER quit
+
+	set TAMT=DSWA
+
+	// Invalid withholding category
+	if 'BKT do Runtime.setErrMSG("DEP",1508) quit
+
+	set STATETAX=1
+
+	do FILE(.dep,.trn,.ttx,.iratype)
+
+	quit
+
+
+INIT(RecordDEP dep,		// Deposit account		/REF:R
+     RecordTTX ttx)		// Transaction			/REF:R
+     
+	// Initialize transaction-required data
+
+	set TAMT=+ttx.tamt
+
+	if 'dep.ira quit
+
+	// IRA-specific initialization
+	set CYR=$$DAT^%ZM(%SystemDate,"YEAR")
+	if 'TYR set CYR=CYR-1
+
+	quit
+
+
+public EC(RecordDEP dep,	// Deposit account		/REF:RW
+	  RecordTTX ttx,	// Transaction			/REF:R
+	  RecordTRN trn,	// Transaction code		/REF:R
+	  String CTL)		// Control indicator
+	  
+	/*
+	Error Correct of backup withholding tax adjustment
+	
+	   Called by deposit transaction codes to error correct or reverse
+	   withholding amounts applied.
+
+	   Additional notes on ARGUMENTS:
+	       . CTL
+	               0 - Prior Year
+	               1 - Current Year
+	*/
+	
+        type public Boolean ER
+
+	new TYR,UTSO,YR
+
+	// Set CTL to 0 if EFD prior year
+	if CTL=1,%EffectiveDate'="",($$DAT^%ZM(%EffectiveDate,"YEAR")=($$DAT^%ZM(%SystemDate,"YEAR")-1)) set CTL=0
+
+	set YR=$$PYFLAG^DEPINT(.dep,.ttx)
+	set TYR=$$PTYFLAG^DEPINT(.dep,.ttx)
+	set ER=0
+
+	do INIT(.dep,.ttx)
+
+	// Define UTSO and IRA distribution withholding codes
+	do TSO(.ttx)
+	if ER quit
+
+	if dep.ira do ECIRA(.dep,.trn,.ttx) quit
+
+	/*
+	Set up iratype to be passed to FILE.  This iratype will not be used.
+	It is only to prevent extra database hits when dep.ira is true in section CRT.
+	*/
+	type RecordIRATYPE iratype=Class.new("RecordIRATYPE")
+
+	set iratype.planid=""
+
+	do FILE(.dep,.trn,.ttx,.iratype)
+
+	quit
+
+
+public ECST(RecordDEP dep,	// Deposit account		/REF:RW
+	    RecordTTX ttx,	// Transaction			/REF:R
+	    RecordTRN trn,	// Transaction code		/REF:R
+	    String CTL)		// Control variable
+	    
+	/*
+	Error Correct / reversa of state backup withholding tax adjustment
+	
+	  Called by deposit transaction codes to error correct or reverse
+	  state withholding amounts applied.
+
+	  Additional notes on ARGUMENTS:
+		. CTL
+			0 - Prior Year
+			1 - Current Year
+        */
+        
+	type public Boolean ER
+
+	new STATETAX,TYR,UTSO,YR
+
+	set CTL=$G(CTL)
+	set YR=$$PYFLAG^DEPINT(.dep,.ttx)
+	set TYR=$$PTYFLAG^DEPINT(.dep,.ttx)
+	set ER=0
+
+	// Set CTL to 0 if EFD prior year
+	if CTL=1,%EffectiveDate'="",($$DAT^%ZM(%EffectiveDate,"YEAR")=($$DAT^%ZM(%SystemDate,"YEAR")-1)) set CTL=0
+
+	do INIT(.dep,.ttx)
+
+	// Define UTSO and IRA distribution withholding codes
+	do TSO(.ttx)
+	if ER quit
+
+	if dep.ira do { quit
+
+		set STATETAX=1
+
+		do ECIRA(.dep,.trn,.ttx)
+		}
+
+	/*
+	Set up iratype to be passed to FILE.  This iratype will not be used.
+	It is only to prevent extra database hits when dep.ira is true in section CRT.
+	*/
+	type RecordIRATYPE iratype=Class.new("RecordIRATYPE")
+
+	set iratype.planid=""
+
+	do FILE(.dep,.trn,.ttx,.iratype)
+
+	quit
+
+
+AUT(RecordDEP dep)	// Deposit account		/REF:R
+
+	// Authorization Verification
+
+	// Restriction Flag
+	if dep.rflg do ^UFLG(.dep)
+
+	// Account Status
+	if dep.stat set OVR(dep.cid,"OVR","STAT"_dep.stat)=""
+
+	quit
+
+
+VER(RecordDEP dep)	// Deposit account		/REF:R
+
+	// Verify Amount
+
+	// Apply no restriction to an Investment Account
+	if dep.grp="SEC" quit
+
+	// Amount exceeds year-to-day int/div
+	if YR,(dep.iytd-TAMT)<0 do Runtime.setErrMSG("DEP",272) quit
+
+	// Amount exceeds year-to-day int/div
+	if TYR,(dep.itytd-TAMT)<0 do Runtime.setErrMSG("DEP",272) quit
+
+	// Amount exceeds prior year int/div
+	if 'YR,(dep.ipy-TAMT)<0 do Runtime.setErrMSG("DEP",268) quit
+
+	// Amount exceeds prior year int/div
+	if 'TYR,(dep.ipty-TAMT)<0 do Runtime.setErrMSG("DEP",268) quit
+
+	quit
+
+
+ECIRA(RecordDEP dep,		// Deposit account		/REF:RW
+      RecordTRN trn,		// Transaction code		/REF:R
+      RecordTTX ttx) 		// Transaction			/REF:R
+      
+	// Validate and file IRA Current/Prior year withholding amounts
+
+	new ADJSTATE,DSWA,DWA
+
+	if $G(STATETAX) set ADJSTATE=1
+
+	if TYR,$D(UTSO("REV")) do {
+
+		new CID,DATE,TSEQ
+
+		set CID=dep.cid
+		set TSEQ=UTSO("REV")
+
+		type RecordHIST hist=Db.getRecord("HIST","CID,TSEQ")
+
+		set DATE=$S(hist.efd:hist.efd,1:hist.tjd)
+		set CYR=$$DAT^%ZM(DATE,"YEAR")
+		}
+
+	set DWA=TAMT
+	set DSWA=TAMT
+
+	if 'ttx.itc1,ttx.itc6+ttx.itc12 do {
+		set DWA=-DWA
+		set DSWA=-DSWA
+		}
+
+	// Backup Withholding Financial YTD
+	if YR do {
+		if '$G(STATETAX) do {
+			set dep.bwy=dep.bwy+DWA
+			set dep.fwy=dep.fwy+DWA
+			}
+		else  do {
+			set dep.bwy=dep.bwy+DSWA
+			set dep.swy=dep.swy+DSWA
+			}
+		}
+
+	// Do Not Update Prior Tax Year Buckets
+	if TYR,'trn.pcfd35 do {
+		if '$G(STATETAX) set dep.bwtytd=dep.bwtytd+DWA
+		else  set dep.bwtytd=dep.bwtytd+DSWA
+		}
+
+	if YR!TYR do CYRWTH^IRA(.dep,.ttx) quit
+
+	// Backup Withholding Prior Financial Year
+	if 'YR do {
+		if '$G(STATETAX) do {
+			set dep.bwp=dep.bwp+DWA
+			set dep.fwp=dep.fwp+DWA
+			}
+		else  do {
+			set dep.bwp=dep.bwp+DSWA
+			set dep.swp=dep.swp+DSWA
+			}
+		}
+
+	// Do Not Update Prior Tax Year Buckets
+	if 'TYR,'trn.pcfd35 do {
+		if '$G(STATETAX) set dep.bwpty=dep.bwpty+DWA
+		else  set dep.bwpty=dep.bwpty+DSWA
+		}
+
+	do PYRWTH^IRA(.dep,.ttx)
+
+	quit
+
+
+TSO(RecordTTX ttx)		// Transaction		/REF:R
+	
+	/*
+	Retrieve values for IRA codes from TSO to see what withholding bucket
+	should be used based upon the IRA reason code table.
+	*/
+	
+        type public Boolean ER
+
+	new KEY
+
+	set (BKT,UTSO)=""
+
+	do OUT^UTSO(.UTSO,ttx.tso)
+	if ER quit
+
+	set KEY=$G(UTSO("IRAD"))
+
+	if KEY="" quit
+
+	type RecordUTBLIRADIS uiradis=Db.getRecord("UTBLIRADIS","KEY")
+
+	set BKT=+uiradis.rsn
+
+	quit
+
+
+NRUPD0(RecordDEP dep,		// Deposit account		/REF:RW
+       RecordTTX ttx,		// Transaction			/REF:R
+       RecordTRN trn)		// Transaction code		/REF:R
+       
+       // Update BWA tran codes for non-residents
+
+	new AMT,BWA
+
+	set BWA=TAMT
+	set AMT=0
+
+	if ttx.itc1-dep.trb=0 set BWA=-BWA
+
+	do NRUPD(.dep,.trn)
+
+	quit
+
+
+public NRUPD(RecordDEP dep,		// Deposit account		/REF:RW
+	     RecordTRN trn)     	// Transaction code		/REF:R
+	     
+	/*
+	Update NR int/withholding information in [DEP] (called from DEPINT)
+	
+	   Inputs:
+	   AMT Interest Paid
+	   BWA Withholding
+	*/
+
+	new FYRFLG,TYRFLG
+
+	if '$D(YR)!$G(YR) set FYRFLG=1
+	else  set FYRFLG=0
+
+	if '$D(TYR)!$G(TYR) set TYRFLG=1
+	else  set TYRFLG=0
+
+	// Do not update NR fields
+	if trn.pcfd32=1 quit
+	if 'dep.nr,'trn.pcfd32 quit
+	if 'dep.bwf quit
+	if dep.ira quit
+
+	if FYRFLG set dep.nrwhcy=dep.nrwhcy+BWA
+	else  set dep.nrwhpy=dep.nrwhpy+BWA
+
+	if 'trn.pcfd35,TYRFLG set dep.nrwhtytd=dep.nrwhtytd+BWA
+	if 'trn.pcfd35,'TYRFLG set dep.nrwhpty=dep.nrwhpty+BWA
+
+	if AMT do {
+		if FYRFLG set dep.nrwacy=dep.nrwacy+AMT+BWA
+		else  set dep.nrwapy=dep.nrwapy+AMT+BWA
+
+		if 'trn.pcfd35,TYRFLG set dep.nrwatytd=dep.nrwatytd+AMT+BWA
+		if 'trn.pcfd35,'TYRFLG set dep.nrwapty=dep.nrwapty+AMT+BWA
+		}
+
+	quit
+
+
+public WP(CID)	// Return Withhold Percentage
+
+	if CID.get()="" quit 0
+
+	type RecordDEP dep=Db.getRecord("DEP","CID")
+	type RecordCUVAR cuvar=Db.getRecord("CUVAR")
+
+	set (WC,WP)=""
+	set WP=cuvar.%bwpct
+	set WC=dep.intwcalc
+
+	if WC'="" do {
+		type RecordUTBLWCALC uwcalc=Db.getRecord("UTBLWCALC","WC")
+
+		set WP=uwcalc.wpct
+		}
+
+	quit WP
+
+
+public AWT(String AWTI,		// Accr Withhold Tax Index
+	   Number INT,		// Interest amount
+	   Number BWA,		// Withholding amount		/REF:W
+	   Number IRN,		// Intrest rate
+	   Date EFDATE)		// Effective date
+	   
+	/*
+	Accrued Withholding Tax
+
+	 This function will return the Withholding Tax Rate. It will compare
+	 the Interest Rate defined on the account with the appropriate tier
+	 of the tax index to get the Withholding Tax Rate for the account.
+	 It will also calculate the backup withhoding amount(BWA).
+
+	 Additional note on ARGUMENTS:
+
+		. AWTI
+			   Tax index will be used if the
+			   custom program is not defined.
+			   Tax rate will be determined from
+			   the tax index depending on the rate
+			   of interest.
+
+		. BWA
+			   Returned value of interest
+			   withholding amount as
+			   calculated by this function
+
+		. IRN
+			   The interest rate that will be used to
+			   determine the tax rate from the tax index.
+
+	 RETURNS:
+		. TAXRATE
+			Returns the value of tax rate that is determined
+			from the Tax index.
+
+	 EXAMPLE:
+		TAXRATE = $$AWT^DEPBW(AWTI, INT, .BWA, IRN, %EffectiveDate)
+	*/
+	
+	type public String ET
+
+	new TAXRATE
+
+	// Retrieve the desired effective date from the tax index user table
+	type ResultSet rs=Db.select("EFDATE","UTBLAWTIEFD","AWTI=:AWTI AND EFDATE NOT >:EFDATE","EFDATE DESC")
+
+	if rs.isEmpty() do { quit ""
+
+		set ET=7
+
+		// Rate has not been entered for effective date
+		do ERR^UINDX(.ET)
+		}
+
+	if rs.next() set EFDATE=rs.getCol(1)
+
+	type ResultSet rs1=Db.select("AWTR","UTBLAWTIR","AWTI=:AWTI AND EFDATE=:EFDATE AND IRT NOT >:IRN","IRT DESC")
+
+	// None of the tiers are applicable
+	if rs1.isEmpty() quit 0
+
+	if rs1.next() set TAXRATE=rs1.getCol(1)
+
+	if TAXRATE["IRN" do {
+
+		new PART2
+
+		// Determine "% of" portion of tax rate
+		set PART2=$P(TAXRATE,"*",2)
+
+		if PART2'["IRN" set TAXRATE=PART2*IRN
+		else  set TAXRATE=TAXRATE*IRN
+		}
+
+	set BWA=INT*(TAXRATE/100)
+
+	quit TAXRATE
+	
+
+NEGTAX(RecordDEP dep,		// Deposit account			/REF:R
+       Number INT)		// Interest amount
+	
+	// Calculate tax on negative interest
+
+	if 'dep.vatintopt quit 0
+	
+	type Number NTAX, VATP        
+	
+	// Calculate using the VAT Percentage
+	type RecordUTBLBRCD brcd = Db.getRecord("UTBLBRCD", "BRCD=:dep.boo", 1)
+	set VATP = brcd.vatpct
+	
+	if VATP.isNull() quit 0
+	
+	set NTAX = (-INT) * (VATP / 100)
+	
+	quit NTAX.roundCur(dep.crcd)
+	
+	
+public VATCRT(RecordDEP dep,	// Deposit account		/REF:RW
+              RecordTTX ttx)	// Transaction			/REF:RW
+
+	/*
+	Adjust Value Added Tax on Negative Interest
+
+	Called by deposit transaction codes to apply VAT withholding amounts
+	*/
+
+	type String TAMT = ttx.tamt
+	type Number AMT = +TAMT
+	
+	set AMT=$select((dep.trb - ttx.itc1):AMT, 1:-AMT)
+	
+	set dep.vatnegint = dep.vatnegint + AMT
+	
+	set TAMT.piece("#", 9) = AMT	// Tax on Negative Interest (ttx.unapl)
+	set ttx.tamt = TAMT
+
+	set dep.tld = %SystemDate
+
+	quit
+	
+
+public VATEC(RecordDEP dep,	// Deposit account		/REF:RW
+             RecordTTX ttx)	// Transaction			/REF:R
+             
+	/*
+	Error Correct Value Added Tax on Negative Interest adjustment
+
+	Called by deposit transaction codes to error correct or reverse
+	withholding amounts applied.
+	*/
+
+	type Number AMT = +ttx.tamt
+	
+	set AMT=$select((dep.trb - ttx.itc1):AMT, 1:-AMT)
+	
+	set dep.vatnegint = dep.vatnegint + AMT
+	
+	set dep.tld = %SystemDate
+
+	quit
+	
+WHTHRAMT(RecordDEP dep,	//Deposit Account			/REF:R
+	 Number INT,	//Accrued Int in the posting period
+	 Number BWA,	//Withholding Tax			/REF:RW
+	 Boolean DONE,	//Status Flag				/REF:RW
+	 Date FD,	//From Date for Average Balance Calc	/NOREQ
+	 Date TD)	//To Date for Average Balance Calc	/NOREQ
+	
+	/*
+	 Calculate the withholding tax based on the Threshold amount
+	 and Average Ledger/Collected Balance.
+	*/
+	type Number AVGBAL,DAYSINP,WA,WHBASE,WP,WSP
+	type String IACM,KEY,WS
+	type public String UAVB()
+	if dep.awtp quit 	
+
+	if 'FD.get() do {
+		if dep.ipld="" set FD=dep.odt
+		else  set FD=dep.ipld
+		if dep.convdt,dep.convdt'<FD set FD=dep.convdt		
+		}
+	if 'TD.get() set TD=%SystemDate		
+		
+	if CUVAR.IPD,'dep.ipf.isNull() set TD=TD+1
+	if CUVAR.IPD, (FD '= dep.odt) set FD=FD+1
+
+	set IACM=dep.iacm
+	set DAYSINP=TD-FD
+	
+	do INIT^UAVB(.dep,dep.cid,FD,TD-1,"00100000000000100011")
+	set AVGBAL=0
+	if dep.ircb=1 set AVGBAL=UAVB(1).piece("|",1)
+	if dep.ircb=3 set AVGBAL=UAVB(2).piece("|",3)
+	
+	if dep.intwcalc.isNull() quit 	
+	set KEY=dep.intwcalc
+	type RecordUTBLWCALC utblwcalc=Db.getRecord("UTBLWCALC","KEY=:KEY",1)
+	if utblwcalc.getMode() do {		
+		if dep.ircb'=1,(dep.ircb'=3) quit 
+		set WP=0,WA=0,WS="",WSP=0	
+		set WP=utblwcalc.wpct
+		set WS=utblwcalc.wsch
+		set WA=utblwcalc.wamt
+		if 'WS.isNull() do {
+			type ResultSet rs = Db.select("PCT","UTBLRSPWSCH","WSCH=:WS AND KEY NOT < :INT")
+			if rs.next() set WSP = rs.getCol("PCT")
+			}
+		if utblwcalc.whcalcb=2 do {
+			set DONE=1
+			if utblwcalc.whthramt < AVGBAL do {
+				set WHBASE = AVGBAL - utblwcalc.whthramt
+				set BWA = $$CALC(dep,WHBASE, INT, IACM, WP, WSP, WA, DAYSINP)				
+				if BWA > INT set BWA=INT
+				}		
+			}
+		if utblwcalc.whcalcb=1 do {
+			set DONE=1
+			set WHBASE =  AVGBAL
+			set BWA = $$CALC(.dep,WHBASE, INT, IACM, WP, WSP, WA, DAYSINP)
+			if BWA > INT set BWA=INT
+			}						
+		}
+	quit
+	
+public CALC(RecordDEP dep,	//Deposit Account			/REF:R
+	    Number WHBAL,	//Base amount for withholding tax Calc
+	    Number INT,		//Accrued Int in the posting period
+	    String IACM,	//Interest Accrual Calc Method
+	    Number WP,		//Withholding Percentage
+	    Number WSP,		//Withholding Schedule Percentage
+	    Number WA,		//Withholding Tax Fixed Amount
+	    Number DAYSINP)	//Number of Days in the posting period
+
+	/*
+	 Withholding Tax calculation.
+	*/
+
+	#IF (%SystemDate.year() # 4)
+	type literal Number DENOM = 36500
+	#ELSE
+	type literal Number DENOM = 36600
+	#ENDIF
+	
+	type Number ANFACTOR=dep.intaf
+	
+	if dep.ipf.isNull(),(+IACM.extract(1) = 0) set IACM = 1_IACM.extract(2)
+	
+	//  Actual number days in period
+	if IACM = "10" quit $$^SCARND((((WHBAL * WP / 36000) * DAYSINP) + (INT * WSP / 100) + WA),0,dep.cid)
+	else  if IACM = "11" quit $$^SCARND((((WHBAL * WP / DENOM) * DAYSINP) + (INT * WSP / 100) + WA),0,dep.cid)
+	else  if IACM = "13" quit $$^SCARND((((WHBAL * WP / 36500) * DAYSINP) + (INT * WSP / 100) + WA),0,dep.cid)
+
+	// Standard number of days in period
+	else  if IACM = "00" quit $$^SCARND(((WHBAL * WP / ANFACTOR / 100) + (INT * WSP / 100) + WA),0,dep.cid)
+	else  if IACM = "01" quit $$^SCARND(((WHBAL * WP * 360 / ANFACTOR / DENOM) + (INT * WSP / 100) + WA),0,dep.cid)
+	else  if IACM = "03" quit $$^SCARND(((WHBAL * WP * 360 / ANFACTOR / 36500) + (INT * WSP / 100) + WA),0,dep.cid)
+	quit 0
+	
+ #OPTION ResultClass ON
+Public String vSIG()	quit "60786^28651^Hari Natrajan^26582"	// Signature - LTD^TIME^USER^SIZE
