@@ -2,6 +2,6 @@
 
 main () {
 
-     printf ("\nLIBSQL version info: %s\n", version());
+     printf ("\nLIBSQL version info: %u\n", version());
 }
 
