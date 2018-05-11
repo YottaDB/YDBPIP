@@ -20,6 +20,7 @@ JAN 15, 04 thoniyim
 
 #include "libsql.h"
 #include <time.h>
+#include <stdlib.h>
 
 void logging (STR_DESCRIPTOR *descriptor,
               char           *log_message);

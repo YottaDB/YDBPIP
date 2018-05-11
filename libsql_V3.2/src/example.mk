@@ -7,7 +7,7 @@ OBJECTS=\
 #all:	${PROCESS} utilclean
 
 ${PROCESS}:
-	gcc -o ${PROCESS} example.c -L./ -lsql
+	gcc -std=c89 -o ${PROCESS} example.c -L./ -lsql
 #------------------------------------------------------------------------
 # Define the command-line options to the compiler.  
 #------------------------------------------------------------------------
