@@ -17,6 +17,8 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <ctype.h>
+#include <stdio.h>
+#include <string.h>
 
 uid_t	real_uid;
 gid_t	real_gid;
