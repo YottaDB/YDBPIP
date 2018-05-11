@@ -29,9 +29,10 @@ HPUX:
 	make -f libsql.mk "CFLAGS= -Aa -c +z -D_HPUX_SOURCE" "LFLAGS=-b -lm"
 
 LINUX:
-	make -f libsql.mk "CFLAGS= -c -g" "LFLAGS=-shared"
- 
+	make -f libsql.mk "CFLAGS= -c -g -std=c89 -D_GNU_SOURCE -fPIC" "LFLAGS=-shared"
+
 version:
 	make -f version.mk
-
+clean:
+	rm -f *.o *.a getversion
 # DO NOT DELETE THIS LINE
