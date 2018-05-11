@@ -5,6 +5,6 @@ OBJECTS=\
 	version.o
 
 ${PROCESS}:
-	gcc -o ${PROCESS} version.c -L. -lextcall
+	gcc -std=c89 -o ${PROCESS} version.c -L. -l:extcall.sl
 
 # DO NOT DELETE THIS LINE

@@ -17,7 +17,7 @@ PROCESS=./shlib.o
 OBJECTS=\
 	shlib.o
 
-CFLAGS = -c -fpic ${DEBUG}
+CFLAGS = -c -fpic -std=c89 ${DEBUG}
 #CFLAGS = -c  -nomember_alignment ${DEBUG}
 include ./rules.mk
  

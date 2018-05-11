@@ -33,6 +33,7 @@ versions.
 
  
 /*#include <sys/types.h>*/
+#include <unistd.h>
 #include <sys/errno.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
