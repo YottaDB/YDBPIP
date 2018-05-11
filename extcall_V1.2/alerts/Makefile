@@ -19,6 +19,9 @@ include ./slibrule.mk
 
 all: ${OBJECTS} ${SHARED_LIBRARY}
 
+clean:
+	rm -f *.o *.sl alertsversion
+
 #------------------------------------------------------------------------
 # Define the command-line options to the compiler.  The options we use
 # have the following meanings:
