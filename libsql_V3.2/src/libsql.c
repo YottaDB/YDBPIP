@@ -239,8 +239,7 @@ int ProfileSQL (const unsigned char *sql_token,
                    header_array[2].field_size);
         if (i != 0)
         {
-                strcpy(profile_reply,"Message Ids for the request and reply does
-n't match. Disconnect and connect again.");
+                strcpy(profile_reply,"Message Ids for the request and reply doesn't match. Disconnect and connect again.");
                 return -1001;
         }
  
@@ -385,8 +384,7 @@ int ProfileMRPC (const unsigned char *message_token,
                    header_array[2].field_size);
         if (i != 0)
         {
-                strcpy(profile_reply,"Message Ids for the request and reply does
-n't match. Disconnect and connect again.");
+                strcpy(profile_reply,"Message Ids for the request and reply doesn't match. Disconnect and connect again.");
                 return -1001;
         }
  
