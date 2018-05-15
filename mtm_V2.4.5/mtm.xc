@@ -1,4 +1,4 @@
-/home/pip/pip_V02/mtm_V2.4.5/mtmapi.sl
+/home/pip/pip/mtm_V2.4.5/mtmapi.sl
 ClConnect: void ClConnect(I:xc_char_t *,IO:xc_int_t *)
 ClDisconnect: void ClDisconnect(IO:xc_int_t *)
 ClExchmsg: void ClExchmsg(IO:xc_string_t *,IO:xc_string_t *,I:xc_int_t,IO:xc_int_t *)

@@ -1,4 +1,4 @@
-/home/pip/pip_V02/extcall_V1.2/extcall.sl
+/home/pip/pip/extcall_V1.2/src/extcall.sl
 clxfr: void clxfr(I:xc_char_t *,I:xc_char_t *,I:xc_char_t *,I:xc_char_t *,I:xc_char_t *,I:xc_char_t *,I:xc_char_t *,I:xc_char_t *,O:xc_long_t *)
 colin: void sql_lv_to_bitmap(IO:xc_string_t *,O:xc_string_t *[32000])
 colout: void sql_bitmap_to_lv(IO:xc_string_t *,O:xc_string_t *[32000])
