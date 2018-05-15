@@ -26,5 +26,6 @@ mtm:
 clean:
 	rm -f *.o
 	rm -f mtm
+	rm -f mtmapi.sl
 
 # DO NOT DELETE THIS LINE
