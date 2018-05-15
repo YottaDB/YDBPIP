@@ -36,12 +36,6 @@ typedef struct {
 	int	flag;
 } st_timeout;
 
-struct msgbuf
-{
-	long int mtype;		/* type of received/sent message */
-	char mtext[1];		/* text of the message */
-};
-
 /*
 *	sca_msgsnd
 *
