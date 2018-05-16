@@ -5,6 +5,6 @@ OBJECTS=\
 	version.o
 
 ${PROCESS}:
-	cc -o ${PROCESS} version.c -L. alerts.sl
+	cc -std=c89 -o ${PROCESS} version.c -L. alerts.sl
 
 # DO NOT DELETE THIS LINE
