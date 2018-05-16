@@ -163,7 +163,7 @@ START	;Private;
 	I $G(%zparams)["ERROR=" S %zjoberr=$P($P(%zparams,"ERROR=",2),"/",1)
 	;
 	; Build parameter list
-	S %zpar="(STA="""_%zjobf1_""":ERROR="""_%zjoberr
+	S %zpar="(ERROR="""_%zjoberr
 	S %zpar=%zpar_""":OUTPUT="""_%zjobout_""""
 	;
 	; Under the GT.M implementation on Unix, process name has no value
