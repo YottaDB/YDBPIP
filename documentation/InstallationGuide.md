@@ -1,6 +1,6 @@
 # PIP Installation guide
 
-Installing PIP requires compiling various C applications, setting up YottaDB, and changing Linux kernel parameters. There will be some manual edits to certain files depending on the directory structures used for installation. This guide assumes that PIP is cloned into the installing user's home directory, if it is different for your installation - adjust paths as required.
+Installing PIP requires compiling various C applications, changing Linux kernel parameters, and setting up YottaDB. There will be some manual edits to certain files depending on the directory structures used for installation. This guide assumes that PIP is cloned into the installing user's home directory, if it is different for your installation - adjust paths as required.
 
 ## Prerequisites
 PIP requires the following software packages:
@@ -31,36 +31,12 @@ PIP requires the following software packages:
      * Type: `make`
      * Type: `make -f version.mk`
  * Compile SQL library (libsql)
-   * Type: `cd ~/pip/libsql_*`
+   * Type: `cd ~/pip/libsql_*/src`
    * Type: `make LINUX`
    * Type: `make version`
  * Compile M interrupt utility (mintrpt)
    * Type: `cd ~/pip/util`
    * Type: `make -f mintrpt.mk`
-
-## YottaDB configuration
-
- * Create GDE file
-   This is based on using the default templates for YottaDB and making targeted changes to support PIP:
-    * Type: `cd ~/pip`
-    * Type: `./dm`
-    * Type: `D ^GDE`
-    * `change -region DEFAULT -RECORD_SIZE=4080`
-    * `change -segment DEFAULT -alloc=4000 -exten=5000 -glob=2000 -FILE=$HOME/Projects/yottadb/pip/gbls/mumps.dat`
-    * Type: `exit`
-    * Type: `H`
-
- * Import PIP globals
-   * Type: ``
-
- * Fix C callout files
-   The C callout files - `*.xc` - file has a reference to the shared library that needs to be executed that is system dependent. Modify the following files to have the correct full path to the shared library:
-   * ~/pip/extcall_V1.2/extcall.xc
-   * ~/pip/extcall_V1.2/alerts.xc
-   * ~/pip/mtm_V2.4.5/mtm.xc
-
- * Enable journaling
-   * Type: `/usr/local/lib/yottadb/r120/utf8/mupip set -journal="enable,on,before" -file gbls/mumps.dat`
 
 ## Setting Kernel parameters
 PIP uses kernel system calls to pass messages. The messages and queues are larger than most linux defaults:
@@ -75,7 +51,7 @@ PIP uses kernel system calls to pass messages. The messages and queues are large
  * Type: `cat /proc/sys/kernel/msgmni`
 
  To modify these values:
- Note: if the current values are larger than below omit the value
+ Note: If the current values are larger than below omit the value
  * Type: `sudo vi /etc/sysctl.conf`
  * Go to the bottom of the file and add:
    ```
@@ -85,6 +61,38 @@ PIP uses kernel system calls to pass messages. The messages and queues are large
    ```
   * To activate the values:
     * Type: `sudo sysctl -p`
+
+## YottaDB configuration
+
+ * Create GDE file
+   This is based on using the default templates for YottaDB and making targeted changes to support PIP.
+   Note: We are manually set some environment variables just to create the global directory. The `dm` or `drv` script should normally be used to run PIP.
+    * Type: `export ydb_chset=UTF-8`
+    * Type: `export ydb_icu_version=55.1`
+    * Type: `export ydb_gbldir=/home/pip/pip/gbls/pip.gld`
+    * Type: `export ydb_dist=/usr/local/lib/yottadb/current`
+    * Type: `export ydb_routines=${ydb_dist}/utf8/libyottadbutil.so`
+    * Type: `$ydb_dist/mumps -run ^GDE`
+    * Type: `change -region DEFAULT -RECORD_SIZE=4080`
+    * Type: `change -segment DEFAULT -alloc=4000 -exten=5000 -glob=2000 -FILE=/home/pip/pip/gbls/pip.dat`
+    * Type: `exit`
+    * Type: `$ydb_dist/mupip create`
+
+ * Import PIP globals
+   * Type: `export ydb_chset=UTF-8`
+   * Type: `export ydb_icu_version=55.1`
+   * Type: `export ydb_gbldir=/home/pip/pip/gbls/pip.gld`
+   * Type: `export ydb_dist=/usr/local/lib/yottadb/current`
+   * Type: `export ydb_routines=${ydb_dist}/utf8/libyottadbutil.so`
+   * Type: `$ydb_dist/mupip load /home/pip/pip/gbls/globals.zwr`
+
+ * Fix C callout files
+   The C callout files - `*.xc` - file has a reference to the shared library that needs to be executed that is system dependent. Modify the following files to have the correct full path to the shared library:
+   * ~/pip/extcall_V1.2/extcall.xc
+   * ~/pip/extcall_V1.2/alerts.xc
+   * ~/pip/mtm_V2.4.5/mtm.xc
+ * Enable journaling
+   * Type: `/usr/local/lib/yottadb/r120/utf8/mupip set -journal="enable,on,before" -file gbls/mumps.dat`
 
 ## Starting PIP
 Included in the installation are scripts used to start, stop, and recover the PIP environment. These scripts should be reviewed for applicability in your environment. This starts MTM and the PBS Server.
@@ -107,7 +115,7 @@ The JDBC connection connects to the MTM server to process SQL queries. It uses t
 Relevant information:
  * JDBC url scheme: protocol=jdbc:sanchez/database={PIP server IP/hostname}:{MTM Port}:SCA$IBS
  * userid: 1
- * password: xxx
+ * password: XXX
 
 Tips:
  * Do not pass a schema to PIP queries as it will fail.
