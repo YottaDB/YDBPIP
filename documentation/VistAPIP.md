@@ -4,7 +4,7 @@ This document describes how to make VistA and PIP coexist together.
 ## Docker Container
 There is a pre-configured docker container that has all of the modifications below already done. The following command will pull the image and start it:
 
-`docker run -d -p 2222:22 -p 8001:8001 -p 9430:9430 -p 8080:8080 -p 61012:61012 --sysctl kernel.msgmax=1048700 --sysctl kernel.msgmnb=65536000 --name=vehu-pip cje1985/vehu-pip`
+`docker run -d -v "$PWD/p":/home/vehu/p -p 2222:22 -p 8001:8001 -p 9430:9430 -p 8080:8080 -p 61012:61012 --sysctl kernel.msgmax=1048700 --sysctl kernel.msgmnb=65536000 --name=vehu-pip cje1985/vehu-pip`
 
 ## Manual Instructions
 This will walk a user through manually configuring a VistA instance (based on https://github.com/OSEHRA/docker-vista configuration).
