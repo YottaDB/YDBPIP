@@ -28,7 +28,6 @@ MAPFM(FILE)
  . . ;W "SET Command: "_"S ^DBTBL("_QUOTE_"SYSDEV"_QUOTE_",1,"_QUOTE_FILENAME_QUOTE_",9,"_QUOTE_SQLFIELDNAME_QUOTE_")="_QUOTE_SUBSCRIPT_"|40|||||||T|"_SQLFIELDNAME_"|S||||0||0||||"_PIECE_"|"_SQLFIELDNAME_"|0||64786|vehu||0|||0"_QUOTE,!
  . . S ^DBTBL("SYSDEV",1,FILENAME,9,SQLFIELDNAME)=SUBSCRIPT_"|40|||||||T|"_SQLFIELDNAME_"|S||||0||0||||"_PIECE_"|"_SQLFIELDNAME_"|0||64786|vehu||0|||0"
  . I +TYPE D
- . . QUIT
  . . ; Subfiles have to be unravled from the parent file as they aren't standalone files with definitions in ^DIC
  . . ; UP^DIDG gave the information to unravel this.
  . . ; The chain works like the following:
@@ -39,22 +38,29 @@ MAPFM(FILE)
  . . W "Subfile: "_+TYPE_" found!",!
  . . W "Attempting to map Sub-File",!
  . . I $$CREATEMAP(FILE,+TYPE) W "Errors creating Sub-File header",! Q
+ . . ; Get a SQL compatible Table Name for the SubFile
+ . . S SUBFILENAME=$$FNB^DMSQU(+TYPE)
  . . W "Attempting to map fields in Sub-File",!
-  . . ; This isn't a SQL compatible Field name
- . . S FIELDNAME=$P(^DD(FILE,FIELD,0),"^",1)
- . . ; Get a SQL compatible Column Name for the Field
- . . S SQLFIELDNAME=$$SQLK^DMSQU(FIELDNAME,30)
- . . S SUBSCRIPT=$P($P(^DD(FILE,FIELD,0),"^",4),";",1)
- . . S PIECE=$P($P(^DD(FILE,FIELD,0),"^",4),";",2)
- . . S TYPE=$P(^DD(FILE,FIELD,0),"^",2)
  . . ;
- . . W "Field: "_FIELDNAME,!
- . . W "SQLI Field: "_SQLFIELDNAME,!
- . . W "Type: "_TYPE,!
- . . W "Subscript: "_SUBSCRIPT,!
- . . W "Piece: "_PIECE,!
- . . W "SET Command: "_"S ^DBTBL("_QUOTE_"SYSDEV"_QUOTE_",1,"_QUOTE_FILENAME_QUOTE_",9,"_QUOTE_SQLFIELDNAME_QUOTE_")="_QUOTE_SUBSCRIPT_"|40|||||||T|"_SQLFIELDNAME_"|S||||0||0||||"_PIECE_"|"_SQLFIELDNAME_"|0||64786|vehu||0|||0"_QUOTE,!
- . . S ^DBTBL("SYSDEV",1,FILENAME,9,SQLFIELDNAME)=SUBSCRIPT_"|40|||||||T|"_SQLFIELDNAME_"|S||||0||0||||"_PIECE_"|"_SQLFIELDNAME_"|0||64786|vehu||0|||0"
+ . . ; Loop through SubFile Fields
+ . . S SUBFILEFIELD=0
+ . . F  S SUBFILEFIELD=$O(^DD(+TYPE,SUBFILEFIELD)) Q:SUBFILEFIELD=""  Q:SUBFILEFIELD'=+SUBFILEFIELD  D
+ . . . ; This isn't a SQL compatible Field name
+ . . . S FIELDNAME=$P(^DD(+TYPE,SUBFILEFIELD,0),"^",1)
+ . . . ; Get a SQL compatible Column Name for the Field
+ . . . S SQLFIELDNAME=$$SQLK^DMSQU(FIELDNAME,30)
+ . . . S SUBSCRIPT=$P($P(^DD(+TYPE,SUBFILEFIELD,0),"^",4),";",1)
+ . . . S PIECE=$P($P(^DD(+TYPE,SUBFILEFIELD,0),"^",4),";",2)
+ . . . S SUBTYPE=$P(^DD(+TYPE,SUBFILEFIELD,0),"^",2)
+ . . . ;
+ . . . W "SubFile SQLI Name: "_SUBFILENAME,!
+ . . . W "Field: "_FIELDNAME,!
+ . . . W "SQLI Field: "_SQLFIELDNAME,!
+ . . . W "SubType: "_SUBTYPE,!
+ . . . W "Subscript: "_SUBSCRIPT,!
+ . . . W "Piece: "_PIECE,!
+ . . . W "SET Command: "_"S ^DBTBL("_QUOTE_"SYSDEV"_QUOTE_",1,"_QUOTE_SUBFILENAME_QUOTE_",9,"_QUOTE_SQLFIELDNAME_QUOTE_")="_QUOTE_SUBSCRIPT_"|40|||||||T|"_SQLFIELDNAME_"|S||||0||0||||"_PIECE_"|"_SQLFIELDNAME_"|0||64786|vehu||0|||0"_QUOTE,!
+ . . . S ^DBTBL("SYSDEV",1,SUBFILENAME,9,SQLFIELDNAME)=SUBSCRIPT_"|40|||||||T|"_SQLFIELDNAME_"|S||||0||0||||"_PIECE_"|"_SQLFIELDNAME_"|0||64786|vehu||0|||0"
  QUIT
  ;
  ;
@@ -117,6 +123,8 @@ CREATEMAP(FILE,SUBFILE)
  S SEPARATOR=$A("^")
  ;
  ;
+ ; Kill off the old mapping
+ K ^DBTBL("SYSDEV",1,SQLFILENAME)
  ; This series of sets is based on manual mapping of the global and translating
  ; to be an automated function
  ;
