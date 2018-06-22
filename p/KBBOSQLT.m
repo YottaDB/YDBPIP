@@ -7,29 +7,27 @@ TEST
  ;
  ; Patient File Tests
 PATIENT ; @TEST
- N SQLPAR,ERROR,ROWS,SQL
- N %DB,%LIBS,%TOKEN,ER,pslTbl,fsn,RM
- S SQLPAR("ROWS")=2
- S ERROR=$$^SQL("SELECT "_$$LIST^SQLDD("PATIENT")_" FROM PATIENT",.SQLPAR,,.ROWS)
- D ASSERT(0,ERROR,"Error status code set from $$^SQL")
- D ASSERT(1,$D(ROWS),"No rows returned from query")
- D ARRAYSQL(.SQL,ROWS)
- D ASSERT(SQLPAR("ROWS"),$O(SQL(""),-1),"Too many rows returned")
- D VERIFYSQL(2,.SQL)
+ D TESTSQL(2)
  QUIT
  ;
  ;Person File Tests
 PERSON ; @TEST
- N SQLPAR,ERROR,ROWS,SQL
- N %DB,%LIBS,%TOKEN,ER,pslTbl
- S SQLPAR("ROWS")=2
+ D TESTSQL(200)
+ QUIT
+ ;
+ ; All SQL Tests follow the same order of operations - so this method can
+ ; test any FileMan mapped SQL table.
+TESTSQL(FILE)
+ N SQLPAR,ERROR,ROWS,SQL,FILENAME
  N %DB,%LIBS,%TOKEN,ER,I,J,pslTbl,fsn,RM
- S ERROR=$$^SQL("SELECT "_$$LIST^SQLDD("NEW_PERSON")_" FROM NEW_PERSON",.SQLPAR,,.ROWS)
+ S SQLPAR("ROWS")=2
+ S FILENAME=$$FNB^DMSQU(FILE)
+ S ERROR=$$^SQL("SELECT "_$$LIST^SQLDD(FILENAME)_" FROM "_FILENAME,.SQLPAR,,.ROWS)
  D ASSERT(0,ERROR,"Error status code set from $$^SQL")
  D ASSERT(1,$D(ROWS),"No rows returned from query")
  D ARRAYSQL(.SQL,ROWS)
  D ASSERT(SQLPAR("ROWS"),$O(SQL(""),-1),"Too many rows returned")
- D VERIFYSQL(200,.SQL)
+ D VERIFYSQL(FILE,.SQL)
  QUIT
  ; Converts ROWS returned by a SQL Query to an array format for easy checking
  ; RETURNS: RETURN(#)=ROW
@@ -41,16 +39,15 @@ ARRAYSQL(RETURN,ROWS)
  ;
 VERIFYSQL(FILE,SQL)
  N ROW,ERROR,FIELD,FILENAME,SQLFIELDNAME,FM,SQLIENS,SQLMAP,FIELDNAME,COLUMNS
+ N DIC
  S FILENAME=$$FNB^DMSQU(FILE)
  D GETCOLUMNS(FILENAME)
  ;
  S ROW=1 ; SKIP THE FIRST SQL ROW AS THAT IS THE 0 NODE WHICH IS INVALID
  F  S ROW=$O(SQL(ROW)) Q:ROW=""  D
- . ;W ! ZWR SQL(ROW) W !
  . K FM,ERROR,SQLIENS
  . S SQLIENS=$P(SQL(ROW),$C(9),1)_","
  . D GETS^DIQ(FILE,SQLIENS,"*","I","FM","ERROR")
- . ;W ! ZWR FM W !
  . D ASSERT(0,$D(ERROR),"FileMan error occurred")
  . S FIELD=""
  . F  S FIELD=$O(FM(FILE,SQLIENS,FIELD)) Q:FIELD=""  D
@@ -59,7 +56,7 @@ VERIFYSQL(FILE,SQL)
  . . ; Get a SQL compatible Column Name for the Field
  . . S SQLFIELDNAME=$$SQLK^DMSQU($P(^DD(FILE,FIELD,0),"^",1),30)
  . . ; Skip computed fields
- . . I $P(^DD(FILE,FIELD,0),"^",2)["C" QUIT
+ . . I $P(^DD(FILE,FIELD,0),"^",2)["C" Q
  . . ;
  . . D ASSERT(FM(FILE,SQLIENS,FIELD,"I"),$P(SQL(ROW),$C(9),COLUMNS(SQLFIELDNAME)),"data mismatch between FileMan "_$P(^DD(FILE,FIELD,0),"^",1)_" (#"_FIELD_") and SQL "_SQLFIELDNAME)
  QUIT
@@ -68,12 +65,9 @@ GETCOLUMNS(FILE)
  N SQLFIELDNAME,POSITION,LIST
  S SQLFIELDNAME=""
  S LIST=$$LIST^SQLDD(FILE)
- ;F POSITION=1:1 S SQLFIELDNAME=$O(^DBTBL("SYSDEV",1,FILE,9,SQLFIELDNAME)) Q:SQLFIELDNAME=""  D
  F POSITION=1:1:$L(LIST,",") D
  . S COLUMNS($P(LIST,",",POSITION))=POSITION
- ;ZWR COLUMNS
  QUIT
-
  ;
  ; Convience method
 ASSERT(EXPECT,ACTUAL,MSG)
