@@ -1,13 +1,22 @@
-MAPFM(FILE)
+KBBOSQL ; YDB/CJE - SQL Mapper ;2018-05-31
+ ;;1.0;KBBOSQL;**1**;May 31, 2018;Build 1
+MAPFM(FILE,DEBUG)
+ S DEBUG=$G(DEBUG)
+ I $$CREATEMAP(FILE,DEBUG) W "Errors creating File header",! QUIT
+ D MAPFIELDS(FILE,DEBUG)
+ QUIT
+ ;
+ ;
+ ; This maps Fields in a given FileMan File/SubFile
+MAPFIELDS(FILE,DEBUG)
+ S DEBUG=$G(DEBUG)
  N FIELD,QUOTE,TYPE,SQLFIELDNAME,SUBSCRIPT,PIECE,FILENAME
- I $$CREATEMAP(FILE) W "Errors creating File header",! QUIT
- ; Fields are after the "0" subscript
- S FIELD=0
  ; For convience of printing SET command
  S QUOTE=""""
  ; Get a SQL compatible Table Name for the File
  S FILENAME=$$FNB^DMSQU(FILE)
- ; Loop through each field number
+ ; Fields are after the "0" subscript
+ S FIELD=0
  F  S FIELD=$O(^DD(FILE,FIELD)) Q:FIELD=""  Q:FIELD'=+FIELD  D
  . ; Figure out if it is a Sub-File and map it separately
  . ; Subfiles begin with a number in the Type field
@@ -20,14 +29,14 @@ MAPFM(FILE)
  . . S SUBSCRIPT=$P($P(^DD(FILE,FIELD,0),"^",4),";",1)
  . . S PIECE=$P($P(^DD(FILE,FIELD,0),"^",4),";",2)
  . . ;
- . . W:SQLFIELDNAME="CLAIM_FOLDER_LOCATION" "Standalone Field: "_FIELDNAME,!
- . . W:SQLFIELDNAME="CLAIM_FOLDER_LOCATION" "SQLI Field: "_SQLFIELDNAME,!
- . . W:SQLFIELDNAME="CLAIM_FOLDER_LOCATION" "Type: "_TYPE,!
- . . W:SQLFIELDNAME="CLAIM_FOLDER_LOCATION" "Subscript: "_SUBSCRIPT,!
- . . W:SQLFIELDNAME="CLAIM_FOLDER_LOCATION" "Piece: "_PIECE,!
- . . ;W "SET Command: "_"S ^DBTBL("_QUOTE_"SYSDEV"_QUOTE_",1,"_QUOTE_FILENAME_QUOTE_",9,"_QUOTE_SQLFIELDNAME_QUOTE_")="_QUOTE_SUBSCRIPT_"|40|||||||T|"_SQLFIELDNAME_"|S||||0||0||||"_PIECE_"|"_SQLFIELDNAME_"|0||64786|vehu||0|||0"_QUOTE,!
+ . . W:DEBUG "Field Name: "_FIELDNAME,!
+ . . W:DEBUG "SQL Compatible Field Name: "_SQLFIELDNAME,!
+ . . W:DEBUG "FileMan Type: "_TYPE,!
+ . . W:DEBUG "Subscript: "_SUBSCRIPT,!
+ . . W:DEBUG "Piece: "_PIECE,!
+ . . W:DEBUG "SQL Map Command: "_"S ^DBTBL("_QUOTE_"SYSDEV"_QUOTE_",1,"_QUOTE_FILENAME_QUOTE_",9,"_QUOTE_SQLFIELDNAME_QUOTE_")="_QUOTE_SUBSCRIPT_"|40|||||||T|"_SQLFIELDNAME_"|S||||0||0||||"_PIECE_"|"_SQLFIELDNAME_"|0||64786|vehu||0|||0"_QUOTE,!
  . . S ^DBTBL("SYSDEV",1,FILENAME,9,SQLFIELDNAME)=SUBSCRIPT_"|40|||||||T|"_SQLFIELDNAME_"|S||||0||0||||"_PIECE_"|"_SQLFIELDNAME_"|0||64786|vehu||0|||0"
- . I +TYPE D
+ . E  I +TYPE D
  . . ; Subfiles have to be unravled from the parent file as they aren't standalone files with definitions in ^DIC
  . . ; UP^DIDG gave the information to unravel this.
  . . ; The chain works like the following:
@@ -35,32 +44,15 @@ MAPFM(FILE)
  . . ; * Take the number from +TYPE and S X=$ORDER(^DD(FILE,"SB",+TYPE,""))
  . . ; * Take the result of the $ORDER and get the field definition from ^DD(FILE,X,0) - This follows the normal field definition
  . . ;   in that the definition in that piece 4 of the 0 subscript contains the subscript and piece of the data.
- . . W "Subfile: "_+TYPE_" found!",!
- . . W "Attempting to map Sub-File",!
- . . I $$CREATEMAP(FILE,+TYPE) W "Errors creating Sub-File header",! Q
+ . . W:DEBUG "Subfile: "_+TYPE_" found!",!
+ . . W:DEBUG "Attempting to map Sub-File",!
+ . . I $$CREATEMAP(+TYPE,DEBUG) W "Errors creating Sub-File header.",!,"File: ",FILE,!,"SubFile: ",+TYPE,! Q
+ . . ; Recursively call ourselves as SubFiles can now be treated like regular files (and can have SubFiles of their own)
  . . ; Get a SQL compatible Table Name for the SubFile
- . . S SUBFILENAME=$$FNB^DMSQU(+TYPE)
- . . W "Attempting to map fields in Sub-File",!
- . . ;
- . . ; Loop through SubFile Fields
- . . S SUBFILEFIELD=0
- . . F  S SUBFILEFIELD=$O(^DD(+TYPE,SUBFILEFIELD)) Q:SUBFILEFIELD=""  Q:SUBFILEFIELD'=+SUBFILEFIELD  D
- . . . ; This isn't a SQL compatible Field name
- . . . S FIELDNAME=$P(^DD(+TYPE,SUBFILEFIELD,0),"^",1)
- . . . ; Get a SQL compatible Column Name for the Field
- . . . S SQLFIELDNAME=$$SQLK^DMSQU(FIELDNAME,30)
- . . . S SUBSCRIPT=$P($P(^DD(+TYPE,SUBFILEFIELD,0),"^",4),";",1)
- . . . S PIECE=$P($P(^DD(+TYPE,SUBFILEFIELD,0),"^",4),";",2)
- . . . S SUBTYPE=$P(^DD(+TYPE,SUBFILEFIELD,0),"^",2)
- . . . ;
- . . . W "SubFile SQLI Name: "_SUBFILENAME,!
- . . . W "Field: "_FIELDNAME,!
- . . . W "SQLI Field: "_SQLFIELDNAME,!
- . . . W "SubType: "_SUBTYPE,!
- . . . W "Subscript: "_SUBSCRIPT,!
- . . . W "Piece: "_PIECE,!
- . . . W "SET Command: "_"S ^DBTBL("_QUOTE_"SYSDEV"_QUOTE_",1,"_QUOTE_SUBFILENAME_QUOTE_",9,"_QUOTE_SQLFIELDNAME_QUOTE_")="_QUOTE_SUBSCRIPT_"|40|||||||T|"_SQLFIELDNAME_"|S||||0||0||||"_PIECE_"|"_SQLFIELDNAME_"|0||64786|vehu||0|||0"_QUOTE,!
- . . . S ^DBTBL("SYSDEV",1,SUBFILENAME,9,SQLFIELDNAME)=SUBSCRIPT_"|40|||||||T|"_SQLFIELDNAME_"|S||||0||0||||"_PIECE_"|"_SQLFIELDNAME_"|0||64786|vehu||0|||0"
+ . . D MAPFIELDS(+TYPE,DEBUG)
+ . ; Computed Fields need to be handled
+ . E  I TYPE["C" D
+ . . W "Skipping Computed Field: "_$P(^DD(FILE,FIELD,0),"^",1)_" (#"_FIELD_")",! Q
  QUIT
  ;
  ;
@@ -70,51 +62,55 @@ MAPFM(FILE)
  ; the SUB-FILE.
  ; FILE is always required as SUB-FILE mapping requires data from the parent
  ; FILE.
-CREATEMAP(FILE,SUBFILE)
- S SUBFILE=$G(SUBFILE)
+CREATEMAP(FILE,DEBUG)
+ S DEBUG=$G(DEBUG)
  ; This requires a FILE Number (No names)
- ; Files need to be numeric and exist in ^DIC or ^DD
- I (FILE'=+FILE)!('$D(^DIC(FILE))) W "Invalid File passed",! QUIT 1
+ ; Files need to be numeric and exist in ^DIC or ^DD (Due to SubFile support)
+ I (FILE'=+FILE)&(('$D(^DIC(FILE)))!('$D(^DD(FILE)))) W "Invalid File passed: ",FILE,! QUIT 1
  ;
- N SQLFILENAME,GLOBAL,SEPARATOR,KEYS,KEY,I,SB,QUIT
+ N SQLFILENAME,GLOBAL,SEPARATOR,KEYS,KEY,I,SB,QUIT,PARENT
  ;
- ; Figure out if we are given a true sub-file number or the field number
- ; and validate it
- I $L(SUBFILE) D
- . I '$D(^DD(SUBFILE)) W "Invalid Sub-File passed - Can't find in ^DD",! S QUIT=1
- . S SB=$O(^DD(FILE,"SB",SUBFILE,""))
- . W "SB: "_SB,!
- . I ('$D(^DD(FILE,SB)))!(+$P(^DD(FILE,SB,0),"^",2)'=SUBFILE) W "Invalid Sub-File passed - Link to Parent File broken",! S QUIT=1
+ ; Figure out if we are given a SubFile and make sure we can get to the parent File
+ I '$D(^DIC(FILE)) D  ; SubFiles don't exist in ^DIC
+ . S PARENT=$G(^DD(FILE,0,"UP"))
+ . I '$L(PARENT) W "Can't Find Parent File of SubFile: ",FILE,! S QUIT=1 Q
+ . S SB=$QS($Q(^DD(PARENT,"SB",FILE)),4)
+ . W:DEBUG "SUBFILE NUMBER: "_SB,!
+ . I ('$D(^DD(PARENT,SB)))!(+$P(^DD(PARENT,SB,0),"^",2)'=FILE) W "Invalid SubFile passed - Link to Parent File broken",!,"File: ",PARENT,!,"SubFile: ",FILE,! S QUIT=1
  QUIT:QUIT
  ;
  ;
- ; Get a SQL compatible Table name for the (SUB)FILE
- I $L(SUBFILE) D
- . S SQLFILENAME=$$FNB^DMSQU(SUBFILE)
- E  D
- . S SQLFILENAME=$$FNB^DMSQU(FILE)
- W "Table Name: "_SQLFILENAME,!
+ ; Get a SQL compatible Table name for the (Sub)File
+ S SQLFILENAME=$$FNB^DMSQU(FILE)
+ W:DEBUG "Table Name: "_SQLFILENAME,!
  ;
  ; The global reference includes the "^" and subscripts
  ; We have to strip the subscripts (they become keys) and the "^"
  ; For subfiles we need to append data in ^DD(FILE,SUBFILE,0) Piece 4 to KEYS
- S (GLOBAL,KEYS)=$G(^DIC(FILE,0,"GL"))
+ ; We need to recursively get the parent of the SubFile to get the global location
+ S PARENT=$$GETPARENTS(FILE)
+ I PARENT="" S (GLOBAL,KEYS)=$G(^DIC(FILE,0,"GL"))
+ E  S (GLOBAL,KEYS)=$G(^DIC($P(PARENT,"^",$L(PARENT,"^")),0,"GL"))
  I GLOBAL="" W "No Global node found",! QUIT 1
  S GLOBAL=$E(GLOBAL,2,$F(GLOBAL,"(")-2)
  ;
  ;
  ; Setup the KEYS to access the file
- ; IEN is always assumed and is the last subscript
- ; 99% of the time the 1st key will be the file number
+ ; IEN is always assumed to be the last subscript
  S KEYS=$E(KEYS,$F(KEYS,"("),$L(KEYS))_"IEN"
- I $L(SUBFILE) D
- . S KEYS=KEYS_","_$P($P(^DD(FILE,SB,0),"^",4),";",1)_",IEN1"
- W "KEYS: "_KEYS,!
+ I PARENT'="" D
+ . ; Loop through all parents to get all of the keys
+ . F IEN=1:1:$L(PARENT,"^") D
+ . . S SUBPARENT=$P(PARENT,"^",IEN)
+ . . S SB=$QS($Q(^DD(SUBPARENT,"SB",FILE)),4)
+ . . W:DEBUG "PARENT: "_SUBPARENT,!
+ . . W:DEBUG "SB: "_SB,!
+ . . W:DEBUG "Zero node: "_^DD(SUBPARENT,SB,0),!
+ . . S KEYS=KEYS_","_$P($P(^DD(SUBPARENT,SB,0),"^",4),";",1)_",IEN"_IEN
+ W:DEBUG "KEYS: "_KEYS,!
  F KEY=1:1:$L(KEYS,",") D
  . S KEYS(KEY)=$P(KEYS,",",KEY)
- W "PARSED KEYS: ",! ZWR KEYS
- ;
- ;QUIT 1
+ W:DEBUG "PARSED KEYS: ",! ZWRITE:DEBUG KEYS
  ;
  ; All variables setup and now common between subfiles and files (in ignore relationship mode)
  ;
@@ -129,7 +125,7 @@ CREATEMAP(FILE,SUBFILE)
  ; to be an automated function
  ;
  ; This is the description
- ; TODO: fix the file name for subfiles
+ ; TODO: Add the SubFile name to the File name if a SubFile is passed
  S ^DBTBL("SYSDEV",1,SQLFILENAME)="VistA "_$P(^DIC(FILE,0),"^",1)_" File "_FILE
  ;
  ; This is the GLOBAL location (no keys or "^")
@@ -195,3 +191,10 @@ CREATEMAP(FILE,SUBFILE)
  .  S ^DBTBL("SYSDEV",1,SQLFILENAME,9,KEYS(KEY))=I_"*|12|||||||N|"_KEYS(KEY)_"|S||||1||0|||||"_KEYS(KEY)_"|0||"_+$H_"|FileManMapper||0|||0"
  ;
  QUIT 0
+ ;
+ ; Recurse a given SubFile to get all of its parents
+GETPARENTS(FILE,PARENT)
+ I '$L($G(^DD(FILE,0,"UP"))) QUIT PARENT
+ S PARENT=$S($G(PARENT)'="":PARENT_"^",1:"")_$G(^DD(FILE,0,"UP"))
+ S PARENT=$$GETPARENTS(^DD(FILE,0,"UP"),PARENT)
+ QUIT PARENT
