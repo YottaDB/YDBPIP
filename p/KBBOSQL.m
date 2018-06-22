@@ -10,7 +10,7 @@ MAPFM(FILE,DEBUG)
  ; This maps Fields in a given FileMan File/SubFile
 MAPFIELDS(FILE,DEBUG)
  S DEBUG=$G(DEBUG)
- N FIELD,QUOTE,TYPE,SQLFIELDNAME,SUBSCRIPT,PIECE,FILENAME
+ N FIELD,QUOTE,TYPE,SQLFIELDNAME,SUBSCRIPT,PIECE,FILENAME,FIELDNAME
  ; For convience of printing SET command
  S QUOTE=""""
  ; Get a SQL compatible Table Name for the File
@@ -68,7 +68,7 @@ CREATEMAP(FILE,DEBUG)
  ; Files need to be numeric and exist in ^DIC or ^DD (Due to SubFile support)
  I (FILE'=+FILE)&(('$D(^DIC(FILE)))!('$D(^DD(FILE)))) W "Invalid File passed: ",FILE,! QUIT 1
  ;
- N SQLFILENAME,GLOBAL,SEPARATOR,KEYS,KEY,I,SB,QUIT,PARENT
+ N SQLFILENAME,GLOBAL,SEPARATOR,KEYS,KEY,I,SB,QUIT,PARENT,IEN,SUBPARENT
  ;
  ; Figure out if we are given a SubFile and make sure we can get to the parent File
  I '$D(^DIC(FILE)) D  ; SubFiles don't exist in ^DIC
