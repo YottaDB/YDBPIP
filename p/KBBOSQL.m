@@ -36,6 +36,7 @@ MAPFIELDS(FILE,DEBUG)
  . . W:DEBUG "Piece: "_PIECE,!
  . . ; If we don't have a piece and subscript the field shouldn't be mapped
  . . I ((SUBSCRIPT="")!(SUBSCRIPT=" "))&(PIECE="") W "Skipping field that is likely a Key field - no subscript or piece",! Q
+ . . ;
  . . W:DEBUG "SQL Map Command: "_"S ^DBTBL("_QUOTE_"SYSDEV"_QUOTE_",1,"_QUOTE_FILENAME_QUOTE_",9,"_QUOTE_SQLFIELDNAME_QUOTE_")="_QUOTE_SUBSCRIPT_"|40|||||||T|"_SQLFIELDNAME_"|S||||0||0||||"_PIECE_"|"_SQLFIELDNAME_"|0||64786|vehu||0|||0"_QUOTE,!
  . . S ^DBTBL("SYSDEV",1,FILENAME,9,SQLFIELDNAME)=SUBSCRIPT_"|40|||||||T|"_SQLFIELDNAME_"|S||||0||0||||"_PIECE_"|"_SQLFIELDNAME_"|0||64786|vehu||0|||0"
  . E  I +TYPE D
@@ -95,6 +96,7 @@ CREATEMAP(FILE,DEBUG)
  ; We need to recursively get the parent of the SubFile to get the global location
  S PARENT=$$GETPARENTS(FILE)
  I PARENT="" S (GLOBAL,KEYS)=$G(^DIC(FILE,0,"GL"))
+ ; Last parent is the root File
  E  S (GLOBAL,KEYS)=$G(^DIC($P(PARENT,"^",$L(PARENT,"^")),0,"GL"))
  I GLOBAL="" W "No Global node found",! QUIT 1
  S GLOBAL=$E(GLOBAL,2,$F(GLOBAL,"(")-2)
@@ -111,7 +113,11 @@ CREATEMAP(FILE,DEBUG)
  . . W:DEBUG "PARENT: "_SUBPARENT,!
  . . W:DEBUG "SB: "_SB,!
  . . W:DEBUG "Zero node: "_^DD(SUBPARENT,SB,0),!
- . . S KEYS=KEYS_","_QUOTE_$P($P(^DD(SUBPARENT,SB,0),"^",4),";",1)_QUOTE_",IEN"_IEN
+ . . W:DEBUG "Renamed .001 Field: "_$D(^DD(FILE,.001,0)),!
+ . . W:DEBUG ".001 node: "_$G(^DD(FILE,.001,0)),!
+ . . S KEYS=KEYS_","_QUOTE_$P($P(^DD(SUBPARENT,SB,0),"^",4),";",1)_QUOTE
+ . . ; $SELECT here to either get the name of the .001 field or fill in the default IEN
+ . . S KEYS=KEYS_$S($D(^DD(FILE,.001,0)):","_$$SQLK^DMSQU($P(^DD(FILE,.001,0),"^",1),30),1:",IEN"_IEN)
  W:DEBUG "KEYS: "_KEYS,!
  F KEY=1:1:$L(KEYS,",") D
  . S KEYS(KEY)=$P(KEYS,",",KEY)
