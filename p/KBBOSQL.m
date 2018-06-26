@@ -34,6 +34,8 @@ MAPFIELDS(FILE,DEBUG)
  . . W:DEBUG "FileMan Type: "_TYPE,!
  . . W:DEBUG "Subscript: "_SUBSCRIPT,!
  . . W:DEBUG "Piece: "_PIECE,!
+ . . ; If we don't have a piece and subscript the field shouldn't be mapped
+ . . I ((SUBSCRIPT="")!(SUBSCRIPT=" "))&(PIECE="") W "Skipping field that is likely a Key field - no subscript or piece",! Q
  . . W:DEBUG "SQL Map Command: "_"S ^DBTBL("_QUOTE_"SYSDEV"_QUOTE_",1,"_QUOTE_FILENAME_QUOTE_",9,"_QUOTE_SQLFIELDNAME_QUOTE_")="_QUOTE_SUBSCRIPT_"|40|||||||T|"_SQLFIELDNAME_"|S||||0||0||||"_PIECE_"|"_SQLFIELDNAME_"|0||64786|vehu||0|||0"_QUOTE,!
  . . S ^DBTBL("SYSDEV",1,FILENAME,9,SQLFIELDNAME)=SUBSCRIPT_"|40|||||||T|"_SQLFIELDNAME_"|S||||0||0||||"_PIECE_"|"_SQLFIELDNAME_"|0||64786|vehu||0|||0"
  . E  I +TYPE D
@@ -53,6 +55,8 @@ MAPFIELDS(FILE,DEBUG)
  . ; Computed Fields need to be handled
  . E  I TYPE["C" D
  . . W "Skipping Computed Field: "_$P(^DD(FILE,FIELD,0),"^",1)_" (#"_FIELD_")",! Q
+ ; Rebuild Data Item Control Files
+ D BLDINDX^DBSDF9(FILENAME)
  QUIT
  ;
  ;
@@ -64,6 +68,7 @@ MAPFIELDS(FILE,DEBUG)
  ; FILE.
 CREATEMAP(FILE,DEBUG)
  S DEBUG=$G(DEBUG)
+ S QUOTE=""""
  ; This requires a FILE Number (No names)
  ; Files need to be numeric and exist in ^DIC or ^DD (Due to SubFile support)
  I (FILE'=+FILE)&(('$D(^DIC(FILE)))!('$D(^DD(FILE)))) W "Invalid File passed: ",FILE,! QUIT 1
@@ -106,7 +111,7 @@ CREATEMAP(FILE,DEBUG)
  . . W:DEBUG "PARENT: "_SUBPARENT,!
  . . W:DEBUG "SB: "_SB,!
  . . W:DEBUG "Zero node: "_^DD(SUBPARENT,SB,0),!
- . . S KEYS=KEYS_","_$P($P(^DD(SUBPARENT,SB,0),"^",4),";",1)_",IEN"_IEN
+ . . S KEYS=KEYS_","_QUOTE_$P($P(^DD(SUBPARENT,SB,0),"^",4),";",1)_QUOTE_",IEN"_IEN
  W:DEBUG "KEYS: "_KEYS,!
  F KEY=1:1:$L(KEYS,",") D
  . S KEYS(KEY)=$P(KEYS,",",KEY)
@@ -188,7 +193,7 @@ CREATEMAP(FILE,DEBUG)
  ; Add the Key fields
  S KEY=""
  F I=1:1 S KEY=$O(KEYS(KEY)) Q:KEY=""  D
- .  S ^DBTBL("SYSDEV",1,SQLFILENAME,9,KEYS(KEY))=I_"*|12|||||||N|"_KEYS(KEY)_"|S||||1||0|||||"_KEYS(KEY)_"|0||"_+$H_"|FileManMapper||0|||0"
+ .  S ^DBTBL("SYSDEV",1,SQLFILENAME,9,KEYS(KEY))=I_"*|12|||||||T|"_KEYS(KEY)_"|S||||1||0|||||"_KEYS(KEY)_"|0||"_+$H_"|FileManMapper||0|||0"
  ;
  QUIT 0
  ;
