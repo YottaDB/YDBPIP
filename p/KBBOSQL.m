@@ -1,5 +1,13 @@
 KBBOSQL ; YDB/CJE - SQL Mapper ;2018-05-31
  ;;1.0;KBBOSQL;**1**;May 31, 2018;Build 1
+MAPALL(DEBUG)
+ S DEBUG=$G(DEBUG)
+ N FILE
+ S FILE=1
+ ; Use ^DIC instead of ^DD as ^DIC only contains Root Files
+ F  S FILE=$O(^DIC(FILE)) Q:FILE=""  Q:FILE'=+FILE  D
+ . D MAPFM(FILE,DEBUG)
+ QUIT
 MAPFM(FILE,DEBUG)
  S DEBUG=$G(DEBUG)
  I $$CREATEMAP(FILE,DEBUG) W "Error: Unable to create SQL table header for File (#"_FILE_")",! QUIT
