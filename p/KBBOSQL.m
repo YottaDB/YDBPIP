@@ -2,7 +2,7 @@ KBBOSQL ; YDB/CJE - SQL Mapper ;2018-05-31
  ;;1.0;KBBOSQL;**1**;May 31, 2018;Build 1
 MAPFM(FILE,DEBUG)
  S DEBUG=$G(DEBUG)
- I $$CREATEMAP(FILE,DEBUG) W "Errors creating File header",! QUIT
+ I $$CREATEMAP(FILE,DEBUG) W "Error: Unable to create SQL table header for File (#"_FILE_")",! QUIT
  D MAPFIELDS(FILE,DEBUG)
  QUIT
  ;
@@ -10,7 +10,7 @@ MAPFM(FILE,DEBUG)
  ; This maps Fields in a given FileMan File/SubFile
 MAPFIELDS(FILE,DEBUG)
  S DEBUG=$G(DEBUG)
- N FIELD,QUOTE,TYPE,SQLFIELDNAME,SUBSCRIPT,PIECE,FILENAME,FIELDNAME
+ N FIELD,QUOTE,TYPE,SQLFIELDNAME,SUBSCRIPT,PIECE,FILENAME,FIELDNAME,%DB
  ; For convience of printing SET command
  S QUOTE=""""
  ; Get a SQL compatible Table Name for the File
@@ -34,28 +34,36 @@ MAPFIELDS(FILE,DEBUG)
  . . W:DEBUG "FileMan Type: "_TYPE,!
  . . W:DEBUG "Subscript: "_SUBSCRIPT,!
  . . W:DEBUG "Piece: "_PIECE,!
+ . . I FIELD=.001 W "Info: Skipping NUMBER (#.001) Virtual Field",! Q
  . . ; If we don't have a piece and subscript the field shouldn't be mapped
- . . I ((SUBSCRIPT="")!(SUBSCRIPT=" "))&(PIECE="") W "Skipping field that is likely a Key field - no subscript or piece",! Q
+ . . I ((SUBSCRIPT="")!(SUBSCRIPT=" "))&(PIECE="") D  Q
+ . . . W "Field Error: No Piece or Subscript could be found for Field "_FIELDNAME
+ . . . W " (#"_FIELD_") in File "_FILENAME_" (#"_FILE_")",!
  . . ;
  . . W:DEBUG "SQL Map Command: "_"S ^DBTBL("_QUOTE_"SYSDEV"_QUOTE_",1,"_QUOTE_FILENAME_QUOTE_",9,"_QUOTE_SQLFIELDNAME_QUOTE_")="_QUOTE_SUBSCRIPT_"|40|||||||T|"_SQLFIELDNAME_"|S||||0||0||||"_PIECE_"|"_SQLFIELDNAME_"|0||64786|vehu||0|||0"_QUOTE,!
  . . S ^DBTBL("SYSDEV",1,FILENAME,9,SQLFIELDNAME)=SUBSCRIPT_"|40|||||||T|"_SQLFIELDNAME_"|S||||0||0||||"_PIECE_"|"_SQLFIELDNAME_"|0||64786|vehu||0|||0"
  . E  I +TYPE D
- . . ; Subfiles have to be unravled from the parent file as they aren't standalone files with definitions in ^DIC
+ . . ; Subfiles have to be unravled from the parent file as they aren't standalone files
+ . . ; with definitions in ^DIC
  . . ; UP^DIDG gave the information to unravel this.
  . . ; The chain works like the following:
  . . ; * Identify that we are a subfile with +TYPE
  . . ; * Take the number from +TYPE and S X=$ORDER(^DD(FILE,"SB",+TYPE,""))
- . . ; * Take the result of the $ORDER and get the field definition from ^DD(FILE,X,0) - This follows the normal field definition
- . . ;   in that the definition in that piece 4 of the 0 subscript contains the subscript and piece of the data.
+ . . ; * Take the result of the $ORDER and get the field definition from ^DD(FILE,X,0)
+ . . ;   - This follows the normal field definition in that the definition in that
+ . . ;   piece 4 of the 0 subscript contains the subscript and piece of the data.
  . . W:DEBUG "Subfile: "_+TYPE_" found!",!
  . . W:DEBUG "Attempting to map Sub-File",!
- . . I $$CREATEMAP(+TYPE,DEBUG) W "Errors creating Sub-File header.",!,"File: ",FILE,!,"SubFile: ",+TYPE,! Q
- . . ; Recursively call ourselves as SubFiles can now be treated like regular files (and can have SubFiles of their own)
- . . ; Get a SQL compatible Table Name for the SubFile
+ . . I $$CREATEMAP(+TYPE,DEBUG) D  Q
+ . . . W "Error: Unable to create SQL table header for File (#"_FILE_") SubFile (#"_+TYPE_")",!
+ . . ; Recursively call ourselves as SubFiles can now be treated like regular files
+ . . ; (and can have SubFiles of their own)
  . . D MAPFIELDS(+TYPE,DEBUG)
- . ; Computed Fields need to be handled
+ . ; TODO: Computed Fields need to be handled by DATA-QWIK as FileMan stores no data
+ . ; in globals for these fields
  . E  I TYPE["C" D
- . . W "Skipping Computed Field: "_$P(^DD(FILE,FIELD,0),"^",1)_" (#"_FIELD_")",! Q
+ . . W "Info: Skipping Computed Field: "_$P(^DD(FILE,FIELD,0),"^",1)_" (#"_FIELD_")",! Q
+ ;
  ; Rebuild Data Item Control Files
  D BLDINDX^DBSDF9(FILENAME)
  QUIT
@@ -69,20 +77,23 @@ MAPFIELDS(FILE,DEBUG)
  ; FILE.
 CREATEMAP(FILE,DEBUG)
  S DEBUG=$G(DEBUG)
- S QUOTE=""""
  ; This requires a FILE Number (No names)
  ; Files need to be numeric and exist in ^DIC or ^DD (Due to SubFile support)
- I (FILE'=+FILE)&(('$D(^DIC(FILE)))!('$D(^DD(FILE)))) W "Invalid File passed: ",FILE,! QUIT 1
+ I (FILE'=+FILE)&(('$D(^DIC(FILE)))!('$D(^DD(FILE)))) W "Error: Invalid File passed: ",FILE,! QUIT 1
  ;
- N SQLFILENAME,GLOBAL,SEPARATOR,KEYS,KEY,I,SB,QUIT,PARENT,IEN,SUBPARENT
+ N SQLFILENAME,GLOBAL,SEPARATOR,KEYS,KEY,I,SB,QUIT,PARENT,PREVPARENT,IEN,SUBPARENT,QUOTE
+ S QUOTE=""""
  ;
  ; Figure out if we are given a SubFile and make sure we can get to the parent File
  I '$D(^DIC(FILE)) D  ; SubFiles don't exist in ^DIC
  . S PARENT=$G(^DD(FILE,0,"UP"))
- . I '$L(PARENT) W "Can't Find Parent File of SubFile: ",FILE,! S QUIT=1 Q
- . S SB=$QS($Q(^DD(PARENT,"SB",FILE)),4)
+ . I '$L(PARENT) W "Error: Can't Find Parent File of SubFile: ",FILE,! S QUIT=1 Q
+ . ; This is just to get the SubFile Number in the Parent file.
+ . S SB=$O(^DD(PARENT,"SB",FILE,""))
  . W:DEBUG "SUBFILE NUMBER: "_SB,!
- . I ('$D(^DD(PARENT,SB)))!(+$P(^DD(PARENT,SB,0),"^",2)'=FILE) W "Invalid SubFile passed - Link to Parent File broken",!,"File: ",PARENT,!,"SubFile: ",FILE,! S QUIT=1
+ . I ('$D(^DD(PARENT,SB)))!(+$P(^DD(PARENT,SB,0),"^",2)'=FILE) D
+ . . W "Error: Invalid SubFile passed - Link to Parent File broken File (#"
+ . . W PARENT_") SubFile (#"_FILE_")",! S QUIT=1
  QUIT:QUIT
  ;
  ;
@@ -98,24 +109,38 @@ CREATEMAP(FILE,DEBUG)
  I PARENT="" S (GLOBAL,KEYS)=$G(^DIC(FILE,0,"GL"))
  ; Last parent is the root File
  E  S (GLOBAL,KEYS)=$G(^DIC($P(PARENT,"^",$L(PARENT,"^")),0,"GL"))
- I GLOBAL="" W "No Global node found",! QUIT 1
+ I GLOBAL="" D  QUIT 1
+ . W "Error: No Global node for File (#"_$S(PARENT'="":$P(PARENT,"^",$L(PARENT,"^")),1:FILE)_")",!
  S GLOBAL=$E(GLOBAL,2,$F(GLOBAL,"(")-2)
  ;
  ;
  ; Setup the KEYS to access the file
  ; IEN is always assumed to be the last subscript
  S KEYS=$E(KEYS,$F(KEYS,"("),$L(KEYS))_"IEN"
+ ; PARENT is not "" when we have a SubFile
  I PARENT'="" D
+ . ; Add the File we are working with to the list of parents
+ . S PARENT=FILE_"^"_PARENT
  . ; Loop through all parents to get all of the keys
- . F IEN=1:1:$L(PARENT,"^") D
+ . F IEN=1:1:$L(PARENT,"^")-1 D
  . . S SUBPARENT=$P(PARENT,"^",IEN)
- . . S SB=$QS($Q(^DD(SUBPARENT,"SB",FILE)),4)
- . . W:DEBUG "PARENT: "_SUBPARENT,!
+ . . S PREVPARENT=$P(PARENT,"^",IEN+1)
+ . . S SB=$O(^DD(^DD(SUBPARENT,0,"UP"),"SB",SUBPARENT,""))
+ . . W:DEBUG "---------------------------",!
+ . . W:DEBUG "FILE: "_FILE,!
+ . . W:DEBUG "PREVPARENT: "_PREVPARENT,!
+ . . W:DEBUG "PARENT: "_PARENT,!
+ . . W:DEBUG "SUBPARENT: "_SUBPARENT,!
  . . W:DEBUG "SB: "_SB,!
+ . . ;
+ . . I SB="" D  Q
+ . . . W "Error: Unable to get SubFile number (#"_SUBPARENT_") in Parent File (#"_PREVPARENT_")",!
+ . . ;
+ . . W:DEBUG "SUBSCRIPTS: "_$P($P(^DD(PREVPARENT,SB,0),"^",4),";",1),!
  . . W:DEBUG "Zero node: "_^DD(SUBPARENT,SB,0),!
- . . W:DEBUG "Renamed .001 Field: "_$D(^DD(FILE,.001,0)),!
- . . W:DEBUG ".001 node: "_$G(^DD(FILE,.001,0)),!
- . . S KEYS=KEYS_","_QUOTE_$P($P(^DD(SUBPARENT,SB,0),"^",4),";",1)_QUOTE
+ . . W:DEBUG "Renamed .001 Field: "_$D(^DD(SUBPARENT,.001,0)),!
+ . . W:DEBUG ".001 node: "_$G(^DD(SUBPARENT,.001,0)),!
+ . . S KEYS=KEYS_","_QUOTE_$P($P(^DD(PREVPARENT,SB,0),"^",4),";",1)_QUOTE
  . . ; $SELECT here to either get the name of the .001 field or fill in the default IEN
  . . S KEYS=KEYS_$S($D(^DD(FILE,.001,0)):","_$$SQLK^DMSQU($P(^DD(FILE,.001,0),"^",1),30),1:",IEN"_IEN)
  W:DEBUG "KEYS: "_KEYS,!
@@ -149,7 +174,8 @@ CREATEMAP(FILE,DEBUG)
  S ^DBTBL("SYSDEV",1,SQLFILENAME,6)=""
  S ^DBTBL("SYSDEV",1,SQLFILENAME,7)=""
  ;
- ; This is the SEPARATOR|SYSTEM NAME|NETWORK LOCATION||||?|||DATE MODIFIED (+$HOROLOG)|USERNAME|FILE TYPE||?
+ ; Format:
+ ; SEPARATOR|SYSTEM NAME|NETWORK LOCATION||||?|||DATE MODIFIED (+$HOROLOG)|USERNAME|FILE TYPE||?
  ;
  ; NETWORK LOCATION   VALUE
  ; ================   =====
@@ -181,7 +207,8 @@ CREATEMAP(FILE,DEBUG)
  S ^DBTBL("SYSDEV",1,SQLFILENAME,22)="0||||||||0|0"
  S ^DBTBL("SYSDEV",1,SQLFILENAME,99)=""
  ;
- ; This is GLOBAL LOCATION WITH KEYS [^VA(200,IEN]|RECORD TYPE|||LOGGING
+ ; Format:
+ ; GLOBAL LOCATION WITH KEYS [^VA(200,IEN]|RECORD TYPE|||LOGGING
  ;
  ; RECORD TYPE        VALUES
  ; ===========        ======
