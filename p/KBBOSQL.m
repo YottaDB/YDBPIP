@@ -1,12 +1,18 @@
 KBBOSQL ; YDB/CJE - SQL Mapper ;2018-05-31
  ;;1.0;KBBOSQL;**1**;May 31, 2018;Build 1
-MAPALL(DEBUG)
+MAPALL(VERIFY,DEBUG)
  S DEBUG=$G(DEBUG)
+ S VERIFY=$G(VERIFY)
  N FILE
  S FILE=1
  ; Use ^DIC instead of ^DD as ^DIC only contains Root Files
  F  S FILE=$O(^DIC(FILE)) Q:FILE=""  Q:FILE'=+FILE  D
+ . W "Mapping File "_$P(^DIC(FILE,0),"^",1)_" (#"_FILE_")",!
  . D MAPFM(FILE,DEBUG)
+ . W:VERIFY "Verifying File "_$P(^DIC(FILE,0),"^",1)_" (#"_FILE_")",!
+ . D:VERIFY VERIFY^KBBOSQLT(FILE,1)
+ . W "Done Mapping File "_$P(^DIC(FILE,0),"^",1)_" (#"_FILE_")",!
+ . W "--------------------------------------------------------------------------------",!
  QUIT
 MAPFM(FILE,DEBUG)
  S DEBUG=$G(DEBUG)
