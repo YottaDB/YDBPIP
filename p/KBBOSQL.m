@@ -24,7 +24,7 @@ MAPFM(FILE,DEBUG)
  ; This maps Fields in a given FileMan File/SubFile
 MAPFIELDS(FILE,DEBUG)
  S DEBUG=$G(DEBUG)
- N FIELD,QUOTE,TYPE,SQLFIELDNAME,SUBSCRIPT,PIECE,FILENAME,FIELDNAME,%DB
+ N FIELD,QUOTE,TYPE,SQLFIELDNAME,SUBSCRIPT,PIECE,EXTRACT,PIECEEXTRACT,FILENAME,FIELDNAME,%DB
  ; For convience of printing SET command
  S QUOTE=""""
  ; Get a SQL compatible Table Name for the File
@@ -35,27 +35,42 @@ MAPFIELDS(FILE,DEBUG)
  . ; Figure out if it is a Sub-File and map it separately
  . ; Subfiles begin with a number in the Type field
  . S TYPE=$P(^DD(FILE,FIELD,0),"^",2)
- . I ('+TYPE)&(TYPE'["C") D
+ . I ('+TYPE) D
  . . ; This isn't a SQL compatible Field name
  . . S FIELDNAME=$P(^DD(FILE,FIELD,0),"^",1)
  . . ; Get a SQL compatible Column Name for the Field
  . . S SQLFIELDNAME=$$SQLK^DMSQU(FIELDNAME,30)
  . . S SUBSCRIPT=$P($P(^DD(FILE,FIELD,0),"^",4),";",1)
- . . S PIECE=$P($P(^DD(FILE,FIELD,0),"^",4),";",2)
+ . . S PIECEEXTRACT=$P($P(^DD(FILE,FIELD,0),"^",4),";",2)
+ . . I PIECEEXTRACT["E" S EXTRACT=PIECEEXTRACT
+ . . E  S PIECE=PIECEEXTRACT
  . . ;
- . . W:DEBUG "Field Name: "_FIELDNAME,!
+ . . W "Field Name: "_FIELDNAME,!
  . . W:DEBUG "SQL Compatible Field Name: "_SQLFIELDNAME,!
- . . W:DEBUG "FileMan Type: "_TYPE,!
+ . . W "FileMan Type: "_TYPE,!
  . . W:DEBUG "Subscript: "_SUBSCRIPT,!
- . . W:DEBUG "Piece: "_PIECE,!
+ . . W:DEBUG "Piece: "_$G(PIECE),!
+ . . W:DEBUG "Extract: "_$G(EXTRACT),!
  . . I FIELD=.001 W "Info: Skipping NUMBER (#.001) Virtual Field",! Q
  . . ; If we don't have a piece and subscript the field shouldn't be mapped
  . . I ((SUBSCRIPT="")!(SUBSCRIPT=" "))&(PIECE="") D  Q
  . . . W "Field Error: No Piece or Subscript could be found for Field "_FIELDNAME
  . . . W " (#"_FIELD_") in File "_FILENAME_" (#"_FILE_")",!
  . . ;
- . . W:DEBUG "SQL Map Command: "_"S ^DBTBL("_QUOTE_"SYSDEV"_QUOTE_",1,"_QUOTE_FILENAME_QUOTE_",9,"_QUOTE_SQLFIELDNAME_QUOTE_")="_QUOTE_SUBSCRIPT_"|40|||||||T|"_SQLFIELDNAME_"|S||||0||0||||"_PIECE_"|"_SQLFIELDNAME_"|0||64786|vehu||0|||0"_QUOTE,!
- . . S ^DBTBL("SYSDEV",1,FILENAME,9,SQLFIELDNAME)=SUBSCRIPT_"|40|||||||T|"_SQLFIELDNAME_"|S||||0||0||||"_PIECE_"|"_SQLFIELDNAME_"|0||64786|vehu||0|||0"
+ . . ; Disambiguate Data Types
+ . . ; Numeric
+ . . I TYPE["N" D
+ . . . W:DEBUG "SQL Map Command: "_"S ^DBTBL("_QUOTE_"SYSDEV"_QUOTE_",1,"_QUOTE_FILENAME_QUOTE_",9,"_QUOTE_SQLFIELDNAME_QUOTE_")="_QUOTE_SUBSCRIPT_"|40|||||||N|"_SQLFIELDNAME_"|S||||0||0||||"_PIECE_"|"_SQLFIELDNAME_"|0||64786|vehu||0|||0"_QUOTE,!
+ . . . S ^DBTBL("SYSDEV",1,FILENAME,9,SQLFIELDNAME)=SUBSCRIPT_"|40|||||||N|"_SQLFIELDNAME_"|S||||0||0||||"_PIECE_"|"_SQLFIELDNAME_"|0||64786|vehu||0|||0"
+ . . ; Computed
+ . . I TYPE["C" D
+ . . . W "Info: Computed Field: "_$P(^DD(FILE,FIELD,0),"^",1)_" File: (#"_FILE_") Field: (#"_FIELD_")",!
+ . . . W "SQL Map Command: "_"S ^DBTBL("_QUOTE_"SYSDEV"_QUOTE_",1,"_QUOTE_FILENAME_QUOTE_",9,"_QUOTE_SQLFIELDNAME_QUOTE_")="_QUOTE_SUBSCRIPT_"|40|||||||T|"_SQLFIELDNAME_"|S||||0|$$COMPEXP^KBBOSQL("_FILE_","_FIELD_")|0|||||"_SQLFIELDNAME_"|0||64786|vehu||0|||0"_QUOTE,!
+ . . . S ^DBTBL("SYSDEV",1,FILENAME,9,SQLFIELDNAME)=SUBSCRIPT_"|40|||||||T|"_SQLFIELDNAME_"|S||||0|$$COMPEXP^KBBOSQL("_FILE_","_FIELD_")|0|||||"_SQLFIELDNAME_"|0||64786|vehu||0|||0"
+ . . ; Default to Text Data Type
+ . . E  D
+ . . . W:DEBUG "SQL Map Command: "_"S ^DBTBL("_QUOTE_"SYSDEV"_QUOTE_",1,"_QUOTE_FILENAME_QUOTE_",9,"_QUOTE_SQLFIELDNAME_QUOTE_")="_QUOTE_SUBSCRIPT_"|40|||||||T|"_SQLFIELDNAME_"|S||||0||0||||"_PIECE_"|"_SQLFIELDNAME_"|0||64786|vehu||0|||0"_QUOTE,!
+ . . . S ^DBTBL("SYSDEV",1,FILENAME,9,SQLFIELDNAME)=SUBSCRIPT_"|40|||||||T|"_SQLFIELDNAME_"|S||||0||0||||"_PIECE_"|"_SQLFIELDNAME_"|0||64786|vehu||0|||0"
  . E  I +TYPE D
  . . ; Subfiles have to be unravled from the parent file as they aren't standalone files
  . . ; with definitions in ^DIC
@@ -73,10 +88,6 @@ MAPFIELDS(FILE,DEBUG)
  . . ; Recursively call ourselves as SubFiles can now be treated like regular files
  . . ; (and can have SubFiles of their own)
  . . D MAPFIELDS(+TYPE,DEBUG)
- . ; TODO: Computed Fields need to be handled by DATA-QWIK as FileMan stores no data
- . ; in globals for these fields
- . E  I TYPE["C" D
- . . W "Info: Skipping Computed Field: "_$P(^DD(FILE,FIELD,0),"^",1)_" (#"_FIELD_")",! Q
  ;
  ; Rebuild Data Item Control Files
  D BLDINDX^DBSDF9(FILENAME)
@@ -250,3 +261,13 @@ GETPARENTS(FILE,PARENT)
  S PARENT=$S($G(PARENT)'="":PARENT_"^",1:"")_$G(^DD(FILE,0,"UP"))
  S PARENT=$$GETPARENTS(^DD(FILE,0,"UP"),PARENT)
  QUIT PARENT
+ ;
+ ; Convert computed expressions to be an extrinsic function
+COMPEXP(FILE,FIELD)
+ N D0,U,DT,X,Y
+ S D0=vsql(2)
+ S U="^"
+ S DT=$P($$NOW^XLFDT,".",1)
+ ; TODO: don't use $P here, use something else to get the rest of the line
+ X $P(^DD(FILE,FIELD,0),U,5,9999999)
+ QUIT X
