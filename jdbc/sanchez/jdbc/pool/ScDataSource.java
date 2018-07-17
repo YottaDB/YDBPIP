@@ -32,20 +32,6 @@ import sanchez.jdbc.driver.ScDriver;
 
 public class ScDataSource
         implements DataSource, Serializable, Referenceable {
-    @Override
-    public Logger getParentLogger() {
-        return null;
-    }
-
-    @Override
-    public boolean isWrapperFor(Class<?> iface) {
-        return false;
-    }
-
-    @Override
-    public <T> T unwrap(Class<T> iface) {
-        return null;
-    }
 
     /**
      * Empty ScDatasource constructor
@@ -423,6 +409,21 @@ public class ScDataSource
     public String getNetworkProtocol()
             throws SQLException {
         return networkProtocol;
+    }
+
+    @Override
+    public Logger getParentLogger() {
+        return null;
+    }
+
+    @Override
+    public boolean isWrapperFor(Class<?> iface) {
+        return false;
+    }
+
+    @Override
+    public <T> T unwrap(Class<T> iface) {
+        return null;
     }
 
     /**

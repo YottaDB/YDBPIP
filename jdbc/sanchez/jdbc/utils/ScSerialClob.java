@@ -24,16 +24,6 @@ import sanchez.base.ScResourceKeys;
 public class ScSerialClob
         implements Clob, Serializable, Cloneable {
 
-    @Override
-    public Reader getCharacterStream(long pos, long length) {
-        return null;
-    }
-
-    @Override
-    public void free() {
-
-    }
-
     public ScSerialClob(String s) {
         buf = s.toCharArray();
         len = buf.length;
@@ -206,6 +196,16 @@ public class ScSerialClob
             buf = getSubString(0L, (int) len).toCharArray();
             return;
         }
+    }
+
+    @Override
+    public Reader getCharacterStream(long pos, long length) {
+        return null;
+    }
+
+    @Override
+    public void free() {
+
     }
 
     char buf[];

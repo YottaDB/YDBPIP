@@ -12,11 +12,6 @@ import java.util.Map;
 public class ScSerialArray
         implements Array, Serializable, Cloneable {
 
-    @Override
-    public void free() {
-
-    }
-
     public ScSerialArray(Array array, Map map)
             throws SQLException {
         elements = (Object[]) array.getArray(map);
@@ -157,6 +152,11 @@ public class ScSerialArray
     public ResultSet getResultSet(long l, int i, Map map)
             throws SQLException {
         throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void free() {
+
     }
 
     private Object elements[];

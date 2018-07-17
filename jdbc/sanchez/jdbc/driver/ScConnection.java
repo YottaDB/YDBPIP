@@ -76,96 +76,6 @@ public class ScConnection implements Connection {
     protected int resHoldability = ResultSet.CLOSE_CURSORS_AT_COMMIT;
     Locale connLocale;
 
-    @Override
-    public int getNetworkTimeout() {
-        return 0;
-    }
-
-    @Override
-    public void setNetworkTimeout(Executor executor, int milliseconds) {
-
-    }
-
-    @Override
-    public void abort(Executor executor) {
-
-    }
-
-    @Override
-    public String getSchema() {
-        return null;
-    }
-
-    @Override
-    public void setSchema(String schema) {
-
-    }
-
-    @Override
-    public Struct createStruct(String typeName, Object[] attributes) {
-        return null;
-    }
-
-    @Override
-    public Array createArrayOf(String typeName, Object[] elements) {
-        return null;
-    }
-
-    @Override
-    public Properties getClientInfo() {
-        return null;
-    }
-
-    @Override
-    public String getClientInfo(String name) {
-        return null;
-    }
-
-    @Override
-    public void setClientInfo(Properties properties) {
-
-    }
-
-    @Override
-    public void setClientInfo(String name, String value) {
-
-    }
-
-    @Override
-    public boolean isValid(int timeout) {
-        return false;
-    }
-
-    @Override
-    public SQLXML createSQLXML() {
-        return null;
-    }
-
-    @Override
-    public NClob createNClob() {
-        return null;
-    }
-
-    @Override
-    public Blob createBlob() {
-        return null;
-    }
-
-    @Override
-    public Clob createClob() {
-        return null;
-    }
-
-    @Override
-    public boolean isWrapperFor(Class<?> iface) {
-        return false;
-    }
-
-    @Override
-    public <T> T unwrap(Class<T> iface) {
-        return null;
-    }
-
     public ScConnection()
             throws SQLException {
     }
@@ -1061,6 +971,96 @@ public class ScConnection implements Connection {
 
     public Locale getLocale() {
         return connLocale;
+    }
+
+    @Override
+    public int getNetworkTimeout() {
+        return 0;
+    }
+
+    @Override
+    public void setNetworkTimeout(Executor executor, int milliseconds) {
+
+    }
+
+    @Override
+    public void abort(Executor executor) {
+
+    }
+
+    @Override
+    public String getSchema() {
+        return null;
+    }
+
+    @Override
+    public void setSchema(String schema) {
+
+    }
+
+    @Override
+    public Struct createStruct(String typeName, Object[] attributes) {
+        return null;
+    }
+
+    @Override
+    public Array createArrayOf(String typeName, Object[] elements) {
+        return null;
+    }
+
+    @Override
+    public Properties getClientInfo() {
+        return null;
+    }
+
+    @Override
+    public String getClientInfo(String name) {
+        return null;
+    }
+
+    @Override
+    public void setClientInfo(Properties properties) {
+
+    }
+
+    @Override
+    public void setClientInfo(String name, String value) {
+
+    }
+
+    @Override
+    public boolean isValid(int timeout) {
+        return false;
+    }
+
+    @Override
+    public SQLXML createSQLXML() {
+        return null;
+    }
+
+    @Override
+    public NClob createNClob() {
+        return null;
+    }
+
+    @Override
+    public Blob createBlob() {
+        return null;
+    }
+
+    @Override
+    public Clob createClob() {
+        return null;
+    }
+
+    @Override
+    public boolean isWrapperFor(Class<?> iface) {
+        return false;
+    }
+
+    @Override
+    public <T> T unwrap(Class<T> iface) {
+        return null;
     }
 }
 

@@ -15,26 +15,6 @@ import java.util.Vector;
 public class ScSQLOutputImpl
         implements SQLOutput {
 
-    @Override
-    public void writeSQLXML(SQLXML x) {
-
-    }
-
-    @Override
-    public void writeRowId(RowId x) {
-
-    }
-
-    @Override
-    public void writeNClob(NClob x) {
-
-    }
-
-    @Override
-    public void writeNString(String x) {
-
-    }
-
     public ScSQLOutputImpl(Vector vector, Map map1) {
         attribs = vector;
         map = map1;
@@ -181,6 +161,26 @@ public class ScSQLOutputImpl
     public void writeURL(URL url)
             throws SQLException {
         throw new SQLException("Operation not supported");
+    }
+
+    @Override
+    public void writeSQLXML(SQLXML x) {
+
+    }
+
+    @Override
+    public void writeRowId(RowId x) {
+
+    }
+
+    @Override
+    public void writeNClob(NClob x) {
+
+    }
+
+    @Override
+    public void writeNString(String x) {
+
     }
 
     private Vector attribs;

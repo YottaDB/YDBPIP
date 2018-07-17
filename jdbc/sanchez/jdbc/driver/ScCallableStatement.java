@@ -77,186 +77,6 @@ public class ScCallableStatement extends ScPreparedStatement implements Callable
     int fetchRows = 0;
     int prepare = 0;
 
-    @Override
-    public <T> T getObject(int parameterIndex, Class<T> type) {
-        return null;
-    }
-
-    @Override
-    public <T> T getObject(String parameterName, Class<T> type) {
-        return null;
-    }
-
-    @Override
-    public void setNClob(String parameterName, NClob value) {
-
-    }
-
-    @Override
-    public void setNClob(String parameterName, Reader reader) {
-
-    }
-
-    @Override
-    public void setNClob(String parameterName, Reader reader, long length) {
-
-    }
-
-    @Override
-    public void setBlob(String parameterName, Blob x) {
-
-    }
-
-    @Override
-    public void setBlob(String parameterName, InputStream inputStream) {
-
-    }
-
-    @Override
-    public void setBlob(String parameterName, InputStream inputStream, long length) {
-
-    }
-
-    @Override
-    public void setClob(String parameterName, Clob x) {
-
-    }
-
-    @Override
-    public void setClob(String parameterName, Reader reader) {
-
-    }
-
-    @Override
-    public void setClob(String parameterName, Reader reader, long length) {
-
-    }
-
-    @Override
-    public void setNCharacterStream(String parameterName, Reader value) {
-
-    }
-
-    @Override
-    public void setNCharacterStream(String parameterName, Reader value, long length) {
-
-    }
-
-    @Override
-    public void setCharacterStream(String parameterName, Reader reader) {
-
-    }
-
-    @Override
-    public void setCharacterStream(String parameterName, Reader reader, long length) {
-
-    }
-
-    @Override
-    public void setBinaryStream(String parameterName, InputStream x) {
-
-    }
-
-    @Override
-    public void setBinaryStream(String parameterName, InputStream x, long length) {
-
-    }
-
-    @Override
-    public void setAsciiStream(String parameterName, InputStream x) {
-
-    }
-
-    @Override
-    public void setAsciiStream(String parameterName, InputStream x, long length) {
-
-    }
-
-    @Override
-    public Reader getCharacterStream(int parameterIndex) {
-        return null;
-    }
-
-    @Override
-    public Reader getCharacterStream(String parameterName) {
-        return null;
-    }
-
-    @Override
-    public Reader getNCharacterStream(int parameterIndex) {
-        return null;
-    }
-
-    @Override
-    public Reader getNCharacterStream(String parameterName) {
-        return null;
-    }
-
-    @Override
-    public String getNString(int parameterIndex) {
-        return null;
-    }
-
-    @Override
-    public String getNString(String parameterName) {
-        return null;
-    }
-
-    @Override
-    public SQLXML getSQLXML(int parameterIndex) {
-        return null;
-    }
-
-    @Override
-    public SQLXML getSQLXML(String parameterName) {
-        return null;
-    }
-
-    @Override
-    public void setSQLXML(int parameterIndex, SQLXML xmlObject) {
-        super.setSQLXML(parameterIndex, xmlObject);
-    }
-
-    @Override
-    public void setSQLXML(String parameterName, SQLXML xmlObject) {
-
-    }
-
-    @Override
-    public NClob getNClob(int parameterIndex) {
-        return null;
-    }
-
-    @Override
-    public NClob getNClob(String parameterName) {
-        return null;
-    }
-
-    @Override
-    public void setNString(int parameterIndex, String value) {
-        super.setNString(parameterIndex, value);
-    }
-
-    @Override
-    public void setNString(String parameterName, String value) {
-
-    }
-
-    @Override
-    public void setRowId(String parameterName, RowId x) {
-
-    }
-
-    @Override
-    public RowId getRowId(String parameterName) {
-        return null;
-    }
-
-    @Override
-    public RowId getRowId(int parameterIndex) {
-        return null;
-    }
-
     /**
      *Constructs a ResultSet object using a connection and Statement
      *@param ScConnection cConnection
@@ -1744,6 +1564,186 @@ public class ScCallableStatement extends ScPreparedStatement implements Callable
      */
     public int getResultSetHoldability() throws SQLException {
         return this.resHoldabilty;
+    }
+
+    @Override
+    public <T> T getObject(int parameterIndex, Class<T> type) {
+        return null;
+    }
+
+    @Override
+    public <T> T getObject(String parameterName, Class<T> type) {
+        return null;
+    }
+
+    @Override
+    public void setNClob(String parameterName, NClob value) {
+
+    }
+
+    @Override
+    public void setNClob(String parameterName, Reader reader) {
+
+    }
+
+    @Override
+    public void setNClob(String parameterName, Reader reader, long length) {
+
+    }
+
+    @Override
+    public void setBlob(String parameterName, Blob x) {
+
+    }
+
+    @Override
+    public void setBlob(String parameterName, InputStream inputStream) {
+
+    }
+
+    @Override
+    public void setBlob(String parameterName, InputStream inputStream, long length) {
+
+    }
+
+    @Override
+    public void setClob(String parameterName, Clob x) {
+
+    }
+
+    @Override
+    public void setClob(String parameterName, Reader reader) {
+
+    }
+
+    @Override
+    public void setClob(String parameterName, Reader reader, long length) {
+
+    }
+
+    @Override
+    public void setNCharacterStream(String parameterName, Reader value) {
+
+    }
+
+    @Override
+    public void setNCharacterStream(String parameterName, Reader value, long length) {
+
+    }
+
+    @Override
+    public void setCharacterStream(String parameterName, Reader reader) {
+
+    }
+
+    @Override
+    public void setCharacterStream(String parameterName, Reader reader, long length) {
+
+    }
+
+    @Override
+    public void setBinaryStream(String parameterName, InputStream x) {
+
+    }
+
+    @Override
+    public void setBinaryStream(String parameterName, InputStream x, long length) {
+
+    }
+
+    @Override
+    public void setAsciiStream(String parameterName, InputStream x) {
+
+    }
+
+    @Override
+    public void setAsciiStream(String parameterName, InputStream x, long length) {
+
+    }
+
+    @Override
+    public Reader getCharacterStream(int parameterIndex) {
+        return null;
+    }
+
+    @Override
+    public Reader getCharacterStream(String parameterName) {
+        return null;
+    }
+
+    @Override
+    public Reader getNCharacterStream(int parameterIndex) {
+        return null;
+    }
+
+    @Override
+    public Reader getNCharacterStream(String parameterName) {
+        return null;
+    }
+
+    @Override
+    public String getNString(int parameterIndex) {
+        return null;
+    }
+
+    @Override
+    public String getNString(String parameterName) {
+        return null;
+    }
+
+    @Override
+    public SQLXML getSQLXML(int parameterIndex) {
+        return null;
+    }
+
+    @Override
+    public SQLXML getSQLXML(String parameterName) {
+        return null;
+    }
+
+    @Override
+    public void setSQLXML(int parameterIndex, SQLXML xmlObject) {
+        super.setSQLXML(parameterIndex, xmlObject);
+    }
+
+    @Override
+    public void setSQLXML(String parameterName, SQLXML xmlObject) {
+
+    }
+
+    @Override
+    public NClob getNClob(int parameterIndex) {
+        return null;
+    }
+
+    @Override
+    public NClob getNClob(String parameterName) {
+        return null;
+    }
+
+    @Override
+    public void setNString(int parameterIndex, String value) {
+        super.setNString(parameterIndex, value);
+    }
+
+    @Override
+    public void setNString(String parameterName, String value) {
+
+    }
+
+    @Override
+    public void setRowId(String parameterName, RowId x) {
+
+    }
+
+    @Override
+    public RowId getRowId(String parameterName) {
+        return null;
+    }
+
+    @Override
+    public RowId getRowId(int parameterIndex) {
+        return null;
     }
 }
 

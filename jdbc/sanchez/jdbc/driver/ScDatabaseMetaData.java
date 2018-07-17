@@ -2385,7 +2385,6 @@ public class ScDatabaseMetaData implements DatabaseMetaData {
         return true;
     }
 
-
     @Override
     public boolean generatedKeyAlwaysReturned() {
         return false;

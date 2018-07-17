@@ -90,266 +90,6 @@ public class ScJdbcResultSet implements ResultSet {
     int oldCurrentRow;
     int currentColIndex = 0;
 
-    @Override
-    public <T> T getObject(int columnIndex, Class<T> type) {
-        return null;
-    }
-
-    @Override
-    public <T> T getObject(String columnLabel, Class<T> type) {
-        return null;
-    }
-
-    @Override
-    public void updateNClob(int columnIndex, NClob nClob) {
-
-    }
-
-    @Override
-    public void updateNClob(int columnIndex, Reader reader) {
-
-    }
-
-    @Override
-    public void updateNClob(String columnLabel, NClob nClob) {
-
-    }
-
-    @Override
-    public void updateNClob(String columnLabel, Reader reader) {
-
-    }
-
-    @Override
-    public void updateNClob(int columnIndex, Reader reader, long length) {
-
-    }
-
-    @Override
-    public void updateNClob(String columnLabel, Reader reader, long length) {
-
-    }
-
-    @Override
-    public void updateClob(int columnIndex, Reader reader) {
-
-    }
-
-    @Override
-    public void updateClob(String columnLabel, Reader reader) {
-
-    }
-
-    @Override
-    public void updateClob(int columnIndex, Reader reader, long length) {
-
-    }
-
-    @Override
-    public void updateClob(String columnLabel, Reader reader, long length) {
-
-    }
-
-    @Override
-    public void updateBlob(int columnIndex, InputStream inputStream) {
-
-    }
-
-    @Override
-    public void updateBlob(String columnLabel, InputStream inputStream) {
-
-    }
-
-    @Override
-    public void updateBlob(int columnIndex, InputStream inputStream, long length) {
-
-    }
-
-    @Override
-    public void updateBlob(String columnLabel, InputStream inputStream, long length) {
-
-    }
-
-    @Override
-    public void updateCharacterStream(int columnIndex, Reader x) {
-
-    }
-
-    @Override
-    public void updateCharacterStream(String columnLabel, Reader reader) {
-
-    }
-
-    @Override
-    public void updateCharacterStream(int columnIndex, Reader x, long length) {
-
-    }
-
-    @Override
-    public void updateCharacterStream(String columnLabel, Reader reader, long length) {
-
-    }
-
-    @Override
-    public void updateBinaryStream(int columnIndex, InputStream x) {
-
-    }
-
-    @Override
-    public void updateBinaryStream(String columnLabel, InputStream x) {
-
-    }
-
-    @Override
-    public void updateBinaryStream(int columnIndex, InputStream x, long length) {
-
-    }
-
-    @Override
-    public void updateBinaryStream(String columnLabel, InputStream x, long length) {
-
-    }
-
-    @Override
-    public void updateAsciiStream(int columnIndex, InputStream x) {
-
-    }
-
-    @Override
-    public void updateAsciiStream(String columnLabel, InputStream x) {
-
-    }
-
-    @Override
-    public void updateAsciiStream(int columnIndex, InputStream x, long length) {
-
-    }
-
-    @Override
-    public void updateAsciiStream(String columnLabel, InputStream x, long length) {
-
-    }
-
-    @Override
-    public void updateNCharacterStream(int columnIndex, Reader x) {
-
-    }
-
-    @Override
-    public void updateNCharacterStream(String columnLabel, Reader reader) {
-
-    }
-
-    @Override
-    public void updateNCharacterStream(int columnIndex, Reader x, long length) {
-
-    }
-
-    @Override
-    public void updateNCharacterStream(String columnLabel, Reader reader, long length) {
-
-    }
-
-    @Override
-    public Reader getNCharacterStream(int columnIndex) {
-        return null;
-    }
-
-    @Override
-    public Reader getNCharacterStream(String columnLabel) {
-        return null;
-    }
-
-    @Override
-    public String getNString(int columnIndex) {
-        return null;
-    }
-
-    @Override
-    public String getNString(String columnLabel) {
-        return null;
-    }
-
-    @Override
-    public void updateSQLXML(int columnIndex, SQLXML xmlObject) {
-
-    }
-
-    @Override
-    public void updateSQLXML(String columnLabel, SQLXML xmlObject) {
-
-    }
-
-    @Override
-    public SQLXML getSQLXML(int columnIndex) {
-        return null;
-    }
-
-    @Override
-    public SQLXML getSQLXML(String columnLabel) {
-        return null;
-    }
-
-    @Override
-    public NClob getNClob(int columnIndex) {
-        return null;
-    }
-
-    @Override
-    public NClob getNClob(String columnLabel) {
-        return null;
-    }
-
-    @Override
-    public void updateNString(int columnIndex, String nString) {
-
-    }
-
-    @Override
-    public void updateNString(String columnLabel, String nString) {
-
-    }
-
-    @Override
-    public boolean isClosed() {
-        return closed;
-    }
-
-    @Override
-    public int getHoldability() {
-        return 0;
-    }
-
-    @Override
-    public void updateRowId(int columnIndex, RowId x) {
-
-    }
-
-    @Override
-    public void updateRowId(String columnLabel, RowId x) {
-
-    }
-
-    @Override
-    public RowId getRowId(int columnIndex) {
-        return null;
-    }
-
-    @Override
-    public RowId getRowId(String columnLabel) {
-        return null;
-    }
-
-    @Override
-    public boolean isWrapperFor(Class<?> iface) {
-        return false;
-    }
-
-    @Override
-    public <T> T unwrap(Class<T> iface) {
-        return null;
-    }
-
     /**
      * Constructs a ResultSet object using a connection and Statement
      * @param c ScConnection object
@@ -4276,6 +4016,266 @@ public class ScJdbcResultSet implements ResultSet {
 
     public ScConnection getScConnection() {
         return connection;
+    }
+
+    @Override
+    public <T> T getObject(int columnIndex, Class<T> type) {
+        return null;
+    }
+
+    @Override
+    public <T> T getObject(String columnLabel, Class<T> type) {
+        return null;
+    }
+
+    @Override
+    public void updateNClob(int columnIndex, NClob nClob) {
+
+    }
+
+    @Override
+    public void updateNClob(int columnIndex, Reader reader) {
+
+    }
+
+    @Override
+    public void updateNClob(String columnLabel, NClob nClob) {
+
+    }
+
+    @Override
+    public void updateNClob(String columnLabel, Reader reader) {
+
+    }
+
+    @Override
+    public void updateNClob(int columnIndex, Reader reader, long length) {
+
+    }
+
+    @Override
+    public void updateNClob(String columnLabel, Reader reader, long length) {
+
+    }
+
+    @Override
+    public void updateClob(int columnIndex, Reader reader) {
+
+    }
+
+    @Override
+    public void updateClob(String columnLabel, Reader reader) {
+
+    }
+
+    @Override
+    public void updateClob(int columnIndex, Reader reader, long length) {
+
+    }
+
+    @Override
+    public void updateClob(String columnLabel, Reader reader, long length) {
+
+    }
+
+    @Override
+    public void updateBlob(int columnIndex, InputStream inputStream) {
+
+    }
+
+    @Override
+    public void updateBlob(String columnLabel, InputStream inputStream) {
+
+    }
+
+    @Override
+    public void updateBlob(int columnIndex, InputStream inputStream, long length) {
+
+    }
+
+    @Override
+    public void updateBlob(String columnLabel, InputStream inputStream, long length) {
+
+    }
+
+    @Override
+    public void updateCharacterStream(int columnIndex, Reader x) {
+
+    }
+
+    @Override
+    public void updateCharacterStream(String columnLabel, Reader reader) {
+
+    }
+
+    @Override
+    public void updateCharacterStream(int columnIndex, Reader x, long length) {
+
+    }
+
+    @Override
+    public void updateCharacterStream(String columnLabel, Reader reader, long length) {
+
+    }
+
+    @Override
+    public void updateBinaryStream(int columnIndex, InputStream x) {
+
+    }
+
+    @Override
+    public void updateBinaryStream(String columnLabel, InputStream x) {
+
+    }
+
+    @Override
+    public void updateBinaryStream(int columnIndex, InputStream x, long length) {
+
+    }
+
+    @Override
+    public void updateBinaryStream(String columnLabel, InputStream x, long length) {
+
+    }
+
+    @Override
+    public void updateAsciiStream(int columnIndex, InputStream x) {
+
+    }
+
+    @Override
+    public void updateAsciiStream(String columnLabel, InputStream x) {
+
+    }
+
+    @Override
+    public void updateAsciiStream(int columnIndex, InputStream x, long length) {
+
+    }
+
+    @Override
+    public void updateAsciiStream(String columnLabel, InputStream x, long length) {
+
+    }
+
+    @Override
+    public void updateNCharacterStream(int columnIndex, Reader x) {
+
+    }
+
+    @Override
+    public void updateNCharacterStream(String columnLabel, Reader reader) {
+
+    }
+
+    @Override
+    public void updateNCharacterStream(int columnIndex, Reader x, long length) {
+
+    }
+
+    @Override
+    public void updateNCharacterStream(String columnLabel, Reader reader, long length) {
+
+    }
+
+    @Override
+    public Reader getNCharacterStream(int columnIndex) {
+        return null;
+    }
+
+    @Override
+    public Reader getNCharacterStream(String columnLabel) {
+        return null;
+    }
+
+    @Override
+    public String getNString(int columnIndex) {
+        return null;
+    }
+
+    @Override
+    public String getNString(String columnLabel) {
+        return null;
+    }
+
+    @Override
+    public void updateSQLXML(int columnIndex, SQLXML xmlObject) {
+
+    }
+
+    @Override
+    public void updateSQLXML(String columnLabel, SQLXML xmlObject) {
+
+    }
+
+    @Override
+    public SQLXML getSQLXML(int columnIndex) {
+        return null;
+    }
+
+    @Override
+    public SQLXML getSQLXML(String columnLabel) {
+        return null;
+    }
+
+    @Override
+    public NClob getNClob(int columnIndex) {
+        return null;
+    }
+
+    @Override
+    public NClob getNClob(String columnLabel) {
+        return null;
+    }
+
+    @Override
+    public void updateNString(int columnIndex, String nString) {
+
+    }
+
+    @Override
+    public void updateNString(String columnLabel, String nString) {
+
+    }
+
+    @Override
+    public boolean isClosed() {
+        return closed;
+    }
+
+    @Override
+    public int getHoldability() {
+        return 0;
+    }
+
+    @Override
+    public void updateRowId(int columnIndex, RowId x) {
+
+    }
+
+    @Override
+    public void updateRowId(String columnLabel, RowId x) {
+
+    }
+
+    @Override
+    public RowId getRowId(int columnIndex) {
+        return null;
+    }
+
+    @Override
+    public RowId getRowId(String columnLabel) {
+        return null;
+    }
+
+    @Override
+    public boolean isWrapperFor(Class<?> iface) {
+        return false;
+    }
+
+    @Override
+    public <T> T unwrap(Class<T> iface) {
+        return null;
     }
 }
 

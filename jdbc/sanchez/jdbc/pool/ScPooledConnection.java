@@ -34,18 +34,6 @@ public class ScPooledConnection
     private SQLException sqlException;
     private boolean autoCommitFlag;
 
-
-    @Override
-    public void removeStatementEventListener(StatementEventListener listener) {
-
-    }
-
-    @Override
-    public void addStatementEventListener(StatementEventListener listener) {
-
-    }
-
-
     /**
      * Constructs a ScPooledConnection Object using database url.
      * @param url
@@ -188,6 +176,16 @@ public class ScPooledConnection
             sqlException = new SQLException(ScBundle.getMessage(ScResourceKeys.Listener_Hashtable_Null));
         else
             eventListeners.remove(listener);
+    }
+
+    @Override
+    public void removeStatementEventListener(StatementEventListener listener) {
+
+    }
+
+    @Override
+    public void addStatementEventListener(StatementEventListener listener) {
+
     }
 } 
 

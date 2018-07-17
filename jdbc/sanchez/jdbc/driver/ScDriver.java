@@ -38,11 +38,6 @@ public class ScDriver implements Driver {
     public static final String PROFILE_DRIVER_LOCALE = "profile.driver.locale";
     private static Locale driverLocale = null;
 
-    @Override
-    public Logger getParentLogger() {
-        return null;
-    }
-
     /**
      * Class Constructor
      * @exception SQLException If any database access error occurrs
@@ -587,6 +582,11 @@ public class ScDriver implements Driver {
             }
         }
         return driverLocale;
+    }
+
+    @Override
+    public Logger getParentLogger() {
+        return null;
     }
 }
 

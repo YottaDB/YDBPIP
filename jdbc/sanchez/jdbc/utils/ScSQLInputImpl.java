@@ -10,26 +10,6 @@ import java.util.Map;
 public class ScSQLInputImpl
         implements SQLInput {
 
-    @Override
-    public RowId readRowId() {
-        return null;
-    }
-
-    @Override
-    public SQLXML readSQLXML() {
-        return null;
-    }
-
-    @Override
-    public String readNString() {
-        return null;
-    }
-
-    @Override
-    public NClob readNClob() {
-        return null;
-    }
-
     public ScSQLInputImpl(Object aobj[], Map map1) {
         attrib = aobj;
         idx = -1;
@@ -321,6 +301,26 @@ public class ScSQLInputImpl
     public URL readURL()
             throws SQLException {
         throw new SQLException("Operation not supported");
+    }
+
+    @Override
+    public RowId readRowId() {
+        return null;
+    }
+
+    @Override
+    public SQLXML readSQLXML() {
+        return null;
+    }
+
+    @Override
+    public String readNString() {
+        return null;
+    }
+
+    @Override
+    public NClob readNClob() {
+        return null;
     }
 
     private boolean lastValueWasNull;

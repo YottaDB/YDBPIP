@@ -22,16 +22,6 @@ public class ScResultSetMetaData implements ResultSetMetaData {
     ScConnection connection;
     ScStatement statement;
 
-    @Override
-    public boolean isWrapperFor(Class<?> iface) {
-        return false;
-    }
-
-    @Override
-    public <T> T unwrap(Class<T> iface) {
-        return null;
-    }
-
     public ScResultSetMetaData(ScDBStatement dBStatement) {
 
     }
@@ -512,6 +502,16 @@ public class ScResultSetMetaData implements ResultSetMetaData {
             default:
                 return "java.lang.String";
         }
+    }
+
+    @Override
+    public boolean isWrapperFor(Class<?> iface) {
+        return false;
+    }
+
+    @Override
+    public <T> T unwrap(Class<T> iface) {
+        return null;
     }
 
     private int getValidColumnIndex(int column)

@@ -71,96 +71,6 @@ public class ScPreparedStatement extends ScStatement implements PreparedStatemen
     protected String orig_sSql;
     static Hashtable storeprocedure = new Hashtable();
 
-    @Override
-    public void setNClob(int parameterIndex, NClob value) {
-
-    }
-
-    @Override
-    public void setNClob(int parameterIndex, Reader reader) {
-
-    }
-
-    @Override
-    public void setNClob(int parameterIndex, Reader reader, long length) {
-
-    }
-
-    @Override
-    public void setBlob(int parameterIndex, InputStream inputStream) {
-
-    }
-
-    @Override
-    public void setBlob(int parameterIndex, InputStream inputStream, long length) {
-
-    }
-
-    @Override
-    public void setClob(int parameterIndex, Reader reader) {
-
-    }
-
-    @Override
-    public void setClob(int parameterIndex, Reader reader, long length) {
-
-    }
-
-    @Override
-    public void setNCharacterStream(int parameterIndex, Reader value) {
-
-    }
-
-    @Override
-    public void setNCharacterStream(int parameterIndex, Reader value, long length) {
-
-    }
-
-    @Override
-    public void setCharacterStream(int parameterIndex, Reader reader) {
-
-    }
-
-    @Override
-    public void setCharacterStream(int parameterIndex, Reader reader, long length) {
-
-    }
-
-    @Override
-    public void setBinaryStream(int parameterIndex, InputStream x) {
-
-    }
-
-    @Override
-    public void setBinaryStream(int parameterIndex, InputStream x, long length) {
-
-    }
-
-    @Override
-    public void setAsciiStream(int parameterIndex, InputStream x) {
-
-    }
-
-    @Override
-    public void setAsciiStream(int parameterIndex, InputStream x, long length) {
-
-    }
-
-    @Override
-    public void setSQLXML(int parameterIndex, SQLXML xmlObject) {
-
-    }
-
-    @Override
-    public void setNString(int parameterIndex, String value) {
-
-    }
-
-    @Override
-    public void setRowId(int parameterIndex, RowId x) {
-
-    }
-
     /**
      * Constructs ScPreparedStatement Object using ScConnection object and sSqlStatement
      * @param cConnection
@@ -1613,6 +1523,96 @@ public class ScPreparedStatement extends ScStatement implements PreparedStatemen
      */
     public int getResultSetHoldability() throws SQLException {
         return this.resHoldabilty;
+
+    }
+
+    @Override
+    public void setNClob(int parameterIndex, NClob value) {
+
+    }
+
+    @Override
+    public void setNClob(int parameterIndex, Reader reader) {
+
+    }
+
+    @Override
+    public void setNClob(int parameterIndex, Reader reader, long length) {
+
+    }
+
+    @Override
+    public void setBlob(int parameterIndex, InputStream inputStream) {
+
+    }
+
+    @Override
+    public void setBlob(int parameterIndex, InputStream inputStream, long length) {
+
+    }
+
+    @Override
+    public void setClob(int parameterIndex, Reader reader) {
+
+    }
+
+    @Override
+    public void setClob(int parameterIndex, Reader reader, long length) {
+
+    }
+
+    @Override
+    public void setNCharacterStream(int parameterIndex, Reader value) {
+
+    }
+
+    @Override
+    public void setNCharacterStream(int parameterIndex, Reader value, long length) {
+
+    }
+
+    @Override
+    public void setCharacterStream(int parameterIndex, Reader reader) {
+
+    }
+
+    @Override
+    public void setCharacterStream(int parameterIndex, Reader reader, long length) {
+
+    }
+
+    @Override
+    public void setBinaryStream(int parameterIndex, InputStream x) {
+
+    }
+
+    @Override
+    public void setBinaryStream(int parameterIndex, InputStream x, long length) {
+
+    }
+
+    @Override
+    public void setAsciiStream(int parameterIndex, InputStream x) {
+
+    }
+
+    @Override
+    public void setAsciiStream(int parameterIndex, InputStream x, long length) {
+
+    }
+
+    @Override
+    public void setSQLXML(int parameterIndex, SQLXML xmlObject) {
+
+    }
+
+    @Override
+    public void setNString(int parameterIndex, String value) {
+
+    }
+
+    @Override
+    public void setRowId(int parameterIndex, RowId x) {
 
     }
 

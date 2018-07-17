@@ -24,16 +24,6 @@ import sanchez.base.ScResourceKeys;
 public class ScSerialBlob
         implements Blob, Serializable, Cloneable {
 
-    @Override
-    public InputStream getBinaryStream(long pos, long length) {
-        return null;
-    }
-
-    @Override
-    public void free() {
-
-    }
-
     /**
      * Constructs a SerialBlob object that is a serialized version of the given Blob object.
      *
@@ -174,6 +164,16 @@ public class ScSerialBlob
             buf = getBytes(0L, (int) len);
             return;
         }
+    }
+
+    @Override
+    public InputStream getBinaryStream(long pos, long length) {
+        return null;
+    }
+
+    @Override
+    public void free() {
+
     }
 
     byte buf[];
