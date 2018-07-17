@@ -13,188 +13,173 @@ import java.util.Vector;
 //            SerialArray
 
 public class ScSQLOutputImpl
-    implements SQLOutput
-{
+        implements SQLOutput {
 
-    public ScSQLOutputImpl(Vector vector, Map map1)
-    {
+    @Override
+    public void writeSQLXML(SQLXML x) {
+
+    }
+
+    @Override
+    public void writeRowId(RowId x) {
+
+    }
+
+    @Override
+    public void writeNClob(NClob x) {
+
+    }
+
+    @Override
+    public void writeNString(String x) {
+
+    }
+
+    public ScSQLOutputImpl(Vector vector, Map map1) {
         attribs = vector;
         map = map1;
     }
 
     public void writeString(String s)
-        throws SQLException
-    {
+            throws SQLException {
         attribs.add(s);
     }
 
     public void writeBoolean(boolean flag)
-        throws SQLException
-    {
+            throws SQLException {
         attribs.add(new Boolean(flag));
     }
 
     public void writeByte(byte byte0)
-        throws SQLException
-    {
+            throws SQLException {
         attribs.add(new Byte(byte0));
     }
 
     public void writeShort(short word0)
-        throws SQLException
-    {
+            throws SQLException {
         attribs.add(new Short(word0));
     }
 
     public void writeInt(int i)
-        throws SQLException
-    {
+            throws SQLException {
         attribs.add(new Integer(i));
     }
 
     public void writeLong(long l)
-        throws SQLException
-    {
+            throws SQLException {
         attribs.add(new Long(l));
     }
 
     public void writeFloat(float f)
-        throws SQLException
-    {
+            throws SQLException {
         attribs.add(new Float(f));
     }
 
     public void writeDouble(double d)
-        throws SQLException
-    {
+            throws SQLException {
         attribs.add(new Double(d));
     }
 
     public void writeBigDecimal(BigDecimal bigdecimal)
-        throws SQLException
-    {
+            throws SQLException {
         attribs.add(bigdecimal);
     }
 
     public void writeBytes(byte abyte0[])
-        throws SQLException
-    {
+            throws SQLException {
         attribs.add(abyte0);
     }
 
     public void writeDate(Date date)
-        throws SQLException
-    {
+            throws SQLException {
         attribs.add(date);
     }
 
     public void writeTime(Time time)
-        throws SQLException
-    {
+            throws SQLException {
         attribs.add(time);
     }
 
     public void writeTimestamp(Timestamp timestamp)
-        throws SQLException
-    {
+            throws SQLException {
         attribs.add(timestamp);
     }
 
     public void writeCharacterStream(Reader reader)
-        throws SQLException
-    {
+            throws SQLException {
     }
 
     public void writeAsciiStream(InputStream inputstream)
-        throws SQLException
-    {
+            throws SQLException {
     }
 
     public void writeBinaryStream(InputStream inputstream)
-        throws SQLException
-    {
+            throws SQLException {
     }
 
     public void writeObject(SQLData sqldata)
-        throws SQLException
-    {
-        if(sqldata == null)
-        {
+            throws SQLException {
+        if (sqldata == null) {
             attribs.add(sqldata);
             return;
-        } else
-        {
+        } else {
             attribs.add(new ScSerialStruct(sqldata, map));
             return;
         }
     }
 
     public void writeRef(Ref ref)
-        throws SQLException
-    {
-        if(ref == null)
-        {
+            throws SQLException {
+        if (ref == null) {
             attribs.add(ref);
             return;
-        } else
-        {
+        } else {
             attribs.add(new ScSerialRef(ref));
             return;
         }
     }
 
     public void writeBlob(Blob blob)
-        throws SQLException
-    {
-        if(blob == null)
-        {
+            throws SQLException {
+        if (blob == null) {
             attribs.add(blob);
             return;
-        } else
-        {
+        } else {
             attribs.add(new ScSerialBlob(blob));
             return;
         }
     }
 
     public void writeClob(Clob clob)
-        throws SQLException
-    {
-        if(clob == null)
-        {
+            throws SQLException {
+        if (clob == null) {
             attribs.add(clob);
             return;
-        } else
-        {
+        } else {
             attribs.add(new ScSerialClob(clob));
             return;
         }
     }
 
     public void writeStruct(Struct struct)
-        throws SQLException
-    {
+            throws SQLException {
         ScSerialStruct serialstruct = new ScSerialStruct(struct, map);
         attribs.add(serialstruct);
     }
 
     public void writeArray(Array array)
-        throws SQLException
-    {
-        if(array == null)
-        {
+            throws SQLException {
+        if (array == null) {
             attribs.add(array);
             return;
-        } else
-        {
+        } else {
             attribs.add(new ScSerialArray(array, map));
             return;
         }
     }
 
     public void writeURL(URL url)
-        throws SQLException
-    {
+            throws SQLException {
         throw new SQLException("Operation not supported");
     }
 

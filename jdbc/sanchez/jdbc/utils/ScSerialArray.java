@@ -10,161 +10,152 @@ import java.util.Map;
 //            SerialJavaObject, SerialException
 
 public class ScSerialArray
-    implements Array, Serializable, Cloneable
-{
+        implements Array, Serializable, Cloneable {
+
+    @Override
+    public void free() {
+
+    }
+
     public ScSerialArray(Array array, Map map)
-        throws SQLException
-    {
-        elements = (Object[])array.getArray(map);
+            throws SQLException {
+        elements = (Object[]) array.getArray(map);
         baseType = getBaseType();
         baseTypeName = getBaseTypeName();
         len = elements.length;
-        switch(baseType)
-        {
-        default:
-            break;
+        switch (baseType) {
+            default:
+                break;
 
-        case 2002: 
-            for(int i = 0; i < len; i++)
-                elements[i] = new ScSerialStruct((Struct)elements[i], map);
+            case 2002:
+                for (int i = 0; i < len; i++)
+                    elements[i] = new ScSerialStruct((Struct) elements[i], map);
 
-            break;
+                break;
 
-        case 2003: 
-            for(int j = 0; j < len; j++)
-                elements[j] = new ScSerialArray((Array)elements[j], map);
+            case 2003:
+                for (int j = 0; j < len; j++)
+                    elements[j] = new ScSerialArray((Array) elements[j], map);
 
-            break;
+                break;
 
-        case 2004: 
-            for(int k = 0; k < len; k++)
-                elements[k] = new ScSerialBlob((Blob)elements[k]);
+            case 2004:
+                for (int k = 0; k < len; k++)
+                    elements[k] = new ScSerialBlob((Blob) elements[k]);
 
-            break;
+                break;
 
-        case 2005: 
-            for(int l = 0; l < len; l++)
-                elements[l] = new ScSerialClob((Clob)elements[l]);
+            case 2005:
+                for (int l = 0; l < len; l++)
+                    elements[l] = new ScSerialClob((Clob) elements[l]);
 
-            break;
+                break;
 
-        case 70: // 'F'
-            for(int i1 = 0; i1 < len; i1++)
-                elements[i1] = new ScSerialDatalink((URL)elements[i1]);
+            case 70: // 'F'
+                for (int i1 = 0; i1 < len; i1++)
+                    elements[i1] = new ScSerialDatalink((URL) elements[i1]);
 
-            // fall through
+                // fall through
 
-        case 2000: 
-            for(int j1 = 0; j1 < len; j1++)
-                elements[j1] = new ScSerialJavaObject((URL)elements[j1]);
+            case 2000:
+                for (int j1 = 0; j1 < len; j1++)
+                    elements[j1] = new ScSerialJavaObject((URL) elements[j1]);
 
-            break;
+                break;
         }
     }
 
     public ScSerialArray(Array array)
-        throws SQLException
-    {
-        elements = (Object[])array.getArray();
+            throws SQLException {
+        elements = (Object[]) array.getArray();
         baseType = getBaseType();
         baseTypeName = getBaseTypeName();
         len = elements.length;
-        switch(baseType)
-        {
-        default:
-            break;
+        switch (baseType) {
+            default:
+                break;
 
-        case 2004: 
-            for(int i = 0; i < len; i++)
-                elements[i] = new ScSerialBlob((Blob)elements[i]);
+            case 2004:
+                for (int i = 0; i < len; i++)
+                    elements[i] = new ScSerialBlob((Blob) elements[i]);
 
-            break;
+                break;
 
-        case 2005: 
-            for(int j = 0; j < len; j++)
-                elements[j] = new ScSerialClob((Clob)elements[j]);
+            case 2005:
+                for (int j = 0; j < len; j++)
+                    elements[j] = new ScSerialClob((Clob) elements[j]);
 
-            break;
+                break;
 
-        case 70: // 'F'
-            for(int k = 0; k < len; k++)
-                elements[k] = new ScSerialDatalink((URL)elements[k]);
+            case 70: // 'F'
+                for (int k = 0; k < len; k++)
+                    elements[k] = new ScSerialDatalink((URL) elements[k]);
 
-            // fall through
+                // fall through
 
-        case 2000: 
-            for(int l = 0; l < len; l++)
-                elements[l] = new ScSerialJavaObject((URL)elements[l]);
+            case 2000:
+                for (int l = 0; l < len; l++)
+                    elements[l] = new ScSerialJavaObject((URL) elements[l]);
 
-            break;
+                break;
         }
     }
 
     public Object getArray()
-        throws SQLException
-    {
+            throws SQLException {
         Object aobj[] = new Object[len];
         System.arraycopy(((Object) (elements)), 0, ((Object) (aobj)), 0, len);
         return ((Object) (aobj));
     }
 
     public Object getArray(Map map)
-        throws SQLException
-    {
+            throws SQLException {
         Object aobj[] = new Object[len];
         System.arraycopy(((Object) (elements)), 0, ((Object) (aobj)), 0, len);
         return ((Object) (aobj));
     }
 
     public Object getArray(long l, int i)
-        throws SQLException
-    {
+            throws SQLException {
         Object aobj[] = new Object[i];
-        System.arraycopy(((Object) (elements)), (int)l, ((Object) (aobj)), 0, i);
+        System.arraycopy(((Object) (elements)), (int) l, ((Object) (aobj)), 0, i);
         return ((Object) (aobj));
     }
 
     public Object getArray(long l, int i, Map map)
-        throws SQLException
-    {
+            throws SQLException {
         Object aobj[] = new Object[i];
-        System.arraycopy(((Object) (elements)), (int)l, ((Object) (aobj)), 0, i);
+        System.arraycopy(((Object) (elements)), (int) l, ((Object) (aobj)), 0, i);
         return ((Object) (aobj));
     }
 
     public int getBaseType()
-        throws SQLException
-    {
+            throws SQLException {
         return baseType;
     }
 
     public String getBaseTypeName()
-        throws SQLException
-    {
+            throws SQLException {
         return baseTypeName;
     }
 
     public ResultSet getResultSet(long l, int i)
-        throws SQLException
-    {
+            throws SQLException {
         throw new UnsupportedOperationException();
     }
 
     public ResultSet getResultSet(Map map)
-        throws SQLException
-    {
+            throws SQLException {
         throw new UnsupportedOperationException();
     }
 
     public ResultSet getResultSet()
-        throws SQLException
-    {
+            throws SQLException {
         throw new UnsupportedOperationException();
     }
 
     public ResultSet getResultSet(long l, int i, Map map)
-        throws SQLException
-    {
+            throws SQLException {
         throw new UnsupportedOperationException();
     }
 

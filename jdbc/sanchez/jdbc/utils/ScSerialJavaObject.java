@@ -10,48 +10,41 @@ import sanchez.jdbc.dbaccess.ScDBError;
 //            SerialException
 
 public class ScSerialJavaObject
-    implements Serializable, Cloneable
-{
+        implements Serializable, Cloneable {
 
     public ScSerialJavaObject(Object obj1)
-        throws SQLException
-    {
+            throws SQLException {
         Class class1 = obj1.getClass();
         boolean flag = false;
         Class aclass[] = class1.getInterfaces();
-        for(int i = 0; i < aclass.length; i++)
-        {
+        for (int i = 0; i < aclass.length; i++) {
             String s = aclass[i].getName();
-            if(s == "java.io.Serializable")
+            if (s == "java.io.Serializable")
                 flag = true;
         }
 
         boolean flag1 = false;
         fields = class1.getFields();
-        for(int j = 0; j < fields.length; j++)
-            if(fields[j].getModifiers() == 8)
+        for (int j = 0; j < fields.length; j++)
+            if (fields[j].getModifiers() == 8)
                 flag1 = true;
 
-        if(!flag || flag1)
-        {
+        if (!flag || flag1) {
             throw new ScSerialException("Located static fields in object instance. Cannot serialize");
-        } else
-        {
+        } else {
             obj = obj1;
             return;
         }
     }
 
     public Object getObject()
-        throws SQLException
-    {
+            throws SQLException {
         return obj;
     }
 
     public Field[] getFields()
-        throws SQLException
-    {
-        if(fields != null)
+            throws SQLException {
+        if (fields != null)
             return fields;
         else
             throw new ScSerialException("SerialJavaObject does not contain a serialized object instance");

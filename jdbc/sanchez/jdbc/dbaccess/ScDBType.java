@@ -1,7 +1,6 @@
 package sanchez.jdbc.dbaccess;
 
-public class ScDBType
-{
+public class ScDBType {
     public int type;
     public int max_length;
     public boolean is_stream;
@@ -21,70 +20,67 @@ public class ScDBType
     public static final int CFILE = 115;
 
 
-    public void setFields(int type)
-    {
+    public void setFields(int type) {
         is_stream = false;
-        switch (type)
-        {
-        case 96:
-            max_length = 255;
-            return;
+        switch (type) {
+            case 96:
+                max_length = 255;
+                return;
 
-        case 1:
-            max_length = 2000;
-            return;
+            case 1:
+                max_length = 2000;
+                return;
 
-        case 8:
-            max_length = 2147483647;
-            is_stream = true;
-            return;
+            case 8:
+                max_length = 2147483647;
+                is_stream = true;
+                return;
 
-        case 2:
-        case 6:
-            max_length = 22;
-            return;
+            case 2:
+            case 6:
+                max_length = 22;
+                return;
 
-        case 23:
-            max_length = 255;
-            return;
+            case 23:
+                max_length = 255;
+                return;
 
-        case 24:
-            max_length = 2147483647;
-            is_stream = true;
-            return;
+            case 24:
+                max_length = 2147483647;
+                is_stream = true;
+                return;
 
-        case 11:
-            max_length = 128;
-            return;
-
-
-        case 102:
-            max_length = 0;
-            return;
-
-        case 12:
-            max_length = 7;
-            return;
-
-        case 112:
-        case 113:
-            max_length = 86;
-            return;
+            case 11:
+                max_length = 128;
+                return;
 
 
-        case 114:
-        case 115:
-            max_length = 530;
-            break;
+            case 102:
+                max_length = 0;
+                return;
 
-        default:
+            case 12:
+                max_length = 7;
+                return;
+
+            case 112:
+            case 113:
+                max_length = 86;
+                return;
+
+
+            case 114:
+            case 115:
+                max_length = 530;
+                break;
+
+            default:
         }
         return;
     }
 
 
-    public ScDBType(int type, int max_size, boolean is_stream)
-    {
+    public ScDBType(int type, int max_size, boolean is_stream) {
         this.type = type;
         setFields(type);
         if (!is_stream)
@@ -95,19 +91,16 @@ public class ScDBType
     }
 
 
-    public ScDBType(int type)
-    {
+    public ScDBType(int type) {
         this.type = type;
         setFields(type);
     }
 
 
-    public ScDBType(int type, int max_size)
-    {
+    public ScDBType(int type, int max_size) {
         this.type = type;
         setFields(type);
-        if (type == 102)
-        {
+        if (type == 102) {
             max_length = max_size;
             return;
         }

@@ -4,8 +4,7 @@ import java.sql.*;
 import java.io.InputStream;
 import java.math.BigDecimal;
 
-public interface ScDBConversion
-{
+public interface ScDBConversion {
     public static final short ASCII_CHARSET = 1;
     public static final short ISO_LATIN_1_CHARSET = 31;
     public static final short UNICODE_1_CHARSET = 870;
@@ -14,41 +13,41 @@ public interface ScDBConversion
     public abstract short getCharacterSet();
 
     public abstract byte[] StringToCharBytes(String string)
-        throws SQLException;
+            throws SQLException;
 
     public abstract String CharBytesToString(byte ab[], int i)
-        throws SQLException;
+            throws SQLException;
 
     public abstract byte[] StringToWorkbench(String string);
 
     public abstract int StringToWorkbench(String string, byte ab[], int i);
 
     public abstract byte[] StringToNetworkRep(String string)
-        throws SQLException;
+            throws SQLException;
 
     public abstract byte[] BigDecimalToNumberBytes(BigDecimal bigDecimal)
-        throws SQLException;
+            throws SQLException;
 
     public abstract BigDecimal NumberBytesToBigDecimal(byte ab[], int i)
-        throws SQLException;
+            throws SQLException;
 
     public abstract byte NumberBytesToByte(byte ab[], int i)
-        throws SQLException;
+            throws SQLException;
 
     public abstract byte[] ByteToNumberBytes(byte b);
 
     public abstract short NumberBytesToShort(byte ab[], int i)
-        throws SQLException;
+            throws SQLException;
 
     public abstract byte[] ShortToNumberBytes(short s);
 
     public abstract int NumberBytesToInt(byte ab[], int i)
-        throws SQLException;
+            throws SQLException;
 
     public abstract byte[] IntToNumberBytes(int i);
 
     public abstract long NumberBytesToLong(byte ab[], int i)
-        throws SQLException;
+            throws SQLException;
 
     public abstract byte[] LongToNumberBytes(long i);
 
@@ -59,12 +58,12 @@ public interface ScDBConversion
     public abstract double NumberBytesToDouble(byte ab[], int i);
 
     public abstract byte[] DoubleToNumberBytes(double d)
-        throws SQLException;
+            throws SQLException;
 
     public abstract byte[] BooleanToNumberBytes(boolean flag);
 
     public abstract boolean NumberBytesToBoolean(byte ab[], int i)
-        throws SQLException;
+            throws SQLException;
 
     public abstract Date DateBytesToDate(byte ab[], int i);
 
@@ -83,10 +82,10 @@ public interface ScDBConversion
     public abstract InputStream ConvertStream(InputStream inputStream, int i);
 
     public abstract int CHARBytesToJavaChars(byte ab[], int i, char ach[])
-        throws SQLException;
+            throws SQLException;
 
     public abstract int JavaCharsToCHARBytes(char ach[], int i, byte ab[])
-        throws SQLException;
+            throws SQLException;
 
     public abstract int JavaCharsToAsciiBytes(char ach[], int i, byte ab[]);
 

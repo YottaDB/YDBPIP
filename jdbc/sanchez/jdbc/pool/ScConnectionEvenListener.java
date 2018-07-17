@@ -30,59 +30,51 @@ import javax.sql.DataSource;
 import javax.sql.PooledConnection;
 
 public class ScConnectionEvenListener
-    implements ConnectionEventListener
-{
-  
-   static final int _CLOSED_EVENT = 1;
-   static final int _ERROROCCURED_EVENT = 2;
-   private DataSource ds;
-  
-  public ScConnectionEvenListener()
-  {
-        ds = null;
-  }
-    
-  public ScConnectionEvenListener(DataSource d)
-  {
-        ds = d;
-  }
-  
-  /**
-   * <P>Invoked when the application calls close() on its
-   * representation of the connection.
-   *
-   * @param event an event object describing the source of 
-   * the event
-   */
-  public void connectionClosed(ConnectionEvent event)
-  {
-      try
-        {
-            if(ds != null && (ds instanceof ScJDBCConnectionPoolCache))
-                ((ScJDBCConnectionPoolCache)ds).reusePooledConnection((PooledConnection)event.getSource());
-        }
-        catch(SQLException _ex) { }
-  }
-      
-  /**
-   * <p>Invoked when a fatal connection error occurs, just before
-   * an SQLException is thrown to the application.
-   *
-   * @param event an event object describing the source of 
-   * the event
-   */
-  public void connectionErrorOccurred(ConnectionEvent event)
-  {
-    try
-        {
-            if(ds != null && (ds instanceof ScJDBCConnectionPoolCache))
-                ((ScJDBCConnectionPoolCache)ds).closePooledConnection((PooledConnection)event.getSource());
-        }
-        catch(SQLException _ex) { }
-       
-  }
+        implements ConnectionEventListener {
 
-   
+    static final int _CLOSED_EVENT = 1;
+    static final int _ERROROCCURED_EVENT = 2;
+    private DataSource ds;
+
+    public ScConnectionEvenListener() {
+        ds = null;
+    }
+
+    public ScConnectionEvenListener(DataSource d) {
+        ds = d;
+    }
+
+    /**
+     * <P>Invoked when the application calls close() on its
+     * representation of the connection.
+     *
+     * @param event an event object describing the source of
+     *              the event
+     */
+    public void connectionClosed(ConnectionEvent event) {
+        try {
+            if (ds != null && (ds instanceof ScJDBCConnectionPoolCache))
+                ((ScJDBCConnectionPoolCache) ds).reusePooledConnection((PooledConnection) event.getSource());
+        } catch (SQLException _ex) {
+        }
+    }
+
+    /**
+     * <p>Invoked when a fatal connection error occurs, just before
+     * an SQLException is thrown to the application.
+     *
+     * @param event an event object describing the source of
+     *              the event
+     */
+    public void connectionErrorOccurred(ConnectionEvent event) {
+        try {
+            if (ds != null && (ds instanceof ScJDBCConnectionPoolCache))
+                ((ScJDBCConnectionPoolCache) ds).closePooledConnection((PooledConnection) event.getSource());
+        } catch (SQLException _ex) {
+        }
+
+    }
+
 
 }
 

@@ -12,43 +12,37 @@ import sanchez.jdbc.dbaccess.ScDBError;
 //            SerialException
 
 public class ScSerialRef
-    implements Ref, Serializable, Cloneable
-{
+        implements Ref, Serializable, Cloneable {
 
     public ScSerialRef(Ref ref)
-        throws SQLException
-    {
+            throws SQLException {
         baseTypeName = new String(ref.getBaseTypeName());
     }
 
     public String getBaseTypeName()
-        throws SQLException
-    {
+            throws SQLException {
         return baseTypeName;
     }
 
     public Object getObject(Map map)
-        throws SQLException
-    {
+            throws SQLException {
         map = new Hashtable(map);
-        if(!object.equals(null))
+        if (!object.equals(null))
             return map.get(object);
         else
             throw new SQLException("The object is not set");
     }
 
     public Object getObject()
-        throws SQLException
-    {
-        if(!object.equals(null))
+            throws SQLException {
+        if (!object.equals(null))
             return object;
         else
             throw new SQLException("The object is not set");
     }
 
     public void setObject(Object obj)
-        throws SQLException
-    {
+            throws SQLException {
         object = obj;
     }
 

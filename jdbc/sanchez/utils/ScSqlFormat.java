@@ -1,10 +1,10 @@
 package sanchez.utils;
 
 import java.sql.SQLException;
+
 import sanchez.jdbc.dbaccess.ScDBError;
 
-public class ScSqlFormat
-{
+public class ScSqlFormat {
     int iCurrentArgument;
     int i;
     int iLength;
@@ -15,15 +15,13 @@ public class ScSqlFormat
     StringBuffer sbScSql;
     StringBuffer sbTokenBuffer;
 
-    public ScSqlFormat()
-    {
+    public ScSqlFormat() {
         sbScSql = new StringBuffer(128);
         sbTokenBuffer = new StringBuffer(32);
     }
 
     public String parse(String os)
-        throws SQLException
-    {
+            throws SQLException {
         iCurrentArgument = 1;
         i = 0;
         bFirst = true;
@@ -34,8 +32,7 @@ public class ScSqlFormat
         sOdbcSql = os;
         handleODBC();
 
-        if (i < iLength)
-        {
+        if (i < iLength) {
             Integer index = new Integer(i);
             ScDBError.check_error(-33, index);
         }
@@ -43,95 +40,81 @@ public class ScSqlFormat
     }
 
     void handleODBC()
-       throws SQLException
-    {
+            throws SQLException {
         String s;
-        while (i < iLength)
-        {
+        while (i < iLength) {
             c = sOdbcSql.charAt(i);
-            if (bInString)
-            {
+            if (bInString) {
                 sbScSql.append(c);
                 if (c == 39)
                     bInString = false;
                 i++;
-            }
-            else
-            {
-                switch (c)
-                {
-                case 39:
-                    sbScSql.append(c);
-                    bInString = true;
-                    i++;
-                    bFirst = false;
-                    break;
+            } else {
+                switch (c) {
+                    case 39:
+                        sbScSql.append(c);
+                        bInString = true;
+                        i++;
+                        bFirst = false;
+                        break;
 
-                case 123:
-                    sbTokenBuffer.setLength(0);
-                    i++;
+                    case 123:
+                        sbTokenBuffer.setLength(0);
+                        i++;
 
-                    skipSpace();
-                    for (; i < iLength && (Character.isJavaLetterOrDigit(c = sOdbcSql.charAt(i)) || c == 63); i++)
-                        sbTokenBuffer.append(c);
-                    handleToken(sbTokenBuffer.toString());
-                    c = sOdbcSql.charAt(i);
-                    if (c != 125)
-                    {
-                        s = new String(i + ": Expecting \"}\" got \"" + c + "\"");
-                        ScDBError.check_error(-33, s);
-                    }
-                    i++;
-                    break;
+                        skipSpace();
+                        for (; i < iLength && (Character.isJavaLetterOrDigit(c = sOdbcSql.charAt(i)) || c == 63); i++)
+                            sbTokenBuffer.append(c);
+                        handleToken(sbTokenBuffer.toString());
+                        c = sOdbcSql.charAt(i);
+                        if (c != 125) {
+                            s = new String(i + ": Expecting \"}\" got \"" + c + "\"");
+                            ScDBError.check_error(-33, s);
+                        }
+                        i++;
+                        break;
 
-                case 125:
-                    return;
+                    case 125:
+                        return;
 
-                default:
-                    appendChar(sbScSql, c);
-                    i++;
-                    bFirst = false;
-                    break;
-              }
+                    default:
+                        appendChar(sbScSql, c);
+                        i++;
+                        bFirst = false;
+                        break;
+                }
             }
         }
     }
 
 
     void handleToken(String token)
-        throws SQLException
-    {
-        if (token.equalsIgnoreCase("?"))
-        {
+            throws SQLException {
+        if (token.equalsIgnoreCase("?")) {
             handleFunction();
             return;
         }
-        if (token.equalsIgnoreCase("call"))
-        {
+        if (token.equalsIgnoreCase("call")) {
             handleCall();
             return;
         }
 
-        if (token.equalsIgnoreCase("ts"))
-        {
+        if (token.equalsIgnoreCase("ts")) {
             handleTimestamp();
             return;
         }
 
-        if (token.equalsIgnoreCase("t"))
-        {
+        if (token.equalsIgnoreCase("t")) {
             handleTime();
             return;
         }
 
-        if (token.equalsIgnoreCase("d"))
-        {
+        if (token.equalsIgnoreCase("d")) {
             handleDate();
             return;
         }
 
-        if (token.equalsIgnoreCase("escape"))
-        {
+        if (token.equalsIgnoreCase("escape")) {
             handleEscape();
             return;
         }
@@ -141,16 +124,14 @@ public class ScSqlFormat
     }
 
     void handleFunction()
-        throws SQLException
-    {
+            throws SQLException {
         boolean need_block = bFirst;
         if (need_block)
             sbScSql.append("BEGIN ");
         appendChar(sbScSql, '?');
         skipSpace();
 
-        if (c != 61)
-        {
+        if (c != 61) {
             String s = new String(i + ". Expecting \"=\" got \"" + c + "\"");
             ScDBError.check_error(-33, s);
         }
@@ -158,8 +139,7 @@ public class ScSqlFormat
         i++;
         skipSpace();
 
-        if (!sOdbcSql.startsWith("call", i))
-        {
+        if (!sOdbcSql.startsWith("call", i)) {
             String s = new String(i + ". Expecting \"call\"");
             ScDBError.check_error(-33, s);
         }
@@ -174,8 +154,7 @@ public class ScSqlFormat
     }
 
     void handleCall()
-        throws SQLException
-    {
+            throws SQLException {
         boolean need_block = bFirst;
         if (need_block)
             sbScSql.append("BEGIN ");
@@ -188,16 +167,13 @@ public class ScSqlFormat
     }
 
     void handleTimestamp()
-        throws SQLException
-    {
+            throws SQLException {
         sbScSql.append("TO_DATE (");
         skipSpace();
 
         boolean in_nanos = false;
-        for (; i < iLength && (c = sOdbcSql.charAt(i)) != 125; i++)
-        {
-            if (!in_nanos)
-            {
+        for (; i < iLength && (c = sOdbcSql.charAt(i)) != 125; i++) {
+            if (!in_nanos) {
                 if (c == 46)
                     in_nanos = true;
                 else
@@ -211,8 +187,7 @@ public class ScSqlFormat
     }
 
     void handleTime()
-        throws SQLException
-    {
+            throws SQLException {
         sbScSql.append("TO_DATE (");
         skipSpace();
         handleODBC();
@@ -220,8 +195,7 @@ public class ScSqlFormat
     }
 
     void handleDate()
-        throws SQLException
-    {
+            throws SQLException {
 
         sbScSql.append("TO_DATE (");
         skipSpace();
@@ -230,24 +204,20 @@ public class ScSqlFormat
     }
 
     void handleEscape()
-        throws SQLException
-    {
+            throws SQLException {
         sbScSql.append("ESCAPE ");
         skipSpace();
         handleODBC();
     }
 
-    String nextArgument()
-    {
+    String nextArgument() {
         String result = ":" + iCurrentArgument;
         iCurrentArgument++;
         return result;
     }
 
-    void appendChar(StringBuffer sbScSql, char c)
-    {
-        if (c == 63)
-        {
+    void appendChar(StringBuffer sbScSql, char c) {
+        if (c == 63) {
             sbScSql.append(nextArgument());
             return;
         }
@@ -255,8 +225,7 @@ public class ScSqlFormat
         sbScSql.append(c);
     }
 
-    void skipSpace()
-    {
+    void skipSpace() {
         for (i++; i < iLength && (c = sOdbcSql.charAt(i)) == 32; i++) /* null body */ ;
     }
 

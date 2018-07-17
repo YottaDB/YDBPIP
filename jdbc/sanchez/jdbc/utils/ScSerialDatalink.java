@@ -11,32 +11,24 @@ import sanchez.jdbc.dbaccess.ScDBError;
 //            SerialException
 
 public class ScSerialDatalink
-    implements Serializable, Cloneable
-{
+        implements Serializable, Cloneable {
 
     public ScSerialDatalink(URL url1)
-        throws SQLException
-    {
-        if(url1 == null)
-        {
+            throws SQLException {
+        if (url1 == null) {
             throw new ScSerialException("Cannot serialize empty URL instance");
-        } else
-        {
+        } else {
             url = url1;
             return;
         }
     }
 
     public URL getDatalink()
-        throws SQLException
-    {
+            throws SQLException {
         URL url1 = null;
-        try
-        {
+        try {
             url1 = new URL(url.toString());
-        }
-        catch(MalformedURLException malformedurlexception)
-        {
+        } catch (MalformedURLException malformedurlexception) {
             malformedurlexception.printStackTrace();
         }
         return url1;
