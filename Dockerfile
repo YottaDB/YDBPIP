@@ -2,7 +2,15 @@ FROM yottadb/yottadb
 
 # Install prereqs
 RUN apt-get update && \
-    apt-get install git build-essential curl unzip default-jre vim -y
+    apt-get install \
+                    git \
+                    build-essential \
+                    curl \
+                    unzip \
+                    default-jdk \
+                    vim \
+                    cmake \
+                    -y
 
 # Create PIP user
 RUN useradd -ms /bin/bash pip
