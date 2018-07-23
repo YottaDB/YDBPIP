@@ -14,30 +14,17 @@ PIP requires the following software packages:
 
 ### Compile PIP C applications
 
+ * Create directory structure
+   * Type: `mkdir ~/Projects`
+   * Type: `cd ~/Projects`
  * Download the source code from github:
    * Type: `git clone https://github.com/YottaDB/pip.git`
- * Compile Message Transfer Manager (MTM)
-   * Type: `cd ~/pip/mtm_*`
+ * Compile source code:
+   * Type: `mkdir pip-build`
+   * Type: `cd pip-build`
+   * Type: `cmake -D CMAKE_INSTALL_PREFIX=~/pip ../pip`
    * Type: `make`
- * Compile External Call Utility (extcall)
-   This is broken into multiple parts: shlib, alerts, and the main extcall library. The order below is required to be followed due to dependencies in the libraries.
-   * Compile shlib
-     * Type: `cd ~/pip/extcall_*/shlib`
-     * Type: `make`
-   * Compile alerts
-     * Type: `cd ../alerts`
-     * Type: `make`
-   * Compile extcall
-     * Type: `cd ../src`
-     * Type: `make`
-     * Type: `make -f version.mk`
- * Compile SQL library (libsql)
-   * Type: `cd ~/pip/libsql_*/src`
-   * Type: `make LINUX`
-   * Type: `make version`
- * Compile M interrupt utility (mintrpt)
-   * Type: `cd ~/pip/util`
-   * Type: `make -f mintrpt.mk`
+   * Type: `make install`
 
 ### Setting Kernel parameters
 PIP uses kernel system calls to pass messages. The messages and queues are larger than most linux defaults:

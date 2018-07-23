@@ -2,21 +2,29 @@ FROM yottadb/yottadb
 
 # Install prereqs
 RUN apt-get update && \
-    apt-get install git build-essential curl unzip default-jre vim -y
+    apt-get install \
+                    git \
+                    build-essential \
+                    curl \
+                    unzip \
+                    default-jdk \
+                    vim \
+                    cmake \
+                    -y
 
 # Create PIP user
 RUN useradd -ms /bin/bash pip
 USER pip
 
 # Copy PIP files to their proper place
-ADD . /home/pip/pip
-WORKDIR /home/pip/pip
+ADD . /home/pip/Projects/pip
+WORKDIR /home/pip
 USER root
-RUN chown -R pip:pip /home/pip/pip
+RUN chown -R pip:pip /home/pip
 USER pip
 
 # Install PIP
-RUN ./build.sh
+RUN ./Projects/pip/build.sh
 
 USER root
 
@@ -36,7 +44,7 @@ RUN curl -fSsLO http://www-us.apache.org/dist//db/derby/db-derby-10.14.2.0/db-de
     rm -f db-derby-*-lib.zip
 
 # Extract Derby Database
-RUN tar xvzf ProfileBrowserIDE/profile_ide_db.tgz -C /opt
+RUN tar xvzf /home/pip/Projects/pip/ProfileBrowserIDE/profile_ide_db.tgz -C /opt
 
 # Fix permissions
 RUN chown -R pip:pip /opt/apache-tomcat-* && \
