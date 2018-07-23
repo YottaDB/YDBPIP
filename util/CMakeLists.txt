@@ -12,8 +12,15 @@
 
 cmake_minimum_required(VERSION 2.8)
 
-project(shlib)
+project(util)
 
-set(SOURCES shlib.c)
-add_library(shlib SHARED ${SOURCES})
-install(TARGETS shlib DESTINATION lib)
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fpic -std=c89")
+
+set(SOURCES mintrpt.c)
+add_executable(mintrpt ${SOURCES})
+install(TARGETS mintrpt DESTINATION bin)
+
+install(DIRECTORY . DESTINATION util
+	PATTERN "CMakeLists.txt" EXCLUDE
+	PATTERN ".git*" EXCLUDE
+	PATTERN "*.c" EXCLUDE)

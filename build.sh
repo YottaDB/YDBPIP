@@ -1,5 +1,17 @@
 #!/bin/bash
 
+#################################################################
+#								#
+# Copyright (c) 2017-2018 YottaDB LLC. and/or its subsidiaries.	#
+# All rights reserved.						#
+#								#
+#	This source code contains the intellectual property	#
+#	of its copyright holder(s), and is made available	#
+#	under a license.  If you do not know the terms of	#
+#	the license, please stop and do not read further.	#
+#								#
+#################################################################
+
 # Install required tools
 #apt-get install git build-essential
 
@@ -7,27 +19,10 @@
 #cd ~
 #git clone https://github.com/YottaDB/pip.git
 
-# Build Message Transfer Manager
-cd ~/pip/mtm_*
-make
-
-# Build External Call Utility
-cd ~/pip/extcall_*/shlib
-make
-cd ../alerts
-make
-cd ../src
-make
-make -f version.mk
-
-# Build SQL Library
-cd ~/pip/libsql_*/src
-make LINUX
-make version
-
-# Compile M interrupt
-cd ~/pip/util
-make -f mintrpt.mk
+# Compile and Install PIP code
+mkdir -p ~/pip/build
+cd ~/pip/build
+cmake -D CMAKE_INSTALL_PREFIX=~/test-install ~/pip && make
 
 # Create database
 cd ~/pip

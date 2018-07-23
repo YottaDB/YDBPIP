@@ -12,8 +12,8 @@
 
 cmake_minimum_required(VERSION 2.8)
 
-project(shlib)
+project(mrtns)
 
-set(SOURCES shlib.c)
-add_library(shlib SHARED ${SOURCES})
-install(TARGETS shlib DESTINATION lib)
+install(DIRECTORY . DESTINATION mrtns
+	PATTERN "CMakeLists.txt" EXCLUDE
+	PATTERN ".git*" EXCLUDE)

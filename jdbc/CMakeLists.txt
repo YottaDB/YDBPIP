@@ -1,13 +1,24 @@
-cmake_minimum_required(VERSION 3.5)
+#################################################################
+#								#
+# Copyright (c) 2017-2018 YottaDB LLC. and/or its subsidiaries.	#
+# All rights reserved.						#
+#								#
+#	This source code contains the intellectual property	#
+#	of its copyright holder(s), and is made available	#
+#	under a license.  If you do not know the terms of	#
+#	the license, please stop and do not read further.	#
+#								#
+#################################################################
+
+cmake_minimum_required(VERSION 2.8)
 
 project(jdbc)
 
 find_package(Java REQUIRED)
 include(UseJava)
 
-# sanchez/him_pa/transports/ScMQTransport.java
-# sanchez/ipc/ScMQCommunication.java
-# sanchez/utils/objectpool/ScMQCommPool.java
+option(usemq "Use IBM MQ Message Transport Engine" OFF)
+
 set(SOURCES sanchez/app/ScGlobalCacheManager.java
 	    sanchez/base/ScBaseException.java
 	    sanchez/base/ScBundle.java
@@ -121,4 +132,11 @@ set(SOURCES sanchez/app/ScGlobalCacheManager.java
 	    sanchez/utils/SiLoggable.java
 	    sanchez/utils/SiLogger.java)
 
+if(usemq)
+	list(append SOURCES sanchez/him_pa/transports/ScMQTransport.java
+		            sanchez/ipc/ScMQCommunication.java
+		            sanchez/utils/objectpool/ScMQCommPool.java)
+endif()
+
 add_jar(ScJDBC ${SOURCES})
+install_jar(ScJDBC DESTINATION jdbc)
