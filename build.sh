@@ -20,21 +20,20 @@
 #git clone https://github.com/YottaDB/pip.git
 
 # Compile and Install PIP code
-mkdir -p ~/pip/build
-cd ~/pip/build
-cmake -D CMAKE_INSTALL_PREFIX=~/test-install ~/pip && make
+mkdir -p ~/Projects/pip-build
+cd ~/Projects/pip-build
+cmake -D CMAKE_INSTALL_PREFIX=~/pip ~/Projects/pip && make && make install
 
 # Create database
-cd ~/pip
+cd ~
 export gtm_chset=UTF-8
 export gtm_icu_version=55.1
-export gtmgbldir=/home/pip/pip/gbls/pip.gld
+export gtmgbldir=~/pip/gbls/pip.gld
 export gtm_dist=/opt/yottadb/current
 export gtmroutines=${gtm_dist}/utf8/libyottadbutil.so
-$gtm_dist/mumps -run ^GDE < gbls/db.gde
+$gtm_dist/mumps -run ^GDE < ~/pip/gbls/db.gde
 $gtm_dist/mupip create
-$gtm_dist/mupip set -journal="enable,on,before" -file gbls/pip.dat
+$gtm_dist/mupip set -journal="enable,on,before" -file ~/pip/gbls/pip.dat
 
 # Import globals
-cd ~/pip
-$gtm_dist/mupip load gbls/globals.zwr
+$gtm_dist/mupip load ~/pip/gbls/globals.zwr

@@ -20,6 +20,7 @@ add_subdirectory(mrtns)
 add_subdirectory(prtns)
 add_subdirectory(srtns)
 add_subdirectory(zrtns)
+add_subdirectory(gbls)
 
 # Add compiled projects
 add_subdirectory(extcall_V1.2)
@@ -28,14 +29,19 @@ add_subdirectory(mtm_V2.4.5)
 add_subdirectory(util)
 add_subdirectory(jdbc)
 
-install(FILES dm
-	     drv
+install(FILES
 	     gtmenv
 	     gtmenv1
-	     piprecover
-	     pipstart
-	     pipstop
 	     UCOPTS.ini
 	     UCOPTS_2_7DEV.ini
 	     UCOPTS_3DEV.ini
+	DESTINATION .)
+
+install(PROGRAMS
+		 dm
+		 drv
+	         piprecover
+	         pipstart
+	         pipstart-docker
+	         pipstop
 	DESTINATION .)

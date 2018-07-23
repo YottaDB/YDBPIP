@@ -23,3 +23,8 @@ install(TARGETS alerts DESTINATION lib)
 add_executable(alertsversion version.c)
 target_link_libraries(alertsversion alerts)
 install(TARGETS alertsversion DESTINATION bin)
+
+configure_file(alerts.xc.in alerts.xc)
+install(FILES ${CMAKE_BINARY_DIR}/extcall_V1.2/alerts/alerts.xc DESTINATION lib)
+
+install(PROGRAMS sca_alert.sh DESTINATION bin)

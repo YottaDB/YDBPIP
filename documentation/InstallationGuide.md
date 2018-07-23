@@ -14,13 +14,17 @@ PIP requires the following software packages:
 
 ### Compile PIP C applications
 
+ * Create directory structure
+   * Type: `mkdir ~/Projects`
+   * Type: `cd ~/Projects`
  * Download the source code from github:
    * Type: `git clone https://github.com/YottaDB/pip.git`
  * Compile source code:
    * Type: `mkdir pip-build`
    * Type: `cd pip-build`
-   * Type: `cmake ../pip`
+   * Type: `cmake -D CMAKE_INSTALL_PREFIX=~/pip ../pip`
    * Type: `make`
+   * Type: `make install`
 
 ### Setting Kernel parameters
 PIP uses kernel system calls to pass messages. The messages and queues are larger than most linux defaults:

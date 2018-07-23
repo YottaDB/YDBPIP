@@ -12,15 +12,8 @@
 
 cmake_minimum_required(VERSION 2.8)
 
-project(util)
+project(gbls)
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fpic -std=c89")
-
-set(SOURCES mintrpt.c)
-add_executable(mintrpt ${SOURCES})
-install(TARGETS mintrpt DESTINATION bin)
-
-install(DIRECTORY . DESTINATION util
-	PATTERN "CMakeLists.txt" EXCLUDE
-	PATTERN ".git*" EXCLUDE
-	PATTERN "*.c" EXCLUDE)
+install(FILES db.gde
+	      globals.zwr
+	DESTINATION gbls)

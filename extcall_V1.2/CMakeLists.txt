@@ -51,3 +51,6 @@ include_directories(extcallversion ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(extcallversion extcall)
 target_link_libraries(extcallversion m)
 install(TARGETS extcallversion DESTINATION bin)
+
+configure_file(extcall.xc.in extcall.xc)
+install(FILES ${CMAKE_BINARY_DIR}/extcall_V1.2/extcall.xc DESTINATION lib)

@@ -45,3 +45,8 @@ set(MTMSOURCES mtmcntrl.c
 add_executable(mtm ${MTMSOURCES})
 target_link_libraries(mtm m)
 install(TARGETS mtm DESTINATION bin)
+
+configure_file(mtm.xc.in mtm.xc)
+install(FILES ${CMAKE_BINARY_DIR}/mtm_V2.4.5/mtm.xc DESTINATION lib)
+
+install(PROGRAMS pipmtm DESTINATION bin)
