@@ -32,8 +32,8 @@ install(FILES
 	      stbler.err
 	      stblmsg.err
 	      merror.err
-	      queue.err
-	      mupip.err
+	      dbinteg.err
+	      scripts.err
 	DESTINATION tables)
 
 install(PROGRAMS sca_alert.sh DESTINATION bin)
