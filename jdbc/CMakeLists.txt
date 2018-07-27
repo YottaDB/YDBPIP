@@ -139,4 +139,4 @@ if(usemq)
 endif()
 
 add_jar(ScJDBC ${SOURCES})
-install_jar(ScJDBC DESTINATION jdbc)
+install_jar(ScJDBC jdbc)
