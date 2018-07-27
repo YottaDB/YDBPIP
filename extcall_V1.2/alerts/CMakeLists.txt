@@ -34,6 +34,6 @@ install(FILES
 	      merror.err
 	      dbinteg.err
 	      scripts.err
-	DESTINATION tables)
+	DESTINATION alerts)
 
 install(PROGRAMS sca_alert.sh DESTINATION bin)
